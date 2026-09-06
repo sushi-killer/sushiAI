@@ -6,15 +6,17 @@
 
 **sushiAI** brings agent terminals, chats, files, and Git diffs into one macOS window. Run Claude Code, Codex, Gemini CLI, and Cursor Agent with your installed tools and accounts. Use local terminals or persistent Herdr sessions, including over SSH.
 
-[Watch the demo](promo/sushiAI-launch.mp4) · [Download 0.0.1 Alpha](https://github.com/sushi-killer/sushiAI/releases/tag/v0.0.1-alpha.1) · [Installation guide](docs/INSTALL.md)
+[Watch the demo](promo/sushiAI-launch.mp4) · [Download 0.0.2](https://github.com/sushi-killer/sushiAI/releases/tag/v0.0.2) · [Installation guide](docs/INSTALL.md)
 
 The demo uses fictional projects and sample data.
 
 ## Install
 
-**[Download the Apple Silicon DMG](https://github.com/sushi-killer/sushiAI/releases/download/v0.0.1-alpha.1/sushiAI-0.0.1-alpha.1-arm64.dmg)** — requires an M1 or newer Mac running macOS 13 or later.
+**[Download the Apple Silicon DMG](https://github.com/sushi-killer/sushiAI/releases/download/v0.0.2/sushiAI-0.0.2-arm64.dmg)** — requires an M1 or newer Mac running macOS 13 or later.
 
-Open the DMG, drag sushiAI to Applications, and launch it. This alpha is ad-hoc signed and is not Apple-notarized. See the [installation guide](docs/INSTALL.md) for first-launch instructions, checksums, tool setup, and [building from source](docs/INSTALL.md#build-from-source).
+Open the DMG, drag sushiAI to Applications, and launch it. This build is ad-hoc signed and is not Apple-notarized. See the [installation guide](docs/INSTALL.md) for first-launch instructions, checksums, tool setup, and [building from source](docs/INSTALL.md#build-from-source).
+
+**Upgrading from 0.0.1 Alpha:** install this DMG manually once to enable in-app updates for future releases.
 
 ## Features
 
@@ -25,6 +27,7 @@ Open the DMG, drag sushiAI to Applications, and launch it. This alpha is ad-hoc 
 - **Files and previews:** browse directories, read text, view images and PDFs, and preview static HTML with relative assets.
 - **Text editing:** edit UTF-8 files with conflict detection if an agent changes the file before you save.
 - **Git diffs:** inspect the current branch, working-tree changes, and staged changes.
+- **Software updates:** check GitHub Releases automatically and download a verified DMG when an update is available.
 - **Agent chats:** use Claude Code or Codex through their installed CLIs.
 
 ## Workspaces and sessions
@@ -59,6 +62,16 @@ sushiAI uses your system SSH configuration, keys, and agent. Remote browser URLs
 Open **Files & Git** with the folder button in the toolbar. Choose **Edit**, then **Save** or **⌘S** to update an existing UTF-8 file up to 2 MB. If the file changes on disk, saving is rejected and your draft remains available.
 
 File previews support files up to 16 MB; text output is limited to 2 MB. Static HTML previews support relative assets. Open development servers by URL in a browser panel. Git views show changes; use a terminal for commits and other Git operations.
+
+## Software updates
+
+Open **Settings → Software updates** to check for a new release. Packaged builds check this project's public GitHub Releases shortly after startup and every six hours. Automatic downloads and alpha/beta releases can be enabled or disabled separately. Development builds check only when requested.
+
+When a compatible update is found, an indicator appears in the toolbar and Notifications. Downloads are verified against the release asset's SHA-256 digest. Choose **Install and restart** to apply a downloaded update. The installer verifies the DMG and application signature, prepares a new copy, waits for sushiAI to exit, replaces the app, and reopens it. A recovery copy is kept until the new version loads; replacement failures restore the previous app. Save edits first: local terminals stop during the restart, while Herdr sessions continue running. Automatic downloads never trigger installation on their own.
+
+Install sushiAI in a writable Applications folder before updating; an app running directly from a mounted DMG cannot replace itself. Development builds offer **Open installer** for manual installation instead.
+
+Updates use the Mac's architecture, ignore draft releases and older versions, and require a matching uploaded DMG. A failed network request can be retried from Settings. No GitHub account or access token is required.
 
 ## Keyboard shortcuts
 
@@ -95,6 +108,8 @@ npm run test:stream   # Terminal stream, input, and resize
 ```
 
 For SSH integration tests, set `SUSHIAI_SSH_HOST` to your test host and `SUSHIAI_SSH_SOCKET` to its Herdr socket, then run `npm run test:remote`. Without a socket override, SSH tests use `~/.config/herdr/sessions/sushiai/herdr.sock`. Integration tests create temporary workspaces and files and clean them up afterward.
+
+Run `node scripts/updates-smoke.mjs` for isolated desktop checks of the update flow using synthetic release data.
 
 See the [build instructions](docs/INSTALL.md#build-from-source) to package the app. `npm run dev:web` provides a UI preview; terminals, SSH, editing, and CLI chats require the desktop app.
 

@@ -71,7 +71,44 @@ export type ChatEvent = {
   done?: boolean;
   error?: string;
 };
+export type UpdateSettings = {
+  autoCheck: boolean;
+  autoDownload: boolean;
+  includePrereleases: boolean;
+};
+export type UpdateState = {
+  canInstall: boolean;
+  currentVersion: string;
+  repository: string;
+  settings: UpdateSettings;
+  phase:
+    | "idle"
+    | "checking"
+    | "available"
+    | "downloading"
+    | "installing"
+    | "ready"
+    | "current"
+    | "error";
+  release: {
+    version: string;
+    name: string;
+    size: number;
+    notes: string;
+  } | null;
+  progress: number;
+  checkedAt: string | null;
+  error: string | null;
+};
 export interface Bridge {
+  updatesState(): Promise<UpdateState>;
+  updatesCheck(): Promise<UpdateState>;
+  updatesDownload(): Promise<UpdateState>;
+  updatesConfigure(settings: Partial<UpdateSettings>): Promise<UpdateState>;
+  updatesOpen(): Promise<void>;
+  updatesInstall(): Promise<UpdateState>;
+  updatesReleasePage(): Promise<void>;
+  onUpdates(callback: (state: UpdateState) => void): () => void;
   system(): Promise<System>;
   chooseDirectory(): Promise<string | null>;
   terminalOpen(options: {

@@ -5,6 +5,7 @@ const {
   dialog,
   Menu,
   session,
+  shell,
 } = require("electron");
 const path = require("node:path");
 const os = require("node:os");
@@ -17,7 +18,13 @@ const { Connections } = require("./connections.cjs");
 const { PreviewServer } = require("./preview.cjs");
 const { openHerdrStream, detectAgent } = require("./terminal-stream.cjs");
 const { quote } = require("./connections.cjs");
-let connections, preview;
+const { Updates } = require("./updates.cjs");
+const {
+  install,
+  applicationPath,
+  cleanupCompleted,
+} = require("./installer.cjs");
+let connections, preview, updates;
 const terminals = new Map(),
   terminalPending = new Map(),
   chats = new Map(),
@@ -134,6 +141,13 @@ handle("herdr", async (endpoint, method, params = {}) => {
   }
   return request(socketPath, method, params);
 });
+handle("updates-state", () => updates.snapshot());
+handle("updates-check", () => updates.check());
+handle("updates-download", () => updates.download());
+handle("updates-configure", (settings) => updates.configure(settings));
+handle("updates-open", () => updates.openInstaller());
+handle("updates-install", () => updates.install());
+handle("updates-release-page", () => updates.releasePage());
 handle("connections-list", () => connections.list());
 handle("connections-save", (profile) => connections.save(profile));
 async function disconnectEndpoint(endpoint) {
@@ -502,6 +516,24 @@ function validWebURL(value) {
 app.whenReady().then(async () => {
   connections = new Connections(app.getPath("userData"));
   await connections.init();
+  updates = new Updates({
+    directory: app.getPath("userData"),
+    currentVersion: app.getVersion(),
+    canInstall: app.isPackaged && process.platform === "darwin",
+    installer: (release, dmg) =>
+      install({
+        directory: path.join(app.getPath("userData"), "updates"),
+        release,
+        dmg,
+        packaged: app.isPackaged,
+        onReady: () => app.quit(),
+      }),
+    openPath: (file) => shell.openPath(file),
+    openExternal: (url) => shell.openExternal(url),
+    onChange: (state) => send("updates-state", state),
+    automatic: app.isPackaged && process.env.SUSHIAI_TEST_HEADLESS !== "1",
+  });
+  await updates.init();
   preview = new PreviewServer(connections);
   await preview.start();
   if (
@@ -589,6 +621,17 @@ app.whenReady().then(async () => {
       },
     ]),
   );
+  mainWindow.webContents.once("did-finish-load", async () => {
+    if (app.isPackaged) {
+      try {
+        await cleanupCompleted(
+          path.join(app.getPath("userData"), "updates", "installed.json"),
+          await fs.realpath(applicationPath()),
+          app.getVersion(),
+        );
+      } catch {}
+    }
+  });
   const devURL = process.env.BRIDGE_DEV_URL;
   if (devURL === "http://127.0.0.1:5173") mainWindow.loadURL(devURL);
   else mainWindow.loadFile(path.join(root, "dist/index.html"));
@@ -598,6 +641,7 @@ let quitReady = false;
 app.on("before-quit", (event) => {
   if (quitReady) return;
   event.preventDefault();
+  updates?.close();
   preview?.close();
   for (const pending of terminalPending.values()) pending.cancelled = true;
   for (const terminal of terminals.values())

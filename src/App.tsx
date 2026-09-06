@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowUpRight,
+  Download,
   Bell,
   Check,
   ChevronDown,
@@ -38,6 +39,7 @@ import type {
   PanelKind,
   Snapshot,
   System,
+  UpdateState,
   Workspace,
 } from "./types";
 import { insert, leaf, remove, resize, split, swap, tidy, uid } from "./layout";
@@ -47,6 +49,8 @@ import { ChatPanel } from "./ChatPanel";
 import { ConnectionsSettings } from "./ConnectionsSettings";
 import { ProjectPanel } from "./ProjectPanel";
 import { SessionsDialog } from "./SessionsDialog";
+
+import { UpdateSettings } from "./UpdateSettings";
 
 const STORAGE = "sushiai.v1";
 type Routine = { id: string; name: string; command: string };
@@ -148,6 +152,7 @@ export function App() {
   const [connection, setConnection] = useState<
     "connected" | "offline" | "connecting"
   >("connecting");
+  const [updates, setUpdates] = useState<UpdateState | null>(null);
   const [connectionError, setConnectionError] = useState("");
   const [mode, setMode] = useState("Code");
   const [tabMode, setTabMode] = useState(false);
@@ -165,6 +170,7 @@ export function App() {
     | "workspace"
     | "settings"
     | "notifications"
+    | "updates"
     | "routine"
     | "sessions"
     | "close"
@@ -206,6 +212,26 @@ export function App() {
     return () => observer.disconnect();
   }, []);
   const notify = useCallback((text: string) => setToast(text), []);
+  useEffect(() => {
+    const bridge = window.bridge;
+    if (!bridge?.updatesState) return;
+    let stopped = false;
+    let received = false;
+    const unsubscribe = bridge.onUpdates((state) => {
+      received = true;
+      setUpdates(state);
+    });
+    bridge
+      .updatesState()
+      .then((state) => {
+        if (!stopped && !received) setUpdates(state);
+      })
+      .catch((e) => notify(errorText(e)));
+    return () => {
+      stopped = true;
+      unsubscribe();
+    };
+  }, [notify]);
   const updateWorkspace = useCallback(
     (workspaceId: string, update: (w: Workspace) => Workspace) =>
       setWorkspaces((items) =>
@@ -920,13 +946,29 @@ export function App() {
           >
             <LayoutGrid size={12} /> Tidy
           </button>
+          {updates?.release && (
+            <button
+              className="update-indicator"
+              aria-label="Software update available"
+              onClick={() => setModal("updates")}
+            >
+              <Download size={13} />
+              <span>
+                {updates.phase === "downloading"
+                  ? `${updates.progress}%`
+                  : updates.phase === "ready"
+                    ? "Update ready"
+                    : "Update available"}
+              </span>
+            </button>
+          )}
           <button
             className="icon-button notification-button"
             aria-label="Notifications"
             onClick={() => setModal("notifications")}
           >
             <Bell size={14} />
-            {blocked.length > 0 && <i />}
+            {(blocked.length > 0 || updates?.release) && <i />}
           </button>
         </div>
       </header>
@@ -1386,7 +1428,9 @@ export function App() {
                         ? "Session manager"
                         : modal === "workspace-actions"
                           ? "Workspace settings"
-                          : "Notifications"
+                          : modal === "updates"
+                            ? "Software updates"
+                            : "Notifications"
             }
           >
             <button
@@ -1396,7 +1440,9 @@ export function App() {
             >
               <X size={17} />
             </button>
-            {modal === "sessions" ? (
+            {modal === "updates" ? (
+              <UpdateSettings state={updates} />
+            ) : modal === "sessions" ? (
               <SessionsDialog
                 workspaces={workspaces}
                 activeId={active.id}
@@ -1644,6 +1690,8 @@ export function App() {
                   }}
                 />
                 <div className="settings-divider" />
+                <UpdateSettings state={updates} />
+                <div className="settings-divider" />
                 <label className="scale-setting">
                   Interface size
                   <select
@@ -1771,6 +1819,23 @@ export function App() {
               <>
                 <div className="dialog-eyebrow">ACTIVITY</div>
                 <h2>Your agents at a glance.</h2>
+                {updates?.release && (
+                  <button
+                    className="notification-item"
+                    onClick={() => setModal("updates")}
+                  >
+                    <Download size={18} />
+                    <div>
+                      <strong>sushiAI {updates.release.version}</strong>
+                      <p>
+                        {updates.phase === "ready"
+                          ? "Ready to install"
+                          : "A new update is available"}
+                      </p>
+                    </div>
+                    <ArrowUpRight size={15} />
+                  </button>
+                )}
                 {blocked.length ? (
                   blocked.map(({ workspace, panel }) => (
                     <button

@@ -2624,3 +2624,151 @@ iframe {
 .adaptive-panel > .tab-panel[hidden] {
   display: none;
 }
+
+/* Software updates */
+.update-note {
+  font-size: 11px;
+  line-height: 1.7;
+  color: #898e84;
+  margin: 16px 0;
+}
+.update-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+}
+.update-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid #384833;
+  border-radius: 6px;
+  background: #1e2a1a;
+  color: #b0d19f;
+  font-size: 10px;
+  -webkit-app-region: no-drag;
+}
+.update-settings {
+  min-width: 0;
+}
+.update-heading {
+  align-items: flex-start;
+}
+.update-heading > div {
+  min-width: 0;
+}
+.update-heading > svg {
+  flex-shrink: 0;
+  color: #9eb58e;
+  margin: 3px 22px 0 0;
+}
+.update-settings h3 {
+  font-size: 17px;
+  font-weight: 500;
+  margin: 0 0 8px;
+  letter-spacing: -0.3px;
+}
+.update-heading p {
+  color: #90958b;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  margin: 0 0 20px;
+}
+.update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.update-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid #393c35;
+  border-radius: 7px;
+  padding: 9px 11px;
+  font-size: 11px;
+}
+.update-actions button:disabled {
+  opacity: 0.45;
+}
+.update-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 2px 0 18px;
+  font-size: 11px;
+  color: #a9c695;
+}
+.update-progress progress {
+  flex: 1;
+  min-width: 0;
+  height: 6px;
+  accent-color: #a4c594;
+}
+.update-checked {
+  font-size: 10px;
+  color: #858b80;
+  margin: 12px 0;
+}
+.update-preferences {
+  display: flex;
+  flex-direction: column;
+  gap: 17px;
+  margin-top: 22px;
+  padding-top: 20px;
+  border-top: 1px solid #30322d;
+}
+.modal .update-preferences label {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 11px;
+  margin: 0;
+  cursor: pointer;
+}
+.modal .update-preferences input {
+  appearance: auto;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  margin: 1px 0 0;
+  flex-shrink: 0;
+  accent-color: #a7bf92;
+}
+.update-preferences label span {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.update-preferences strong {
+  font-size: 12px;
+  font-weight: 500;
+  color: #d2d7cd;
+}
+.update-preferences small {
+  font-size: 11px;
+  line-height: 1.5;
+  color: #898f82;
+}
+.update-notes summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #bfcab4;
+}
+.update-notes pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.8;
+  color: #949c8c;
+  max-height: 220px;
+  overflow: auto;
+}
+@media (max-width: 1000px) {
+  .update-indicator span {
+    display: none;
+  }
+}

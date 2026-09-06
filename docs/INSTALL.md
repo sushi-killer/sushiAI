@@ -2,16 +2,16 @@
 
 ## Download for macOS
 
-The **0.0.1 Alpha** DMG requires **Apple Silicon (M1 or newer)** and **macOS 13 Ventura or later**. This release does not include a prebuilt Intel package.
+The **0.0.2** DMG requires **Apple Silicon (M1 or newer)** and **macOS 13 Ventura or later**. This release does not include a prebuilt Intel package.
 
-1. Open the [0.0.1 Alpha release](https://github.com/sushi-killer/sushiAI/releases/tag/v0.0.1-alpha.1).
-2. Download `sushiAI-0.0.1-alpha.1-arm64.dmg`.
+1. Open the [0.0.2 release](https://github.com/sushi-killer/sushiAI/releases/tag/v0.0.2).
+2. Download `sushiAI-0.0.2-arm64.dmg`.
 3. Open the DMG and drag **sushiAI** to **Applications**.
 4. Launch sushiAI from Applications, then eject the disk image.
 
 ### First launch
 
-This alpha is ad-hoc signed. It is **not signed with an Apple Developer ID or notarized by Apple**, so macOS may block its first launch.
+This build is ad-hoc signed. It is **not signed with an Apple Developer ID or notarized by Apple**, so macOS may block its first launch.
 
 After attempting to open the app, go to **System Settings → Privacy & Security → Open Anyway** to approve it. See [Apple's instructions for opening an app from an unidentified developer](https://support.apple.com/102445).
 
@@ -25,7 +25,11 @@ shasum -a 256 -c SHA256SUMS.txt
 
 ### Update the app
 
-Save your file edits and quit sushiAI before replacing it in Applications. Local terminals stop when the app quits; Herdr sessions continue running.
+Open **Settings → Software updates** and choose **Install and restart** when an update is ready. The installer prepares and verifies the new app before closing sushiAI, then replaces it and restarts it. Save file edits first: local terminals stop during the restart, while Herdr sessions continue running.
+
+The app must be in a writable folder, such as your personal Applications folder. For manual installation, quit sushiAI and replace the app in Applications using the downloaded DMG.
+
+Version 0.0.1 Alpha does not include an updater. Download and install 0.0.2 manually once; subsequent updates can be installed from Settings.
 
 ## Set up your tools
 

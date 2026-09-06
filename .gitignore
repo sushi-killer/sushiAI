@@ -1,0 +1,8 @@
+node_modules/
+dist/
+release/
+.runtime/
+artifacts/
+.DS_Store
+promo/soundtrack.wav
+promo/assets/frame-*.png

@@ -1,0 +1,74 @@
+{
+  "name": "sushiai-workspace",
+  "version": "0.0.1-alpha.1",
+  "private": true,
+  "description": "A macOS workspace for terminal agents, powered by Herdr",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "start": "electron .",
+    "test": "node --test tests/*.test.cjs",
+    "test:desktop": "node scripts/smoke.mjs",
+    "test:herdr": "node scripts/herdr-integration.cjs",
+    "package": "npm run build && electron-builder --mac dir",
+    "postinstall": "electron-builder install-app-deps",
+    "format": "prettier --write src electron scripts tests *.json *.ts *.html README.md",
+    "icon": "node scripts/icon.mjs",
+    "test:stream": "node scripts/stream-integration.cjs",
+    "test:remote": "node scripts/features-smoke.mjs",
+    "promo": "node scripts/promo.mjs",
+    "package:dmg": "npm run build && electron-builder --mac dmg --arm64"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "lucide-react": "^0.577.0",
+    "node-pty": "^1.1.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "electron": "^44.2.0",
+    "electron-builder": "^26.0.12",
+    "playwright": "^1.58.0",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.0"
+  },
+  "build": {
+    "appId": "local.sushiai.workspace",
+    "productName": "sushiAI",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json",
+      "THIRD_PARTY_NOTICES.md",
+      "LICENSE"
+    ],
+    "asarUnpack": [
+      "node_modules/node-pty/**/*"
+    ],
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "target": "dir",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "minimumSystemVersion": "13.0"
+    },
+    "artifactName": "sushiAI-${version}-${arch}.${ext}",
+    "dmg": {
+      "title": "sushiAI 0.0.1 Alpha"
+    }
+  },
+  "license": "MIT",
+  "author": "sushi-killer"
+}

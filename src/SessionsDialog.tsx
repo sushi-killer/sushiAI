@@ -23,7 +23,10 @@ export function SessionsDialog({
   const rows = workspaces
     .filter((w) => !scope || w.id === scope)
     .flatMap((workspace) =>
-      workspace.panels.map((panel) => ({ workspace, panel })),
+      // Chat threads are conversations, not sessions; the Chat tab owns them.
+      workspace.panels
+        .filter((panel) => panel.kind !== "chat")
+        .map((panel) => ({ workspace, panel })),
     )
     .filter(
       ({ workspace, panel }) =>

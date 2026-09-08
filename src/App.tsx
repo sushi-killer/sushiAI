@@ -42,10 +42,23 @@ import type {
   UpdateState,
   Workspace,
 } from "./types";
-import { insert, leaf, remove, resize, split, swap, tidy, uid } from "./layout";
+import {
+  contains,
+  insert,
+  leaf,
+  remove,
+  resize,
+  split,
+  swap,
+  tidy,
+  uid,
+} from "./layout";
 import { TerminalPanel, disposeTerminal } from "./TerminalPanel";
 import { BrowserPanel } from "./BrowserPanel";
 import { ChatPanel } from "./ChatPanel";
+import { ChatView } from "./ChatView";
+import { DEFAULT_TITLES, titleFrom } from "./chat-threads";
+import { AgentsView } from "./agents/AgentsView";
 import { ConnectionsSettings } from "./ConnectionsSettings";
 import { ProjectPanel } from "./ProjectPanel";
 import { SessionsDialog } from "./SessionsDialog";
@@ -71,7 +84,13 @@ function restore(): Saved | null {
       workspaces: value.workspaces.map((w: Workspace) => ({
         ...w,
         connection: w.herdrId ? w.connection || value.socket : undefined,
-        panels: w.panels.map((p) => ({ ...p, busy: false, started: false })),
+        panels: w.panels.map((p) => ({
+          ...p,
+          busy: false,
+          started: false,
+          // A reply that never arrived leaves an empty bubble; drop it.
+          messages: p.messages?.filter((m) => m.role === "user" || m.text),
+        })),
       })),
     };
   } catch {
@@ -141,6 +160,10 @@ const agentTitle = (name: string) =>
   })[name] || name;
 const errorText = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
+// Chat threads live in the workspace but belong to the Chat tab unless they
+// were placed into the Code layout, so Code only lists what it shows.
+const codePanels = (w: Workspace) =>
+  w.panels.filter((p) => p.kind !== "chat" || contains(w.layout, p.id));
 
 export function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>(
@@ -155,9 +178,14 @@ export function App() {
   const [updates, setUpdates] = useState<UpdateState | null>(null);
   const [connectionError, setConnectionError] = useState("");
   const [mode, setMode] = useState("Code");
+  const [agentNotices, setAgentNotices] = useState<
+    import("./agents/types").AgentActivity[]
+  >([]);
   const [tabMode, setTabMode] = useState(false);
   const [section, setSection] = useState("");
   const [sidebar, setSidebar] = useState(window.innerWidth >= 760);
+  // Agent and Chat render their lists into this slot of the shared sidebar.
+  const [slot, setSlot] = useState<HTMLElement | null>(null);
   const visitedTabs = useRef(new Set<string>());
   useEffect(() => {
     const query = window.matchMedia("(max-width: 760px)");
@@ -212,6 +240,19 @@ export function App() {
     return () => observer.disconnect();
   }, []);
   const notify = useCallback((text: string) => setToast(text), []);
+  useEffect(
+    () =>
+      window.bridge?.onAgents((event) => {
+        if (event.type !== "activity") return;
+        const activity =
+          event.activity as import("./agents/types").AgentActivity;
+        setAgentNotices((old) =>
+          [activity, ...old.filter((a) => a.id !== activity.id)].slice(0, 100),
+        );
+        notify(`${activity.agentName} · ${activity.title}`);
+      }),
+    [notify],
+  );
   useEffect(() => {
     const bridge = window.bridge;
     if (!bridge?.updatesState) return;
@@ -283,11 +324,29 @@ export function App() {
                 ...last,
                 text: last.text + event.text,
               };
+            if (
+              event.done &&
+              last?.role === "assistant" &&
+              !messages.at(-1)?.text
+            )
+              messages.pop();
+            // Stamp the answer with the model that produced it, so switching
+            // models later still shows what each earlier turn was answered by.
+            const final = messages.at(-1);
+            if (event.done && final?.role === "assistant" && final.text)
+              messages[messages.length - 1] = {
+                ...final,
+                model: event.model || p.resolvedModel,
+              };
             return {
               ...p,
               messages,
               busy: !event.done,
               error: event.error || p.error,
+              note: event.done ? undefined : (event.note ?? p.note),
+              resolvedModel: event.model || p.resolvedModel,
+              usage: event.usage || p.usage,
+              updatedAt: event.done ? Date.now() : p.updatedAt,
             };
           }),
         })),
@@ -453,6 +512,7 @@ export function App() {
         setZoomed(null);
       }
       if (!event.metaKey) return;
+      if (mode !== "Code" && !section && event.key !== "b") return;
       if (event.key === "k" || event.key === "t") {
         event.preventDefault();
         setModal("pane");
@@ -471,8 +531,9 @@ export function App() {
         event.preventDefault();
         if (currentPanel) closePanel(currentPanel);
       }
+      const panels = codePanels(active);
       if (/^[1-9]$/.test(event.key)) {
-        const panel = active.panels[Number(event.key) - 1];
+        const panel = panels[Number(event.key) - 1];
         if (panel) {
           event.preventDefault();
           setSelected(panel.id);
@@ -482,23 +543,23 @@ export function App() {
       if (
         event.shiftKey &&
         ["BracketLeft", "BracketRight"].includes(event.code) &&
-        active.panels.length
+        panels.length
       ) {
         event.preventDefault();
-        const index = active.panels.findIndex((p) => p.id === selected);
+        const index = panels.findIndex((p) => p.id === selected);
         setSelected(
-          active.panels[
+          panels[
             (Math.max(0, index) +
               (event.code === "BracketRight" ? 1 : -1) +
-              active.panels.length) %
-              active.panels.length
+              panels.length) %
+              panels.length
           ]?.id,
         );
       }
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [selected, active, modal]);
+  }, [selected, active, modal, mode, section]);
   useEffect(() => {
     setSearch("");
     setCatalog([]);
@@ -619,12 +680,15 @@ export function App() {
       window.bridge
         ?.cancelChat(panel.id)
         .catch((error) => notify(errorText(error)));
+    // A pane is a view, a thread is a conversation: closing the view leaves the
+    // Code layout only. Threads are deleted from the Chat tab.
     updateWorkspace(active.id, (w) => ({
       ...w,
       layout: remove(w.layout, panel.id),
-      panels: panel.herdrId
-        ? w.panels
-        : w.panels.filter((p) => p.id !== panel.id),
+      panels:
+        panel.herdrId || panel.kind === "chat"
+          ? w.panels
+          : w.panels.filter((p) => p.id !== panel.id),
     }));
     if (zoomed === panel.id) setZoomed(null);
   }
@@ -652,29 +716,76 @@ export function App() {
     });
     setDragId(null);
   }
-  async function sendChat(panel: Panel, text: string) {
+  async function sendChat(
+    panel: Panel,
+    text: string,
+    attachments: string[] = [],
+  ) {
     if (!window.bridge)
       return notify("Open the desktop app to chat with your agents.");
+    const owner =
+      workspaces.find((w) => w.panels.some((p) => p.id === panel.id)) || active;
     const messages: Message[] = [
       ...(panel.messages || []),
-      { id: uid(), role: "user", text },
+      {
+        id: uid(),
+        role: "user",
+        text,
+        attachments: attachments.length ? attachments : undefined,
+      },
     ];
     updatePanel(panel.id, {
       messages: [...messages, { id: uid(), role: "assistant", text: "" }],
       busy: true,
       error: "",
+      note: "",
+      resolvedModel: "",
+      updatedAt: Date.now(),
+      title: DEFAULT_TITLES.has(panel.title) ? titleFrom(text) : panel.title,
     });
     try {
       await window.bridge.chat({
         panelId: panel.id,
-        cwd: active.cwd,
-        endpoint: active.connection,
+        cwd: owner.cwd,
+        endpoint: owner.connection,
         agent: panel.agent || "claude",
         messages,
+        model: panel.model || undefined,
+        effort: panel.effort || undefined,
+        permission: panel.permission || undefined,
       });
     } catch (error) {
       updatePanel(panel.id, { busy: false, error: errorText(error) });
     }
+  }
+  // Chat threads live in the project's panel list but stay out of the Code layout.
+  function newThread(workspaceId: string): Panel {
+    const panel: Panel = {
+      id: uid(),
+      kind: "chat",
+      title: "New thread",
+      agent: "claude",
+      permission: "acceptEdits",
+      messages: [],
+      updatedAt: Date.now(),
+    };
+    updateWorkspace(workspaceId, (w) => ({
+      ...w,
+      panels: [...w.panels, panel],
+    }));
+    return panel;
+  }
+  function deleteThread(workspaceId: string, panel: Panel) {
+    if (panel.busy)
+      window.bridge
+        ?.cancelChat(panel.id)
+        .catch((error) => notify(errorText(error)));
+    updateWorkspace(workspaceId, (w) => ({
+      ...w,
+      layout: remove(w.layout, panel.id),
+      panels: w.panels.filter((p) => p.id !== panel.id),
+    }));
+    if (zoomed === panel.id) setZoomed(null);
   }
   async function runRoutine(routine: Routine) {
     if (!window.bridge) return notify("Run routines in the desktop app.");
@@ -724,7 +835,7 @@ export function App() {
     setWorkspaces((list) =>
       list.map((w) => ({
         ...w,
-        panels: w.panels.filter((p) => !closed.has(p.id)),
+        panels: w.panels.filter((p) => !closed.has(p.id) || p.kind === "chat"),
         layout: [...closed].reduce((tree, id) => remove(tree, id), w.layout),
       })),
     );
@@ -844,26 +955,51 @@ export function App() {
       </PanelFrame>
     );
   }
-  const filteredPanels = active.panels.filter((p) =>
-    mode === "Agent"
-      ? p.kind === "agent"
-      : mode === "Chat"
-        ? p.kind === "chat"
-        : true,
-  );
+  const filteredPanels = codePanels(active);
   const compactId =
     filteredPanels.find((p) => p.id === selected)?.id || filteredPanels[0]?.id;
   const useTabs = tabMode || compact || filteredPanels.length > 6;
   if (compactId) visitedTabs.current.add(compactId);
-  const visibleLayout =
-    mode === "Code" ? active.layout : tidy(filteredPanels.map((p) => p.id));
-  const totalPanels = workspaces.reduce((sum, w) => sum + w.panels.length, 0);
+  const visibleLayout = active.layout;
+  const totalPanels = workspaces.reduce(
+    (sum, w) => sum + codePanels(w).length,
+    0,
+  );
   const blocked = workspaces.flatMap((w) =>
     w.panels
       .filter((p) => p.status === "blocked")
       .map((p) => ({ workspace: w, panel: p })),
   );
 
+  const profile = (
+    <div className="profile">
+      <span className="avatar">
+        <img src="./sushi.svg" width="22" height="22" alt="" />
+      </span>
+      <div>
+        <strong>sushiAI</strong>
+        <span>ON YOUR MAC</span>
+      </div>
+      <button
+        className="icon-button"
+        title="Keyboard shortcuts"
+        onClick={() =>
+          notify(
+            "⌘K Add panel · ⌘B Toggle sidebar · ⌘Enter Focus panel · Esc Restore layout. Drag panel headers to rearrange; drag dividers to resize.",
+          )
+        }
+      >
+        <CircleHelp size={13} />
+      </button>
+      <button
+        className="icon-button"
+        aria-label="Settings"
+        onClick={() => setModal("settings")}
+      >
+        <Settings size={13} />
+      </button>
+    </div>
+  );
   return (
     <div
       className={`app ${compact ? "compact" : ""}`}
@@ -909,43 +1045,47 @@ export function App() {
           ))}
         </div>
         <div className="titlebar-right">
-          <button
-            className={`icon-button ${tabMode ? "active" : ""}`}
-            title={tabMode ? "Switch to split panels" : "Switch to tabs"}
-            aria-pressed={tabMode}
-            onClick={() => {
-              setTabMode(!tabMode);
-              setZoomed(null);
-            }}
-          >
-            <Columns2 size={14} />
-          </button>
-          <button
-            className="icon-button"
-            title="Files and Git"
-            onClick={() => {
-              const panel = active.panels.find((p) => p.kind === "files");
-              panel ? showPanel(panel) : addPanel("files");
-            }}
-          >
-            <FolderOpen size={14} />
-          </button>
-          <button
-            className="tidy"
-            onClick={() => {
-              updateWorkspace(active.id, (w) => ({
-                ...w,
-                layout: tidy(w.panels.map((p) => p.id)),
-              }));
-              setZoomed(null);
-              setSection("");
-              setMode("Code");
-              setTabMode(false);
-            }}
-            title="Arrange all panels"
-          >
-            <LayoutGrid size={12} /> Tidy
-          </button>
+          {(mode === "Code" || !!section) && (
+            <>
+              <button
+                className={`icon-button ${tabMode ? "active" : ""}`}
+                title={tabMode ? "Switch to split panels" : "Switch to tabs"}
+                aria-pressed={tabMode}
+                onClick={() => {
+                  setTabMode(!tabMode);
+                  setZoomed(null);
+                }}
+              >
+                <Columns2 size={14} />
+              </button>
+              <button
+                className="icon-button"
+                title="Files and Git"
+                onClick={() => {
+                  const panel = active.panels.find((p) => p.kind === "files");
+                  panel ? showPanel(panel) : addPanel("files");
+                }}
+              >
+                <FolderOpen size={14} />
+              </button>
+              <button
+                className="tidy"
+                onClick={() => {
+                  updateWorkspace(active.id, (w) => ({
+                    ...w,
+                    layout: tidy(codePanels(w).map((p) => p.id)),
+                  }));
+                  setZoomed(null);
+                  setSection("");
+                  setMode("Code");
+                  setTabMode(false);
+                }}
+                title="Arrange all panels"
+              >
+                <LayoutGrid size={12} /> Tidy
+              </button>
+            </>
+          )}
           {updates?.release && (
             <button
               className="update-indicator"
@@ -968,173 +1108,164 @@ export function App() {
             onClick={() => setModal("notifications")}
           >
             <Bell size={14} />
-            {(blocked.length > 0 || updates?.release) && <i />}
+            {(blocked.length > 0 ||
+              updates?.release ||
+              agentNotices.length > 0) && <i />}
           </button>
         </div>
       </header>
       <div className="app-body">
         {sidebar && (
           <aside className="sidebar">
-            <nav className="primary-nav">
-              {[
-                { label: "Dashboard", icon: LayoutDashboard },
-                { label: "Sessions", icon: TerminalSquare },
-                { label: "Routines", icon: Workflow },
-                { label: "Plugins", icon: Plug },
-                { label: "Skills", icon: Sparkles },
-              ].map(({ label, icon: NavIcon }) => (
-                <button
-                  key={label}
-                  className={
-                    section === label ? "nav-item current" : "nav-item"
-                  }
-                  onClick={() =>
-                    label === "Sessions"
-                      ? setModal("sessions")
-                      : setSection(section === label ? "" : label)
-                  }
-                >
-                  <NavIcon size={14} />
-                  <span>{label}</span>
-                  {label === "Dashboard" && (
-                    <span className="count">{workspaces.length}</span>
-                  )}
-                </button>
-              ))}
-            </nav>
-            <div className="workspace-section">
-              <div className="section-label">
-                <span>Workspaces</span>
-                <button
-                  className="icon-button"
-                  aria-label="New workspace"
-                  onClick={() => setModal("workspace")}
-                >
-                  <Plus size={14} />
-                </button>
-              </div>
-              <label className="workspace-search">
-                <Search size={12} />
-                <input
-                  aria-label="Search workspaces"
-                  placeholder="Find workspace…"
-                  value={workspaceQuery}
-                  onChange={(e) => setWorkspaceQuery(e.target.value)}
-                />
-              </label>
-              <div className="workspace-list">
-                {workspaces
-                  .filter((w) =>
-                    w.name.toLowerCase().includes(workspaceQuery.toLowerCase()),
-                  )
-                  .map((w) => (
-                    <div key={w.id} className="workspace-item">
-                      <button
-                        className="workspace-more"
-                        title={`Manage workspace ${w.name}`}
-                        onClick={() => {
-                          setClosing({ workspace: w });
-                          setModal("workspace-actions");
-                        }}
-                      >
-                        <MoreHorizontal size={13} />
-                      </button>
-                      <button
-                        className={`workspace-name ${w.id === active.id && !section ? "active" : ""}`}
-                        onClick={() => switchWorkspace(w.id)}
-                        title={w.cwd}
-                      >
-                        {w.id === active.id ? (
-                          <ChevronDown size={12} />
-                        ) : (
-                          <ChevronRight size={12} />
-                        )}
-                        <span>{w.name}</span>
-                        {w.herdrId && (
-                          <i
-                            className={`status-dot ${connected ? "green" : ""}`}
-                            title="Herdr workspace"
-                          />
-                        )}
-                      </button>
-                      {w.id === active.id && !section && (
-                        <div className="workspace-panels">
-                          {w.panels.map((p) => (
-                            <button
-                              key={p.id}
-                              className={selected === p.id ? "selected" : ""}
-                              onClick={() => showPanel(p)}
-                              title={p.title}
-                            >
-                              <Icon kind={p.kind} agent={p.agent} />
-                              <span>
-                                {p.kind === "browser" && p.url
-                                  ? p.url
-                                      .replace(/^https?:\/\//, "")
-                                      .replace(/\/$/, "")
-                                  : p.title}
-                              </span>
-                              {p.status === "working" && (
-                                <i className="status-dot green pulse" />
-                              )}
-                              {p.status === "blocked" && (
-                                <i className="status-dot yellow" />
-                              )}
-                            </button>
-                          ))}
-                        </div>
+            {/* The sidebar is one container; Code fills it with nav, workspaces
+                and footer, Agent and Chat load only their list into it. */}
+            {mode === "Code" ? (
+              <>
+                <nav className="primary-nav">
+                  {[
+                    { label: "Dashboard", icon: LayoutDashboard },
+                    { label: "Sessions", icon: TerminalSquare },
+                    { label: "Routines", icon: Workflow },
+                    { label: "Plugins", icon: Plug },
+                    { label: "Skills", icon: Sparkles },
+                  ].map(({ label, icon: NavIcon }) => (
+                    <button
+                      key={label}
+                      className={
+                        section === label ? "nav-item current" : "nav-item"
+                      }
+                      onClick={() =>
+                        label === "Sessions"
+                          ? setModal("sessions")
+                          : setSection(section === label ? "" : label)
+                      }
+                    >
+                      <NavIcon size={14} />
+                      <span>{label}</span>
+                      {label === "Dashboard" && (
+                        <span className="count">{workspaces.length}</span>
                       )}
-                    </div>
+                    </button>
                   ))}
-              </div>
-            </div>
-            <footer className="sidebar-footer">
-              <button
-                className="backend-status"
-                onClick={() => setModal("settings")}
-              >
-                <span>Herdr</span>
-                <span className={`status-pill ${connected ? "live" : ""}`}>
-                  <i />
-                  {connected
-                    ? "Connected"
-                    : connection === "connecting"
-                      ? "Connecting"
-                      : "Offline"}
-                </span>
-              </button>
-              <div className="session-count">
-                <span>Panels</span>
-                <span className="count">{totalPanels}</span>
-              </div>
-              <div className="profile">
-                <span className="avatar">
-                  <img src="./sushi.svg" width="22" height="22" alt="" />
-                </span>
-                <div>
-                  <strong>sushiAI</strong>
-                  <span>ON YOUR MAC</span>
+                </nav>
+                <div className="workspace-section">
+                  <div className="section-label">
+                    <span>Workspaces</span>
+                    <button
+                      className="icon-button"
+                      aria-label="New workspace"
+                      onClick={() => setModal("workspace")}
+                    >
+                      <Plus size={14} />
+                    </button>
+                  </div>
+                  <label className="workspace-search">
+                    <Search size={12} />
+                    <input
+                      aria-label="Search workspaces"
+                      placeholder="Find workspace…"
+                      value={workspaceQuery}
+                      onChange={(e) => setWorkspaceQuery(e.target.value)}
+                    />
+                  </label>
+                  <div className="workspace-list">
+                    {workspaces
+                      .filter((w) =>
+                        w.name
+                          .toLowerCase()
+                          .includes(workspaceQuery.toLowerCase()),
+                      )
+                      .map((w) => (
+                        <div key={w.id} className="workspace-item">
+                          <button
+                            className="workspace-more"
+                            title={`Manage workspace ${w.name}`}
+                            onClick={() => {
+                              setClosing({ workspace: w });
+                              setModal("workspace-actions");
+                            }}
+                          >
+                            <MoreHorizontal size={13} />
+                          </button>
+                          <button
+                            className={`workspace-name ${w.id === active.id && !section ? "active" : ""}`}
+                            onClick={() => switchWorkspace(w.id)}
+                            title={w.cwd}
+                          >
+                            {w.id === active.id ? (
+                              <ChevronDown size={12} />
+                            ) : (
+                              <ChevronRight size={12} />
+                            )}
+                            <span>{w.name}</span>
+                            {w.herdrId && (
+                              <i
+                                className={`status-dot ${connected ? "green" : ""}`}
+                                title="Herdr workspace"
+                              />
+                            )}
+                          </button>
+                          {w.id === active.id && !section && (
+                            <div className="workspace-panels">
+                              {codePanels(w).map((p) => (
+                                <button
+                                  key={p.id}
+                                  className={
+                                    selected === p.id ? "selected" : ""
+                                  }
+                                  onClick={() => showPanel(p)}
+                                  title={p.title}
+                                >
+                                  <Icon kind={p.kind} agent={p.agent} />
+                                  <span>
+                                    {p.kind === "browser" && p.url
+                                      ? p.url
+                                          .replace(/^https?:\/\//, "")
+                                          .replace(/\/$/, "")
+                                      : p.title}
+                                  </span>
+                                  {p.status === "working" && (
+                                    <i className="status-dot green pulse" />
+                                  )}
+                                  {p.status === "blocked" && (
+                                    <i className="status-dot yellow" />
+                                  )}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                  </div>
                 </div>
-                <button
-                  className="icon-button"
-                  title="Keyboard shortcuts"
-                  onClick={() =>
-                    notify(
-                      "⌘K Add panel · ⌘B Toggle sidebar · ⌘Enter Focus panel · Esc Restore layout. Drag panel headers to rearrange; drag dividers to resize.",
-                    )
-                  }
-                >
-                  <CircleHelp size={13} />
-                </button>
-                <button
-                  className="icon-button"
-                  aria-label="Settings"
-                  onClick={() => setModal("settings")}
-                >
-                  <Settings size={13} />
-                </button>
-              </div>
-            </footer>
+                <footer className="sidebar-footer">
+                  <button
+                    className="backend-status"
+                    onClick={() => setModal("settings")}
+                  >
+                    <span>Herdr</span>
+                    <span className={`status-pill ${connected ? "live" : ""}`}>
+                      <i />
+                      {connected
+                        ? "Connected"
+                        : connection === "connecting"
+                          ? "Connecting"
+                          : "Offline"}
+                    </span>
+                  </button>
+                  <div className="session-count">
+                    <span>Panels</span>
+                    <span className="count">{totalPanels}</span>
+                  </div>
+                  {profile}
+                </footer>
+              </>
+            ) : (
+              <>
+                <div className="sidebar-slot" ref={setSlot} />
+                <footer className="sidebar-footer">{profile}</footer>
+              </>
+            )}
           </aside>
         )}
         <main
@@ -1199,7 +1330,8 @@ export function App() {
                         <strong>{w.name}</strong>
                         <p>{w.cwd}</p>
                         <span>
-                          {w.panels.length} panels <ArrowUpRight size={13} />
+                          {codePanels(w).length} panels{" "}
+                          <ArrowUpRight size={13} />
                         </span>
                       </button>
                     ))}
@@ -1292,6 +1424,29 @@ export function App() {
                 </>
               )}
             </div>
+          ) : mode === "Agent" ? (
+            <AgentsView slot={slot} />
+          ) : mode === "Chat" ? (
+            <ChatView
+              workspaces={workspaces}
+              active={active}
+              slot={slot}
+              onSelectWorkspace={(id) => {
+                const target = workspaces.find((w) => w.id === id);
+                if (target?.connection) setSocket(target.connection);
+                setActiveId(id);
+              }}
+              onNewThread={newThread}
+              onSend={sendChat}
+              onCancel={(id) =>
+                window.bridge
+                  ?.cancelChat(id)
+                  .catch((error) => notify(errorText(error)))
+              }
+              onPatch={updatePanel}
+              onDelete={deleteThread}
+              onToggleSidebar={() => setSidebar(!sidebar)}
+            />
           ) : zoomed && active.panels.some((p) => p.id === zoomed) ? (
             renderPanel(zoomed)
           ) : useTabs && compactId ? (
@@ -1382,16 +1537,10 @@ export function App() {
           ) : (
             <Empty
               icon={<Columns2 size={30} />}
-              title={
-                mode === "Chat"
-                  ? "A fresh thread starts here."
-                  : "Space for your next idea."
-              }
+              title="Space for your next idea."
               text="Add a panel to get started."
-              action={`Add ${mode === "Chat" ? "chat" : "panel"}`}
-              onAction={() =>
-                mode === "Chat" ? addPanel("chat") : setModal("pane")
-              }
+              action="Add panel"
+              onAction={() => setModal("pane")}
             />
           )}
         </main>
@@ -1819,6 +1968,27 @@ export function App() {
               <>
                 <div className="dialog-eyebrow">ACTIVITY</div>
                 <h2>Your agents at a glance.</h2>
+                {agentNotices.map((activity) => (
+                  <div key={activity.id} className="notification-item">
+                    <span>✦</span>
+                    <div>
+                      <strong>
+                        {activity.agentName} · {activity.title}
+                      </strong>
+                      <p>{activity.summary}</p>
+                    </div>
+                    <button
+                      aria-label="Dismiss activity"
+                      onClick={() =>
+                        setAgentNotices((old) =>
+                          old.filter((a) => a.id !== activity.id),
+                        )
+                      }
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
                 {updates?.release && (
                   <button
                     className="notification-item"
@@ -1855,13 +2025,13 @@ export function App() {
                       <ArrowUpRight size={15} />
                     </button>
                   ))
-                ) : (
+                ) : !agentNotices.length ? (
                   <Empty
                     icon={<Check size={26} />}
                     title="All quiet for now."
                     text="Agents waiting for your input will appear here."
                   />
-                )}
+                ) : null}
               </>
             )}
           </div>

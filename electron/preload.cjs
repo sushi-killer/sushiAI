@@ -1,9 +1,17 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 const invoke =
   (channel) =>
   (...args) =>
     ipcRenderer.invoke(channel, ...args);
 contextBridge.exposeInMainWorld("bridge", {
+  agentProviders: invoke("agent-providers"),
+  agentCall: invoke("agent-call"),
+  agentOpenExternal: invoke("agent-open-external"),
+  onAgents: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on("agent-event", listener);
+    return () => ipcRenderer.removeListener("agent-event", listener);
+  },
   system: invoke("system"),
   updatesState: invoke("updates-state"),
   updatesCheck: invoke("updates-check"),
@@ -18,13 +26,17 @@ contextBridge.exposeInMainWorld("bridge", {
     return () => ipcRenderer.removeListener("updates-state", listener);
   },
   chooseDirectory: invoke("choose-directory"),
+  chooseAttachments: invoke("choose-attachments"),
+  pathForFile: (file) => webUtils.getPathForFile(file),
   terminalOpen: invoke("terminal-open"),
   terminalWrite: invoke("terminal-write"),
+  terminalAttach: invoke("terminal-attach"),
   terminalResize: invoke("terminal-resize"),
   terminalClose: invoke("terminal-close"),
   terminalScroll: invoke("terminal-scroll"),
   herdr: invoke("herdr"),
   chat: invoke("chat"),
+  chatModels: invoke("chat-models"),
   cancelChat: invoke("chat-cancel"),
   catalog: invoke("catalog"),
   window: invoke("window"),

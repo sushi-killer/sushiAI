@@ -1,6 +1,6 @@
 {
   "name": "sushiai-workspace",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "description": "A macOS workspace for terminal agents, powered by Herdr",
   "main": "electron/main.cjs",
@@ -27,7 +27,9 @@
     "lucide-react": "^0.577.0",
     "node-pty": "^1.1.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
@@ -66,7 +68,7 @@
     },
     "artifactName": "sushiAI-${version}-${arch}.${ext}",
     "dmg": {
-      "title": "sushiAI 0.0.2"
+      "title": "sushiAI 0.0.3"
     }
   },
   "license": "MIT",

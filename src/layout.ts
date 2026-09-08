@@ -7,6 +7,11 @@ export const split = (
   axis: "row" | "column",
   ratio = 0.5,
 ): Layout => ({ type: "split", id: uid(), axis, ratio, a, b });
+export const contains = (node: Layout | null, id: string): boolean =>
+  !!node &&
+  (node.type === "leaf"
+    ? node.id === id
+    : contains(node.a, id) || contains(node.b, id));
 export function remove(node: Layout | null, id: string): Layout | null {
   if (!node || node.type === "leaf") return node?.id === id ? null : node;
   const a = remove(node.a, id),

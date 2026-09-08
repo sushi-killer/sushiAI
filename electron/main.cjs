@@ -10,7 +10,7 @@ const {
 const path = require("node:path");
 const os = require("node:os");
 const fs = require("node:fs/promises");
-const { existsSync } = require("node:fs");
+const { existsSync, statSync } = require("node:fs");
 const { spawn } = require("node:child_process");
 const pty = require("node-pty");
 const { request, inputCommands } = require("./herdr.cjs");
@@ -20,11 +20,23 @@ const { openHerdrStream, detectAgent } = require("./terminal-stream.cjs");
 const { quote } = require("./connections.cjs");
 const { Updates } = require("./updates.cjs");
 const {
+  chatArgs,
+  chatPrompt,
+  claudeEvent,
+  codexEvent,
+  IMAGE,
+} = require("./chat-args.cjs");
+const { chatModels } = require("./agent-models.cjs");
+const { AgentRegistry } = require("./agents/registry.cjs");
+const { HermesProvider } = require("./agents/hermes-provider.cjs");
+const {
   install,
   applicationPath,
   cleanupCompleted,
 } = require("./installer.cjs");
 let connections, preview, updates;
+const agents = new AgentRegistry();
+agents.on("event", (event) => send("agent-event", event));
 const terminals = new Map(),
   terminalPending = new Map(),
   chats = new Map(),
@@ -33,6 +45,15 @@ let mainWindow;
 const root = path.join(__dirname, "..");
 const dataDir = process.env.BRIDGE_DATA_DIR;
 if (dataDir) app.setPath("userData", path.resolve(dataDir));
+agents.register(
+  new HermesProvider({
+    activityFile: path.join(
+      app.getPath("userData"),
+      "agents",
+      "hermes-activity.json",
+    ),
+  }),
+);
 const extraPath = [
   path.join(os.homedir(), ".local/bin"),
   "/opt/homebrew/bin",
@@ -78,6 +99,22 @@ function handle(channel, callback) {
     return callback(...args);
   });
 }
+handle("agent-providers", () => agents.list());
+handle("agent-call", (provider, operation, input) =>
+  agents.call(provider, operation, input),
+);
+handle("agent-open-external", async (value) => {
+  if (typeof value !== "string" || value.length > 8192)
+    throw new Error("Invalid link.");
+  const url = new URL(value);
+  if (
+    !["http:", "https:"].includes(url.protocol) ||
+    url.username ||
+    url.password
+  )
+    throw new Error("Only web links can be opened.");
+  await shell.openExternal(url.href);
+});
 const allowedHerdr = new Set([
   "ping",
   "session.snapshot",
@@ -206,6 +243,12 @@ handle("system", async () => ({
     (name) => ({ name, path: executable(name) }),
   ),
 }));
+handle("choose-attachments", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openFile", "openDirectory", "multiSelections"],
+  });
+  return result.canceled ? [] : result.filePaths;
+});
 handle("choose-directory", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ["openDirectory", "createDirectory"],
@@ -351,6 +394,37 @@ handle("terminal-write", (panelId, data) => {
     throw new Error("Invalid input");
   terminals.get(id(panelId))?.proc.write(data);
 });
+// A pasted or dropped file becomes a real file on disk, so an agent CLI running
+// in the terminal can read the path it is handed.
+handle("terminal-attach", async ({ panelId, name, data }) => {
+  const terminal = terminals.get(id(panelId));
+  if (!terminal || terminal.exited)
+    throw new Error("This terminal is not running.");
+  if (terminal.source !== "pty" || terminal.remote)
+    throw new Error("Files can be attached in local terminals only.");
+  if (typeof data !== "string" || data.length > 28 * 1024 * 1024)
+    throw new Error("Attach files up to 20 MB.");
+  const bytes = Buffer.from(data, "base64");
+  if (!bytes.length) throw new Error("That file is empty.");
+  const safe =
+    path
+      .basename(typeof name === "string" ? name : "")
+      .replace(/[^\w.\- ]+/g, "_")
+      .slice(-80) || "pasted";
+  const directory = path.join(app.getPath("userData"), "attachments");
+  await fs.mkdir(directory, { recursive: true });
+  // ponytail: prune by age on write; a scheduled sweep only if this ever grows.
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  for (const entry of await fs.readdir(directory).catch(() => [])) {
+    const full = path.join(directory, entry);
+    const info = await fs.stat(full).catch(() => null);
+    if (info && info.mtimeMs < cutoff)
+      await fs.rm(full, { force: true }).catch(() => {});
+  }
+  const file = path.join(directory, `${Date.now().toString(36)}-${safe}`);
+  await fs.writeFile(file, bytes);
+  return file;
+});
 handle("terminal-resize", (panelId, cols, rows) => {
   if (
     !Number.isInteger(cols) ||
@@ -387,98 +461,152 @@ function stopChat(panelId) {
   }
 }
 handle("chat-cancel", (panelId) => stopChat(id(panelId)));
-handle("chat", ({ panelId, cwd, agent, messages, endpoint }) => {
-  id(panelId);
-  const remote = endpoint?.startsWith("ssh:")
-    ? connections.get(endpoint)
-    : null;
-  if (!remote) directory(cwd);
-  else if (typeof cwd !== "string" || !cwd.startsWith("/"))
-    throw new Error("Choose an absolute remote project folder.");
-  if (chats.has(panelId)) throw new Error("A response is already running.");
-  if (!["claude", "codex"].includes(agent))
-    throw new Error("Choose Claude Code or Codex.");
-  const binary = remote ? "/usr/bin/ssh" : executable(agent);
-  if (!binary)
-    throw new Error(
-      `${agent} is not installed. Install and sign in to the CLI first.`,
-    );
-  if (
-    !Array.isArray(messages) ||
-    messages.length > 200 ||
-    messages.some(
-      (m) =>
-        !["user", "assistant"].includes(m.role) || typeof m.text !== "string",
+handle(
+  "chat",
+  ({ panelId, cwd, agent, messages, endpoint, model, effort, permission }) => {
+    id(panelId);
+    const remote = endpoint?.startsWith("ssh:")
+      ? connections.get(endpoint)
+      : null;
+    if (!remote) directory(cwd);
+    else if (typeof cwd !== "string" || !cwd.startsWith("/"))
+      throw new Error("Choose an absolute remote project folder.");
+    if (chats.has(panelId)) throw new Error("A response is already running.");
+    if (!["claude", "codex"].includes(agent))
+      throw new Error("Choose Claude Code or Codex.");
+    const binary = remote ? "/usr/bin/ssh" : executable(agent);
+    if (!binary)
+      throw new Error(
+        `${agent} is not installed. Install and sign in to the CLI first.`,
+      );
+    if (
+      !Array.isArray(messages) ||
+      messages.length > 200 ||
+      messages.some(
+        (m) =>
+          !["user", "assistant"].includes(m.role) || typeof m.text !== "string",
+      )
     )
-  )
-    throw new Error("Invalid conversation");
-  const prompt = messages.map((m) => `${m.role}: ${m.text}`).join("\n\n");
-  if (prompt.length > 200000)
-    throw new Error("Conversation is too long. Start a new chat.");
-  // Keep the prompt off argv and preserve each CLI's ordinary permission policy.
-  let args =
-    agent === "claude"
-      ? ["--print", "--output-format", "text"]
-      : ["exec", "--json", "--skip-git-repo-check", "-"];
-  if (remote)
-    args = [
-      ...connections.args(remote),
-      remote.host,
-      `export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; cd ${quote(cwd)} && exec ${quote(agent)} ${args.map(quote).join(" ")}`,
-    ];
-  const proc = spawn(binary, args, {
-    cwd: remote ? os.homedir() : cwd,
-    env: process.env,
-    stdio: ["pipe", "pipe", "pipe"],
-    detached: true,
-  });
-  chats.set(panelId, proc);
-  let buffered = "",
-    errorOutput = "";
-  proc.stdout.setEncoding("utf8");
-  proc.stderr.setEncoding("utf8");
-  const emit = (text) => send("chat-data", { panelId, text });
-  proc.stdout.on("data", (data) => {
-    if (agent === "claude") return emit(data);
-    buffered += data;
-    let boundary;
-    while ((boundary = buffered.indexOf("\n")) >= 0) {
-      const line = buffered.slice(0, boundary);
-      buffered = buffered.slice(boundary + 1);
-      try {
-        const event = JSON.parse(line);
-        if (
-          event.type === "item.completed" &&
-          event.item?.type === "agent_message"
-        )
-          emit(event.item.text + "\n");
-        else if (event.type === "error" || event.type === "turn.failed")
-          errorOutput +=
-            event.message || event.error?.message || "Agent request failed.";
-      } catch {
-        /* non-event diagnostic */
-      }
-    }
-  });
-  proc.stderr.on("data", (data) => {
-    errorOutput = (errorOutput + data).slice(-8000);
-  });
-  proc.on("error", (error) => {
-    chats.delete(panelId);
-    send("chat-data", { panelId, done: true, error: error.message });
-  });
-  proc.on("close", (code) => {
-    chats.delete(panelId);
-    send("chat-data", {
-      panelId,
-      done: true,
-      error: code ? errorOutput || `Agent exited (${code}).` : undefined,
+      throw new Error("Invalid conversation");
+    if (
+      messages.some(
+        (m) =>
+          m.attachments !== undefined &&
+          (!Array.isArray(m.attachments) ||
+            m.attachments.length > 20 ||
+            m.attachments.some(
+              (a) =>
+                typeof a !== "string" || a.length > 1000 || !path.isAbsolute(a),
+            )),
+      )
+    )
+      throw new Error("Invalid attachments");
+    const attachments = messages.flatMap((m) => m.attachments || []);
+    if (attachments.length && remote)
+      throw new Error("Attachments work with local projects only.");
+    const present = attachments.filter((a) => existsSync(a));
+    const dirs = [
+      ...new Set(
+        present.map((a) => (statSync(a).isDirectory() ? a : path.dirname(a))),
+      ),
+    ].slice(0, 30);
+    const images = present.filter((a) => IMAGE.test(a)).slice(-10);
+    const prompt = chatPrompt(messages);
+    if (prompt.length > 200000)
+      throw new Error("Conversation is too long. Start a new chat.");
+    // Keep the prompt off argv and preserve each CLI's ordinary permission policy.
+    let args = chatArgs(agent, { model, effort, permission, dirs, images });
+    if (remote)
+      args = [
+        ...connections.args(remote),
+        remote.host,
+        `export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; cd ${quote(cwd)} && exec ${quote(agent)} ${args.map(quote).join(" ")}`,
+      ];
+    const proc = spawn(binary, args, {
+      cwd: remote ? os.homedir() : cwd,
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: true,
     });
-  });
-  proc.stdin.on("error", () => {});
-  proc.stdin.end(prompt);
-  return { started: true };
-});
+    chats.set(panelId, proc);
+    // Codex names its model only where it was asked to; Claude reports the one it
+    // resolved to, which can differ from the alias the thread requested.
+    if (agent === "codex")
+      send("chat-data", {
+        panelId,
+        model: model || chatModels().codex.defaultModelId || "",
+      });
+    const parse = agent === "claude" ? claudeEvent : codexEvent;
+    let buffered = "",
+      diagnostics = "",
+      warnings = "",
+      fatal = "",
+      full = "",
+      answered = false,
+      usage;
+    proc.stdout.setEncoding("utf8");
+    proc.stderr.setEncoding("utf8");
+    const emit = (text) => {
+      answered = true;
+      send("chat-data", { panelId, text });
+    };
+    proc.stdout.on("data", (data) => {
+      buffered += data;
+      let boundary;
+      while ((boundary = buffered.indexOf("\n")) >= 0) {
+        const line = buffered.slice(0, boundary);
+        buffered = buffered.slice(boundary + 1);
+        let event;
+        try {
+          event = JSON.parse(line);
+        } catch {
+          continue; /* non-event diagnostic */
+        }
+        const update = parse(event);
+        if (!update) continue;
+        if (update.model) send("chat-data", { panelId, model: update.model });
+        if (update.full) full = update.full;
+        if (update.usage) usage = update.usage;
+        if (update.text) emit(update.text);
+        else if (update.note) send("chat-data", { panelId, note: update.note });
+        if (update.error) {
+          if (update.fatal) fatal = update.error;
+          else
+            warnings =
+              `${warnings ? `${warnings}\n` : ""}${update.error}`.slice(-4000);
+        }
+      }
+    });
+    proc.stderr.on("data", (data) => {
+      diagnostics = (diagnostics + data).slice(-8000);
+    });
+    proc.on("error", (error) => {
+      chats.delete(panelId);
+      send("chat-data", { panelId, done: true, error: error.message });
+    });
+    proc.on("close", (code) => {
+      chats.delete(panelId);
+      // Codex logs warnings on runs that succeed, so they surface only when the
+      // turn failed or came back empty; stderr is a last resort for a bad exit.
+      // Deltas carry the answer; the closing summary is the net if they went missing.
+      if (!answered && full) emit(full);
+      const failed = code
+        ? diagnostics || warnings || `Agent exited (${code}).`
+        : "";
+      send("chat-data", {
+        panelId,
+        done: true,
+        usage,
+        error:
+          fatal || failed || (answered ? undefined : warnings || undefined),
+      });
+    });
+    proc.stdin.on("error", () => {});
+    proc.stdin.end(prompt);
+    return { started: true };
+  },
+);
+handle("chat-models", () => chatModels());
 handle("catalog", async (kind) => {
   if (kind !== "skills") return [];
   const results = [];
@@ -647,7 +775,10 @@ app.on("before-quit", (event) => {
   for (const terminal of terminals.values())
     if (!terminal.exited) terminal.proc.kill();
   for (const panelId of chats.keys()) stopChat(panelId);
-  Promise.resolve(connections?.close()).finally(() => {
+  Promise.allSettled([
+    Promise.resolve(connections?.close()),
+    agents.close(),
+  ]).finally(() => {
     quitReady = true;
     app.quit();
   });

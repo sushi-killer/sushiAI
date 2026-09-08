@@ -215,9 +215,10 @@ textarea::placeholder {
   min-height: 0;
 }
 .sidebar {
-  width: 250px;
-  min-width: 220px;
-  max-width: 260px;
+  width: 290px;
+  min-width: 260px;
+  max-width: 300px;
+  font-size: 1.06em;
   flex-shrink: 0;
   background: #131313;
   border: 1px solid #303030;
@@ -283,6 +284,18 @@ textarea::placeholder {
 .section-label .icon-button {
   width: 18px;
   height: 18px;
+}
+.section-actions {
+  display: flex;
+  gap: 4px;
+}
+.sidebar-slot {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 0 9px;
+  padding-top: 12px;
 }
 .workspace-list {
   overflow: auto;
@@ -1681,8 +1694,8 @@ iframe {
 }
 @media (max-width: 1150px) {
   .sidebar {
-    width: 220px;
-    min-width: 200px;
+    width: 260px;
+    min-width: 240px;
   }
   .app-body {
     gap: 12px;
@@ -2430,8 +2443,8 @@ iframe {
     top: 44px;
     bottom: 8px;
     z-index: 25;
-    width: 235px;
-    min-width: 235px;
+    width: 270px;
+    min-width: 270px;
     box-shadow: 10px 0 35px #0008;
   }
   .workspace-canvas {
@@ -2771,4 +2784,29 @@ iframe {
   .update-indicator span {
     display: none;
   }
+}
+
+/* Every view mounts into the same two frames; a short fade instead of a hard cut. */
+@keyframes view-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.sidebar,
+.workspace-canvas,
+.section-page {
+  /* animation: view-in 0.22s ease-out; */
+}
+.nav-item,
+.workspace-name,
+.workspace-panels button,
+.icon-button {
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
 }

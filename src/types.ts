@@ -7,7 +7,14 @@ export type ConnectionProfile = {
   socket: string;
   connected?: boolean;
 };
-export type Message = { id: string; role: "user" | "assistant"; text: string };
+export type Message = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  attachments?: string[];
+  /** The model that actually answered, as the CLI resolved it. */
+  model?: string;
+};
 export type Panel = {
   id: string;
   kind: PanelKind;
@@ -21,6 +28,15 @@ export type Panel = {
   busy?: boolean;
   error?: string;
   previewFile?: { root: string; path: string; endpoint?: string };
+  pinned?: boolean;
+  updatedAt?: number;
+  note?: string;
+  usage?: ChatUsage;
+  /** What the CLI reported using for the last turn, which may differ from `model`. */
+  resolvedModel?: string;
+  model?: string;
+  effort?: string;
+  permission?: string;
 };
 export type Layout =
   | { type: "leaf"; id: string }
@@ -65,12 +81,42 @@ export type System = {
   platform: string;
   agents: { name: string; path: string | null }[];
 };
+export type ChatUsage = {
+  input: number;
+  output: number;
+  cached: number;
+  /** The window the CLI reported for this turn, when it reports one. */
+  context?: number;
+};
 export type ChatEvent = {
   panelId: string;
   text?: string;
+  /** One line of live progress from the agent, replaced as the turn advances. */
+  note?: string;
+  model?: string;
+  usage?: ChatUsage;
   done?: boolean;
   error?: string;
 };
+export type ChatModel = {
+  id: string;
+  label: string;
+  description: string;
+  efforts: string[];
+  defaultEffort: string;
+  context: number;
+};
+export type ChatModels = Record<
+  string,
+  {
+    models: ChatModel[];
+    efforts: string[];
+    defaultModel: string;
+    defaultModelId?: string;
+    defaultContext?: number;
+    defaultEffort?: string;
+  }
+>;
 export type UpdateSettings = {
   autoCheck: boolean;
   autoDownload: boolean;
@@ -101,6 +147,12 @@ export type UpdateState = {
   error: string | null;
 };
 export interface Bridge {
+  agentProviders(): Promise<import("./agents/types").AgentProvider[]>;
+  agentCall: import("./agents/types").AgentCall;
+  agentOpenExternal(url: string): Promise<void>;
+  onAgents(
+    callback: (event: import("./agents/types").AgentEvent) => void,
+  ): () => void;
   updatesState(): Promise<UpdateState>;
   updatesCheck(): Promise<UpdateState>;
   updatesDownload(): Promise<UpdateState>;
@@ -111,6 +163,8 @@ export interface Bridge {
   onUpdates(callback: (state: UpdateState) => void): () => void;
   system(): Promise<System>;
   chooseDirectory(): Promise<string | null>;
+  chooseAttachments(): Promise<string[]>;
+  pathForFile(file: File): string;
   terminalOpen(options: {
     panelId: string;
     cwd: string;
@@ -121,6 +175,11 @@ export interface Bridge {
     herdrId?: string;
   }): Promise<{ history: string; exited?: boolean }>;
   terminalWrite(panelId: string, data: string): Promise<void>;
+  terminalAttach(input: {
+    panelId: string;
+    name: string;
+    data: string;
+  }): Promise<string>;
   terminalResize(panelId: string, cols: number, rows: number): Promise<void>;
   terminalClose(panelId: string): Promise<void>;
   terminalScroll(
@@ -139,8 +198,12 @@ export interface Bridge {
     agent: string;
     messages: Message[];
     endpoint?: string;
+    model?: string;
+    effort?: string;
+    permission?: string;
   }): Promise<unknown>;
   cancelChat(panelId: string): Promise<void>;
+  chatModels(): Promise<ChatModels>;
   onTerminal(
     callback: (event: {
       panelId: string;

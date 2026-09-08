@@ -6,3 +6,5 @@ artifacts/
 .DS_Store
 promo/soundtrack.wav
 promo/assets/frame-*.png
+.gstack/
+/docs/PLAN-2026-09.md

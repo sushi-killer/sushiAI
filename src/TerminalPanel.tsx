@@ -16,6 +16,14 @@ type CachedTerminal = {
   notify?: () => void;
 };
 const cache = new Map<string, CachedTerminal>();
+const base64 = (bytes: Uint8Array) => {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000)
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+};
+// A shell reads the path as one word however the file was named.
+const shellPath = (value: string) => `'${value.replace(/'/g, "'\\''")}' `;
 export function disposeTerminal(id: string) {
   const runtime = cache.get(id);
   if (runtime) {
@@ -113,6 +121,45 @@ export function TerminalPanel({
             entry.notify?.();
           });
       });
+      // Paste or drop a screenshot and the terminal receives its path, which is
+      // what Claude Code and the other agent CLIs read an image from.
+      const attach = async (files: File[]) => {
+        for (const file of files.slice(0, 8))
+          try {
+            const stored = await window.bridge!.terminalAttach({
+              panelId: panel.id,
+              name: file.name || "pasted.png",
+              data: base64(new Uint8Array(await file.arrayBuffer())),
+            });
+            await window.bridge!.terminalWrite(panel.id, shellPath(stored));
+          } catch (e) {
+            entry.error = e instanceof Error ? e.message : String(e);
+            entry.notify?.();
+            return;
+          }
+      };
+      element.addEventListener("dragover", (event) => {
+        if (!event.dataTransfer?.types.includes("Files")) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      });
+      element.addEventListener("drop", (event) => {
+        const files = [...(event.dataTransfer?.files || [])];
+        if (!files.length) return;
+        event.preventDefault();
+        void attach(files);
+      });
+      element.addEventListener(
+        "paste",
+        (event) => {
+          const files = [...(event.clipboardData?.files || [])];
+          if (!files.length) return;
+          event.preventDefault();
+          event.stopPropagation();
+          void attach(files);
+        },
+        true,
+      );
       if (panel.herdrId)
         element.addEventListener(
           "wheel",

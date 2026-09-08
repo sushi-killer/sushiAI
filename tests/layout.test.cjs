@@ -33,3 +33,10 @@ test("swap keeps split geometry and resizing changes only its target", async () 
   assert.equal(resized.ratio, original.ratio);
   assert.equal(resized.b.ratio, 0.7);
 });
+test("contains finds a leaf anywhere in the tree and nothing in an empty layout", async () => {
+  const { tidy, contains } = await library;
+  const layout = tidy(["a", "b", "c"]);
+  assert.equal(contains(layout, "c"), true);
+  assert.equal(contains(layout, "zzz"), false);
+  assert.equal(contains(null, "a"), false);
+});

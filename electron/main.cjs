@@ -13,6 +13,7 @@ const fs = require("node:fs/promises");
 const { existsSync, statSync } = require("node:fs");
 const { spawn } = require("node:child_process");
 const pty = require("node-pty");
+const { terminalEnvironment, herdrLaunchParams } = require("./terminal-text.cjs");
 const { request, inputCommands } = require("./herdr.cjs");
 const { Connections } = require("./connections.cjs");
 const { PreviewServer } = require("./preview.cjs");
@@ -176,7 +177,7 @@ handle("herdr", async (endpoint, method, params = {}) => {
       if (inputQueues.get(queueKey) === next) inputQueues.delete(queueKey);
     }
   }
-  return request(socketPath, method, params);
+  return request(socketPath, method, herdrLaunchParams(method, params));
 });
 handle("updates-state", () => updates.snapshot());
 handle("updates-check", () => updates.check());
@@ -347,7 +348,7 @@ handle(
       cols: Math.max(10, Math.min(500, cols)),
       rows: Math.max(3, Math.min(300, rows)),
       cwd: remote ? os.homedir() : cwd,
-      env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" },
+      env: terminalEnvironment(),
     });
     const entry = {
       proc,
@@ -380,14 +381,24 @@ handle(
     return { history: "" };
   },
 );
-handle("terminal-scroll", (panelId, direction, lines) => {
+handle("terminal-scroll", (panelId, direction, lines, position) => {
+  if (
+    position &&
+    (!Number.isInteger(position.column) ||
+      !Number.isInteger(position.row) ||
+      position.column < 0 ||
+      position.column >= 500 ||
+      position.row < 0 ||
+      position.row >= 300)
+  )
+    throw new Error("Invalid terminal mouse position");
   if (
     ["up", "down"].includes(direction) &&
     Number.isInteger(lines) &&
     lines > 0 &&
     lines < 1000
   )
-    terminals.get(id(panelId))?.proc.scroll?.(direction, lines);
+    return terminals.get(id(panelId))?.proc.scroll?.(direction, lines, position);
 });
 handle("terminal-write", (panelId, data) => {
   if (typeof data !== "string" || data.length > 1000000)
@@ -397,33 +408,14 @@ handle("terminal-write", (panelId, data) => {
 // A pasted or dropped file becomes a real file on disk, so an agent CLI running
 // in the terminal can read the path it is handed.
 handle("terminal-attach", async ({ panelId, name, data }) => {
-  const terminal = terminals.get(id(panelId));
-  if (!terminal || terminal.exited)
-    throw new Error("This terminal is not running.");
-  if (terminal.source !== "pty" || terminal.remote)
-    throw new Error("Files can be attached in local terminals only.");
-  if (typeof data !== "string" || data.length > 28 * 1024 * 1024)
-    throw new Error("Attach files up to 20 MB.");
-  const bytes = Buffer.from(data, "base64");
-  if (!bytes.length) throw new Error("That file is empty.");
-  const safe =
-    path
-      .basename(typeof name === "string" ? name : "")
-      .replace(/[^\w.\- ]+/g, "_")
-      .slice(-80) || "pasted";
-  const directory = path.join(app.getPath("userData"), "attachments");
-  await fs.mkdir(directory, { recursive: true });
-  // ponytail: prune by age on write; a scheduled sweep only if this ever grows.
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  for (const entry of await fs.readdir(directory).catch(() => [])) {
-    const full = path.join(directory, entry);
-    const info = await fs.stat(full).catch(() => null);
-    if (info && info.mtimeMs < cutoff)
-      await fs.rm(full, { force: true }).catch(() => {});
-  }
-  const file = path.join(directory, `${Date.now().toString(36)}-${safe}`);
-  await fs.writeFile(file, bytes);
-  return file;
+  const { storeTerminalAttachment } = require("./terminal-attachments.cjs");
+  return storeTerminalAttachment({
+    terminal: terminals.get(id(panelId)),
+    name,
+    data,
+    dataDir: app.getPath("userData"),
+    connections,
+  });
 });
 handle("terminal-resize", (panelId, cols, rows) => {
   if (

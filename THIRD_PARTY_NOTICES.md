@@ -11,3 +11,5 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 Agent marks (`public/agents`) are from Simple Icons via Iconify: Claude, OpenAI, Google Gemini and Cursor. Simple Icons artwork is released under CC0-1.0: https://github.com/simple-icons/simple-icons. Brand names and marks belong to their respective owners; sushiAI is an independent project.
 
 Dependencies retain their own licenses. Herdr is installed separately and is not redistributed in this application.
+
+Terminal symbol fallback: Symbols Nerd Font Mono, Nerd Fonts v3.4.0 (https://github.com/ryanoasis/nerd-fonts). Bundled unchanged in public/fonts. License and upstream icon attribution are included as NERD-FONTS-LICENSE and NERD-FONTS-README.md beside the font.

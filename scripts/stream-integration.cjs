@@ -1,7 +1,10 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
-const { Connections } = require("../electron/connections.cjs");
-const { openHerdrStream } = require("../electron/terminal-stream.cjs");
+const { Connections, quote } = require("../electron/connections.cjs");
+const {
+  openHerdrStream,
+  claudeForeground,
+} = require("../electron/terminal-stream.cjs");
 const { request } = require("../electron/herdr.cjs");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function until(check, label) {
@@ -90,6 +93,86 @@ async function until(check, label) {
       () => output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").includes("EDIT_OK"),
       "backspace input",
     );
+    // A real mouse-aware TUI behind Herdr: verify coordinates and step counts.
+    const fixture = [
+      "import os,sys,tty,termios,select,time",
+      "old=termios.tcgetattr(0)",
+      "tty.setraw(0)",
+      "os.write(1,b'\\x1b[?1000h\\x1b[?1006hMOUSE_READY')",
+      "data=b''",
+      "deadline=time.time()+8",
+      "while time.time()<deadline:",
+      " if select.select([0],[],[],0.1)[0]:",
+      "  data+=os.read(0,4096)",
+      "  if data.endswith(b'm'): break",
+      "termios.tcsetattr(0,termios.TCSANOW,old)",
+      "os.write(1,b'\\x1b[?1000l\\x1b[?1006l\\r\\nMOUSE_HEX:'+data.hex().encode()+b'\\r\\n')",
+    ].join("\n");
+    output = "";
+    stream.proc.write(
+      `python3 -c "import base64;exec(base64.b64decode('${Buffer.from(fixture).toString("base64")}'))"\r`,
+    );
+    await until(() => output.includes("MOUSE_READY"), "mouse fixture ready");
+    await sleep(200);
+    await stream.proc.scroll("up", 6, { column: 12, row: 5 });
+    await stream.proc.scroll("up", 6, { column: 12, row: 5, fast: true });
+    const click = "\x1b[<0;13;6M\x1b[<0;13;6m";
+    stream.proc.write(click);
+    const expectedMouse = Buffer.from(
+      "\x1b[<64;13;6M".repeat(4) + click,
+    ).toString("hex");
+    await until(
+      () =>
+        output
+          .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+          .replace(/\s/g, "")
+          .includes("MOUSE_HEX:" + expectedMouse),
+      "Herdr mouse coordinates, one normal wheel event plus three Alt steps and button click",
+    );
+    // Reproduce the dangerous fallback: a Claude-shaped foreground process
+    // temporarily has mouse reporting disabled while it redraws. Host history
+    // must not move; the application must still receive all four wheel reports.
+    output = "";
+    const redrawFixture = `
+      process.title = 'claude';
+      process.stdin.setRawMode(true);
+      process.stdout.write('\\x1b[?1000l\\x1b[?1006lMOUSE_READY');
+      let data = Buffer.alloc(0);
+      const timer = setTimeout(() => process.exit(1), 8000);
+      process.stdin.on('data', chunk => {
+        data = Buffer.concat([data, chunk]);
+        if (data.at(-1) !== 109) return;
+        clearTimeout(timer);
+        process.stdin.setRawMode(false);
+        process.stdout.write('\\r\\nMOUSE_HEX:' + data.toString('hex') + '\\r\\n');
+        process.exit(0);
+      });
+    `;
+    stream.proc.write("node -e " + quote(redrawFixture) + "\r");
+    await until(
+      () => output.includes("MOUSE_READY"),
+      "Claude redraw fixture ready",
+    );
+    await sleep(200);
+    const redrawProcess = await request(socket, "pane.process_info", {
+      pane_id: pane,
+    });
+    assert.equal(
+      claudeForeground(redrawProcess),
+      true,
+      JSON.stringify(redrawProcess),
+    );
+    await stream.proc.scroll("up", 6, { column: 12, row: 5 });
+    await stream.proc.scroll("up", 6, { column: 12, row: 5, fast: true });
+    stream.proc.write(click);
+    await until(
+      () =>
+        output
+          .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+          .replace(/\s/g, "")
+          .includes("MOUSE_HEX:" + expectedMouse),
+      "Claude receives accelerated scroll even while mouse reporting is disabled",
+    );
     stream.proc.kill();
     await until(() => stream.exited, "release lease");
     output = "";
@@ -109,9 +192,7 @@ async function until(check, label) {
     });
     await until(
       () =>
-        output
-          .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
-          .includes("STREAM_VERIFIED"),
+        output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").includes("MOUSE_HEX:"),
       "reattach retains terminal content",
     );
     await request(socket, "pane.close", { pane_id: pane });
@@ -124,6 +205,8 @@ async function until(check, label) {
           latencyMs: latency,
           checks: [
             "raw streaming",
+            "mouse coordinates / native wheel / click",
+            "Claude Alt scroll during disabled mouse reporting",
             "input/backspace",
             "real PTY resize",
             "release/reattach",

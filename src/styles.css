@@ -1,3 +1,10 @@
+@font-face {
+  font-family: "Sushi Terminal Symbols";
+  src: url("/fonts/SymbolsNerdFontMono-Regular.ttf") format("truetype");
+  font-display: block;
+  unicode-range: U+E000-F8FF, U+F0000-FFFFD;
+}
+
 :root {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #e7e7e7;
@@ -1840,6 +1847,36 @@ iframe {
   height: 100%;
   width: 100%;
 }
+.terminal-surface.file-drop-active::after {
+  content: "Drop images or files to attach";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border: 1px dashed #799dff;
+  border-radius: 6px;
+  background: #151e35ed;
+  color: #d5dfff;
+  font-size: 12px;
+  pointer-events: none;
+  z-index: 5;
+}
+.terminal-transfer {
+  position: absolute;
+  right: 12px;
+  bottom: 8px;
+  max-width: calc(100% - 24px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 5px 9px;
+  border-radius: 5px;
+  background: #202735;
+  color: #d5dfff;
+  font-size: 11px;
+  pointer-events: none;
+  z-index: 6;
+}
 .terminal-reconnect {
   display: block;
   margin-top: 8px;
@@ -2809,4 +2846,18 @@ iframe {
   transition:
     background 0.15s ease,
     color 0.15s ease;
+}
+
+/* Herdr owns scrollback; a local xterm thumb only moves stale rendered frames. */
+.terminal-surface .xterm-scrollable-element > .scrollbar {
+  display: none;
+}
+
+.terminal-surface .xterm-viewport {
+  scrollbar-width: none;
+}
+.terminal-surface .xterm-viewport::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }

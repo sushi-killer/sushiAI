@@ -35,6 +35,25 @@ def git(root, *args):
 
 def inspect(data):
     operation = data["operation"]
+    if operation == "terminal_attachment":
+        encoded = data.get("data")
+        if not isinstance(encoded, str) or len(encoded) > 28 * 1024 * 1024:
+            raise ValueError("Attach files up to 20 MB")
+        content = base64.b64decode(encoded, validate=True)
+        if not content or len(content) > 20 * 1024 * 1024:
+            raise ValueError("Choose non-empty files up to 20 MB")
+        name = Path(str(data.get("name", "pasted"))).name
+        name = "".join(c if c.isascii() and (c.isalnum() or c in ".- _") else "_" for c in name)[-80:] or "pasted"
+        directory = Path.home() / ".cache" / "sushiai" / "attachments"
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, filename = tempfile.mkstemp(prefix="upload-", suffix="-" + name, dir=directory)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(content)
+        except Exception:
+            os.unlink(filename)
+            raise
+        return {"path": filename, "size": len(content)}
     if operation == "home":
         return {"home": str(Path.home()), "socket": str(Path(data.get("socket", "~/.config/herdr/herdr.sock")).expanduser())}
     base, target = resolve(data["root"], data.get("path", "."))

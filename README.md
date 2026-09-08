@@ -6,13 +6,13 @@
 
 **sushiAI** brings agent terminals, chats, files, and Git diffs into one macOS window. Run Claude Code, Codex, Gemini CLI, and Cursor Agent with your installed tools and accounts. Use local terminals or persistent Herdr sessions, including over SSH.
 
-[Watch the demo](promo/sushiAI-launch.mp4) · [Download 0.0.3](https://github.com/sushi-killer/sushiAI/releases/tag/v0.0.3) · [Installation guide](docs/INSTALL.md)
+[Watch the demo](promo/sushiAI-launch.mp4) · [Download 0.0.4](https://github.com/sushi-killer/sushiAI/releases/tag/v0.0.4) · [Installation guide](docs/INSTALL.md)
 
 The demo uses fictional projects and sample data.
 
 ## Install
 
-**[Download the Apple Silicon DMG](https://github.com/sushi-killer/sushiAI/releases/download/v0.0.3/sushiAI-0.0.3-arm64.dmg)** — requires an M1 or newer Mac running macOS 13 or later.
+**[Download the Apple Silicon DMG](https://github.com/sushi-killer/sushiAI/releases/download/v0.0.4/sushiAI-0.0.4-arm64.dmg)** — requires an M1 or newer Mac running macOS 13 or later.
 
 Open the DMG, drag sushiAI to Applications, and launch it. This build is ad-hoc signed and is not Apple-notarized. See the [installation guide](docs/INSTALL.md) for first-launch instructions, checksums, tool setup, and [building from source](docs/INSTALL.md#build-from-source).
 

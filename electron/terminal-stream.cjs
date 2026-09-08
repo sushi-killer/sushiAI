@@ -1,5 +1,113 @@
 const { spawn } = require("node:child_process");
 const { quote } = require("./connections.cjs");
+const { request } = require("./herdr.cjs");
+const { createFrameDecoder } = require("./terminal-text.cjs");
+
+function claudeForeground(info) {
+  return (info?.process_info?.foreground_processes || []).some((process) =>
+    [process.name, process.argv0, ...(process.argv || [])].some(
+      (value) =>
+        typeof value === "string" &&
+        (/(?:^|\/)claude(?:$|\s)/.test(value) ||
+          value.includes("/@anthropic-ai/claude-code/")),
+    ),
+  );
+}
+
+function scrollCommands(
+  direction,
+  lines,
+  position,
+  claude,
+  steps = position.fast === true ? 3 : 1,
+) {
+  if (claude) {
+    const report = `\x1b[<${direction === "up" ? 64 : 65};${(position.column || 0) + 1};${(position.row || 0) + 1}M`;
+    return [
+      {
+        type: "terminal.input",
+        bytes: Buffer.from(report.repeat(steps)).toString("base64"),
+      },
+    ];
+  }
+  return Array.from({ length: steps }, () => ({
+    type: "terminal.scroll",
+    direction,
+    lines,
+    source: "wheel",
+    column: position.column,
+    row: position.row,
+  }));
+}
+
+// Process discovery is control-plane work: never put its round trip in the
+// steady-state wheel path. Keep the last successful result during refreshes.
+function createScrollHandler({ lookup, write, closed, now = Date.now }) {
+  let foreground;
+  let pending;
+  let checkedAt = -Infinity;
+  let remainder = 0;
+  let lastDirection;
+  let lastFast;
+  let generation = 0;
+  const refresh = () => {
+    if (!pending && now() - checkedAt >= 500) {
+      checkedAt = now();
+      const version = generation;
+      pending = Promise.resolve()
+        .then(lookup)
+        .then(
+          (value) => {
+            if (version !== generation) return;
+            if (foreground !== value) remainder = 0;
+            foreground = value;
+          },
+          () => {
+            // A transient timeout must not redirect Claude wheel input into history.
+          },
+        )
+        .finally(() => {
+          if (version !== generation) return;
+          pending = undefined;
+          checkedAt = now();
+        });
+    }
+    return pending;
+  };
+  // Warm the route while the terminal's initial frame is being attached.
+  refresh();
+  const scroll = async (direction, lines, position = {}) => {
+    if (closed()) return;
+    const lookupPending = refresh();
+    if (foreground === undefined) await lookupPending;
+    if (closed() || foreground === undefined) return;
+    if (lastDirection !== direction || lastFast !== !!position.fast)
+      remainder = 0;
+    lastDirection = direction;
+    lastFast = !!position.fast;
+    // Mouse reports and history lines are integers. Carry tenths between wheel
+    // events to deliver exactly +30%, without rounding every event up to +100%.
+    remainder += position.fast ? 30 : 13;
+    const amount = Math.floor(remainder / 10);
+    remainder %= 10;
+    for (const command of scrollCommands(
+      direction,
+      lines,
+      position,
+      foreground,
+      amount,
+    ))
+      write(command);
+  };
+  scroll.invalidate = () => {
+    generation++;
+    pending = undefined;
+    foreground = undefined;
+    checkedAt = -Infinity;
+    remainder = 0;
+  };
+  return scroll;
+}
 function detectAgent(processName = "", title = "") {
   const value = `${processName} ${title}`.toLowerCase();
   return (
@@ -48,7 +156,8 @@ async function openHerdrStream({
   }
   if (!command) throw new Error("Install Herdr to attach a terminal stream.");
   const child = spawn(command, argv, { env, stdio: ["pipe", "pipe", "pipe"] });
-  const entry = { history: "", exited: false, source: "herdr" };
+  const entry = { history: "", exited: false, source: "herdr", target };
+  const decodeFrame = createFrameDecoder();
   let buffer = "",
     diagnostic = "",
     closing = false;
@@ -56,12 +165,26 @@ async function openHerdrStream({
     if (!entry.exited && !child.stdin.destroyed)
       child.stdin.write(JSON.stringify(value) + "\n");
   };
+  const scroll = createScrollHandler({
+    lookup: () =>
+      connections
+        .socket(endpoint)
+        .then((socket) =>
+          request(socket, "pane.process_info", { pane_id: target }, 500),
+        )
+        .then(claudeForeground),
+    write,
+    closed: () => closing || entry.exited,
+  });
   entry.proc = {
-    write: (data) =>
+    write: (data) => {
+      // Enter and process-control keys can launch/exit the foreground program.
+      if (/[\r\n\x03\x04\x1a]/.test(data)) scroll.invalidate();
       write({
         type: "terminal.input",
         bytes: Buffer.from(data).toString("base64"),
-      }),
+      });
+    },
     resize: (cols, rows) => write({ type: "terminal.resize", cols, rows }),
     kill: () => {
       closing = true;
@@ -70,8 +193,7 @@ async function openHerdrStream({
       const timer = setTimeout(() => child.kill(), 500);
       timer.unref();
     },
-    scroll: (direction, lines) =>
-      write({ type: "terminal.scroll", direction, lines, source: "wheel" }),
+    scroll,
   };
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
@@ -88,7 +210,7 @@ async function openHerdrStream({
       try {
         const frame = JSON.parse(line);
         if (frame.type === "terminal.frame") {
-          const data = Buffer.from(frame.bytes, "base64").toString("utf8");
+          const data = decodeFrame(frame.bytes, frame.full);
           entry.history = frame.full
             ? data
             : (entry.history + data).slice(-2 * 1024 * 1024);
@@ -119,4 +241,10 @@ async function openHerdrStream({
   });
   return entry;
 }
-module.exports = { openHerdrStream, detectAgent };
+module.exports = {
+  openHerdrStream,
+  detectAgent,
+  claudeForeground,
+  scrollCommands,
+  createScrollHandler,
+};

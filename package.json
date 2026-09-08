@@ -1,6 +1,6 @@
 {
   "name": "sushiai-workspace",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "private": true,
   "description": "A macOS workspace for terminal agents, powered by Herdr",
   "main": "electron/main.cjs",
@@ -11,6 +11,7 @@
     "start": "electron .",
     "test": "node --test tests/*.test.cjs",
     "test:desktop": "node scripts/smoke.mjs",
+    "test:terminal": "node scripts/terminal-rendering.mjs",
     "test:herdr": "node scripts/herdr-integration.cjs",
     "package": "npm run build && electron-builder --mac dir",
     "postinstall": "electron-builder install-app-deps",
@@ -19,7 +20,8 @@
     "test:stream": "node scripts/stream-integration.cjs",
     "test:remote": "node scripts/features-smoke.mjs",
     "promo": "node scripts/promo.mjs",
-    "package:dmg": "npm run build && electron-builder --mac dmg --arm64"
+    "package:dmg": "npm run build && electron-builder --mac dmg --arm64",
+    "test:unicode": "node scripts/terminal-unicode.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
@@ -68,7 +70,7 @@
     },
     "artifactName": "sushiAI-${version}-${arch}.${ext}",
     "dmg": {
-      "title": "sushiAI 0.0.3"
+      "title": "sushiAI 0.0.4"
     }
   },
   "license": "MIT",

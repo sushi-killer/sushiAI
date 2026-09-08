@@ -186,6 +186,7 @@ export interface Bridge {
     panelId: string,
     direction: string,
     lines: number,
+    position?: { column: number; row: number; fast?: boolean },
   ): Promise<void>;
   herdr(
     socket: string,

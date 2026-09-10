@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld("bridge", {
   chatModels: invoke("chat-models"),
   cancelChat: invoke("chat-cancel"),
   catalog: invoke("catalog"),
+  skillsManage: invoke("skills-manage"),
   window: invoke("window"),
   connectionsList: invoke("connections-list"),
   connectionsSave: invoke("connections-save"),

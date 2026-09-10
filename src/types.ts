@@ -28,6 +28,13 @@ export type Panel = {
   busy?: boolean;
   error?: string;
   previewFile?: { root: string; path: string; endpoint?: string };
+  filesTarget?: {
+    root: string;
+    path: string;
+    endpoint?: string;
+    edit?: boolean;
+    openToken?: number;
+  };
   pinned?: boolean;
   updatedAt?: number;
   note?: string;
@@ -106,6 +113,41 @@ export type ChatModel = {
   defaultEffort: string;
   context: number;
 };
+export type SkillProvider = "Codex" | "Claude" | "Agent" | "Other";
+export type SkillUsage = {
+  at: number;
+  project?: string;
+  session?: string;
+};
+export type SkillCatalogItem = {
+  name: string;
+  description: string;
+  path?: string;
+  provider?: SkillProvider;
+  harness?: string;
+  source?: string;
+  availability?: "active" | "disabled" | "external";
+  disabledBy?: "provider" | "skill-config" | "skill-override";
+  plugin?: string;
+  pluginScope?: "user" | "project" | "local";
+  updatedAt?: number;
+  lastUsedAt?: number;
+  lastUsedSource?: "skill event" | "usage cache" | "filesystem access";
+  usageCount?: number;
+  usageSource?: "skill events" | "usage cache" | "filesystem access";
+  recentUses?: SkillUsage[];
+  size?: number;
+  changed?: boolean;
+  isRecent?: boolean;
+  isUnused?: boolean;
+  isStale?: boolean;
+  isDuplicate?: boolean;
+  duplicateKind?: "exact" | "name";
+  duplicateCount?: number;
+  duplicateWith?: string[];
+  needsReview?: boolean;
+};
+export type SkillManagementAction = "enable" | "disable" | "delete";
 export type ChatModels = Record<
   string,
   {
@@ -216,7 +258,16 @@ export interface Bridge {
   onChat(callback: (event: ChatEvent) => void): () => void;
   catalog(
     kind: string,
-  ): Promise<{ name: string; description: string; path: string }[]>;
+    options?: { force?: boolean },
+  ): Promise<SkillCatalogItem[]>;
+  skillsManage(
+    action: SkillManagementAction,
+    item: SkillCatalogItem,
+  ): Promise<{
+    action: SkillManagementAction;
+    changed: boolean;
+    message: string;
+  }>;
   window(action: string): Promise<void>;
   connectionsList(): Promise<ConnectionProfile[]>;
   connectionsSave(

@@ -13,7 +13,10 @@ const fs = require("node:fs/promises");
 const { existsSync, statSync } = require("node:fs");
 const { spawn } = require("node:child_process");
 const pty = require("node-pty");
-const { terminalEnvironment, herdrLaunchParams } = require("./terminal-text.cjs");
+const {
+  terminalEnvironment,
+  herdrLaunchParams,
+} = require("./terminal-text.cjs");
 const { request, inputCommands } = require("./herdr.cjs");
 const { Connections } = require("./connections.cjs");
 const { PreviewServer } = require("./preview.cjs");
@@ -28,6 +31,8 @@ const {
   IMAGE,
 } = require("./chat-args.cjs");
 const { chatModels } = require("./agent-models.cjs");
+const { scanLocalSkills } = require("./skills-catalog.cjs");
+const { manageSkill } = require("./skills-manager.cjs");
 const { AgentRegistry } = require("./agents/registry.cjs");
 const { HermesProvider } = require("./agents/hermes-provider.cjs");
 const {
@@ -43,6 +48,8 @@ const terminals = new Map(),
   chats = new Map(),
   inputQueues = new Map();
 let mainWindow;
+let skillsCatalogCache;
+let skillsCatalogScan;
 const root = path.join(__dirname, "..");
 const dataDir = process.env.BRIDGE_DATA_DIR;
 if (dataDir) app.setPath("userData", path.resolve(dataDir));
@@ -398,7 +405,9 @@ handle("terminal-scroll", (panelId, direction, lines, position) => {
     lines > 0 &&
     lines < 1000
   )
-    return terminals.get(id(panelId))?.proc.scroll?.(direction, lines, position);
+    return terminals
+      .get(id(panelId))
+      ?.proc.scroll?.(direction, lines, position);
 });
 handle("terminal-write", (panelId, data) => {
   if (typeof data !== "string" || data.length > 1000000)
@@ -599,32 +608,36 @@ handle(
   },
 );
 handle("chat-models", () => chatModels());
-handle("catalog", async (kind) => {
+handle("catalog", async (kind, options = {}) => {
   if (kind !== "skills") return [];
-  const results = [];
-  for (const base of [
-    path.join(os.homedir(), ".codex/skills"),
-    path.join(os.homedir(), ".agents/skills"),
-  ]) {
-    const entries = await fs
-      .readdir(base, { withFileTypes: true })
-      .catch(() => []);
-    for (const entry of entries.filter((item) => !item.name.startsWith("."))) {
-      const skillPath = path.join(base, entry.name, "SKILL.md");
-      try {
-        const source = await fs.readFile(skillPath, "utf8");
-        results.push({
-          name: entry.name,
-          description:
-            source.match(/^description:\s*(.+)$/m)?.[1] || "Local agent skill",
-          path: skillPath,
-        });
-      } catch {
-        /* not a skill */
-      }
-    }
-  }
-  return results;
+  const snapshotFile = path.join(
+    app.getPath("userData"),
+    "skills-catalog.json",
+  );
+  const force = Boolean(options?.force);
+  if (!force && skillsCatalogCache?.snapshotFile === snapshotFile)
+    return skillsCatalogCache.items;
+  if (skillsCatalogScan) return skillsCatalogScan;
+  skillsCatalogScan = scanLocalSkills({ snapshotFile })
+    .then((items) => {
+      skillsCatalogCache = { snapshotFile, items };
+      return items;
+    })
+    .finally(() => {
+      skillsCatalogScan = undefined;
+    });
+  return skillsCatalogScan;
+});
+handle("skills-manage", async (action, item) => {
+  const result = await manageSkill({
+    home: os.homedir(),
+    action,
+    item,
+    shell,
+    executable,
+  });
+  skillsCatalogCache = undefined;
+  return result;
 });
 function validWebURL(value) {
   try {

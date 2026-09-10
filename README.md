@@ -6,13 +6,13 @@
 
 **sushiAI** brings agent terminals, chats, files, and Git diffs into one macOS window. Run Claude Code, Codex, Gemini CLI, and Cursor Agent with your installed tools and accounts. Use local terminals or persistent Herdr sessions, including over SSH.
 
-[Watch the demo](promo/sushiAI-launch.mp4) · [Download 0.0.4](https://github.com/sushi-killer/sushiAI/releases/tag/v0.0.4) · [Installation guide](docs/INSTALL.md)
+[Watch the demo](promo/sushiAI-launch.mp4) · [Download 0.0.5](https://github.com/sushi-killer/sushiAI/releases/tag/v0.0.5) · [Installation guide](docs/INSTALL.md)
 
 The demo uses fictional projects and sample data.
 
 ## Install
 
-**[Download the Apple Silicon DMG](https://github.com/sushi-killer/sushiAI/releases/download/v0.0.4/sushiAI-0.0.4-arm64.dmg)** — requires an M1 or newer Mac running macOS 13 or later.
+**[Download the Apple Silicon DMG](https://github.com/sushi-killer/sushiAI/releases/download/v0.0.5/sushiAI-0.0.5-arm64.dmg)** — requires an M1 or newer Mac running macOS 13 or later.
 
 Open the DMG, drag sushiAI to Applications, and launch it. This build is ad-hoc signed and is not Apple-notarized. See the [installation guide](docs/INSTALL.md) for first-launch instructions, checksums, tool setup, and [building from source](docs/INSTALL.md#build-from-source).
 
@@ -27,6 +27,7 @@ Open the DMG, drag sushiAI to Applications, and launch it. This build is ad-hoc 
 - **Files and previews:** browse directories, read text, view images and PDFs, and preview static HTML with relative assets.
 - **Text editing:** edit UTF-8 files with conflict detection if an agent changes the file before you save.
 - **Git diffs:** inspect the current branch, working-tree changes, and staged changes.
+- **Skill inventory:** scan local Codex, Claude and other agent skills, group them by harness, review usage and duplicate signals, and edit `SKILL.md` in a VS Code-style pane.
 - **Software updates:** check GitHub Releases automatically and download a verified DMG when an update is available.
 - **Agent chats:** use Claude Code or Codex through their installed CLIs.
 - **Chat tab:** threads per project with pinning, renaming and a project picker on **+**. Each thread keeps its agent, model, effort and permission mode; attach files and folders with **+** or by dropping them into the composer.

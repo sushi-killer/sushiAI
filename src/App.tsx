@@ -39,6 +39,8 @@ import type {
   PanelKind,
   Snapshot,
   System,
+  SkillCatalogItem,
+  SkillManagementAction,
   UpdateState,
   Workspace,
 } from "./types";
@@ -62,6 +64,7 @@ import { AgentsView } from "./agents/AgentsView";
 import { ConnectionsSettings } from "./ConnectionsSettings";
 import { ProjectPanel } from "./ProjectPanel";
 import { SessionsDialog } from "./SessionsDialog";
+import { LocalSkillsView } from "./LocalSkillsView";
 
 import { UpdateSettings } from "./UpdateSettings";
 
@@ -160,6 +163,36 @@ const agentTitle = (name: string) =>
   })[name] || name;
 const errorText = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
+const catalogFingerprint = (items: SkillCatalogItem[]) =>
+  items
+    .map((item) =>
+      [
+        item.path,
+        item.provider,
+        item.harness,
+        item.source,
+        item.availability,
+        item.disabledBy,
+        item.plugin,
+        item.name,
+        item.description,
+        item.size,
+        item.updatedAt,
+        item.lastUsedAt,
+        item.lastUsedSource,
+        item.usageCount,
+        item.isRecent,
+        item.isUnused,
+        item.isStale,
+        item.changed,
+        item.isDuplicate,
+        item.duplicateKind,
+        item.duplicateCount,
+        [...(item.duplicateWith || [])].sort().join(","),
+        JSON.stringify(item.recentUses || []),
+      ].join("\u001f"),
+    )
+    .join("\u001e");
 // Chat threads live in the workspace but belong to the Chat tab unless they
 // were placed into the Code layout, so Code only lists what it shows.
 const codePanels = (w: Workspace) =>
@@ -218,9 +251,11 @@ export function App() {
   const [toast, setToast] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [routines, setRoutines] = useState<Routine[]>(saved?.routines || []);
-  const [catalog, setCatalog] = useState<
-    { name: string; description: string; path?: string }[]
-  >([]);
+  const [catalog, setCatalog] = useState<SkillCatalogItem[]>([]);
+  const [skillsCatalog, setSkillsCatalog] = useState<SkillCatalogItem[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const skillsLoadedRef = useRef(false);
+  const skillsFingerprintRef = useRef("");
   const [search, setSearch] = useState("");
   const [fontScale, setFontScale] = useState(saved?.fontScale || 1);
   const active = workspaces.find((w) => w.id === activeId) || workspaces[0];
@@ -240,6 +275,41 @@ export function App() {
     return () => observer.disconnect();
   }, []);
   const notify = useCallback((text: string) => setToast(text), []);
+  const loadSkills = useCallback(
+    async (force = false) => {
+      if (!window.bridge) {
+        setSkillsCatalog([]);
+        skillsFingerprintRef.current = "";
+        return;
+      }
+      setCatalogLoading(true);
+      try {
+        const nextCatalog = await window.bridge.catalog("skills", { force });
+        const nextFingerprint = catalogFingerprint(nextCatalog);
+        if (nextFingerprint !== skillsFingerprintRef.current) {
+          setSkillsCatalog(nextCatalog);
+          skillsFingerprintRef.current = nextFingerprint;
+        }
+        skillsLoadedRef.current = true;
+      } catch (error) {
+        notify(errorText(error));
+      } finally {
+        setCatalogLoading(false);
+      }
+    },
+    [notify],
+  );
+  const refreshSkills = useCallback(() => loadSkills(true), [loadSkills]);
+  const manageSkill = useCallback(
+    async (action: SkillManagementAction, item: SkillCatalogItem) => {
+      if (!window.bridge?.skillsManage)
+        throw new Error("Desktop skill management is unavailable.");
+      const result = await window.bridge.skillsManage(action, item);
+      notify(result.message);
+      await loadSkills(true);
+    },
+    [loadSkills, notify],
+  );
   useEffect(
     () =>
       window.bridge?.onAgents((event) => {
@@ -562,12 +632,11 @@ export function App() {
   }, [selected, active, modal, mode, section]);
   useEffect(() => {
     setSearch("");
+    if (section === "Skills") {
+      if (!skillsLoadedRef.current) void loadSkills();
+      return;
+    }
     setCatalog([]);
-    if (section === "Skills")
-      window.bridge
-        ?.catalog("skills")
-        .then(setCatalog)
-        .catch((error) => notify(errorText(error)));
     if (section === "Plugins" && connected)
       window.bridge
         ?.herdr(socket, "plugin.list", {})
@@ -582,7 +651,7 @@ export function App() {
           ),
         )
         .catch((error) => notify(errorText(error)));
-  }, [section, connected, socket, notify]);
+  }, [section, connected, socket, notify, loadSkills]);
 
   function switchWorkspace(id: string) {
     const target = workspaces.find((w) => w.id === id);
@@ -593,7 +662,11 @@ export function App() {
     setMode("Code");
     setZoomed(null);
   }
-  async function addPanel(kind: PanelKind, agent = "claude") {
+  async function addPanel(
+    kind: PanelKind,
+    agent = "claude",
+    filesTarget?: Panel["filesTarget"],
+  ) {
     const current = activeRef.current;
     if (adding) return;
     setAdding(true);
@@ -644,6 +717,7 @@ export function App() {
           agent: kind === "agent" || kind === "chat" ? agent : undefined,
           started: kind === "agent",
           messages: kind === "chat" ? [] : undefined,
+          filesTarget: kind === "files" ? filesTarget : undefined,
         };
         updateWorkspace(current.id, (w) => ({
           ...w,
@@ -940,8 +1014,13 @@ export function App() {
           />
         ) : panel.kind === "files" ? (
           <ProjectPanel
-            cwd={active.cwd}
-            endpoint={active.connection}
+            key={`${panel.id}:${panel.filesTarget?.root || active.cwd}:${panel.filesTarget?.path || ""}:${panel.filesTarget?.openToken || ""}`}
+            cwd={panel.filesTarget?.root || active.cwd}
+            initialFile={panel.filesTarget?.path}
+            initialEdit={panel.filesTarget?.edit}
+            endpoint={
+              panel.filesTarget ? panel.filesTarget.endpoint : active.connection
+            }
             onHTML={openHTML}
           />
         ) : (
@@ -1284,7 +1363,7 @@ export function App() {
                       : section === "Routines"
                         ? "Your everyday commands, one click away."
                         : section === "Skills"
-                          ? "The skills installed on your Mac."
+                          ? "Skills found on this Mac, grouped by harness and ready for cleanup review."
                           : "Extensions connected to your Herdr session."}
                   </p>
                 </div>
@@ -1375,6 +1454,16 @@ export function App() {
                     onAction={() => setModal("routine")}
                   />
                 )
+              ) : section === "Skills" ? (
+                <LocalSkillsView
+                  items={skillsCatalog}
+                  search={search}
+                  loading={catalogLoading}
+                  onSearchChange={setSearch}
+                  onRefresh={() => void refreshSkills()}
+                  onManage={manageSkill}
+                  home={system?.home}
+                />
               ) : (
                 <>
                   <label className="catalog-search">

@@ -12,16 +12,21 @@ import {
   Pencil,
   Save,
 } from "lucide-react";
+import { SyntaxHighlightedCode } from "./SyntaxHighlightedCode";
 type Entry = { name: string; path: string; directory: boolean; size: number };
 type Change = { path: string; status: string; previous?: string };
 type Draft = { file: string; text: string; original: string; hash: string };
 const drafts = new Map<string, Draft>();
 export function ProjectPanel({
   cwd,
+  initialFile,
+  initialEdit,
   endpoint,
   onHTML,
 }: {
   cwd: string;
+  initialFile?: string;
+  initialEdit?: boolean;
   endpoint?: string;
   onHTML(root: string, path: string): void;
 }) {
@@ -55,7 +60,8 @@ export function ProjectPanel({
     return true;
   };
   const version = useRef(0),
-    listVersion = useRef(0);
+    listVersion = useRef(0),
+    initialOpen = useRef("");
   const inspect = (operation: string, extra = {}) => {
     if (!window.bridge)
       return Promise.reject(
@@ -101,7 +107,20 @@ export function ProjectPanel({
       version.current++;
     };
   }, [root, directory, tab, hidden, endpoint]);
-  async function openFile(file: string, mode = diffMode) {
+  useEffect(() => {
+    if (!initialFile || tab !== "files") return;
+    const slash = initialFile.lastIndexOf("/");
+    const targetDirectory = slash > 0 ? initialFile.slice(0, slash) : ".";
+    if (directory !== targetDirectory) {
+      setDirectory(targetDirectory);
+      return;
+    }
+    const openKey = `${initialFile}:${initialEdit ? "edit" : "view"}`;
+    if (initialOpen.current === openKey) return;
+    initialOpen.current = openKey;
+    void openFile(initialFile, diffMode, initialEdit);
+  }, [initialFile, initialEdit, tab, directory]);
+  async function openFile(file: string, mode = diffMode, enterEdit = false) {
     if (!leaveEditor()) return;
     const revision = ++version.current;
     setSelected(file);
@@ -155,6 +174,16 @@ export function ProjectPanel({
                 setText(exact);
                 setFileHash(data.hash);
                 setEditable(true);
+                if (enterEdit) {
+                  setDraftText(exact);
+                  setEditing(true);
+                  drafts.set(draftKey, {
+                    file,
+                    text: exact,
+                    original: exact,
+                    hash: data.hash,
+                  });
+                }
               } catch {
                 /* Non-UTF-8 files remain read-only. */
               }
@@ -419,27 +448,11 @@ export function ProjectPanel({
               <img src={image} alt={selected} />
             </div>
           ) : text ? (
-            <pre className={`file-code ${tab === "git" ? "diff-code" : ""}`}>
-              {text.split("\n").map((line, i) => (
-                <div
-                  key={i}
-                  className={
-                    tab === "git"
-                      ? line.startsWith("+")
-                        ? "diff-add"
-                        : line.startsWith("-")
-                          ? "diff-remove"
-                          : line.startsWith("@@")
-                            ? "diff-hunk"
-                            : ""
-                      : ""
-                  }
-                >
-                  <span className="line-number">{i + 1}</span>
-                  <code>{line || " "}</code>
-                </div>
-              ))}
-            </pre>
+            <SyntaxHighlightedCode
+              text={text}
+              path={selected}
+              diff={tab === "git"}
+            />
           ) : (
             <div className="file-empty">
               <Code2 size={27} />

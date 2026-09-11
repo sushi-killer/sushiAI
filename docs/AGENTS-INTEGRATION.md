@@ -35,31 +35,31 @@ unsupported capability is explicitly unavailable, never simulated.
 
 - [x] Discover both existing Hermes agents with stable profile identity.
 - [ ] Open the canonical agent conversation and other conversation tabs; create,
-  rename, archive, delete, search, resume and paginate conversations.
+      rename, archive, delete, search, resume and paginate conversations.
 - [ ] Stream text, actual available reasoning, tool arguments/results/progress,
-  subagents, todos, usage and errors in their original order.
+      subagents, todos, usage and errors in their original order.
 - [ ] Show actual memory writes, self-improvement and skill activity; keep full
-  details accessible after reload where the engine persists them.
-  The primary experience is agent activity and notifications, not manual memory
-  editing. Distinguish committed tool writes from staged approvals and failures.
-  Show native `review.summary` notifications even after the main answer ends.
+      details accessible after reload where the engine persists them.
+      The primary experience is agent activity and notifications, not manual memory
+      editing. Distinguish committed tool writes from staged approvals and failures.
+      Show native `review.summary` notifications even after the main answer ends.
 - [ ] Send, interrupt, recover after disconnect/restart, and preserve background
-  runs when switching tabs or modes without duplicate prompts.
+      runs when switching tabs or modes without duplicate prompts.
 - [ ] Handle approvals, clarification, secret/password requests and desktop tool
-  callbacks explicitly; never auto-approve or leave a tool silently blocked.
+      callbacks explicitly; never auto-approve or leave a tool silently blocked.
 - [ ] Manage agent identity/instructions, models, reasoning and tool permissions.
 - [ ] Read and edit memory, manage skills, tools and MCP integrations.
 - [ ] Manage schedules, projects/files, attachments and supported voice workflows.
 - [ ] Expose remaining Hermes workflow capabilities through native add-on panels;
-  audit against the installed Desktop feature inventory before completion.
+      audit against the installed Desktop feature inventory before completion.
 - [ ] Keep authentication in main; scope every operation and event by provider,
-  agent and conversation; validate IPC and close only owned resources.
+      agent and conversation; validate IPC and close only owned resources.
 - [ ] Match sushiAI styling, support narrow layouts and keyboard navigation,
-  retain Code, Chat and the original Dashboard unchanged.
+      retain Code, Chat and the original Dashboard unchanged.
 - [ ] Verify deterministic protocol/UI tests plus real read-only discovery and
-  history on both agents and controlled disposable execution sessions.
+      history on both agents and controlled disposable execution sessions.
 - [ ] Deliver a runnable local build for testing, without commits, pushes or a
-  public release until requested.
+      public release until requested.
 
 ## Verification policy
 
@@ -122,8 +122,8 @@ and SOUL editing is a separate optional resource panel.
 
 The broader unchecked items above remain in progress. These checks do not yet
 establish full Hermes Desktop feature parity. Recovery of all pending interaction
-  kinds, reconnect replay gaps during a live turn, and other unchecked capabilities
-  still require further coverage.
+kinds, reconnect replay gaps during a live turn, and other unchecked capabilities
+still require further coverage.
 This verification predates the 0.0.3 release, which includes this integration.
 
 ### Connections module
@@ -159,6 +159,29 @@ editor. Hermes does not expose an atomic conditional map update, so a concurrent
 external writer between the final read and save is not covered by that revision;
 configuration edits within this provider are serialized. Changing transport or
 authentication type and rotating an HTTP bearer token are not yet exposed here.
+
+### Universal workspace controls
+
+Workspace settings expose one compact, provider-neutral controls table. The
+first harness is Claude Code: MCP server names come from the current project's
+`.mcp.json`, the user's `~/.claude.json`, and the per-project Claude state.
+A toggle preserves every server definition and writes only Claude Code's native
+per-project `disabledMcpjsonServers` or `disabledMcpServers` list. This includes
+saved Claude.ai connector choices when Claude Code has exposed their display name.
+
+Claude Code plugins are read from `enabledPlugins` in user, project and local
+settings plus the installed plugin catalog. Per-project changes are written to
+`.claude/settings.local.json`, so a personal disable does not rewrite shared
+`.claude/settings.json`. Values from server environments, plugin settings and
+credentials are never sent to the renderer. Changes affect new Claude Code
+sessions; existing sessions must be restarted. New workspace creation discovers
+the same plugin catalog and offers a multi-select list of plugins to start
+disabled. The Stats tab correlates the local skill catalog with recent Claude
+skill events by project; it is a review signal rather than a complete historical
+audit, and SSH analytics is intentionally deferred until the remote event
+catalog is exposed. SSH workspaces use the same validated protocol through the
+selected SSH host. The table is grouped by harness so Codex and other agents can
+add controls without another modal.
 
 `node scripts/hermes-settings-smoke.cjs` verifies native HTTP and command edits,
 credential and tool-policy preservation, environment replacement/removal and stale

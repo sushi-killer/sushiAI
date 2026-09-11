@@ -6,6 +6,7 @@ const {
   Menu,
   session,
   shell,
+  safeStorage,
 } = require("electron");
 const path = require("node:path");
 const os = require("node:os");
@@ -33,6 +34,9 @@ const {
 const { chatModels } = require("./agent-models.cjs");
 const { scanLocalSkills } = require("./skills-catalog.cjs");
 const { manageSkill } = require("./skills-manager.cjs");
+const { ClaudeMcp } = require("./claude-mcp.cjs");
+const { ClaudePlugins } = require("./claude-plugins.cjs");
+const { ModelProviders } = require("./model-providers.cjs");
 const { AgentRegistry } = require("./agents/registry.cjs");
 const { HermesProvider } = require("./agents/hermes-provider.cjs");
 const {
@@ -42,6 +46,8 @@ const {
 } = require("./installer.cjs");
 let connections, preview, updates;
 const agents = new AgentRegistry();
+const claudeMcp = new ClaudeMcp({ home: os.homedir() });
+const claudePlugins = new ClaudePlugins({ home: os.homedir() });
 agents.on("event", (event) => send("agent-event", event));
 const terminals = new Map(),
   terminalPending = new Map(),
@@ -62,6 +68,10 @@ agents.register(
     ),
   }),
 );
+const modelProviders = new ModelProviders({
+  userDataDir: app.getPath("userData"),
+  safeStorage,
+});
 const extraPath = [
   path.join(os.homedir(), ".local/bin"),
   "/opt/homebrew/bin",
@@ -92,6 +102,12 @@ function id(value) {
   if (typeof value !== "string" || !value || value.length > 200)
     throw new Error("Invalid panel ID.");
   return value;
+}
+/** Writes a `claude --settings` file for a model profile; the caller owns
+ * where it's used (a local pty's argv, or typed into a herdr pane). */
+async function stageModelSettings(modelProfileId) {
+  id(modelProfileId);
+  return modelProviders.stageSettings(modelProfileId, os.tmpdir());
 }
 function send(channel, value) {
   if (mainWindow && !mainWindow.isDestroyed())
@@ -229,7 +245,18 @@ handle("connections-forward", async (endpoint, url) => {
 });
 handle("project-inspect", (endpoint, options) => {
   if (
-    !["list", "read", "write", "git", "diff", "home"].includes(
+    ![
+      "list",
+      "read",
+      "write",
+      "git",
+      "diff",
+      "home",
+      "log",
+      "commit",
+      "branches",
+      "checkout",
+    ].includes(
       options?.operation,
     )
   )
@@ -279,6 +306,7 @@ handle(
     rows = 24,
     endpoint,
     herdrId,
+    modelProfileId,
   }) => {
     id(panelId);
     if (terminals.has(panelId))
@@ -350,6 +378,15 @@ handle(
       throw new Error(
         `${command} is not installed. Install it and sign in from a terminal first.`,
       );
+    // Custom model providers only cover a direct local Claude Code launch for
+    // now. This has to be Claude Code's own --settings flag: a plain env var
+    // on the spawned process is silently outranked by a cached subscription
+    // login, so the launch looks fine and just talks to real Anthropic.
+    let modelSettingsPath;
+    if (modelProfileId && command === "claude" && !remote) {
+      modelSettingsPath = await stageModelSettings(modelProfileId);
+      args = [...args, "--settings", modelSettingsPath];
+    }
     const proc = pty.spawn(binary, args, {
       name: "xterm-256color",
       cols: Math.max(10, Math.min(500, cols)),
@@ -367,6 +404,7 @@ handle(
       remote: !!remote,
       command,
       endpoint,
+      modelSettingsPath,
     };
     terminals.set(panelId, entry);
     proc.onData((data) => {
@@ -379,6 +417,12 @@ handle(
     });
     proc.onExit(({ exitCode }) => {
       entry.exited = true;
+      if (entry.modelSettingsPath)
+        for (const file of [
+          entry.modelSettingsPath,
+          entry.modelSettingsPath.replace(/\.json$/, ".key"),
+        ])
+          fs.unlink(file).catch(() => {});
       send("terminal-data", {
         panelId,
         exitCode,
@@ -639,6 +683,78 @@ handle("skills-manage", async (action, item) => {
   skillsCatalogCache = undefined;
   return result;
 });
+handle("claude-mcp-list", (cwd, endpoint) =>
+  typeof endpoint === "string" && endpoint.startsWith("ssh:")
+    ? connections.inspect(endpoint, {
+        operation: "claude_mcp",
+        action: "list",
+        cwd,
+      })
+    : claudeMcp.list(cwd),
+);
+handle("claude-mcp-toggle", (input) => {
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw new Error("Invalid MCP request.");
+  const { endpoint, ...request } = input;
+  return typeof endpoint === "string" && endpoint.startsWith("ssh:")
+    ? connections.inspect(endpoint, {
+        operation: "claude_mcp",
+        action: "toggle",
+        ...request,
+      })
+    : claudeMcp.toggle(request);
+});
+handle("claude-plugins-list", (cwd, endpoint) =>
+  typeof endpoint === "string" && endpoint.startsWith("ssh:")
+    ? connections.inspect(endpoint, {
+        operation: "claude_plugins",
+        action: "list",
+        cwd,
+      })
+    : claudePlugins.list(cwd),
+);
+handle("claude-plugins-toggle", (input) => {
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw new Error("Invalid plugin request.");
+  const { endpoint, ...request } = input;
+  return typeof endpoint === "string" && endpoint.startsWith("ssh:")
+    ? connections.inspect(endpoint, {
+        operation: "claude_plugins",
+        action: "toggle",
+        ...request,
+      })
+    : claudePlugins.toggle(request);
+});
+handle("providers-list", () => modelProviders.listProviders());
+handle("providers-upsert", (input) => modelProviders.upsertProvider(input));
+handle("providers-delete", (providerId) =>
+  modelProviders.deleteProvider(providerId),
+);
+handle("providers-set-key", (providerId, key) =>
+  modelProviders.setProviderKey(providerId, key),
+);
+handle("providers-clear-key", (providerId) =>
+  modelProviders.clearProviderKey(providerId),
+);
+handle("providers-test", (providerId) =>
+  modelProviders.testConnection(providerId),
+);
+handle("providers-models", (providerId) =>
+  modelProviders.fetchModels(providerId),
+);
+handle("model-profiles-list", () => modelProviders.listProfiles());
+handle("model-profiles-upsert", (input) => modelProviders.upsertProfile(input));
+handle("model-profiles-delete", (profileId) =>
+  modelProviders.deleteProfile(profileId),
+);
+// For a herdr-backed panel on the LOCAL herdr socket only: herdr's pane
+// input is just typed text, no argv/env injection point of its own, so the
+// renderer stages this file, then types `claude --settings <path>` itself.
+// Remote (ssh) herdr isn't supported yet — the path wouldn't exist on that
+// host — the renderer refuses those before calling this.
+handle("model-settings-stage", (modelProfileId) =>
+  stageModelSettings(modelProfileId),
+);
 function validWebURL(value) {
   try {
     return ["http:", "https:"].includes(new URL(value).protocol);

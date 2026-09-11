@@ -6,6 +6,7 @@ import {
   File,
   Folder,
   GitBranch,
+  History,
   Image,
   RefreshCw,
   Search,
@@ -13,6 +14,7 @@ import {
   Save,
 } from "lucide-react";
 import { SyntaxHighlightedCode } from "./SyntaxHighlightedCode";
+import { GitHistoryPanel } from "./GitHistoryPanel";
 type Entry = { name: string; path: string; directory: boolean; size: number };
 type Change = { path: string; status: string; previous?: string };
 type Draft = { file: string; text: string; original: string; hash: string };
@@ -74,6 +76,7 @@ export function ProjectPanel({
     });
   };
   async function refresh() {
+    if (tab === "history") return;
     const revision = ++listVersion.current;
     setError("");
     try {
@@ -269,8 +272,19 @@ export function ProjectPanel({
         >
           <GitBranch size={12} /> Git changes
         </button>
+        <button
+          className={tab === "history" ? "active" : ""}
+          onClick={() => {
+            if (leaveEditor()) setTab("history");
+          }}
+        >
+          <History size={12} /> History
+        </button>
         {endpoint?.startsWith("ssh:") && <span>SSH</span>}
       </div>
+      {tab === "history" ? (
+        <GitHistoryPanel root={root} endpoint={endpoint} />
+      ) : (
       <div className="project-body">
         <aside className="file-list">
           <label className="file-filter">
@@ -464,6 +478,7 @@ export function ProjectPanel({
           )}
         </div>
       </div>
+      )}
     </div>
   );
 }

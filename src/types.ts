@@ -44,6 +44,32 @@ export type Panel = {
   model?: string;
   effort?: string;
   permission?: string;
+  /** Set when this agent panel was launched against a custom model provider. */
+  modelProfileId?: string;
+};
+export type ModelProviderKind = "openrouter" | "opencode-go" | "custom";
+export type ModelProvider = {
+  id: string;
+  kind: ModelProviderKind;
+  label: string;
+  baseUrl: string;
+  hasKey: boolean;
+  /** True when the key could not be Keychain-encrypted and is stored plainly. */
+  keyPlaintext: boolean;
+};
+export type ModelProfile = {
+  id: string;
+  providerId: string;
+  modelId: string;
+  label: string;
+  effort?: string;
+  contextWindow?: number;
+};
+export type ProviderModel = { id: string; label: string; context?: number };
+export type ProviderTestResult = {
+  ok: boolean;
+  code: "ok" | "no_key" | "unauthorized" | "network" | "unknown";
+  message: string;
 };
 export type Layout =
   | { type: "leaf"; id: string }
@@ -148,6 +174,18 @@ export type SkillCatalogItem = {
   needsReview?: boolean;
 };
 export type SkillManagementAction = "enable" | "disable" | "delete";
+export type ClaudeMcpServer = {
+  name: string;
+  source: "local" | "project" | "user" | "saved";
+  sourceLabel: string;
+  disabled: boolean;
+};
+export type ClaudePlugin = {
+  name: string;
+  source: "local" | "project" | "user" | "installed";
+  sourceLabel: string;
+  disabled: boolean;
+};
 export type ChatModels = Record<
   string,
   {
@@ -215,6 +253,7 @@ export interface Bridge {
     rows?: number;
     endpoint?: string;
     herdrId?: string;
+    modelProfileId?: string;
   }): Promise<{ history: string; exited?: boolean }>;
   terminalWrite(panelId: string, data: string): Promise<void>;
   terminalAttach(input: {
@@ -268,6 +307,65 @@ export interface Bridge {
     changed: boolean;
     message: string;
   }>;
+  claudeMcpList(
+    cwd: string,
+    endpoint?: string,
+  ): Promise<{
+    cwd: string;
+    servers: ClaudeMcpServer[];
+  }>;
+  claudeMcpToggle(input: {
+    cwd: string;
+    endpoint?: string;
+    name: string;
+    source?: ClaudeMcpServer["source"];
+    disabled: boolean;
+  }): Promise<{
+    cwd: string;
+    servers: ClaudeMcpServer[];
+  }>;
+  claudePluginsList(
+    cwd: string,
+    endpoint?: string,
+  ): Promise<{
+    cwd: string;
+    plugins: ClaudePlugin[];
+  }>;
+  claudePluginsToggle(input: {
+    cwd: string;
+    endpoint?: string;
+    name: string;
+    disabled: boolean;
+  }): Promise<{
+    cwd: string;
+    plugins: ClaudePlugin[];
+  }>;
+  providersList(): Promise<ModelProvider[]>;
+  providersUpsert(input: {
+    id?: string;
+    kind: ModelProviderKind;
+    label?: string;
+    baseUrl?: string;
+  }): Promise<ModelProvider>;
+  providersDelete(id: string): Promise<void>;
+  providersSetKey(
+    id: string,
+    key: string,
+  ): Promise<{ hasKey: boolean; keyPlaintext: boolean; keyHint: string }>;
+  providersClearKey(id: string): Promise<void>;
+  providersTest(id: string): Promise<ProviderTestResult>;
+  providersModels(id: string): Promise<ProviderModel[]>;
+  modelProfilesList(): Promise<ModelProfile[]>;
+  modelProfilesUpsert(input: {
+    id?: string;
+    providerId: string;
+    modelId: string;
+    label?: string;
+    effort?: string;
+    contextWindow?: number;
+  }): Promise<ModelProfile>;
+  modelProfilesDelete(id: string): Promise<void>;
+  modelSettingsStage(modelProfileId: string): Promise<string>;
   window(action: string): Promise<void>;
   connectionsList(): Promise<ConnectionProfile[]>;
   connectionsSave(

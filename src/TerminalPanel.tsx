@@ -258,6 +258,8 @@ export function TerminalPanel({
           endpoint: panel.herdrId ? socket : endpoint,
           herdrId: panel.herdrId,
           command: panel.kind === "agent" ? panel.agent || "claude" : undefined,
+          modelProfileId:
+            panel.kind === "agent" ? panel.modelProfileId : undefined,
           cols: terminal.cols,
           rows: terminal.rows,
         })

@@ -2336,7 +2336,7 @@ iframe {
   padding: 24px;
 }
 .modal {
-  width: 490px;
+  width: 588px;
   max-height: calc(100dvh - 64px);
   overflow: auto;
   background: #161616;
@@ -2408,14 +2408,23 @@ iframe {
   background: #303030;
   margin: 26px 0 20px;
 }
-.modal .scale-setting {
+/* A settings row whose label is a section heading and whose control sits under
+   it, left aligned — used by Interface size in the General tab. */
+.setting-block {
   display: flex;
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 18px;
 }
-.scale-setting select {
-  width: 125px;
+.setting-heading + .setting-block {
+  margin-top: 18px;
+}
+.setting-block h4 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: #d2d7cd;
 }
 .settings-note {
   display: flex;
@@ -2867,6 +2876,63 @@ iframe {
   font-size: 11px;
   color: #aaa;
 }
+/* Connections is one block: socket row, then hosts. No section heading — the
+   tab bar already names it. */
+.connections-hosts {
+  margin-top: 18px;
+}
+/* Add triggers sit at the end of their list, like .add-profile. */
+.add-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 12px 0 0;
+  font-size: 11px;
+  color: #aaa;
+}
+.add-row:hover {
+  color: #fff;
+}
+/* Providers opens straight into its description, without a section heading. */
+.providers-settings > .muted:first-child {
+  margin-top: 18px;
+}
+/* The socket row keeps the status beside its label and the Reconnect button on
+   the input's line instead of on a row of its own. */
+.modal .socket-form {
+  gap: 8px;
+  margin-top: 16px;
+}
+.socket-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+.socket-head label {
+  font-size: 12px;
+  color: #aaa;
+  flex-shrink: 0;
+}
+.socket-head .connection-detail {
+  justify-content: flex-end;
+  text-align: right;
+}
+.socket-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.socket-controls input {
+  flex: 1;
+  min-width: 0;
+}
+.socket-controls .primary {
+  height: 38px;
+  flex-shrink: 0;
+  padding: 0 13px;
+}
 .connection-card {
   border: 1px solid #333;
   border-radius: 8px;
@@ -2907,6 +2973,264 @@ iframe {
 }
 .connection-card > button:not(.connection-info) {
   padding: 2px;
+}
+/* Model providers: a card per provider (same surface as .panel-options
+   cards) with its model profiles nested in a darker well at the bottom. */
+.provider-card {
+  border: 1px solid #333;
+  border-radius: 9px;
+  background: #1c1c1c;
+  padding: 12px 12px 0;
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.provider-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.provider-card-head > svg {
+  color: #a9b1a5;
+  flex-shrink: 0;
+}
+.provider-card-head strong {
+  font-size: 12px;
+  font-weight: 500;
+  color: #ccc;
+  white-space: nowrap;
+}
+.provider-kind {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: #8a8a8a;
+  background: #222;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 2px 5px;
+  flex-shrink: 0;
+}
+.provider-card-head small {
+  color: #777;
+  font-size: 10px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.provider-card-head > button,
+.profile-row > button {
+  padding: 2px;
+  color: #777;
+  margin-left: auto;
+}
+.provider-card-head > button:hover,
+.profile-row > button:hover {
+  color: #ccc;
+}
+/* Beats the generic `.modal form` column layout so key + actions stay on one line. */
+.modal .provider-key-form {
+  flex-direction: row;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 0;
+}
+.provider-key-form > button {
+  height: 38px;
+  padding: 0 11px;
+  border: 1px solid #353535;
+  border-radius: 7px;
+  background: #252525;
+  color: #ccc;
+  font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.provider-key-form > button:hover:not(:disabled) {
+  background: #2c2c2c;
+  border-color: #444;
+}
+.provider-card-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 10px;
+  color: #777;
+}
+.provider-card-status .ok {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #8fba96;
+}
+.provider-card-status > button {
+  font-size: 10px;
+  color: #aaa;
+  text-decoration: underline;
+  text-decoration-color: #444;
+  text-underline-offset: 3px;
+}
+.provider-card-status > button:hover:not(:disabled) {
+  color: #fff;
+}
+.provider-card-result {
+  flex: 1;
+  min-width: 140px;
+  color: #969696;
+  overflow-wrap: anywhere;
+}
+.provider-profiles {
+  margin: 2px -12px 0;
+  padding: 10px 12px 12px;
+  border-top: 1px solid #2a2a2a;
+  border-radius: 0 0 8px 8px;
+  background: #181818;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* Model profiles read as a table: aligned columns instead of one run-on line
+   (the row used to repeat the model id and never said what "high" meant). */
+.profile-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.profile-table th {
+  text-align: left;
+  padding: 0 6px 6px;
+  color: #777f86;
+  font-size: 9px;
+  letter-spacing: 2px;
+  font-weight: 600;
+}
+.profile-table th:last-child {
+  width: 46px;
+}
+.profile-table tr.profile-row {
+  cursor: pointer;
+}
+.profile-table tr.profile-row td {
+  padding: 6px;
+  font-size: 11px;
+  color: #ccc;
+  border: 0;
+}
+.profile-table tr.profile-row:hover td {
+  background: #202020;
+}
+.profile-table tr.profile-row td:first-child {
+  border-radius: 5px 0 0 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+.profile-table tr.profile-row td:last-child {
+  border-radius: 0 5px 5px 0;
+  text-align: right;
+  white-space: nowrap;
+}
+.profile-table td.p-meta {
+  color: #777;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.profile-table .row-actions {
+  display: inline-flex;
+  gap: 2px;
+}
+.profile-table .row-actions button {
+  padding: 2px;
+  color: #777;
+}
+.profile-table .row-actions button:hover:not(:disabled) {
+  color: #ccc;
+}
+.profile-table .p-edit {
+  opacity: 0;
+}
+.profile-table tr.profile-row:hover .p-edit,
+.profile-table .p-edit:focus-visible {
+  opacity: 1;
+}
+.provider-profiles-label {
+  margin-bottom: 4px;
+}
+.profile-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  margin: 0 -6px;
+  border-radius: 5px;
+  font-size: 11px;
+  color: #ccc;
+}
+.profile-row:hover {
+  background: #202020;
+}
+.profile-row > span {
+  white-space: nowrap;
+}
+.profile-row small {
+  color: #777;
+  font-size: 10px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.add-profile {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 0;
+  font-size: 11px;
+  color: #aaa;
+  align-self: flex-start;
+}
+.add-profile:hover {
+  color: #fff;
+}
+.modal .model-profile-form {
+  gap: 10px;
+  margin-top: 4px;
+}
+.model-profile-form > .form-row:last-child {
+  flex-direction: row-reverse;
+  align-items: center;
+  gap: 12px;
+}
+.model-profile-form > .form-row:last-child > button:not(.primary) {
+  font-size: 11px;
+  color: #aaa;
+}
+.model-profile-form > .form-row:last-child > button:not(.primary):hover {
+  color: #fff;
+}
+/* Sits directly under the .agent-options grid as one more compact row. */
+.modal .agent-model-picker {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+  padding: 6px 6px 6px 10px;
+  border: 1px solid #2c2c2c;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #969696;
+}
+.agent-model-picker select {
+  width: 220px;
+  height: 30px;
+  padding: 4px 8px;
+  font-size: 11px;
 }
 .form-row {
   align-items: flex-start;
@@ -2970,8 +3294,125 @@ iframe {
 .workspace-actions-modal form > .primary {
   align-self: stretch;
 }
-.workspace-actions-modal > .danger {
-  width: 100%;
+.claude-controls-modal {
+  width: min(960px, calc(100vw - 48px));
+}
+.workspace-controls-settings {
+  display: grid;
+  gap: 12px;
+}
+.workspace-controls-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  justify-content: space-between;
+}
+.workspace-controls-heading h2 {
+  margin: 0;
+  padding-right: 12px;
+}
+.workspace-controls-heading p {
+  margin: 7px 0 0;
+  color: #929292;
+  line-height: 1.45;
+}
+.workspace-control-tabs {
+  display: inline-flex;
+  gap: 2px;
+  width: fit-content;
+  padding: 3px;
+  border: 1px solid #303030;
+  border-radius: 7px;
+  background: #121212;
+}
+.workspace-control-tabs button {
+  padding: 5px 11px;
+  border-radius: 5px;
+  color: #808080;
+  font-size: 0.75rem;
+}
+.workspace-control-tabs button.selected {
+  background: #2b2b2b;
+  color: #e0e0e0;
+}
+.workspace-controls-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+.settings-muted,
+.settings-error {
+  margin: 0;
+  line-height: 1.45;
+}
+.settings-muted {
+  color: #929292;
+}
+.settings-error {
+  color: #ff9c91;
+}
+.workspace-controls-context {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  color: #737b80;
+  font-size: 0.78rem;
+}
+.workspace-controls-context span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-controls-context small {
+  flex: 0 0 auto;
+  color: #9ba7b8;
+}
+.modal label.workspace-control-header {
+  min-height: 25px;
+  color: #777;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: default;
+}
+.workspace-control-header > span:last-child {
+  text-align: right;
+}
+.workspace-control-empty {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 39px;
+  padding: 0 9px;
+  border: 1px solid #303030;
+  border-radius: 7px;
+  color: #858585;
+  font-size: 0.82rem;
+}
+.workspace-controls-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #777;
+  font-size: 0.72rem;
+}
+.modal .workspace-plugin-picker {
+  height: auto;
+  min-height: 92px;
+  padding: 5px;
+}
+.workspace-plugin-picker option {
+  padding: 6px 7px;
+}
+.workspace-plugin-hint {
+  color: #777;
+  font-size: 0.7rem;
+  line-height: 1.4;
 }
 .session-filters > select {
   width: auto;
@@ -3280,11 +3721,11 @@ iframe {
   left: 0;
   background: #101010;
 }
-.diff-add {
+.diff-addition {
   background: #18332366;
   color: #a5d4a9;
 }
-.diff-remove {
+.diff-deletion {
   background: #421f2266;
   color: #e1a09a;
 }
@@ -3382,6 +3823,243 @@ iframe {
 }
 .clean-tree {
   padding: 15px;
+}
+/* Branch switcher above the graph. Capped height so a repo with 50 branches
+   still leaves the commit list readable. */
+.branch-section {
+  border-bottom: 1px solid #282828;
+}
+.branch-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 9px;
+  color: #8a8a8a;
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.branch-section-head:hover {
+  color: #ccc;
+}
+.branch-section-head svg:first-child {
+  transition: transform 0.12s;
+}
+.branch-section-head[aria-expanded="true"] svg:first-child {
+  transform: rotate(90deg);
+}
+.branch-section-head .count {
+  margin-left: auto;
+  color: #666;
+  letter-spacing: 0;
+}
+.branch-rows {
+  max-height: min(216px, 34vh);
+  overflow: auto;
+  padding-bottom: 3px;
+}
+.branch-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 3px 9px;
+  color: #9a9a9a;
+  font-size: 11px;
+  text-align: left;
+}
+.branch-row:hover:not(:disabled) {
+  background: #1e1e1e;
+  color: #eee;
+}
+.branch-row.current {
+  color: #9bb29d;
+}
+.branch-row:disabled {
+  opacity: 0.55;
+}
+.branch-check {
+  flex-shrink: 0;
+  display: flex;
+  width: 11px;
+  color: #8fba96;
+}
+.branch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.branch-track {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: #d1b883;
+  font-size: 9px;
+}
+.graph-toolbar select {
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 4px;
+  font-size: 10px;
+}
+.graph-head {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #7c927e;
+  font-family: Menlo, monospace;
+  font-size: 9.5px;
+}
+.graph-toolbar button {
+  display: flex;
+  padding: 3px;
+  color: #888;
+}
+/* Row height must equal the SVG height or the lane lines break between rows. */
+.graph-row {
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 0 10px;
+}
+.graph-svg {
+  flex-shrink: 0;
+  overflow: visible;
+}
+.graph-summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+}
+.graph-merge-icon {
+  flex-shrink: 0;
+  color: #a58bd6;
+}
+.graph-subject {
+  flex-shrink: 1;
+  min-width: 26px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.graph-meta {
+  flex-shrink: 0;
+  color: #6a6a6a;
+  font-size: 9.5px;
+  font-family: Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.ref-badge {
+  flex-shrink: 0;
+  max-width: 56px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 9px;
+  line-height: 15px;
+  background: #1c2620;
+  color: #8bb38a;
+  border: 1px solid #263229;
+}
+.ref-badge.ref-head {
+  background: #1c2333;
+  color: #8aa6d6;
+  border-color: #253049;
+}
+.ref-badge.ref-tag {
+  background: #302a1c;
+  color: #d1b883;
+  border-color: #3a331f;
+}
+.ref-badge.ref-remote {
+  background: #201f26;
+  color: #a89bd1;
+  border-color: #2c2a38;
+}
+.commit-header > span {
+  font-weight: 500;
+  color: #ddd;
+}
+/* One dense line instead of the old wrapping block; the body reads below it. */
+.commit-meta {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 7px 10px;
+  border-bottom: 1px solid #222;
+  color: #888;
+  font-size: 10px;
+}
+.commit-sha {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #1a2420;
+  color: #9bb29d;
+  font-family: Menlo, monospace;
+  font-size: 9.5px;
+}
+.commit-author {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #bbb;
+}
+.commit-date {
+  flex-shrink: 0;
+  color: #6a6a6a;
+  font-family: Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.commit-parents {
+  flex-shrink: 0;
+  color: #a58bd6;
+}
+.commit-body {
+  flex-shrink: 0;
+  max-height: 96px;
+  overflow: auto;
+  margin: 0;
+  padding: 7px 10px;
+  border-bottom: 1px solid #222;
+  color: #999;
+  white-space: pre-wrap;
+  font-size: 10px;
+  line-height: 1.6;
+}
+.commit-files {
+  flex-shrink: 0;
+  max-height: min(210px, 28vh);
+  overflow: auto;
+  border-bottom: 1px solid #222;
+}
+.commit-files .file-row {
+  padding: 4px 10px;
+  border-bottom: 1px solid #1b1b1b;
+}
+.commit-files .git-status {
+  flex-shrink: 0;
+  min-width: 13px;
+  text-align: center;
+  font-family: Menlo, monospace;
+  font-weight: 600;
+}
+.commit-diff {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 @media (max-width: 1000px) {
   .titlebar-right {
@@ -3829,4 +4507,672 @@ iframe {
   display: none;
   width: 0;
   height: 0;
+}
+
+/* Workspace controls keep actions and usage in one compact table. */
+.workspace-meta {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  font-family: "SFMono-Regular", Menlo, monospace;
+  font-size: 10.5px;
+  color: #777;
+}
+.workspace-meta .sep { color: #3a3a3a; }
+.workspace-meta .workspace-cwd {
+  color: #8a8a8a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 340px;
+}
+.workspace-host {
+  color: #8fba96;
+  background: #1d2820;
+  border: 1px solid #57755e;
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+/* Keep the rename affordance inside the heading without changing its height. */
+.workspace-rename-toggle {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+  color: #777;
+  flex-shrink: 0;
+}
+.workspace-rename-toggle:hover {
+  color: #ddd;
+}
+.workspace-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+.workspace-heading-actions .primary,
+.workspace-heading-actions .secondary {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 11.5px;
+}
+.workspace-heading-actions .icon-button { width: 26px; height: 26px; }
+/* Keep the heading and rename field in one box with a stable height. */
+.workspace-controls-heading h2,
+.modal .workspace-name-input {
+  font-size: 25px;
+  font-weight: 500;
+  letter-spacing: -0.9px;
+  line-height: 32px;
+  height: 32px;
+  margin: 0;
+  padding: 0;
+}
+.modal .workspace-name-input {
+  field-sizing: content;
+  width: auto;
+  min-width: 4ch;
+  max-width: 100%;
+  color: #e5e5e5;
+  background: none;
+  border: 0;
+  border-radius: 0;
+}
+.modal .workspace-name-input:focus-visible {
+  outline: none;
+  border-bottom: 1px solid #3c3c3c;
+}
+.workspace-scroll {
+  max-height: 495px;
+  overflow: auto;
+  border: 1px solid #303030;
+  border-radius: 7px;
+  background: #171717;
+}
+.workspace-table { width: 100%; border-collapse: collapse; }
+.workspace-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #171717;
+  text-align: left;
+  padding: 8px 10px;
+  color: #777f86;
+  font-size: 9px;
+  letter-spacing: 2px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.workspace-table th.num { text-align: right; width: 104px; }
+.workspace-table th.acc { text-align: right; width: 86px; }
+.workspace-table td {
+  padding: 7px 10px;
+  border-top: 1px solid #2b2b2b;
+  font-size: 11.5px;
+  color: #ccc;
+}
+.workspace-table tbody tr:hover td { background: #202020; }
+.workspace-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.workspace-cell strong {
+  font-weight: 500;
+  color: #e0e0e0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-kind {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: #8a8a8a;
+  background: #222;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 2px 5px;
+  flex-shrink: 0;
+}
+.workspace-src { color: #777; font-size: 10.5px; white-space: nowrap; }
+.workspace-uses, .workspace-num { text-align: right; white-space: nowrap; }
+.workspace-num { font-family: "SFMono-Regular", Menlo, monospace; font-size: 11px; }
+.workspace-dash { color: #4a4a4a; }
+.workspace-bar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  font-family: "SFMono-Regular", Menlo, monospace;
+  font-size: 11px;
+}
+.workspace-bar i {
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  background: #57755e;
+  min-width: 2px;
+}
+.workspace-access {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  color: #999;
+  font-size: 11px;
+}
+.workspace-access input { width: 14px; height: 14px; accent-color: #a7bf92; }
+.workspace-note {
+  margin: 12px 0 0;
+  font-size: 11px;
+  line-height: 1.7;
+  color: #777;
+}
+.workspace-note b {
+  color: #969696;
+  font-weight: 400;
+  font-family: "SFMono-Regular", Menlo, monospace;
+  font-size: 10.5px;
+}
+.workspace-controls-footer .spacer { flex: 1; }
+.workspace-close-row { display: flex; justify-content: center; }
+.workspace-confirm {
+  position: absolute;
+  inset: 0;
+  border-radius: 17px;
+  background: #000000cc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 5;
+}
+.workspace-confirm-box {
+  width: 100%;
+  max-width: 360px;
+  background: #161616;
+  border: 1px solid #3c3c3c;
+  border-radius: 17px;
+  padding: 26px;
+  box-shadow: 0 20px 60px #000c;
+}
+.workspace-confirm-box h2 {
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: -0.3px;
+  margin: 10px 0 8px;
+  padding: 0;
+}
+.workspace-confirm-box p {
+  margin: 0 0 18px;
+  font-size: 12px;
+  color: #8a8a8a;
+  line-height: 1.7;
+}
+.workspace-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Git history: a compact log first, then an inspector that stays readable at
+   both a narrow split-panel width and a maximized project panel. */
+.git-history {
+  --history-bg: #101110;
+  --history-panel: #141614;
+  --history-raised: #191b19;
+  --history-line: #252925;
+  --history-text: #d9ded9;
+  --history-muted: #7b837c;
+  --history-accent: #a8c99e;
+  container-type: inline-size;
+  container-name: git-history;
+  background: var(--history-bg);
+}
+.git-history-list {
+  width: 320px;
+  flex: 0 0 320px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--history-line);
+  background: var(--history-panel);
+}
+.history-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px 7px;
+  border-bottom: 1px solid var(--history-line);
+  background: #171917;
+}
+.history-branch-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  color: var(--history-accent);
+}
+.history-branch-control select {
+  min-width: 0;
+  width: 100%;
+  padding: 3px 18px 3px 0;
+  border: 0;
+  color: #d8ded8;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 520;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.history-branch-control select:disabled { opacity: 0.65; }
+.history-track {
+  flex-shrink: 0;
+  color: #d1b883;
+  font: 10px/1 Menlo, monospace;
+}
+.history-refresh {
+  display: flex;
+  flex-shrink: 0;
+  padding: 5px;
+  color: #8c958d;
+  border-radius: 5px;
+}
+.history-refresh:hover { color: #e1e6e1; background: #252925; }
+.history-toolbar-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px 6px;
+  border-bottom: 1px solid var(--history-line);
+}
+.history-scope {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid #2a302b;
+  border-radius: 6px;
+  background: #101210;
+}
+.history-scope button {
+  padding: 3px 7px;
+  border-radius: 4px;
+  color: #7f887f;
+  font-size: 10px;
+}
+.history-scope button:hover { color: #d3dbd3; }
+.history-scope button.active {
+  color: #e0e7df;
+  background: #2b352d;
+  box-shadow: inset 0 0 0 1px #3e4c40;
+}
+.history-count {
+  color: #737b74;
+  font: 10px/1.2 Menlo, monospace;
+  white-space: nowrap;
+}
+.history-context {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  color: #697169;
+  background: #121412;
+  border-bottom: 1px solid #202420;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.history-context-label { color: #8f9b90; }
+.history-head {
+  margin-left: auto;
+  min-width: 0;
+  max-width: 54%;
+  overflow: hidden;
+  color: #5f6a61;
+  font: 9px/1 Menlo, monospace;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+.history-error {
+  min-width: 0;
+  margin: 6px 9px 0;
+  padding: 5px 7px;
+  overflow: hidden;
+  color: #d4b18a;
+  border: 1px solid #4b3928;
+  background: #211b15;
+  font-size: 10px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-rows {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 0 0 10px;
+}
+.history-commit {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+  height: 50px;
+  min-height: 50px;
+  box-sizing: border-box;
+  padding: 0 10px 0 12px;
+  color: var(--history-text);
+  text-align: left;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid #1c201d;
+  background: transparent;
+}
+.history-commit:hover { background: #1b1f1c; }
+.history-commit.active {
+  border-left-color: var(--history-accent);
+  background: #202820;
+  box-shadow: inset 0 1px 0 #2d3d2f, inset 0 -1px 0 #2d3d2f;
+}
+.history-graph {
+  flex-shrink: 0;
+  align-self: stretch;
+  overflow: visible;
+}
+.history-commit-copy {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+  padding: 4px 0;
+}
+.history-commit-title {
+  min-width: 0;
+  overflow: hidden;
+  color: #d4d9d4;
+  font-size: 11px;
+  line-height: 1.18;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.history-commit-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  color: #737d75;
+  font: 9px/1.1 Menlo, monospace;
+}
+.history-commit-meta > code:first-child {
+  flex-shrink: 0;
+  color: #768277;
+}
+.history-commit-meta .ref-badge { max-width: 82px; }
+.history-merge { flex-shrink: 0; color: #b39cdc; }
+.history-commit-time {
+  flex-shrink: 0;
+  align-self: center;
+  color: #667066;
+  font: 9px/1 Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.git-history-detail {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #0e100e;
+}
+.history-empty {
+  display: flex;
+  flex: 1;
+  min-height: 120px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  padding: 22px;
+  color: #69716a;
+  text-align: center;
+  font-size: 11px;
+}
+.history-empty strong {
+  color: #a7b0a8;
+  font-size: 12px;
+  font-weight: 500;
+}
+.history-empty span { color: #59615b; line-height: 1.5; }
+.history-inspector-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  min-width: 0;
+  padding: 14px 16px 11px;
+  border-bottom: 1px solid var(--history-line);
+  background: linear-gradient(180deg, #181c18 0%, #141714 100%);
+}
+.history-inspector-title { min-width: 0; flex: 1; }
+.history-kicker {
+  display: block;
+  margin-bottom: 5px;
+  color: #718074;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.13em;
+}
+.history-inspector-title h2 {
+  overflow: hidden;
+  margin: 0;
+  color: #e0e5e0;
+  font-size: 15px;
+  font-weight: 520;
+  letter-spacing: -0.2px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-inspector-refs {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+  max-width: 45%;
+}
+.history-inspector-refs .ref-badge { max-width: 116px; }
+.history-commit-meta-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 16px;
+  color: #848e86;
+  border-bottom: 1px solid #202420;
+  font-size: 10px;
+}
+.history-commit-meta-bar .commit-author {
+  max-width: 30%;
+  color: #b5beb6;
+}
+.history-commit-meta-bar .commit-date { margin-left: auto; }
+.history-commit-meta-bar .commit-parents {
+  color: #ab94d2;
+  font-size: 9px;
+}
+.git-history .commit-body {
+  max-height: 90px;
+  margin: 0;
+  padding: 8px 16px;
+  overflow: auto;
+  color: #939d95;
+  border-bottom: 1px solid #202420;
+  background: #111311;
+  font-size: 10px;
+  line-height: 1.55;
+}
+.history-diff-layout {
+  display: grid;
+  grid-template-columns: minmax(175px, 25%) minmax(0, 1fr);
+  min-height: 0;
+  flex: 1;
+}
+.history-files-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid var(--history-line);
+  background: #121512;
+}
+.history-pane-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 33px;
+  padding: 0 11px;
+  color: #788278;
+  border-bottom: 1px solid #242824;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.history-pane-label > span:last-child,
+.history-diff-stats {
+  color: #5d685e;
+  font: 9px/1 Menlo, monospace;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.history-files-list {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+.history-file {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 10px;
+  color: #9da69e;
+  text-align: left;
+  border-bottom: 1px solid #1c201d;
+  font-size: 10px;
+}
+.history-file:hover { background: #1b201c; color: #e0e6e0; }
+.history-file.active {
+  color: #e2e8e2;
+  background: #263126;
+  box-shadow: inset 2px 0 0 var(--history-accent);
+}
+.history-file > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-file .git-status {
+  min-width: 14px;
+  font-size: 10px;
+  font-weight: 650;
+  text-align: center;
+}
+.history-diff-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  background: #0c0e0c;
+}
+.history-diff-path {
+  min-width: 0;
+  overflow: hidden;
+  color: #aeb8b0;
+  font: 10px/1 Menlo, monospace;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+.history-diff-stats {
+  display: flex;
+  flex-shrink: 0;
+  gap: 7px;
+}
+.history-diff-stats b { color: #8fca99; font-weight: 500; }
+.history-diff-stats i { color: #d99a95; font-style: normal; }
+.git-history .commit-diff {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+.git-history .commit-diff .file-code {
+  padding-top: 8px;
+  padding-bottom: 12px;
+  font-size: 10.5px;
+  line-height: 1.65;
+}
+.git-history .commit-diff .line-number { min-width: 38px; }
+
+@container git-history (max-width: 700px) {
+  .git-history { flex-direction: column; }
+  .git-history-list {
+    width: auto;
+    max-height: 53%;
+    flex: 0 0 53%;
+    border-right: 0;
+    border-bottom: 1px solid var(--history-line);
+  }
+  .history-diff-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .history-files-pane {
+    max-height: 118px;
+    border-right: 0;
+    border-bottom: 1px solid var(--history-line);
+  }
+  .history-files-list {
+    display: flex;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .history-file {
+    width: auto;
+    min-width: 180px;
+    border-right: 1px solid #1c201d;
+    border-bottom: 0;
+  }
+  .history-inspector-head { padding: 11px 12px 9px; }
+  .history-commit-meta-bar { padding: 7px 12px; }
+  .git-history .commit-body { max-height: 66px; padding: 7px 12px; }
+}
+@container git-history (max-width: 420px) {
+  .history-toolbar { padding: 8px 8px 6px; }
+  .history-toolbar-sub { padding: 6px 8px 5px; }
+  .history-context { padding: 5px 9px; }
+  .history-commit { padding-right: 8px; }
+  .history-commit-time { display: none; }
+  .history-inspector-title h2 { font-size: 13px; }
+  .history-inspector-refs { max-width: 100%; justify-content: flex-start; }
+  .history-commit-meta-bar .commit-author { max-width: 45%; }
+  .history-commit-meta-bar .commit-date { margin-left: 0; }
 }

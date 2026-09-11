@@ -6,13 +6,13 @@
 
 **sushiAI** brings agent terminals, chats, files, and Git diffs into one macOS window. Run Claude Code, Codex, Gemini CLI, and Cursor Agent with your installed tools and accounts. Use local terminals or persistent Herdr sessions, including over SSH.
 
-[Watch the demo](promo/sushiAI-launch.mp4) · [Download 0.0.5](https://github.com/sushi-killer/sushiAI/releases/tag/v0.0.5) · [Installation guide](docs/INSTALL.md)
+[Watch the demo](promo/sushiAI-launch.mp4) · [Download 0.0.6](https://github.com/sushi-killer/sushiAI/releases/tag/v0.0.6) · [Installation guide](docs/INSTALL.md)
 
 The demo uses fictional projects and sample data.
 
 ## Install
 
-**[Download the Apple Silicon DMG](https://github.com/sushi-killer/sushiAI/releases/download/v0.0.5/sushiAI-0.0.5-arm64.dmg)** — requires an M1 or newer Mac running macOS 13 or later.
+**[Download the Apple Silicon DMG](https://github.com/sushi-killer/sushiAI/releases/download/v0.0.6/sushiAI-0.0.6-arm64.dmg)** — requires an M1 or newer Mac running macOS 13 or later.
 
 Open the DMG, drag sushiAI to Applications, and launch it. This build is ad-hoc signed and is not Apple-notarized. See the [installation guide](docs/INSTALL.md) for first-launch instructions, checksums, tool setup, and [building from source](docs/INSTALL.md#build-from-source).
 
@@ -26,10 +26,11 @@ Open the DMG, drag sushiAI to Applications, and launch it. This build is ad-hoc 
 - **Local and remote projects:** connect to Herdr over SSH using your existing SSH configuration.
 - **Files and previews:** browse directories, read text, view images and PDFs, and preview static HTML with relative assets.
 - **Text editing:** edit UTF-8 files with conflict detection if an agent changes the file before you save.
-- **Git diffs:** inspect the current branch, working-tree changes, and staged changes.
+- **Git history and diffs:** inspect a compact branch graph, browse any local or origin branch without checkout, and review commit files and diffs alongside working-tree and staged changes.
 - **Skill inventory:** scan local Codex, Claude and other agent skills, group them by harness, review usage and duplicate signals, and edit `SKILL.md` in a VS Code-style pane.
 - **Software updates:** check GitHub Releases automatically and download a verified DMG when an update is available.
 - **Agent chats:** use Claude Code or Codex through their installed CLIs.
+- **Project controls:** open a workspace menu to enable or disable Claude Code MCP servers and plugins without deleting their configuration.
 - **Chat tab:** threads per project with pinning, renaming and a project picker on **+**. Each thread keeps its agent, model, effort and permission mode; attach files and folders with **+** or by dropping them into the composer.
 - **Live model list:** Codex models, their reasoning levels and your configured defaults are read from the installed CLI, so a new release appears without updating sushiAI. Codex turns report progress and real token usage while they run.
 
@@ -40,6 +41,8 @@ Use **+**, **⌘K**, or **⌘T** to add a terminal, agent, browser, Files & Git 
 When space is limited, panels switch to tabs and the sidebar collapses. You can also select tab mode from the toolbar.
 
 Open **Sessions** to search and filter sessions or end several at once. For Herdr sessions, **Hide** removes the view while **End** stops the underlying process. Use the workspace menu to rename or close a workspace and its sessions.
+
+Use the workspace menu → **Manage workspace controls** to rename a workspace and turn Claude Code MCP connections and plugins on or off for that project. The same compact table has a **Stats** view with recent local project-usage signals, so plugins with no recent use are easy to review. The New workspace form also lets you choose which discovered plugins start disabled. sushiAI writes Claude Code's native per-project choice to `~/.claude.json` and `.claude/settings.local.json` on the selected host; server definitions, plugin settings and credentials stay untouched. The control applies to new Claude Code sessions and is structured to add other harnesses later.
 
 Local terminals stop when sushiAI quits. Herdr sessions continue independently of the app. Save file edits before quitting; unsaved drafts are kept only in memory. Use terminal panels when an agent requires interactive approval.
 

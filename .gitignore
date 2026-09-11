@@ -1,8 +1,12 @@
 node_modules/
+__pycache__/
+*.pyc
 dist/
 release/
 .runtime/
 artifacts/
+# Local UI concepts and throwaway prototypes.
+concepts/
 .DS_Store
 promo/soundtrack.wav
 promo/assets/frame-*.png

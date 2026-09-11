@@ -2,10 +2,10 @@
 
 ## Download for macOS
 
-The **0.0.5** DMG requires **Apple Silicon (M1 or newer)** and **macOS 13 Ventura or later**. This release does not include a prebuilt Intel package.
+The **0.0.6** DMG requires **Apple Silicon (M1 or newer)** and **macOS 13 Ventura or later**. This release does not include a prebuilt Intel package.
 
-1. Open the [0.0.5 release](https://github.com/sushi-killer/sushiAI/releases/tag/v0.0.5).
-2. Download `sushiAI-0.0.5-arm64.dmg`.
+1. Open the [0.0.6 release](https://github.com/sushi-killer/sushiAI/releases/tag/v0.0.6).
+2. Download `sushiAI-0.0.6-arm64.dmg`.
 3. Open the DMG and drag **sushiAI** to **Applications**.
 4. Launch sushiAI from Applications, then eject the disk image.
 
@@ -29,7 +29,7 @@ Open **Settings → Software updates** and choose **Install and restart** when a
 
 The app must be in a writable folder, such as your personal Applications folder. For manual installation, quit sushiAI and replace the app in Applications using the downloaded DMG.
 
-Version 0.0.1 Alpha does not include an updater. Download and install 0.0.5 manually once; subsequent updates can be installed from Settings.
+Version 0.0.1 Alpha does not include an updater. Download and install 0.0.6 manually once; subsequent updates can be installed from Settings.
 
 ## Set up your tools
 

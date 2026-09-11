@@ -1,6 +1,6 @@
 {
   "name": "sushiai-workspace",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "private": true,
   "description": "A macOS workspace for terminal agents, powered by Herdr",
   "main": "electron/main.cjs",
@@ -70,7 +70,7 @@
     },
     "artifactName": "sushiAI-${version}-${arch}.${ext}",
     "dmg": {
-      "title": "sushiAI 0.0.5"
+      "title": "sushiAI 0.0.6"
     }
   },
   "license": "MIT",

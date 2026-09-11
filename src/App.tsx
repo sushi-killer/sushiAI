@@ -35,12 +35,14 @@ import {
 import type {
   Layout,
   Message,
+  ModelProfile,
   Panel,
   PanelKind,
   Snapshot,
   System,
   SkillCatalogItem,
   SkillManagementAction,
+  ClaudePlugin,
   UpdateState,
   Workspace,
 } from "./types";
@@ -65,6 +67,8 @@ import { ConnectionsSettings } from "./ConnectionsSettings";
 import { ProjectPanel } from "./ProjectPanel";
 import { SessionsDialog } from "./SessionsDialog";
 import { LocalSkillsView } from "./LocalSkillsView";
+import { ClaudeMcpSettings } from "./ClaudeMcpSettings";
+import { ProvidersSettings } from "./ProvidersSettings";
 
 import { UpdateSettings } from "./UpdateSettings";
 
@@ -76,14 +80,29 @@ type Saved = {
   socket: string;
   routines: Routine[];
   fontScale: number;
+  mode?: "Agent" | "Code" | "Chat";
+  tabMode?: boolean;
+  section?: string;
+  selected?: string;
+  zoomed?: string | null;
+  sidebar?: boolean;
 };
 function restore(): Saved | null {
   try {
     const value = JSON.parse(localStorage.getItem(STORAGE) || "null");
     if (!Array.isArray(value?.workspaces) || !value.workspaces.length)
       return null;
+    const mode =
+      value.mode === "Agent" || value.mode === "Chat" ? value.mode : "Code";
     return {
       ...value,
+      mode,
+      tabMode: value.tabMode === true,
+      section: typeof value.section === "string" ? value.section : "",
+      selected: typeof value.selected === "string" ? value.selected : "",
+      zoomed: typeof value.zoomed === "string" ? value.zoomed : null,
+      sidebar:
+        typeof value.sidebar === "boolean" ? value.sidebar : undefined,
       workspaces: value.workspaces.map((w: Workspace) => ({
         ...w,
         connection: w.herdrId ? w.connection || value.socket : undefined,
@@ -209,14 +228,23 @@ export function App() {
     "connected" | "offline" | "connecting"
   >("connecting");
   const [updates, setUpdates] = useState<UpdateState | null>(null);
+  const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([]);
+  const [selectedModelProfileId, setSelectedModelProfileId] = useState("");
+  const [settingsTab, setSettingsTab] = useState<
+    "general" | "connections" | "providers" | "updates"
+  >("general");
   const [connectionError, setConnectionError] = useState("");
-  const [mode, setMode] = useState("Code");
+  const [mode, setMode] = useState<"Agent" | "Code" | "Chat">(
+    saved?.mode || "Code",
+  );
   const [agentNotices, setAgentNotices] = useState<
     import("./agents/types").AgentActivity[]
   >([]);
-  const [tabMode, setTabMode] = useState(false);
-  const [section, setSection] = useState("");
-  const [sidebar, setSidebar] = useState(window.innerWidth >= 760);
+  const [tabMode, setTabMode] = useState(saved?.tabMode || false);
+  const [section, setSection] = useState(saved?.section || "");
+  const [sidebar, setSidebar] = useState(
+    saved?.sidebar ?? window.innerWidth >= 760,
+  );
   // Agent and Chat render their lists into this slot of the shared sidebar.
   const [slot, setSlot] = useState<HTMLElement | null>(null);
   const visitedTabs = useRef(new Set<string>());
@@ -246,8 +274,8 @@ export function App() {
   const canvasRef = useRef<HTMLElement>(null);
   const [compact, setCompact] = useState(false);
   const [adding, setAdding] = useState(false);
-  const [selected, setSelected] = useState("");
-  const [zoomed, setZoomed] = useState<string | null>(null);
+  const [selected, setSelected] = useState(saved?.selected || "");
+  const [zoomed, setZoomed] = useState<string | null>(saved?.zoomed || null);
   const [toast, setToast] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [routines, setRoutines] = useState<Routine[]>(saved?.routines || []);
@@ -263,6 +291,13 @@ export function App() {
   activeRef.current = active;
   const connected = connection === "connected";
   const activeEndpoint = active.connection || socket;
+  useEffect(() => {
+    const panels = codePanels(active);
+    if (selected && !panels.some((panel) => panel.id === selected))
+      setSelected(panels[0]?.id || "");
+    if (zoomed && !panels.some((panel) => panel.id === zoomed))
+      setZoomed(null);
+  }, [active.id, active.layout, active.panels, selected, zoomed]);
   useEffect(() => {
     const el = canvasRef.current;
     if (!el) return;
@@ -473,12 +508,31 @@ export function App() {
           socket,
           routines,
           fontScale,
+          mode,
+          tabMode,
+          section,
+          selected,
+          zoomed,
+          sidebar,
         }),
       );
     } catch {
       notify("Storage is full. Clear older chat history.");
     }
-  }, [workspaces, active.id, socket, routines, fontScale, notify]);
+  }, [
+    workspaces,
+    active.id,
+    socket,
+    routines,
+    fontScale,
+    mode,
+    tabMode,
+    section,
+    selected,
+    zoomed,
+    sidebar,
+    notify,
+  ]);
   const refreshHerdr = useCallback(
     async (path = socket) => {
       if (!window.bridge || !path) return;
@@ -631,6 +685,11 @@ export function App() {
     return () => window.removeEventListener("keydown", key);
   }, [selected, active, modal, mode, section]);
   useEffect(() => {
+    if (modal === "pane" || modal === "settings")
+      window.bridge?.modelProfilesList().then(setModelProfiles);
+    if (modal === "pane") setSelectedModelProfileId("");
+  }, [modal]);
+  useEffect(() => {
     setSearch("");
     if (section === "Skills") {
       if (!skillsLoadedRef.current) void loadSkills();
@@ -666,39 +725,48 @@ export function App() {
     kind: PanelKind,
     agent = "claude",
     filesTarget?: Panel["filesTarget"],
+    modelProfileId?: string,
   ) {
+    const modelProfile = modelProfiles.find((p) => p.id === modelProfileId);
     const current = activeRef.current;
     if (adding) return;
     setAdding(true);
     try {
       if (current.herdrId && (kind === "terminal" || kind === "agent")) {
         if (!window.bridge) throw new Error("Open the desktop app first.");
-        const result = await window.bridge.herdr(
-          current.connection || socket,
-          "pane.split",
-          {
-            workspace_id: current.herdrId,
-            target_pane_id: current.panels.find((p) => p.herdrId)?.herdrId,
-            direction: "right",
-            focus: false,
-            cwd: current.cwd,
-          },
-        );
+        const endpoint = current.connection || socket;
+        // Staged before the pane exists: a gateway that can't be reached
+        // shouldn't leave an empty pane behind. Herdr panes are just a typed
+        // shell command, so the model swap rides on that command line
+        // instead of the argv/env injection the direct local launch uses.
+        let launchText = agent;
+        if (kind === "agent" && agent === "claude" && modelProfileId) {
+          if (endpoint.startsWith("ssh:"))
+            throw new Error(
+              "Custom models aren't supported on remote (SSH) workspaces yet.",
+            );
+          const settingsPath =
+            await window.bridge.modelSettingsStage(modelProfileId);
+          launchText = `claude --settings '${settingsPath}'`;
+        }
+        const result = await window.bridge.herdr(endpoint, "pane.split", {
+          workspace_id: current.herdrId,
+          target_pane_id: current.panels.find((p) => p.herdrId)?.herdrId,
+          direction: "right",
+          focus: false,
+          cwd: current.cwd,
+        });
         const paneId = result.pane?.pane_id || result.pane_id;
         if (kind === "agent" && paneId)
-          await window.bridge.herdr(
-            current.connection || socket,
-            "pane.send_input",
-            {
-              pane_id: paneId,
-              text: agent,
-              keys: ["Enter"],
-            },
-          );
-        await refreshHerdr(current.connection || socket);
+          await window.bridge.herdr(endpoint, "pane.send_input", {
+            pane_id: paneId,
+            text: launchText,
+            keys: ["Enter"],
+          });
+        await refreshHerdr(endpoint);
         if (paneId)
           setSelected(
-            `herdr:${(current.connection || socket).startsWith("ssh:") ? current.connection || socket : "local"}:${paneId}`,
+            `herdr:${endpoint.startsWith("ssh:") ? endpoint : "local"}:${paneId}`,
           );
       } else {
         const panel: Panel = {
@@ -706,7 +774,7 @@ export function App() {
           kind,
           title:
             kind === "agent"
-              ? agentTitle(agent)
+              ? modelProfile?.label || agentTitle(agent)
               : kind === "terminal"
                 ? "zsh"
                 : kind === "browser"
@@ -718,6 +786,7 @@ export function App() {
           started: kind === "agent",
           messages: kind === "chat" ? [] : undefined,
           filesTarget: kind === "files" ? filesTarget : undefined,
+          modelProfileId: kind === "agent" ? modelProfileId : undefined,
         };
         updateWorkspace(current.id, (w) => ({
           ...w,
@@ -1109,7 +1178,7 @@ export function App() {
           </button>
         </div>
         <div className="mode-switch">
-          {["Agent", "Code", "Chat"].map((item) => (
+          {(["Agent", "Code", "Chat"] as const).map((item) => (
             <button
               key={item}
               className={mode === item ? "active" : ""}
@@ -1650,7 +1719,7 @@ export function App() {
           }}
         >
           <div
-            className={`modal ${modal === "pane" ? "command-modal" : ""} ${modal === "sessions" ? "sessions-modal" : ""} ${modal === "workspace-actions" ? "workspace-actions-modal" : ""}`}
+            className={`modal ${modal === "pane" ? "command-modal" : ""} ${modal === "sessions" ? "sessions-modal" : ""} ${modal === "workspace-actions" ? "workspace-actions-modal claude-controls-modal" : ""}`}
             role="dialog"
             aria-modal="true"
             aria-label={
@@ -1665,7 +1734,7 @@ export function App() {
                       : modal === "sessions"
                         ? "Session manager"
                         : modal === "workspace-actions"
-                          ? "Workspace settings"
+                          ? "Workspace controls"
                           : modal === "updates"
                             ? "Software updates"
                             : "Notifications"
@@ -1732,71 +1801,36 @@ export function App() {
                 </div>
               </>
             ) : modal === "workspace-actions" && closing ? (
-              <>
-                <div className="dialog-eyebrow">WORKSPACE</div>
-                <h2>{closing.workspace.name}</h2>
-                <p className="workspace-summary">
-                  <span>
-                    {closing.workspace.panels.length}{" "}
-                    {closing.workspace.panels.length === 1
-                      ? "session"
-                      : "sessions"}
-                  </span>
-                  <span
-                    className="workspace-path"
-                    title={closing.workspace.cwd}
-                  >
-                    {closing.workspace.cwd}
-                  </span>
-                </p>
-                <form
-                  onSubmit={async (e) => {
-                    e.preventDefault();
-                    const name = String(
-                      new FormData(e.currentTarget).get("name"),
+              <ClaudeMcpSettings
+                cwd={closing.workspace.cwd}
+                endpoint={closing.workspace.connection}
+                remote={
+                  closing.workspace.connection?.startsWith("ssh:") || false
+                }
+                workspaceName={closing.workspace.name}
+                sessionCount={closing.workspace.panels.length}
+                onRename={async (name) => {
+                  if (closing.workspace.herdrId)
+                    await window.bridge!.herdr(
+                      closing.workspace.connection || socket,
+                      "workspace.rename",
+                      {
+                        workspace_id: closing.workspace.herdrId,
+                        label: name,
+                      },
                     );
-                    try {
-                      if (closing.workspace.herdrId)
-                        await window.bridge!.herdr(
-                          closing.workspace.connection || socket,
-                          "workspace.rename",
-                          {
-                            workspace_id: closing.workspace.herdrId,
-                            label: name,
-                          },
-                        );
-                      updateWorkspace(closing.workspace.id, (w) => ({
-                        ...w,
-                        name,
-                      }));
-                      setModal(null);
-                    } catch (error) {
-                      notify(errorText(error));
-                    }
-                  }}
-                >
-                  <label>
-                    Workspace name
-                    <input
-                      name="name"
-                      defaultValue={closing.workspace.name}
-                      required
-                    />
-                  </label>
-                  <button className="primary">Rename workspace</button>
-                </form>
-                <div className="settings-divider" />
-                <p>
-                  Closing this workspace ends all its sessions. Project files
-                  stay on disk.
-                </p>
-                <button
-                  className="danger"
-                  onClick={() => endWorkspace(closing.workspace)}
-                >
-                  Close workspace and sessions
-                </button>
-              </>
+                  updateWorkspace(closing.workspace.id, (w) => ({
+                    ...w,
+                    name,
+                  }));
+                  setClosing((value) =>
+                    value
+                      ? { ...value, workspace: { ...value.workspace, name } }
+                      : value,
+                  );
+                }}
+                onCloseWorkspace={() => endWorkspace(closing.workspace)}
+              />
             ) : modal === "pane" ? (
               <>
                 <div className="dialog-eyebrow">MAKE IT YOUR SPACE</div>
@@ -1849,7 +1883,16 @@ export function App() {
                     (agent) => (
                       <button
                         key={agent}
-                        onClick={() => addPanel("agent", agent)}
+                        onClick={() =>
+                          addPanel(
+                            "agent",
+                            agent,
+                            undefined,
+                            agent === "claude"
+                              ? selectedModelProfileId || undefined
+                              : undefined,
+                          )
+                        }
                       >
                         <span
                           className={
@@ -1874,6 +1917,25 @@ export function App() {
                     ),
                   )}
                 </div>
+                {modelProfiles.length > 0 && (
+                  <label className="agent-model-picker">
+                    Claude Code · Custom model
+                    <select
+                      value={selectedModelProfileId}
+                      onChange={(event) =>
+                        setSelectedModelProfileId(event.target.value)
+                      }
+                    >
+                      <option value="">Automatic (Anthropic)</option>
+                      {modelProfiles.map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.label}
+                        </option>
+                      ))}
+                    </select>
+                    <small>Pick a model, then click Claude Code above.</small>
+                  </label>
+                )}
                 <div className="dialog-footer">
                   <span>
                     Launches in <strong>{active.name}</strong>
@@ -1885,101 +1947,181 @@ export function App() {
               <>
                 <div className="dialog-eyebrow">PREFERENCES</div>
                 <h2>Your workspace, connected.</h2>
-                <p>Connect the desktop to a running Herdr session.</p>
-                <form
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    const value = String(
-                      new FormData(event.currentTarget).get("socket"),
-                    );
-                    setSocket(value);
-                    setConnection("connecting");
-                    refreshHerdr(value);
-                  }}
-                >
-                  <label>
-                    Herdr socket
-                    <input
-                      name="socket"
-                      key={socket}
-                      defaultValue={
-                        socket.startsWith("ssh:") ? system?.socketPath : socket
-                      }
-                      placeholder="/Users/you/.config/herdr/herdr.sock"
-                      required
-                    />
-                  </label>
-                  <div className="connection-detail">
-                    <i className={`status-dot ${connected ? "green" : ""}`} />
-                    {connected
-                      ? "Connected · workspaces sync automatically"
-                      : connectionError || "Connecting…"}
-                  </div>
-                  <button className="primary" type="submit">
-                    <RefreshCw size={14} /> Reconnect
-                  </button>
-                </form>
-                <ConnectionsSettings
-                  endpoint={socket}
-                  localSocket={system?.socketPath || ""}
-                  onSelect={(value) => {
-                    setSocket(value);
-                    setConnection("connecting");
-                  }}
-                />
-                <div className="settings-divider" />
-                <UpdateSettings state={updates} />
-                <div className="settings-divider" />
-                <label className="scale-setting">
-                  Interface size
-                  <select
-                    value={fontScale}
-                    onChange={(event) =>
-                      setFontScale(Number(event.target.value))
-                    }
-                  >
-                    <option value={0.95}>Compact</option>
-                    <option value={1}>Default</option>
-                    <option value={1.1}>Large</option>
-                  </select>
-                </label>
-                <div className="settings-note">
-                  <TerminalSquare size={16} />
-                  <p>
-                    Herdr sessions keep running when you close sushiAI. Local
-                    terminals live for the duration of the app.
-                  </p>
-                </div>
-                <div className="cli-status">
-                  {system?.agents.map((a) => (
-                    <div key={a.name}>
-                      <span>{agentTitle(a.name)}</span>
-                      <span>
-                        {a.path ? (
-                          <>
-                            <Check size={12} /> Installed
-                          </>
-                        ) : (
-                          "Not found"
-                        )}
-                      </span>
-                    </div>
+                <div className="workspace-control-tabs" role="tablist">
+                  {(
+                    [
+                      ["general", "General"],
+                      ["connections", "Connections"],
+                      ["providers", "Providers"],
+                      ["updates", "Updates"],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <button
+                      key={key}
+                      className={settingsTab === key ? "selected" : ""}
+                      role="tab"
+                      aria-selected={settingsTab === key}
+                      onClick={() => setSettingsTab(key)}
+                    >
+                      {label}
+                    </button>
                   ))}
                 </div>
+                {settingsTab === "connections" ? (
+                  <ConnectionsSettings
+                    endpoint={socket}
+                    localSocket={system?.socketPath || ""}
+                    onSelect={(value) => {
+                      setSocket(value);
+                      setConnection("connecting");
+                    }}
+                    socketForm={
+                      <form
+                        className="socket-form"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          const value = String(
+                            new FormData(event.currentTarget).get("socket"),
+                          );
+                          setSocket(value);
+                          setConnection("connecting");
+                          refreshHerdr(value);
+                        }}
+                      >
+                        <div className="socket-head">
+                          <label htmlFor="settings-socket">Herdr socket</label>
+                          <div className="connection-detail">
+                            <i
+                              className={`status-dot ${connected ? "green" : ""}`}
+                            />
+                            {connected
+                              ? "Connected · workspaces sync automatically"
+                              : connectionError || "Connecting…"}
+                          </div>
+                        </div>
+                        <div className="socket-controls">
+                          <input
+                            id="settings-socket"
+                            name="socket"
+                            key={socket}
+                            defaultValue={
+                              socket.startsWith("ssh:")
+                                ? system?.socketPath
+                                : socket
+                            }
+                            placeholder="/Users/you/.config/herdr/herdr.sock"
+                            required
+                          />
+                          <button className="primary" type="submit">
+                            <RefreshCw size={14} /> Reconnect
+                          </button>
+                        </div>
+                      </form>
+                    }
+                  />
+                ) : settingsTab === "providers" ? (
+                  <ProvidersSettings />
+                ) : settingsTab === "updates" ? (
+                  <UpdateSettings state={updates} />
+                ) : (
+                  <>
+                    <div className="setting-block">
+                      <h4>Interface size</h4>
+                      <div
+                        className="workspace-control-tabs"
+                        role="group"
+                        aria-label="Interface size"
+                      >
+                        {(
+                          [
+                            [0.95, "Compact"],
+                            [1, "Default"],
+                            [1.1, "Large"],
+                          ] as const
+                        ).map(([value, label]) => (
+                          <button
+                            key={label}
+                            role="radio"
+                            aria-checked={fontScale === value}
+                            className={fontScale === value ? "selected" : ""}
+                            onClick={() => setFontScale(value)}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="settings-note">
+                      <TerminalSquare size={16} />
+                      <p>
+                        Herdr sessions keep running when you close sushiAI.
+                        Local terminals live for the duration of the app.
+                      </p>
+                    </div>
+                    <div className="cli-status">
+                      {system?.agents.map((a) => (
+                        <div key={a.name}>
+                          <span>{agentTitle(a.name)}</span>
+                          <span>
+                            {a.path ? (
+                              <>
+                                <Check size={12} /> Installed
+                              </>
+                            ) : (
+                              "Not found"
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
               </>
             ) : modal === "workspace" ? (
               <WorkspaceDialog
                 defaultCwd={active.cwd}
                 endpoint={socket}
                 connected={connected}
-                onCreate={async (name, cwd, backend, starter) => {
+                onCreate={async (
+                  name,
+                  cwd,
+                  backend,
+                  starter,
+                  pluginChanges,
+                ) => {
                   try {
+                    const pluginEndpoint =
+                      backend === "herdr" && socket.startsWith("ssh:")
+                        ? socket
+                        : undefined;
+                    const applyPluginChanges = async () => {
+                      if (!pluginChanges.length) return;
+                      if (!window.bridge)
+                        throw new Error("Open the desktop app first.");
+                      for (const plugin of pluginChanges)
+                        await window.bridge.claudePluginsToggle({
+                          cwd,
+                          endpoint: pluginEndpoint,
+                          name: plugin.name,
+                          disabled: plugin.disabled,
+                        });
+                    };
                     if (backend === "herdr") {
                       const result = await window.bridge!.herdr(
                         socket,
                         "workspace.create",
                         { label: name, cwd, focus: false },
                       );
+                      try {
+                        await applyPluginChanges();
+                      } catch (error) {
+                        await window.bridge
+                          ?.herdr(socket, "workspace.close", {
+                            workspace_id: result.workspace.workspace_id,
+                          })
+                          .catch(() => {});
+                        throw error;
+                      }
                       await refreshHerdr();
                       if (starter !== "shell")
                         await window.bridge!.herdr(socket, "pane.send_input", {
@@ -1992,6 +2134,7 @@ export function App() {
                         `herdr:${socket.startsWith("ssh:") ? socket : "local"}:${result.workspace.workspace_id}`,
                       );
                     } else {
+                      await applyPluginChanges();
                       const w = initialWorkspace(cwd);
                       w.name = name;
                       const panel: Panel = {
@@ -2174,12 +2317,17 @@ function WorkspaceDialog({
     cwd: string,
     backend: string,
     starter: string,
+    pluginChanges: Array<{ name: string; disabled: boolean }>,
   ): Promise<void>;
 }) {
   const [cwd, setCwd] = useState(defaultCwd),
     [busy, setBusy] = useState(false),
     [backend, setBackend] = useState(connected ? "herdr" : "local");
+  const [plugins, setPlugins] = useState<ClaudePlugin[]>([]);
+  const [disabledPlugins, setDisabledPlugins] = useState<string[]>([]);
+  const [pluginsLoading, setPluginsLoading] = useState(false);
   const remote = backend === "herdr" && endpoint.startsWith("ssh:");
+  const targetEndpoint = remote ? endpoint : undefined;
   useEffect(() => {
     let cancelled = false;
     if (remote)
@@ -2194,6 +2342,41 @@ function WorkspaceDialog({
       cancelled = true;
     };
   }, [remote, endpoint, defaultCwd]);
+  useEffect(() => {
+    let cancelled = false;
+    setPluginsLoading(true);
+    setPlugins([]);
+    setDisabledPlugins([]);
+    const request = window.bridge?.claudePluginsList(cwd, targetEndpoint);
+    if (!request) {
+      setPluginsLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+    request
+      .then((result) => {
+        if (cancelled) return;
+        setPlugins(result.plugins);
+        setDisabledPlugins(
+          result.plugins
+            .filter((plugin) => plugin.disabled)
+            .map((plugin) => plugin.name),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPlugins([]);
+          setDisabledPlugins([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setPluginsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, targetEndpoint]);
   return (
     <>
       <div className="dialog-eyebrow">A PLACE TO BUILD</div>
@@ -2204,13 +2387,22 @@ function WorkspaceDialog({
           event.preventDefault();
           const data = new FormData(event.currentTarget);
           setBusy(true);
-          await onCreate(
-            String(data.get("name")),
-            cwd,
-            backend,
-            String(data.get("starter")),
-          );
-          setBusy(false);
+          try {
+            await onCreate(
+              String(data.get("name")),
+              cwd,
+              backend,
+              String(data.get("starter")),
+              plugins.flatMap((plugin) => {
+                const disabled = disabledPlugins.includes(plugin.name);
+                return disabled === plugin.disabled
+                  ? []
+                  : [{ name: plugin.name, disabled }];
+              }),
+            );
+          } finally {
+            setBusy(false);
+          }
         }}
       >
         <label>
@@ -2246,7 +2438,7 @@ function WorkspaceDialog({
           </div>
         </label>
         <label>
-          Start with
+          Agent / harness
           <select name="starter">
             <option value="shell">One terminal</option>
             <option value="claude">Claude Code</option>
@@ -2254,6 +2446,35 @@ function WorkspaceDialog({
             <option value="gemini">Gemini CLI</option>
           </select>
         </label>
+        {plugins.length > 0 ? (
+          <label>
+            Claude Code plugins to disable
+            <select
+              className="workspace-plugin-picker"
+              multiple
+              size={Math.min(5, Math.max(3, plugins.length))}
+              value={disabledPlugins}
+              onChange={(event) =>
+                setDisabledPlugins(
+                  Array.from(
+                    event.currentTarget.selectedOptions,
+                    (option) => option.value,
+                  ),
+                )
+              }
+            >
+              {plugins.map((plugin) => (
+                <option value={plugin.name} key={plugin.name}>
+                  {plugin.name} · {plugin.disabled ? "off" : "on"}
+                </option>
+              ))}
+            </select>
+            <small className="workspace-plugin-hint">
+              Select plugins that should be off in this workspace. Existing
+              selections reflect their current state.
+            </small>
+          </label>
+        ) : null}
         <label>
           Session backend
           <select
@@ -2266,8 +2487,16 @@ function WorkspaceDialog({
             <option value="local">Local · built-in PTY</option>
           </select>
         </label>
-        <button type="submit" className="primary" disabled={busy}>
-          {busy ? "Creating…" : "Create workspace"}
+        <button
+          type="submit"
+          className="primary"
+          disabled={busy || pluginsLoading}
+        >
+          {busy
+            ? "Creating…"
+            : pluginsLoading
+              ? "Finding plugins…"
+              : "Create workspace"}
           <ArrowUpRight size={14} />
         </button>
       </form>

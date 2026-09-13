@@ -161,6 +161,12 @@ by `scripts/check-conventions.mjs` in CI, not just a naming convention:
 - Use the `ship-pr` skill to open a normal PR, and `cut-release` to prepare
   a release PR — both are procedure around the CI/`scripts/release.mjs`
   machinery described above, not a replacement for it.
+- Squash-only is a `main`-history invariant, not just a PR-merge-button
+  setting: if a change ever has to land on `main` outside the normal
+  pipeline (a rare, explicitly-approved bootstrapping exception, not
+  routine practice), squash it to the intended granularity yourself first
+  — don't push a branch's raw commit-by-commit history as-is just because
+  it happens to fast-forward cleanly.
 
 ## Execution gotchas
 

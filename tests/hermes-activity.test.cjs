@@ -38,16 +38,39 @@ test("only committed memory writes produce activity", () => {
 });
 test("successful duplicate or unchanged results do not announce new memories or skills", () => {
   for (const name of ["memory", "skill_manage"]) {
-    const item = { id: "unchanged", name, status: "complete",
-      input: { action: name === "memory" ? "add" : "patch" } };
-    for (const marker of [{ changed: false }, { noop: true }, { status: "unchanged" }]) {
-      assert.equal(activityFor(complete, { ...item, output: { success: true, ...marker } }), null);
+    const item = {
+      id: "unchanged",
+      name,
+      status: "complete",
+      input: { action: name === "memory" ? "add" : "patch" },
+    };
+    for (const marker of [
+      { changed: false },
+      { noop: true },
+      { status: "unchanged" },
+    ]) {
+      assert.equal(
+        activityFor(complete, {
+          ...item,
+          output: { success: true, ...marker },
+        }),
+        null,
+      );
     }
   }
-  assert.equal(activityFor(complete, {
-    id: "duplicate", name: "memory", status: "complete", input: { action: "add" },
-    output: { success: true, message: "Entry already exists (no duplicate added)." },
-  }), null);
+  assert.equal(
+    activityFor(complete, {
+      id: "duplicate",
+      name: "memory",
+      status: "complete",
+      input: { action: "add" },
+      output: {
+        success: true,
+        message: "Entry already exists (no duplicate added).",
+      },
+    }),
+    null,
+  );
 });
 test("skill mutations and native reviews stay distinct from model claims", () => {
   const item = {

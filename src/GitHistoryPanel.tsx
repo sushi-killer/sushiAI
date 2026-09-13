@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   GitBranch,
   GitCommitVertical,
@@ -88,7 +88,7 @@ function displayError(error: unknown) {
     .replace(/^Error:\s*/, "");
 }
 
-export function GitHistoryPanel({
+export const GitHistoryPanel = memo(function GitHistoryPanel({
   root,
   endpoint,
 }: {
@@ -110,6 +110,7 @@ export function GitHistoryPanel({
     [diffText, setDiffText] = useState(""),
     [diffBusy, setDiffBusy] = useState(false),
     [branches, setBranches] = useState<Branch[]>([]),
+    [branchesError, setBranchesError] = useState(""),
     [historyRef, setHistoryRef] = useState("");
 
   const listVersion = useRef(0),
@@ -121,7 +122,11 @@ export function GitHistoryPanel({
       return Promise.reject(
         new Error("Open the desktop app to browse project history."),
       );
-    return window.bridge.projectInspect(endpoint, { operation, root, ...extra });
+    return window.bridge.projectInspect(endpoint, {
+      operation,
+      root,
+      ...extra,
+    });
   };
 
   useEffect(() => {
@@ -132,7 +137,8 @@ export function GitHistoryPanel({
     setDetail(null);
     setSelectedFile("");
     setDiffText("");
-    inspect("log", {
+    setBranchesError("");
+    inspect("git_overview", {
       refs: historyRef ? "current" : scope,
       ...(historyRef ? { branch: historyRef } : {}),
     })
@@ -141,28 +147,19 @@ export function GitHistoryPanel({
         setCommits(result.commits || []);
         setHead(result.head || null);
         setTruncated(!!result.truncated);
+        setBranches(result.branches || []);
+        setBranchesError(result.branchesError || "");
       })
       .catch((e) => {
-        if (revision === listVersion.current) setError(displayError(e));
+        if (revision !== listVersion.current) return;
+        // Keep whatever branches we already have: dropping them would empty the
+        // picker and leave no way back to a branch whose history still loads.
+        setError(displayError(e));
       })
       .finally(() => {
         if (revision === listVersion.current) setLoading(false);
       });
   }, [root, endpoint, scope, historyRef, reloadToken]);
-
-  const branchVersion = useRef(0);
-  useEffect(() => {
-    const revision = ++branchVersion.current;
-    inspect("branches")
-      .then((result) => {
-        if (revision === branchVersion.current)
-          setBranches(result.branches || []);
-      })
-      .catch(() => {
-        // Branch chrome is optional; the graph below still works without it.
-        if (revision === branchVersion.current) setBranches([]);
-      });
-  }, [root, endpoint, reloadToken]);
 
   const currentBranch = useMemo(
     () => branches.find((branch) => branch.current),
@@ -236,7 +233,10 @@ export function GitHistoryPanel({
       });
   }
 
-  function renderEdge(edge: { fromLane: number; toLane: number }, top: boolean) {
+  function renderEdge(
+    edge: { fromLane: number; toLane: number },
+    top: boolean,
+  ) {
     const x1 = LANE_WIDTH / 2 + edge.fromLane * LANE_WIDTH + LANE_WIDTH / 2;
     const x2 = LANE_WIDTH / 2 + edge.toLane * LANE_WIDTH + LANE_WIDTH / 2;
     const [xa, ya, xb, yb] = top
@@ -303,7 +303,8 @@ export function GitHistoryPanel({
                       .filter((branch) => branch.local)
                       .map((branch) => (
                         <option key={branch.ref} value={branch.ref}>
-                          {branch.name} · {branch.origin ? "local · origin" : "local only"}
+                          {branch.name} ·{" "}
+                          {branch.origin ? "local · origin" : "local only"}
                         </option>
                       ))}
                   </optgroup>
@@ -336,7 +337,11 @@ export function GitHistoryPanel({
           </button>
         </div>
         <div className="history-toolbar-sub">
-          <div className="history-scope" role="group" aria-label="History scope">
+          <div
+            className="history-scope"
+            role="group"
+            aria-label="History scope"
+          >
             <button
               className={scope === "all" ? "active" : ""}
               aria-pressed={scope === "all"}
@@ -374,6 +379,11 @@ export function GitHistoryPanel({
         {error && (
           <div className="inline-error history-error" role="alert">
             {error}
+          </div>
+        )}
+        {branchesError && (
+          <div className="inline-error history-error" role="status">
+            Branch list unavailable: {displayError(branchesError)}
           </div>
         )}
         <div className="history-rows">
@@ -420,7 +430,9 @@ export function GitHistoryPanel({
                     </span>
                     <span className="history-commit-meta">
                       <code>{commit.hash.slice(0, 7)}</code>
-                      {isMerge && <GitMerge size={11} className="history-merge" />}
+                      {isMerge && (
+                        <GitMerge size={11} className="history-merge" />
+                      )}
                       {badges.slice(0, 2).map((badge) => (
                         <code
                           key={badge.label}
@@ -431,7 +443,10 @@ export function GitHistoryPanel({
                       ))}
                     </span>
                   </span>
-                  <span className="history-commit-time" title={formatDate(commit.date)}>
+                  <span
+                    className="history-commit-time"
+                    title={formatDate(commit.date)}
+                  >
                     {relativeDate(commit.date)}
                   </span>
                 </button>
@@ -462,7 +477,10 @@ export function GitHistoryPanel({
               {detail && (
                 <div className="history-inspector-refs">
                   {detailBadges.map((badge) => (
-                    <code key={badge.label} className={`ref-badge ref-${badge.kind}`}>
+                    <code
+                      key={badge.label}
+                      className={`ref-badge ref-${badge.kind}`}
+                    >
                       {badge.label}
                     </code>
                   ))}
@@ -490,7 +508,8 @@ export function GitHistoryPanel({
                   </span>
                   {detail.parents.length > 1 && (
                     <span className="commit-parents">
-                      merge · {detail.parents.map((p) => p.slice(0, 7)).join(" + ")}
+                      merge ·{" "}
+                      {detail.parents.map((p) => p.slice(0, 7)).join(" + ")}
                     </span>
                   )}
                 </div>
@@ -514,7 +533,9 @@ export function GitHistoryPanel({
                             }
                             onClick={() => openCommitFile(selected, file.path)}
                           >
-                            <code className={`git-status status-${file.status.trim()[0]}`}>
+                            <code
+                              className={`git-status status-${file.status.trim()[0]}`}
+                            >
                               {file.status}
                             </code>
                             <span>{file.path}</span>
@@ -541,7 +562,11 @@ export function GitHistoryPanel({
                       {diffBusy ? (
                         <div className="history-empty">Loading diff…</div>
                       ) : diffText ? (
-                        <SyntaxHighlightedCode text={diffText} path={selectedFile} diff />
+                        <SyntaxHighlightedCode
+                          text={diffText}
+                          path={selectedFile}
+                          diff
+                        />
                       ) : (
                         <div className="history-empty">
                           <span>Select a file to view its diff.</span>
@@ -557,4 +582,4 @@ export function GitHistoryPanel({
       </section>
     </div>
   );
-}
+});

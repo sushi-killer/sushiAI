@@ -21,10 +21,19 @@ try {
   });
   const page = await desktop.firstWindow();
   await page.waitForFunction(() => !!window.bridge);
-  assert.equal(await page.evaluate(async () => {
-    const fonts = await document.fonts.load('12px "Sushi Terminal Symbols"', "󰂺");
-    return fonts.length > 0 && fonts.every(font => font.status === "loaded");
-  }), true, "Packaged terminal symbols must load from the bundled font");
+  assert.equal(
+    await page.evaluate(async () => {
+      const fonts = await document.fonts.load(
+        '12px "Sushi Terminal Symbols"',
+        "󰂺",
+      );
+      return (
+        fonts.length > 0 && fonts.every((font) => font.status === "loaded")
+      );
+    }),
+    true,
+    "Packaged terminal symbols must load from the bundled font",
+  );
   await page.evaluate(async (cwd) => {
     window.unicodeOutput = "";
     window.bridge.onTerminal((event) => {

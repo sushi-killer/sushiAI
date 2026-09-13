@@ -25,7 +25,7 @@ export function AgentConnectionCatalog({
   agentId: string;
   onClose: () => void;
 }) {
-  const revision=useRef(0);
+  const revision = useRef(0);
   const [entries, setEntries] = useState<Entry[]>([]),
     [selected, setSelected] = useState<Entry | null>(null),
     [query, setQuery] = useState("");
@@ -55,14 +55,14 @@ export function AgentConnectionCatalog({
     };
   }, [providerId, agentId]);
   useEffect(() => {
-    const request=++revision.current;
+    const request = ++revision.current;
     setInstall(null);
     if (!selected) return;
     let cancelled = false;
     const poll = async () => {
       try {
         const r = await call<Install>("installStatus", { id: selected.name });
-        if (cancelled || request!==revision.current) return;
+        if (cancelled || request !== revision.current) return;
         setInstall(r);
       } catch (e) {
         if (!cancelled) setError(String(e));
@@ -92,11 +92,15 @@ export function AgentConnectionCatalog({
       clearTimeout(timer);
     };
   }, [install, selected?.name]);
-  useEffect(()=>{
-    if(install?.status!=="installed"||!selected)return;
-    setEntries(old=>old.map(e=>e.name===selected.name?{...e,installed:true}:e));
-    setSelected(old=>old?{...old,installed:true}:old);
-  },[install?.status,selected?.name]);
+  useEffect(() => {
+    if (install?.status !== "installed" || !selected) return;
+    setEntries((old) =>
+      old.map((e) =>
+        e.name === selected.name ? { ...e, installed: true } : e,
+      ),
+    );
+    setSelected((old) => (old ? { ...old, installed: true } : old));
+  }, [install?.status, selected?.name]);
   return (
     <section className="agent-addon-panel">
       <header>

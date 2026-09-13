@@ -1,0 +1,511 @@
+{
+  "id": "test.probe",
+  "name": "Contract probe",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "scope": "app",
+  "description": "Not a product feature. One extension that declares every host, placement, layout, field type, tone and default the contract allows, so the suite tests the contract instead of whichever plugin was handy. Its records are specimens and mean nothing.",
+  "contributions": {
+    "surfaces": [
+      {
+        "id": "probe.ledger",
+        "title": "Specimen ledger",
+        "description": "The slice everything else in this manifest borrows.",
+        "icon": "list-check",
+        "allowedHosts": ["app.page", "workspace.pane"],
+        "defaultHost": "app.page",
+        "instancePolicy": "singleton",
+        "stateScope": "project",
+        "stateVersion": 2,
+        "tokens": {
+          "accent": "sage",
+          "density": "compact",
+          "radius": "sm",
+          "elevation": "raised"
+        },
+        "view": {
+          "kind": "declarative",
+          "schemaVersion": 2,
+          "title": "Specimen ledger",
+          "description": "Every field type the contract has, once each.",
+          "itemLabel": "specimen",
+          "allowRemove": true,
+          "data": {
+            "fields": [
+              { "id": "name", "type": "text", "label": "Specimen" },
+              { "id": "origin", "type": "text", "label": "Origin" },
+              { "id": "catalogued", "type": "boolean", "label": "Catalogued" },
+              { "id": "fragile", "type": "boolean", "label": "Fragile" },
+              { "id": "collected", "type": "date", "label": "Collected" },
+              { "id": "inspected", "type": "date", "label": "Inspected" },
+              {
+                "id": "tone",
+                "type": "select",
+                "label": "Tone",
+                "options": [
+                  { "value": "neutral", "label": "Neutral", "tone": "neutral" },
+                  { "value": "info", "label": "Info", "tone": "info" },
+                  { "value": "ok", "label": "Ok", "tone": "ok" },
+                  { "value": "warning", "label": "Warning", "tone": "warning" },
+                  { "value": "danger", "label": "Danger", "tone": "danger" },
+                  { "value": "muted", "label": "Muted", "tone": "muted" }
+                ]
+              },
+              {
+                "id": "shape",
+                "type": "select",
+                "label": "Shape",
+                "options": [
+                  { "value": "cube", "label": "Cube" },
+                  { "value": "helix", "label": "Helix", "tone": "info" },
+                  { "value": "shard", "label": "Shard", "tone": "warning" }
+                ]
+              }
+            ]
+          },
+          "views": [
+            {
+              "layout": "list",
+              "primary": "name",
+              "secondary": "origin",
+              "toggle": "catalogued",
+              "meta": ["tone", "shape", "collected", "fragile"],
+              "editable": ["tone", "collected"],
+              "filterable": ["catalogued", "shape"],
+              "groupable": ["shape", "fragile", "collected"],
+              "sort": [
+                { "field": "collected", "dir": "asc" },
+                { "field": "tone", "dir": "desc" },
+                { "field": "origin" },
+                { "field": "catalogued", "dir": "desc" }
+              ],
+              "summary": [
+                {
+                  "label": "Neutral",
+                  "field": "tone",
+                  "value": "neutral",
+                  "tone": "neutral"
+                },
+                {
+                  "label": "Info",
+                  "field": "tone",
+                  "value": "info",
+                  "tone": "info"
+                },
+                { "label": "Ok", "field": "tone", "value": "ok", "tone": "ok" },
+                {
+                  "label": "Warning",
+                  "field": "tone",
+                  "value": "warning",
+                  "tone": "warning"
+                },
+                {
+                  "label": "Danger",
+                  "field": "tone",
+                  "value": "danger",
+                  "tone": "danger"
+                },
+                {
+                  "label": "Muted",
+                  "field": "tone",
+                  "value": "muted",
+                  "tone": "muted"
+                }
+              ],
+              "actions": ["probe.open-board", "probe.open-tab", "probe.open-notes"]
+            }
+          ]
+        }
+      },
+      {
+        "id": "probe.board",
+        "title": "Specimen board",
+        "description": "Every project's ledger at once, pivoted on tone.",
+        "icon": {
+          "kind": "svg",
+          "viewBox": "0 0 24 24",
+          "paths": ["M4 5h6v14H4z", "M14 5h6v9h-6z"]
+        },
+        "allowedHosts": ["app.page"],
+        "defaultHost": "app.page",
+        "instancePolicy": "singleton",
+        "stateScope": "project",
+        "stateVersion": 2,
+        "stateId": "probe.ledger",
+        "aggregate": true,
+        "tokens": {
+          "accent": "blue",
+          "density": "comfortable",
+          "radius": "md",
+          "elevation": "flat"
+        },
+        "view": {
+          "kind": "declarative",
+          "schemaVersion": 2,
+          "title": "Specimen board",
+          "itemLabel": "specimen",
+          "data": {
+            "fields": [
+              { "id": "name", "type": "text", "label": "Specimen" },
+              { "id": "catalogued", "type": "boolean", "label": "Catalogued" },
+              { "id": "collected", "type": "date", "label": "Collected" },
+              {
+                "id": "tone",
+                "type": "select",
+                "label": "Tone",
+                "options": [
+                  { "value": "neutral", "label": "Neutral", "tone": "neutral" },
+                  { "value": "info", "label": "Info", "tone": "info" },
+                  { "value": "ok", "label": "Ok", "tone": "ok" },
+                  { "value": "warning", "label": "Warning", "tone": "warning" },
+                  { "value": "danger", "label": "Danger", "tone": "danger" },
+                  { "value": "muted", "label": "Muted", "tone": "muted" }
+                ]
+              },
+              {
+                "id": "shape",
+                "type": "select",
+                "label": "Shape",
+                "options": [
+                  { "value": "cube", "label": "Cube" },
+                  { "value": "helix", "label": "Helix", "tone": "info" },
+                  { "value": "shard", "label": "Shard", "tone": "warning" }
+                ]
+              }
+            ]
+          },
+          "views": [
+            {
+              "layout": "board",
+              "columns": "tone",
+              "primary": "name",
+              "meta": ["$project", "collected"],
+              "groupable": ["$project", "shape"],
+              "filter": [{ "field": "catalogued", "op": "ne", "value": true }]
+            }
+          ]
+        }
+      },
+      {
+        "id": "probe.table",
+        "title": "Specimen table",
+        "description": "The same slice, read-only, as columns.",
+        "allowedHosts": ["dashboard.section", "app.page", "workspace.pane"],
+        "defaultHost": "dashboard.section",
+        "instancePolicy": "singleton",
+        "stateScope": "project",
+        "stateVersion": 2,
+        "stateId": "probe.ledger",
+        "view": {
+          "kind": "declarative",
+          "schemaVersion": 2,
+          "title": "Specimen table",
+          "itemLabel": "specimen",
+          "allowAdd": false,
+          "allowToggle": false,
+          "data": {
+            "fields": [
+              { "id": "name", "type": "text", "label": "Specimen" },
+              { "id": "origin", "type": "text", "label": "Origin" },
+              { "id": "collected", "type": "date", "label": "Collected" },
+              {
+                "id": "tone",
+                "type": "select",
+                "label": "Tone",
+                "options": [
+                  { "value": "neutral", "label": "Neutral", "tone": "neutral" },
+                  { "value": "info", "label": "Info", "tone": "info" },
+                  { "value": "ok", "label": "Ok", "tone": "ok" },
+                  { "value": "warning", "label": "Warning", "tone": "warning" },
+                  { "value": "danger", "label": "Danger", "tone": "danger" },
+                  { "value": "muted", "label": "Muted", "tone": "muted" }
+                ]
+              }
+            ]
+          },
+          "views": [
+            {
+              "layout": "table",
+              "primary": "name",
+              "secondary": "origin",
+              "meta": ["tone", "collected"],
+              "sort": [{ "field": "collected", "dir": "desc" }]
+            }
+          ]
+        }
+      },
+      {
+        "id": "probe.tab",
+        "title": "Specimen tab",
+        "description": "A v1 checklist, one per pane, to prove the old schema still renders.",
+        "icon": "terminal",
+        "allowedHosts": ["workspace.tab", "workspace.pane"],
+        "defaultHost": "workspace.tab",
+        "instancePolicy": "multiple",
+        "stateScope": "instance",
+        "stateVersion": 1,
+        "view": {
+          "kind": "declarative",
+          "schemaVersion": 1,
+          "document": {
+            "kind": "collection",
+            "title": "Specimen tab",
+            "description": "Seeded, removable, one list per pane.",
+            "itemLabel": "reading",
+            "allowRemove": true,
+            "items": [
+              { "id": "seed-a", "label": "First reading" },
+              { "id": "seed-b", "label": "Second reading", "done": true }
+            ]
+          }
+        }
+      },
+      {
+        "id": "probe.notes",
+        "title": "Specimen notes",
+        "description": "One list for the whole machine, not per project.",
+        "icon": "sparkles",
+        "allowedHosts": ["sessions.section"],
+        "defaultHost": "sessions.section",
+        "instancePolicy": "singleton",
+        "stateScope": "global",
+        "view": {
+          "kind": "declarative",
+          "schemaVersion": 2,
+          "title": "Specimen notes",
+          "itemLabel": "note",
+          "data": {
+            "fields": [
+              { "id": "note", "type": "text", "label": "Note" },
+              { "id": "seen", "type": "date", "label": "Seen" },
+              { "id": "flag", "type": "boolean", "label": "Flagged" }
+            ]
+          },
+          "views": [
+            {
+              "primary": "note",
+              "meta": ["seen", "flag"],
+              "groupable": ["seen"],
+              "defaultGroup": "seen"
+            }
+          ]
+        }
+      },
+      {
+        "id": "probe.notes-board",
+        "title": "Flagged notes",
+        "description": "The notes slice again, grouped without fixed columns.",
+        "icon": "workflow",
+        "allowedHosts": ["skills.section"],
+        "defaultHost": "skills.section",
+        "instancePolicy": "singleton",
+        "stateScope": "global",
+        "stateVersion": 1,
+        "stateId": "probe.notes",
+        "tokens": { "accent": "amber" },
+        "view": {
+          "kind": "declarative",
+          "schemaVersion": 2,
+          "title": "Flagged notes",
+          "itemLabel": "note",
+          "allowAdd": false,
+          "allowToggle": false,
+          "data": {
+            "fields": [
+              { "id": "note", "type": "text", "label": "Note" },
+              { "id": "flag", "type": "boolean", "label": "Flagged" }
+            ]
+          },
+          "views": [
+            {
+              "layout": "board",
+              "primary": "note",
+              "meta": ["flag"],
+              "groupable": ["flag"],
+              "filter": [{ "field": "flag", "value": true }]
+            }
+          ]
+        }
+      },
+      {
+        "id": "probe.settings",
+        "title": "Probe preferences",
+        "description": "Instance state inside a settings section, both by default.",
+        "icon": "plug",
+        "allowedHosts": ["settings.section"],
+        "defaultHost": "settings.section",
+        "tokens": { "accent": "violet" },
+        "view": {
+          "kind": "declarative",
+          "schemaVersion": 2,
+          "title": "Probe preferences",
+          "itemLabel": "preference",
+          "data": {
+            "fields": [
+              { "id": "label", "type": "text", "label": "Preference" },
+              {
+                "id": "level",
+                "type": "select",
+                "label": "Level",
+                "options": [
+                  { "value": "off", "label": "Off", "tone": "muted" },
+                  { "value": "some", "label": "Some", "tone": "info" },
+                  { "value": "all", "label": "All", "tone": "ok" }
+                ]
+              }
+            ]
+          },
+          "views": [
+            {
+              "layout": "list",
+              "primary": "label",
+              "meta": ["level"],
+              "editable": ["level"],
+              "sort": [{ "field": "level", "dir": "desc" }]
+            }
+          ]
+        }
+      }
+    ],
+    "navigation": [
+      {
+        "id": "probe.nav-mode",
+        "targetSurfaceId": "probe.ledger",
+        "allowedPlacements": ["mode.primary"],
+        "defaultPlacement": "mode.primary",
+        "label": "Probe",
+        "icon": "layout-grid",
+        "order": 40
+      },
+      {
+        "id": "probe.nav-sidebar-board",
+        "targetSurfaceId": "probe.board",
+        "allowedPlacements": ["sidebar.primary"],
+        "defaultPlacement": "sidebar.primary",
+        "label": "Probe board",
+        "icon": "list-check"
+      },
+      {
+        "id": "probe.nav-sidebar-ledger",
+        "targetSurfaceId": "probe.ledger",
+        "allowedPlacements": ["sidebar.primary"],
+        "defaultPlacement": "sidebar.primary",
+        "label": "Probe ledger",
+        "icon": "plug",
+        "order": 2000
+      },
+      {
+        "id": "probe.nav-dashboard",
+        "targetSurfaceId": "probe.ledger",
+        "allowedPlacements": ["dashboard.navigation"],
+        "defaultPlacement": "dashboard.navigation",
+        "label": "Probe on dashboard",
+        "icon": "list-todo",
+        "order": -1
+      },
+      {
+        "id": "probe.nav-sessions",
+        "targetSurfaceId": "probe.tab",
+        "allowedPlacements": ["sessions.navigation"],
+        "defaultPlacement": "sessions.navigation",
+        "label": "Probe in sessions",
+        "icon": "terminal"
+      },
+      {
+        "id": "probe.nav-skills",
+        "targetSurfaceId": "probe.table",
+        "allowedPlacements": ["skills.navigation"],
+        "defaultPlacement": "skills.navigation",
+        "label": "Probe in skills",
+        "icon": "sparkles"
+      },
+      {
+        "id": "probe.nav-picker-tab",
+        "targetSurfaceId": "probe.tab",
+        "allowedPlacements": ["panel.picker"],
+        "defaultPlacement": "panel.picker",
+        "label": "Probe readings",
+        "icon": {
+          "kind": "svg",
+          "viewBox": "0 0 24 24",
+          "paths": [
+            { "d": "M5 5h14v14H5z", "fill": "currentColor", "strokeWidth": 2 }
+          ]
+        }
+      },
+      {
+        "id": "probe.nav-picker-table",
+        "targetSurfaceId": "probe.table",
+        "allowedPlacements": ["panel.picker"],
+        "defaultPlacement": "panel.picker",
+        "label": "Probe table pane",
+        "icon": "workflow"
+      }
+    ],
+    "actions": [
+      {
+        "id": "probe.act-start",
+        "commandId": "probe.open-ledger",
+        "allowedPlacements": ["workspace.toolbar.start"],
+        "defaultPlacement": "workspace.toolbar.start",
+        "label": "Probe start",
+        "icon": "folder"
+      },
+      {
+        "id": "probe.act-before",
+        "commandId": "probe.open-board",
+        "allowedPlacements": ["workspace.toolbar.before-tidy"],
+        "defaultPlacement": "workspace.toolbar.before-tidy",
+        "label": "Probe before tidy",
+        "icon": "layout-grid"
+      },
+      {
+        "id": "probe.act-after",
+        "commandId": "probe.open-tab",
+        "allowedPlacements": ["workspace.toolbar.after-tidy"],
+        "defaultPlacement": "workspace.toolbar.after-tidy",
+        "label": "Probe after tidy",
+        "icon": "terminal"
+      },
+      {
+        "id": "probe.act-end",
+        "commandId": "probe.open-ledger",
+        "allowedPlacements": ["workspace.toolbar.end"],
+        "defaultPlacement": "workspace.toolbar.end",
+        "label": "Probe end",
+        "icon": "list-check",
+        "order": 20
+      },
+      {
+        "id": "probe.act-folder",
+        "commandId": "probe.open-board",
+        "allowedPlacements": ["workspace.folder.actions"],
+        "defaultPlacement": "workspace.folder.actions",
+        "label": "Probe this workspace",
+        "icon": "folder"
+      }
+    ],
+    "commands": [
+      {
+        "id": "probe.open-ledger",
+        "title": "Open the specimen ledger",
+        "surfaceId": "probe.ledger"
+      },
+      {
+        "id": "probe.open-board",
+        "title": "Open the specimen board",
+        "surfaceId": "probe.board"
+      },
+      {
+        "id": "probe.open-tab",
+        "title": "Open the specimen tab",
+        "surfaceId": "probe.tab"
+      },
+      {
+        "id": "probe.open-notes",
+        "title": "Open the specimen notes",
+        "surfaceId": "probe.notes"
+      }
+    ]
+  }
+}

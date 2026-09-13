@@ -79,3 +79,28 @@ test("multiline bracketed paste remains literal rather than executing lines", ()
     { text: "echo one\necho two" },
   ]);
 });
+
+test("herdr pane input validates the pane id before it reaches the socket", async () => {
+  const {
+    registerHerdrExtension,
+  } = require("../electron/extensions/builtin-herdr.cjs");
+  // The same validator main.cjs injects; it is the trust boundary for pane ids.
+  const id = (value) => {
+    if (typeof value !== "string" || !value || value.length > 200)
+      throw new Error("Invalid panel ID.");
+    return value;
+  };
+  const handlers = new Map();
+  registerHerdrExtension({
+    handle: (channel, callback) => handlers.set(channel, callback),
+    getConnections: () => ({ socket: async () => "/tmp/herdr-test.sock" }),
+    id,
+  });
+  const herdr = handlers.get("herdr");
+  for (const paneId of [undefined, "", 123, "x".repeat(201)])
+    await assert.rejects(
+      herdr("ssh:demo", "pane.send_input", { pane_id: paneId, raw: "hi" }),
+      /Invalid panel ID/,
+      `pane_id ${JSON.stringify(paneId)} is refused`,
+    );
+});

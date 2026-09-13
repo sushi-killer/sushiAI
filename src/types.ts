@@ -15,9 +15,8 @@ export type Message = {
   /** The model that actually answered, as the CLI resolved it. */
   model?: string;
 };
-export type Panel = {
+type PanelState = {
   id: string;
-  kind: PanelKind;
   title: string;
   agent?: string;
   started?: boolean;
@@ -47,6 +46,17 @@ export type Panel = {
   /** Set when this agent panel was launched against a custom model provider. */
   modelProfileId?: string;
 };
+export type CorePanel = PanelState & { kind: PanelKind };
+export type ExtensionPanel = PanelState & {
+  kind: "extension";
+  extension: {
+    extensionId: string;
+    contributionId: string;
+    instanceId: string;
+    stateVersion: number;
+  };
+};
+export type Panel = CorePanel | ExtensionPanel;
 export type ModelProviderKind = "openrouter" | "opencode-go" | "custom";
 export type ModelProvider = {
   id: string;
@@ -366,6 +376,40 @@ export interface Bridge {
   }): Promise<ModelProfile>;
   modelProfilesDelete(id: string): Promise<void>;
   modelSettingsStage(modelProfileId: string): Promise<string>;
+  extensionsList(): Promise<import("./extensions/types.ts").ExtensionSnapshot>;
+  extensionsRefresh(): Promise<
+    import("./extensions/types.ts").ExtensionSnapshot
+  >;
+  extensionsStateRead(
+    extensionId: string,
+    surfaceId: string,
+    version: number,
+    scope: string,
+  ): Promise<unknown>;
+  extensionsStateAggregate(
+    extensionId: string,
+    surfaceId: string,
+    version: number,
+  ): Promise<{ scope: string; records: unknown }[]>;
+  extensionsStateWrite(
+    extensionId: string,
+    surfaceId: string,
+    version: number,
+    scope: string,
+    value: unknown,
+  ): Promise<void>;
+  onExtensionState(
+    callback: (change: {
+      extensionId: string;
+      surfaceId: string;
+      version: number;
+      scope: string;
+    }) => void,
+  ): () => void;
+  extensionsSetEnabled(
+    extensionId: string,
+    enabled: boolean,
+  ): Promise<import("./extensions/types.ts").ExtensionSnapshot>;
   window(action: string): Promise<void>;
   connectionsList(): Promise<ConnectionProfile[]>;
   connectionsSave(

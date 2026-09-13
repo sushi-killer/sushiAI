@@ -4,13 +4,20 @@ const library = import("../src/terminal-copy.ts");
 
 test("checkpoint sentence copies consistently at different widths and without indentation", async () => {
   const { cleanTerminalCopy } = await library;
-  const first = "⏺ Записано в PLAN-NEXT.md. Теперь запускаю батч-прогон по всем 5 чекпоинтам r1-retry (последовательная загрузка, но каждый dev-прогон идёт";
+  const first =
+    "⏺ Записано в PLAN-NEXT.md. Теперь запускаю батч-прогон по всем 5 чекпоинтам r1-retry (последовательная загрузка, но каждый dev-прогон идёт";
   const next = "с параллельными запросами вместо --workers 1).";
   for (const columns of [130, 180, 240]) {
     for (const padding of ["", " ", "  "])
-      assert.equal(cleanTerminalCopy(first + "\n" + padding + next, columns), first + " " + next);
+      assert.equal(
+        cleanTerminalCopy(first + "\n" + padding + next, columns),
+        first + " " + next,
+      );
     const fragment = first.slice(first.indexOf("Теперь"));
-    assert.equal(cleanTerminalCopy(fragment + "\n" + next, columns, first), fragment + " " + next);
+    assert.equal(
+      cleanTerminalCopy(fragment + "\n" + next, columns, first),
+      fragment + " " + next,
+    );
   }
 });
 
@@ -44,10 +51,14 @@ test("prose removes repeated spaces and joins near-margin continuations", async 
   const { cleanTerminalCopy } = await library;
   const line = "Это достаточно длинное предложение для узкой панели терминала";
   for (const spaces of ["  ", "   ", "     "]) {
-    assert.equal(cleanTerminalCopy("Первое предложение." + spaces + "Второе предложение."),
-      "Первое предложение. Второе предложение.");
-    assert.equal(cleanTerminalCopy(line + "." + spaces + "\n  Следующее предложение.", 64),
-      line + ". Следующее предложение.");
+    assert.equal(
+      cleanTerminalCopy("Первое предложение." + spaces + "Второе предложение."),
+      "Первое предложение. Второе предложение.",
+    );
+    assert.equal(
+      cleanTerminalCopy(line + "." + spaces + "\n  Следующее предложение.", 64),
+      line + ". Следующее предложение.",
+    );
   }
   assert.equal(
     cleanTerminalCopy(line + "\n  с  продолжением.", 64),

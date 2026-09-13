@@ -1,11 +1,20 @@
 import { useState } from "react";
 import { Eye, Search, TerminalSquare, Trash2 } from "lucide-react";
+import {
+  ExtensionNavSlot,
+  ExtensionSectionSlot,
+} from "./extensions/ExtensionSlots.tsx";
+import type { ExtensionRegistry } from "./extensions/registry.ts";
 import type { Panel, Workspace } from "./types";
 export function SessionsDialog({
   workspaces,
   activeId,
   onCloseSessions,
   onShow,
+  registry,
+  openExtensionTarget,
+  cwd,
+  connection,
 }: {
   workspaces: Workspace[];
   activeId: string;
@@ -13,6 +22,10 @@ export function SessionsDialog({
     items: { workspace: Workspace; panel: Panel }[],
   ): Promise<void>;
   onShow(workspace: Workspace, panel: Panel): void;
+  registry: ExtensionRegistry;
+  openExtensionTarget(extensionId: string, targetSurfaceId: string): void;
+  cwd: string;
+  connection?: string;
 }) {
   const [query, setQuery] = useState(""),
     [scope, setScope] = useState(activeId),
@@ -46,6 +59,13 @@ export function SessionsDialog({
         Hide a view or end the actual session. Ending Herdr sessions stops their
         processes.
       </p>
+      <ExtensionSectionSlot
+        registry={registry}
+        host="sessions.section"
+        cwd={cwd}
+        connection={connection}
+        workspaces={workspaces}
+      />
       <div className="session-filters">
         <label className="catalog-search">
           <Search size={14} />
@@ -89,6 +109,12 @@ export function SessionsDialog({
           <option value="done">Finished agents</option>
           <option value="blocked">Needs input</option>
         </select>
+        <ExtensionNavSlot
+          registry={registry}
+          placement="sessions.navigation"
+          className="secondary extension-nav"
+          onOpen={openExtensionTarget}
+        />
       </div>
       <div className="session-select-all">
         <label>

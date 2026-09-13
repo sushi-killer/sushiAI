@@ -63,7 +63,13 @@ function validate(value, rule, path = "input") {
 function checked(result, flag = "ok", applied) {
   if (!result || typeof result !== "object")
     fail("Invalid Hermes result.", "HERMES_INVALID_RESULT");
-  if(result.confirm_required===true && !result.error && result.success!==false && !applied)return result;
+  if (
+    result.confirm_required === true &&
+    !result.error &&
+    result.success !== false &&
+    !applied
+  )
+    return result;
   if (
     result.error ||
     result.ok === false ||
@@ -451,15 +457,40 @@ function installHermesAddons(provider) {
       return { ok: true, enabledToolsets: r.enabled_toolsets, reset: r.reset };
     },
   );
-  add("models","reasoning",{},[],false,async c=>{
-    const r=await c.rpc("config.get",{key:"reasoning"});return {value:r.value,display:r.display};
+  add("models", "reasoning", {}, [], false, async (c) => {
+    const r = await c.rpc("config.get", { key: "reasoning" });
+    return { value: r.value, display: r.display };
   });
-  add("models","setReasoning",{value:str(20)},["value"],true,async(c,i)=>{
-    if(!["none","minimal","low","medium","high","xhigh","max","ultra"].includes(i.value))fail("Invalid reasoning effort.");
-    const r=await c.rpc("config.set",{key:"reasoning",value:i.value,scope:"global"});
-    if(r.value!==i.value)fail("Hermes did not confirm the reasoning setting.");
-    return {ok:true,value:r.value};
-  });
+  add(
+    "models",
+    "setReasoning",
+    { value: str(20) },
+    ["value"],
+    true,
+    async (c, i) => {
+      if (
+        ![
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+          "ultra",
+        ].includes(i.value)
+      )
+        fail("Invalid reasoning effort.");
+      const r = await c.rpc("config.set", {
+        key: "reasoning",
+        value: i.value,
+        scope: "global",
+      });
+      if (r.value !== i.value)
+        fail("Hermes did not confirm the reasoning setting.");
+      return { ok: true, value: r.value };
+    },
+  );
   add("models", "current", {}, [], false, async (c) =>
     resource(
       c.p,

@@ -1,0 +1,74 @@
+/* The design vocabulary. Every other stylesheet spends these and defines no
+ * colour of its own; src/styles.css is the legacy file the boundary moves out
+ * of, rule by rule, and scripts/check-conventions.mjs enforces the line.
+ *
+ * Values follow the Skills page, which is the reference for how a page looks.
+ * Adopting them normalises card borders by a shade and radii by a pixel or two
+ * in places that had drifted - deliberate, not a regression. */
+:root {
+  /* Surface: depth, not decoration. */
+  --bg-app: #0b0b0b;
+  --bg-sunken: #101210;
+  --bg-raised: #171717;
+  --bg-hover: #1b1d1b;
+  --bg-selected: #1d241d;
+  --bg-elevated: #1b1b1b;
+
+  /* Line. */
+  --line: #303030;
+  --line-strong: #4a554b;
+  --line-selected: #71866e;
+
+  /* Text. */
+  --text: #e7e8e0;
+  --text-muted: #8f948d;
+  --text-faint: #6c726d;
+
+  /* Accent and state. */
+  --accent: #a9c58b;
+  --accent-ink: #20201f;
+  /* The accents an extension may choose between. A manifest names one of
+   * these; it can never supply a colour of its own. */
+  --accent-sage: #a9c58b;
+  --accent-blue: #8fa7c9;
+  --accent-amber: #d6b57a;
+  --accent-violet: #b39ed0;
+  --danger: #c98b84;
+  --danger-line: #4a3230;
+  --danger-bg: #1b1514;
+  --focus: #7797d7;
+
+  /* Tones: what a value means, in the four words the app understands. A
+   * manifest names one of these; it never supplies a colour. */
+  --tone-ok: #8fbd8a;
+  --tone-ok-bg: #16201a;
+  --tone-info: #8fa7c9;
+  --tone-info-bg: #161a21;
+  --tone-warning: #d6b57a;
+  --tone-warning-bg: #201c14;
+  --tone-danger: var(--danger);
+  --tone-danger-bg: var(--danger-bg);
+  --tone-neutral: var(--text-muted);
+  --tone-neutral-bg: transparent;
+  --tone-muted: var(--text-faint);
+  --tone-muted-bg: transparent;
+
+  /* Geometry. */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --control-h: 32px;
+  --gap-xs: 4px;
+  --gap-sm: 7px;
+  --gap-md: 12px;
+  --gap-lg: 18px;
+  --gap-xl: 26px;
+
+  /* Type. */
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-lg: 18px;
+  --text-xl: 22px;
+  --text-2xl: 32px;
+}

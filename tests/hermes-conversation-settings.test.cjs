@@ -122,16 +122,50 @@ test("model switches preserve the chosen session reasoning through native setter
   assert.equal(writes[1].input.scope, "session");
 });
 
-test('model suggestions are scoped to the conversation profile and contain no credentials', async () => {
- const {p,s,call}=fixture();let request;
- s.state.status='running';
- p.transport=()=>({request:async(method,path,input)=>{request={method,path,input};return {provider:'custom:example',api_key:'secret',providers:[{name:'custom:example',models:['first',{id:'second',api_key:'hidden'},'first'],api_key:'hidden'}]};}});
- assert.deepEqual(await call('options'),{defaultProvider:'custom:example',providers:[{name:'custom:example',models:['first','second']}]});
- assert.deepEqual(request,{method:'GET',path:'/api/model/options',input:{profile:'a',query:{explicit_only:1,include_unconfigured:0}}});
- assert.equal(s.settingsPending,undefined);
+test("model suggestions are scoped to the conversation profile and contain no credentials", async () => {
+  const { p, s, call } = fixture();
+  let request;
+  s.state.status = "running";
+  p.transport = () => ({
+    request: async (method, path, input) => {
+      request = { method, path, input };
+      return {
+        provider: "custom:example",
+        api_key: "secret",
+        providers: [
+          {
+            name: "custom:example",
+            models: ["first", { id: "second", api_key: "hidden" }, "first"],
+            api_key: "hidden",
+          },
+        ],
+      };
+    },
+  });
+  assert.deepEqual(await call("options"), {
+    defaultProvider: "custom:example",
+    providers: [{ name: "custom:example", models: ["first", "second"] }],
+  });
+  assert.deepEqual(request, {
+    method: "GET",
+    path: "/api/model/options",
+    input: {
+      profile: "a",
+      query: { explicit_only: 1, include_unconfigured: 0 },
+    },
+  });
+  assert.equal(s.settingsPending, undefined);
 });
-test('named custom providers are passed explicitly without accepting command flags',async()=>{
- const {call,calls}=fixture();await call('model',{model:'example',provider:'custom:example'});
- assert.equal(calls.find(c=>c.method==='config.set'&&c.input.key==='model').input.value,'example --provider custom:example --session');
- await assert.rejects(call('model',{model:'example',provider:'custom:example --global'}),/without command flags/);
+test("named custom providers are passed explicitly without accepting command flags", async () => {
+  const { call, calls } = fixture();
+  await call("model", { model: "example", provider: "custom:example" });
+  assert.equal(
+    calls.find((c) => c.method === "config.set" && c.input.key === "model")
+      .input.value,
+    "example --provider custom:example --session",
+  );
+  await assert.rejects(
+    call("model", { model: "example", provider: "custom:example --global" }),
+    /without command flags/,
+  );
 });

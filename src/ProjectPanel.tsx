@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   Code2,
@@ -14,7 +14,13 @@ import {
   Save,
 } from "lucide-react";
 import { SyntaxHighlightedCode } from "./SyntaxHighlightedCode";
-import { GitHistoryPanel } from "./GitHistoryPanel";
+import { RenderProfiler } from "./RenderProfiler";
+
+const GitHistoryPanel = lazy(() =>
+  import("./GitHistoryPanel").then(({ GitHistoryPanel: Component }) => ({
+    default: Component,
+  })),
+);
 type Entry = { name: string; path: string; directory: boolean; size: number };
 type Change = { path: string; status: string; previous?: string };
 type Draft = { file: string; text: string; original: string; hash: string };
@@ -30,7 +36,7 @@ export function ProjectPanel({
   initialFile?: string;
   initialEdit?: boolean;
   endpoint?: string;
-  onHTML(root: string, path: string): void;
+  onHTML(root: string, path: string, endpoint?: string): void;
 }) {
   const [root, setRoot] = useState(cwd),
     [draft, setDraft] = useState(cwd),
@@ -283,201 +289,207 @@ export function ProjectPanel({
         {endpoint?.startsWith("ssh:") && <span>SSH</span>}
       </div>
       {tab === "history" ? (
-        <GitHistoryPanel root={root} endpoint={endpoint} />
+        <Suspense fallback={<div className="loading">Loading history…</div>}>
+          <RenderProfiler id="git-history">
+            <GitHistoryPanel root={root} endpoint={endpoint} />
+          </RenderProfiler>
+        </Suspense>
       ) : (
-      <div className="project-body">
-        <aside className="file-list">
-          <label className="file-filter">
-            <Search size={12} />
-            <input
-              aria-label="Filter files"
-              placeholder="Filter files…"
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-            />
-          </label>
-          {tab === "files" ? (
-            <>
-              <div className="file-breadcrumb">
-                <button
-                  title="Parent folder"
-                  disabled={directory === "."}
-                  onClick={() =>
-                    setDirectory(
-                      directory.split("/").slice(0, -1).join("/") || ".",
-                    )
-                  }
-                >
-                  <ArrowLeft size={12} />
-                </button>
-                <span>
-                  {directory === "." ? "Project" : directory.split("/").at(-1)}
-                </span>
-                <label title="Show hidden files">
-                  <input
-                    type="checkbox"
-                    checked={hidden}
-                    onChange={(e) => setHidden(e.target.checked)}
-                  />
-                </label>
-              </div>
-              {entries
-                .filter((e) =>
-                  e.name.toLowerCase().includes(filter.toLowerCase()),
-                )
-                .map((entry) => (
-                  <button
-                    className={`file-row ${selected === entry.path ? "active" : ""}`}
-                    key={entry.path}
-                    title={entry.path}
-                    onClick={() =>
-                      entry.directory
-                        ? leaveEditor() && setDirectory(entry.path)
-                        : openFile(entry.path)
-                    }
-                  >
-                    {entry.directory ? (
-                      <Folder size={13} />
-                    ) : /\.(png|jpe?g|gif|webp|svg)$/i.test(entry.name) ? (
-                      <Image size={13} />
-                    ) : (
-                      <File size={13} />
-                    )}
-                    <span>{entry.name}</span>
-                  </button>
-                ))}
-            </>
-          ) : (
-            <>
-              <div className="git-branch">
-                <GitBranch size={12} />
-                {branch || "Repository"}
-                <span>{changes.length}</span>
-              </div>
-              {changes
-                .filter((c) =>
-                  c.path.toLowerCase().includes(filter.toLowerCase()),
-                )
-                .map((change) => (
-                  <button
-                    key={change.path}
-                    className={`file-row ${selected === change.path ? "active" : ""}`}
-                    title={
-                      change.previous
-                        ? `${change.previous} → ${change.path}`
-                        : change.path
-                    }
-                    onClick={() => openFile(change.path)}
-                  >
-                    <code
-                      className={`git-status status-${change.status.trim()[0]}`}
-                    >
-                      {change.status}
-                    </code>
-                    <span>{change.path}</span>
-                  </button>
-                ))}
-              {!changes.length && !error && (
-                <p className="muted clean-tree">Working tree is clean.</p>
-              )}
-            </>
-          )}
-        </aside>
-        <div className="file-preview">
-          <div className="file-preview-toolbar">
-            <span title={selected}>{selected || "Select a file"}</span>
-            {editable && tab === "files" && !editing && (
-              <button
-                title="Edit text file"
-                onClick={() => {
-                  setDraftText(text);
-                  setEditing(true);
-                }}
-              >
-                <Pencil size={12} /> Edit
-              </button>
-            )}
-            {editing && (
+        <div className="project-body">
+          <aside className="file-list">
+            <label className="file-filter">
+              <Search size={12} />
+              <input
+                aria-label="Filter files"
+                placeholder="Filter files…"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+              />
+            </label>
+            {tab === "files" ? (
               <>
-                <small>{dirty ? "Unsaved" : "Editing"}</small>
-                <button disabled={saving} onClick={leaveEditor}>
-                  Cancel
-                </button>
-                <button
-                  title="Save file · ⌘S"
-                  disabled={!dirty || saving}
-                  onClick={saveFile}
-                >
-                  <Save size={12} /> {saving ? "Saving…" : "Save"}
-                </button>
+                <div className="file-breadcrumb">
+                  <button
+                    title="Parent folder"
+                    disabled={directory === "."}
+                    onClick={() =>
+                      setDirectory(
+                        directory.split("/").slice(0, -1).join("/") || ".",
+                      )
+                    }
+                  >
+                    <ArrowLeft size={12} />
+                  </button>
+                  <span>
+                    {directory === "."
+                      ? "Project"
+                      : directory.split("/").at(-1)}
+                  </span>
+                  <label title="Show hidden files">
+                    <input
+                      type="checkbox"
+                      checked={hidden}
+                      onChange={(e) => setHidden(e.target.checked)}
+                    />
+                  </label>
+                </div>
+                {entries
+                  .filter((e) =>
+                    e.name.toLowerCase().includes(filter.toLowerCase()),
+                  )
+                  .map((entry) => (
+                    <button
+                      className={`file-row ${selected === entry.path ? "active" : ""}`}
+                      key={entry.path}
+                      title={entry.path}
+                      onClick={() =>
+                        entry.directory
+                          ? leaveEditor() && setDirectory(entry.path)
+                          : openFile(entry.path)
+                      }
+                    >
+                      {entry.directory ? (
+                        <Folder size={13} />
+                      ) : /\.(png|jpe?g|gif|webp|svg)$/i.test(entry.name) ? (
+                        <Image size={13} />
+                      ) : (
+                        <File size={13} />
+                      )}
+                      <span>{entry.name}</span>
+                    </button>
+                  ))}
+              </>
+            ) : (
+              <>
+                <div className="git-branch">
+                  <GitBranch size={12} />
+                  {branch || "Repository"}
+                  <span>{changes.length}</span>
+                </div>
+                {changes
+                  .filter((c) =>
+                    c.path.toLowerCase().includes(filter.toLowerCase()),
+                  )
+                  .map((change) => (
+                    <button
+                      key={change.path}
+                      className={`file-row ${selected === change.path ? "active" : ""}`}
+                      title={
+                        change.previous
+                          ? `${change.previous} → ${change.path}`
+                          : change.path
+                      }
+                      onClick={() => openFile(change.path)}
+                    >
+                      <code
+                        className={`git-status status-${change.status.trim()[0]}`}
+                      >
+                        {change.status}
+                      </code>
+                      <span>{change.path}</span>
+                    </button>
+                  ))}
+                {!changes.length && !error && (
+                  <p className="muted clean-tree">Working tree is clean.</p>
+                )}
               </>
             )}
-            {tab === "git" && (
-              <select
-                aria-label="Diff mode"
-                value={diffMode}
-                onChange={(e) => {
-                  setDiffMode(e.target.value);
-                  if (selected) openFile(selected, e.target.value);
-                }}
-              >
-                <option value="working">Working tree</option>
-                <option value="staged">Staged</option>
-              </select>
+          </aside>
+          <div className="file-preview">
+            <div className="file-preview-toolbar">
+              <span title={selected}>{selected || "Select a file"}</span>
+              {editable && tab === "files" && !editing && (
+                <button
+                  title="Edit text file"
+                  onClick={() => {
+                    setDraftText(text);
+                    setEditing(true);
+                  }}
+                >
+                  <Pencil size={12} /> Edit
+                </button>
+              )}
+              {editing && (
+                <>
+                  <small>{dirty ? "Unsaved" : "Editing"}</small>
+                  <button disabled={saving} onClick={leaveEditor}>
+                    Cancel
+                  </button>
+                  <button
+                    title="Save file · ⌘S"
+                    disabled={!dirty || saving}
+                    onClick={saveFile}
+                  >
+                    <Save size={12} /> {saving ? "Saving…" : "Save"}
+                  </button>
+                </>
+              )}
+              {tab === "git" && (
+                <select
+                  aria-label="Diff mode"
+                  value={diffMode}
+                  onChange={(e) => {
+                    setDiffMode(e.target.value);
+                    if (selected) openFile(selected, e.target.value);
+                  }}
+                >
+                  <option value="working">Working tree</option>
+                  <option value="staged">Staged</option>
+                </select>
+              )}
+              {/\.(html?|pdf)$/i.test(selected) && (
+                <button
+                  title="Open file in browser"
+                  onClick={() => onHTML(root, selected, endpoint)}
+                >
+                  <ExternalLink size={13} /> Open in browser
+                </button>
+              )}
+            </div>
+            {error && (
+              <div className="inline-error" role="alert">
+                {error}
+              </div>
             )}
-            {/\.(html?|pdf)$/i.test(selected) && (
-              <button
-                title="Open file in browser"
-                onClick={() => onHTML(root, selected)}
-              >
-                <ExternalLink size={13} /> Open in browser
-              </button>
+            {busy ? (
+              <div className="file-empty">Loading…</div>
+            ) : editing ? (
+              <textarea
+                className="file-editor"
+                aria-label={`Edit ${selected}`}
+                spellCheck={false}
+                value={draftText}
+                onChange={(e) => {
+                  setDraftText(e.target.value);
+                  drafts.set(draftKey, {
+                    file: selected,
+                    text: e.target.value,
+                    original: text,
+                    hash: fileHash,
+                  });
+                }}
+              />
+            ) : image ? (
+              <div className="image-preview">
+                <img src={image} alt={selected} />
+              </div>
+            ) : text ? (
+              <SyntaxHighlightedCode
+                text={text}
+                path={selected}
+                diff={tab === "git"}
+              />
+            ) : (
+              <div className="file-empty">
+                <Code2 size={27} />
+                <p>Explore your project.</p>
+                <small>
+                  Code, images, HTML and Git changes — here or over SSH.
+                </small>
+              </div>
             )}
           </div>
-          {error && (
-            <div className="inline-error" role="alert">
-              {error}
-            </div>
-          )}
-          {busy ? (
-            <div className="file-empty">Loading…</div>
-          ) : editing ? (
-            <textarea
-              className="file-editor"
-              aria-label={`Edit ${selected}`}
-              spellCheck={false}
-              value={draftText}
-              onChange={(e) => {
-                setDraftText(e.target.value);
-                drafts.set(draftKey, {
-                  file: selected,
-                  text: e.target.value,
-                  original: text,
-                  hash: fileHash,
-                });
-              }}
-            />
-          ) : image ? (
-            <div className="image-preview">
-              <img src={image} alt={selected} />
-            </div>
-          ) : text ? (
-            <SyntaxHighlightedCode
-              text={text}
-              path={selected}
-              diff={tab === "git"}
-            />
-          ) : (
-            <div className="file-empty">
-              <Code2 size={27} />
-              <p>Explore your project.</p>
-              <small>
-                Code, images, HTML and Git changes — here or over SSH.
-              </small>
-            </div>
-          )}
         </div>
-      </div>
       )}
     </div>
   );

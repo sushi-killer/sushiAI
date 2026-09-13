@@ -94,6 +94,115 @@ Updates use the Mac's architecture, ignore draft releases and older versions, an
 | Save a text file                   | ⌘S                  |
 | Send a message / insert a new line | Enter / Shift Enter |
 
+## Extensions
+
+Extensions are JSON. A folder with a `manifest.json` declares pages, workspace
+panes, dashboard cards, sidebar entries and toolbar actions; the app renders
+them itself. No code from the folder is ever loaded or executed, so installing
+one is as safe as opening a text file.
+
+Drop your folder here and press **Reload** on the Extensions page:
+
+```
+~/Library/Application Support/sushiai-workspace/local-extensions/<your-extension>/manifest.json
+```
+
+A new extension arrives disabled — enable it on the Extensions page. Editing
+the manifest and pressing Reload is the whole development loop; the version
+field is yours to bump freely. One broken folder never affects the others: it
+is listed with its error and the rest keep working.
+
+### What a manifest controls
+
+| Field | What you decide |
+| --- | --- |
+| `surfaces[].allowedHosts` | Where the surface may appear: `app.page`, `workspace.pane`, `workspace.tab`, `dashboard.section`, `sessions.section`, `skills.section`, `settings.section` |
+| `surfaces[].stateScope` | Whether its contents are per pane (`instance`), per project (`project`), or one for the machine (`global`) |
+| `surfaces[].instancePolicy` | `singleton` reveals the pane that is already open instead of adding a second; `multiple` opens another. A surface keeping `project` or `global` state must be a singleton — several panes sharing one slice would overwrite each other |
+| `surfaces[].stateVersion` | Bump it when the shape of what you store changes; older state is kept but no longer read |
+| `surfaces[].stateId` | Read and write another surface's contents instead of your own — how one list gets two views. The two must agree on `stateScope` and `stateVersion` |
+| `surfaces[].aggregate` | A read-only page over every project at once. Needs `stateScope: "project"`, and may group by `$project`, which the app fills in with the workspace name |
+| `surfaces[].tokens` | `accent`, `density`, `radius`, `elevation` — the surface is painted in the app's own palette, and these shift it within it. Declare none and it is identical to a built-in view |
+| `navigation[].defaultPlacement` | `panel.picker` (a card in the add-panel list), `sidebar.primary`, `mode.primary`, `dashboard.navigation`, `sessions.navigation`, `skills.navigation` |
+| `actions[].defaultPlacement` | `workspace.toolbar.start`, `.before-tidy`, `.after-tidy`, `.end`, or `workspace.folder.actions` |
+| `*.order` | Position among other contributions in the same spot. In the sidebar a negative order sits above Dashboard and the other built-in sections, a positive one below them |
+| `*.icon` | A bundled name, or your own geometry (below) |
+
+Anything the manifest does not ask for does not appear: a surface that lists
+only `workspace.pane` has no page and no sidebar entry. A contributed page
+opens in the working area the way Skills does — the sidebar, the workspace list
+and the toolbar stay exactly where they were. No manifest can take the window.
+
+### What a view describes
+
+A surface holds records; a view says how to read them. Fields are declared once
+under `data.fields` (`text`, `boolean`, `date`, `select`), and each view picks
+from them:
+
+| Field | What you decide |
+| --- | --- |
+| `primary` / `secondary` | The line of a row, and a quieter line under it |
+| `toggle` | The boolean a row's checkmark sets |
+| `meta` | Fields shown on the row. `$project` is allowed on an aggregate |
+| `editable` | Of the shown fields, the ones this view may change. Nothing is editable unless listed |
+| `layout` | `list`, `board`, or `table` |
+| `columns` | For a board: a `select` field whose options are the columns. Every option gets a column, empty or not, so the board keeps its shape |
+| `groupable` / `defaultGroup` | Fields the reader may group by. The app draws the chooser and remembers the pick |
+| `filter` | Always applied, invisible: `[{ "field": "done", "op": "ne", "value": true }]` |
+| `filterable` | Offered as a "Hide done" chip the app draws |
+| `sort` | `[{ "field": "due", "dir": "asc" }]`. Blanks sort last |
+| `summary` | Counting tiles above the list: `{ label, field, value, tone }` |
+| `actions` | Command ids to put in the page heading |
+| `allowAdd` / `allowToggle` / `allowRemove` | What a reader may do. Removal is off unless asked for |
+
+A `select` option may carry a `tone` — `neutral`, `info`, `ok`, `warning`,
+`danger`, `muted`. That is a meaning, not a colour: the app decides what
+"blocked" looks like, so two extensions read the same in the same theme. Dates
+render as "in 3 days" or "2 days ago", and an overdue one is flagged, without
+the manifest asking.
+
+Open the Extensions page and expand a card to see exactly what an extension
+contributes and where — in plain words rather than field names.
+
+### Where state is kept
+
+State lives with the app, not in your folder, so editing a manifest never
+touches what a user has typed:
+
+```
+~/Library/Application Support/sushiai-workspace/extensions/state/<extension-id>.json
+```
+
+`project` scope is keyed by the project folder. The same folder over SSH is a
+different project; a local Herdr session is not. A project-scoped surface
+opened without a folder renders read-only rather than writing into a shared
+bucket.
+
+### Icons
+
+Use a bundled name (`list-check`, `list-todo`, `layout-grid`, `plug`,
+`sparkles`, `workflow`, `terminal`, `folder`) or ship your own:
+
+```json
+"icon": {
+  "kind": "svg",
+  "viewBox": "0 0 24 24",
+  "paths": ["M4 7h10", { "d": "M17 8l2 2 4-4", "fill": "currentColor" }]
+}
+```
+
+Only path geometry is accepted — up to 12 paths, plain path data, no other
+attributes. The app builds the `<svg>` around it and paints it in the current
+text colour, so an icon can never carry script, styles or a remote reference.
+
+`tests/fixtures/extensions/probe/manifest.json` is the one extension the suite
+tests against. It is deliberately not a product feature: its records are
+"specimens" and mean nothing. It declares every host, placement, layout, field
+type, tone and token the contract allows, and
+`tests/extension-contract-coverage.test.cjs` reads the allowed values straight
+out of the validator and fails when one of them appears nowhere in the fixture.
+Widening the contract means widening the fixture in the same change.
+
 ## Development
 
 Requires Node.js 22.18+, npm, and Xcode Command Line Tools.

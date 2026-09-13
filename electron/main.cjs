@@ -11,27 +11,11 @@ const {
 const path = require("node:path");
 const os = require("node:os");
 const fs = require("node:fs/promises");
-const { existsSync, statSync } = require("node:fs");
-const { spawn } = require("node:child_process");
+const { existsSync } = require("node:fs");
 const pty = require("node-pty");
-const {
-  terminalEnvironment,
-  herdrLaunchParams,
-} = require("./terminal-text.cjs");
-const { request, inputCommands } = require("./herdr.cjs");
 const { Connections } = require("./connections.cjs");
 const { PreviewServer } = require("./preview.cjs");
-const { openHerdrStream, detectAgent } = require("./terminal-stream.cjs");
-const { quote } = require("./connections.cjs");
 const { Updates } = require("./updates.cjs");
-const {
-  chatArgs,
-  chatPrompt,
-  claudeEvent,
-  codexEvent,
-  IMAGE,
-} = require("./chat-args.cjs");
-const { chatModels } = require("./agent-models.cjs");
 const { scanLocalSkills } = require("./skills-catalog.cjs");
 const { manageSkill } = require("./skills-manager.cjs");
 const { ClaudeMcp } = require("./claude-mcp.cjs");
@@ -39,6 +23,17 @@ const { ClaudePlugins } = require("./claude-plugins.cjs");
 const { ModelProviders } = require("./model-providers.cjs");
 const { AgentRegistry } = require("./agents/registry.cjs");
 const { HermesProvider } = require("./agents/hermes-provider.cjs");
+const { registerProjectIpc } = require("./ipc/projects.cjs");
+const { registerTerminalIpc } = require("./ipc/terminals.cjs");
+const { registerChatIpc } = require("./ipc/chat.cjs");
+const { registerAppIpc } = require("./ipc/app.cjs");
+const { registerExtensionIpc } = require("./ipc/extensions.cjs");
+const { SurfaceStateStore } = require("./extensions/surface-state.cjs");
+const { ExtensionManager } = require("./extensions/extension-manager.cjs");
+const {
+  HERDR_MANIFEST,
+  registerHerdrExtension,
+} = require("./extensions/builtin-herdr.cjs");
 const {
   install,
   applicationPath,
@@ -51,14 +46,25 @@ const claudePlugins = new ClaudePlugins({ home: os.homedir() });
 agents.on("event", (event) => send("agent-event", event));
 const terminals = new Map(),
   terminalPending = new Map(),
-  chats = new Map(),
-  inputQueues = new Map();
+  chats = new Map();
 let mainWindow;
-let skillsCatalogCache;
-let skillsCatalogScan;
 const root = path.join(__dirname, "..");
 const dataDir = process.env.BRIDGE_DATA_DIR;
 if (dataDir) app.setPath("userData", path.resolve(dataDir));
+const extensions = new ExtensionManager({
+  dataDir: app.getPath("userData"),
+  builtins: [HERDR_MANIFEST],
+  // Folders dropped here are read as JSON manifests, never executed. The
+  // override exists so the desktop smoke can point at its own fixtures.
+  localDir: process.env.SUSHIAI_EXTENSIONS_DIR
+    ? path.resolve(root, process.env.SUSHIAI_EXTENSIONS_DIR)
+    : // A sibling of the settings folder, not inside it: this one is meant to
+      // be opened in Finder and edited by hand.
+      path.join(app.getPath("userData"), "local-extensions"),
+});
+const surfaceState = new SurfaceStateStore(
+  path.join(app.getPath("userData"), "extensions", "state"),
+);
 agents.register(
   new HermesProvider({
     activityFile: path.join(
@@ -123,638 +129,60 @@ function handle(channel, callback) {
     return callback(...args);
   });
 }
-handle("agent-providers", () => agents.list());
-handle("agent-call", (provider, operation, input) =>
-  agents.call(provider, operation, input),
-);
-handle("agent-open-external", async (value) => {
-  if (typeof value !== "string" || value.length > 8192)
-    throw new Error("Invalid link.");
-  const url = new URL(value);
-  if (
-    !["http:", "https:"].includes(url.protocol) ||
-    url.username ||
-    url.password
-  )
-    throw new Error("Only web links can be opened.");
-  await shell.openExternal(url.href);
+registerProjectIpc({
+  handle,
+  getConnections: () => connections,
+  getPreview: () => preview,
+  terminals,
+  terminalPending,
 });
-const allowedHerdr = new Set([
-  "ping",
-  "session.snapshot",
-  "workspace.create",
-  "workspace.rename",
-  "pane.rename",
-  "pane.split",
-  "pane.read",
-  "pane.send_text",
-  "pane.send_keys",
-  "pane.send_input",
-  "plugin.list",
-  "pane.close",
-  "workspace.close",
-]);
-const detectionTimer = setInterval(() => {
-  for (const [panelId, entry] of terminals) {
-    if (entry.exited || entry.source !== "pty") continue;
-    let foreground = "";
-    try {
-      foreground = entry.remote
-        ? entry.command || ""
-        : entry.proc.process || "";
-    } catch {}
-    const agent = detectAgent(foreground, entry.title);
-    if (agent !== entry.lastAgent) {
-      entry.lastAgent = agent;
-      send("terminal-data", { panelId, data: "", agent });
-    }
-  }
-}, 1200);
-detectionTimer.unref();
-handle("herdr", async (endpoint, method, params = {}) => {
-  const socketPath = await connections.socket(endpoint);
-  if (
-    typeof socketPath !== "string" ||
-    !path.isAbsolute(socketPath) ||
-    !allowedHerdr.has(method)
-  )
-    throw new Error("Invalid Herdr request");
-  if (method === "pane.send_input" && params.raw !== undefined) {
-    if (typeof params.raw !== "string" || params.raw.length > 1000000)
-      throw new Error("Input too large");
-    const queueKey = socketPath + ":" + id(params.pane_id);
-    const next = (inputQueues.get(queueKey) || Promise.resolve())
-      .catch(() => {})
-      .then(async () => {
-        for (const command of inputCommands(params.raw))
-          await request(socketPath, "pane.send_input", {
-            pane_id: params.pane_id,
-            ...command,
-          });
-      });
-    inputQueues.set(queueKey, next);
-    try {
-      await next;
-      return {};
-    } finally {
-      if (inputQueues.get(queueKey) === next) inputQueues.delete(queueKey);
-    }
-  }
-  return request(socketPath, method, herdrLaunchParams(method, params));
+registerExtensionIpc({
+  handle,
+  getExtensions: () => extensions,
+  getSurfaceState: () => surfaceState,
+  announce: (change) => send("extensions-state-changed", change),
 });
-handle("updates-state", () => updates.snapshot());
-handle("updates-check", () => updates.check());
-handle("updates-download", () => updates.download());
-handle("updates-configure", (settings) => updates.configure(settings));
-handle("updates-open", () => updates.openInstaller());
-handle("updates-install", () => updates.install());
-handle("updates-release-page", () => updates.releasePage());
-handle("connections-list", () => connections.list());
-handle("connections-save", (profile) => connections.save(profile));
-async function disconnectEndpoint(endpoint) {
-  for (const pending of terminalPending.values())
-    if (pending.endpoint === endpoint) pending.cancelled = true;
-  for (const terminal of terminals.values())
-    if (terminal.endpoint === endpoint && !terminal.exited)
-      terminal.proc.kill();
-  await connections.disconnect(endpoint);
-}
-handle("connections-delete", async (endpoint) => {
-  await disconnectEndpoint(endpoint);
-  await connections.delete(endpoint);
+registerHerdrExtension({ handle, getConnections: () => connections, id });
+const terminalIpc = registerTerminalIpc({
+  handle,
+  send,
+  app,
+  pty,
+  getConnections: () => connections,
+  executable,
+  directory,
+  id,
+  terminals,
+  terminalPending,
+  stageModelSettings,
 });
-handle("connections-connect", async (endpoint) => {
-  await connections.socket(endpoint);
-  return { connected: true };
+const chatIpc = registerChatIpc({
+  handle,
+  send,
+  getConnections: () => connections,
+  executable,
+  directory,
+  id,
+  chats,
 });
-handle("connections-disconnect", disconnectEndpoint);
-handle("connections-forward", async (endpoint, url) => {
-  const parsed = new URL(url);
-  if (
-    !["http:", "https:"].includes(parsed.protocol) ||
-    !["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname)
-  )
-    throw new Error("Forwarding supports only a remote localhost URL.");
-  const local = await connections.forward(
-    endpoint,
-    Number(parsed.port) || (parsed.protocol === "https:" ? 443 : 80),
-  );
-  parsed.hostname = "127.0.0.1";
-  parsed.port = String(local);
-  return parsed.href;
+registerAppIpc({
+  handle,
+  app,
+  dialog,
+  shell,
+  getMainWindow: () => mainWindow,
+  getConnections: () => connections,
+  getUpdates: () => updates,
+  agents,
+  claudeMcp,
+  claudePlugins,
+  modelProviders,
+  executable,
+  scanLocalSkills,
+  manageSkill,
+  userDataDir: () => app.getPath("userData"),
+  stageModelSettings,
 });
-handle("project-inspect", (endpoint, options) => {
-  if (
-    ![
-      "list",
-      "read",
-      "write",
-      "git",
-      "diff",
-      "home",
-      "log",
-      "commit",
-      "branches",
-      "checkout",
-    ].includes(
-      options?.operation,
-    )
-  )
-    throw new Error("Unknown project operation");
-  return connections.inspect(endpoint, options);
-});
-handle("project-preview", async (endpoint, root, file) => {
-  await connections.inspect(endpoint, { operation: "read", root, path: file });
-  return preview.grant(endpoint, root, file);
-});
-handle("system", async () => ({
-  home: os.homedir(),
-  cwd: app.isPackaged ? os.homedir() : process.cwd(),
-  platform: process.platform,
-  socketPath:
-    process.env.HERDR_SOCKET_PATH ||
-    path.join(os.homedir(), ".config/herdr/herdr.sock"),
-  agents: ["claude", "codex", "gemini", "cursor-agent", "herdr"].map(
-    (name) => ({ name, path: executable(name) }),
-  ),
-}));
-handle("choose-attachments", async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ["openFile", "openDirectory", "multiSelections"],
-  });
-  return result.canceled ? [] : result.filePaths;
-});
-handle("choose-directory", async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ["openDirectory", "createDirectory"],
-  });
-  return result.canceled ? null : result.filePaths[0];
-});
-handle("window", (action) => {
-  if (action === "minimize") mainWindow.minimize();
-  if (action === "maximize")
-    mainWindow.setFullScreen(!mainWindow.isFullScreen());
-  if (action === "close") mainWindow.close();
-});
-handle(
-  "terminal-open",
-  async ({
-    panelId,
-    cwd,
-    command,
-    cols = 80,
-    rows = 24,
-    endpoint,
-    herdrId,
-    modelProfileId,
-  }) => {
-    id(panelId);
-    if (terminals.has(panelId))
-      return {
-        history: terminals.get(panelId).history,
-        exited: terminals.get(panelId).exited,
-      };
-    if (herdrId) {
-      id(herdrId);
-      if (terminalPending.has(panelId)) {
-        const pending = terminalPending.get(panelId);
-        const entry = await pending.promise;
-        return { history: entry.history, exited: entry.exited };
-      }
-      const pending = { cancelled: false, endpoint };
-      terminalPending.set(panelId, pending);
-      pending.promise = openHerdrStream({
-        endpoint,
-        panelId,
-        target: herdrId,
-        cols,
-        rows,
-        connections,
-        binary: executable("herdr"),
-        send: (channel, event) => {
-          if (!pending.cancelled) send(channel, event);
-        },
-      });
-      try {
-        const entry = await pending.promise;
-        if (pending.cancelled) {
-          entry.proc.kill();
-          return { history: "", exited: true };
-        }
-        terminals.set(panelId, entry);
-        entry.opening = pending;
-        entry.endpoint = endpoint;
-        return { history: "" };
-      } finally {
-        if (terminalPending.get(panelId) === pending)
-          terminalPending.delete(panelId);
-      }
-    }
-    const remote = endpoint?.startsWith("ssh:")
-      ? connections.get(endpoint)
-      : null;
-    if (!remote) directory(cwd);
-    else if (typeof cwd !== "string" || !cwd.startsWith("/"))
-      throw new Error("Choose an absolute remote project folder.");
-    if (
-      command &&
-      !["claude", "codex", "gemini", "cursor-agent"].includes(command)
-    )
-      throw new Error("Unsupported agent");
-    let binary = command
-      ? executable(command)
-      : process.env.SHELL || "/bin/zsh";
-    let args = command ? [] : ["-l"];
-    if (remote) {
-      binary = "/usr/bin/ssh";
-      args = [
-        ...connections.args(remote),
-        "-tt",
-        remote.host,
-        `export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; cd ${quote(cwd)} && exec ${command ? quote(command) : '"${SHELL:-/bin/sh}" -l'}`,
-      ];
-    }
-    if (!binary)
-      throw new Error(
-        `${command} is not installed. Install it and sign in from a terminal first.`,
-      );
-    // Custom model providers only cover a direct local Claude Code launch for
-    // now. This has to be Claude Code's own --settings flag: a plain env var
-    // on the spawned process is silently outranked by a cached subscription
-    // login, so the launch looks fine and just talks to real Anthropic.
-    let modelSettingsPath;
-    if (modelProfileId && command === "claude" && !remote) {
-      modelSettingsPath = await stageModelSettings(modelProfileId);
-      args = [...args, "--settings", modelSettingsPath];
-    }
-    const proc = pty.spawn(binary, args, {
-      name: "xterm-256color",
-      cols: Math.max(10, Math.min(500, cols)),
-      rows: Math.max(3, Math.min(300, rows)),
-      cwd: remote ? os.homedir() : cwd,
-      env: terminalEnvironment(),
-    });
-    const entry = {
-      proc,
-      history: "",
-      exited: false,
-      source: "pty",
-      lastAgent: undefined,
-      title: "",
-      remote: !!remote,
-      command,
-      endpoint,
-      modelSettingsPath,
-    };
-    terminals.set(panelId, entry);
-    proc.onData((data) => {
-      const titles = [
-        ...data.matchAll(/\x1b\](?:0|2);([^\x07\x1b]*)(?:\x07|\x1b\\)/g),
-      ];
-      if (titles.length) entry.title = titles.at(-1)[1];
-      entry.history = (entry.history + data).slice(-1000000);
-      send("terminal-data", { panelId, data });
-    });
-    proc.onExit(({ exitCode }) => {
-      entry.exited = true;
-      if (entry.modelSettingsPath)
-        for (const file of [
-          entry.modelSettingsPath,
-          entry.modelSettingsPath.replace(/\.json$/, ".key"),
-        ])
-          fs.unlink(file).catch(() => {});
-      send("terminal-data", {
-        panelId,
-        exitCode,
-        data: `\r\n\x1b[90mProcess exited (${exitCode}). Close this panel to start a new session.\x1b[0m\r\n`,
-      });
-    });
-    return { history: "" };
-  },
-);
-handle("terminal-scroll", (panelId, direction, lines, position) => {
-  if (
-    position &&
-    (!Number.isInteger(position.column) ||
-      !Number.isInteger(position.row) ||
-      position.column < 0 ||
-      position.column >= 500 ||
-      position.row < 0 ||
-      position.row >= 300)
-  )
-    throw new Error("Invalid terminal mouse position");
-  if (
-    ["up", "down"].includes(direction) &&
-    Number.isInteger(lines) &&
-    lines > 0 &&
-    lines < 1000
-  )
-    return terminals
-      .get(id(panelId))
-      ?.proc.scroll?.(direction, lines, position);
-});
-handle("terminal-write", (panelId, data) => {
-  if (typeof data !== "string" || data.length > 1000000)
-    throw new Error("Invalid input");
-  terminals.get(id(panelId))?.proc.write(data);
-});
-// A pasted or dropped file becomes a real file on disk, so an agent CLI running
-// in the terminal can read the path it is handed.
-handle("terminal-attach", async ({ panelId, name, data }) => {
-  const { storeTerminalAttachment } = require("./terminal-attachments.cjs");
-  return storeTerminalAttachment({
-    terminal: terminals.get(id(panelId)),
-    name,
-    data,
-    dataDir: app.getPath("userData"),
-    connections,
-  });
-});
-handle("terminal-resize", (panelId, cols, rows) => {
-  if (
-    !Number.isInteger(cols) ||
-    !Number.isInteger(rows) ||
-    cols < 10 ||
-    rows < 3 ||
-    cols > 500 ||
-    rows > 300
-  )
-    return;
-  const terminal = terminals.get(id(panelId));
-  if (terminal && !terminal.exited) terminal.proc.resize(cols, rows);
-});
-handle("terminal-close", (panelId) => {
-  const pending = terminalPending.get(id(panelId));
-  if (pending) {
-    pending.cancelled = true;
-    terminalPending.delete(panelId);
-  }
-  const terminal = terminals.get(id(panelId));
-  if (terminal?.opening) terminal.opening.cancelled = true;
-  if (terminal && !terminal.exited) terminal.proc.kill();
-  terminals.delete(panelId);
-});
-
-function stopChat(panelId) {
-  const proc = chats.get(panelId);
-  if (proc) {
-    try {
-      process.kill(-proc.pid, "SIGTERM");
-    } catch {
-      proc.kill();
-    }
-  }
-}
-handle("chat-cancel", (panelId) => stopChat(id(panelId)));
-handle(
-  "chat",
-  ({ panelId, cwd, agent, messages, endpoint, model, effort, permission }) => {
-    id(panelId);
-    const remote = endpoint?.startsWith("ssh:")
-      ? connections.get(endpoint)
-      : null;
-    if (!remote) directory(cwd);
-    else if (typeof cwd !== "string" || !cwd.startsWith("/"))
-      throw new Error("Choose an absolute remote project folder.");
-    if (chats.has(panelId)) throw new Error("A response is already running.");
-    if (!["claude", "codex"].includes(agent))
-      throw new Error("Choose Claude Code or Codex.");
-    const binary = remote ? "/usr/bin/ssh" : executable(agent);
-    if (!binary)
-      throw new Error(
-        `${agent} is not installed. Install and sign in to the CLI first.`,
-      );
-    if (
-      !Array.isArray(messages) ||
-      messages.length > 200 ||
-      messages.some(
-        (m) =>
-          !["user", "assistant"].includes(m.role) || typeof m.text !== "string",
-      )
-    )
-      throw new Error("Invalid conversation");
-    if (
-      messages.some(
-        (m) =>
-          m.attachments !== undefined &&
-          (!Array.isArray(m.attachments) ||
-            m.attachments.length > 20 ||
-            m.attachments.some(
-              (a) =>
-                typeof a !== "string" || a.length > 1000 || !path.isAbsolute(a),
-            )),
-      )
-    )
-      throw new Error("Invalid attachments");
-    const attachments = messages.flatMap((m) => m.attachments || []);
-    if (attachments.length && remote)
-      throw new Error("Attachments work with local projects only.");
-    const present = attachments.filter((a) => existsSync(a));
-    const dirs = [
-      ...new Set(
-        present.map((a) => (statSync(a).isDirectory() ? a : path.dirname(a))),
-      ),
-    ].slice(0, 30);
-    const images = present.filter((a) => IMAGE.test(a)).slice(-10);
-    const prompt = chatPrompt(messages);
-    if (prompt.length > 200000)
-      throw new Error("Conversation is too long. Start a new chat.");
-    // Keep the prompt off argv and preserve each CLI's ordinary permission policy.
-    let args = chatArgs(agent, { model, effort, permission, dirs, images });
-    if (remote)
-      args = [
-        ...connections.args(remote),
-        remote.host,
-        `export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; cd ${quote(cwd)} && exec ${quote(agent)} ${args.map(quote).join(" ")}`,
-      ];
-    const proc = spawn(binary, args, {
-      cwd: remote ? os.homedir() : cwd,
-      env: process.env,
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: true,
-    });
-    chats.set(panelId, proc);
-    // Codex names its model only where it was asked to; Claude reports the one it
-    // resolved to, which can differ from the alias the thread requested.
-    if (agent === "codex")
-      send("chat-data", {
-        panelId,
-        model: model || chatModels().codex.defaultModelId || "",
-      });
-    const parse = agent === "claude" ? claudeEvent : codexEvent;
-    let buffered = "",
-      diagnostics = "",
-      warnings = "",
-      fatal = "",
-      full = "",
-      answered = false,
-      usage;
-    proc.stdout.setEncoding("utf8");
-    proc.stderr.setEncoding("utf8");
-    const emit = (text) => {
-      answered = true;
-      send("chat-data", { panelId, text });
-    };
-    proc.stdout.on("data", (data) => {
-      buffered += data;
-      let boundary;
-      while ((boundary = buffered.indexOf("\n")) >= 0) {
-        const line = buffered.slice(0, boundary);
-        buffered = buffered.slice(boundary + 1);
-        let event;
-        try {
-          event = JSON.parse(line);
-        } catch {
-          continue; /* non-event diagnostic */
-        }
-        const update = parse(event);
-        if (!update) continue;
-        if (update.model) send("chat-data", { panelId, model: update.model });
-        if (update.full) full = update.full;
-        if (update.usage) usage = update.usage;
-        if (update.text) emit(update.text);
-        else if (update.note) send("chat-data", { panelId, note: update.note });
-        if (update.error) {
-          if (update.fatal) fatal = update.error;
-          else
-            warnings =
-              `${warnings ? `${warnings}\n` : ""}${update.error}`.slice(-4000);
-        }
-      }
-    });
-    proc.stderr.on("data", (data) => {
-      diagnostics = (diagnostics + data).slice(-8000);
-    });
-    proc.on("error", (error) => {
-      chats.delete(panelId);
-      send("chat-data", { panelId, done: true, error: error.message });
-    });
-    proc.on("close", (code) => {
-      chats.delete(panelId);
-      // Codex logs warnings on runs that succeed, so they surface only when the
-      // turn failed or came back empty; stderr is a last resort for a bad exit.
-      // Deltas carry the answer; the closing summary is the net if they went missing.
-      if (!answered && full) emit(full);
-      const failed = code
-        ? diagnostics || warnings || `Agent exited (${code}).`
-        : "";
-      send("chat-data", {
-        panelId,
-        done: true,
-        usage,
-        error:
-          fatal || failed || (answered ? undefined : warnings || undefined),
-      });
-    });
-    proc.stdin.on("error", () => {});
-    proc.stdin.end(prompt);
-    return { started: true };
-  },
-);
-handle("chat-models", () => chatModels());
-handle("catalog", async (kind, options = {}) => {
-  if (kind !== "skills") return [];
-  const snapshotFile = path.join(
-    app.getPath("userData"),
-    "skills-catalog.json",
-  );
-  const force = Boolean(options?.force);
-  if (!force && skillsCatalogCache?.snapshotFile === snapshotFile)
-    return skillsCatalogCache.items;
-  if (skillsCatalogScan) return skillsCatalogScan;
-  skillsCatalogScan = scanLocalSkills({ snapshotFile })
-    .then((items) => {
-      skillsCatalogCache = { snapshotFile, items };
-      return items;
-    })
-    .finally(() => {
-      skillsCatalogScan = undefined;
-    });
-  return skillsCatalogScan;
-});
-handle("skills-manage", async (action, item) => {
-  const result = await manageSkill({
-    home: os.homedir(),
-    action,
-    item,
-    shell,
-    executable,
-  });
-  skillsCatalogCache = undefined;
-  return result;
-});
-handle("claude-mcp-list", (cwd, endpoint) =>
-  typeof endpoint === "string" && endpoint.startsWith("ssh:")
-    ? connections.inspect(endpoint, {
-        operation: "claude_mcp",
-        action: "list",
-        cwd,
-      })
-    : claudeMcp.list(cwd),
-);
-handle("claude-mcp-toggle", (input) => {
-  if (!input || typeof input !== "object" || Array.isArray(input))
-    throw new Error("Invalid MCP request.");
-  const { endpoint, ...request } = input;
-  return typeof endpoint === "string" && endpoint.startsWith("ssh:")
-    ? connections.inspect(endpoint, {
-        operation: "claude_mcp",
-        action: "toggle",
-        ...request,
-      })
-    : claudeMcp.toggle(request);
-});
-handle("claude-plugins-list", (cwd, endpoint) =>
-  typeof endpoint === "string" && endpoint.startsWith("ssh:")
-    ? connections.inspect(endpoint, {
-        operation: "claude_plugins",
-        action: "list",
-        cwd,
-      })
-    : claudePlugins.list(cwd),
-);
-handle("claude-plugins-toggle", (input) => {
-  if (!input || typeof input !== "object" || Array.isArray(input))
-    throw new Error("Invalid plugin request.");
-  const { endpoint, ...request } = input;
-  return typeof endpoint === "string" && endpoint.startsWith("ssh:")
-    ? connections.inspect(endpoint, {
-        operation: "claude_plugins",
-        action: "toggle",
-        ...request,
-      })
-    : claudePlugins.toggle(request);
-});
-handle("providers-list", () => modelProviders.listProviders());
-handle("providers-upsert", (input) => modelProviders.upsertProvider(input));
-handle("providers-delete", (providerId) =>
-  modelProviders.deleteProvider(providerId),
-);
-handle("providers-set-key", (providerId, key) =>
-  modelProviders.setProviderKey(providerId, key),
-);
-handle("providers-clear-key", (providerId) =>
-  modelProviders.clearProviderKey(providerId),
-);
-handle("providers-test", (providerId) =>
-  modelProviders.testConnection(providerId),
-);
-handle("providers-models", (providerId) =>
-  modelProviders.fetchModels(providerId),
-);
-handle("model-profiles-list", () => modelProviders.listProfiles());
-handle("model-profiles-upsert", (input) => modelProviders.upsertProfile(input));
-handle("model-profiles-delete", (profileId) =>
-  modelProviders.deleteProfile(profileId),
-);
-// For a herdr-backed panel on the LOCAL herdr socket only: herdr's pane
-// input is just typed text, no argv/env injection point of its own, so the
-// renderer stages this file, then types `claude --settings <path>` itself.
-// Remote (ssh) herdr isn't supported yet — the path wouldn't exist on that
-// host — the renderer refuses those before calling this.
-handle("model-settings-stage", (modelProfileId) =>
-  stageModelSettings(modelProfileId),
-);
 function validWebURL(value) {
   try {
     return ["http:", "https:"].includes(new URL(value).protocol);
@@ -892,10 +320,11 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   updates?.close();
   preview?.close();
+  terminalIpc.close();
   for (const pending of terminalPending.values()) pending.cancelled = true;
   for (const terminal of terminals.values())
     if (!terminal.exited) terminal.proc.kill();
-  for (const panelId of chats.keys()) stopChat(panelId);
+  chatIpc.close();
   Promise.allSettled([
     Promise.resolve(connections?.close()),
     agents.close(),

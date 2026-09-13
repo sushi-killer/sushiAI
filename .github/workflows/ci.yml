@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main, codex/**]
+  pull_request:
+
+jobs:
+  # Fast feedback: build, unit tests and the repository conventions.
+  deterministic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run ci
+
+  # The tests import .ts directly and rely on Node's type stripping, so the
+  # floor in package.json engines is worth proving rather than assuming.
+  conventions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Repository conventions
+        run: node scripts/check-conventions.mjs
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.sha }}
+
+  # The desktop smoke drives a real Electron window, so it needs macOS. Herdr
+  # is not installed on a runner; the smoke skips that step and says so.
+  desktop:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: npm run test:desktop
+        env:
+          SUSHIAI_TEST_HEADLESS: "1"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-smoke-artifacts
+          path: artifacts/
+          if-no-files-found: ignore

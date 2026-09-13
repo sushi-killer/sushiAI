@@ -1,4 +1,5 @@
-import type { Panel, Workspace } from "./types";
+import { uid } from "./layout.ts";
+import type { ChatEvent, Message, Panel, Workspace } from "./types";
 
 export const DEFAULT_TITLES = new Set(["Thread", "New thread"]);
 
@@ -81,4 +82,67 @@ export function modelName(id: string): string {
     .filter(Boolean)
     .join(" ");
   return long ? `${name} · 1M` : name;
+}
+
+/** Opens a user turn: appends the prompt, parks an empty assistant message for
+ * the stream to fill, and names an untitled thread after the first prompt. */
+export function startUserTurn(
+  panel: Panel,
+  text: string,
+  attachments: string[] = [],
+  now = Date.now(),
+): { messages: Message[]; update: Partial<Panel> } {
+  const messages: Message[] = [
+    ...(panel.messages || []),
+    {
+      id: uid(),
+      role: "user",
+      text,
+      attachments: attachments.length ? attachments : undefined,
+    },
+  ];
+  return {
+    messages,
+    update: {
+      messages: [...messages, { id: uid(), role: "assistant", text: "" }],
+      busy: true,
+      error: "",
+      note: "",
+      resolvedModel: "",
+      updatedAt: now,
+      title: DEFAULT_TITLES.has(panel.title) ? titleFrom(text) : panel.title,
+    },
+  };
+}
+
+/** Folds one streamed chat event into a panel. An answer that ends empty is
+ * dropped; one that ends with text is stamped with the model that produced it,
+ * so switching models later still shows what answered each earlier turn. */
+export function applyChatEvent(
+  panel: Panel,
+  event: ChatEvent,
+  now = Date.now(),
+): Panel {
+  const messages = [...(panel.messages || [])];
+  const last = messages.at(-1);
+  if (event.text && last?.role === "assistant")
+    messages[messages.length - 1] = { ...last, text: last.text + event.text };
+  if (event.done && last?.role === "assistant" && !messages.at(-1)?.text)
+    messages.pop();
+  const final = messages.at(-1);
+  if (event.done && final?.role === "assistant" && final.text)
+    messages[messages.length - 1] = {
+      ...final,
+      model: event.model || panel.resolvedModel,
+    };
+  return {
+    ...panel,
+    messages,
+    busy: !event.done,
+    error: event.error || panel.error,
+    note: event.done ? undefined : (event.note ?? panel.note),
+    resolvedModel: event.model || panel.resolvedModel,
+    usage: event.usage || panel.usage,
+    updatedAt: event.done ? now : panel.updatedAt,
+  };
 }

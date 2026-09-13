@@ -10,6 +10,8 @@ class ActivityStore {
     this.entries = [];
     this.error = null;
     this.pending = Promise.resolve();
+    this.writeTimer = null;
+    this.writeQueued = false;
     if (!file) return;
     try {
       if (fs.statSync(file).size > 4 * 1024 * 1024)
@@ -36,6 +38,20 @@ class ActivityStore {
   save(entries) {
     this.entries = structuredClone(entries.slice(-500));
     if (!this.file) return;
+    // Writes are coalesced for up to 200ms to keep rapid activity updates off
+    // the disk path. Normal shutdown calls close(), which flushes immediately;
+    // a hard crash in this window can lose only the newest pending snapshot.
+    this.writeQueued = true;
+    if (this.writeTimer) return;
+    this.writeTimer = setTimeout(() => {
+      this.writeTimer = null;
+      this.flush();
+    }, 200);
+    this.writeTimer.unref?.();
+  }
+  flush() {
+    if (!this.file || !this.writeQueued) return this.pending;
+    this.writeQueued = false;
     const data = JSON.stringify(this.entries);
     this.pending = this.pending.then(async () => {
       const temporary = `${this.file}.${randomUUID()}.tmp`;
@@ -56,8 +72,14 @@ class ActivityStore {
         await promises.rm(temporary, { force: true }).catch(() => {});
       }
     });
+    return this.pending;
   }
   async close() {
+    if (this.writeTimer) {
+      clearTimeout(this.writeTimer);
+      this.writeTimer = null;
+    }
+    this.flush();
     await this.pending;
   }
 }

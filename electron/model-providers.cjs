@@ -30,7 +30,10 @@ const PRESETS = {
       { id: "~anthropic/claude-opus-latest", label: "Opus" },
       { id: "~anthropic/claude-opus-latest[1m]", label: "Opus (1M context)" },
       { id: "~anthropic/claude-sonnet-latest", label: "Sonnet" },
-      { id: "~anthropic/claude-sonnet-latest[1m]", label: "Sonnet (1M context)" },
+      {
+        id: "~anthropic/claude-sonnet-latest[1m]",
+        label: "Sonnet (1M context)",
+      },
       { id: "~anthropic/claude-haiku-latest", label: "Haiku" },
     ],
   },
@@ -106,10 +109,7 @@ class ModelProviders {
     providers[providerId] = {
       id: providerId,
       kind,
-      label: String(label || preset?.label || "Custom provider").slice(
-        0,
-        80,
-      ),
+      label: String(label || preset?.label || "Custom provider").slice(0, 80),
       baseUrl: resolvedBaseUrl,
     };
     await this.#writeJson(this.providersFile, providers);
@@ -138,8 +138,16 @@ class ModelProviders {
     const backend = this.#encryptedBackend();
     const trimmed = key.trim();
     secrets[id] = backend
-      ? { v: 1, backend, ct: this.safeStorage.encryptString(trimmed).toString("base64") }
-      : { v: 1, backend: "plain", ct: Buffer.from(trimmed, "utf8").toString("base64") };
+      ? {
+          v: 1,
+          backend,
+          ct: this.safeStorage.encryptString(trimmed).toString("base64"),
+        }
+      : {
+          v: 1,
+          backend: "plain",
+          ct: Buffer.from(trimmed, "utf8").toString("base64"),
+        };
     await this.#writeJson(this.secretsFile, secrets);
     return { hasKey: true, keyPlaintext: !backend, keyHint: keyHint(trimmed) };
   }
@@ -174,7 +182,14 @@ class ModelProviders {
     return Object.values(profiles);
   }
 
-  async upsertProfile({ id, providerId, modelId, label, effort, contextWindow }) {
+  async upsertProfile({
+    id,
+    providerId,
+    modelId,
+    label,
+    effort,
+    contextWindow,
+  }) {
     const providers = await this.#readJson(this.providersFile);
     if (!providers[providerId]) throw new Error("Unknown provider.");
     if (!MODEL_RE.test(String(modelId || "")))
@@ -187,7 +202,8 @@ class ModelProviders {
       modelId,
       label: String(label || modelId).slice(0, 80),
       effort: effort || undefined,
-      contextWindow: Number(contextWindow) > 0 ? Number(contextWindow) : undefined,
+      contextWindow:
+        Number(contextWindow) > 0 ? Number(contextWindow) : undefined,
     };
     await this.#writeJson(this.profilesFileFor(), profiles);
     return profiles[profileId];
@@ -259,14 +275,17 @@ class ModelProviders {
     await fs.writeFile(`${base}.key`, key, { mode: 0o600 });
     // ponytail: assumes `dir` has no single quote (os.tmpdir() doesn't).
     const document = { apiKeyHelper: `cat '${base}.key'`, env: settings };
-    await fs.writeFile(`${base}.json`, JSON.stringify(document), { mode: 0o600 });
+    await fs.writeFile(`${base}.json`, JSON.stringify(document), {
+      mode: 0o600,
+    });
     return `${base}.json`;
   }
 
   async testConnection(id) {
     const providers = await this.#readJson(this.providersFile);
     const provider = providers[id];
-    if (!provider) return { ok: false, code: "unknown", message: "Unknown provider." };
+    if (!provider)
+      return { ok: false, code: "unknown", message: "Unknown provider." };
     const key = await this.#keyFor(id);
     if (!key)
       return {
@@ -291,7 +310,11 @@ class ModelProviders {
           code: "network",
           message: `${provider.label} returned an error (${response.status}).`,
         };
-      return { ok: true, code: "ok", message: `Connected to ${provider.label}.` };
+      return {
+        ok: true,
+        code: "ok",
+        message: `Connected to ${provider.label}.`,
+      };
     } catch {
       return {
         ok: false,

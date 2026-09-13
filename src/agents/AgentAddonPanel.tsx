@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import {AgentSchedulerControl} from "./AgentSchedulerControl";
+import { AgentSchedulerControl } from "./AgentSchedulerControl";
 type Resource = { id: string; kind: string; data: Record<string, unknown> };
 const string = (v: unknown) =>
   typeof v === "string" ? v : v == null ? "" : String(v);
@@ -26,7 +26,7 @@ export function AgentAddonPanel({
   const [confirmDelete, setConfirmDelete] = useState(false),
     [creating, setCreating] = useState(false);
   const [fields, setFields] = useState<Record<string, string>>({});
-  const [reasoning,setReasoning]=useState("medium");
+  const [reasoning, setReasoning] = useState("medium");
   const [models, setModels] = useState<
     { name: string; models: unknown[]; baseUrl?: string }[]
   >([]);
@@ -84,7 +84,8 @@ export function AgentAddonPanel({
       });
       const options = await call<{ providers: typeof models }>("options");
       setModels(options.providers);
-      const effort=await call<{value:string}>("reasoning");setReasoning(effort.value);
+      const effort = await call<{ value: string }>("reasoning");
+      setReasoning(effort.value);
       return;
     }
     const result = await call<{ resources: Resource[] }>(
@@ -281,7 +282,9 @@ export function AgentAddonPanel({
         </p>
       )}
       {notice && <p role="status">{notice}</p>}
-      {addonId==="schedules"&&<AgentSchedulerControl providerId={providerId} agentId={agentId}/>}
+      {addonId === "schedules" && (
+        <AgentSchedulerControl providerId={providerId} agentId={agentId} />
+      )}
       <div
         className={`agent-resource-layout ${["profile", "soul", "models"].includes(addonId) ? "single" : ""}`}
       >
@@ -374,8 +377,42 @@ export function AgentAddonPanel({
                         })}
                     </datalist>
                   </label>
-                  <label>Reasoning effort<select aria-label="Default reasoning effort" value={reasoning} onChange={e=>setReasoning(e.target.value)}>{["none","minimal","low","medium","high","xhigh","max","ultra"].map(value=><option key={value} value={value}>{value}</option>)}</select></label>
-                  <button disabled={busy} onClick={()=>void run(async()=>{await call("setReasoning",{value:reasoning});setNotice("Reasoning effort saved for new conversations.");})}>Save reasoning effort</button>
+                  <label>
+                    Reasoning effort
+                    <select
+                      aria-label="Default reasoning effort"
+                      value={reasoning}
+                      onChange={(e) => setReasoning(e.target.value)}
+                    >
+                      {[
+                        "none",
+                        "minimal",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max",
+                        "ultra",
+                      ].map((value) => (
+                        <option key={value} value={value}>
+                          {value}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    disabled={busy}
+                    onClick={() =>
+                      void run(async () => {
+                        await call("setReasoning", { value: reasoning });
+                        setNotice(
+                          "Reasoning effort saved for new conversations.",
+                        );
+                      })
+                    }
+                  >
+                    Save reasoning effort
+                  </button>
                   {modelConfirm && <p>{modelConfirm}</p>}
                   <button disabled={busy} onClick={save}>
                     {modelConfirm ? "Confirm model change" : "Use model"}

@@ -195,8 +195,22 @@ export function ChatView({
     memory.attachments[panel.id] = [];
     if (textarea.current) textarea.current.style.height = "";
   }
+  const [dropError, setDropError] = useState("");
   const attach = (paths: string[]) =>
     setAttachments((old) => [...new Set([...old, ...paths])].slice(0, 20));
+  /** A dropped file the host cannot resolve to a path attaches nothing. Say so
+   * rather than appearing to accept it and sending a message without it. */
+  const attachDropped = (files: File[]) => {
+    const paths = files
+      .map((file) => window.bridge?.pathForFile(file) || "")
+      .filter(Boolean);
+    attach(paths);
+    setDropError(
+      paths.length < files.length
+        ? `${files.length - paths.length} of ${files.length} files could not be read. Try the + button instead.`
+        : "",
+    );
+  };
   const agent = current?.agent || "claude";
   const provider = catalog[agent];
   const models = provider?.models || [];
@@ -515,15 +529,22 @@ export function ChatView({
             event.preventDefault();
             setDragging(true);
           }}
-          onDragLeave={() => setDragging(false)}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node))
+              setDragging(false);
+          }}
           onDrop={(event) => {
             event.preventDefault();
             setDragging(false);
-            const bridge = window.bridge;
-            if (!bridge) return;
-            attach([...event.dataTransfer.files].map(bridge.pathForFile));
+            if (!window.bridge) return;
+            attachDropped([...event.dataTransfer.files]);
           }}
         >
+          {dropError && (
+            <div className="chat-error" role="alert">
+              {dropError}
+            </div>
+          )}
           {attachments.length > 0 && (
             <div className="chat-attachments">
               {attachments.map((path) => (

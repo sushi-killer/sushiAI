@@ -28,7 +28,10 @@ def resolve(root, relative="."):
 def git(root, *args):
     result = subprocess.run(
         ["git", "--no-pager", "-c", "core.fsmonitor=false", "-C", str(root), *args],
-        capture_output=True, timeout=15, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        timeout=15,
+        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
     )
     if result.returncode:
         raise ValueError(result.stderr.decode("utf-8", "replace")[:2000])
@@ -83,6 +86,107 @@ def parse_diff_tree(output):
             files.append({"status": code, "path": tokens[index]})
             index += 1
     return files
+
+
+def git_log_result(base, data):
+    try:
+        limit = max(1, min(int(data.get("limit", 400)), 5000))
+    except (TypeError, ValueError):
+        limit = 400
+    args = [
+        "log", "--topo-order", "--decorate=short",
+        "--pretty=format:%H" + FIELD_SEP + "%P" + FIELD_SEP + "%an" + FIELD_SEP + "%ct" + FIELD_SEP + "%D" + FIELD_SEP + "%s",
+        "-n", str(limit),
+    ]
+    branch = data.get("branch")
+    if branch is not None:
+        if (
+            not isinstance(branch, str)
+            or not branch
+            or branch.startswith("-")
+            or "\x00" in branch
+            or "\n" in branch
+        ):
+            raise ValueError("Invalid branch")
+        git(base, "rev-parse", "--verify", branch + "^{commit}")
+        args.insert(1, branch)
+    elif data.get("refs") == "all":
+        args.insert(1, "--all")
+    try:
+        head = git(base, "symbolic-ref", "--short", "HEAD").strip()
+    except ValueError:
+        head = None
+    commits = parse_log(git(base, *args))
+    return {"commits": commits, "head": head, "truncated": len(commits) >= limit}
+
+
+def git_branches_result(base):
+    # One for-each-ref call covers the whole list; trackshort gives ahead /
+    # behind against the upstream without a rev-list subprocess per branch.
+    output = git(
+        base, "for-each-ref",
+        "--format=%(refname:short)" + FIELD_SEP + "%(HEAD)" + FIELD_SEP
+        + "%(upstream:short)" + FIELD_SEP + "%(upstream:trackshort)" + FIELD_SEP
+        + "%(committerdate:unix)" + FIELD_SEP + "%(contents:subject)",
+        "--sort=-committerdate", "refs/heads",
+    )
+    remote_output = git(
+        base,
+        "for-each-ref",
+        "--format=%(refname:short)" + FIELD_SEP + "%(committerdate:unix)" + FIELD_SEP + "%(contents:subject)",
+        "--sort=-committerdate",
+        "refs/remotes/origin",
+    )
+    remote_rows = {}
+    for line in remote_output.splitlines():
+        fields = line.split(FIELD_SEP, 2)
+        fields += [""] * (3 - len(fields))
+        name, date, subject = fields
+        if name:
+            remote_rows[name] = (date, subject)
+    origin_refs = {
+        name
+        for name in remote_rows
+        if name != "origin/HEAD"
+    }
+    branches = []
+    local_names = set()
+    for line in output.splitlines():
+        fields = line.split(FIELD_SEP, 5)
+        fields += [""] * (6 - len(fields))
+        name, head, upstream, track, date, subject = fields
+        if not name:
+            continue
+        local_names.add(name)
+        branches.append({
+            "name": name,
+            "ref": name,
+            "current": head.strip() == "*",
+            "upstream": upstream,
+            "track": track,
+            "date": int(date) if date.isdigit() else 0,
+            "subject": subject,
+            "local": True,
+            "origin": "origin/" + name if "origin/" + name in origin_refs else "",
+        })
+    for remote_ref in sorted(origin_refs):
+        name = remote_ref.removeprefix("origin/")
+        if name in local_names:
+            continue
+        date, subject = remote_rows[remote_ref]
+        branches.append({
+            "name": name,
+            "ref": remote_ref,
+            "current": False,
+            "upstream": "",
+            "track": "",
+            "date": int(date) if date.isdigit() else 0,
+            "subject": subject,
+            "local": False,
+            "origin": remote_ref,
+            "remoteOnly": True,
+        })
+    return {"branches": branches}
 
 
 def read_json_file(filename, fallback):
@@ -478,106 +582,18 @@ def inspect(data):
             args.append("--cached")
         args.extend(["--", path])
         return {"text": git(base, *args)}
+    if operation == "git_overview":
+        history = git_log_result(base, data)
+        try:
+            return {**history, **git_branches_result(base)}
+        except (ValueError, subprocess.TimeoutExpired) as error:
+            # Branch metadata is useful context, but it must not hide a valid
+            # commit history when a remote/ref lookup is temporarily broken.
+            return {**history, "branches": [], "branchesError": str(error)}
     if operation == "log":
-        try:
-            limit = max(1, min(int(data.get("limit", 400)), 5000))
-        except (TypeError, ValueError):
-            limit = 400
-        args = [
-            "log", "--topo-order", "--decorate=short",
-            "--pretty=format:%H" + FIELD_SEP + "%P" + FIELD_SEP + "%an" + FIELD_SEP + "%ct" + FIELD_SEP + "%D" + FIELD_SEP + "%s",
-            "-n", str(limit),
-        ]
-        branch = data.get("branch")
-        if branch is not None:
-            if (
-                not isinstance(branch, str)
-                or not branch
-                or branch.startswith("-")
-                or "\x00" in branch
-                or "\n" in branch
-            ):
-                raise ValueError("Invalid branch")
-            # Resolve the selected ref before passing it to git log. This keeps
-            # the operation read-only and makes branch history independent from
-            # the worktree's checked-out branch.
-            git(base, "rev-parse", "--verify", branch + "^{commit}")
-            args.insert(1, branch)
-        elif data.get("refs") == "all":
-            args.insert(1, "--all")
-        try:
-            head = git(base, "symbolic-ref", "--short", "HEAD").strip()
-        except ValueError:
-            head = None
-        output = git(base, *args)
-        commits = parse_log(output)
-        return {"commits": commits, "head": head, "truncated": len(commits) >= limit}
+        return git_log_result(base, data)
     if operation == "branches":
-        # One for-each-ref call covers the whole list; trackshort gives ahead /
-        # behind against the upstream without a rev-list subprocess per branch.
-        output = git(
-            base, "for-each-ref",
-            "--format=%(refname:short)" + FIELD_SEP + "%(HEAD)" + FIELD_SEP
-            + "%(upstream:short)" + FIELD_SEP + "%(upstream:trackshort)" + FIELD_SEP
-            + "%(committerdate:unix)" + FIELD_SEP + "%(contents:subject)",
-            "--sort=-committerdate", "refs/heads",
-        )
-        remote_output = git(
-            base,
-            "for-each-ref",
-            "--format=%(refname:short)" + FIELD_SEP + "%(committerdate:unix)" + FIELD_SEP + "%(contents:subject)",
-            "--sort=-committerdate",
-            "refs/remotes/origin",
-        )
-        origin_refs = {
-            line.split(FIELD_SEP, 1)[0].strip()
-            for line in remote_output.splitlines()
-            if line.strip() and line.split(FIELD_SEP, 1)[0].strip() != "origin/HEAD"
-        }
-        branches = []
-        local_names = set()
-        for line in output.splitlines():
-            fields = line.split(FIELD_SEP, 5)
-            fields += [""] * (6 - len(fields))
-            name, head, upstream, track, date, subject = fields
-            if not name:
-                continue
-            local_names.add(name)
-            branches.append({
-                "name": name,
-                "ref": name,
-                "current": head.strip() == "*",
-                "upstream": upstream,
-                "track": track,
-                "date": int(date) if date.isdigit() else 0,
-                "subject": subject,
-                "local": True,
-                "origin": "origin/" + name if "origin/" + name in origin_refs else "",
-            })
-        for remote_ref in sorted(origin_refs):
-            name = remote_ref.removeprefix("origin/")
-            if name in local_names:
-                continue
-            remote_line = next(
-                (line for line in remote_output.splitlines() if line.startswith(remote_ref + FIELD_SEP)),
-                "",
-            )
-            fields = remote_line.split(FIELD_SEP, 2)
-            fields += [""] * (3 - len(fields))
-            _, date, subject = fields
-            branches.append({
-                "name": name,
-                "ref": remote_ref,
-                "current": False,
-                "upstream": "",
-                "track": "",
-                "date": int(date) if date.isdigit() else 0,
-                "subject": subject,
-                "local": False,
-                "origin": remote_ref,
-                "remoteOnly": True,
-            })
-        return {"branches": branches}
+        return git_branches_result(base)
     if operation == "checkout":
         branch = data.get("branch")
         if not isinstance(branch, str) or not branch or branch.startswith("-"):
@@ -626,8 +642,39 @@ def inspect(data):
     raise ValueError("Unsupported project operation")
 
 
+def worker():
+    # One bad request must not take the worker down with it: the Node side
+    # keeps a single worker per endpoint, so an uncaught exception would fail
+    # every other pending inspection. Catch broadly and answer the frame.
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        request_id = None
+        try:
+            envelope = json.loads(line)
+            if not isinstance(envelope, dict) or not isinstance(envelope.get("id"), str):
+                raise ValueError("Invalid inspection request envelope")
+            request_id = envelope["id"]
+            data = envelope.get("request")
+            if not isinstance(data, dict):
+                raise ValueError("Invalid inspection request")
+            print(json.dumps({"id": request_id, "result": inspect(data)}), flush=True)
+        except BrokenPipeError:
+            return
+        except BaseException as error:  # noqa: BLE001 - the loop must survive
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                raise
+            try:
+                print(json.dumps({"id": request_id, "error": str(error) or type(error).__name__}), flush=True)
+            except (BrokenPipeError, OSError, ValueError):
+                return
+
+
 if __name__ == "__main__":
-    try:
-        print(json.dumps({"result": inspect(json.load(sys.stdin))}))
-    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
-        print(json.dumps({"error": str(error)}))
+    if "--sushiai-worker" in sys.argv:
+        worker()
+    else:
+        try:
+            print(json.dumps({"result": inspect(json.load(sys.stdin))}))
+        except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
+            print(json.dumps({"error": str(error)}))

@@ -9,7 +9,8 @@ function fakeSafeStorage({ available = true } = {}) {
   return {
     isEncryptionAvailable: () => available,
     getSelectedStorageBackend: () => "keychain_access",
-    encryptString: (value) => Buffer.from([...value].reverse().join(""), "utf8"),
+    encryptString: (value) =>
+      Buffer.from([...value].reverse().join(""), "utf8"),
     decryptString: (buf) => [...buf.toString("utf8")].reverse().join(""),
   };
 }
@@ -71,10 +72,7 @@ test("stores keys encrypted and never returns the raw key from listing", async (
   try {
     const provider = await f.providers.upsertProvider({ kind: "openrouter" });
     await f.providers.setProviderKey(provider.id, "sk-or-secret-value");
-    const raw = await fs.readFile(
-      `${f.userDataDir}/secrets.json`,
-      "utf8",
-    );
+    const raw = await fs.readFile(`${f.userDataDir}/secrets.json`, "utf8");
     assert.equal(raw.includes("sk-or-secret-value"), false);
     const listed = await f.providers.listProviders();
     assert.equal(listed[0].hasKey, true);
@@ -86,7 +84,9 @@ test("stores keys encrypted and never returns the raw key from listing", async (
 });
 
 test("falls back to a marked plaintext key when encryption is unavailable", async () => {
-  const f = await fixture({ safeStorage: fakeSafeStorage({ available: false }) });
+  const f = await fixture({
+    safeStorage: fakeSafeStorage({ available: false }),
+  });
   try {
     const provider = await f.providers.upsertProvider({ kind: "openrouter" });
     const result = await f.providers.setProviderKey(provider.id, "plain-key");
@@ -108,7 +108,10 @@ test("stages a --settings file that feeds the key via apiKeyHelper, never ANTHRO
       modelId: "some/model",
       label: "Go model",
     });
-    const settingsPath = await f.providers.stageSettings(profile.id, f.userDataDir);
+    const settingsPath = await f.providers.stageSettings(
+      profile.id,
+      f.userDataDir,
+    );
     const staged = JSON.parse(await fs.readFile(settingsPath, "utf8"));
     const keyPath = settingsPath.replace(/\.json$/, ".key");
     assert.equal(staged.apiKeyHelper, `cat '${keyPath}'`);
@@ -141,7 +144,10 @@ test("appends the [1m] model-id suffix for a Claude-family model at a million-to
     });
     const resolved = await f.providers.resolveEnv(profile.id);
     assert.equal(resolved.model, "~anthropic/claude-sonnet-latest[1m]");
-    assert.equal(resolved.settings.ANTHROPIC_MODEL, "~anthropic/claude-sonnet-latest[1m]");
+    assert.equal(
+      resolved.settings.ANTHROPIC_MODEL,
+      "~anthropic/claude-sonnet-latest[1m]",
+    );
     assert.equal(resolved.settings.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined);
   } finally {
     await f.cleanup();
@@ -174,7 +180,10 @@ test("resolveEnv fails clearly when no key was saved yet", async () => {
       providerId: provider.id,
       modelId: "openai/gpt-5.1",
     });
-    await assert.rejects(f.providers.resolveEnv(profile.id), /No API key saved/);
+    await assert.rejects(
+      f.providers.resolveEnv(profile.id),
+      /No API key saved/,
+    );
   } finally {
     await f.cleanup();
   }
@@ -190,7 +199,10 @@ test("deleting a provider cascades to its model profiles", async () => {
     });
     await f.providers.deleteProvider(provider.id);
     const profiles = await f.providers.listProfiles();
-    assert.equal(profiles.find((p) => p.id === profile.id), undefined);
+    assert.equal(
+      profiles.find((p) => p.id === profile.id),
+      undefined,
+    );
   } finally {
     await f.cleanup();
   }
@@ -226,8 +238,15 @@ test("fetchModels filters out :batch model IDs from OpenCode Go's live catalog",
           ok: true,
           json: async () => ({
             data: [
-              { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", context_length: 400000 },
-              { id: "deepseek/deepseek-v4-pro:batch", name: "DeepSeek V4 Pro batch" },
+              {
+                id: "deepseek/deepseek-v4-pro",
+                name: "DeepSeek V4 Pro",
+                context_length: 400000,
+              },
+              {
+                id: "deepseek/deepseek-v4-pro:batch",
+                name: "DeepSeek V4 Pro batch",
+              },
             ],
           }),
         },
@@ -238,7 +257,11 @@ test("fetchModels filters out :batch model IDs from OpenCode Go's live catalog",
     const provider = await f.providers.upsertProvider({ kind: "opencode-go" });
     const models = await f.providers.fetchModels(provider.id);
     assert.deepEqual(models, [
-      { id: "deepseek/deepseek-v4-pro", label: "DeepSeek V4 Pro", context: 400000 },
+      {
+        id: "deepseek/deepseek-v4-pro",
+        label: "DeepSeek V4 Pro",
+        context: 400000,
+      },
     ]);
   } finally {
     await f.cleanup();

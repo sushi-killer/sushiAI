@@ -46,7 +46,8 @@ export interface AgentConversation {
 }
 export interface AgentTranscriptItem {
   id: string;
-  kind: "text" | "reasoning" | "tool" | "activity" | "notice" | "todo" | "image";
+  kind:
+    "text" | "reasoning" | "tool" | "activity" | "notice" | "todo" | "image";
   role?: string;
   text?: string;
   name?: string;

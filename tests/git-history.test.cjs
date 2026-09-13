@@ -67,12 +67,22 @@ test("git log/commit/diff operations expose branch topology, refs and merge chan
         "add a.txt",
       ]),
     );
-    const merge = all.commits.find((entry) => entry.subject === "merge feature");
+    const merge = all.commits.find(
+      (entry) => entry.subject === "merge feature",
+    );
     assert.equal(merge.parents.length, 2);
     assert.ok(merge.refs.some((r) => r.includes("main")));
     assert.ok(merge.refs.some((r) => r.startsWith("tag: v1.0")));
-    const rootCommit = all.commits.find((entry) => entry.subject === "add a.txt");
+    const rootCommit = all.commits.find(
+      (entry) => entry.subject === "add a.txt",
+    );
     assert.deepEqual(rootCommit.parents, []);
+
+    const overview = await inspect("git_overview", { refs: "all" });
+    assert.deepEqual(overview.commits, all.commits);
+    assert.equal(overview.head, all.head);
+    assert.equal(overview.truncated, all.truncated);
+    assert.ok(overview.branches.some((entry) => entry.name === "main"));
 
     const current = await inspect("log", { refs: "current" });
     const currentSubjects = current.commits.map((entry) => entry.subject);
@@ -83,9 +93,16 @@ test("git log/commit/diff operations expose branch topology, refs and merge chan
     // Browsing another branch must be read-only: it must not move HEAD.
     const featureHistory = await inspect("log", { branch: "feature" });
     assert.equal(featureHistory.head, "main");
-    assert.ok(featureHistory.commits.some((entry) => entry.subject === "add b.txt"));
-    assert.ok(!featureHistory.commits.some((entry) => entry.subject === "add c.txt"));
-    assert.equal((await inspect("branches")).branches.find((entry) => entry.current).name, "main");
+    assert.ok(
+      featureHistory.commits.some((entry) => entry.subject === "add b.txt"),
+    );
+    assert.ok(
+      !featureHistory.commits.some((entry) => entry.subject === "add c.txt"),
+    );
+    assert.equal(
+      (await inspect("branches")).branches.find((entry) => entry.current).name,
+      "main",
+    );
 
     const mainHistory = await inspect("log", { branch: "main" });
     assert.ok(mainHistory.commits.length > 0);
@@ -111,11 +128,44 @@ test("git log/commit/diff operations expose branch topology, refs and merge chan
     assert.match(rootDiff.text, /\+one/);
 
     await assert.rejects(inspect("commit", { commit: "not-a-hash" }));
-    await assert.rejects(inspect("diff", { commit: "'; rm -rf /", path: "a.txt" }));
+    await assert.rejects(
+      inspect("diff", { commit: "'; rm -rf /", path: "a.txt" }),
+    );
   } finally {
     await c.close();
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+test("git overview keeps history when branch metadata times out", async (t) => {
+  const root = await fs.mkdtemp("/tmp/sushiai-git-overview-timeout-test-");
+  const c = new Connections(root);
+  await c.init();
+  t.after(async () => {
+    await c.close();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  await run("/usr/bin/git", ["init", "-q", "-b", "main", root]);
+  await commit(root, "a.txt", "one\n");
+  const source = await fs.readFile(
+    path.join(__dirname, "..", "electron", "remote-files.py"),
+    "utf8",
+  );
+  c.inspectionSource = async () =>
+    source.replace(
+      "def git_branches_result(base):",
+      'def git_branches_result(base):\n    raise subprocess.TimeoutExpired("git", 15)',
+    );
+
+  const overview = await c.inspect(null, {
+    operation: "git_overview",
+    root,
+    refs: "all",
+  });
+  assert.equal(overview.commits.length, 1);
+  assert.deepEqual(overview.branches, []);
+  assert.match(overview.branchesError, /timed out/i);
 });
 
 test("branches lists local branches and checkout refuses to drop uncommitted work", async () => {
@@ -159,12 +209,16 @@ test("branches lists local branches and checkout refuses to drop uncommitted wor
         ["main", true],
       ],
     );
-    assert.ok(before.branches.every((branch) => typeof branch.track === "string"));
+    assert.ok(
+      before.branches.every((branch) => typeof branch.track === "string"),
+    );
     assert.equal(
       before.branches.find((branch) => branch.name === "feature").origin,
       "origin/feature",
     );
-    const originOnly = before.branches.find((branch) => branch.name === "release");
+    const originOnly = before.branches.find(
+      (branch) => branch.name === "release",
+    );
     assert.equal(originOnly.ref, "origin/release");
     assert.equal(originOnly.local, false);
     assert.equal(originOnly.remoteOnly, true);
@@ -178,7 +232,10 @@ test("branches lists local branches and checkout refuses to drop uncommitted wor
 
     await inspect("checkout", { branch: "feature" });
     const after = await inspect("branches");
-    assert.equal(after.branches.find((branch) => branch.current).name, "feature");
+    assert.equal(
+      after.branches.find((branch) => branch.current).name,
+      "feature",
+    );
     assert.equal((await inspect("log", { refs: "current" })).head, "feature");
 
     // Switching with uncommitted tracked changes must be refused, not carried over.
@@ -187,7 +244,10 @@ test("branches lists local branches and checkout refuses to drop uncommitted wor
       inspect("checkout", { branch: "main" }),
       /uncommitted changes/,
     );
-    assert.equal((await inspect("branches")).branches.find((b) => b.current).name, "feature");
+    assert.equal(
+      (await inspect("branches")).branches.find((b) => b.current).name,
+      "feature",
+    );
   } finally {
     await c.close();
     await fs.rm(root, { recursive: true, force: true });

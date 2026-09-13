@@ -21,7 +21,13 @@
     "test:remote": "node scripts/features-smoke.mjs",
     "promo": "node scripts/promo.mjs",
     "package:dmg": "npm run build && electron-builder --mac dmg --arm64",
-    "test:unicode": "node scripts/terminal-unicode.mjs"
+    "test:unicode": "node scripts/terminal-unicode.mjs",
+    "perf": "node scripts/perf-benchmark.mjs",
+    "check:conventions": "node scripts/check-conventions.mjs",
+    "test:contracts": "node --test tests/app-ipc.test.cjs tests/navigation.test.cjs tests/extension-manifest.test.cjs tests/extension-registry.test.cjs tests/extension-routes.test.cjs tests/extension-contract-coverage.test.cjs tests/extension-records.test.cjs",
+    "test:extensions": "node --test tests/extension-manager.test.cjs tests/extension-manifest.test.cjs tests/extension-registry.test.cjs tests/local-extensions.test.cjs tests/surface-state.test.cjs",
+    "test:core": "node --test tests/layout.test.cjs tests/navigation.test.cjs tests/workspace-actions.test.cjs tests/chat-threads.test.cjs tests/dialog-state.test.cjs tests/app-boundary.test.cjs tests/workspace-state.test.cjs tests/herdr-snapshot.test.cjs tests/inspection-worker.test.cjs tests/git-history.test.cjs",
+    "ci": "npm run build && npm run test:core && npm run test:contracts && npm run test:extensions && npm run check:conventions && git diff --check"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
@@ -72,6 +78,9 @@
     "dmg": {
       "title": "sushiAI 0.0.6"
     }
+  },
+  "engines": {
+    "node": ">=22.18"
   },
   "license": "MIT",
   "author": "sushi-killer"

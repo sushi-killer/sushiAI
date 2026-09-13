@@ -51,7 +51,9 @@ export function AgentRecoveryPanel({
           {error}
         </p>
       )}
-      {saved === null && !error && <p role="status">Loading recovery settings…</p>}
+      {saved === null && !error && (
+        <p role="status">Loading recovery settings…</p>
+      )}
       <form
         onSubmit={async (e) => {
           e.preventDefault();

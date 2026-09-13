@@ -270,8 +270,11 @@ try {
   ]);
   assert.equal(results.copyMatches, true);
   assert.equal(results.cleanCopy, "  code\n    nested  x\n");
-  assert.equal(results.idleWheelSelectionChanges, 0,
-    "Scrolling without a selection must not trigger selection notifications or resize work");
+  assert.equal(
+    results.idleWheelSelectionChanges,
+    0,
+    "Scrolling without a selection must not trigger selection notifications or resize work",
+  );
   assert.deepEqual(results.remoteInput, ["\x1b[<0;11;1M\x1b[<0;11;1m"]);
   assert.deepEqual(results.remoteEvents, [
     { direction: "up", lines: 1, position: { column: 10, row: 0 } },
@@ -365,13 +368,24 @@ try {
   );
   const grid = await page.locator(".xterm-screen").boundingBox();
   const cell = await page.locator(".xterm-rows > div").first().boundingBox();
-  assert.equal(await page.locator(".terminal-herdr .scrollbar.vertical").evaluateAll(
-    (elements) => elements.every((element) => getComputedStyle(element).display === "none")), true);
+  assert.equal(
+    await page
+      .locator(".terminal-herdr .scrollbar.vertical")
+      .evaluateAll((elements) =>
+        elements.every(
+          (element) => getComputedStyle(element).display === "none",
+        ),
+      ),
+    true,
+  );
   await page.mouse.move(grid.x + 200, cell.y + cell.height / 2);
   await page.mouse.down();
   await page.waitForTimeout(100);
-  assert.equal(await page.locator(".terminal-selection-status").count(), 0,
-    "Holding a click without selecting text must not show a selection indicator");
+  assert.equal(
+    await page.locator(".terminal-selection-status").count(),
+    0,
+    "Holding a click without selecting text must not show a selection indicator",
+  );
   await page.mouse.up();
   // Double click chooses the real word under the pointer, including Cyrillic.
   await page.mouse.dblclick(grid.x + 4 * 7.2, cell.y + cell.height / 2);
@@ -459,23 +473,52 @@ try {
   await page.mouse.click(grid.x + 600, cell.y + cell.height * 4.5);
   // A selected transcript pauses Herdr frames. Jump must release that pause,
   // otherwise Claude moves to the bottom but the user keeps seeing the old frame.
-  await page.evaluate(() => window.terminalHarness.output(
-    "\x1b[2J\x1b[HSelect this transcript\r\n  Jump to bottom (click) ↓",
-  ));
-  await page.waitForFunction(() => document.querySelector(".xterm-rows")?.textContent.includes("Jump to bottom"));
+  await page.evaluate(() =>
+    window.terminalHarness.output(
+      "\x1b[2J\x1b[HSelect this transcript\r\n  Jump to bottom (click) ↓",
+    ),
+  );
+  await page.waitForFunction(() =>
+    document
+      .querySelector(".xterm-rows")
+      ?.textContent.includes("Jump to bottom"),
+  );
   await page.mouse.dblclick(grid.x + 4 * 7.2, cell.y + cell.height / 2);
-  await page.evaluate(() => window.terminalHarness.output("\x1b[2J\x1b[HQUEUED FRAME"));
+  await page.evaluate(() =>
+    window.terminalHarness.output("\x1b[2J\x1b[HQUEUED FRAME"),
+  );
   await page.waitForTimeout(100);
-  assert.ok((await page.locator(".xterm-rows").textContent()).includes("Jump to bottom"));
-  const beforeJump = await page.evaluate(() => window.terminalHarness.calls.writes.length);
+  assert.ok(
+    (await page.locator(".xterm-rows").textContent()).includes(
+      "Jump to bottom",
+    ),
+  );
+  const beforeJump = await page.evaluate(
+    () => window.terminalHarness.calls.writes.length,
+  );
   await page.mouse.click(grid.x + 10 * 7.2, cell.y + cell.height * 1.5);
-  await page.waitForFunction(() => document.querySelector(".xterm-rows")?.textContent.includes("QUEUED FRAME"));
-  assert.equal(await readCopy(), "", "Jump clears the selection that paused rendering");
-  const jumpWrites = await page.evaluate(before => window.terminalHarness.calls.writes.slice(before), beforeJump);
+  await page.waitForFunction(() =>
+    document.querySelector(".xterm-rows")?.textContent.includes("QUEUED FRAME"),
+  );
+  assert.equal(
+    await readCopy(),
+    "",
+    "Jump clears the selection that paused rendering",
+  );
+  const jumpWrites = await page.evaluate(
+    (before) => window.terminalHarness.calls.writes.slice(before),
+    beforeJump,
+  );
   assert.equal(jumpWrites.length, 1);
   assert.match(jumpWrites[0], /^\x1b\[<0;\d+;2M\x1b\[<0;\d+;2m$/);
-  await page.evaluate(() => window.terminalHarness.output("\x1b[2J\x1b[HACTUAL BOTTOM FRAME"));
-  await page.waitForFunction(() => document.querySelector(".xterm-rows")?.textContent.includes("ACTUAL BOTTOM FRAME"));
+  await page.evaluate(() =>
+    window.terminalHarness.output("\x1b[2J\x1b[HACTUAL BOTTOM FRAME"),
+  );
+  await page.waitForFunction(() =>
+    document
+      .querySelector(".xterm-rows")
+      ?.textContent.includes("ACTUAL BOTTOM FRAME"),
+  );
   await page.evaluate(() => window.terminalHarness.fail());
   await drop();
   await page.getByRole("button", { name: "Dismiss", exact: true }).click();
@@ -504,21 +547,39 @@ try {
   await page.screenshot({ path: "artifacts/terminal-drop.png" });
   // Returning from a harness to zsh immediately disables all file attachments.
   await page.evaluate(() => window.terminalHarness.shell());
-  const fileCount = await page.evaluate(() => window.terminalHarness.calls.files.length);
+  const fileCount = await page.evaluate(
+    () => window.terminalHarness.calls.files.length,
+  );
   await drop();
   await page.evaluate(() => {
     const data = new DataTransfer();
     data.items.add(new File(["image"], "blocked.png", { type: "image/png" }));
     document.querySelector(".xterm-helper-textarea").dispatchEvent(
-      new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }),
+      new ClipboardEvent("paste", {
+        clipboardData: data,
+        bubbles: true,
+        cancelable: true,
+      }),
     );
   });
   await page.waitForTimeout(100);
-  assert.equal(await page.evaluate(() => window.terminalHarness.calls.files.length), fileCount);
-  assert.equal(await page.evaluate(async () => {
-    const fonts = await document.fonts.load('12px "Sushi Terminal Symbols"', "󰂺");
-    return fonts.length > 0 && fonts.every(font => font.status === "loaded");
-  }), true, "Bundled terminal symbols must load without installed Nerd Fonts");
+  assert.equal(
+    await page.evaluate(() => window.terminalHarness.calls.files.length),
+    fileCount,
+  );
+  assert.equal(
+    await page.evaluate(async () => {
+      const fonts = await document.fonts.load(
+        '12px "Sushi Terminal Symbols"',
+        "󰂺",
+      );
+      return (
+        fonts.length > 0 && fonts.every((font) => font.status === "loaded")
+      );
+    }),
+    true,
+    "Bundled terminal symbols must load without installed Nerd Fonts",
+  );
   await page.evaluate(() => window.terminalHarness.dispose());
   console.log(
     "Component checks passed: drop, paste, focus, error dismissal, bracketed input.",

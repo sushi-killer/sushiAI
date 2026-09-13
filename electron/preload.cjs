@@ -55,6 +55,17 @@ contextBridge.exposeInMainWorld("bridge", {
   modelProfilesUpsert: invoke("model-profiles-upsert"),
   modelProfilesDelete: invoke("model-profiles-delete"),
   modelSettingsStage: invoke("model-settings-stage"),
+  extensionsList: invoke("extensions-list"),
+  extensionsRefresh: invoke("extensions-refresh"),
+  extensionsStateRead: invoke("extensions-state-read"),
+  extensionsStateAggregate: invoke("extensions-state-aggregate"),
+  extensionsStateWrite: invoke("extensions-state-write"),
+  onExtensionState: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on("extensions-state-changed", listener);
+    return () => ipcRenderer.removeListener("extensions-state-changed", listener);
+  },
+  extensionsSetEnabled: invoke("extensions-set-enabled"),
   window: invoke("window"),
   connectionsList: invoke("connections-list"),
   connectionsSave: invoke("connections-save"),

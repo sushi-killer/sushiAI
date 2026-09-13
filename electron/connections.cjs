@@ -4,6 +4,7 @@ const { spawn } = require("node:child_process");
 const net = require("node:net");
 const { randomUUID } = require("node:crypto");
 const { request } = require("./herdr.cjs");
+const { InspectionWorker } = require("./inspection-worker.cjs");
 const quote = (text) => "'" + String(text).replaceAll("'", "'\\''") + "'";
 
 function run(binary, args, input = "", timeout = 20000) {
@@ -70,6 +71,10 @@ class Connections {
     this.profiles = [];
     this.runtime = new Map();
     this.pending = new Map();
+    this.inspectionWorkers = new Map();
+    this.inspectionSourcePromise = null;
+    this.closed = false;
+    this.closePromise = null;
   }
   async init() {
     this.temp = await fs.mkdtemp("/tmp/sushiai-ssh-");
@@ -110,8 +115,8 @@ class Connections {
   }
   async save(profile) {
     const p = validate(profile);
-    await this.disconnect(`ssh:${p.id}`);
     this.profiles = [...this.profiles.filter((x) => x.id !== p.id), p];
+    await this.disconnect(`ssh:${p.id}`);
     await fs.mkdir(path.dirname(this.file), { recursive: true });
     await fs.writeFile(this.file, JSON.stringify(this.profiles, null, 2), {
       mode: 0o600,
@@ -120,35 +125,49 @@ class Connections {
   }
   async delete(endpoint) {
     const p = this.get(endpoint);
-    await this.disconnect(endpoint);
     this.profiles = this.profiles.filter((x) => x.id !== p.id);
+    await this.disconnect(endpoint);
     await fs.writeFile(this.file, JSON.stringify(this.profiles), {
       mode: 0o600,
     });
   }
   async inspect(endpoint, options) {
-    const source = await fs.readFile(
-      path.join(__dirname, "remote-files.py"),
-      "utf8",
-    );
-    const p = endpoint?.startsWith("ssh:") ? this.get(endpoint) : null;
-    const output = p
-      ? await run(
-          "/usr/bin/ssh",
-          [...this.args(p), p.host, `python3 -c ${quote(source)}`],
-          JSON.stringify(options),
-        )
-      : await run("/usr/bin/python3", ["-c", source], JSON.stringify(options));
-    let envelope;
-    try {
-      envelope = JSON.parse(output);
-    } catch {
-      throw new Error(
-        "Project reader returned invalid data. Check Python 3 and SSH shell startup output.",
-      );
+    if (this.closed) throw new Error("Connections are closed.");
+    return this.inspectionWorker(endpoint).request(options);
+  }
+  async inspectionSource() {
+    if (!this.inspectionSourcePromise) {
+      this.inspectionSourcePromise = fs
+        .readFile(path.join(__dirname, "remote-files.py"), "utf8")
+        .catch((error) => {
+          this.inspectionSourcePromise = null;
+          throw error;
+        });
     }
-    if (envelope.error) throw new Error(envelope.error);
-    return envelope.result;
+    return this.inspectionSourcePromise;
+  }
+  inspectionWorker(endpoint) {
+    const profile = endpoint?.startsWith("ssh:") ? this.get(endpoint) : null;
+    const key = profile ? `ssh:${profile.id}` : "local";
+    let worker = this.inspectionWorkers.get(key);
+    if (worker) return worker;
+    worker = new InspectionWorker({
+      command: profile ? "/usr/bin/ssh" : "/usr/bin/python3",
+      args: (source) =>
+        profile
+          ? [
+              ...this.args(profile),
+              profile.host,
+              `python3 -u -c ${quote(source)} --sushiai-worker`,
+            ]
+          : ["-u", "-c", source, "--sushiai-worker"],
+      sourceLoader: () => this.inspectionSource(),
+      label: profile
+        ? `Project inspection for ${profile.name}`
+        : "Project inspection",
+    });
+    this.inspectionWorkers.set(key, worker);
+    return worker;
   }
   async socket(endpoint) {
     if (!endpoint.startsWith("ssh:")) {
@@ -333,6 +352,11 @@ class Connections {
     throw new Error(error || "Port forwarding failed");
   }
   async disconnect(endpoint) {
+    const workerKey = endpoint?.startsWith("ssh:") ? endpoint : "local";
+    const inspector = this.inspectionWorkers.get(workerKey);
+    this.inspectionWorkers.delete(workerKey);
+    if (inspector) await inspector.close("Connection disconnected.");
+    if (!endpoint?.startsWith("ssh:")) return;
     const id = endpoint.replace(/^ssh:/, "");
     if (this.pending.has(id)) await this.pending.get(id).catch(() => {});
     const state = this.runtime.get(id);
@@ -343,9 +367,18 @@ class Connections {
     }
   }
   async close() {
-    await Promise.allSettled([...this.pending.values()]);
-    for (const id of this.runtime.keys()) await this.disconnect(`ssh:${id}`);
-    if (this.temp) await fs.rm(this.temp, { recursive: true, force: true });
+    if (this.closePromise) return this.closePromise;
+    this.closed = true;
+    this.closePromise = (async () => {
+      const inspectors = [...this.inspectionWorkers.values()];
+      this.inspectionWorkers.clear();
+      await Promise.allSettled(inspectors.map((worker) => worker.close()));
+      await Promise.allSettled([...this.pending.values()]);
+      for (const id of [...this.runtime.keys()])
+        await this.disconnect(`ssh:${id}`);
+      if (this.temp) await fs.rm(this.temp, { recursive: true, force: true });
+    })();
+    return this.closePromise;
   }
 }
 module.exports = { Connections, run, quote, validate };

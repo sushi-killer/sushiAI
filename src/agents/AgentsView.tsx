@@ -580,7 +580,7 @@ export function AgentsView({ slot }: { slot: HTMLElement | null }) {
     }
   }, [tabs]);
   useEffect(() => {
-    Object.assign(viewMemory, { providerId, agentId, active, drafts });
+    Object.assign(viewMemory, { providerId, agentId, active });
     try {
       localStorage.setItem(
         focusStorage,
@@ -589,7 +589,10 @@ export function AgentsView({ slot }: { slot: HTMLElement | null }) {
     } catch {
       /* The current window remains usable without storage. */
     }
-  }, [providerId, agentId, active, drafts]);
+  }, [providerId, agentId, active]);
+  useEffect(() => {
+    viewMemory.drafts = drafts;
+  }, [drafts]);
   useLayoutEffect(() => {
     const el = transcript.current,
       anchor = scrollAnchor.current;
@@ -748,83 +751,85 @@ export function AgentsView({ slot }: { slot: HTMLElement | null }) {
     <div className="agents-view">
       {slot &&
         createPortal(
-        <div className="agents-roster">
-          <div className="section-label">
-            <span>Agents</span>
-            <span className="section-actions">
-              <button
-                className="icon-button"
-                title="Add agent"
-                aria-label="Add agent"
-                disabled={busy}
-                onClick={() => setNewAgent(true)}
-              >
-                <Plus size={14} />
-              </button>
-              <button
-                className="icon-button"
-                title="Refresh agents"
-                aria-label="Refresh agents"
-                disabled={busy}
-                onClick={() =>
-                  void run(async () =>
-                    setAgents(await call<AgentIdentity[]>("agents.list")),
-                  )
-                }
-              >
-                <RefreshCw size={13} />
-              </button>
-            </span>
-          </div>
-          {providers.length > 1 && (
-            <select
-              aria-label="Agent provider"
-              value={providerId}
-              onChange={(e) => setProviderId(e.target.value)}
-            >
-              {providers.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          )}
-          {/* The open agent always leads the list; its colour stays tied to
-              its original position so reordering does not recolour it. */}
-          {[...agents]
-            .sort(
-              (a, b) => Number(b.id === agentId) - Number(a.id === agentId),
-            )
-            .map((a) => (
-            <button
-              key={a.id}
-              className={`agent-roster-row ${a.id === agentId ? "selected" : ""}`}
-              aria-busy={busy}
-              onClick={() => openAgent(a.id)}
-            >
-              <span className={`agent-avatar color-${agents.indexOf(a) % 5}`}>
-                <span
-                  className="agent-face"
-                  data-state={a.id === agentId ? snapshot?.status : "idle"}
-                  aria-hidden="true"
+          <div className="agents-roster">
+            <div className="section-label">
+              <span>Agents</span>
+              <span className="section-actions">
+                <button
+                  className="icon-button"
+                  title="Add agent"
+                  aria-label="Add agent"
+                  disabled={busy}
+                  onClick={() => setNewAgent(true)}
                 >
-                  <i />
-                  <i />
-                </span>
+                  <Plus size={14} />
+                </button>
+                <button
+                  className="icon-button"
+                  title="Refresh agents"
+                  aria-label="Refresh agents"
+                  disabled={busy}
+                  onClick={() =>
+                    void run(async () =>
+                      setAgents(await call<AgentIdentity[]>("agents.list")),
+                    )
+                  }
+                >
+                  <RefreshCw size={13} />
+                </button>
               </span>
-              <span>
-                <strong>{a.name}</strong>
-                <small>{a.model || a.description || provider?.name}</small>
-              </span>
-            </button>
-          ))}
-          {!agents.length && (
-            <p className="agent-muted">
-              {busy ? "Connecting to your agents…" : "No agents connected."}
-            </p>
-          )}
-        </div>,
-        slot,
+            </div>
+            {providers.length > 1 && (
+              <select
+                aria-label="Agent provider"
+                value={providerId}
+                onChange={(e) => setProviderId(e.target.value)}
+              >
+                {providers.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            {/* The open agent always leads the list; its colour stays tied to
+              its original position so reordering does not recolour it. */}
+            {[...agents]
+              .sort(
+                (a, b) => Number(b.id === agentId) - Number(a.id === agentId),
+              )
+              .map((a) => (
+                <button
+                  key={a.id}
+                  className={`agent-roster-row ${a.id === agentId ? "selected" : ""}`}
+                  aria-busy={busy}
+                  onClick={() => openAgent(a.id)}
+                >
+                  <span
+                    className={`agent-avatar color-${agents.indexOf(a) % 5}`}
+                  >
+                    <span
+                      className="agent-face"
+                      data-state={a.id === agentId ? snapshot?.status : "idle"}
+                      aria-hidden="true"
+                    >
+                      <i />
+                      <i />
+                    </span>
+                  </span>
+                  <span>
+                    <strong>{a.name}</strong>
+                    <small>{a.model || a.description || provider?.name}</small>
+                  </span>
+                </button>
+              ))}
+            {!agents.length && (
+              <p className="agent-muted">
+                {busy ? "Connecting to your agents…" : "No agents connected."}
+              </p>
+            )}
+          </div>,
+          slot,
         )}
       <section className="agents-main">
         <header className="agent-header">
@@ -1367,8 +1372,10 @@ export function AgentsView({ slot }: { slot: HTMLElement | null }) {
                   onDragOver={(event) => {
                     if (event.dataTransfer.types.includes("Files")) {
                       event.preventDefault();
-                      event.dataTransfer.dropEffect =
-                        busy || inProgress ? "none" : "copy";
+                      // Always accept the drop: refusing it here shows a
+                      // "no entry" cursor and drops the file on the floor,
+                      // while addAttachments can explain why it has to wait.
+                      event.dataTransfer.dropEffect = "copy";
                     }
                   }}
                   onDrop={(event) => {

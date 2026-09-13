@@ -1,6 +1,7 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
+const { addsMarkdownFragment } = require("../scripts/lib/release-notes.mjs");
 
 function run(env) {
   return spawnSync(process.execPath, ["scripts/check-conventions.mjs"], {
@@ -57,15 +58,23 @@ test("a title with no conventional-commit prefix is rejected", () => {
   assert.match(result.stderr, /doesn't start with a conventional-commit type/);
 });
 
-test("a breaking-change title needs an added docs/releases/unreleased/*.md fragment", () => {
-  const result = run({
-    HEAD_BRANCH: "feature/x",
-    PR_TITLE: "feat!: drop old field",
-    BASE_REF: "v0.0.6",
-    HEAD_REF: "HEAD",
-  });
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /marks a breaking change/);
+// The breaking-change-needs-a-fragment rule's git plumbing (spawning `git
+// diff` between BASE_REF/HEAD_REF) isn't unit tested here - it needs real
+// repo history depth that a shallow CI checkout doesn't have. This tests
+// the pure predicate instead, which is the actual logic under test; the
+// real `conventions` CI job exercises the plumbing with fetch-depth: 0.
+test("addsMarkdownFragment finds an added .md file among other added files", () => {
+  assert.equal(
+    addsMarkdownFragment("A\tdocs/releases/unreleased/.gitkeep\n"),
+    false,
+  );
+  assert.equal(
+    addsMarkdownFragment(
+      "A\tdocs/releases/unreleased/.gitkeep\nA\tdocs/releases/unreleased/my-change.md\n",
+    ),
+    true,
+  );
+  assert.equal(addsMarkdownFragment(""), false);
 });
 
 test("docs/LESSONS.md within its caps passes, fenced example not counted", () => {

@@ -160,10 +160,15 @@ by `scripts/check-conventions.mjs` in CI, not just a naming convention:
   does not auto-merge anything. GitHub branch protection requiring a PR
   before merging `main` is the first layer, but it can't tell the owner's
   own click apart from an agent invoking `gh`/`git` with the owner's own
-  credentials — the real enforcement for an agent is
-  `scripts/hooks/guard-bash.mjs`, which hard-denies `gh pr merge` and any
-  direct push to `main` outright. An agent must never work around this by
-  routing the same command through another tool or a different credential.
+  credentials — `scripts/hooks/guard-bash.mjs` denies `gh pr merge` and a
+  direct push to `main` for the realistic case (the agent just running the
+  command). That is a heuristic tripwire, not an unbypassable sandbox — it
+  scans command text and, for a direct interpreter invocation, the script
+  file it names; a hand-obfuscated command or a deeper indirection could
+  still slip past it. The actual guarantee is that an agent must never
+  deliberately try to route around this policy (a different tool, a
+  rewritten command, a subagent) — it isn't that no string could ever
+  evade the regex.
 - Use the `ship-pr` skill to open a normal PR, and `cut-release` to prepare
   a release PR — both are procedure around the CI/`scripts/release.mjs`
   machinery described above, not a replacement for it.

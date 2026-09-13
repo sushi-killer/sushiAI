@@ -108,7 +108,7 @@ const body = fragments.length
   : "_No user-facing changes recorded for this release._";
 writeFileSync(
   `docs/releases/${newVersion}.md`,
-  `Extension API: ${apiVersions}\n\n${body}\n`,
+  `> Extension API: ${apiVersions}\n\n${body}\n`,
 );
 for (const name of fragments) unlinkSync(path.join(unreleasedDir, name));
 

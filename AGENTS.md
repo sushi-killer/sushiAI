@@ -157,7 +157,13 @@ by `scripts/check-conventions.mjs` in CI, not just a naming convention:
   fragment into `docs/releases/<version>.md` at release time and deletes
   them — don't hand-write a dated release note directly.
 - Only the owner merges — feature PRs and the release PR alike. This repo
-  does not auto-merge anything.
+  does not auto-merge anything. GitHub branch protection requiring a PR
+  before merging `main` is the first layer, but it can't tell the owner's
+  own click apart from an agent invoking `gh`/`git` with the owner's own
+  credentials — the real enforcement for an agent is
+  `scripts/hooks/guard-bash.mjs`, which hard-denies `gh pr merge` and any
+  direct push to `main` outright. An agent must never work around this by
+  routing the same command through another tool or a different credential.
 - Use the `ship-pr` skill to open a normal PR, and `cut-release` to prepare
   a release PR — both are procedure around the CI/`scripts/release.mjs`
   machinery described above, not a replacement for it.

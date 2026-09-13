@@ -505,9 +505,14 @@ try {
   const settings = page.getByRole("dialog", { name: "Settings" });
   await settings.waitFor();
   await settings.getByRole("tab", { name: "Connections", exact: true }).click();
-  await page
-    .getByText("Connected · workspaces sync automatically")
-    .waitFor({ state: "visible" });
+  // Same Herdr-availability gate as the ping check above: this text only
+  // ever renders once a real Herdr daemon accepts the connection, which a
+  // clean CI runner never has.
+  if (herdr.ok)
+    await page
+      .getByText("Connected · workspaces sync automatically")
+      .waitFor({ state: "visible" });
+  else skipped.push(`Connections tab "Connected" state (${herdr.reason})`);
   await settings.getByRole("tab", { name: "Providers", exact: true }).click();
   await settings.locator(".providers-settings").waitFor({ state: "visible" });
   await settings.getByRole("tab", { name: "Updates", exact: true }).click();

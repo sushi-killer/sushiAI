@@ -157,10 +157,27 @@ by `scripts/check-conventions.mjs` in CI, not just a naming convention:
   fragment into `docs/releases/<version>.md` at release time and deletes
   them — don't hand-write a dated release note directly.
 - Only the owner merges — feature PRs and the release PR alike. This repo
-  does not auto-merge anything.
+  does not auto-merge anything. GitHub branch protection requiring a PR
+  before merging `main` is the first layer, but it can't tell the owner's
+  own click apart from an agent invoking `gh`/`git` with the owner's own
+  credentials — `scripts/hooks/guard-bash.mjs` denies `gh pr merge` and a
+  direct push to `main` for the realistic case (the agent just running the
+  command). That is a heuristic tripwire, not an unbypassable sandbox — it
+  scans command text and, for a direct interpreter invocation, the script
+  file it names; a hand-obfuscated command or a deeper indirection could
+  still slip past it. The actual guarantee is that an agent must never
+  deliberately try to route around this policy (a different tool, a
+  rewritten command, a subagent) — it isn't that no string could ever
+  evade the regex.
 - Use the `ship-pr` skill to open a normal PR, and `cut-release` to prepare
   a release PR — both are procedure around the CI/`scripts/release.mjs`
   machinery described above, not a replacement for it.
+- Squash-only is a `main`-history invariant, not just a PR-merge-button
+  setting: if a change ever has to land on `main` outside the normal
+  pipeline (a rare, explicitly-approved bootstrapping exception, not
+  routine practice), squash it to the intended granularity yourself first
+  — don't push a branch's raw commit-by-commit history as-is just because
+  it happens to fast-forward cleanly.
 
 ## Execution gotchas
 

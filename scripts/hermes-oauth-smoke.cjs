@@ -132,7 +132,7 @@ const { HermesTransport } = require("../electron/agents/hermes-transport.cjs");
         return json(res, 200, { jsonrpc: "2.0", id: rpc.id, result });
       }
       json(res, 404, { error: "not found" });
-    } catch (error) {
+    } catch {
       json(res, 500, { error: "Synthetic OAuth validation failed" });
     }
   });

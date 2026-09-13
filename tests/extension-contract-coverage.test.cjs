@@ -4,6 +4,8 @@ const fs = require("node:fs");
 const {
   CONTRACT,
   validateExtensionManifest,
+  ACTION_PLACEMENT_LIST,
+  ICON_LIST,
 } = require("../electron/extensions/manifest.cjs");
 
 const FIXTURE = "tests/fixtures/extensions/probe/manifest.json";
@@ -12,7 +14,7 @@ const probe = validateExtensionManifest({
   ...raw,
   source: { kind: "local", path: "/tmp/probe" },
 });
-const { surfaces, navigation, actions, commands } = probe.contributions;
+const { surfaces, navigation, actions } = probe.contributions;
 // Only views[0] renders, so only views[0] counts as covered.
 const views = surfaces.map((surface) => surface.view.document.views[0]);
 const named = (icon) => (icon?.kind === "named" ? [icon.name] : []);
@@ -22,6 +24,7 @@ const collect = (items, pick) => new Set(items.flatMap(pick));
  * a host is covered by being somebody's defaultHost, not by sitting in an
  * allowedHosts list nothing mounts from. */
 const used = {
+  SUPPORTED_API_VERSIONS: new Set([probe.apiVersion]),
   // Every host but one is reached by being a surface's defaultHost.
   // workspace.pane is the exception: nothing declares it as a default, a
   // surface becomes pane-mountable by listing it, and page and tab win first
@@ -193,6 +196,20 @@ test("the types the app compiles against list the same values", () => {
       [...union(name)].sort(),
       [...allowed].sort(),
       `${name} and the validator disagree about what is allowed`,
+    );
+});
+
+test("ACTION_PLACEMENTS and ICONS carry no copy-pasted duplicate", () => {
+  // Both become a Set, which swallows a duplicate add with no error - the
+  // list literal is the only place a duplicate can still be caught.
+  for (const [name, list] of [
+    ["ACTION_PLACEMENTS", ACTION_PLACEMENT_LIST],
+    ["ICONS", ICON_LIST],
+  ])
+    assert.equal(
+      new Set(list).size,
+      list.length,
+      `${name} has a duplicate entry`,
     );
 });
 

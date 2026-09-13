@@ -22,7 +22,6 @@ import {
 } from "lucide-react";
 import type { ChatModels, Panel, Workspace } from "./types";
 import {
-  DEFAULT_TITLES,
   contextUsage,
   groupThreads,
   modelName as readableModel,

@@ -63,7 +63,8 @@ contextBridge.exposeInMainWorld("bridge", {
   onExtensionState: (callback) => {
     const listener = (_, data) => callback(data);
     ipcRenderer.on("extensions-state-changed", listener);
-    return () => ipcRenderer.removeListener("extensions-state-changed", listener);
+    return () =>
+      ipcRenderer.removeListener("extensions-state-changed", listener);
   },
   extensionsSetEnabled: invoke("extensions-set-enabled"),
   window: invoke("window"),

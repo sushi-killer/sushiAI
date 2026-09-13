@@ -196,7 +196,11 @@ test("a named icon must be one the app actually bundles", () => {
 test("an icon cannot smuggle markup, script or a remote reference", () => {
   const { validateExtensionManifest } = library;
   const refused = [
-    { kind: "svg", viewBox: "0 0 24 24", paths: ["</path><script>x()</script>"] },
+    {
+      kind: "svg",
+      viewBox: "0 0 24 24",
+      paths: ["</path><script>x()</script>"],
+    },
     { kind: "svg", viewBox: "0 0 24 24", paths: ["url(http://evil/x.png)"] },
     { kind: "svg", viewBox: "0 0 24 24", paths: ['M0 0" onload="alert(1)'] },
     { kind: "svg", viewBox: "0 0 24 24", paths: ["M4 7h10;expression(1)"] },
@@ -401,7 +405,8 @@ const withOverview = (changes = {}, view = {}) => {
 
 test("an aggregate surface is a read-only page over every project", () => {
   const { validateExtensionManifest } = library;
-  const ok = validateExtensionManifest(withOverview()).contributions.surfaces[1];
+  const ok =
+    validateExtensionManifest(withOverview()).contributions.surfaces[1];
   assert.equal(ok.aggregate, true);
   assert.equal(ok.stateId, "probe.ledger");
   assert.deepEqual(ok.view.document.views[0].groupable, ["$project"]);
@@ -431,16 +436,21 @@ test("an aggregate surface is a read-only page over every project", () => {
   // Aggregating its own slice can only ever show an empty page: the validator
   // forces it read-only, so nothing writes there.
   assert.throws(
-    () => validateExtensionManifest(withOverview({ stateId: "probe.overview" })),
+    () =>
+      validateExtensionManifest(withOverview({ stateId: "probe.overview" })),
     /the page would always be empty/,
   );
 });
 
 test("a borrowed slice must be real, matching and read-only", () => {
   const { validateExtensionManifest } = library;
-  const surfaces = validateExtensionManifest(withOverview())
-    .contributions.surfaces;
-  assert.equal(surfaces[0].stateId, "probe.ledger", "a surface owns its own id");
+  const surfaces =
+    validateExtensionManifest(withOverview()).contributions.surfaces;
+  assert.equal(
+    surfaces[0].stateId,
+    "probe.ledger",
+    "a surface owns its own id",
+  );
   assert.equal(surfaces[1].stateId, "probe.ledger");
 
   assert.throws(
@@ -454,9 +464,19 @@ test("a borrowed slice must be real, matching and read-only", () => {
   assert.throws(
     () =>
       validateExtensionManifest(
-        withOverview({ aggregate: false, stateScope: "instance" }, {
-          views: [{ layout: "list", primary: "name", toggle: "catalogued", meta: [] }],
-        }),
+        withOverview(
+          { aggregate: false, stateScope: "instance" },
+          {
+            views: [
+              {
+                layout: "list",
+                primary: "name",
+                toggle: "catalogued",
+                meta: [],
+              },
+            ],
+          },
+        ),
       ),
     /instance state is keyed per pane/,
   );
@@ -465,38 +485,58 @@ test("a borrowed slice must be real, matching and read-only", () => {
   assert.throws(
     () =>
       validateExtensionManifest(
-        withOverview({ aggregate: false }, {
-          views: [{ layout: "list", primary: "name", toggle: "catalogued", meta: [] }],
-        }),
+        withOverview(
+          { aggregate: false },
+          {
+            views: [
+              {
+                layout: "list",
+                primary: "name",
+                toggle: "catalogued",
+                meta: [],
+              },
+            ],
+          },
+        ),
       ),
     /so it must not write them/,
   );
-  const readOnly = withOverview({ aggregate: false }, {
-    allowAdd: false,
-    allowToggle: false,
-    views: [{ layout: "list", primary: "name", toggle: "catalogued", meta: [] }],
-  });
+  const readOnly = withOverview(
+    { aggregate: false },
+    {
+      allowAdd: false,
+      allowToggle: false,
+      views: [
+        { layout: "list", primary: "name", toggle: "catalogued", meta: [] },
+      ],
+    },
+  );
   assert.equal(
     validateExtensionManifest(readOnly).contributions.surfaces[1].stateId,
     "probe.ledger",
     "a read-only second view of one list is allowed",
   );
-  const stray = withOverview({ aggregate: false }, {
-    allowAdd: false,
-    allowToggle: false,
-    data: {
-      fields: [
-        { id: "name", type: "text", label: "Specimen" },
-        { id: "catalogued", type: "boolean", label: "Catalogued" },
-        { id: "owner", type: "text", label: "Owner" },
+  const stray = withOverview(
+    { aggregate: false },
+    {
+      allowAdd: false,
+      allowToggle: false,
+      data: {
+        fields: [
+          { id: "name", type: "text", label: "Specimen" },
+          { id: "catalogued", type: "boolean", label: "Catalogued" },
+          { id: "owner", type: "text", label: "Owner" },
+        ],
+      },
+      views: [
+        {
+          layout: "list",
+          primary: "name",
+          toggle: "catalogued",
+          meta: ["owner"],
+        },
       ],
     },
-    views: [
-      { layout: "list", primary: "name", toggle: "catalogued", meta: ["owner"] },
-    ],
-  });
-  assert.throws(
-    () => validateExtensionManifest(stray),
-    /has no "owner" field/,
   );
+  assert.throws(() => validateExtensionManifest(stray), /has no "owner" field/);
 });

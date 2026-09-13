@@ -14,8 +14,7 @@ export type ExtensionRouteState = { extensionId: string; surfaceId: string };
  * one of these, not a state of its own: the shell has no way to tell it from
  * Dashboard or Skills, which is what keeps a manifest out of the chrome. */
 export type SectionRef =
-  | { kind: "core"; id: string }
-  | ({ kind: "extension" } & ExtensionRouteState);
+  { kind: "core"; id: string } | ({ kind: "extension" } & ExtensionRouteState);
 
 export type NavigationState = {
   mode: CoreMode;

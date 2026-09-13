@@ -507,10 +507,6 @@ export function highlightLine(
   return tokens;
 }
 
-function mergeTokens(tokens: SyntaxToken[], next: SyntaxToken[]) {
-  for (const token of next) push(tokens, token.text, token.kind);
-}
-
 function diffParts(line: string): {
   kind: DiffLineKind;
   prefix?: string;

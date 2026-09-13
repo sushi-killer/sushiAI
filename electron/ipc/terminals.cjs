@@ -1,5 +1,4 @@
 const os = require("node:os");
-const path = require("node:path");
 const fs = require("node:fs/promises");
 const { quote } = require("../connections.cjs");
 const { openHerdrStream, detectAgent } = require("../terminal-stream.cjs");

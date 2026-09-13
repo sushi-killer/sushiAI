@@ -22,6 +22,24 @@ const probe = validateExtensionManifest({
     path: path.join(root, "tests/fixtures/extensions/probe"),
   },
 });
+// A leftover fixture directory (e.g. a deleted extension's folder someone
+// forgot to remove) inflates the extension count the app loads without
+// changing anything this smoke reads by id - it only shows up as a mismatched
+// count elsewhere. Catch it here instead.
+const fixtureDirs = (
+  await readdir(path.join(root, "tests/fixtures/extensions"), {
+    withFileTypes: true,
+  })
+)
+  .filter((entry) => entry.isDirectory())
+  .map((entry) => entry.name)
+  .sort();
+assert.deepEqual(
+  fixtureDirs,
+  ["probe"],
+  "tests/fixtures/extensions holds an unexpected directory - delete a stale fixture or update this list",
+);
+
 const contributed = (kind, id) =>
   probe.contributions[kind].find((item) => item.id === id);
 const surfaceOf = (id) => contributed("surfaces", id);

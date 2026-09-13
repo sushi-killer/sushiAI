@@ -110,7 +110,11 @@ const { HermesTransport } = require("../electron/agents/hermes-transport.cjs");
       updated.mcp_servers[opened.id].env.KEEP,
       "synthetic-secret-keep",
     );
-    const recovery = (action, extra = {}) => p.operations.get(`addons.recovery.${action}`)({ agentId: "default", ...extra });
+    const recovery = (action, extra = {}) =>
+      p.operations.get(`addons.recovery.${action}`)({
+        agentId: "default",
+        ...extra,
+      });
     assert.equal((await recovery("read")).enabled, true);
     await recovery("update", { enabled: false });
     assert.equal((await recovery("read")).enabled, false);

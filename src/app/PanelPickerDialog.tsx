@@ -1,10 +1,7 @@
 import { useEffect, useState } from "react";
 import {
-  Bot,
   FolderOpen,
   Globe,
-  LayoutGrid,
-  MessageSquare,
   Plus,
   Sparkles,
   TerminalSquare,
@@ -53,7 +50,11 @@ export function PanelPickerDialog({
       <h2>Add a panel</h2>
       <p>Everything you need, side by side.</p>
       {herdrWorkspace && (
-        <div className="panel-backend" role="group" aria-label="Session backend">
+        <div
+          className="panel-backend"
+          role="group"
+          aria-label="Session backend"
+        >
           {(
             [
               ["herdr", "Herdr", "Keeps running when the app closes"],
@@ -103,7 +104,9 @@ export function PanelPickerDialog({
         ).map((item) => (
           <button
             key={item.kind}
-            onClick={() => addPanel(item.kind, undefined, undefined, undefined, backend)}
+            onClick={() =>
+              addPanel(item.kind, undefined, undefined, undefined, backend)
+            }
           >
             <item.icon size={19} />
             <div>

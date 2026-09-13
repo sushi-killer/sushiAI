@@ -204,7 +204,10 @@ class ExtensionManager {
       // your own manifest is the normal edit loop, not a supply-chain event.
       if (manifest.source.kind === "local") {
         if (!this.state.extensions[manifest.id]) {
-          this.state.extensions[manifest.id] = { enabled: false, overrides: {} };
+          this.state.extensions[manifest.id] = {
+            enabled: false,
+            overrides: {},
+          };
           stateChanged = true;
         }
         continue;

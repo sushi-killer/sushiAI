@@ -72,7 +72,6 @@ const { HermesTransport } = require("../electron/agents/hermes-transport.cjs");
       transportFactory: (o) =>
         new HermesTransport({
           ...o,
-          spawn: (...args) => { ownedChild = require("node:child_process").spawn(...args); return ownedChild; },
           spawn: (...args) => {
             ownedChild = require("node:child_process").spawn(...args);
             return ownedChild;
@@ -104,7 +103,11 @@ const { HermesTransport } = require("../electron/agents/hermes-transport.cjs");
         ...extra,
       });
     const suggestions = await setting("options");
-    assert.ok(suggestions.providers.some(provider => provider.models.includes("synthetic-primary")));
+    assert.ok(
+      suggestions.providers.some((provider) =>
+        provider.models.includes("synthetic-primary"),
+      ),
+    );
     assert.ok(!JSON.stringify(suggestions).includes("synthetic-test"));
     await setting("reasoning", { value: "low" });
     assert.equal((await setting("read")).reasoning, "low");

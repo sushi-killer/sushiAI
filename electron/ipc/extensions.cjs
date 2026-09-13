@@ -42,7 +42,9 @@ function checkRecords(surface, value) {
     if (!record || typeof record !== "object" || Array.isArray(record))
       throw new Error(`${at} stores objects.`);
     if (typeof record.id !== "string" || !record.id || record.id.length > 64)
-      throw new Error(`${at}: every record needs an id of up to 64 characters.`);
+      throw new Error(
+        `${at}: every record needs an id of up to 64 characters.`,
+      );
     if (seen.has(record.id))
       throw new Error(`${at}: record id ${record.id} appears twice.`);
     seen.add(record.id);
@@ -88,7 +90,9 @@ function registerExtensionIpc({
   handle("extensions-state-aggregate", (extensionId, surfaceId, version) => {
     const surface = locate(getExtensions(), extensionId, surfaceId);
     if (version !== surface.stateVersion)
-      throw new Error(`Surface ${surfaceId} keeps version ${surface.stateVersion} state.`);
+      throw new Error(
+        `Surface ${surfaceId} keeps version ${surface.stateVersion} state.`,
+      );
     if (surface.stateScope !== "project")
       throw new Error(`Surface ${surfaceId} does not keep state per project.`);
     if (!getExtensions()?.aggregatesOver(extensionId, surfaceId))

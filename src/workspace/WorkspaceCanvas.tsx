@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef } from "react";
 import { Columns2, Plus, X } from "lucide-react";
 import { resize } from "../layout.ts";
 import { codePanels } from "../workspaceState.ts";
@@ -31,7 +31,6 @@ export function WorkspaceCanvas({
     zoomed,
     dragId,
     setSelected,
-    setZoomed,
     focusPanel,
     startPanelDrag,
     endPanelDrag,

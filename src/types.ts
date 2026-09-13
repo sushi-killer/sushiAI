@@ -283,6 +283,7 @@ export interface Bridge {
     socket: string,
     method: string,
     params?: Record<string, unknown>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic RPC passthrough, callers narrow the result themselves
   ): Promise<any>;
   chat(options: {
     panelId: string;
@@ -422,6 +423,7 @@ export interface Bridge {
   projectInspect(
     endpoint: string | undefined,
     options: Record<string, unknown>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic inspection result, callers narrow it themselves
   ): Promise<any>;
   projectPreview(
     endpoint: string | undefined,

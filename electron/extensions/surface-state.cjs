@@ -53,7 +53,8 @@ class SurfaceStateStore {
       return value;
     } catch (error) {
       if (error?.code === "ENOENT") return {};
-      if (error instanceof SyntaxError) throw new DamagedSurfaceState(extensionId);
+      if (error instanceof SyntaxError)
+        throw new DamagedSurfaceState(extensionId);
       throw error;
     }
   }

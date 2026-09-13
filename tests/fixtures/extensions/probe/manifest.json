@@ -112,7 +112,11 @@
                   "tone": "muted"
                 }
               ],
-              "actions": ["probe.open-board", "probe.open-tab", "probe.open-notes"]
+              "actions": [
+                "probe.open-board",
+                "probe.open-tab",
+                "probe.open-notes"
+              ]
             }
           ]
         }

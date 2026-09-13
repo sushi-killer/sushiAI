@@ -1,5 +1,11 @@
 const path = require("node:path");
-const { mkdir, readdir, readFile, realpath, stat } = require("node:fs/promises");
+const {
+  mkdir,
+  readdir,
+  readFile,
+  realpath,
+  stat,
+} = require("node:fs/promises");
 const { validateExtensionManifest } = require("./manifest.cjs");
 
 // A manifest is a single JSON document that travels to the renderer over IPC,

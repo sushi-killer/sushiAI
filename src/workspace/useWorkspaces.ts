@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { contains, leaf, remove, resize, split, tidy, uid } from "../layout.ts";
-import { codePanels, initialWorkspace } from "../workspaceState.ts";
+import { contains, leaf, remove, resize, split, uid } from "../layout.ts";
+import { initialWorkspace } from "../workspaceState.ts";
 import type { Routine, Saved } from "../workspaceState.ts";
 import { applyChatEvent, startUserTurn } from "../chat-threads.ts";
 import { disposeTerminal } from "../TerminalPanel.tsx";
@@ -282,11 +282,13 @@ export function useWorkspaces({
    * current view and zoom alone. */
   function selectWorkspace(id: string) {
     const target = workspacesRef.current.find((w) => w.id === id);
+    // eslint-disable-next-line react-hooks/rules-of-hooks -- useEndpoint is a plain callback prop (App.tsx passes setSocket), not a hook; the name predates this lint rule
     if (target?.connection) useEndpoint(target.connection);
     setActiveId(id);
   }
   function switchWorkspace(id: string) {
     const target = workspaces.find((w) => w.id === id);
+    // eslint-disable-next-line react-hooks/rules-of-hooks -- same non-hook callback, see selectWorkspace above
     if (target?.connection) useEndpoint(target.connection);
     setActiveId(id);
     showWorkspace();

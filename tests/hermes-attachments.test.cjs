@@ -52,7 +52,7 @@ test("partial upload failure detaches already queued images and never submits a 
   const calls = [];
   await assert.rejects(
     stageAttachments(
-      async (method, params) => {
+      async (method) => {
         calls.push(method);
         if (method === "file.attach") throw Error("Upload failed");
         return { attached: true, path: "/synthetic/image" };

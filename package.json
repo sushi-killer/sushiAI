@@ -24,10 +24,12 @@
     "test:unicode": "node scripts/terminal-unicode.mjs",
     "perf": "node scripts/perf-benchmark.mjs",
     "check:conventions": "node scripts/check-conventions.mjs",
+    "lint": "eslint .",
     "test:contracts": "node --test tests/app-ipc.test.cjs tests/navigation.test.cjs tests/extension-manifest.test.cjs tests/extension-registry.test.cjs tests/extension-routes.test.cjs tests/extension-contract-coverage.test.cjs tests/extension-records.test.cjs",
     "test:extensions": "node --test tests/extension-manager.test.cjs tests/extension-manifest.test.cjs tests/extension-registry.test.cjs tests/local-extensions.test.cjs tests/surface-state.test.cjs",
     "test:core": "node --test tests/layout.test.cjs tests/navigation.test.cjs tests/workspace-actions.test.cjs tests/chat-threads.test.cjs tests/dialog-state.test.cjs tests/app-boundary.test.cjs tests/workspace-state.test.cjs tests/herdr-snapshot.test.cjs tests/inspection-worker.test.cjs tests/git-history.test.cjs",
-    "ci": "npm run build && npm run test:core && npm run test:contracts && npm run test:extensions && npm run check:conventions && git diff --check"
+    "ci": "npm run build && npm test && npm run check:conventions && npm run lint && prettier --check src electron scripts tests *.json *.ts *.html README.md && git diff --check",
+    "release:prepare": "node scripts/release.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
@@ -45,9 +47,15 @@
     "@types/react-dom": "^19.2.0",
     "electron": "^44.2.0",
     "electron-builder": "^26.0.12",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.12.0",
     "playwright": "^1.58.0",
     "prettier": "^3.9.6",
     "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.0",
     "vite": "^7.3.0"
   },
   "build": {
@@ -74,10 +82,7 @@
       "hardenedRuntime": false,
       "minimumSystemVersion": "13.0"
     },
-    "artifactName": "sushiAI-${version}-${arch}.${ext}",
-    "dmg": {
-      "title": "sushiAI 0.0.6"
-    }
+    "artifactName": "sushiAI-${version}-${arch}.${ext}"
   },
   "engines": {
     "node": ">=22.18"

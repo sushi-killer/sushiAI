@@ -13,7 +13,7 @@ try {
   await page.waitForSelector(".panel-agent");
   const result = await page.evaluate(async (cwd) => {
     const panelId = "sushiai-chat-integration";
-    return await new Promise(async (resolve) => {
+    return await new Promise((resolve) => {
       let text = "";
       const timer = setTimeout(async () => {
         await window.bridge.cancelChat(panelId);
@@ -28,24 +28,26 @@ try {
           resolve({ text, error: event.error });
         }
       });
-      try {
-        await window.bridge.chat({
-          panelId,
-          cwd,
-          agent: "claude",
-          messages: [
-            {
-              id: "test",
-              role: "user",
-              text: "Reply with exactly SUSHIAI_CHAT_OK. Do not use any tools, read files, or change anything.",
-            },
-          ],
-        });
-      } catch (error) {
-        clearTimeout(timer);
-        unsubscribe();
-        resolve({ text, error: String(error) });
-      }
+      (async () => {
+        try {
+          await window.bridge.chat({
+            panelId,
+            cwd,
+            agent: "claude",
+            messages: [
+              {
+                id: "test",
+                role: "user",
+                text: "Reply with exactly SUSHIAI_CHAT_OK. Do not use any tools, read files, or change anything.",
+              },
+            ],
+          });
+        } catch (error) {
+          clearTimeout(timer);
+          unsubscribe();
+          resolve({ text, error: String(error) });
+        }
+      })();
     });
   }, project);
   assert.equal(result.error, undefined);

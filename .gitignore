@@ -12,3 +12,8 @@ promo/soundtrack.wav
 promo/assets/frame-*.png
 .gstack/
 /docs/PLAN-2026-09.md
+# Per-machine Claude Code state - .claude/settings.json (shared hooks) and
+# .claude/agents, .claude/skills (symlinks into .agents/skills) stay tracked.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/

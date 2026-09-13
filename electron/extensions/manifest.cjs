@@ -1,4 +1,9 @@
 const path = require("node:path");
+// Additive manifest changes (a new optional field, field type, icon, or
+// placement) never bump this. Removing, renaming, or re-meaning something
+// does: add the new version here, keep accepting the old one for at least
+// two app minors with a deprecation warning, then drop it. See AGENTS.md.
+const SUPPORTED_API_VERSIONS = [1];
 const ID = /^[a-z0-9][a-z0-9._-]*$/;
 const VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 const COMMIT = /^[0-9a-f]{7,64}$/i;
@@ -32,15 +37,19 @@ const PLACEMENTS = new Set([
 const INSTANCE_POLICIES = new Set(["singleton", "multiple"]);
 const STATE_SCOPES = new Set(["instance", "project", "global"]);
 // Named spots rather than numbers: core can add or move its own buttons
-// without renumbering a contract extensions depend on.
-const ACTION_PLACEMENTS = new Set([
+// without renumbering a contract extensions depend on. Kept as a list before
+// becoming a Set so a copy-pasted duplicate entry has somewhere to be caught
+// (a Set literal swallows a duplicate add with no error) — see
+// tests/extension-contract-coverage.test.cjs.
+const ACTION_PLACEMENT_LIST = [
   "workspace.toolbar.start",
   "workspace.toolbar.before-tidy",
   "workspace.toolbar.after-tidy",
   "workspace.toolbar.end",
   "workspace.folder.actions",
-]);
-const ICONS = new Set([
+];
+const ACTION_PLACEMENTS = new Set(ACTION_PLACEMENT_LIST);
+const ICON_LIST = [
   "list-check",
   "list-todo",
   "layout-grid",
@@ -49,7 +58,8 @@ const ICONS = new Set([
   "workflow",
   "terminal",
   "folder",
-]);
+];
+const ICONS = new Set(ICON_LIST);
 
 // Caps, not opinions: an unbounded title breaks the panel header and the
 // picker card long before it looks like an attack.
@@ -554,7 +564,7 @@ function validateExtensionManifest(input) {
   const name = requiredString(input.name, "name");
   const version = requiredString(input.version, "version");
   if (!VERSION.test(version)) throw new Error("Invalid extension version.");
-  if (input.apiVersion !== 1)
+  if (!SUPPORTED_API_VERSIONS.includes(input.apiVersion))
     throw new Error("Unsupported extension API version.");
   if (input.scope !== undefined && input.scope !== "app")
     throw new Error("Only app-wide extensions are supported.");
@@ -771,6 +781,17 @@ function validateExtensionManifest(input) {
       ids.add(item.id);
     }
   }
+  // Labels are user-facing (button text, tab text); a duplicate breaks
+  // role+name selectors in tests and confuses anyone reading the UI, even
+  // though contribution ids stay unique.
+  for (const [kind, items] of Object.entries({ navigation, actions })) {
+    const labels = new Set();
+    for (const item of items) {
+      if (labels.has(item.label))
+        throw new Error(`Duplicate extension ${kind} label: ${item.label}.`);
+      labels.add(item.label);
+    }
+  }
   const surfaceIds = new Set(surfaces.map((item) => item.id));
   const commandIds = new Set(commands.map((item) => item.id));
   for (const item of navigation)
@@ -784,7 +805,7 @@ function validateExtensionManifest(input) {
         `Action targets an unknown extension command: ${item.commandId}.`,
       );
   for (const item of commands)
-    if (item.surfaceId && !surfaceIds.has(item.surfaceId))
+    if (!surfaceIds.has(item.surfaceId))
       throw new Error(
         `Command targets an unknown extension surface: ${item.surfaceId}.`,
       );
@@ -799,7 +820,7 @@ function validateExtensionManifest(input) {
     id: extensionId,
     name,
     version,
-    apiVersion: 1,
+    apiVersion: input.apiVersion,
     source,
     scope: "app",
     ...(typeof input.description === "string"
@@ -820,6 +841,7 @@ function extensionSourceLabel(source) {
  * this rather than a copy of it, so widening the contract fails the coverage
  * test until the probe fixture exercises the new value. */
 const CONTRACT = {
+  SUPPORTED_API_VERSIONS,
   HOSTS,
   PLACEMENTS,
   ACTION_PLACEMENTS,
@@ -843,4 +865,6 @@ module.exports = {
   validateExtensionSource,
   extensionSourceLabel,
   CONTRACT,
+  ACTION_PLACEMENT_LIST,
+  ICON_LIST,
 };

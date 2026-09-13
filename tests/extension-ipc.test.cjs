@@ -72,7 +72,14 @@ function wire({ surfaces = [board, overview], enabled = true } = {}) {
 }
 
 const write = (call, value, scope = "/a") =>
-  call("extensions-state-write", "user.specimen", "probe.ledger", 2, scope, value);
+  call(
+    "extensions-state-write",
+    "user.specimen",
+    "probe.ledger",
+    2,
+    scope,
+    value,
+  );
 
 test("state is addressed against the manifest, not against what was sent", async () => {
   const { call, calls } = wire();
@@ -111,7 +118,13 @@ test("state is addressed against the manifest, not against what was sent", async
   const off = wire({ enabled: false });
   await assert.rejects(
     async () =>
-      off.call("extensions-state-read", "user.specimen", "probe.ledger", 2, "/a"),
+      off.call(
+        "extensions-state-read",
+        "user.specimen",
+        "probe.ledger",
+        2,
+        "/a",
+      ),
     /No active extension surface/,
     "a disabled extension cannot read its own state",
   );
@@ -123,7 +136,10 @@ test("records are checked against the fields the manifest declared", async () =>
     [[{ id: "1", nope: "x" }], /nope is not a field/],
     [[{ id: "1", catalogued: "yes" }], /catalogued is true or false/],
     [[{ id: "1", name: 4 }], /name is text/],
-    [[{ id: "1", collected: "12.09.2026" }], /collected is a date as YYYY-MM-DD/],
+    [
+      [{ id: "1", collected: "12.09.2026" }],
+      /collected is a date as YYYY-MM-DD/,
+    ],
     [
       [{ id: "1", tone: "later" }],
       /tone must be one of neutral, info, ok, warning, danger, muted/,
@@ -133,13 +149,27 @@ test("records are checked against the fields the manifest declared", async () =>
     [[{}], /needs an id/],
     ["not a list", /stores a list of records/],
     [[null], /stores objects/],
-    [Array.from({ length: 1001 }, (_, i) => ({ id: String(i) })), /at most 1000/],
+    [
+      Array.from({ length: 1001 }, (_, i) => ({ id: String(i) })),
+      /at most 1000/,
+    ],
   ];
   for (const [value, message] of refused)
-    await assert.rejects(async () => write(call, value), message, String(message));
+    await assert.rejects(
+      async () => write(call, value),
+      message,
+      String(message),
+    );
 
   // Clearing a slice is how a surface forgets a project, not a malformed write.
-  await call("extensions-state-write", "user.specimen", "probe.ledger", 2, "/a", null);
+  await call(
+    "extensions-state-write",
+    "user.specimen",
+    "probe.ledger",
+    2,
+    "/a",
+    null,
+  );
 });
 
 test("a borrowed slice is validated against the surface that owns it", async () => {
@@ -159,7 +189,12 @@ test("a borrowed slice is validated against the surface that owns it", async () 
   const alone = wire({ surfaces: [board] });
   await assert.rejects(
     async () =>
-      alone.call("extensions-state-aggregate", "user.specimen", "probe.ledger", 2),
+      alone.call(
+        "extensions-state-aggregate",
+        "user.specimen",
+        "probe.ledger",
+        2,
+      ),
     /No surface aggregates/,
   );
 

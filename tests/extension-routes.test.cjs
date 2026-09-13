@@ -107,7 +107,9 @@ const withPlacement = (placement) => ({
     ...fixture.contributions,
     navigation: [
       {
-        ...fixture.contributions.navigation.find((n) => n.id === "probe.nav-mode"),
+        ...fixture.contributions.navigation.find(
+          (n) => n.id === "probe.nav-mode",
+        ),
         allowedPlacements: [placement],
         defaultPlacement: placement,
       },
@@ -138,8 +140,12 @@ test("a mode.primary surface resolves to an app page", async () => {
 });
 
 test("a sidebar entry can open a page, and every resolver agrees", async () => {
-  const { resolveExtensionCommand, resolveNavigation, primaryNavigation, activePage } =
-    await library;
+  const {
+    resolveExtensionCommand,
+    resolveNavigation,
+    primaryNavigation,
+    activePage,
+  } = await library;
   const { registry, snapshot } = await registryWith(
     withPlacement("sidebar.primary"),
   );
@@ -150,10 +156,18 @@ test("a sidebar entry can open a page, and every resolver agrees", async () => {
   // The surface hosts app.page, so a sidebar entry is a page control like any
   // other. All three resolvers used to disagree here, which opened the page
   // and then closed it on the next render.
-  assert.deepEqual(resolveExtensionCommand(registry, snapshot, "test.probe", "probe.open-ledger"), {
-    kind: "page",
-    ...target,
-  });
+  assert.deepEqual(
+    resolveExtensionCommand(
+      registry,
+      snapshot,
+      "test.probe",
+      "probe.open-ledger",
+    ),
+    {
+      kind: "page",
+      ...target,
+    },
+  );
   assert.equal(
     resolveNavigation(registry, {
       extensionId: "test.probe",
@@ -181,7 +195,9 @@ test("a surface with no page control is never opened as a page", async () => {
   paneOnly.contributions.surfaces = [ledger];
   paneOnly.contributions.navigation = [
     {
-      ...fixture.contributions.navigation.find((n) => n.id === "probe.nav-mode"),
+      ...fixture.contributions.navigation.find(
+        (n) => n.id === "probe.nav-mode",
+      ),
       allowedPlacements: ["panel.picker"],
       defaultPlacement: "panel.picker",
     },
@@ -228,8 +244,12 @@ test("a command cannot reach another extension's surface", async () => {
   const { resolveExtensionCommand } = await library;
   const { registry, snapshot } = await registryWith(fixture);
   assert.equal(
-    resolveExtensionCommand(registry, snapshot, "other.extension", "probe.open-ledger")
-      .kind,
+    resolveExtensionCommand(
+      registry,
+      snapshot,
+      "other.extension",
+      "probe.open-ledger",
+    ).kind,
     "unavailable",
     "commands are addressed as (extensionId, commandId), never by name alone",
   );
@@ -247,7 +267,9 @@ const placementFixture = (placement, host = "workspace.pane") => ({
     ],
     navigation: [
       {
-        ...fixture.contributions.navigation.find((n) => n.id === "probe.nav-mode"),
+        ...fixture.contributions.navigation.find(
+          (n) => n.id === "probe.nav-mode",
+        ),
         allowedPlacements: [placement],
         defaultPlacement: placement,
       },
@@ -302,7 +324,9 @@ test("every action placement in the contract is selectable", async () => {
         ...fixture.contributions,
         actions: [
           {
-            ...fixture.contributions.actions.find((a) => a.id === "probe.act-start"),
+            ...fixture.contributions.actions.find(
+              (a) => a.id === "probe.act-start",
+            ),
             allowedPlacements: [placement],
             defaultPlacement: placement,
           },
@@ -395,10 +419,13 @@ test("a singleton surface is revealed instead of opened twice", async () => {
   const { resolvePaneOpen } = await library;
   const { registry } = await paneRegistry("singleton");
   const open = pane("test.probe", "probe.ledger");
-  assert.deepEqual(resolvePaneOpen(registry, [], {
-    extensionId: "test.probe",
-    surfaceId: "probe.ledger",
-  }), { kind: "add" });
+  assert.deepEqual(
+    resolvePaneOpen(registry, [], {
+      extensionId: "test.probe",
+      surfaceId: "probe.ledger",
+    }),
+    { kind: "add" },
+  );
   const result = resolvePaneOpen(registry, [open], {
     extensionId: "test.probe",
     surfaceId: "probe.ledger",
@@ -442,7 +469,6 @@ test("a surface that is gone reports unavailable rather than adding a pane", asy
   });
   assert.equal(result.kind, "unavailable");
 });
-
 
 const surfaceLibrary = library;
 const SEP = String.fromCharCode(0);

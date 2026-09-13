@@ -449,7 +449,7 @@ class HermesProvider {
       };
       this.changed(s);
       if (event.payload?.reason === "backend-restarted")
-        void this.reattach(s).catch((error) => {
+        void this.reattach(s).catch(() => {
           s.state = { ...s.state, status: "error" };
           this.changed(s);
         });

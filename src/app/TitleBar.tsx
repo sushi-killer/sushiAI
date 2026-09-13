@@ -15,7 +15,6 @@ import type { UpdateState, Workspace } from "../types";
 
 export function TitleBar({
   nav,
-  active,
   updates,
   tabMode,
   setTabMode,
@@ -60,7 +59,7 @@ export function TitleBar({
   noticeCount: number;
 }) {
   const { mode, section, currentRouteId } = nav;
-  const { setMode, openExtension, showWorkspace } = nav;
+  const { setMode, openExtension } = nav;
   // A contributed entry in this switch marks itself, so the mode button behind
   // it must let go - otherwise two buttons in one segmented control read as
   // selected. Computed from the route id: the title bar still learns nothing

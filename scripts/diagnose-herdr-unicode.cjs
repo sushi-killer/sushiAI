@@ -50,4 +50,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     stream?.proc.kill();
     if (w) await request(socket, "workspace.close", { workspace_id: w });
   }
-})().catch((error) => { console.error(error.message); process.exitCode = 1; });
+})().catch((error) => {
+  console.error(error.message);
+  process.exitCode = 1;
+});

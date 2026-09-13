@@ -1,0 +1,55 @@
+name: Release
+
+# Fires only when a release PR (built by scripts/release.mjs) gets
+# squash-merged - its title becomes the merge commit's message.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: startsWith(github.event.head_commit.message, 'chore(release):')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" \
+            --title "sushiAI ${{ steps.version.outputs.version }}" \
+            --notes-file "docs/releases/${{ steps.version.outputs.version }}.md" \
+            --target "${{ github.sha }}" \
+            --draft
+
+  # Unsigned for now - code signing/notarization needs an Apple developer
+  # certificate only the owner can provide. Follow-up, not silently skipped.
+  #
+  # The release stays a draft (not publicly visible) until this job uploads
+  # the dmg and un-drafts it - so a failed build here never leaves a public
+  # release with no installer to download.
+  dmg:
+    needs: publish
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run package:dmg
+      - run: cd release && shasum -a 256 *.dmg > SHA256SUMS.txt
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "v${{ needs.publish.outputs.version }}" release/*.dmg release/SHA256SUMS.txt
+          gh release edit "v${{ needs.publish.outputs.version }}" --draft=false

@@ -31,7 +31,11 @@ test("navigation restores the 0.0.6 storage shape, which never wrote a route", a
 
 test("navigation restores and re-emits an extension route", async () => {
   const { restoreNavigation, routeOf } = await library;
-  const state = restoreNavigation({ mode: "Code", section: "", route: savedRoute });
+  const state = restoreNavigation({
+    mode: "Code",
+    section: "",
+    route: savedRoute,
+  });
   assert.deepEqual(state.section, tasksSection);
   assert.deepEqual(routeOf(state), savedRoute);
 });
@@ -88,8 +92,10 @@ test("toggling the same section twice returns to the workspace", async () => {
     null,
   );
   assert.deepEqual(
-    navigationReducer(opened, { type: "toggleSection", section: core("Skills") })
-      .section,
+    navigationReducer(opened, {
+      type: "toggleSection",
+      section: core("Skills"),
+    }).section,
     core("Skills"),
   );
   // Same rule for a contributed page: clicking its entry again goes back.
@@ -123,10 +129,13 @@ test("any page opens in the Code shell, whoever contributed it", async () => {
   for (const mode of ["Agent", "Chat"])
     for (const section of [tasksSection, core("Skills")])
       assert.equal(
-        navigationReducer({ mode, section: null }, {
-          type: "toggleSection",
-          section,
-        }).mode,
+        navigationReducer(
+          { mode, section: null },
+          {
+            type: "toggleSection",
+            section,
+          },
+        ).mode,
         "Code",
         `${section.kind} page opened from ${mode}`,
       );
@@ -163,7 +172,10 @@ test("a route pointing at a surface that is gone closes itself", async () => {
     "a disabled or uninstalled extension does not strand the shell",
   );
   assert.equal(
-    shouldCloseExtension({ mode: "Code", section: core("Skills") }, () => false),
+    shouldCloseExtension(
+      { mode: "Code", section: core("Skills") },
+      () => false,
+    ),
     false,
     "a core section is never closed by a missing surface",
   );

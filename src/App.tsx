@@ -1,7 +1,7 @@
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { X } from "lucide-react";
 import type { Workspace } from "./types";
-import { tidy, uid } from "./layout";
+import { uid } from "./layout";
 import { ChatView } from "./ChatView";
 import { AgentsView } from "./agents/AgentsView";
 import { SessionsDialog } from "./SessionsDialog";
@@ -91,7 +91,6 @@ export function App() {
     connection,
     setConnection,
     connectionError,
-    setConnectionError,
     refreshHerdr,
   } = useHerdr({
     savedSocket: saved?.socket || "",
@@ -130,7 +129,6 @@ export function App() {
   });
   const {
     active,
-    activeId,
     selected,
     zoomed,
     dragId,
@@ -139,25 +137,14 @@ export function App() {
     setZoomed,
     updateWorkspace,
     updatePanel,
-    focusPanel,
-    startPanelDrag,
-    endPanelDrag,
-    zoomPanel,
-    startPanel,
-    navigatePanel,
-    setPanelAgent,
-    cancelPanelChat,
-    renamePanel,
     closePanel,
     showPanel,
-    drop,
     sendChat,
     newThread,
     deleteThread,
     runRoutine,
     endSessions,
     endWorkspace,
-    openHTML,
   } = ws;
   const addPanel = ws.addPanel;
   function switchWorkspace(id: string) {

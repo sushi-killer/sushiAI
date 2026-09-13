@@ -114,19 +114,19 @@ is listed with its error and the rest keep working.
 
 ### What a manifest controls
 
-| Field | What you decide |
-| --- | --- |
-| `surfaces[].allowedHosts` | Where the surface may appear: `app.page`, `workspace.pane`, `workspace.tab`, `dashboard.section`, `sessions.section`, `skills.section`, `settings.section` |
-| `surfaces[].stateScope` | Whether its contents are per pane (`instance`), per project (`project`), or one for the machine (`global`) |
-| `surfaces[].instancePolicy` | `singleton` reveals the pane that is already open instead of adding a second; `multiple` opens another. A surface keeping `project` or `global` state must be a singleton — several panes sharing one slice would overwrite each other |
-| `surfaces[].stateVersion` | Bump it when the shape of what you store changes; older state is kept but no longer read |
-| `surfaces[].stateId` | Read and write another surface's contents instead of your own — how one list gets two views. The two must agree on `stateScope` and `stateVersion` |
-| `surfaces[].aggregate` | A read-only page over every project at once. Needs `stateScope: "project"`, and may group by `$project`, which the app fills in with the workspace name |
-| `surfaces[].tokens` | `accent`, `density`, `radius`, `elevation` — the surface is painted in the app's own palette, and these shift it within it. Declare none and it is identical to a built-in view |
-| `navigation[].defaultPlacement` | `panel.picker` (a card in the add-panel list), `sidebar.primary`, `mode.primary`, `dashboard.navigation`, `sessions.navigation`, `skills.navigation` |
-| `actions[].defaultPlacement` | `workspace.toolbar.start`, `.before-tidy`, `.after-tidy`, `.end`, or `workspace.folder.actions` |
-| `*.order` | Position among other contributions in the same spot. In the sidebar a negative order sits above Dashboard and the other built-in sections, a positive one below them |
-| `*.icon` | A bundled name, or your own geometry (below) |
+| Field                           | What you decide                                                                                                                                                                                                                        |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `surfaces[].allowedHosts`       | Where the surface may appear: `app.page`, `workspace.pane`, `workspace.tab`, `dashboard.section`, `sessions.section`, `skills.section`, `settings.section`                                                                             |
+| `surfaces[].stateScope`         | Whether its contents are per pane (`instance`), per project (`project`), or one for the machine (`global`)                                                                                                                             |
+| `surfaces[].instancePolicy`     | `singleton` reveals the pane that is already open instead of adding a second; `multiple` opens another. A surface keeping `project` or `global` state must be a singleton — several panes sharing one slice would overwrite each other |
+| `surfaces[].stateVersion`       | Bump it when the shape of what you store changes; older state is kept but no longer read                                                                                                                                               |
+| `surfaces[].stateId`            | Read and write another surface's contents instead of your own — how one list gets two views. The two must agree on `stateScope` and `stateVersion`                                                                                     |
+| `surfaces[].aggregate`          | A read-only page over every project at once. Needs `stateScope: "project"`, and may group by `$project`, which the app fills in with the workspace name                                                                                |
+| `surfaces[].tokens`             | `accent`, `density`, `radius`, `elevation` — the surface is painted in the app's own palette, and these shift it within it. Declare none and it is identical to a built-in view                                                        |
+| `navigation[].defaultPlacement` | `panel.picker` (a card in the add-panel list), `sidebar.primary`, `mode.primary`, `dashboard.navigation`, `sessions.navigation`, `skills.navigation`                                                                                   |
+| `actions[].defaultPlacement`    | `workspace.toolbar.start`, `.before-tidy`, `.after-tidy`, `.end`, or `workspace.folder.actions`                                                                                                                                        |
+| `*.order`                       | Position among other contributions in the same spot. In the sidebar a negative order sits above Dashboard and the other built-in sections, a positive one below them                                                                   |
+| `*.icon`                        | A bundled name, or your own geometry (below)                                                                                                                                                                                           |
 
 Anything the manifest does not ask for does not appear: a surface that lists
 only `workspace.pane` has no page and no sidebar entry. A contributed page
@@ -139,21 +139,21 @@ A surface holds records; a view says how to read them. Fields are declared once
 under `data.fields` (`text`, `boolean`, `date`, `select`), and each view picks
 from them:
 
-| Field | What you decide |
-| --- | --- |
-| `primary` / `secondary` | The line of a row, and a quieter line under it |
-| `toggle` | The boolean a row's checkmark sets |
-| `meta` | Fields shown on the row. `$project` is allowed on an aggregate |
-| `editable` | Of the shown fields, the ones this view may change. Nothing is editable unless listed |
-| `layout` | `list`, `board`, or `table` |
-| `columns` | For a board: a `select` field whose options are the columns. Every option gets a column, empty or not, so the board keeps its shape |
-| `groupable` / `defaultGroup` | Fields the reader may group by. The app draws the chooser and remembers the pick |
-| `filter` | Always applied, invisible: `[{ "field": "done", "op": "ne", "value": true }]` |
-| `filterable` | Offered as a "Hide done" chip the app draws |
-| `sort` | `[{ "field": "due", "dir": "asc" }]`. Blanks sort last |
-| `summary` | Counting tiles above the list: `{ label, field, value, tone }` |
-| `actions` | Command ids to put in the page heading |
-| `allowAdd` / `allowToggle` / `allowRemove` | What a reader may do. Removal is off unless asked for |
+| Field                                      | What you decide                                                                                                                     |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `primary` / `secondary`                    | The line of a row, and a quieter line under it                                                                                      |
+| `toggle`                                   | The boolean a row's checkmark sets                                                                                                  |
+| `meta`                                     | Fields shown on the row. `$project` is allowed on an aggregate                                                                      |
+| `editable`                                 | Of the shown fields, the ones this view may change. Nothing is editable unless listed                                               |
+| `layout`                                   | `list`, `board`, or `table`                                                                                                         |
+| `columns`                                  | For a board: a `select` field whose options are the columns. Every option gets a column, empty or not, so the board keeps its shape |
+| `groupable` / `defaultGroup`               | Fields the reader may group by. The app draws the chooser and remembers the pick                                                    |
+| `filter`                                   | Always applied, invisible: `[{ "field": "done", "op": "ne", "value": true }]`                                                       |
+| `filterable`                               | Offered as a "Hide done" chip the app draws                                                                                         |
+| `sort`                                     | `[{ "field": "due", "dir": "asc" }]`. Blanks sort last                                                                              |
+| `summary`                                  | Counting tiles above the list: `{ label, field, value, tone }`                                                                      |
+| `actions`                                  | Command ids to put in the page heading                                                                                              |
+| `allowAdd` / `allowToggle` / `allowRemove` | What a reader may do. Removal is off unless asked for                                                                               |
 
 A `select` option may carry a `tone` — `neutral`, `info`, `ok`, `warning`,
 `danger`, `muted`. That is a meaning, not a colour: the app decides what

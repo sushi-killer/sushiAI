@@ -1,6 +1,5 @@
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
-import path from "node:path";
 import assert from "node:assert/strict";
 
 const profile = await fs.mkdtemp("/tmp/sushiai-agent-ui-");

@@ -158,10 +158,10 @@ test("two folders claiming one id load neither", async (t) => {
   const { manifests, problems } = await scanLocalExtensions(root);
   assert.equal(manifests.size, 0, "the outcome does not depend on read order");
   assert.equal(problems.length, 2);
-  assert.deepEqual(
-    problems.map((problem) => problem.folder).sort(),
-    ["a-first", "b-second"],
-  );
+  assert.deepEqual(problems.map((problem) => problem.folder).sort(), [
+    "a-first",
+    "b-second",
+  ]);
 });
 
 test("a folder cannot shadow a bundled extension", async (t) => {

@@ -337,7 +337,11 @@ test("editing the version is a normal edit, not a lock violation", async (t) => 
   const first = build(dirs);
   await first.setEnabled("user.specimen", true);
 
-  await localFolder(dirs.localDir, "tasks", localManifest("user.specimen", "2.0.0"));
+  await localFolder(
+    dirs.localDir,
+    "tasks",
+    localManifest("user.specimen", "2.0.0"),
+  );
   const second = build(dirs);
   const snapshot = await second.list();
   assert.equal(
@@ -385,7 +389,8 @@ test("a broken manifest is reported and recovers on refresh", async (t) => {
   const fixed = await manager.refresh();
   assert.deepEqual(fixed.problems, []);
   assert.equal(
-    fixed.extensions.find((item) => item.manifest.id === "user.specimen").status,
+    fixed.extensions.find((item) => item.manifest.id === "user.specimen")
+      .status,
     "active",
     "the earlier choice is remembered, no need to enable it again",
   );

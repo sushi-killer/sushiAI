@@ -36,6 +36,8 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha }}
           HEAD_REF: ${{ github.event.pull_request.head.sha }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
 
   # The desktop smoke drives a real Electron window, so it needs macOS. Herdr
   # is not installed on a runner; the smoke skips that step and says so.

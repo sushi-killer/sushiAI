@@ -3,13 +3,11 @@ import {
   Blocks,
   FolderOpen,
   Play,
-  Plug,
   Plus,
   Sparkles,
   TerminalSquare,
   Trash2,
   Workflow,
-  X,
 } from "lucide-react";
 import { ExtensionsView } from "../extensions/ExtensionsView.tsx";
 import { PageFrame } from "./PageFrame.tsx";
@@ -42,12 +40,8 @@ export function SectionPage({
   runRoutine,
   skills,
   extensionSnapshot,
-  notify,
-  connected,
-  activeEndpoint,
   home,
   switchWorkspace,
-  addExtensionPanel,
   setExtensionEnabled,
   refreshExtensions,
   openRoutineDialog,

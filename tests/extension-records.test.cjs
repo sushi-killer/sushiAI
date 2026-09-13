@@ -49,9 +49,17 @@ test("a field reads the way its type means it to", async (t) => {
   const { display } = await library;
   at(t, "2026-09-12");
   assert.equal(display("ok", tone), "Ok", "a select shows its label");
-  assert.equal(display("elsewhere", tone), "elsewhere", "an unknown value is not hidden");
+  assert.equal(
+    display("elsewhere", tone),
+    "elsewhere",
+    "an unknown value is not hidden",
+  );
   assert.equal(display(true, fragile), "Fragile", "a flag reads as its name");
-  assert.equal(display(false, fragile), "", "and says nothing when it is not set");
+  assert.equal(
+    display(false, fragile),
+    "",
+    "and says nothing when it is not set",
+  );
   assert.equal(display("2026-09-12", collected), "Today");
   assert.equal(display("2026-09-13", collected), "Tomorrow");
   assert.equal(display("2026-09-11", collected), "Yesterday");
@@ -69,19 +77,33 @@ test("a field reads the way its type means it to", async (t) => {
 test("a date carries its own urgency; everything else declares one", async (t) => {
   const { toneOf } = await library;
   at(t, "2026-09-12");
-  assert.equal(toneOf("danger", tone), "danger", "a select says so in the manifest");
+  assert.equal(
+    toneOf("danger", tone),
+    "danger",
+    "a select says so in the manifest",
+  );
   assert.equal(toneOf("missing", tone), "neutral");
   assert.equal(toneOf("2026-09-11", collected), "danger", "overdue");
   assert.equal(toneOf("2026-09-12", collected), "warning", "today");
   assert.equal(toneOf("2026-09-30", collected), "neutral");
-  assert.equal(toneOf("anything", name), "neutral", "text means nothing on its own");
+  assert.equal(
+    toneOf("anything", name),
+    "neutral",
+    "text means nothing on its own",
+  );
 });
 
 test("a filter compares a missing value with an absent one", async () => {
   const { matches } = await library;
   const rule = (field, op, value) => ({ field, op, value });
-  assert.equal(matches({ id: "a", tone: "ok" }, rule("tone", "eq", "ok")), true);
-  assert.equal(matches({ id: "a", tone: "ok" }, rule("tone", "ne", "ok")), false);
+  assert.equal(
+    matches({ id: "a", tone: "ok" }, rule("tone", "eq", "ok")),
+    true,
+  );
+  assert.equal(
+    matches({ id: "a", tone: "ok" }, rule("tone", "ne", "ok")),
+    false,
+  );
   assert.equal(
     matches({ id: "a" }, rule("catalogued", "ne", true)),
     true,
@@ -102,7 +124,8 @@ test("a filter compares a missing value with an absent one", async () => {
 test("records sort the way their field reads, and blanks sort last", async () => {
   const { compareRecords } = await library;
   const byId = new Map([tone, collected, fragile, name].map((f) => [f.id, f]));
-  const sorted = (sort, items) => [...items].sort(compareRecords(sort, byId)).map((i) => i.id);
+  const sorted = (sort, items) =>
+    [...items].sort(compareRecords(sort, byId)).map((i) => i.id);
   assert.deepEqual(
     sorted(
       [{ field: "tone", dir: "asc" }],
@@ -169,11 +192,26 @@ test("records sort the way their field reads, and blanks sort last", async () =>
 test("buckets are piles a person would name", async (t) => {
   const { bucketOf } = await library;
   at(t, "2026-09-12");
-  assert.equal(bucketOf({ id: "a", $project: "Smart Read" }, undefined, "$project"), "Smart Read");
-  assert.equal(bucketOf({ id: "a", collected: "2026-09-01" }, collected, "collected"), "Overdue");
-  assert.equal(bucketOf({ id: "a", collected: "2026-09-12" }, collected, "collected"), "Today");
-  assert.equal(bucketOf({ id: "a", collected: "2026-09-16" }, collected, "collected"), "This week");
-  assert.equal(bucketOf({ id: "a", collected: "2026-11-01" }, collected, "collected"), "Later");
+  assert.equal(
+    bucketOf({ id: "a", $project: "Smart Read" }, undefined, "$project"),
+    "Smart Read",
+  );
+  assert.equal(
+    bucketOf({ id: "a", collected: "2026-09-01" }, collected, "collected"),
+    "Overdue",
+  );
+  assert.equal(
+    bucketOf({ id: "a", collected: "2026-09-12" }, collected, "collected"),
+    "Today",
+  );
+  assert.equal(
+    bucketOf({ id: "a", collected: "2026-09-16" }, collected, "collected"),
+    "This week",
+  );
+  assert.equal(
+    bucketOf({ id: "a", collected: "2026-11-01" }, collected, "collected"),
+    "Later",
+  );
   assert.equal(bucketOf({ id: "a" }, collected, "collected"), "No date");
   assert.equal(bucketOf({ id: "a", tone: "ok" }, tone, "tone"), "Ok");
   assert.equal(
@@ -186,7 +224,9 @@ test("buckets are piles a person would name", async (t) => {
 test("bucket headings read in their own order, never alphabetically", async () => {
   const { orderBuckets } = await library;
   assert.deepEqual(
-    ["Later", "No date", "Overdue", "This week", "Today"].sort(orderBuckets(collected)),
+    ["Later", "No date", "Overdue", "This week", "Today"].sort(
+      orderBuckets(collected),
+    ),
     ["Overdue", "Today", "This week", "Later", "No date"],
     "alphabetical order would put Overdue after Later",
   );

@@ -11,10 +11,8 @@ import {
   Sparkles,
   TerminalSquare,
   Workflow,
-  X,
 } from "lucide-react";
 import { Icon } from "../PanelIcon.tsx";
-import type React from "react";
 import {
   ExtensionActionSlot,
   ExtensionIcon,
@@ -140,7 +138,6 @@ export function Sidebar({
   setWorkspaceQuery,
   switchWorkspace,
   showPanel,
-  requestClose,
   setSlot,
   selected,
   connected,

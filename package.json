@@ -20,7 +20,7 @@
     "test:stream": "node scripts/stream-integration.cjs",
     "test:remote": "node scripts/features-smoke.mjs",
     "promo": "node scripts/promo.mjs",
-    "package:dmg": "npm run build && electron-builder --mac dmg --arm64",
+    "package:dmg": "npm run build && electron-builder --mac dmg --arm64 --publish never",
     "test:unicode": "node scripts/terminal-unicode.mjs",
     "perf": "node scripts/perf-benchmark.mjs",
     "check:conventions": "node scripts/check-conventions.mjs",

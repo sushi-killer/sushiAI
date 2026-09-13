@@ -7,6 +7,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
+import { addsMarkdownFragment } from "./lib/release-notes.mjs";
 
 const run = promisify(execFile);
 const root = process.cwd();
@@ -189,7 +190,7 @@ if (headBranch && prTitle) {
       "--",
       "docs/releases/unreleased/",
     ]);
-    if (!added.split("\n").some((line) => line.endsWith(".md")))
+    if (!addsMarkdownFragment(added))
       problems.push(
         `PR title marks a breaking change ("!") but adds no docs/releases/unreleased/*.md fragment`,
       );

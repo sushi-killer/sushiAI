@@ -7,6 +7,7 @@ const {
   validate,
   quote,
   run,
+  declaresForwards,
 } = require("../electron/connections.cjs");
 const { PreviewServer } = require("../electron/preview.cjs");
 const { detectAgent } = require("../electron/terminal-stream.cjs");
@@ -118,4 +119,26 @@ test("project inspection: text, images, git, containment and static preview", as
     await c.close();
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+test("a host whose ssh_config declares a forward is detected, lookalikes are not", () => {
+  // Shaped like `ssh -G <host>` output. A LocalForward the user's ssh_config
+  // declares rides along on every connection to that Host. Synthetic values:
+  // 192.0.2.0/24 is RFC 5737 documentation space and never a real machine.
+  assert.equal(
+    declaresForwards(
+      "user builder\nhostname 192.0.2.10\nlocalforward 8080 [192.0.2.10]:80\n",
+    ),
+    true,
+  );
+  assert.equal(declaresForwards("remoteforward 9000 localhost:9000\n"), true);
+  assert.equal(declaresForwards("dynamicforward 1080\n"), true);
+  // Printed for every host, forward or not. Matching the word "forward" alone
+  // would send every connection past the shared master.
+  assert.equal(
+    declaresForwards(
+      "user builder\nforwardagent no\nforwardx11 no\nexitonforwardfailure no\nclearallforwardings no\n",
+    ),
+    false,
+  );
 });

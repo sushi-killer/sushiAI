@@ -7,6 +7,7 @@ const {
   session,
   shell,
   safeStorage,
+  powerMonitor,
 } = require("electron");
 const path = require("node:path");
 const os = require("node:os");
@@ -193,6 +194,9 @@ function validWebURL(value) {
 app.whenReady().then(async () => {
   connections = new Connections(app.getPath("userData"));
   await connections.init();
+  // Sleep/wake can drop every SSH tunnel at once - retry them all rather than
+  // waiting for each one's own backoff timer to come back around.
+  powerMonitor.on("resume", () => connections.retryAutoConnect());
   updates = new Updates({
     directory: app.getPath("userData"),
     currentVersion: app.getVersion(),

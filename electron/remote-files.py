@@ -189,6 +189,16 @@ def git_branches_result(base):
     return {"branches": branches}
 
 
+def git_remote_result(base):
+    # Missing repo or missing "origin" both raise the same way from git() -
+    # neither is an error worth surfacing, just "no remote to match on".
+    try:
+        url = git(base, "remote", "get-url", "origin").strip()
+    except ValueError:
+        url = ""
+    return {"remote": url}
+
+
 def read_json_file(filename, fallback):
     try:
         value = json.loads(filename.read_text(encoding="utf-8"))
@@ -594,6 +604,8 @@ def inspect(data):
         return git_log_result(base, data)
     if operation == "branches":
         return git_branches_result(base)
+    if operation == "git_remote":
+        return git_remote_result(base)
     if operation == "checkout":
         branch = data.get("branch")
         if not isinstance(branch, str) or not branch or branch.startswith("-"):

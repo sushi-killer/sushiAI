@@ -253,3 +253,31 @@ test("branches lists local branches and checkout refuses to drop uncommitted wor
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test("git_remote reports the origin URL, or an empty one when there isn't a repo or remote", async () => {
+  const root = await fs.mkdtemp("/tmp/sushiai-git-remote-test-");
+  const c = new Connections(root);
+  await c.init();
+  const inspect = (operation, extra = {}) =>
+    c.inspect(null, { operation, root, ...extra });
+  try {
+    assert.equal((await inspect("git_remote")).remote, "");
+    await run("/usr/bin/git", ["init", "-q", "-b", "main", root]);
+    assert.equal((await inspect("git_remote")).remote, "");
+    await run("/usr/bin/git", [
+      "-C",
+      root,
+      "remote",
+      "add",
+      "origin",
+      "git@example.invalid:acme/n8n.git",
+    ]);
+    assert.equal(
+      (await inspect("git_remote")).remote,
+      "git@example.invalid:acme/n8n.git",
+    );
+  } finally {
+    await c.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

@@ -47,12 +47,18 @@ export function TerminalPanel({
   cwd,
   socket,
   endpoint,
+  hostLabel,
   onStart,
 }: {
   panel: Panel;
   cwd: string;
   socket: string;
   endpoint?: string;
+  /** Pane provenance (AC23-AC24): set only when this pane's workspace is a
+   * member of a merged sidebar row (flat mode). Renders in the same corner
+   * cluster as the Herdr note, ahead of it (AC24), and independently of it -
+   * a merged workspace's local (non-Herdr) pane still gets the label alone. */
+  hostLabel?: string;
   onStart(): void;
 }) {
   const host = useRef<HTMLDivElement>(null);
@@ -425,13 +431,25 @@ export function TerminalPanel({
           </button>
         </div>
       )}
-      {panel.herdrId && (
-        <span
-          className="herdr-terminal-note"
-          title="Direct Herdr stream: raw input, incremental frames and native terminal resizing."
-        >
-          Herdr · live stream
-        </span>
+      {(hostLabel || panel.herdrId) && (
+        <div className="pane-host-cluster">
+          {panel.herdrId && (
+            <span
+              className="herdr-terminal-note"
+              title="Direct Herdr stream: raw input, incremental frames and native terminal resizing."
+            >
+              Herdr · live stream
+            </span>
+          )}
+          {hostLabel && (
+            <span
+              className="herdr-terminal-note"
+              title={`This pane runs on ${hostLabel}.`}
+            >
+              {hostLabel}
+            </span>
+          )}
+        </div>
       )}
     </div>
   );

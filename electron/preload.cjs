@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld("bridge", {
     return () => ipcRenderer.removeListener("agent-event", listener);
   },
   system: invoke("system"),
+  keepAwake: invoke("keep-awake"),
   updatesState: invoke("updates-state"),
   updatesCheck: invoke("updates-check"),
   updatesDownload: invoke("updates-download"),
@@ -70,6 +71,7 @@ contextBridge.exposeInMainWorld("bridge", {
   window: invoke("window"),
   connectionsList: invoke("connections-list"),
   connectionsSave: invoke("connections-save"),
+  connectionsSetHidden: invoke("connections-set-hidden"),
   connectionsDelete: invoke("connections-delete"),
   connectionsConnect: invoke("connections-connect"),
   connectionsDisconnect: invoke("connections-disconnect"),

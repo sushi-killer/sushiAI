@@ -1,37 +1,56 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { Globe, Link, Plus, Server, Trash2, Unplug } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import {
+  Eye,
+  EyeOff,
+  Globe,
+  Link,
+  Pencil,
+  Plus,
+  Server,
+  Trash2,
+  Unplug,
+} from "lucide-react";
 import type { ConnectionProfile } from "./types";
 export function ConnectionsSettings({
   endpoint,
   localSocket,
   onSelect,
   socketForm,
+  profiles,
+  onRefresh,
+  notify,
 }: {
   endpoint: string;
   localSocket: string;
   onSelect(endpoint: string): void;
   /** The Herdr socket form, owned by App because it drives the connection. */
   socketForm?: ReactNode;
+  /** Shared with the Sidebar, which labels workspace groups by the same profiles. */
+  profiles: ConnectionProfile[];
+  onRefresh(): Promise<void>;
+  notify(text: string): void;
 }) {
-  const [profiles, setProfiles] = useState<ConnectionProfile[]>([]),
-    [editing, setEditing] = useState(false),
+  const [editing, setEditing] = useState<ConnectionProfile | "new" | null>(
+      null,
+    ),
     [busy, setBusy] = useState(""),
     [error, setError] = useState("");
-  const refresh = () =>
-    window.bridge
-      ?.connectionsList()
-      .then(setProfiles)
-      .catch((e) => setError(e.message));
-  useEffect(() => {
-    refresh();
-  }, []);
-  async function connect(value: string) {
+  async function connect(value: string, label: string) {
     setBusy(value);
     setError("");
     try {
       await window.bridge!.connectionsConnect(value);
       onSelect(value);
-      await refresh();
+      const response = await window
+        .bridge!.herdr(value, "session.snapshot")
+        .catch(() => null);
+      const count = (response?.snapshot ?? response)?.workspaces?.length;
+      notify(
+        typeof count === "number"
+          ? `Connected to ${label}: ${count} workspace${count === 1 ? "" : "s"}.`
+          : `Connected to ${label}.`,
+      );
+      await onRefresh();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -55,33 +74,53 @@ export function ConnectionsSettings({
         </button>
         {profiles.map((p) => (
           <div
-            className={`connection-card ${endpoint === `ssh:${p.id}` ? "selected" : ""}`}
+            className={`connection-card ${endpoint === `ssh:${p.id}` ? "selected" : ""} ${p.hidden ? "hidden-from-sidebar" : ""}`}
             key={p.id}
           >
             <Globe size={17} />
             <button
               className="connection-info"
-              onClick={() => connect(`ssh:${p.id}`)}
+              onClick={() => connect(`ssh:${p.id}`, p.name)}
             >
               <strong>{p.name}</strong>
               <small>
                 {p.host}
                 {p.port ? `:${p.port}` : ""} · {p.socket}
+                {p.hidden ? " · hidden from Workspaces" : ""}
               </small>
             </button>
             <button
               title={`Connect ${p.name}`}
               disabled={!!busy}
-              onClick={() => connect(`ssh:${p.id}`)}
+              onClick={() => connect(`ssh:${p.id}`, p.name)}
             >
               <Link size={14} />
+            </button>
+            <button title={`Edit ${p.name}`} onClick={() => setEditing(p)}>
+              <Pencil size={13} />
+            </button>
+            <button
+              title={
+                p.hidden
+                  ? `Show ${p.name} in Workspaces`
+                  : `Hide ${p.name} from Workspaces`
+              }
+              onClick={async () => {
+                await window.bridge!.connectionsSetHidden(
+                  `ssh:${p.id}`,
+                  !p.hidden,
+                );
+                await onRefresh();
+              }}
+            >
+              {p.hidden ? <EyeOff size={14} /> : <Eye size={14} />}
             </button>
             <button
               title={`Disconnect ${p.name}`}
               onClick={async () => {
                 await window.bridge!.connectionsDisconnect(`ssh:${p.id}`);
                 if (endpoint === `ssh:${p.id}`) onSelect(localSocket);
-                refresh();
+                await onRefresh();
               }}
             >
               <Unplug size={14} />
@@ -91,7 +130,7 @@ export function ConnectionsSettings({
               onClick={async () => {
                 await window.bridge!.connectionsDelete(`ssh:${p.id}`);
                 if (endpoint === `ssh:${p.id}`) onSelect(localSocket);
-                refresh();
+                await onRefresh();
               }}
             >
               <Trash2 size={13} />
@@ -107,14 +146,15 @@ export function ConnectionsSettings({
               setError("");
               try {
                 const p = await window.bridge!.connectionsSave({
+                  id: typeof editing === "object" ? editing.id : undefined,
                   name: String(form.get("name")),
                   host: String(form.get("host")),
                   port: Number(form.get("port")) || undefined,
                   socket: String(form.get("socket")),
                 });
-                setEditing(false);
-                await refresh();
-                await connect(`ssh:${p.id}`);
+                setEditing(null);
+                await onRefresh();
+                await connect(`ssh:${p.id}`, p.name);
               } catch (e) {
                 setError(String(e));
               }
@@ -122,12 +162,26 @@ export function ConnectionsSettings({
           >
             <label>
               Connection name
-              <input name="name" placeholder="Lab" required />
+              <input
+                name="name"
+                placeholder="Lab"
+                defaultValue={
+                  typeof editing === "object" ? editing.name : undefined
+                }
+                required
+              />
             </label>
             <div className="form-row">
               <label>
                 SSH alias or user@host
-                <input name="host" placeholder="lab" required />
+                <input
+                  name="host"
+                  placeholder="lab"
+                  defaultValue={
+                    typeof editing === "object" ? editing.host : undefined
+                  }
+                  required
+                />
               </label>
               <label>
                 Port
@@ -137,6 +191,9 @@ export function ConnectionsSettings({
                   min="1"
                   max="65535"
                   placeholder="From SSH config"
+                  defaultValue={
+                    typeof editing === "object" ? editing.port : undefined
+                  }
                 />
               </label>
             </div>
@@ -144,19 +201,25 @@ export function ConnectionsSettings({
               Remote Herdr socket
               <input
                 name="socket"
-                defaultValue="~/.config/herdr/herdr.sock"
+                defaultValue={
+                  typeof editing === "object"
+                    ? editing.socket
+                    : "~/.config/herdr/herdr.sock"
+                }
                 required
               />
             </label>
             <p className="muted">
               Uses your SSH config, keys and agent. Connect once in Terminal to
               verify a new host’s key. Remote file browsing requires Python 3.
+              To connect as a different Unix user, use <code>user@host</code>{" "}
+              (e.g. <code>user@devbox</code>).
             </p>
             <div className="dialog-actions">
               <button
                 className="secondary"
                 type="button"
-                onClick={() => setEditing(false)}
+                onClick={() => setEditing(null)}
               >
                 Cancel
               </button>
@@ -166,7 +229,7 @@ export function ConnectionsSettings({
             </div>
           </form>
         ) : (
-          <button className="add-row" onClick={() => setEditing(true)}>
+          <button className="add-row" onClick={() => setEditing("new")}>
             <Plus size={12} /> Add SSH host
           </button>
         )}

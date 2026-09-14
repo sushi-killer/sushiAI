@@ -1,6 +1,6 @@
 ---
 name: extension-manifest-change
-description: This skill should be used when changing what an extension manifest may contain in sushiAI — adding, renaming, or narrowing a field on surfaces, navigation, actions, or commands in electron/extensions/manifest.cjs. Trigger on requests like "add a new manifest field", "change the extension contract", or "the validator needs to accept/reject X".
+description: Changes what an extension manifest may contain: validator in electron/extensions/manifest.cjs, then the mirrored src/extensions/types.ts, then the probe fixture and contract-coverage tests, in that order. Use for any request to add, rename, narrow or remove a manifest field, or make the validator accept or reject something.
 ---
 
 # Extension manifest contract change

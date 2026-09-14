@@ -1,0 +1,8 @@
+## Cross-host workspace rows merge in flat mode, and panes name their host
+
+- With grouping off (flat list), a project that runs on this Mac and on an SSH host now shows as one row instead of two, with a small text chip per host next to the name (`This Mac`, the host's own name) and a single status dot for whichever host you're actually on. Expanding the row lists every host's sessions in one list, each with a small icon for its machine (hover for the host name); clicking a session is what actually switches you to that machine, never the row itself.
+- The host-mix marker on a cross-host row that doesn't qualify to merge (different checkout name) now sits immediately after the workspace name, with a small gap, in both flat and grouped mode - it used to sit after the remote host tag.
+- A terminal or agent pane belonging to a merged workspace now names its host in the pane's corner, in a matching chip to the right of the `Herdr · live stream` note. Panes of a workspace that isn't merged are unchanged.
+- The remote host tag's text colour is very slightly brighter everywhere it appears, to pass accessibility contrast now that a merged row's host chips depend on it.
+
+Known limitations: the merge only recognizes two workspaces as the same project when they share a normalized git remote and an equal checkout folder name - a project without a git remote, or checked out under two different folder names, always keeps two separate rows.

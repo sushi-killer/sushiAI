@@ -37,12 +37,14 @@ import {
   groupStatus,
   isHidden,
   mergedMarkerAccessibleName,
+  memberLabel,
   mergedRowStatusKey,
   mixedRemotes,
   shouldCollapseHostMarkers,
   type MergeGroup,
 } from "./workspaceMerge.ts";
 import type { ConnectionProfile, Panel, Workspace } from "../types";
+import type { ProjectGit } from "./useProjectGit.ts";
 
 /** The left nav is the app's own sections followed by whatever manifests add.
  * A manifest orders its entries among themselves and cannot reach above a
@@ -164,7 +166,7 @@ export function Sidebar({
   localSocket,
   connectionProfiles,
   statusByEndpoint,
-  projectRemotes,
+  projectGit,
   workspaceGrouping,
   setWorkspaceGrouping,
   openSettings,
@@ -203,9 +205,9 @@ export function Sidebar({
   /** Real, current poll status per endpoint - every connected host is polled
    * independently, so this is never just the default connection's status. */
   statusByEndpoint: Record<string, string>;
-  /** Each workspace's normalized git remote ("" when unknown/not a repo) -
-   * two workspaces sharing one are the same project checked out twice. */
-  projectRemotes: Record<string, string>;
+  /** Each workspace's git identity - remote, shared git dir, checkout and
+   * branch - which decides when two workspaces are one project. */
+  projectGit: Record<string, ProjectGit>;
   /** "grouped" sections workspaces under a collapsible host header; "flat"
    * is a single list with a small tag naming a remote workspace's host. */
   workspaceGrouping: "grouped" | "flat";
@@ -240,7 +242,8 @@ export function Sidebar({
       return next;
     });
   /** One workspace row - each carries a `tag` (the owning host's label) next
-   * to its name when it isn't this Mac's, since the list is always flat, and
+   * to its name when it isn't this Mac's, or its branch when another row
+   * shares its name, since the list is always flat, and
    * a small `mixed` marker when this project also runs on the other kind of
    * machine (a plain signal, not a merge - every copy stays its own row). */
   const renderRow = (
@@ -335,6 +338,8 @@ export function Sidebar({
     const live =
       groupStatus(statusKey, localSocket, statusByEndpoint) === "connected";
     const collapse = shouldCollapseHostMarkers(group, connectionProfiles);
+    // On one machine every pane's icon would be identical noise.
+    const manyHosts = new Set(group.members.map((m) => m.hostKey)).size > 1;
     const markerName = mergedMarkerAccessibleName(
       group,
       connectionProfiles,
@@ -344,7 +349,7 @@ export function Sidebar({
     const rowTitle = group.members
       .map(
         (m) =>
-          `${groupLabel(m.hostKey, connectionProfiles)} - ${m.workspace.cwd}`,
+          `${memberLabel(group, m, connectionProfiles)} - ${m.workspace.cwd}`,
       )
       .join("\n");
     return (
@@ -382,11 +387,13 @@ export function Sidebar({
             title={markerName}
           >
             {collapse ? (
-              <span className="remote-tag">{group.members.length} hosts</span>
+              <span className="remote-tag">
+                {group.members.length} {group.worktrees ? "worktrees" : "hosts"}
+              </span>
             ) : (
               group.members.map((m) => (
-                <span className="remote-tag" key={m.hostKey}>
-                  {groupLabel(m.hostKey, connectionProfiles)}
+                <span className="remote-tag" key={m.workspace.id}>
+                  {memberLabel(group, m, connectionProfiles)}
                 </span>
               ))
             )}
@@ -399,14 +406,14 @@ export function Sidebar({
         {expanded && (
           <div className="workspace-panels">
             {group.members.flatMap((m) => {
-              const label = groupLabel(m.hostKey, connectionProfiles);
+              const label = memberLabel(group, m, connectionProfiles);
               const offline =
                 groupStatus(m.hostKey, localSocket, statusByEndpoint) ===
                 "offline";
               const HostIcon = m.hostKey === LOCAL_GROUP ? Server : Globe;
               return codePanels(m.workspace).map((p) => (
                 <button
-                  key={`${m.hostKey}:${p.id}`}
+                  key={`${m.workspace.id}:${p.id}`}
                   className={`${selected === p.id && m.workspace.id === active.id ? "selected" : ""} ${offline ? "offline" : ""}`}
                   onClick={() => selectHostPane(m.workspace, p)}
                   title={`${p.title} - ${label}${offline ? " (offline)" : ""}`}
@@ -417,11 +424,16 @@ export function Sidebar({
                       ? p.url.replace(/^https?:\/\//, "").replace(/\/$/, "")
                       : p.title}
                   </span>
-                  <HostIcon
-                    size={10}
-                    className="pane-host-icon"
-                    aria-label={label}
-                  />
+                  {group.worktrees && (
+                    <span className="remote-tag pane-branch">{label}</span>
+                  )}
+                  {manyHosts && (
+                    <HostIcon
+                      size={10}
+                      className="pane-host-icon"
+                      aria-label={label}
+                    />
+                  )}
                   {p.status === "working" && (
                     <i className="status-dot green pulse" />
                   )}
@@ -520,7 +532,7 @@ export function Sidebar({
                       .includes(workspaceQuery.toLowerCase()) &&
                     !isHidden(w.connection, connectionProfiles),
                 );
-                const mixed = mixedRemotes(visible, projectRemotes);
+                const mixed = mixedRemotes(visible, projectGit);
                 const filtering = workspaceQuery.trim().length > 0;
                 if (workspaceGrouping === "flat") {
                   // A search that matches nothing used to render an empty
@@ -540,10 +552,13 @@ export function Sidebar({
                   // reorders one.
                   const mergeGroups = computeMergeGroups(
                     visible,
-                    projectRemotes,
+                    projectGit,
                     connectionProfiles,
                   );
                   const consumed = new Set<string>();
+                  const nameCount = new Map<string, number>();
+                  for (const w of visible)
+                    nameCount.set(w.name, (nameCount.get(w.name) ?? 0) + 1);
                   return visible.map((w) => {
                     if (consumed.has(w.id)) return null;
                     const group = mergeGroups.get(w.id);
@@ -557,14 +572,16 @@ export function Sidebar({
                       groupStatus(key, localSocket, statusByEndpoint) ===
                       "connected";
                     const tag =
-                      key === LOCAL_GROUP
-                        ? undefined
-                        : groupLabel(key, connectionProfiles);
+                      key !== LOCAL_GROUP
+                        ? groupLabel(key, connectionProfiles)
+                        : (nameCount.get(w.name) ?? 0) > 1
+                          ? projectGit[w.id]?.branch || undefined
+                          : undefined;
                     return renderRow(
                       w,
                       live,
                       tag,
-                      mixed.has(projectRemotes[w.id]),
+                      mixed.has(projectGit[w.id]?.remote ?? ""),
                     );
                   });
                 }
@@ -648,7 +665,7 @@ export function Sidebar({
                               w,
                               live,
                               undefined,
-                              mixed.has(projectRemotes[w.id]),
+                              mixed.has(projectGit[w.id]?.remote ?? ""),
                             ),
                           )}
                         </div>

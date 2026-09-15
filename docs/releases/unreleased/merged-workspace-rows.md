@@ -5,4 +5,6 @@
 - A terminal or agent pane belonging to a merged workspace now names its host in the pane's corner, in a matching chip to the right of the `Herdr · live stream` note. Panes of a workspace that isn't merged are unchanged.
 - The remote host tag's text colour is very slightly brighter everywhere it appears, to pass accessibility contrast now that a merged row's host chips depend on it.
 
-Known limitations: the merge only recognizes two workspaces as the same project when they share a normalized git remote and an equal checkout folder name - a project without a git remote, or checked out under two different folder names, always keeps two separate rows.
+- Git worktrees of one repository merge into one row the same way, on one machine or across hosts. Once a row holds several worktrees, its chips name each checkout's branch (prefixed with the host's name off this Mac), a crowded row collapses to `N worktrees`, and each session in the expanded list and each pane's corner chip carries that same label. Separate clones of a repository are never merged, even with the same remote and folder name; a clone whose row shares a name with another row shows its branch as a chip instead.
+
+Known limitations: across hosts, two checkouts only count as one project when they share a normalized git remote and the main repository folder has the same name on both. A machine that holds two separate clones of that project contributes neither to the merged row.

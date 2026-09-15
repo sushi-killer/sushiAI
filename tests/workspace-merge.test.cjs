@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 
 const library = import("../src/app/workspaceMerge.ts");
 
-// Invented hosts only, per AGENTS.md - no real hostnames or addresses.
+const REMOTE = "example.test/dev/sushiai";
 const profile = (id, name, extra = {}) => ({
   id,
   name,
@@ -20,63 +20,243 @@ const workspace = (id, connection, cwd, name = id) => ({
   panels: [],
   layout: null,
 });
+/** A checkout's git identity; `repo` is the main checkout whose `.git` a
+ * worktree shares (defaults to the checkout itself). */
+const git = (remote, checkout, branch = "main", repo = checkout) => ({
+  remote,
+  commonDir: `${repo}/.git`,
+  checkout,
+  subdir: "",
+  branch,
+});
+/** Every workspace checked out in its own cwd under one remote. */
+const gitFor = (workspaces, remote = REMOTE) =>
+  Object.fromEntries(workspaces.map((w) => [w.id, git(remote, w.cwd)]));
 
-test("two hosts + same remote + same basename -> one merged entry", async () => {
+test("two hosts + same remote + same repository name -> one merged entry", async () => {
   const { computeMergeGroups } = await library;
   const local = workspace("w-local", undefined, "/Users/dev/sushiai");
   const remote = workspace("w-lab", "ssh:lab", "/home/dev/sushiai");
-  const remotes = {
-    "w-local": "example.test/dev/sushiai",
-    "w-lab": "example.test/dev/sushiai",
-  };
-  const groups = computeMergeGroups([local, remote], remotes, [
+  const groups = computeMergeGroups([local, remote], gitFor([local, remote]), [
     profile("lab", "Lab"),
   ]);
   assert.equal(groups.size, 2, "both member ids resolve to a group");
   assert.equal(groups.get("w-local"), groups.get("w-lab"));
   const group = groups.get("w-local");
   assert.equal(group.members.length, 2);
+  assert.equal(group.worktrees, false);
 });
 
-test("no git remote -> never merges", async () => {
+test("no git remote -> never merges across hosts", async () => {
   const { computeMergeGroups } = await library;
   const local = workspace("w-local", undefined, "/Users/dev/api");
   const remote = workspace("w-lab", "ssh:lab", "/home/dev/api");
-  const remotes = { "w-local": "", "w-lab": "" };
-  const groups = computeMergeGroups([local, remote], remotes, [
-    profile("lab", "Lab"),
-  ]);
+  const groups = computeMergeGroups(
+    [local, remote],
+    gitFor([local, remote], ""),
+    [profile("lab", "Lab")],
+  );
   assert.equal(groups.size, 0);
 });
 
-test("same host twice -> never merges", async () => {
+test("not a git repository -> never merges", async () => {
+  const { computeMergeGroups } = await library;
+  const local = workspace("w-local", undefined, "/Users/dev/api");
+  const remote = workspace("w-lab", "ssh:lab", "/home/dev/api");
+  const none = {
+    remote: "",
+    commonDir: "",
+    checkout: "",
+    subdir: "",
+    branch: "",
+  };
+  const groups = computeMergeGroups(
+    [local, remote],
+    { "w-local": none, "w-lab": none },
+    [profile("lab", "Lab")],
+  );
+  assert.equal(groups.size, 0);
+});
+
+test("one checkout opened twice on a host -> never merges", async () => {
   const { computeMergeGroups } = await library;
   const a = workspace("w-a", "ssh:lab", "/home/dev/sushiai");
   const b = workspace("w-b", "ssh:lab", "/home/dev/sushiai");
-  const remotes = {
-    "w-a": "example.test/dev/sushiai",
-    "w-b": "example.test/dev/sushiai",
-  };
-  const groups = computeMergeGroups([a, b], remotes, [profile("lab", "Lab")]);
+  const groups = computeMergeGroups([a, b], gitFor([a, b]), [
+    profile("lab", "Lab"),
+  ]);
   assert.equal(
     groups.size,
     0,
-    "two workspaces on one host never merge with each other",
+    "two workspaces in one checkout never merge with each other",
   );
 });
 
-test("same remote, different cwd basename -> does not merge", async () => {
+test("same remote, different repository name -> does not merge", async () => {
   const { computeMergeGroups } = await library;
   const local = workspace("w-local", undefined, "/Users/dev/sushiai");
   const remote = workspace("w-lab", "ssh:lab", "/home/dev/sushiai-fork");
-  const remotes = {
-    "w-local": "example.test/dev/sushiai",
-    "w-lab": "example.test/dev/sushiai",
-  };
-  const groups = computeMergeGroups([local, remote], remotes, [
+  const groups = computeMergeGroups([local, remote], gitFor([local, remote]), [
     profile("lab", "Lab"),
   ]);
   assert.equal(groups.size, 0);
+});
+
+test("worktrees of one repository on one host merge, labelled by branch, main checkout first", async () => {
+  const { computeMergeGroups, memberLabel, mergedMarkerAccessibleName } =
+    await library;
+  const feature = workspace(
+    "w-feature",
+    undefined,
+    "/Users/dev/sushiai-feature",
+  );
+  const main = workspace("w-main", undefined, "/Users/dev/sushiai");
+  const projectGit = {
+    "w-feature": git("", feature.cwd, "feature", main.cwd),
+    "w-main": git("", main.cwd, "main"),
+  };
+  const group = computeMergeGroups([feature, main], projectGit, []).get(
+    "w-feature",
+  );
+  assert.ok(group, "worktrees merge even without a remote");
+  assert.equal(group.worktrees, true);
+  assert.deepEqual(
+    group.members.map((m) => m.workspace.id),
+    ["w-main", "w-feature"],
+  );
+  assert.deepEqual(
+    group.members.map((m) => memberLabel(group, m, [])),
+    ["main", "feature"],
+  );
+  assert.equal(
+    mergedMarkerAccessibleName(group, [], "/tmp/local.sock", {
+      "/tmp/local.sock": "connected",
+    }),
+    "Checked out as main (Connected) and feature (Connected).",
+  );
+});
+
+test("separate clones of one repository on one host never merge", async () => {
+  const { computeMergeGroups } = await library;
+  const a = workspace("w-a", undefined, "/Users/dev/sushiai");
+  const b = workspace("w-b", undefined, "/Users/dev/copy/sushiai");
+  const lab = workspace("w-lab", "ssh:lab", "/home/dev/sushiai");
+  const profiles = [profile("lab", "Lab")];
+  assert.equal(computeMergeGroups([a, b], gitFor([a, b]), profiles).size, 0);
+  assert.equal(
+    computeMergeGroups([a, b, lab], gitFor([a, b, lab]), profiles).size,
+    0,
+    "a host holding two clones contributes neither, leaving Lab alone",
+  );
+});
+
+test("a clone next to a worktree pair keeps the pair merged, and out of the cross-host row", async () => {
+  const { computeMergeGroups, memberLabel } = await library;
+  const main = workspace("w-main", undefined, "/Users/dev/sushiai");
+  const feature = workspace(
+    "w-feature",
+    undefined,
+    "/Users/dev/sushiai-feature",
+  );
+  const copy = workspace("w-copy", undefined, "/Users/dev/copy/sushiai");
+  const lab = workspace("w-lab", "ssh:lab", "/home/dev/sushiai");
+  const profiles = [profile("lab", "Lab")];
+  const projectGit = {
+    "w-main": git(REMOTE, main.cwd),
+    "w-feature": git(REMOTE, feature.cwd, "feature", main.cwd),
+    "w-copy": git(REMOTE, copy.cwd),
+    "w-lab": git(REMOTE, lab.cwd),
+  };
+  const groups = computeMergeGroups(
+    [main, feature, copy, lab],
+    projectGit,
+    profiles,
+  );
+  const pair = groups.get("w-main");
+  assert.ok(pair, "the worktrees still merge");
+  assert.equal(groups.get("w-feature"), pair);
+  assert.deepEqual(
+    pair.members.map((m) => memberLabel(pair, m, profiles)),
+    ["main", "feature"],
+  );
+  assert.equal(groups.has("w-copy"), false);
+  assert.equal(groups.has("w-lab"), false, "Lab has no single match here");
+});
+
+test("different folders of one repository never merge across hosts", async () => {
+  const { computeMergeGroups } = await library;
+  const web = workspace("w-web", undefined, "/Users/dev/mono/apps/web");
+  const api = workspace("w-api", "ssh:lab", "/home/dev/mono/apps/api");
+  const projectGit = {
+    "w-web": { ...git(REMOTE, "/Users/dev/mono"), subdir: "apps/web" },
+    "w-api": { ...git(REMOTE, "/home/dev/mono"), subdir: "apps/api" },
+  };
+  assert.equal(
+    computeMergeGroups([web, api], projectGit, [profile("lab", "Lab")]).size,
+    0,
+  );
+  projectGit["w-api"].subdir = "apps/web";
+  assert.equal(
+    computeMergeGroups([web, api], projectGit, [profile("lab", "Lab")]).size,
+    2,
+  );
+});
+
+test("a worktree folder name does not block a cross-host merge", async () => {
+  const { computeMergeGroups, memberLabel } = await library;
+  const local = workspace("w-local", undefined, "/Users/dev/sushiai-feature");
+  const lab = workspace("w-lab", "ssh:lab", "/home/dev/sushiai");
+  const profiles = [profile("lab", "Lab")];
+  const projectGit = {
+    "w-local": git(REMOTE, local.cwd, "feature", "/Users/dev/sushiai"),
+    "w-lab": git(REMOTE, lab.cwd),
+  };
+  const group = computeMergeGroups([local, lab], projectGit, profiles).get(
+    "w-lab",
+  );
+  assert.ok(group);
+  assert.deepEqual(
+    group.members.map((m) => memberLabel(group, m, profiles)),
+    ["This Mac", "Lab"],
+    "one checkout per host still reads as hosts",
+  );
+});
+
+test("worktrees plus another host: labels carry the branch, the remote one its host too", async () => {
+  const { computeMergeGroups, memberLabel, shouldCollapseHostMarkers } =
+    await library;
+  const main = workspace("w-main", undefined, "/Users/dev/sushiai");
+  const feature = workspace(
+    "w-feature",
+    undefined,
+    "/Users/dev/sushiai-feature",
+  );
+  const lab = workspace("w-lab", "ssh:lab", "/home/dev/sushiai");
+  const profiles = [profile("lab", "Lab")];
+  const projectGit = {
+    "w-main": git(REMOTE, main.cwd),
+    "w-feature": git(REMOTE, feature.cwd, "feature", main.cwd),
+    "w-lab": git(REMOTE, lab.cwd),
+  };
+  const group = computeMergeGroups(
+    [lab, feature, main],
+    projectGit,
+    profiles,
+  ).get("w-lab");
+  assert.deepEqual(
+    group.members.map((m) => memberLabel(group, m, profiles)),
+    ["main", "feature", "Lab · main"],
+  );
+  assert.equal(shouldCollapseHostMarkers(group, profiles), true);
+
+  const pair = computeMergeGroups([feature, main], projectGit, profiles).get(
+    "w-main",
+  );
+  assert.equal(
+    shouldCollapseHostMarkers(pair, profiles),
+    false,
+    "main + feature is 11 characters, within the budget",
+  );
 });
 
 test("member ordering: this Mac first, then remote hosts A->Z", async () => {
@@ -84,21 +264,16 @@ test("member ordering: this Mac first, then remote hosts A->Z", async () => {
   const local = workspace("w-local", undefined, "/Users/dev/sushiai");
   const labB = workspace("w-labb", "ssh:labb", "/home/dev/sushiai");
   const labA = workspace("w-laba", "ssh:laba", "/home/dev/sushiai");
-  const remotes = {
-    "w-local": "example.test/dev/sushiai",
-    "w-labb": "example.test/dev/sushiai",
-    "w-laba": "example.test/dev/sushiai",
-  };
+  const projectGit = gitFor([local, labB, labA]);
   const profiles = [profile("laba", "Lab A"), profile("labb", "Lab B")];
-  const groups = computeMergeGroups([local, labB, labA], remotes, profiles);
+  const groups = computeMergeGroups([local, labB, labA], projectGit, profiles);
   const group = groups.get("w-local");
   assert.deepEqual(
     group.members.map((m) => m.workspace.id),
     ["w-local", "w-laba", "w-labb"],
   );
 
-  // Three remote hosts, no local member: still sorted A->Z.
-  const onlyRemotes = computeMergeGroups([labB, labA], remotes, profiles);
+  const onlyRemotes = computeMergeGroups([labB, labA], projectGit, profiles);
   const remoteGroup = onlyRemotes.get("w-laba");
   assert.deepEqual(
     remoteGroup.members.map((m) => m.workspace.id),
@@ -110,30 +285,19 @@ test("D2: the status dot follows the active member, else this Mac, else the firs
   const { computeMergeGroups, mergedRowStatusKey, LOCAL_GROUP } = await library;
   const local = workspace("w-local", undefined, "/Users/dev/sushiai");
   const lab = workspace("w-lab", "ssh:lab", "/home/dev/sushiai");
-  const remotes = {
-    "w-local": "example.test/dev/sushiai",
-    "w-lab": "example.test/dev/sushiai",
-  };
-  const group = computeMergeGroups([local, lab], remotes, [
+  const group = computeMergeGroups([local, lab], gitFor([local, lab]), [
     profile("lab", "Lab"),
   ]).get("w-local");
 
-  // Active member wins even when it isn't This Mac.
   assert.equal(mergedRowStatusKey(group, "w-lab"), "ssh:lab");
-  // No active member here -> falls back to This Mac.
   assert.equal(mergedRowStatusKey(group, "some-other-workspace"), LOCAL_GROUP);
 
-  // With no local member, falls back to the first member in AC11 order.
   const labA = workspace("w-laba", "ssh:laba", "/home/dev/sushiai");
   const labB = workspace("w-labb", "ssh:labb", "/home/dev/sushiai");
-  const remoteOnly = computeMergeGroups(
-    [labA, labB],
-    {
-      "w-laba": "example.test/dev/sushiai",
-      "w-labb": "example.test/dev/sushiai",
-    },
-    [profile("laba", "Lab A"), profile("labb", "Lab B")],
-  ).get("w-laba");
+  const remoteOnly = computeMergeGroups([labA, labB], gitFor([labA, labB]), [
+    profile("laba", "Lab A"),
+    profile("labb", "Lab B"),
+  ]).get("w-laba");
   assert.equal(
     mergedRowStatusKey(remoteOnly, "no-active-workspace"),
     "ssh:laba",
@@ -144,11 +308,7 @@ test("shouldCollapseHostMarkers: 3+ hosts always collapse, remote-label budget i
   const { computeMergeGroups, shouldCollapseHostMarkers } = await library;
   const local = workspace("w-local", undefined, "/Users/dev/sushiai");
   const lab = workspace("w-lab", "ssh:lab", "/home/dev/sushiai");
-  const remotes = {
-    "w-local": "example.test/dev/sushiai",
-    "w-lab": "example.test/dev/sushiai",
-  };
-  const twoHost = computeMergeGroups([local, lab], remotes, [
+  const twoHost = computeMergeGroups([local, lab], gitFor([local, lab]), [
     profile("lab", "Lab"),
   ]).get("w-local");
   assert.equal(
@@ -167,11 +327,7 @@ test("shouldCollapseHostMarkers: 3+ hosts always collapse, remote-label budget i
   const labB = workspace("w-labb", "ssh:labb", "/home/dev/sushiai");
   const threeHost = computeMergeGroups(
     [local, labA, labB],
-    {
-      "w-local": "example.test/dev/sushiai",
-      "w-laba": "example.test/dev/sushiai",
-      "w-labb": "example.test/dev/sushiai",
-    },
+    gitFor([local, labA, labB]),
     [profile("laba", "A"), profile("labb", "B")],
   ).get("w-local");
   assert.equal(
@@ -188,14 +344,12 @@ test("mergedMarkerAccessibleName: two and three hosts, no Oxford comma", async (
   const { computeMergeGroups, mergedMarkerAccessibleName } = await library;
   const local = workspace("w-local", undefined, "/Users/dev/sushiai");
   const lab = workspace("w-lab", "ssh:lab", "/home/dev/sushiai");
-  const remotes = {
-    "w-local": "example.test/dev/sushiai",
-    "w-lab": "example.test/dev/sushiai",
-  };
   const profiles = [profile("lab", "Lab")];
-  const group = computeMergeGroups([local, lab], remotes, profiles).get(
-    "w-local",
-  );
+  const group = computeMergeGroups(
+    [local, lab],
+    gitFor([local, lab]),
+    profiles,
+  ).get("w-local");
   const name = mergedMarkerAccessibleName(group, profiles, "/tmp/local.sock", {
     "/tmp/local.sock": "connected",
     "ssh:lab": "offline",
@@ -208,30 +362,40 @@ test("activeMergedHostLabel: undefined in grouped mode, undefined when not merge
   const local = workspace("w-local", undefined, "/Users/dev/sushiai");
   const lab = workspace("w-lab", "ssh:lab", "/home/dev/sushiai");
   const solo = workspace("w-solo", undefined, "/Users/dev/solo-project");
-  const remotes = {
-    "w-local": "example.test/dev/sushiai",
-    "w-lab": "example.test/dev/sushiai",
-    "w-solo": "",
+  const worktree = workspace("w-wt", undefined, "/Users/dev/solo-project-wt");
+  const projectGit = {
+    ...gitFor([local, lab]),
+    "w-solo": git("", solo.cwd),
   };
   const profiles = [profile("lab", "Lab")];
   const workspaces = [local, lab, solo];
 
   assert.equal(
-    activeMergedHostLabel(workspaces, local, remotes, profiles, "grouped"),
+    activeMergedHostLabel(workspaces, local, projectGit, profiles, "grouped"),
     undefined,
     "merging is flat-mode only",
   );
   assert.equal(
-    activeMergedHostLabel(workspaces, solo, remotes, profiles, "flat"),
+    activeMergedHostLabel(workspaces, solo, projectGit, profiles, "flat"),
     undefined,
     "a workspace with no merged group carries no host label",
   );
   assert.equal(
-    activeMergedHostLabel(workspaces, lab, remotes, profiles, "flat"),
+    activeMergedHostLabel(workspaces, lab, projectGit, profiles, "flat"),
     "Lab",
   );
   assert.equal(
-    activeMergedHostLabel(workspaces, local, remotes, profiles, "flat"),
+    activeMergedHostLabel(workspaces, local, projectGit, profiles, "flat"),
     "This Mac",
+  );
+  assert.equal(
+    activeMergedHostLabel(
+      [...workspaces, worktree],
+      worktree,
+      { ...projectGit, "w-wt": git("", worktree.cwd, "spike", solo.cwd) },
+      profiles,
+      "flat",
+    ),
+    "spike",
   );
 });

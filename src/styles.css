@@ -484,6 +484,14 @@ textarea::placeholder {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A worktree row's session names its checkout as plain muted text, quieter
+   than the row's own chips; a long label shrinks before the title does. */
+.workspace-panels button > span.pane-branch {
+  flex: 0 1 auto;
+  max-width: 45%;
+  background: transparent;
+  padding-inline: 0;
+}
 .workspace-panels svg {
   width: 12px;
   min-width: 12px;

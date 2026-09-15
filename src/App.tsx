@@ -29,7 +29,7 @@ import { TitleBar } from "./app/TitleBar";
 import { useExtensions } from "./app/useExtensions";
 import { useConnectionProfiles } from "./app/useConnectionProfiles";
 import { useHerdr } from "./app/useHerdr";
-import { useProjectRemotes } from "./app/useProjectRemotes";
+import { useProjectGit } from "./app/useProjectGit";
 import { activeMergedHostLabel } from "./app/workspaceMerge";
 import { useSkills } from "./app/useSkills";
 import { useToast } from "./app/useToast";
@@ -104,7 +104,6 @@ export function App() {
     setWorkspaces,
     connectionProfiles,
   });
-  const projectRemotes = useProjectRemotes(workspaces);
   const skills = useSkills(sectionName, notify);
   const [tabMode, setTabMode] = useState(saved?.tabMode || false);
   const [sidebar, setSidebar] = useState(
@@ -176,10 +175,11 @@ export function App() {
   // Pane provenance (AC23-AC26, D5): only set when the active workspace is a
   // member of a merged row, and only in flat mode - the sidebar draws that
   // row, but the canvas is where a Herdr/agent pane actually names its host.
+  const projectGit = useProjectGit(workspaces, active.id);
   const paneHostLabel = activeMergedHostLabel(
     workspaces,
     active,
-    projectRemotes,
+    projectGit,
     connectionProfiles,
     workspaceGrouping,
   );
@@ -376,7 +376,7 @@ export function App() {
             localSocket={system?.socketPath || ""}
             connectionProfiles={connectionProfiles}
             statusByEndpoint={statusByEndpoint}
-            projectRemotes={projectRemotes}
+            projectGit={projectGit}
             workspaceGrouping={workspaceGrouping}
             setWorkspaceGrouping={setWorkspaceGrouping}
             totalPanels={totalPanels}

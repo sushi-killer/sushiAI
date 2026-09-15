@@ -31,6 +31,11 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 Root cause: "tag 4px from the name" measured a box `flex: 1` stretched; a 23px button rendered 251px (`.workspace-panels button` out-specified it), squeezing a label to 0px.
 Rule: measure the text ink (a `Range` over the text) and assert every label's rendered width is non-zero, then look at the shot.
 
+## 2026-09-15 — Unit fixtures merged worktrees; the real layout did not
+
+Root cause: "a host with two clones joins nothing" was checked per identity, so an unrelated clone beside a worktree pair vetoed the pair too. Every unit fixture held only the pair; the evidence repo set (main, worktree, clone) showed it at once.
+Rule: a merge/grouping fixture includes a realistic distractor next to the members it expects to group.
+
 ## Promoted
 
 - 2026-09-14 A test copied from a live debug session carried a real private IP, host alias and ports → examples use 192.0.2.0/24 (RFC 5737); private addresses fail CI. `check-conventions.mjs`.

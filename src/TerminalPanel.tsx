@@ -444,7 +444,7 @@ export function TerminalPanel({
           {hostLabel && (
             <span
               className="herdr-terminal-note"
-              title={`This pane runs on ${hostLabel}.`}
+              title={`This pane belongs to ${hostLabel}.`}
             >
               {hostLabel}
             </span>

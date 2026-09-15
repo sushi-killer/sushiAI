@@ -258,6 +258,9 @@ export interface Bridge {
   /** Waiting count for the Dock badge and the menu bar title; 0 clears both. */
   attentionBadge(count: number): Promise<void>;
   onAttentionOpen(callback: (target: AttentionTarget) => void): () => void;
+  /** Adds a git worktree on a new branch next to the repository holding
+   * `cwd`, on this Mac. Resolves to the new checkout's path. */
+  worktreeCreate(cwd: string, branch: string): Promise<{ path: string }>;
   appPreferences(): Promise<AppPreferences>;
   appPreferencesSet(patch: Partial<AppPreferences>): Promise<AppPreferences>;
   agentProviders(): Promise<import("./agents/types").AgentProvider[]>;

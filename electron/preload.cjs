@@ -78,6 +78,7 @@ contextBridge.exposeInMainWorld("bridge", {
   connectionsForward: invoke("connections-forward"),
   projectInspect: invoke("project-inspect"),
   projectPreview: invoke("project-preview"),
+  worktreeCreate: invoke("worktree-create"),
   onTerminal: (callback) => {
     const listener = (_, data) => callback(data);
     ipcRenderer.on("terminal-data", listener);

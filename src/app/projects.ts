@@ -2,11 +2,7 @@ import type { ConnectionProfile, Workspace } from "../types";
 import type { ClosedProject } from "../workspaceState.ts";
 import { codePanels } from "../workspaceState.ts";
 import type { ProjectGit } from "./useProjectGit.ts";
-import {
-  computeMergeGroups,
-  isHidden,
-  memberLabel,
-} from "./workspaceMerge.ts";
+import { computeMergeGroups, isHidden, memberLabel } from "./workspaceMerge.ts";
 
 /** A closed project's identity is its host endpoint + cwd - the same pair
  * that decides whether reopening it would just recreate an already-open

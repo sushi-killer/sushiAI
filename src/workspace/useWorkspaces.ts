@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { contains, leaf, remove, resize, split, uid } from "../layout.ts";
 import { initialWorkspace } from "../workspaceState.ts";
-import type { Routine, Saved } from "../workspaceState.ts";
+import type { ClosedProject, Routine, Saved } from "../workspaceState.ts";
 import { applyChatEvent, startUserTurn } from "../chat-threads.ts";
 import { disposeTerminal } from "../TerminalPanel.tsx";
 import { errorText } from "../app/errors.ts";
 import { agentTitle } from "../app/agent-title.ts";
+import { normalizeRemote } from "../app/useProjectGit.ts";
+import {
+  closedProjectId,
+  forgetProject as removeClosedProject,
+  rememberProject,
+} from "../app/projects.ts";
 import {
   appendPanel,
   fixSelection,
@@ -48,6 +54,9 @@ export function useWorkspaces({
   const [zoomed, setZoomed] = useState<string | null>(saved?.zoomed || null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [closedProjects, setClosedProjects] = useState<ClosedProject[]>(
+    saved?.closedProjects || [],
+  );
   const active = workspaces.find((w) => w.id === activeId) || workspaces[0];
   const activeRef = useRef(active);
   const workspacesRef = useRef(workspaces);
@@ -537,6 +546,7 @@ export function useWorkspaces({
         disposeTerminal(panel.id);
         if (panel.busy) await window.bridge?.cancelChat(panel.id);
       }
+      if (workspace.cwd) rememberClosed(workspace);
       setWorkspaces((list) => {
         const rest = list.filter((w) => w.id !== workspace.id);
         return rest.length ? rest : [initialWorkspace()];
@@ -545,6 +555,63 @@ export function useWorkspaces({
     } catch (error) {
       notify(errorText(error));
     }
+  }
+  /** Keeps the just-closed workspace on the Dashboard (B1): a fresh git
+   * identity read the same way `useProjectGit` reads one, since the
+   * workspace is about to disappear and can no longer be looked up by id. */
+  function rememberClosed(workspace: Workspace) {
+    const endpoint = workspace.herdrId
+      ? workspace.connection || socket
+      : undefined;
+    const entry: ClosedProject = {
+      id: closedProjectId(endpoint, workspace.cwd),
+      name: workspace.name,
+      cwd: workspace.cwd,
+      endpoint,
+      herdr: Boolean(workspace.herdrId),
+      closedAt: Date.now(),
+      git: { remote: "", commonDir: "", checkout: "", subdir: "", branch: "" },
+    };
+    setClosedProjects((list) => rememberProject(list, entry));
+    window.bridge
+      ?.projectInspect(workspace.connection, {
+        operation: "git_remote",
+        root: workspace.cwd,
+      })
+      .then((result) =>
+        setClosedProjects((list) =>
+          rememberProject(list, {
+            ...entry,
+            git: {
+              remote: normalizeRemote(result?.remote || ""),
+              commonDir: result?.commonDir || "",
+              checkout: result?.checkout || "",
+              subdir: result?.subdir || "",
+              branch: result?.branch || "",
+            },
+          }),
+        ),
+      )
+      .catch(() => {});
+  }
+  /** Reopens a remembered project through the path a fresh workspace already
+   * uses - Herdr on its original host when it had one, else local - and
+   * forgets it only once that succeeds, so a host that cannot be reached
+   * (surfaced via `notify` inside `createWorkspace`) leaves the entry in
+   * place to retry. */
+  async function reopenProject(project: ClosedProject) {
+    const ok = await createWorkspace(
+      project.name,
+      project.cwd,
+      project.herdr ? "herdr" : "local",
+      "shell",
+      [],
+      project.endpoint || socket,
+    );
+    if (ok) forgetProject(project.id);
+  }
+  function forgetProject(id: string) {
+    setClosedProjects((list) => removeClosedProject(list, id));
   }
   const openHTML = useCallback(
     (root: string, file: string, endpoint?: string) => {
@@ -606,6 +673,9 @@ export function useWorkspaces({
     runRoutine,
     endSessions,
     endWorkspace,
+    closedProjects,
+    reopenProject,
+    forgetProject,
     openHTML,
     tidy: () => updateWorkspace(active.id, tidyWorkspace),
     resizeSplit: (id: string, ratio: number) =>

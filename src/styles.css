@@ -1375,20 +1375,35 @@ iframe {
   grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
   gap: 11px;
 }
-.project-grid > button {
+.project-card {
+  position: relative;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
   min-width: 0;
   border: 1px solid #303030;
   border-radius: 10px;
   background: #171717;
+  overflow: hidden;
+}
+.project-card:hover {
+  border-color: #494949;
+}
+.project-card.closed {
+  opacity: 0.85;
+}
+.project-card-open {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  width: 100%;
+  border: none;
+  background: transparent;
   padding: 17px;
   text-align: left;
 }
-.project-grid > button:hover {
+.project-card-open:hover {
   background: #1e1e1e;
-  border-color: #494949;
 }
 .project-grid svg {
   color: #878d86;
@@ -1419,6 +1434,32 @@ iframe {
 }
 .project-grid span svg {
   margin: 0;
+}
+.project-card-open .remote-tag {
+  vertical-align: middle;
+  margin-left: 6px;
+}
+.project-card-hosts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 17px 14px;
+}
+.project-card-hosts .remote-tag.closed,
+.project-card-open .remote-tag.closed {
+  color: #c2a36f;
+}
+.project-card-forget {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 5px;
+  border-radius: 6px;
+  color: #aaa;
+  background: #1c1c1c;
+}
+.project-card-forget:hover {
+  background: #333;
 }
 .empty-state {
   display: flex;

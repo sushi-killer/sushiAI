@@ -209,6 +209,7 @@ export function App() {
       sidebar,
       route,
       workspaceGrouping,
+      closedProjects: ws.closedProjects,
     },
     notify,
   );
@@ -413,6 +414,9 @@ export function App() {
               refreshExtensions={() => void refreshExtensions()}
               openRoutineDialog={() => setDialog({ kind: "routine" })}
               totalPanels={totalPanels}
+              ws={ws}
+              projectGit={projectGit}
+              connectionProfiles={connectionProfiles}
             />
           ) : mode === "Agent" ? (
             <AgentsView slot={slot} />

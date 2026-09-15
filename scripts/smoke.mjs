@@ -6,6 +6,20 @@ import http from "node:http";
 import { readdir, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 const root = process.cwd();
+
+// Polls a check instead of sleeping a fixed time: run straight after
+// `npm run ci`, a loaded machine missed 200-500ms sleeps on checks that pass
+// on rerun. Returns the last value read, so the assert after it still names
+// what never became true.
+async function until(read, ready, timeout = 10000) {
+  const deadline = Date.now() + timeout;
+  let value = await read();
+  while (!ready(value) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    value = await read();
+  }
+  return value;
+}
 // Every label, id and storage key below is read out of the fixture, so the
 // smoke asserts the contract rather than whichever extension wrote it.
 const { validateExtensionManifest } = createRequire(import.meta.url)(
@@ -108,16 +122,19 @@ try {
   await page.evaluate(async (id) => {
     await window.bridge.terminalWrite(id, "printf 'BRIDGE_PTY_OK\\n'\r");
   }, terminalId);
-  await page.waitForTimeout(700);
-  const output = await page.evaluate(
-    async (id) =>
-      (
-        await window.bridge.terminalOpen({
-          panelId: id,
-          cwd: (await window.bridge.system()).cwd,
-        })
-      ).history,
-    terminalId,
+  const output = await until(
+    () =>
+      page.evaluate(
+        async (id) =>
+          (
+            await window.bridge.terminalOpen({
+              panelId: id,
+              cwd: (await window.bridge.system()).cwd,
+            })
+          ).history,
+        terminalId,
+      ),
+    (history) => history.includes("\r\nBRIDGE_PTY_OK"),
   );
   assert.ok(
     output.includes("\r\nBRIDGE_PTY_OK"),
@@ -157,7 +174,9 @@ try {
   await page.screenshot({ path: path.join(root, "artifacts/workspace.png") });
   await page.getByRole("button", { name: "Tidy", exact: true }).click();
   await page.getByRole("button", { name: "Maximize zsh", exact: true }).click();
-  await page.waitForTimeout(300);
+  await page.waitForFunction(
+    () => document.querySelectorAll(".workspace-canvas .panel").length === 1,
+  );
   assert.equal(await page.locator(".workspace-canvas .panel").count(), 1);
   await page.keyboard.press("Escape");
   // Wait for the un-zoomed layout to paint rather than guessing a delay.
@@ -174,7 +193,18 @@ try {
         y: initialAgentBounds.height / 2,
       },
     });
-  await page.waitForTimeout(200);
+  await page
+    .waitForFunction(
+      (x) => {
+        const terminal = document.querySelector(".panel-terminal");
+        return (
+          !!terminal && Math.abs(terminal.getBoundingClientRect().x - x) < 10
+        );
+      },
+      initialAgentBounds.x,
+      { timeout: 10000 },
+    )
+    .catch(() => {});
   const movedTerminalBounds = await page
     .locator(".panel-terminal")
     .boundingBox();
@@ -201,15 +231,18 @@ try {
     .getByRole("textbox", { name: "Browser address" })
     .fill(`http://127.0.0.1:${preview.address().port}`);
   await page.getByRole("textbox", { name: "Browser address" }).press("Enter");
-  await page.waitForTimeout(800);
-  const browserResult = await desktop.evaluate(async ({ webContents }) => {
-    const guest = webContents
-      .getAllWebContents()
-      .find((contents) => contents.getType() === "webview");
-    return guest.executeJavaScript(
-      "({ text: document.body.innerText, bridge: typeof window.bridge, node: typeof process })",
-    );
-  });
+  const browserResult = await until(
+    () =>
+      desktop.evaluate(async ({ webContents }) => {
+        const guest = webContents
+          .getAllWebContents()
+          .find((contents) => contents.getType() === "webview");
+        return guest?.executeJavaScript(
+          "({ text: document.body.innerText, bridge: typeof window.bridge, node: typeof process })",
+        );
+      }),
+    (result) => Boolean(result?.text?.includes("LOCAL_PREVIEW_OK")),
+  );
   assert.ok(browserResult.text.includes("LOCAL_PREVIEW_OK"));
   assert.equal(browserResult.bridge, "undefined");
   assert.equal(browserResult.node, "undefined");
@@ -297,7 +330,13 @@ try {
       exact: false,
     })
     .click();
-  await page.waitForTimeout(250);
+  await page
+    .waitForFunction(
+      () => document.querySelectorAll(".workspace-canvas .panel").length === 1,
+      null,
+      { timeout: 10000 },
+    )
+    .catch(() => {});
   assert.equal(
     await page.locator(".workspace-canvas .panel").count(),
     1,
@@ -528,24 +567,36 @@ try {
     .fill("printf 'ROUTINE_OK\\n'");
   await page.getByRole("button", { name: "Save routine" }).click();
   await page.getByRole("button", { name: "Run routine", exact: true }).click();
-  await page.waitForTimeout(500);
-  const routineId = await page
-    .locator(".workspace-canvas .panel")
-    .getAttribute("data-panel-id");
-  const routineOutput = await page.evaluate(
-    async (id) =>
-      (
-        await window.bridge.terminalOpen({
-          panelId: id,
-          cwd: (await window.bridge.system()).cwd,
-        })
-      ).history,
-    routineId,
+  // runRoutine opens the terminal and writes the command before it adds the
+  // panel, so once the panel is on screen its history only has to catch up.
+  const routinePanel = page.locator(".workspace-canvas .panel", {
+    has: page.getByRole("button", { name: "Close Smoke routine" }),
+  });
+  await routinePanel.waitFor();
+  const routineId = await routinePanel.getAttribute("data-panel-id");
+  const routineOutput = await until(
+    () =>
+      page.evaluate(
+        async (id) =>
+          (
+            await window.bridge.terminalOpen({
+              panelId: id,
+              cwd: (await window.bridge.system()).cwd,
+            })
+          ).history,
+        routineId,
+      ),
+    (history) => history.includes("\r\nROUTINE_OK"),
   );
   assert.ok(routineOutput.includes("\r\nROUTINE_OK"));
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Close Smoke routine" }).click();
-  await page.waitForTimeout(700);
+  // The reload must find the close already persisted, not race its write.
+  await page.waitForFunction(() => {
+    const saved = JSON.parse(localStorage.getItem("sushiai.v1") || "null");
+    const active = saved?.workspaces.find((w) => w.id === saved.activeId);
+    return active && !active.panels.some((p) => p.title === "Smoke routine");
+  });
   await page.reload();
   await page.waitForSelector(".panel-agent");
   assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);

@@ -9,7 +9,12 @@ import {
   ProvidersSettings,
   UpdateSettings,
 } from "../dialogs/lazy-settings.ts";
-import type { System, UpdateState, Workspace } from "../types";
+import type {
+  ConnectionProfile,
+  System,
+  UpdateState,
+  Workspace,
+} from "../types";
 
 export type SettingsTab = "general" | "connections" | "providers" | "updates";
 
@@ -18,11 +23,12 @@ export function SettingsDialog({
   setSettingsTab,
   socket,
   setSocket,
-  setConnection,
   connected,
   refreshHerdr,
   fontScale,
   setFontScale,
+  keepAwake,
+  setKeepAwake,
   updates,
   system,
   connectionError,
@@ -30,16 +36,20 @@ export function SettingsDialog({
   cwd,
   connection,
   workspaces,
+  connectionProfiles,
+  refreshConnectionProfiles,
+  notify,
 }: {
   settingsTab: SettingsTab;
   setSettingsTab(tab: SettingsTab): void;
   socket: string;
   setSocket(value: string): void;
-  setConnection(value: "connected" | "offline" | "connecting"): void;
   connected: boolean;
-  refreshHerdr(path?: string): Promise<void>;
+  refreshHerdr(path: string): Promise<void>;
   fontScale: number;
   setFontScale(value: number): void;
+  keepAwake: boolean;
+  setKeepAwake(on: boolean): void;
   updates: UpdateState | null;
   system: System | null;
   connectionError: string;
@@ -47,6 +57,9 @@ export function SettingsDialog({
   cwd: string;
   connection?: string;
   workspaces: Workspace[];
+  connectionProfiles: ConnectionProfile[];
+  refreshConnectionProfiles(): Promise<void>;
+  notify(text: string): void;
 }) {
   return (
     <>
@@ -78,10 +91,10 @@ export function SettingsDialog({
             <ConnectionsSettings
               endpoint={socket}
               localSocket={system?.socketPath || ""}
-              onSelect={(value) => {
-                setSocket(value);
-                setConnection("connecting");
-              }}
+              onSelect={(value) => setSocket(value)}
+              profiles={connectionProfiles}
+              onRefresh={refreshConnectionProfiles}
+              notify={notify}
               socketForm={
                 <form
                   className="socket-form"
@@ -91,7 +104,6 @@ export function SettingsDialog({
                       new FormData(event.currentTarget).get("socket"),
                     );
                     setSocket(value);
-                    setConnection("connecting");
                     refreshHerdr(value);
                   }}
                 >
@@ -160,6 +172,23 @@ export function SettingsDialog({
                     </button>
                   ))}
                 </div>
+              </div>
+              <div className="setting-block">
+                <h4>Sleep</h4>
+                <label className="setting-check">
+                  <input
+                    type="checkbox"
+                    checked={keepAwake}
+                    onChange={(event) => setKeepAwake(event.target.checked)}
+                  />
+                  <span>
+                    Keep this Mac awake while sushiAI is open
+                    <em>
+                      Stops idle sleep cutting a long agent turn short. The
+                      display still sleeps normally.
+                    </em>
+                  </span>
+                </label>
               </div>
               <div className="settings-note">
                 <TerminalSquare size={16} />

@@ -15,13 +15,7 @@ import {
   retitleTerminal,
   tidyWorkspace,
 } from "./workspace-actions.ts";
-import type {
-  ModelProfile,
-  Panel,
-  PanelKind,
-  System,
-  Workspace,
-} from "../types";
+import type { ModelProfile, Panel, PanelKind, Workspace } from "../types";
 
 export type WorkspaceController = ReturnType<typeof useWorkspaces>;
 
@@ -32,7 +26,6 @@ export function useWorkspaces({
   workspaces,
   setWorkspaces,
   saved,
-  system,
   socket,
   refreshHerdr,
   useEndpoint,
@@ -43,9 +36,8 @@ export function useWorkspaces({
   workspaces: Workspace[];
   setWorkspaces: React.Dispatch<React.SetStateAction<Workspace[]>>;
   saved: Saved | null;
-  system: System | null;
   socket: string;
-  refreshHerdr(path?: string): Promise<void>;
+  refreshHerdr(path: string): Promise<void>;
   useEndpoint(endpoint: string): void;
   notify(text: string): void;
   showWorkspace(): void;
@@ -207,10 +199,13 @@ export function useWorkspaces({
     backend: string,
     starter: string,
     pluginChanges: { name: string; disabled: boolean }[],
+    endpoint: string = socket,
   ): Promise<boolean> {
     try {
       const pluginEndpoint =
-        backend === "herdr" && socket.startsWith("ssh:") ? socket : undefined;
+        backend === "herdr" && endpoint.startsWith("ssh:")
+          ? endpoint
+          : undefined;
       const applyPluginChanges = async () => {
         if (!pluginChanges.length) return;
         if (!window.bridge) throw new Error("Open the desktop app first.");
@@ -223,31 +218,31 @@ export function useWorkspaces({
           });
       };
       if (backend === "herdr") {
-        const result = await window.bridge!.herdr(socket, "workspace.create", {
-          label: name,
-          cwd,
-          focus: false,
-        });
+        const result = await window.bridge!.herdr(
+          endpoint,
+          "workspace.create",
+          { label: name, cwd, focus: false },
+        );
         try {
           await applyPluginChanges();
         } catch (error) {
           await window.bridge
-            ?.herdr(socket, "workspace.close", {
+            ?.herdr(endpoint, "workspace.close", {
               workspace_id: result.workspace.workspace_id,
             })
             .catch(() => {});
           throw error;
         }
-        await refreshHerdr();
+        await refreshHerdr(endpoint);
         if (starter !== "shell")
-          await window.bridge!.herdr(socket, "pane.send_input", {
+          await window.bridge!.herdr(endpoint, "pane.send_input", {
             pane_id: result.root_pane.pane_id,
             text: starter,
             keys: ["Enter"],
           });
-        await refreshHerdr();
+        await refreshHerdr(endpoint);
         switchWorkspace(
-          `herdr:${socket.startsWith("ssh:") ? socket : "local"}:${result.workspace.workspace_id}`,
+          `herdr:${endpoint.startsWith("ssh:") ? endpoint : "local"}:${result.workspace.workspace_id}`,
         );
       } else {
         await applyPluginChanges();
@@ -560,7 +555,7 @@ export function useWorkspaces({
       }
       setWorkspaces((list) => {
         const rest = list.filter((w) => w.id !== workspace.id);
-        return rest.length ? rest : [initialWorkspace(system?.cwd || "")];
+        return rest.length ? rest : [initialWorkspace()];
       });
       setZoomed(null);
     } catch (error) {

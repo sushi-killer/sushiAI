@@ -1,6 +1,7 @@
 ---
 name: ship-pr
-description: This skill should be used when a change is ready to leave the working branch - opening a pull request for sushiAI with the right branch name, conventional-commit title, a release-notes fragment if the change is user-visible, and a verified-green CI run. Use it instead of a bare `gh pr create` whenever the task is "ship this" or "open a PR", not just "commit this".
+description: Opens a sushiAI pull request the way the release pipeline expects: <type>/<slug> branch paired with a conventional-commit title, a docs/releases/unreleased/ fragment when user-visible, npm run ci green first. Use whenever a change is ready to leave the working branch ("ship this", "open a PR", "push this up"). Never merges.
+disable-model-invocation: true
 ---
 
 # Ship a PR

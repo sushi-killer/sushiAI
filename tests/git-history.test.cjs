@@ -253,3 +253,90 @@ test("branches lists local branches and checkout refuses to drop uncommitted wor
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test("git_remote reports the origin URL, or an empty one when there isn't a repo or remote", async () => {
+  const root = await fs.mkdtemp("/tmp/sushiai-git-remote-test-");
+  const c = new Connections(root);
+  await c.init();
+  const inspect = (operation, extra = {}) =>
+    c.inspect(null, { operation, root, ...extra });
+  try {
+    assert.equal((await inspect("git_remote")).remote, "");
+    await run("/usr/bin/git", ["init", "-q", "-b", "main", root]);
+    assert.equal((await inspect("git_remote")).remote, "");
+    await run("/usr/bin/git", [
+      "-C",
+      root,
+      "remote",
+      "add",
+      "origin",
+      "git@example.invalid:acme/n8n.git",
+    ]);
+    assert.equal(
+      (await inspect("git_remote")).remote,
+      "git@example.invalid:acme/n8n.git",
+    );
+  } finally {
+    await c.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("git_remote tells worktrees of one repository apart from separate clones", async () => {
+  const base = await fs.realpath(
+    await fs.mkdtemp("/tmp/sushiai-git-worktree-test-"),
+  );
+  const repo = path.join(base, "n8n");
+  const worktree = path.join(base, "n8n-feature");
+  const clone = path.join(base, "clone", "n8n");
+  const c = new Connections(base);
+  await c.init();
+  const inspect = (root) => c.inspect(null, { operation: "git_remote", root });
+  const git = (...args) =>
+    run("/usr/bin/git", [
+      "-C",
+      repo,
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@example.invalid",
+      ...args,
+    ]);
+  try {
+    await run("/usr/bin/git", ["init", "-q", "-b", "main", repo]);
+    const unborn = await inspect(repo);
+    assert.equal(unborn.branch, "main", "an unborn branch still has a name");
+    assert.equal(unborn.checkout, repo);
+    await fs.writeFile(path.join(repo, "a.txt"), "a\n");
+    await git("add", "a.txt");
+    await git("commit", "-q", "-m", "init");
+    await git("worktree", "add", "-q", "-b", "feature", worktree);
+    await run("/usr/bin/git", ["clone", "-q", repo, clone]);
+    await fs.mkdir(path.join(repo, "sub"));
+
+    const main = await inspect(path.join(repo, "sub"));
+    const linked = await inspect(worktree);
+    const copy = await inspect(clone);
+    assert.equal(main.commonDir, path.join(repo, ".git"));
+    assert.equal(linked.commonDir, main.commonDir);
+    assert.notEqual(copy.commonDir, main.commonDir);
+    assert.equal(main.checkout, repo, "a subdirectory reports its checkout");
+    assert.equal(main.subdir, "sub");
+    assert.equal(linked.subdir, "");
+    assert.equal(linked.checkout, worktree);
+    assert.equal(linked.branch, "feature");
+
+    await run("/usr/bin/git", ["-C", worktree, "checkout", "-q", "--detach"]);
+    assert.match((await inspect(worktree)).branch, /^[0-9a-f]{4,}$/);
+    assert.deepEqual(await inspect(base), {
+      remote: "",
+      commonDir: "",
+      checkout: "",
+      subdir: "",
+      branch: "",
+    });
+  } finally {
+    await c.close();
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});

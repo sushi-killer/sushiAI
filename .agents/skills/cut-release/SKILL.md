@@ -1,6 +1,7 @@
 ---
 name: cut-release
-description: This skill should be used when asked to cut, prepare, or ship a new sushiAI release/version - it runs scripts/release.mjs to compute the version bump from merged history, folds pending docs/releases/unreleased/ fragments into a real release note, and opens the release PR. Use it instead of hand-editing package.json's version.
+description: Prepares a sushiAI release: runs scripts/release.mjs to compute the bump from merged history, folds docs/releases/unreleased/ fragments into the release note, opens the release PR. Use when asked to cut, prepare or ship a release or bump the version; never hand-edit package.json's version.
+disable-model-invocation: true
 ---
 
 # Cut a release

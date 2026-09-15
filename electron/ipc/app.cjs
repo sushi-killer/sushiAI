@@ -1,5 +1,6 @@
 const os = require("node:os");
 const path = require("node:path");
+const { powerSaveBlocker } = require("electron");
 
 function registerAppIpc({
   handle,
@@ -70,6 +71,25 @@ function registerAppIpc({
       (name) => ({ name, path: executable(name) }),
     ),
   }));
+
+  // Idle sleep kills a long agent turn mid-flight, which is why people end up
+  // babysitting `caffeinate` in a terminal. Electron's own blocker does the
+  // same job without a child process: `prevent-app-suspension` stops the
+  // system sleeping while still letting the display go dark, which is the
+  // behaviour `caffeinate -i` gives and what anyone leaving an agent running
+  // overnight actually wants.
+  let awakeBlocker = null;
+  handle("keep-awake", async (on) => {
+    const active =
+      awakeBlocker !== null && powerSaveBlocker.isStarted(awakeBlocker);
+    if (on && !active)
+      awakeBlocker = powerSaveBlocker.start("prevent-app-suspension");
+    else if (!on && active) {
+      powerSaveBlocker.stop(awakeBlocker);
+      awakeBlocker = null;
+    }
+    return awakeBlocker !== null && powerSaveBlocker.isStarted(awakeBlocker);
+  });
 
   handle("choose-attachments", async () => {
     const result = await dialog.showOpenDialog(getMainWindow(), {

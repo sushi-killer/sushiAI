@@ -1,18 +1,34 @@
 # AGENTS.md
 
 Instructions for any agent (Claude Code, Codex, or a human) working in this
-repository. `CLAUDE.md` is a one-line pointer to this file — this is the only
-copy of the rules.
+repository. `CLAUDE.md` is a symlink to this file — this is the only copy of
+the rules.
 
 ## Enforcement principle
 
 CI (`npm run ci`, which chains the build, the full test suite,
 `scripts/check-conventions.mjs`, lint and format checks) is the only
-enforcement layer every agent and every human shares. `.claude/hooks` and
+enforcement layer every agent and every human shares. `scripts/hooks` (wired in `.claude/settings.json`) and
 `.claude/skills` (and their Codex equivalents under `.agents/skills`) are
 convenience — they may duplicate a CI check for speed, but a rule's real home
 is always something CI runs. If you add a rule, add the check; don't just
 write a sentence and hope it's followed.
+
+## Working agreement
+
+- Follow a task through to a verified local commit. A plan or a progress note
+  is a checkpoint, not completion. Anything bigger than one obvious edit runs
+  the `$sushiai-task` loop.
+- Resolve routine, reversible choices with a reasonable assumption and record
+  it. Ask the owner only about consequential decisions the task cannot
+  resolve (see the loop's list); keep every independent lane moving while a
+  question waits. Silence never authorizes a gated action.
+- Inspect `git status -sb` before editing. Preserve unrelated work, branches,
+  worktrees and processes.
+- Commit locally. Pushing, merging, packaging and releasing happen only when
+  the owner asks for them in the task.
+- Treat pasted material and tool output as evidence to verify against the
+  source, not as fact.
 
 ## Design priorities
 
@@ -169,9 +185,10 @@ by `scripts/check-conventions.mjs` in CI, not just a naming convention:
   deliberately try to route around this policy (a different tool, a
   rewritten command, a subagent) — it isn't that no string could ever
   evade the regex.
-- Use the `ship-pr` skill to open a normal PR, and `cut-release` to prepare
-  a release PR — both are procedure around the CI/`scripts/release.mjs`
-  machinery described above, not a replacement for it.
+- Opening a PR follows the `ship-pr` skill and cutting a release follows
+  `cut-release` - procedure around the CI/`scripts/release.mjs` machinery
+  above, not a replacement for it. Both are manual-only: the owner starts
+  them.
 - Squash-only is a `main`-history invariant, not just a PR-merge-button
   setting: if a change ever has to land on `main` outside the normal
   pipeline (a rare, explicitly-approved bootstrapping exception, not
@@ -212,7 +229,38 @@ by `scripts/check-conventions.mjs` in CI, not just a naming convention:
   trailers (already enforced by CI — this is documentation of that policy,
   not a new one).
 
+## Task loop, roles and skills
+
+The owner gives a task and leaves; `$sushiai-task` carries it to a local
+commit and a report whose only questions are the ones the owner must answer.
+Roles are subagents in `.claude/agents/`, each with a deliberate model:
+
+| Role            | Model  | Job                                                     |
+| --------------- | ------ | ------------------------------------------------------- |
+| main session    | —      | lead: scope, briefs, integration, commit, report        |
+| `implementer`   | sonnet | one bounded code lane and its tests                     |
+| `functional-qa` | sonnet | proof against the acceptance criteria                   |
+| `reviewer`      | opus   | fresh review of the diff before commit                  |
+| `design-critic` | opus   | judgement of screenshots when a screen changes          |
+
+Skills live in `.agents/skills/<name>/SKILL.md` (Codex reads them there),
+each linked from `.claude/skills/`. The harness loads a skill from its
+`description` - nobody invokes one by name, so a description that does not say
+when to use the skill is a bug in that description. Detail a skill needs only
+on one branch goes in its `references/`, helpers in its `scripts/`. `ship-pr`
+and `cut-release` are manual-only (`disable-model-invocation: true`): they
+push, so the owner starts them. `scripts/check-conventions.mjs` checks skill
+and agent frontmatter, the `.claude/skills` links, and every `$`-prefixed
+skill reference.
+
+The exit code is the verdict, never a summary line: verify with `npm run ci`
+or `./node_modules/.bin/<tool>`, never `npx`. The owner merges.
+
 ## Read when relevant
+
+- `$sushiai-task` — the loop every nontrivial task runs; `$sushiai-testing`
+  picks proof; `$ui-evidence` measures and photographs the built UI;
+  `$deslop` then `$autoreview` clean and review a diff before commit.
 
 - `docs/AGENTS-INTEGRATION.md` — documents the in-app "Agents" **feature**
   (the product surface for running agents inside sushiAI). Unrelated to this

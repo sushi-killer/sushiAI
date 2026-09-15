@@ -1,6 +1,6 @@
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { X } from "lucide-react";
-import type { Workspace } from "./types";
+import type { Panel, Workspace } from "./types";
 import { uid } from "./layout";
 import { ChatView } from "./ChatView";
 import { AgentsView } from "./agents/AgentsView";
@@ -10,6 +10,7 @@ import { WorkspaceDialog } from "./WorkspaceDialog";
 import { errorText } from "./app/errors";
 import { useAppPersistence } from "./app/useAppPersistence";
 import { useCompact } from "./app/useCompact";
+import { useKeepAwake } from "./app/useKeepAwake";
 import { useAgentNotices } from "./app/useAgentNotices";
 import { useKeyboardShortcuts } from "./app/useKeyboardShortcuts";
 import { PanelPickerDialog } from "./app/PanelPickerDialog";
@@ -26,7 +27,10 @@ import { SectionPage } from "./app/SectionPage";
 import { Sidebar } from "./app/Sidebar";
 import { TitleBar } from "./app/TitleBar";
 import { useExtensions } from "./app/useExtensions";
+import { useConnectionProfiles } from "./app/useConnectionProfiles";
 import { useHerdr } from "./app/useHerdr";
+import { useProjectGit } from "./app/useProjectGit";
+import { activeMergedHostLabel } from "./app/workspaceMerge";
 import { useSkills } from "./app/useSkills";
 import { useToast } from "./app/useToast";
 import { useUpdates } from "./app/useUpdates";
@@ -84,24 +88,30 @@ export function App() {
       [extensionRegistry, extensionSnapshot],
     ),
   });
+  const { connectionProfiles, refreshConnectionProfiles } =
+    useConnectionProfiles();
   const {
     system,
     socket,
     setSocket,
     connection,
-    setConnection,
     connectionError,
     refreshHerdr,
+    statusByEndpoint,
   } = useHerdr({
     savedSocket: saved?.socket || "",
     notify,
     setWorkspaces,
+    connectionProfiles,
   });
   const skills = useSkills(sectionName, notify);
   const [tabMode, setTabMode] = useState(saved?.tabMode || false);
   const [sidebar, setSidebar] = useState(
     saved?.sidebar ?? window.innerWidth >= 760,
   );
+  const [workspaceGrouping, setWorkspaceGrouping] = useState<
+    "grouped" | "flat"
+  >(saved?.workspaceGrouping || "grouped");
   // Agent and Chat render their lists into this slot of the shared sidebar.
   const [slot, setSlot] = useState<HTMLElement | null>(null);
   useEffect(() => {
@@ -114,7 +124,6 @@ export function App() {
     workspaces,
     setWorkspaces,
     saved,
-    system,
     socket,
     refreshHerdr,
     useEndpoint: setSocket,
@@ -158,8 +167,29 @@ export function App() {
   const [compact, canvasRef] = useCompact();
   const [routines, setRoutines] = useState<Routine[]>(saved?.routines || []);
   const [fontScale, setFontScale] = useState(saved?.fontScale || 1);
+  // Held here, not in SettingsDialog: the blocker must be active whenever the
+  // app is open, not only while the preferences dialog happens to be mounted.
+  const [keepAwake, setKeepAwake] = useKeepAwake();
   const connected = connection === "connected";
   const activeEndpoint = active.connection || socket;
+  // Pane provenance (AC23-AC26, D5): only set when the active workspace is a
+  // member of a merged row, and only in flat mode - the sidebar draws that
+  // row, but the canvas is where a Herdr/agent pane actually names its host.
+  const projectGit = useProjectGit(workspaces, active.id);
+  const paneHostLabel = activeMergedHostLabel(
+    workspaces,
+    active,
+    projectGit,
+    connectionProfiles,
+    workspaceGrouping,
+  );
+  /** Clicking a pane inside an expanded merged row (AC21) - unlike a plain
+   * row's `showPanel`, the pane's owning workspace need not be active yet. */
+  function selectHostPane(workspace: Workspace, panel: Panel) {
+    switchWorkspace(workspace.id);
+    setSelected(panel.id);
+    setZoomed(panel.id);
+  }
   const primaryExtensionNavigation = primaryNavigation(extensionRegistry);
 
   const openPanelPicker = useCallback(() => setDialog({ kind: "pane" }), []);
@@ -178,6 +208,7 @@ export function App() {
       zoomed,
       sidebar,
       route,
+      workspaceGrouping,
     },
     notify,
   );
@@ -326,6 +357,7 @@ export function App() {
             setWorkspaceQuery={setWorkspaceQuery}
             switchWorkspace={switchWorkspace}
             showPanel={showPanel}
+            selectHostPane={selectHostPane}
             requestClose={({ workspace, panel }) =>
               setDialog(
                 panel
@@ -341,6 +373,12 @@ export function App() {
             selected={selected}
             connected={connected}
             connection={connection}
+            localSocket={system?.socketPath || ""}
+            connectionProfiles={connectionProfiles}
+            statusByEndpoint={statusByEndpoint}
+            projectGit={projectGit}
+            workspaceGrouping={workspaceGrouping}
+            setWorkspaceGrouping={setWorkspaceGrouping}
             totalPanels={totalPanels}
             notify={notify}
           />
@@ -403,6 +441,7 @@ export function App() {
               tabMode={tabMode}
               compact={compact}
               openPanelPicker={openPanelPicker}
+              hostLabel={paneHostLabel}
             />
           )}
         </main>
@@ -497,20 +536,26 @@ export function App() {
               setSettingsTab={setSettingsTab}
               socket={socket}
               setSocket={setSocket}
-              setConnection={setConnection}
               connected={connected}
               connectionError={connectionError}
               refreshHerdr={refreshHerdr}
               fontScale={fontScale}
               setFontScale={setFontScale}
+              keepAwake={keepAwake}
+              setKeepAwake={setKeepAwake}
               updates={updates}
               system={system}
+              connectionProfiles={connectionProfiles}
+              refreshConnectionProfiles={refreshConnectionProfiles}
+              notify={notify}
             />
           ) : dialog.kind === "workspace" ? (
             <WorkspaceDialog
               defaultCwd={active.cwd}
-              endpoint={socket}
-              connected={connected}
+              activeEndpoint={active.connection}
+              localSocket={system?.socketPath || ""}
+              connectionProfiles={connectionProfiles}
+              statusByEndpoint={statusByEndpoint}
               onCreate={async (...args) => {
                 if (await ws.createWorkspace(...args)) closeDialog();
               }}

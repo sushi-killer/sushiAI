@@ -6,6 +6,11 @@ export type ConnectionProfile = {
   port?: number;
   socket: string;
   connected?: boolean;
+  /** Hidden from the workspace sidebar - the tunnel itself is unaffected. */
+  hidden?: boolean;
+  /** Reconnect automatically on app launch - set on explicit Connect, cleared
+   * on explicit Disconnect. */
+  autoConnect?: boolean;
 };
 export type Message = {
   id: string;
@@ -243,6 +248,9 @@ export interface Bridge {
   onAgents(
     callback: (event: import("./agents/types").AgentEvent) => void,
   ): () => void;
+  /** Holds or releases the main process's power-save blocker. Resolves to
+   * whether the blocker is active afterwards. */
+  keepAwake(on: boolean): Promise<boolean>;
   updatesState(): Promise<UpdateState>;
   updatesCheck(): Promise<UpdateState>;
   updatesDownload(): Promise<UpdateState>;
@@ -415,6 +423,10 @@ export interface Bridge {
   connectionsList(): Promise<ConnectionProfile[]>;
   connectionsSave(
     profile: Partial<ConnectionProfile>,
+  ): Promise<ConnectionProfile>;
+  connectionsSetHidden(
+    endpoint: string,
+    hidden: boolean,
   ): Promise<ConnectionProfile>;
   connectionsDelete(endpoint: string): Promise<void>;
   connectionsConnect(endpoint: string): Promise<void>;

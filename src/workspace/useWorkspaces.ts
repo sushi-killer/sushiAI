@@ -190,49 +190,23 @@ export function useWorkspaces({
       );
     updateWorkspace(workspaceId, (w) => ({ ...w, name }));
   }
-  /** Creates a workspace either as a Herdr session or a local one. A failed
-   * plugin toggle rolls the Herdr session back, so a half-configured workspace
-   * is never left behind. Returns false when nothing was created. */
+  /** Creates a workspace either as a Herdr session or a local one. Plugins
+   * are configured afterwards from the workspace's own controls. Returns false
+   * when nothing was created. */
   async function createWorkspace(
     name: string,
     cwd: string,
     backend: string,
     starter: string,
-    pluginChanges: { name: string; disabled: boolean }[],
     endpoint: string = socket,
   ): Promise<boolean> {
     try {
-      const pluginEndpoint =
-        backend === "herdr" && endpoint.startsWith("ssh:")
-          ? endpoint
-          : undefined;
-      const applyPluginChanges = async () => {
-        if (!pluginChanges.length) return;
-        if (!window.bridge) throw new Error("Open the desktop app first.");
-        for (const plugin of pluginChanges)
-          await window.bridge.claudePluginsToggle({
-            cwd,
-            endpoint: pluginEndpoint,
-            name: plugin.name,
-            disabled: plugin.disabled,
-          });
-      };
       if (backend === "herdr") {
         const result = await window.bridge!.herdr(
           endpoint,
           "workspace.create",
           { label: name, cwd, focus: false },
         );
-        try {
-          await applyPluginChanges();
-        } catch (error) {
-          await window.bridge
-            ?.herdr(endpoint, "workspace.close", {
-              workspace_id: result.workspace.workspace_id,
-            })
-            .catch(() => {});
-          throw error;
-        }
         await refreshHerdr(endpoint);
         if (starter !== "shell")
           await window.bridge!.herdr(endpoint, "pane.send_input", {
@@ -245,7 +219,6 @@ export function useWorkspaces({
           `herdr:${endpoint.startsWith("ssh:") ? endpoint : "local"}:${result.workspace.workspace_id}`,
         );
       } else {
-        await applyPluginChanges();
         const w = initialWorkspace(cwd);
         w.name = name;
         const panel: Panel = {

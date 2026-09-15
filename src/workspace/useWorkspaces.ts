@@ -268,9 +268,15 @@ export function useWorkspaces({
     filesTarget?: Panel["filesTarget"],
     modelProfile?: ModelProfile,
     backend?: "herdr" | "local",
+    targetWorkspaceId?: string,
   ) {
     const modelProfileId = modelProfile?.id;
-    const current = activeRef.current;
+    // A merged-row session host choice (D2): defaults to the active
+    // workspace, same as before targetWorkspaceId existed.
+    const current =
+      (targetWorkspaceId &&
+        workspacesRef.current.find((w) => w.id === targetWorkspaceId)) ||
+      activeRef.current;
     if (adding) return;
     setAdding(true);
     try {
@@ -336,8 +342,13 @@ export function useWorkspaces({
         updateWorkspace(current.id, (w) => appendPanel(w, panel));
         setSelected(panel.id);
       }
-      showWorkspace();
-      setZoomed(null);
+      // D2: a chosen host other than the active workspace becomes active too,
+      // so the new pane (just selected above) is actually visible.
+      if (current.id !== activeRef.current.id) switchWorkspace(current.id);
+      else {
+        showWorkspace();
+        setZoomed(null);
+      }
     } catch (error) {
       notify(errorText(error));
     } finally {

@@ -518,13 +518,27 @@ export function App() {
                 filesTarget,
                 modelProfile,
                 backend,
+                targetWorkspaceId,
               ) => {
-                await addPanel(kind, agent, filesTarget, modelProfile, backend);
+                await addPanel(
+                  kind,
+                  agent,
+                  filesTarget,
+                  modelProfile,
+                  backend,
+                  targetWorkspaceId,
+                );
                 closeDialog();
               }}
               addExtensionPanel={addExtensionPanel}
               extensionRegistry={extensionRegistry}
               connected={connected}
+              hostContext={{
+                workspaces,
+                projectGit,
+                connectionProfiles,
+                workspaceGrouping,
+              }}
             />
           ) : dialog.kind === "settings" ? (
             <SettingsDialog

@@ -1,4 +1,4 @@
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { X } from "lucide-react";
 import type { Panel, Workspace } from "./types";
 import { uid } from "./layout";
@@ -30,11 +30,12 @@ import { useExtensions } from "./app/useExtensions";
 import { useConnectionProfiles } from "./app/useConnectionProfiles";
 import { useHerdr } from "./app/useHerdr";
 import { useProjectGit } from "./app/useProjectGit";
-import { activeMergedHostLabel } from "./app/workspaceMerge";
+import { useMergedCanvas } from "./workspace/mergedLayouts";
+import { useProjectView } from "./workspace/projectView";
 import { useSkills } from "./app/useSkills";
 import { useToast } from "./app/useToast";
 import { useUpdates } from "./app/useUpdates";
-import { blockedPanels, tidyWorkspace } from "./workspace/workspace-actions";
+import { blockedPanels } from "./workspace/workspace-actions";
 import {
   activePage,
   resolveNavigation,
@@ -105,7 +106,6 @@ export function App() {
     connectionProfiles,
   });
   const skills = useSkills(sectionName, notify);
-  const [tabMode, setTabMode] = useState(saved?.tabMode || false);
   const [sidebar, setSidebar] = useState(
     saved?.sidebar ?? window.innerWidth >= 760,
   );
@@ -144,7 +144,6 @@ export function App() {
     adding,
     setSelected,
     setZoomed,
-    updateWorkspace,
     updatePanel,
     closePanel,
     showPanel,
@@ -176,15 +175,23 @@ export function App() {
   // member of a merged row, and only in flat mode - the sidebar draws that
   // row, but the canvas is where a Herdr/agent pane actually names its host.
   const projectGit = useProjectGit(workspaces, active.id);
-  const paneHostLabel = activeMergedHostLabel(
-    workspaces,
-    active,
+  const merged = useMergedCanvas(
+    ws,
     projectGit,
     connectionProfiles,
     workspaceGrouping,
+    socket,
   );
-  /** Clicking a pane inside an expanded merged row (AC21) - unlike a plain
-   * row's `showPanel`, the pane's owning workspace need not be active yet. */
+  const { tabMode, setTabMode, views } = useProjectView(
+    merged.group?.id ?? active.id,
+    ws,
+    saved,
+  );
+  const hostContext = useMemo(
+    () => ({ workspaces, projectGit, connectionProfiles, workspaceGrouping }),
+    [workspaces, projectGit, connectionProfiles, workspaceGrouping],
+  );
+  /** Clicking a pane inside an expanded merged row (AC21) - unlike a plain row's `showPanel`, the pane's owning workspace need not be active yet. */
   function selectHostPane(workspace: Workspace, panel: Panel) {
     switchWorkspace(workspace.id);
     setSelected(panel.id);
@@ -209,11 +216,17 @@ export function App() {
       sidebar,
       route,
       workspaceGrouping,
+      closedProjects: ws.closedProjects,
+      views,
     },
     notify,
   );
 
-  function addExtensionPanel(extensionId: string, contributionId: string) {
+  function addExtensionPanel(
+    extensionId: string,
+    contributionId: string,
+    targetWorkspaceId?: string,
+  ) {
     if (adding) return;
     try {
       const open = resolvePaneOpen(extensionRegistry, active.panels, {
@@ -231,7 +244,7 @@ export function App() {
         contributionId,
         uid(),
       );
-      ws.insertPanel(panel);
+      ws.insertPanel(panel, targetWorkspaceId);
       closeDialog();
     } catch (error) {
       notify(errorText(error));
@@ -290,8 +303,11 @@ export function App() {
     (sum, w) => sum + codePanels(w).length,
     0,
   );
-  // The canvas owns the tab strip; App only needs the flag for the shell class.
-  const useTabs = tabMode || compact || codePanels(active).length > 6;
+  // The canvas owns the tab strip; a merged project's count is every member's panes.
+  const paneCount = merged.group
+    ? merged.panes.length
+    : codePanels(active).length;
+  const useTabs = tabMode || compact || paneCount > 6;
   const blocked = blockedPanels(workspaces);
 
   return (
@@ -324,7 +340,7 @@ export function App() {
           panel ? showPanel(panel) : addPanel("files");
         }}
         tidy={() => {
-          updateWorkspace(active.id, tidyWorkspace);
+          ws.tidy();
           setZoomed(null);
           showWorkspace();
           setTabMode(false);
@@ -413,6 +429,9 @@ export function App() {
               refreshExtensions={() => void refreshExtensions()}
               openRoutineDialog={() => setDialog({ kind: "routine" })}
               totalPanels={totalPanels}
+              ws={ws}
+              projectGit={projectGit}
+              connectionProfiles={connectionProfiles}
             />
           ) : mode === "Agent" ? (
             <AgentsView slot={slot} />
@@ -441,7 +460,7 @@ export function App() {
               tabMode={tabMode}
               compact={compact}
               openPanelPicker={openPanelPicker}
-              hostLabel={paneHostLabel}
+              merged={merged}
             />
           )}
         </main>
@@ -512,19 +531,14 @@ export function App() {
               active={active}
               adding={adding}
               system={system}
-              addPanel={async (
-                kind,
-                agent,
-                filesTarget,
-                modelProfile,
-                backend,
-              ) => {
-                await addPanel(kind, agent, filesTarget, modelProfile, backend);
+              addPanel={async (...args) => {
+                await addPanel(...args);
                 closeDialog();
               }}
               addExtensionPanel={addExtensionPanel}
               extensionRegistry={extensionRegistry}
               connected={connected}
+              hostContext={hostContext}
             />
           ) : dialog.kind === "settings" ? (
             <SettingsDialog

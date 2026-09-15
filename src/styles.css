@@ -457,13 +457,6 @@ textarea::placeholder {
 .workspace-panels {
   padding: 2px 0 6px 24px;
 }
-.workspace-panels .pane-host-icon {
-  width: 10px;
-  min-width: 10px;
-  opacity: 0.6;
-  /* 4px from the name, not the button's 9px gap - same as a row's host tag. */
-  margin-left: calc(var(--gap-xs) - 9px);
-}
 .workspace-panels button.offline {
   opacity: 0.55;
 }
@@ -491,6 +484,11 @@ textarea::placeholder {
 }
 /* A worktree row's session names its checkout as plain muted text, quieter
    than the row's own chips; a long label shrinks before the title does. */
+.workspace-panels .pane-branch svg {
+  width: 10px;
+  min-width: 10px;
+  opacity: 0.6;
+}
 .workspace-panels button > span.pane-branch {
   flex: 0 1 auto;
   max-width: 45%;
@@ -1377,22 +1375,37 @@ iframe {
   grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
   gap: 11px;
 }
-.project-grid > button {
+.project-card {
+  position: relative;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
   min-width: 0;
   border: 1px solid #303030;
   border-radius: 10px;
   background: #171717;
+  overflow: hidden;
+}
+.project-card:hover {
+  border-color: #494949;
+}
+.project-card.closed {
+  opacity: 0.85;
+}
+.project-card-open {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  width: 100%;
+  border: none;
+  background: transparent;
   padding: 17px;
   text-align: left;
 }
-.project-grid > button:hover {
+.project-card-open:hover {
   background: #1e1e1e;
-  border-color: #494949;
 }
-.project-grid svg {
+.project-card-open > svg {
   color: #878d86;
   margin-bottom: 14px;
 }
@@ -1401,6 +1414,7 @@ iframe {
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .project-grid p {
   font-size: 10px;
@@ -1411,7 +1425,7 @@ iframe {
   width: 100%;
   margin: 8px 0 20px;
 }
-.project-grid span {
+.project-card-open > span {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1419,8 +1433,68 @@ iframe {
   font-size: 11px;
   color: #898989;
 }
-.project-grid span svg {
-  margin: 0;
+.project-card-open > span svg {
+  color: #878d86;
+}
+.project-card-open .remote-tag {
+  vertical-align: middle;
+  margin-left: 6px;
+}
+.project-card-hosts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 17px 14px;
+}
+.project-card-hosts .remote-tag.closed,
+.project-card-open .remote-tag.closed {
+  color: #c2a36f;
+}
+.project-card-host {
+  gap: 4px;
+}
+/* A hollow ring marks the member as closed without spelling it out. */
+.project-card-host::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+.project-card-host:hover {
+  background: #333;
+}
+.project-card-host button {
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+.project-card-host-remove {
+  display: inline-flex;
+  color: #aaa;
+  opacity: 0;
+}
+.project-card-host:hover .project-card-host-remove,
+.project-card-host:focus-within .project-card-host-remove {
+  opacity: 1;
+}
+.project-card-host-remove:hover {
+  color: #eee;
+}
+.project-card-forget {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 5px;
+  border-radius: 6px;
+  color: #aaa;
+  background: transparent;
+}
+.project-card-forget:hover {
+  background: #333;
 }
 .empty-state {
   display: flex;

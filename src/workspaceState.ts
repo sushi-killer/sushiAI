@@ -1,10 +1,30 @@
 import type { Panel, Workspace } from "./types";
 import { contains, leaf, split, uid } from "./layout.ts";
 import { validRoute, type RouteRef } from "./extensions/routes.ts";
+import type { ProjectGit } from "./app/useProjectGit.ts";
 
 export const STORAGE = "sushiai.v1";
 
 export type Routine = { id: string; name: string; command: string };
+
+/** A workspace the sidebar dropped ("Close workspace and sessions") but the
+ * Dashboard still offers back - id, name, cwd, host endpoint and the git
+ * identity read at close time, so it can be reopened where it left off and
+ * merged with any open member of the same project (see `app/projects.ts`). */
+export type ClosedProject = {
+  id: string;
+  name: string;
+  cwd: string;
+  endpoint?: string;
+  herdr: boolean;
+  closedAt: number;
+  git: ProjectGit;
+};
+
+/** How one project is looked at: tabs or split panels, and which pane is
+ * maximized. Kept per project (see `workspace/projectView.ts`). */
+export type ProjectView = { tabMode: boolean; zoomed: string | null };
+export type ProjectViews = Record<string, ProjectView>;
 
 export type Saved = {
   workspaces: Workspace[];
@@ -22,12 +42,67 @@ export type Saved = {
   /** How the sidebar shows remote workspaces: sectioned by host, or one flat
    * list with a small tag marking which ones are remote. */
   workspaceGrouping?: "grouped" | "flat";
+  closedProjects?: ClosedProject[];
+  views?: ProjectViews;
 };
 
 export type WorkspaceStorage = {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
 };
+
+function normalizeGit(value: unknown): ProjectGit {
+  const g = (value as Partial<ProjectGit>) || {};
+  return {
+    remote: typeof g.remote === "string" ? g.remote : "",
+    commonDir: typeof g.commonDir === "string" ? g.commonDir : "",
+    checkout: typeof g.checkout === "string" ? g.checkout : "",
+    subdir: typeof g.subdir === "string" ? g.subdir : "",
+    branch: typeof g.branch === "string" ? g.branch : "",
+  };
+}
+/** Accepts only a well-formed array - anything else (missing, not an array,
+ * or an entry missing the id/cwd a merge or a reopen needs) drops silently
+ * rather than carrying a half-broken closed project forward. */
+function normalizeClosedProjects(value: unknown): ClosedProject[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(
+      (p): p is Record<string, unknown> =>
+        Boolean(p) &&
+        typeof p === "object" &&
+        typeof (p as Record<string, unknown>).id === "string" &&
+        typeof (p as Record<string, unknown>).cwd === "string",
+    )
+    .map((p) => ({
+      id: p.id as string,
+      name: typeof p.name === "string" ? p.name : "",
+      cwd: p.cwd as string,
+      endpoint: typeof p.endpoint === "string" ? p.endpoint : undefined,
+      herdr: p.herdr === true,
+      closedAt: typeof p.closedAt === "number" ? p.closedAt : 0,
+      git: normalizeGit(p.git),
+    }));
+}
+
+function normalizeViews(value: unknown): ProjectViews {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).flatMap(([key, entry]) => {
+      if (!entry || typeof entry !== "object") return [];
+      const view = entry as Partial<ProjectView>;
+      return [
+        [
+          key,
+          {
+            tabMode: view.tabMode === true,
+            zoomed: typeof view.zoomed === "string" ? view.zoomed : null,
+          },
+        ],
+      ];
+    }),
+  );
+}
 
 export function restore(
   storage?: Pick<WorkspaceStorage, "getItem">,
@@ -51,6 +126,8 @@ export function restore(
       route: validRoute(value.route) ? value.route : undefined,
       workspaceGrouping:
         value.workspaceGrouping === "flat" ? "flat" : "grouped",
+      closedProjects: normalizeClosedProjects(value.closedProjects),
+      views: normalizeViews(value.views),
       workspaces: value.workspaces.map((w: Workspace) => ({
         ...w,
         connection: w.herdrId ? w.connection || value.socket : undefined,

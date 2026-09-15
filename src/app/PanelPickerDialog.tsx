@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   FolderOpen,
   Globe,
@@ -7,12 +7,16 @@ import {
   TerminalSquare,
 } from "lucide-react";
 import { agentTitle } from "./agent-title.ts";
+import { sessionHostOptions, type SessionHostContext } from "./sessionHosts.ts";
 import { ExtensionPanelOptions } from "../extensions/ExtensionSlots.tsx";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import type { ModelProfile, PanelKind, System, Workspace } from "../types";
 
 /** Model profiles are this dialog's business only, so they load when it opens
- * and the picked profile resets with it. */
+ * and the picked profile resets with it. Same for the session-host pick
+ * (D1-D3): the merge group is only ever the active workspace's, so it too is
+ * safe to derive once, here, from `hostContext` (App.tsx's own state, handed
+ * down as one prop). */
 export function PanelPickerDialog({
   active,
   adding,
@@ -21,6 +25,7 @@ export function PanelPickerDialog({
   addExtensionPanel,
   extensionRegistry,
   connected,
+  hostContext,
 }: {
   active: Workspace;
   adding: boolean;
@@ -31,10 +36,16 @@ export function PanelPickerDialog({
     filesTarget?: undefined,
     modelProfile?: ModelProfile,
     backend?: "herdr" | "local",
+    targetWorkspaceId?: string,
   ): void;
   connected: boolean;
-  addExtensionPanel(extensionId: string, contributionId: string): void;
+  addExtensionPanel(
+    extensionId: string,
+    contributionId: string,
+    targetWorkspaceId?: string,
+  ): void;
   extensionRegistry: ExtensionRegistry;
+  hostContext: SessionHostContext;
 }) {
   const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([]);
   // Only a Herdr-backed workspace has a choice to offer.
@@ -44,11 +55,44 @@ export function PanelPickerDialog({
   useEffect(() => {
     window.bridge?.modelProfilesList().then(setModelProfiles);
   }, []);
+  // Empty outside a merge group (D3): the picker then targets `active` alone,
+  // exactly as it always has.
+  const hostOptions = useMemo(
+    () => sessionHostOptions(active, hostContext),
+    [active, hostContext],
+  );
+  const [hostId, setHostId] = useState(active.id);
+  const targetWorkspaceId = hostOptions.length ? hostId : undefined;
+  const launchLabel =
+    hostOptions.find((option) => option.workspaceId === hostId)?.label ||
+    active.name;
   return (
     <>
       <div className="dialog-eyebrow">MAKE IT YOUR SPACE</div>
       <h2>Add a panel</h2>
       <p>Everything you need, side by side.</p>
+      {hostOptions.length > 0 && (
+        <>
+          <div className="dialog-eyebrow">LAUNCH ON</div>
+          <div
+            className="panel-backend"
+            role="radiogroup"
+            aria-label="Launch on"
+          >
+            {hostOptions.map((option) => (
+              <button
+                key={option.workspaceId}
+                role="radio"
+                aria-checked={hostId === option.workspaceId}
+                className={hostId === option.workspaceId ? "selected" : ""}
+                onClick={() => setHostId(option.workspaceId)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
       {herdrWorkspace && (
         <div
           className="panel-backend"
@@ -105,7 +149,14 @@ export function PanelPickerDialog({
           <button
             key={item.kind}
             onClick={() =>
-              addPanel(item.kind, undefined, undefined, undefined, backend)
+              addPanel(
+                item.kind,
+                undefined,
+                undefined,
+                undefined,
+                backend,
+                targetWorkspaceId,
+              )
             }
           >
             <item.icon size={19} />
@@ -118,7 +169,9 @@ export function PanelPickerDialog({
         ))}
         <ExtensionPanelOptions
           registry={extensionRegistry}
-          onAdd={addExtensionPanel}
+          onAdd={(extensionId, contributionId) =>
+            addExtensionPanel(extensionId, contributionId, targetWorkspaceId)
+          }
         />
       </div>
       <div className="dialog-eyebrow agent-options-label">CODING AGENTS</div>
@@ -137,6 +190,7 @@ export function PanelPickerDialog({
                     )
                   : undefined,
                 backend,
+                targetWorkspaceId,
               )
             }
           >
@@ -177,7 +231,7 @@ export function PanelPickerDialog({
       )}
       <div className="dialog-footer">
         <span>
-          Launches in <strong>{active.name}</strong>
+          Launches in <strong>{launchLabel}</strong>
         </span>
         <kbd>esc</kbd>
       </div>

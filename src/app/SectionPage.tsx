@@ -8,6 +8,7 @@ import {
   TerminalSquare,
   Trash2,
   Workflow,
+  X,
 } from "lucide-react";
 import { ExtensionsView } from "../extensions/ExtensionsView.tsx";
 import { PageFrame } from "./PageFrame.tsx";
@@ -22,11 +23,13 @@ import type { SectionRef } from "./navigation.ts";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import { LocalSkillsView } from "../LocalSkillsView.tsx";
 import { Empty, LayersIcon } from "./Empty.tsx";
-import { codePanels } from "../workspaceState.ts";
 import type { Routine } from "../workspaceState.ts";
 import type { ExtensionSnapshot } from "../extensions/types.ts";
-import type { Workspace } from "../types";
+import type { ConnectionProfile, Workspace } from "../types";
 import type { SkillCatalogItem, SkillManagementAction } from "../types";
+import type { WorkspaceController } from "../workspace/useWorkspaces.ts";
+import type { ProjectGit } from "./useProjectGit.ts";
+import { closedMemberIds, dashboardEntries } from "./projects.ts";
 
 /** The one page in the working area. A core section and a page an extension
  * contributed are both drawn here, in the same frame - there is no second path
@@ -50,6 +53,9 @@ export function SectionPage({
   openExtensionTarget,
   cwd,
   connection,
+  ws,
+  projectGit,
+  connectionProfiles,
 }: {
   section: SectionRef;
   runExtensionCommand(extensionId: string, commandId: string): void;
@@ -83,6 +89,9 @@ export function SectionPage({
   openExtensionTarget(extensionId: string, targetSurfaceId: string): void;
   cwd: string;
   connection?: string;
+  ws: WorkspaceController;
+  projectGit: Record<string, ProjectGit>;
+  connectionProfiles: ConnectionProfile[];
 }) {
   const surface =
     section.kind === "extension" ? activePage(registry, section) : undefined;
@@ -114,6 +123,12 @@ export function SectionPage({
       </PageFrame>
     );
   const name = section.id;
+  const projects = dashboardEntries(
+    workspaces,
+    ws.closedProjects,
+    projectGit,
+    connectionProfiles,
+  );
   return (
     <PageFrame
       eyebrow="YOUR WORKSPACE"
@@ -190,15 +205,89 @@ export function SectionPage({
           </div>
           <h3>Pick up where you left off</h3>
           <div className="project-grid">
-            {workspaces.map((w) => (
-              <button key={w.id} onClick={() => switchWorkspace(w.id)}>
-                <FolderOpen size={19} />
-                <strong>{w.name}</strong>
-                <p>{w.cwd}</p>
-                <span>
-                  {codePanels(w).length} panels <ArrowUpRight size={13} />
-                </span>
-              </button>
+            {projects.map((entry) => (
+              <div
+                key={entry.id}
+                className={`project-card${entry.closed ? " closed" : ""}`}
+              >
+                <button
+                  className="project-card-open"
+                  onClick={() =>
+                    entry.closed
+                      ? void ws.reopenProject(
+                          ws.closedProjects.find(
+                            (p) => p.id === entry.primaryId,
+                          )!,
+                        )
+                      : switchWorkspace(entry.primaryId)
+                  }
+                >
+                  <FolderOpen size={19} />
+                  <strong>
+                    {entry.name}
+                    {entry.closed && (
+                      <span className="remote-tag closed">Closed</span>
+                    )}
+                  </strong>
+                  <p>{entry.cwd}</p>
+                  <span>
+                    {entry.closed
+                      ? "Reopen"
+                      : `${entry.panelCount} ${entry.panelCount === 1 ? "panel" : "panels"}`}{" "}
+                    <ArrowUpRight size={13} />
+                  </span>
+                </button>
+                {entry.members.length > 1 && (
+                  <div className="project-card-hosts">
+                    {entry.members.map((member) =>
+                      member.closed ? (
+                        <span
+                          key={member.id}
+                          className="remote-tag closed project-card-host"
+                        >
+                          <button
+                            type="button"
+                            title={`${member.label} is closed - click to reopen`}
+                            onClick={() => {
+                              const project = ws.closedProjects.find(
+                                (p) => p.id === member.id,
+                              );
+                              if (project) void ws.reopenProject(project);
+                            }}
+                          >
+                            {member.label}
+                          </button>
+                          <button
+                            type="button"
+                            className="project-card-host-remove"
+                            aria-label={`Remove ${member.label} from projects`}
+                            onClick={() => ws.forgetProject(member.id)}
+                          >
+                            <X size={9} />
+                          </button>
+                        </span>
+                      ) : (
+                        <span key={member.id} className="remote-tag">
+                          {member.label}
+                        </span>
+                      ),
+                    )}
+                  </div>
+                )}
+                {entry.closed && (
+                  <button
+                    className="project-card-forget"
+                    title="Remove from projects"
+                    onClick={() =>
+                      closedMemberIds(entry).forEach((id) =>
+                        ws.forgetProject(id),
+                      )
+                    }
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
             ))}
           </div>
         </>

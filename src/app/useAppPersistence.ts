@@ -21,6 +21,8 @@ export function useAppPersistence(
     sidebar,
     route,
     workspaceGrouping,
+    closedProjects,
+    views,
   } = state;
   useEffect(() => {
     try {
@@ -38,6 +40,8 @@ export function useAppPersistence(
         sidebar,
         route,
         workspaceGrouping,
+        closedProjects,
+        views,
       });
     } catch {
       notify("Storage is full. Clear older chat history.");
@@ -56,6 +60,8 @@ export function useAppPersistence(
     sidebar,
     route,
     workspaceGrouping,
+    closedProjects,
+    views,
     notify,
   ]);
 }

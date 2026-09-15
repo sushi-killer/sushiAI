@@ -11,6 +11,7 @@ import { sessionHostOptions, type SessionHostContext } from "./sessionHosts.ts";
 import { ExtensionPanelOptions } from "../extensions/ExtensionSlots.tsx";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import {
+  launchesInWorktree,
   suggestWorktreeBranch,
   worktreeBranchError,
 } from "../workspace/worktree.ts";
@@ -216,7 +217,7 @@ export function PanelPickerDialog({
         ).map((item) => (
           <button
             key={item.kind}
-            disabled={item.kind === "terminal" && worktreeInvalid}
+            disabled={launchesInWorktree(item.kind) && worktreeInvalid}
             onClick={() =>
               addPanel(
                 item.kind,
@@ -225,7 +226,7 @@ export function PanelPickerDialog({
                 undefined,
                 backend,
                 targetWorkspaceId,
-                item.kind === "terminal" ? worktreeArg : undefined,
+                launchesInWorktree(item.kind) ? worktreeArg : undefined,
               )
             }
           >

@@ -1,4 +1,4 @@
-import type { Workspace } from "../types";
+import type { PanelKind, Workspace } from "../types";
 
 /** A local-time, minute-precision suggestion for the branch field, prefilled
  * when the "New worktree" launch choice opens. */
@@ -50,6 +50,13 @@ export function worktreeBranchError(name: string): string {
   if (name.endsWith(".")) return 'Branch name cannot end with ".".';
   if (name.endsWith(".lock")) return 'Branch name cannot end with ".lock".';
   return "";
+}
+
+/** Only a session runs somewhere: a terminal or an agent. Files, Browser and
+ * Thread are views of the project and open in the checkout they are given, so
+ * the picker must not promise them a worktree either. */
+export function launchesInWorktree(kind: PanelKind): boolean {
+  return kind === "terminal" || kind === "agent";
 }
 
 /** Params for the Herdr `worktree.create` socket RPC: a linked worktree of

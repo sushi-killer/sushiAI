@@ -65,10 +65,12 @@ const GROUPS: { key: InboxGroupKey; label: string }[] = [
   { key: "shells", label: "Shells" },
 ];
 
-/** Only agents can wait for input or finish - a chat thread is a conversation
- * and an extension panel answers to its own manifest, not this queue. */
+/** A panel that can wait for input or finish: a dedicated agent panel, or a
+ * terminal Herdr detected an agent inside. Kept in step with `bucketFor` on
+ * purpose - a panel the Inbox lists as blocked must also be one `observe`
+ * times and notifies about. */
 function isAgentPanel(panel: Panel): boolean {
-  return panel.kind === "agent";
+  return panel.kind === "agent" || (panel.kind === "terminal" && !!panel.agent);
 }
 
 /** Whether a listed panel (see `bucketFor`) is a plain shell: a terminal that

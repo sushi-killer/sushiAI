@@ -12,6 +12,7 @@ const {
   worktreeBranchError,
   worktreeCreateParams,
   herdrWorkspaceKey,
+  launchesInWorktree,
 } = require("../src/workspace/worktree.ts");
 const {
   worktreeBranchError: worktreeBranchErrorMain,
@@ -228,4 +229,15 @@ test("createWorktree adds a linked worktree on a new branch next to a real repo"
 
   // A second attempt at the same branch/path is refused rather than clobbering it.
   await assert.rejects(createWorktree(repo, "sushi/test-branch"));
+});
+
+test("only a terminal or an agent launches in a worktree", () => {
+  assert.equal(launchesInWorktree("terminal"), true);
+  assert.equal(launchesInWorktree("agent"), true);
+  for (const kind of ["files", "browser", "chat", "extension"])
+    assert.equal(
+      launchesInWorktree(kind),
+      false,
+      `${kind} is a view of the project, not a session`,
+    );
 });

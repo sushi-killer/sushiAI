@@ -28,6 +28,7 @@ import {
 import type { GroupCanvasContext } from "./workspace-actions.ts";
 import {
   herdrWorkspaceKey,
+  launchesInWorktree,
   worktreeBranchError,
   worktreeCreateParams,
 } from "./worktree.ts";
@@ -323,7 +324,7 @@ export function useWorkspaces({
       // A Herdr workspace runs its sessions in Herdr unless this panel was
       // asked to be local. Nothing else can start a process.
       const viaHerdr = current.herdrId && (backend ?? "herdr") === "herdr";
-      if (viaHerdr && (kind === "terminal" || kind === "agent")) {
+      if (viaHerdr && launchesInWorktree(kind)) {
         if (!window.bridge) throw new Error("Open the desktop app first.");
         const endpoint = current.connection || socket;
         if (worktree) {
@@ -382,7 +383,7 @@ export function useWorkspaces({
           });
         await refreshHerdr(endpoint);
         if (paneId) setSelected(herdrWorkspaceKey(endpoint, paneId));
-      } else if (worktree && (kind === "terminal" || kind === "agent")) {
+      } else if (worktree && launchesInWorktree(kind)) {
         // The local counterpart of the branch above: no Herdr involved, so
         // the new checkout runs as a plain local process on this Mac (also
         // reached from a Herdr workspace whose picker backend was "local").

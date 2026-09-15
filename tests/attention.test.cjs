@@ -302,3 +302,22 @@ test("only sessions are listed: a browser, files or chat panel never reaches the
   assert.deepEqual(listed, ["term"]);
   assert.equal(waitingCount(ws, createAttentionState(), []), 0);
 });
+
+test("a terminal with an agent inside is timed, notified and reminded like an agent panel", async () => {
+  const { createAttentionState, observe, dueReminders, inboxGroups } =
+    await library;
+  const shell = (status) =>
+    workspace("w1", [panel("t", "terminal", { status, agent: "claude" })]);
+  let { state } = observe(createAttentionState(), [shell("working")], 0);
+  const seen = observe(state, [shell("blocked")], 60000);
+  state = seen.state;
+  assert.equal(seen.events.length, 1, "blocked fires for a detected agent");
+  assert.equal(seen.events[0].kind, "blocked");
+  const rows = inboxGroups([shell("blocked")], state, []).find(
+    (group) => group.key === "blocked",
+  ).rows;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].since, 60000, "it is timed like any other session");
+  const due = dueReminders(state, 60000 + 5 * 60000);
+  assert.deepEqual(due.reminders, [{ panelId: "t", minutes: 5 }]);
+});

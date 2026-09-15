@@ -4,7 +4,6 @@ import {
   FolderOpen,
   Play,
   Plus,
-  RotateCcw,
   Sparkles,
   TerminalSquare,
   Trash2,
@@ -233,11 +232,7 @@ export function SectionPage({
                   <p>{entry.cwd}</p>
                   <span>
                     {entry.closed ? "Reopen" : `${entry.panelCount} panels`}{" "}
-                    {entry.closed ? (
-                      <RotateCcw size={13} />
-                    ) : (
-                      <ArrowUpRight size={13} />
-                    )}
+                    <ArrowUpRight size={13} />
                   </span>
                 </button>
                 {entry.members.length > 1 && (

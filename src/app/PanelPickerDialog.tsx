@@ -72,20 +72,26 @@ export function PanelPickerDialog({
       <h2>Add a panel</h2>
       <p>Everything you need, side by side.</p>
       {hostOptions.length > 0 && (
-        <fieldset className="panel-backend">
-          <legend className="dialog-eyebrow">LAUNCH ON</legend>
-          {hostOptions.map((option) => (
-            <label key={option.workspaceId}>
-              <input
-                type="radio"
-                name="session-host"
-                checked={hostId === option.workspaceId}
-                onChange={() => setHostId(option.workspaceId)}
-              />
-              {option.label}
-            </label>
-          ))}
-        </fieldset>
+        <>
+          <div className="dialog-eyebrow">LAUNCH ON</div>
+          <div
+            className="panel-backend"
+            role="radiogroup"
+            aria-label="Launch on"
+          >
+            {hostOptions.map((option) => (
+              <button
+                key={option.workspaceId}
+                role="radio"
+                aria-checked={hostId === option.workspaceId}
+                className={hostId === option.workspaceId ? "selected" : ""}
+                onClick={() => setHostId(option.workspaceId)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </>
       )}
       {herdrWorkspace && (
         <div

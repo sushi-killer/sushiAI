@@ -89,7 +89,7 @@ test("local + remote host merge -> one option per host, labelled by host", async
   assert.equal(byId["w-lab"].label, "Lab");
 });
 
-test("worktrees on one host -> the Local member's label carries its host too", async () => {
+test("worktrees on one host -> labelled by branch alone, no repeated host", async () => {
   const { sessionHostOptions } = await library;
   const main = workspace("w-main", undefined, "/Users/dev/sushiai");
   const feature = workspace("w-feature", undefined, "/Users/dev/sushiai-fx");
@@ -107,8 +107,8 @@ test("worktrees on one host -> the Local member's label carries its host too", a
     context([main, feature], projectGit, [], "flat"),
   );
   const byId = Object.fromEntries(options.map((o) => [o.workspaceId, o]));
-  assert.equal(byId["w-main"].label, "Local · main");
-  assert.equal(byId["w-feature"].label, "Local · feature-x");
+  assert.equal(byId["w-main"].label, "main");
+  assert.equal(byId["w-feature"].label, "feature-x");
 });
 
 test("worktrees mixing hosts -> only the Local member needs the prefix added", async () => {

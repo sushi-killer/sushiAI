@@ -27,10 +27,9 @@ export type SessionHostContext = {
 };
 
 /** D1: one option per merge-group member. `memberLabel` names a worktree
- * member by its branch alone once it's this Mac's checkout - fine inside the
- * sidebar row, which already carries its own "Local" context, but ambiguous
- * standing next to a differently-labelled sibling worktree in a plain list -
- * so here a worktree group's Local member gets its host prefixed too. */
+ * member on this Mac by its branch alone. That is enough while every member
+ * is on one machine, but next to `Lab · feature-x` a bare `main` hides where
+ * it runs - so only a group spanning hosts prefixes the Local member. */
 export function sessionHostOptions(
   active: Workspace,
   {
@@ -48,10 +47,11 @@ export function sessionHostOptions(
     workspaceGrouping,
   );
   if (!group) return [];
+  const manyHosts = new Set(group.members.map((m) => m.hostKey)).size > 1;
   return group.members.map((member) => {
     const label = memberLabel(group, member, connectionProfiles);
     const named =
-      group.worktrees && member.hostKey === LOCAL_GROUP
+      group.worktrees && manyHosts && member.hostKey === LOCAL_GROUP
         ? `${groupLabel(member.hostKey, connectionProfiles)} · ${label}`
         : label;
     return { workspaceId: member.workspace.id, label: named };

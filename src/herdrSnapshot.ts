@@ -92,9 +92,6 @@ export function reconcileHerdrWorkspaces(
   systemHome = "",
 ): Workspace[] {
   const endpointKey = connection.startsWith("ssh:") ? connection : "local";
-  const local = current.filter(
-    (workspace) => !workspace.herdrId || workspace.connection !== connection,
-  );
   const existing = new Map(
     current
       .filter(
@@ -109,7 +106,11 @@ export function reconcileHerdrWorkspaces(
     panesByWorkspace.set(pane.workspace_id, panes);
   }
 
-  const remote = snapshot.workspaces.map((workspace) => {
+  const bySnapshotId = new Map(
+    snapshot.workspaces.map((workspace) => [workspace.workspace_id, workspace]),
+  );
+  function buildWorkspace(workspaceId: string): Workspace {
+    const workspace = bySnapshotId.get(workspaceId)!;
     const old = existing.get(workspace.workspace_id);
     const remotePanes = panesByWorkspace.get(workspace.workspace_id) || [];
     const oldPanelsByHerdr = new Map(
@@ -117,7 +118,17 @@ export function reconcileHerdrWorkspaces(
         .filter((panel) => panel.herdrId)
         .map((panel) => [panel.herdrId as string, panel]),
     );
-    const panels: Panel[] = remotePanes.map((pane) => {
+    // Same reasoning as the workspace order above, one level down: keep each
+    // pane where it already was and only append genuinely new ones.
+    const byPaneId = new Map(remotePanes.map((pane) => [pane.pane_id, pane]));
+    const orderedPaneIds = [
+      ...[...oldPanelsByHerdr.keys()].filter((id) => byPaneId.has(id)),
+      ...remotePanes
+        .map((pane) => pane.pane_id)
+        .filter((id) => !oldPanelsByHerdr.has(id)),
+    ];
+    const panels: Panel[] = orderedPaneIds.map((paneId) => {
+      const pane = byPaneId.get(paneId)!;
       const existingPanel = oldPanelsByHerdr.get(pane.pane_id);
       const nextPanel: Panel = {
         ...(existingPanel || {}),
@@ -170,8 +181,28 @@ export function reconcileHerdrWorkspaces(
       panels: allPanels,
       layout,
     };
-  });
-  const next = [...local, ...remote];
+  }
+  // This app polls every connected host concurrently, each on its own timer
+  // (see useHerdr), so a poll for any one connection must never move workspaces
+  // belonging to a DIFFERENT connection, or this connection's own workspaces
+  // to a new spot - only ever update them in place. Otherwise every
+  // independent poll reordered the whole array: a flat (unsectioned) list
+  // visibly reshuffled every few seconds, and the order-sensitive equality
+  // check below saw a "change" (spurious re-renders) even when nothing about
+  // any workspace had actually changed.
+  const nextBase = current
+    .map((workspace) => {
+      if (!workspace.herdrId || workspace.connection !== connection)
+        return workspace;
+      return bySnapshotId.has(workspace.herdrId)
+        ? buildWorkspace(workspace.herdrId)
+        : null;
+    })
+    .filter((workspace): workspace is Workspace => workspace !== null);
+  const brandNew = [...bySnapshotId.keys()]
+    .filter((id) => !existing.has(id))
+    .map((id) => buildWorkspace(id));
+  const next = [...nextBase, ...brandNew];
   return sameWorkspaces(current, next) ? current : next;
 }
 

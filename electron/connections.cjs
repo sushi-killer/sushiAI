@@ -45,6 +45,12 @@ function run(binary, args, input = "", timeout = 20000) {
     proc.stdin.end(input);
   });
 }
+// `ssh -G` prints the resolved config as one lowercase "key value" per line.
+// Anchored on purpose: forwardagent, forwardx11, exitonforwardfailure and
+// clearallforwardings are printed for every host and are not forwards.
+function declaresForwards(config) {
+  return /^(localforward|remoteforward|dynamicforward)\s/m.test(config);
+}
 function validate(profile) {
   if (!profile || !/^[a-zA-Z0-9_][a-zA-Z0-9_.@-]*$/.test(profile.host || ""))
     throw new Error("Enter an SSH alias or user@hostname.");
@@ -63,14 +69,18 @@ function validate(profile) {
     host: profile.host,
     port: Number(profile.port) || undefined,
     socket: profile.socket,
+    hidden: Boolean(profile.hidden),
+    autoConnect: Boolean(profile.autoConnect),
   };
 }
 class Connections {
   constructor(dataDir) {
     this.file = path.join(dataDir, "connections.json");
+    this.knownHostsFile = path.join(dataDir, "known_hosts");
     this.profiles = [];
     this.runtime = new Map();
     this.pending = new Map();
+    this.retryTimers = new Map();
     this.inspectionWorkers = new Map();
     this.inspectionSourcePromise = null;
     this.closed = false;
@@ -78,6 +88,7 @@ class Connections {
   }
   async init() {
     this.temp = await fs.mkdtemp("/tmp/sushiai-ssh-");
+    await fs.mkdir(path.dirname(this.file), { recursive: true });
     try {
       this.profiles = JSON.parse(await fs.readFile(this.file, "utf8")).map(
         validate,
@@ -102,8 +113,17 @@ class Connections {
       "-T",
       "-o",
       "BatchMode=yes",
+      // A user's own ssh_config can set UserKnownHostsFile=/dev/null (common
+      // alongside their own StrictHostKeyChecking=no), which would silently
+      // discard every host key we try to save. Point at our own file instead
+      // of trusting whatever the user's global config resolves to, so a new
+      // host's key is actually remembered and later changes are still
+      // caught - `accept-new` trusts a host's key the first time (there is
+      // no UI to pre-approve one), then verifies it on every connection after.
       "-o",
-      "StrictHostKeyChecking=yes",
+      `UserKnownHostsFile=${this.knownHostsFile}`,
+      "-o",
+      "StrictHostKeyChecking=accept-new",
       "-o",
       "ConnectTimeout=8",
       "-o",
@@ -122,6 +142,32 @@ class Connections {
       mode: 0o600,
     });
     return p;
+  }
+  /** Hides a profile from the workspace sidebar without touching its tunnel -
+   * unlike `save`, this never disconnects, since it changes only how the app
+   * displays the connection, not the connection itself. */
+  async setHidden(endpoint, hidden) {
+    const p = this.get(endpoint);
+    const next = { ...p, hidden: Boolean(hidden) };
+    this.profiles = this.profiles.map((x) => (x.id === p.id ? next : x));
+    await fs.mkdir(path.dirname(this.file), { recursive: true });
+    await fs.writeFile(this.file, JSON.stringify(this.profiles, null, 2), {
+      mode: 0o600,
+    });
+    return next;
+  }
+  /** Tracks whether this profile should reconnect on the next app launch -
+   * flipped on by an explicit Connect, off by an explicit Disconnect, so the
+   * app resumes whatever the user last left running without asking again. */
+  async setAutoConnect(endpoint, autoConnect) {
+    const p = this.get(endpoint);
+    const next = { ...p, autoConnect: Boolean(autoConnect) };
+    this.profiles = this.profiles.map((x) => (x.id === p.id ? next : x));
+    await fs.mkdir(path.dirname(this.file), { recursive: true });
+    await fs.writeFile(this.file, JSON.stringify(this.profiles, null, 2), {
+      mode: 0o600,
+    });
+    return next;
   }
   async delete(endpoint) {
     const p = this.get(endpoint);
@@ -191,49 +237,70 @@ class Connections {
     return promise;
   }
   async forwardProcess(profile, specification) {
+    // A LocalForward/RemoteForward the user's own ssh_config declares for this
+    // Host rides along on every ssh we spawn, and ssh cannot keep our -L while
+    // dropping theirs - ClearAllForwardings clears both. On a shared master the
+    // competing forward can fail the -O forward after ours is registered,
+    // stranding ours there. So if the config declares any, go private. A
+    // failed `ssh -G` also lands here: private is the path that always works.
     let shared = false;
     try {
-      await run(
+      const config = await run(
         "/usr/bin/ssh",
-        [...this.args(profile), "-O", "check", profile.host],
+        [...this.args(profile), "-G", profile.host],
         "",
         3000,
       );
-      shared = true;
-    } catch {}
-    if (shared) {
-      await run("/usr/bin/ssh", [
-        ...this.args(profile),
-        "-O",
-        "forward",
-        "-L",
-        specification,
-        profile.host,
-      ]);
-      const { EventEmitter } = require("node:events");
-      const handle = new EventEmitter();
-      handle.stderr = new EventEmitter();
-      handle.shared = true;
-      let closed = false;
-      handle.kill = async () => {
-        if (closed) return;
-        closed = true;
+      if (!declaresForwards(config)) {
         await run(
           "/usr/bin/ssh",
-          [
-            ...this.args(profile),
-            "-O",
-            "cancel",
-            "-L",
-            specification,
-            profile.host,
-          ],
+          [...this.args(profile), "-O", "check", profile.host],
           "",
           3000,
-        ).catch(() => {});
-        handle.emit("exit");
-      };
-      return handle;
+        );
+        shared = true;
+      }
+    } catch {}
+    if (shared) {
+      try {
+        await run("/usr/bin/ssh", [
+          ...this.args(profile),
+          "-O",
+          "forward",
+          "-L",
+          specification,
+          profile.host,
+        ]);
+        const { EventEmitter } = require("node:events");
+        const handle = new EventEmitter();
+        handle.stderr = new EventEmitter();
+        handle.shared = true;
+        let closed = false;
+        handle.kill = async () => {
+          if (closed) return;
+          closed = true;
+          await run(
+            "/usr/bin/ssh",
+            [
+              ...this.args(profile),
+              "-O",
+              "cancel",
+              "-L",
+              specification,
+              profile.host,
+            ],
+            "",
+            3000,
+          ).catch(() => {});
+          handle.emit("exit");
+        };
+        return handle;
+      } catch {
+        // The shared master refused this forward - e.g. a LocalForward the
+        // user's own ssh_config declares for this Host competing for the
+        // same local port. Fall through to a private connection instead of
+        // failing outright: it isn't subject to that master's bindings.
+      }
     }
     return spawn(
       "/usr/bin/ssh",
@@ -244,14 +311,46 @@ class Connections {
         "-o",
         "ControlPath=none",
         "-N",
+        // Not yes: a LocalForward the user's ssh_config adds for this Host, on
+        // a port their own session already holds, would kill this connection
+        // even though our own -L came up. Both callers probe their forward by
+        // actually connecting to it, so a failure that matters still surfaces.
         "-o",
-        "ExitOnForwardFailure=yes",
+        "ExitOnForwardFailure=no",
         "-L",
         specification,
         profile.host,
       ],
       { stdio: ["ignore", "ignore", "pipe"] },
     );
+  }
+  /** Self-heals a tunnel that died on its own (network blip, host reboot,
+   * sleep/wake) - only for a profile still marked autoConnect, since an
+   * explicit Disconnect clears that flag and must stay disconnected. Backs
+   * off up to a minute; `socket()`'s own `pending` map keeps this from ever
+   * racing a manual reconnect. */
+  scheduleRetry(profileId, delay = 2000) {
+    clearTimeout(this.retryTimers.get(profileId));
+    this.retryTimers.set(
+      profileId,
+      setTimeout(async () => {
+        this.retryTimers.delete(profileId);
+        if (this.closed || this.runtime.has(profileId)) return;
+        const p = this.profiles.find((x) => x.id === profileId);
+        if (!p?.autoConnect) return;
+        try {
+          await this.socket(`ssh:${profileId}`);
+        } catch {
+          this.scheduleRetry(profileId, Math.min(delay * 2, 60000));
+        }
+      }, delay),
+    );
+  }
+  /** Retries every autoConnect profile that isn't currently live - used after
+   * the system wakes from sleep, when every tunnel may have died at once. */
+  retryAutoConnect() {
+    for (const p of this.profiles)
+      if (p.autoConnect && !this.runtime.has(p.id)) this.scheduleRetry(p.id);
   }
   async connect(profile) {
     const home = await this.inspect(`ssh:${profile.id}`, {
@@ -286,6 +385,7 @@ class Connections {
       if (this.runtime.get(profile.id) === state) {
         for (const child of state.forwards.values()) child.proc.kill();
         this.runtime.delete(profile.id);
+        if (!this.closed) this.scheduleRetry(profile.id);
       }
     });
     for (let attempt = 0; attempt < 40; attempt++) {
@@ -358,6 +458,8 @@ class Connections {
     if (inspector) await inspector.close("Connection disconnected.");
     if (!endpoint?.startsWith("ssh:")) return;
     const id = endpoint.replace(/^ssh:/, "");
+    clearTimeout(this.retryTimers.get(id));
+    this.retryTimers.delete(id);
     if (this.pending.has(id)) await this.pending.get(id).catch(() => {});
     const state = this.runtime.get(id);
     if (state) {
@@ -370,6 +472,8 @@ class Connections {
     if (this.closePromise) return this.closePromise;
     this.closed = true;
     this.closePromise = (async () => {
+      for (const timer of this.retryTimers.values()) clearTimeout(timer);
+      this.retryTimers.clear();
       const inspectors = [...this.inspectionWorkers.values()];
       this.inspectionWorkers.clear();
       await Promise.allSettled(inspectors.map((worker) => worker.close()));
@@ -381,4 +485,4 @@ class Connections {
     return this.closePromise;
   }
 }
-module.exports = { Connections, run, quote, validate };
+module.exports = { Connections, run, quote, validate, declaresForwards };

@@ -17,6 +17,7 @@ export function WorkspaceCanvas({
   tabMode,
   compact,
   openPanelPicker,
+  hostLabel,
 }: {
   ws: WorkspaceController;
   activeEndpoint: string;
@@ -24,6 +25,9 @@ export function WorkspaceCanvas({
   tabMode: boolean;
   compact: boolean;
   openPanelPicker(): void;
+  /** Pane provenance (AC23): set only when the active workspace is a member
+   * of a merged sidebar row, so every pane on this canvas can name its host. */
+  hostLabel?: string;
 }) {
   const {
     active,
@@ -63,6 +67,7 @@ export function WorkspaceCanvas({
         cwd={panel.filesTarget?.root || active.cwd}
         socket={activeEndpoint}
         endpoint={active.connection}
+        hostLabel={hostLabel}
         selected={selected === id}
         zoomed={zoomed === id}
         dragging={!!dragId}

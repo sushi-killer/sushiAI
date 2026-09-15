@@ -99,3 +99,89 @@ test("docs/LESSONS.md with an over-budget entry fails", () => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /open entry #1 is \d+ words \(cap: 120\)/);
 });
+
+test("a private network address in source fails, a documentation example does not", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  // Built at runtime on purpose: this file lives in tests/, which the scan
+  // walks, so a literal dotted private address here would fail CI on itself.
+  const privateHost = ["172", "20", "0", "5"].join(".");
+  const leak = fs.mkdtempSync(path.join(os.tmpdir(), "ip-leak-"));
+  fs.mkdirSync(path.join(leak, "tests"));
+  fs.writeFileSync(
+    path.join(leak, "tests", "probe.test.cjs"),
+    `const host = "${privateHost}";\n`,
+  );
+  const failed = run({ PRIVATE_IP_ROOT_OVERRIDE: leak });
+  assert.equal(failed.status, 1);
+  assert.match(
+    failed.stderr,
+    /tests\/probe\.test\.cjs:1 contains a private network address/,
+  );
+
+  // RFC 5737 documentation space is the sanctioned way to write an example.
+  const clean = fs.mkdtempSync(path.join(os.tmpdir(), "ip-clean-"));
+  fs.mkdirSync(path.join(clean, "src"));
+  fs.writeFileSync(
+    path.join(clean, "src", "example.ts"),
+    `const host = "${["192", "0", "2", "10"].join(".")}";\n`,
+  );
+  const passed = run({ PRIVATE_IP_ROOT_OVERRIDE: clean });
+  assert.equal(passed.status, 0, passed.stderr);
+
+  fs.rmSync(leak, { recursive: true, force: true });
+  fs.rmSync(clean, { recursive: true, force: true });
+});
+
+test("skills and subagents with a broken shape fail, a clean setup passes", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const write = (dir, file, text) => {
+    fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+    fs.writeFileSync(path.join(dir, file), text);
+  };
+  const skill = (dir, name, head) => {
+    write(dir, `.agents/skills/${name}/SKILL.md`, `---\n${head}\n---\n`);
+  };
+  const link = (dir, name) => {
+    fs.mkdirSync(path.join(dir, ".claude/skills"), { recursive: true });
+    fs.symlinkSync(
+      `../../.agents/skills/${name}`,
+      path.join(dir, ".claude/skills", name),
+    );
+  };
+
+  const broken = fs.mkdtempSync(path.join(os.tmpdir(), "agents-broken-"));
+  skill(broken, "good", "name: good\ndescription: Use when testing.");
+  link(broken, "good");
+  skill(broken, "bad", "name: wrong");
+  write(
+    broken,
+    ".claude/agents/role.md",
+    "---\nname: role\ndescription: A role.\nmodel: inherit\nskills: [missing]\n---\nFollow `$nowhere`.\n",
+  );
+  const failed = run({ AGENT_SETUP_ROOT_OVERRIDE: broken });
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /bad\/SKILL\.md: name "wrong" must match/);
+  assert.match(failed.stderr, /bad\/SKILL\.md: no description/);
+  assert.match(failed.stderr, /\.claude\/skills\/bad must be a symlink/);
+  assert.match(failed.stderr, /role\.md: model "inherit"/);
+  assert.match(failed.stderr, /preloads unknown skill "missing"/);
+  assert.match(failed.stderr, /`\$nowhere` is not a skill/);
+
+  const clean = fs.mkdtempSync(path.join(os.tmpdir(), "agents-clean-"));
+  skill(clean, "good", "name: good\ndescription: Use when testing.");
+  link(clean, "good");
+  write(
+    clean,
+    ".claude/agents/role.md",
+    "---\nname: role\ndescription: A role.\nmodel: sonnet\nskills: [good]\n---\nFollow `$good`.\n",
+  );
+  const passed = run({ AGENT_SETUP_ROOT_OVERRIDE: clean });
+  assert.equal(passed.status, 0, passed.stderr);
+
+  fs.rmSync(broken, { recursive: true, force: true });
+  fs.rmSync(clean, { recursive: true, force: true });
+});

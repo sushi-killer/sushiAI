@@ -20,16 +20,23 @@ function registerProjectIpc({
         terminal.proc.kill();
     }
     await connections().disconnect(endpoint);
+    if (endpoint?.startsWith("ssh:"))
+      await connections().setAutoConnect(endpoint, false);
   }
 
   handle("connections-list", () => connections().list());
   handle("connections-save", (profile) => connections().save(profile));
+  handle("connections-set-hidden", (endpoint, hidden) =>
+    connections().setHidden(endpoint, hidden),
+  );
   handle("connections-delete", async (endpoint) => {
     await disconnectEndpoint(endpoint);
     await connections().delete(endpoint);
   });
   handle("connections-connect", async (endpoint) => {
     await connections().socket(endpoint);
+    if (endpoint?.startsWith("ssh:"))
+      await connections().setAutoConnect(endpoint, true);
     return { connected: true };
   });
   handle("connections-disconnect", disconnectEndpoint);
@@ -62,6 +69,7 @@ function registerProjectIpc({
         "commit",
         "branches",
         "git_overview",
+        "git_remote",
         "checkout",
       ].includes(options?.operation)
     )

@@ -101,14 +101,23 @@ test("Herdr reconciliation indexes panes and keeps identical snapshots referenti
   );
   assert.equal(changed[0].connection, "/tmp/herdr");
 
+  // A poll for "/tmp/herdr" must only ever update that connection's own
+  // workspace in place, never reorder one belonging to a different
+  // connection - otherwise every independent poll (the app polls every
+  // connected host concurrently) would reshuffle the whole array.
+  const otherEndpointSource = [
+    ...withLocalPanel,
+    { ...first[0], id: "remote", connection: "ssh:other" },
+  ];
   const otherEndpoint = reconcileHerdrWorkspaces(
-    [...withLocalPanel, { ...first[0], id: "remote", connection: "ssh:other" }],
+    otherEndpointSource,
     snapshot,
     "/tmp/herdr",
     "/home/test",
   );
   assert.equal(otherEndpoint.length, 2);
-  assert.equal(otherEndpoint[0].connection, "ssh:other");
+  assert.equal(otherEndpoint[0].connection, "/tmp/herdr");
+  assert.strictEqual(otherEndpoint[1], otherEndpointSource[1]);
 });
 
 test("Herdr reconciliation builds a large workspace without recursive layout overflow", async () => {

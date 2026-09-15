@@ -19,6 +19,9 @@ export type Saved = {
   zoomed?: string | null;
   sidebar?: boolean;
   route?: RouteRef;
+  /** How the sidebar shows remote workspaces: sectioned by host, or one flat
+   * list with a small tag marking which ones are remote. */
+  workspaceGrouping?: "grouped" | "flat";
 };
 
 export type WorkspaceStorage = {
@@ -46,6 +49,8 @@ export function restore(
       zoomed: typeof value.zoomed === "string" ? value.zoomed : null,
       sidebar: typeof value.sidebar === "boolean" ? value.sidebar : undefined,
       route: validRoute(value.route) ? value.route : undefined,
+      workspaceGrouping:
+        value.workspaceGrouping === "flat" ? "flat" : "grouped",
       workspaces: value.workspaces.map((w: Workspace) => ({
         ...w,
         connection: w.herdrId ? w.connection || value.socket : undefined,

@@ -1,6 +1,8 @@
 ---
 name: author-and-verify-extension
-description: This skill should be used when a user asks to add, scaffold, or build a new extension/plugin/surface for sushiAI end to end — for example "add a task-list extension", "build me a plugin that shows X", or "write an extension with a settings surface". It covers the full loop from manifest to a verified running smoke test, not just writing a manifest file.
+description: Builds a new sushiAI extension end to end: designs the manifest, validates it with validateExtensionManifest, builds, and proves it loads in a real Electron smoke run against a throwaway extensions directory. Use when asked to add, scaffold or build an extension, plugin or surface.
+context: fork
+agent: general-purpose
 ---
 
 # Author and verify an extension
@@ -9,15 +11,6 @@ This is the concrete answer to "I want to write a plugin" — the workflow a
 contributor actually runs, not just a manifest reference. See
 `AGENTS.md`'s "Extension contract is the capability surface" section for the
 contract facts cited below; this skill is the procedure for exercising it.
-
-**Claude Code**: hand this off to the `extension-builder` subagent
-(`.claude/agents/extension-builder.md`) via the `Agent` tool so the
-scaffold/validate/retry loop runs in an isolated context instead of
-consuming the main session's. Give it the requested extension's shape
-(surfaces, navigation, actions, commands) in plain language; it does the
-rest and reports back pass/fail.
-
-**Codex** (no subagent-file mechanism): run the steps below directly.
 
 ## The loop
 
@@ -52,7 +45,7 @@ rest and reports back pass/fail.
    so an external value is silently discarded. Instead, copy
    `scripts/smoke.mjs`'s own setup (the build-freshness check and its
    `electron.launch(...)` call, first ~75 lines) into a throwaway script,
-   point *your copy's* `SUSHIAI_EXTENSIONS_DIR` at the throwaway directory,
+   point _your copy's_ `SUSHIAI_EXTENSIONS_DIR` at the throwaway directory,
    and replace its probe-specific assertions with assertions about your own
    extension (its nav label appears, its surface opens without a renderer
    error).

@@ -15,6 +15,9 @@ type PanelHostProps = {
   cwd: string;
   socket: string;
   endpoint?: string;
+  /** Pane provenance (AC23): the workspace's host label, set only when it is
+   * a member of a merged sidebar row. Only the terminal/agent pane draws it. */
+  hostLabel?: string;
   selected: boolean;
   zoomed: boolean;
   dragging: boolean;
@@ -40,6 +43,7 @@ export const PanelHost = memo(function PanelHost({
   cwd,
   socket,
   endpoint,
+  hostLabel,
   selected,
   zoomed,
   dragging,
@@ -82,6 +86,7 @@ export const PanelHost = memo(function PanelHost({
               cwd={cwd}
               socket={socket}
               endpoint={endpoint}
+              hostLabel={hostLabel}
               onStart={() => onStart(panel.id)}
             />
           ) : (

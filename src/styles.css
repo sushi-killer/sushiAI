@@ -309,6 +309,54 @@ textarea::placeholder {
   flex: 1;
   padding-bottom: 12px;
 }
+.workspace-group + .workspace-group {
+  margin-top: 10px;
+}
+.workspace-group-header {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 7px;
+  color: #b8b8b8;
+  text-align: left;
+  font-size: 0.82em;
+  font-weight: 600;
+  /* Deliberately not uppercase. This row is not a pure label: it also carries
+     a user-typed SSH profile name, and the same .status-pill the sidebar
+     footer draws in sentence case - uppercasing the row rendered "CONNECTED"
+     and "Connected" in one frame, and would shout a host name the user chose. */
+  letter-spacing: 0.3px;
+  background: #202020;
+}
+.workspace-group-header:hover {
+  background: #262626;
+  color: #e0e0e0;
+}
+.workspace-group-header svg:first-child {
+  opacity: 0.7;
+}
+.workspace-group-header span:not(.status-pill):not(.count) {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-group-items {
+  margin: 3px 0 0 13px;
+  padding-left: 9px;
+  border-left: 1px solid #2a2a2a;
+}
+.workspace-group-empty {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  color: #666;
+  font-size: 0.86em;
+  padding: 0 9px;
+}
 .workspace-name {
   display: flex;
   align-items: center;
@@ -337,19 +385,87 @@ textarea::placeholder {
 .workspace-name:hover {
   background: #222;
 }
+/* The name only takes its own width, so a host tag follows it at 4px; the
+   status dot takes the slack instead. */
 .workspace-name span {
-  flex: 1;
+  flex: 0 1 auto;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.workspace-name .remote-tag {
+  flex: none;
+  margin-left: calc(var(--gap-xs) - 8px);
+}
+.workspace-name .host-marker-group .remote-tag {
+  margin-left: 0;
+}
 .workspace-name .status-dot {
+  margin-left: auto;
   width: 4px;
   height: 4px;
   opacity: 0.75;
 }
+.host-mix {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  color: #767676;
+  /* AC3: 4px from the name, not the row's own 8px flex gap - see .remote-tag
+     for why 4px is the chosen value. */
+  margin-left: calc(var(--gap-xs) - 8px);
+}
+.workspace-name .host-mix svg {
+  opacity: 0.9;
+  width: 10px;
+}
+.workspace-name .remote-tag svg {
+  opacity: 0.9;
+  width: 10px;
+  margin-left: -1px;
+}
+.remote-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  font-size: 0.78em;
+  /* P1: #8a8a8a on this chip's #262626 fill measures 4.44:1, just under AA.
+     var(--text-muted) measures 4.95:1 and changes nothing else about the
+     chip - see visual-contract.md P1. */
+  color: var(--text-muted);
+  background: #262626;
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+}
+/* A merged row's host markers (V2): the same .remote-tag chip, one per
+   member host, pulled 4px from the name instead of the row's own 8px gap. */
+.host-marker-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  margin-left: calc(var(--gap-xs) - 8px);
+}
+.host-marker-group .remote-tag {
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .workspace-panels {
   padding: 2px 0 6px 24px;
+}
+.workspace-panels .pane-host-icon {
+  width: 10px;
+  min-width: 10px;
+  opacity: 0.6;
+  /* 4px from the name, not the button's 9px gap - same as a row's host tag. */
+  margin-left: calc(var(--gap-xs) - 9px);
+}
+.workspace-panels button.offline {
+  opacity: 0.55;
 }
 .workspace-panels button {
   display: flex;
@@ -372,6 +488,14 @@ textarea::placeholder {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* A worktree row's session names its checkout as plain muted text, quieter
+   than the row's own chips; a long label shrinks before the title does. */
+.workspace-panels button > span.pane-branch {
+  flex: 0 1 auto;
+  max-width: 45%;
+  background: transparent;
+  padding-inline: 0;
 }
 .workspace-panels svg {
   width: 12px;
@@ -677,15 +801,24 @@ textarea::placeholder {
 .xterm-viewport {
   scrollbar-width: thin;
 }
-.herdr-terminal-note {
+/* Section G: one absolutely-positioned cluster in the note's own corner, so
+   the host label and the note never need two independent offsets computed
+   against each other. With no host label, this cluster has one child and
+   renders at exactly the note's own position (AC25). */
+.pane-host-cluster {
   position: absolute;
   bottom: 5px;
   right: 8px;
+  display: flex;
+  align-items: center;
+  gap: var(--gap-xs);
+  pointer-events: none;
+}
+.herdr-terminal-note {
   font-size: 9px;
   background: #151515dd;
   color: #727d76;
   padding: 2px 5px;
-  pointer-events: none;
   border-radius: 3px;
 }
 .panel-error {
@@ -2435,6 +2568,31 @@ iframe {
   font-weight: 500;
   color: #d2d7cd;
 }
+/* `.modal label` is display:flex/column and `.modal input` is width:100%, both
+   more specific than a bare class - a checkbox row has to out-specify them or
+   it stacks the box above its own caption and stretches it edge to edge. */
+.modal label.setting-check {
+  flex-direction: row;
+  gap: 9px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+.modal .setting-check input[type="checkbox"] {
+  width: auto;
+  margin: 1px 0 0;
+  flex-shrink: 0;
+  accent-color: #7d9b76;
+}
+.setting-check span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: #d2d7cd;
+}
+.setting-check em {
+  font-style: normal;
+  color: #747474;
+}
 .settings-note {
   display: flex;
   gap: 10px;
@@ -2754,6 +2912,20 @@ iframe {
   width: 100%;
   outline: none;
 }
+.workspace-grouping-toggle {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  color: #767676;
+}
+.workspace-grouping-toggle:hover {
+  background: #262626;
+  color: #ccc;
+}
 .terminal-surface {
   height: 100%;
   width: 100%;
@@ -2954,6 +3126,9 @@ iframe {
 .connection-card.selected {
   border-color: #57755e;
   background: #1d2820;
+}
+.connection-card.hidden-from-sidebar {
+  opacity: 0.6;
 }
 .connection-card > div,
 .connection-info {

@@ -2,6 +2,7 @@ import { Suspense, useEffect, useState } from "react";
 import { Check, RefreshCw, TerminalSquare } from "lucide-react";
 import { RenderProfiler } from "../RenderProfiler.tsx";
 import { agentTitle } from "./agent-title.ts";
+import { errorText } from "./errors.ts";
 import { ExtensionSectionSlot } from "../extensions/ExtensionSlots.tsx";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import {
@@ -86,7 +87,9 @@ export function SettingsDialog({
 
   function setAppPreference(key: keyof AppPreferences, value: boolean) {
     setAppPreferences((prev) => ({ ...prev, [key]: value }));
-    window.bridge?.appPreferencesSet({ [key]: value }).catch(() => {});
+    window.bridge
+      ?.appPreferencesSet({ [key]: value })
+      .catch((error) => notify(errorText(error)));
   }
 
   return (

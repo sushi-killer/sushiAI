@@ -160,9 +160,9 @@ test("waitingCount counts blocked and done-not-seen panels across every workspac
     workspace("w2", [panel("c", "agent", { status: "done" })]),
   ];
   ({ state } = observe(state, ws, 0));
-  assert.equal(waitingCount(ws, state), 2);
+  assert.equal(waitingCount(ws, state, []), 2);
   state = markSeen(state, "c");
-  assert.equal(waitingCount(ws, state), 1);
+  assert.equal(waitingCount(ws, state, []), 1);
 });
 
 test("cleanupSelection checks idle shells and seen idle/finished agents, never blocked or working", async () => {
@@ -200,5 +200,34 @@ test("inboxGroups excludes a workspace whose host is hidden from the sidebar", a
   assert.deepEqual(
     groups.flatMap((group) => group.rows.map((row) => row.panel.id)),
     ["a"],
+  );
+});
+
+test("waitingCount skips hosts hidden from the sidebar, like the Inbox does", async () => {
+  const { createAttentionState, observe, waitingCount } = await library;
+  const hidden = {
+    id: "w-lab",
+    name: "app",
+    cwd: "/srv/app",
+    connection: "ssh:lab",
+    panels: [
+      { id: "p-lab", kind: "agent", title: "Claude Code", status: "blocked" },
+    ],
+    layout: null,
+  };
+  const { state } = observe(createAttentionState(), [hidden], 0);
+  assert.equal(waitingCount([hidden], state, []), 1, "visible by default");
+  assert.equal(
+    waitingCount([hidden], state, [
+      {
+        id: "lab",
+        name: "Lab",
+        host: "192.0.2.10",
+        socket: "ssh:lab",
+        hidden: true,
+      },
+    ]),
+    0,
+    "a hidden host contributes nothing to the badge",
   );
 });

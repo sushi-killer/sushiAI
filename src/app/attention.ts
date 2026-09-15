@@ -200,19 +200,21 @@ export function inboxGroups(
 }
 
 /** What the Dock badge and the Inbox nav count show: needing input, plus
- * finished-and-unseen - across every workspace, whether or not its host is
- * hidden from the sidebar, because a badge that silently dropped a waiting
- * agent would defeat the point of it. */
+ * finished-and-unseen. Hidden hosts are skipped exactly as `inboxGroups`
+ * skips them, so the count never promises a row the Inbox cannot show. */
 export function waitingCount(
   workspaces: Workspace[],
   state: AttentionState,
+  profiles: ConnectionProfile[],
 ): number {
   let count = 0;
-  for (const workspace of workspaces)
+  for (const workspace of workspaces) {
+    if (isHidden(workspace.connection, profiles)) continue;
     for (const panel of workspace.panels) {
       const group = bucketFor(panel, state.unseen);
       if (group === "blocked" || group === "done") count++;
     }
+  }
   return count;
 }
 

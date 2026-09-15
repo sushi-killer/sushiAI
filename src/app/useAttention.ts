@@ -117,7 +117,7 @@ export function useAttention({
     return () => clearInterval(timer);
   }, [findPanel]);
 
-  const waiting = waitingCount(workspaces, state);
+  const waiting = waitingCount(workspaces, state, connectionProfiles);
   const lastBadge = useRef(-1);
   useEffect(() => {
     if (lastBadge.current === waiting) return;

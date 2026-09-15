@@ -26,13 +26,14 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 
 ## Open
 
-## 2026-09-15 — A gate chain let a failing change commit
+## 2026-09-16 — A lane could not prove its own feature end to end
 
-Root cause: checks were joined with `;`, so `git commit` ran after `tsc` failed; later a zsh variable holding file paths was not word-split, prettier matched nothing and the commit still went through.
-Rule: join every gate to the commit with `&&`, and pass file lists as explicit arguments, never an unquoted variable.
+Root cause: a bridge contract split across lanes - the renderer lane called methods the Electron lane implemented on another branch, so its desktop smoke failed until integration.
+Rule: land the contract commit first and give every lane its SHA; the lead re-runs the smoke after integration.
 
 ## Promoted
 
+- 2026-09-15 A `;`-joined gate chain let a failing change commit → join gates with `&&`, pass file lists as explicit arguments.
 - 2026-09-15 Desktop smoke failed under load, then passed on the same tree: asserts followed fixed sleeps → wait for the asserted state instead. `scripts/smoke.mjs`.
 - 2026-09-15 Unit fixtures merged worktrees but the real layout (main, worktree, unrelated clone) did not → grouping fixtures include a realistic distractor. `tests/workspace-merge.test.cjs`, `tests/projects.test.cjs`.
 - 2026-09-14 A layout check passed while a label rendered 0px wide: it measured a `flex: 1`-stretched box → measure text ink with a `Range`, assert non-zero label widths. `ui-evidence` skill.

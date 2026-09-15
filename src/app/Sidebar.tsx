@@ -71,13 +71,14 @@ function primaryNav({
   openExtensionTarget(extensionId: string, targetSurfaceId: string): void;
 }) {
   const builtin = [
-    { label: "Dashboard", Glyph: LayoutDashboard, count: workspaces.length },
+    // What waits for you, then what you run, then what you own.
     {
       label: "Inbox",
       Glyph: Inbox,
       count: inboxCount > 0 ? inboxCount : undefined,
     },
     { label: "Routines", Glyph: Workflow },
+    { label: "Dashboard", Glyph: LayoutDashboard, count: workspaces.length },
     { label: "Extensions", Glyph: Plug },
     { label: "Skills", Glyph: Sparkles },
   ].map(({ label, Glyph, count }) => ({

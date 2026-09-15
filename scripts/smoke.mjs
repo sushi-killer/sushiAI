@@ -507,9 +507,9 @@ try {
       label.replace(/\d+$/, ""),
     ),
     [
-      "Dashboard",
       "Inbox",
       "Routines",
+      "Dashboard",
       "Extensions",
       "Skills",
       ...probe.contributions.navigation

@@ -26,6 +26,11 @@ import {
   tidyWorkspace,
 } from "./workspace-actions.ts";
 import type { GroupCanvasContext } from "./workspace-actions.ts";
+import {
+  herdrWorkspaceKey,
+  worktreeBranchError,
+  worktreeCreateParams,
+} from "./worktree.ts";
 import type { ModelProfile, Panel, PanelKind, Workspace } from "../types";
 
 export type WorkspaceController = ReturnType<typeof useWorkspaces>;
@@ -241,7 +246,7 @@ export function useWorkspaces({
           });
         await refreshHerdr(endpoint);
         switchWorkspace(
-          `herdr:${endpoint.startsWith("ssh:") ? endpoint : "local"}:${result.workspace.workspace_id}`,
+          herdrWorkspaceKey(endpoint, result.workspace.workspace_id),
         );
       } else {
         const w = initialWorkspace(cwd);
@@ -303,6 +308,7 @@ export function useWorkspaces({
     modelProfile?: ModelProfile,
     backend?: "herdr" | "local",
     targetWorkspaceId?: string,
+    worktree?: { branch: string },
   ) {
     const modelProfileId = modelProfile?.id;
     // A merged-row session host choice (D2): defaults to the active
@@ -320,6 +326,10 @@ export function useWorkspaces({
       if (viaHerdr && (kind === "terminal" || kind === "agent")) {
         if (!window.bridge) throw new Error("Open the desktop app first.");
         const endpoint = current.connection || socket;
+        if (worktree) {
+          const branchError = worktreeBranchError(worktree.branch);
+          if (branchError) throw new Error(branchError);
+        }
         // Staged before the pane exists: a gateway that can't be reached
         // shouldn't leave an empty pane behind. Herdr panes are just a typed
         // shell command, so the model swap rides on that command line
@@ -333,6 +343,28 @@ export function useWorkspaces({
           const settingsPath =
             await window.bridge.modelSettingsStage(modelProfileId);
           launchText = `claude --settings '${settingsPath}'`;
+        }
+        if (worktree) {
+          // A linked worktree of the same repository: the existing merge
+          // logic groups it with the project row automatically.
+          const result = await window.bridge.herdr(
+            endpoint,
+            "worktree.create",
+            worktreeCreateParams(current, worktree.branch),
+          );
+          const paneId = result.root_pane?.pane_id;
+          if (kind === "agent" && paneId)
+            await window.bridge.herdr(endpoint, "pane.send_input", {
+              pane_id: paneId,
+              text: launchText,
+              keys: ["Enter"],
+            });
+          await refreshHerdr(endpoint);
+          switchWorkspace(
+            herdrWorkspaceKey(endpoint, result.workspace.workspace_id),
+          );
+          if (paneId) setSelected(herdrWorkspaceKey(endpoint, paneId));
+          return;
         }
         const result = await window.bridge.herdr(endpoint, "pane.split", {
           workspace_id: current.herdrId,
@@ -349,10 +381,34 @@ export function useWorkspaces({
             keys: ["Enter"],
           });
         await refreshHerdr(endpoint);
-        if (paneId)
-          setSelected(
-            `herdr:${endpoint.startsWith("ssh:") ? endpoint : "local"}:${paneId}`,
-          );
+        if (paneId) setSelected(herdrWorkspaceKey(endpoint, paneId));
+      } else if (worktree && (kind === "terminal" || kind === "agent")) {
+        // The local counterpart of the branch above: no Herdr involved, so
+        // the new checkout runs as a plain local process on this Mac (also
+        // reached from a Herdr workspace whose picker backend was "local").
+        if (!window.bridge) throw new Error("Open the desktop app first.");
+        const branchError = worktreeBranchError(worktree.branch);
+        if (branchError) throw new Error(branchError);
+        const { path } = await window.bridge.worktreeCreate(
+          current.cwd,
+          worktree.branch,
+        );
+        const w = initialWorkspace(path);
+        w.name = `${current.name} · ${worktree.branch}`;
+        const panel: Panel = {
+          id: uid(),
+          kind,
+          title:
+            kind === "agent" ? modelProfile?.label || agentTitle(agent) : "zsh",
+          agent: kind === "agent" ? agent : undefined,
+          started: kind === "agent",
+          modelProfileId: kind === "agent" ? modelProfileId : undefined,
+        };
+        w.panels = [panel];
+        w.layout = leaf(panel.id);
+        setWorkspaces((items) => [...items, w]);
+        switchWorkspace(w.id);
+        return;
       } else {
         const panel: Panel = {
           id: uid(),

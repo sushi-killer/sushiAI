@@ -10,6 +10,10 @@ import { agentTitle } from "./agent-title.ts";
 import { sessionHostOptions, type SessionHostContext } from "./sessionHosts.ts";
 import { ExtensionPanelOptions } from "../extensions/ExtensionSlots.tsx";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
+import {
+  suggestWorktreeBranch,
+  worktreeBranchError,
+} from "../workspace/worktree.ts";
 import type { ModelProfile, PanelKind, System, Workspace } from "../types";
 
 /** Model profiles are this dialog's business only, so they load when it opens
@@ -37,6 +41,7 @@ export function PanelPickerDialog({
     modelProfile?: ModelProfile,
     backend?: "herdr" | "local",
     targetWorkspaceId?: string,
+    worktree?: { branch: string },
   ): void;
   connected: boolean;
   addExtensionPanel(
@@ -66,6 +71,27 @@ export function PanelPickerDialog({
   const launchLabel =
     hostOptions.find((option) => option.workspaceId === hostId)?.label ||
     active.name;
+  // The launch host, resolved the same way addPanel resolves it - the picker
+  // shows worktree choices for whichever workspace a session would actually
+  // start in, not always the active one.
+  const targetWorkspace =
+    (targetWorkspaceId &&
+      hostContext.workspaces.find((w) => w.id === targetWorkspaceId)) ||
+    active;
+  const targetIsSsh = Boolean(targetWorkspace.connection?.startsWith("ssh:"));
+  const canHerdrWorktree =
+    Boolean(targetWorkspace.herdrId) && connected && backend === "herdr";
+  // A worktree launched without Herdr becomes a plain local process on this
+  // Mac, so it needs the target workspace's own checkout to be local too.
+  const canLocalWorktree =
+    !targetIsSsh && (!targetWorkspace.herdrId || backend === "local");
+  const canWorktree = canHerdrWorktree || canLocalWorktree;
+  const [checkout, setCheckout] = useState<"current" | "worktree">("current");
+  const [branch, setBranch] = useState(() => suggestWorktreeBranch(new Date()));
+  const branchError =
+    checkout === "worktree" ? worktreeBranchError(branch) : "";
+  const worktreeArg = checkout === "worktree" ? { branch } : undefined;
+  const worktreeInvalid = checkout === "worktree" && Boolean(branchError);
   return (
     <>
       <div className="dialog-eyebrow">MAKE IT YOUR SPACE</div>
@@ -91,6 +117,46 @@ export function PanelPickerDialog({
               </button>
             ))}
           </div>
+        </>
+      )}
+      {canWorktree && (
+        <>
+          <div className="dialog-eyebrow">CHECKOUT</div>
+          <div
+            className="panel-backend"
+            role="radiogroup"
+            aria-label="Checkout"
+          >
+            {(
+              [
+                ["current", "This checkout"],
+                ["worktree", "New worktree"],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                role="radio"
+                aria-checked={checkout === value}
+                className={checkout === value ? "selected" : ""}
+                onClick={() => setCheckout(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {checkout === "worktree" && (
+            <label>
+              Branch
+              <input
+                value={branch}
+                onChange={(event) => setBranch(event.target.value)}
+                placeholder="feature/my-change"
+              />
+              {branchError && (
+                <small className="inline-error">{branchError}</small>
+              )}
+            </label>
+          )}
         </>
       )}
       {herdrWorkspace && (
@@ -148,6 +214,7 @@ export function PanelPickerDialog({
         ).map((item) => (
           <button
             key={item.kind}
+            disabled={item.kind === "terminal" && worktreeInvalid}
             onClick={() =>
               addPanel(
                 item.kind,
@@ -156,6 +223,7 @@ export function PanelPickerDialog({
                 undefined,
                 backend,
                 targetWorkspaceId,
+                item.kind === "terminal" ? worktreeArg : undefined,
               )
             }
           >
@@ -179,6 +247,7 @@ export function PanelPickerDialog({
         {["claude", "codex", "gemini", "cursor-agent"].map((agent) => (
           <button
             key={agent}
+            disabled={worktreeInvalid}
             onClick={() =>
               addPanel(
                 "agent",
@@ -191,6 +260,7 @@ export function PanelPickerDialog({
                   : undefined,
                 backend,
                 targetWorkspaceId,
+                worktreeArg,
               )
             }
           >
@@ -231,7 +301,15 @@ export function PanelPickerDialog({
       )}
       <div className="dialog-footer">
         <span>
-          Launches in <strong>{launchLabel}</strong>
+          {checkout === "worktree" ? (
+            <>
+              Launches in a new worktree on <strong>{branch}</strong>
+            </>
+          ) : (
+            <>
+              Launches in <strong>{launchLabel}</strong>
+            </>
+          )}
         </span>
         <kbd>esc</kbd>
       </div>

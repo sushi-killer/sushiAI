@@ -213,18 +213,6 @@ export function reconcileGroupLayout(
   );
 }
 
-/** Panels whose agent is waiting on the user, with the workspace each belongs
- * to. Drives both the bell dot and the notifications list. */
-export function blockedPanels(
-  workspaces: Workspace[],
-): { workspace: Workspace; panel: Panel }[] {
-  return workspaces.flatMap((workspace) =>
-    workspace.panels
-      .filter((panel) => panel.status === "blocked")
-      .map((panel) => ({ workspace, panel })),
-  );
-}
-
 const DEFAULT_TERMINAL_TITLES = new Set([
   "zsh",
   "Claude Code",

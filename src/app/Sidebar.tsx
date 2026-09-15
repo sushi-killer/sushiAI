@@ -5,6 +5,7 @@ import {
   ChevronRight,
   FolderTree,
   Globe,
+  Inbox,
   LayoutDashboard,
   LayoutList,
   MoreHorizontal,
@@ -14,7 +15,6 @@ import {
   Server,
   Settings,
   Sparkles,
-  TerminalSquare,
   Workflow,
 } from "lucide-react";
 import { Icon } from "../PanelIcon.tsx";
@@ -53,9 +53,8 @@ import type { ProjectGit } from "./useProjectGit.ts";
 function primaryNav({
   currentRouteId,
   workspaces,
+  inboxCount,
   registry,
-  openDialog,
-  showWorkspace,
   toggleCoreSection,
   openExtensionTarget,
 }: {
@@ -64,15 +63,20 @@ function primaryNav({
    * as Skills and core never learns which extension is open. */
   currentRouteId: string;
   workspaces: Workspace[];
+  /** Agents needing input plus finished-and-unseen, across every host - the
+   * Inbox entry's own count, styled the same as Dashboard's. */
+  inboxCount: number;
   registry: ExtensionRegistry;
-  openDialog(name: "sessions" | "workspace"): void;
-  showWorkspace(): void;
   toggleCoreSection(section: string): void;
   openExtensionTarget(extensionId: string, targetSurfaceId: string): void;
 }) {
   const builtin = [
     { label: "Dashboard", Glyph: LayoutDashboard, count: workspaces.length },
-    { label: "Sessions", Glyph: TerminalSquare },
+    {
+      label: "Inbox",
+      Glyph: Inbox,
+      count: inboxCount > 0 ? inboxCount : undefined,
+    },
     { label: "Routines", Glyph: Workflow },
     { label: "Extensions", Glyph: Plug },
     { label: "Skills", Glyph: Sparkles },
@@ -82,11 +86,7 @@ function primaryNav({
     count,
     icon: <Glyph size={14} />,
     current: routeFromLegacy("Code", label).surfaceId === currentRouteId,
-    open: () => {
-      if (label !== "Sessions") return toggleCoreSection(label);
-      showWorkspace();
-      openDialog("sessions");
-    },
+    open: () => toggleCoreSection(label),
   }));
   const contributed = navigationFor(registry, "sidebar.primary").map(
     (item) => ({
@@ -148,7 +148,7 @@ export function Sidebar({
   mode,
   onWorkspace,
   currentRouteId,
-  showWorkspace,
+  inboxCount,
   toggleCoreSection,
   openDialog,
   manageWorkspace,
@@ -180,9 +180,10 @@ export function Sidebar({
   /** No page is open, so the canvas is showing this workspace's panels. */
   onWorkspace: boolean;
   currentRouteId: string;
-  showWorkspace(): void;
+  /** Agents needing input plus finished-and-unseen, across every host. */
+  inboxCount: number;
   toggleCoreSection(section: string): void;
-  openDialog(name: "sessions" | "workspace"): void;
+  openDialog(name: "workspace"): void;
   manageWorkspace(workspace: Workspace): void;
   workspaces: Workspace[];
   active: Workspace;
@@ -452,9 +453,8 @@ export function Sidebar({
             {primaryNav({
               currentRouteId,
               workspaces,
+              inboxCount,
               registry,
-              openDialog,
-              showWorkspace,
               toggleCoreSection,
               openExtensionTarget,
             }).map((item) => (

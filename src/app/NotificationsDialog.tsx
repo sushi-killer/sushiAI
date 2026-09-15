@@ -1,22 +1,18 @@
 import { ArrowUpRight, Check, Download } from "lucide-react";
 import { Empty } from "./Empty.tsx";
 import type { AgentActivity } from "../agents/types";
-import type { Panel, UpdateState, Workspace } from "../types";
+import type { UpdateState } from "../types";
 
 export function NotificationsDialog({
   agentNotices,
   setAgentNotices,
   updates,
-  blocked,
   openUpdates,
-  showBlockedPanel,
 }: {
   agentNotices: AgentActivity[];
   setAgentNotices(update: (old: AgentActivity[]) => AgentActivity[]): void;
   updates: UpdateState | null;
-  blocked: { workspace: Workspace; panel: Panel }[];
   openUpdates(): void;
-  showBlockedPanel(item: { workspace: Workspace; panel: Panel }): void;
 }) {
   return (
     <>
@@ -55,28 +51,13 @@ export function NotificationsDialog({
           <ArrowUpRight size={15} />
         </button>
       )}
-      {blocked.length ? (
-        blocked.map(({ workspace, panel }) => (
-          <button
-            key={panel.id}
-            className="notification-item"
-            onClick={() => showBlockedPanel({ workspace, panel })}
-          >
-            <i className="status-dot yellow" />
-            <div>
-              <strong>{panel.title}</strong>
-              <p>{workspace.name} · Needs your attention</p>
-            </div>
-            <ArrowUpRight size={15} />
-          </button>
-        ))
-      ) : !agentNotices.length ? (
+      {!agentNotices.length && !updates?.release && (
         <Empty
           icon={<Check size={26} />}
           title="All quiet for now."
-          text="Agents waiting for your input will appear here."
+          text="Agent activity and app updates will appear here."
         />
-      ) : null}
+      )}
     </>
   );
 }

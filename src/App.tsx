@@ -4,11 +4,11 @@ import type { Panel, Workspace } from "./types";
 import { uid } from "./layout";
 import { ChatView } from "./ChatView";
 import { AgentsView } from "./agents/AgentsView";
-import { SessionsDialog } from "./SessionsDialog";
 import { ClaudeMcpSettings } from "./ClaudeMcpSettings";
 import { WorkspaceDialog } from "./WorkspaceDialog";
 import { errorText } from "./app/errors";
 import { useAppPersistence } from "./app/useAppPersistence";
+import { useAttention } from "./app/useAttention";
 import { useCompact } from "./app/useCompact";
 import { useKeepAwake } from "./app/useKeepAwake";
 import { useAgentNotices } from "./app/useAgentNotices";
@@ -35,7 +35,6 @@ import { useProjectView } from "./workspace/projectView";
 import { useSkills } from "./app/useSkills";
 import { useToast } from "./app/useToast";
 import { useUpdates } from "./app/useUpdates";
-import { blockedPanels } from "./workspace/workspace-actions";
 import {
   activePage,
   resolveNavigation,
@@ -159,6 +158,17 @@ export function App() {
     if (window.innerWidth < 760) setSidebar(false);
     ws.switchWorkspace(id);
   }
+  const attention = useAttention({
+    workspaces,
+    connectionProfiles,
+    section,
+    active,
+    selected,
+    zoomed,
+    switchWorkspace,
+    setSelected,
+    setZoomed,
+  });
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const closeDialog = useCallback(() => setDialog(null), []);
   const target = resolveDialog(dialog, workspaces);
@@ -308,7 +318,6 @@ export function App() {
     ? merged.panes.length
     : codePanels(active).length;
   const useTabs = tabMode || compact || paneCount > 6;
-  const blocked = blockedPanels(workspaces);
 
   return (
     <div
@@ -345,7 +354,6 @@ export function App() {
           showWorkspace();
           setTabMode(false);
         }}
-        blocked={blocked}
         noticeCount={agentNotices.length}
       />
       <div className="app-body">
@@ -357,7 +365,7 @@ export function App() {
             mode={mode}
             onWorkspace={!section}
             currentRouteId={route.surfaceId}
-            showWorkspace={showWorkspace}
+            inboxCount={attention.waiting}
             toggleCoreSection={toggleCoreSection}
             openDialog={(kind) => setDialog({ kind })}
             manageWorkspace={(workspace) =>
@@ -432,6 +440,7 @@ export function App() {
               ws={ws}
               projectGit={projectGit}
               connectionProfiles={connectionProfiles}
+              attention={attention}
             />
           ) : mode === "Agent" ? (
             <AgentsView slot={slot} />
@@ -481,21 +490,6 @@ export function App() {
             >
               <UpdateSettings state={updates} />
             </Suspense>
-          ) : dialog.kind === "sessions" ? (
-            <SessionsDialog
-              registry={extensionRegistry}
-              openExtensionTarget={openExtensionTarget}
-              cwd={active.cwd}
-              connection={active.connection}
-              workspaces={workspaces}
-              activeId={active.id}
-              onCloseSessions={endSessions}
-              onShow={(w, p) => {
-                switchWorkspace(w.id);
-                setZoomed(p.id);
-                closeDialog();
-              }}
-            />
           ) : dialog.kind === "close-session" && target?.panel ? (
             <CloseSessionDialog
               workspace={target!.workspace}
@@ -584,13 +578,7 @@ export function App() {
               agentNotices={agentNotices}
               setAgentNotices={setAgentNotices}
               updates={updates}
-              blocked={blocked}
               openUpdates={() => setDialog({ kind: "updates" })}
-              showBlockedPanel={({ workspace, panel }) => {
-                switchWorkspace(workspace.id);
-                setZoomed(panel.id);
-                closeDialog();
-              }}
             />
           ))}
       </DialogHost>

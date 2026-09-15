@@ -259,6 +259,40 @@ try {
     .last()
     .click();
   assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);
+  // The Inbox replaced the Sessions dialog: it lists the same panels as an
+  // attention queue, and Jump gets you back to the workspace the same way
+  // the old dialog's Show did. Its nav entry may carry a waiting count next
+  // to the label (real agents elsewhere on this machine can be blocked or
+  // done), so the click below matches on the label alone.
+  await page
+    .locator(".primary-nav")
+    .getByRole("button", { name: "Inbox", exact: false })
+    .click();
+  await page
+    .locator(".section-page")
+    .getByRole("heading", { name: "Inbox", exact: true })
+    .waitFor();
+  const shellRow = page
+    .locator(".session-row")
+    .filter({ hasText: "zsh" })
+    .filter({ hasText: "sushiai" })
+    .first();
+  await shellRow.waitFor();
+  await shellRow.getByRole("button", { name: "Jump to zsh" }).click();
+  await page.waitForFunction(
+    () => document.querySelectorAll(".workspace-canvas .panel").length === 1,
+  );
+  assert.equal(
+    await page.locator(".section-page").count(),
+    0,
+    "Jump returns to the workspace canvas, closing the Inbox page",
+  );
+  assert.equal(await page.locator(".workspace-canvas .panel").count(), 1);
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(
+    () => document.querySelectorAll(".workspace-canvas .panel").length === 4,
+  );
+  assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);
   await page.getByRole("button", { name: "Extensions", exact: true }).click();
   await page.getByText(probe.name, { exact: true }).first().waitFor();
   assert.equal(
@@ -474,7 +508,7 @@ try {
     ),
     [
       "Dashboard",
-      "Sessions",
+      "Inbox",
       "Routines",
       "Extensions",
       "Skills",

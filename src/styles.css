@@ -3503,9 +3503,6 @@ iframe {
 .modal .ssh-form {
   gap: 12px;
 }
-.sessions-modal {
-  width: 740px;
-}
 .session-filters {
   display: flex;
   gap: 8px;
@@ -3516,25 +3513,6 @@ iframe {
   margin: 0;
   flex: 1;
   min-width: 160px;
-}
-.modal .catalog-search {
-  flex-direction: row;
-  align-items: center;
-  height: 38px;
-}
-.modal .catalog-search svg {
-  flex-shrink: 0;
-}
-.modal .catalog-search input {
-  min-width: 0;
-  width: 0;
-  height: 100%;
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-.modal .catalog-search:focus-within {
-  border-color: #647b9c;
 }
 .workspace-actions-modal h2 {
   padding-right: 24px;
@@ -3679,16 +3657,35 @@ iframe {
   align-items: center;
   gap: 8px;
 }
-.modal input[type="checkbox"] {
+.modal input[type="checkbox"],
+.session-row input[type="checkbox"],
+.session-select-all input[type="checkbox"] {
   width: 13px;
   height: 13px;
   accent-color: #8aab90;
 }
-.sessions-list {
-  max-height: 330px;
-  overflow: auto;
-  border-top: 1px solid #303030;
-  border-bottom: 1px solid #303030;
+/* The Inbox: the same session-row look as the old Sessions dialog, grouped
+   under a plain header instead of listed in one flat scrollable dialog. */
+.inbox-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  margin-top: 8px;
+}
+.inbox-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: #888;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.inbox-row-time {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #777;
 }
 .session-row {
   padding: 10px 3px;
@@ -4448,9 +4445,6 @@ iframe {
   }
   .session-filters > select {
     max-width: 150px;
-  }
-  .sessions-list {
-    max-height: 240px;
   }
   .brand {
     gap: 5px;

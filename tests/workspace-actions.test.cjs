@@ -175,27 +175,6 @@ test("fixSelection follows panels that disappeared", async () => {
   });
 });
 
-test("blockedPanels pairs waiting panels with their workspace", async () => {
-  const { blockedPanels } = await library;
-  const first = await workspace([
-    panel("idle"),
-    panel("waiting", "agent", { status: "blocked" }),
-  ]);
-  const second = {
-    ...(await workspace([panel("also", "agent", { status: "blocked" })])),
-    id: "w2",
-  };
-  const found = blockedPanels([first, second]);
-  assert.deepEqual(
-    found.map((item) => [item.workspace.id, item.panel.id]),
-    [
-      ["w1", "waiting"],
-      ["w2", "also"],
-    ],
-  );
-  assert.deepEqual(blockedPanels([await workspace([panel("idle")])]), []);
-});
-
 test("retitleTerminal follows the agent but never overwrites a typed name", async () => {
   const { retitleTerminal } = await library;
   const fresh = panel("t", "terminal");

@@ -24,7 +24,7 @@ export type RouteRef = {
 
 export const SECTIONS = new Set([
   "Dashboard",
-  "Sessions",
+  "Inbox",
   "Routines",
   "Extensions",
   "Skills",

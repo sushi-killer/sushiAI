@@ -133,14 +133,21 @@ test("leaving blocked and re-entering restarts the reminder schedule", async () 
 test("a panel that disappears - closed, or its workspace closed - is dropped", async () => {
   const { createAttentionState, observe } = await library;
   let state = createAttentionState();
+  // Unseen only through a real transition: a panel already finished when the
+  // app started was seen before the restart.
+  ({ state } = observe(
+    state,
+    [workspace("w1", [panel("a", "agent", { status: "working" })])],
+    0,
+  ));
   ({ state } = observe(
     state,
     [workspace("w1", [panel("a", "agent", { status: "done" })])],
-    0,
+    1000,
   ));
   assert.ok(state.panels.a);
   assert.ok(state.unseen.has("a"));
-  ({ state } = observe(state, [workspace("w1", [])], 1000));
+  ({ state } = observe(state, [workspace("w1", [])], 2000));
   assert.equal(state.panels.a, undefined);
   assert.ok(
     !state.unseen.has("a"),
@@ -159,7 +166,13 @@ test("waitingCount counts blocked and done-not-seen panels across every workspac
     ]),
     workspace("w2", [panel("c", "agent", { status: "done" })]),
   ];
-  ({ state } = observe(state, ws, 0));
+  // "c" has to finish while the app is watching to count as unseen.
+  ({ state } = observe(
+    state,
+    [ws[0], workspace("w2", [panel("c", "agent", { status: "working" })])],
+    0,
+  ));
+  ({ state } = observe(state, ws, 1000));
   assert.equal(waitingCount(ws, state, []), 2);
   state = markSeen(state, "c");
   assert.equal(waitingCount(ws, state, []), 1);
@@ -229,5 +242,46 @@ test("waitingCount skips hosts hidden from the sidebar, like the Inbox does", as
     ]),
     0,
     "a hidden host contributes nothing to the badge",
+  );
+});
+
+test("a session already finished when the app starts is not counted as unseen", async () => {
+  const { createAttentionState, observe, waitingCount, inboxGroups } =
+    await library;
+  const ws = [
+    workspace("w1", [
+      panel("a", "agent", { status: "done" }),
+      panel("b", "agent", { status: "blocked" }),
+    ]),
+  ];
+  const first = observe(createAttentionState(), ws, 0);
+  assert.deepEqual(first.events, [], "startup is silent");
+  assert.equal(
+    waitingCount(ws, first.state, []),
+    1,
+    "only the blocked agent waits; the finished one was already seen",
+  );
+  const groups = inboxGroups(ws, first.state, []);
+  const byKey = Object.fromEntries(groups.map((g) => [g.key, g.rows.length]));
+  assert.equal(byKey.done, 0, "nothing lands in Done - not seen at startup");
+  assert.equal(byKey.idle, 1, "the finished agent sits in Idle instead");
+  const later = observe(
+    first.state,
+    [workspace("w1", [panel("a", "agent", { status: "working" })])],
+    1000,
+  );
+  const back = observe(
+    later.state,
+    [workspace("w1", [panel("a", "agent", { status: "done" })])],
+    2000,
+  );
+  assert.equal(back.events.length, 1, "finishing while the app runs is news");
+  assert.equal(
+    inboxGroups(
+      [workspace("w1", [panel("a", "agent", { status: "done" })])],
+      back.state,
+      [],
+    ).find((g) => g.key === "done").rows.length,
+    1,
   );
 });

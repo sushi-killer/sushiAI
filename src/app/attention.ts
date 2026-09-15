@@ -112,8 +112,11 @@ export function observe(
       const status = panel.status || "idle";
       const previous = panels[panel.id];
       if (!previous) {
+        // First sight of this panel - at startup that is every agent on every
+        // host. Recording it silently is the point: an agent that finished
+        // while the app was closed is not news, so it never counts as unseen
+        // here (`blocked` still shows up, because it genuinely waits).
         panels[panel.id] = { status, since: now, remindersFired: [] };
-        if (status === "done") unseen.add(panel.id);
         continue;
       }
       if (previous.status === status) continue;

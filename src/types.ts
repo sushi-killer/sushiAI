@@ -241,7 +241,25 @@ export type UpdateState = {
   checkedAt: string | null;
   error: string | null;
 };
+/** A panel an attention event points at: a notification click opens it. */
+export type AttentionTarget = { workspaceId: string; panelId: string };
+export type AttentionNotice = AttentionTarget & { title: string; body: string };
+/** Kept by the main process, which needs both before any window exists. */
+export type AppPreferences = {
+  /** Closing the window hides it; sushiAI stays in the menu bar. */
+  runInMenuBar: boolean;
+  /** macOS notifications for agents that need input or finished. */
+  notifications: boolean;
+};
 export interface Bridge {
+  /** Shows a macOS notification unless notifications are off or the window
+   * is focused. Clicking it shows the window and fires `onAttentionOpen`. */
+  attentionNotify(notice: AttentionNotice): Promise<void>;
+  /** Waiting count for the Dock badge and the menu bar title; 0 clears both. */
+  attentionBadge(count: number): Promise<void>;
+  onAttentionOpen(callback: (target: AttentionTarget) => void): () => void;
+  appPreferences(): Promise<AppPreferences>;
+  appPreferencesSet(patch: Partial<AppPreferences>): Promise<AppPreferences>;
   agentProviders(): Promise<import("./agents/types").AgentProvider[]>;
   agentCall: import("./agents/types").AgentCall;
   agentOpenExternal(url: string): Promise<void>;

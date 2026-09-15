@@ -139,7 +139,9 @@ export function dashboardEntries(
       entries.push({
         id: group.id,
         primaryId: representative.workspace.id,
-        name: representative.workspace.name,
+        // Members are sorted Local first, main checkout first: the sidebar
+        // row's name, whichever member happens to be closed.
+        name: group.members[0].workspace.name,
         cwd: representative.workspace.cwd,
         panelCount: codePanels(representative.workspace).length,
         closed: !open,

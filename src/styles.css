@@ -1451,27 +1451,37 @@ iframe {
   color: #c2a36f;
 }
 .project-card-host {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
+  gap: 4px;
 }
-.project-card-host button.remote-tag {
-  border: none;
-  font: inherit;
-  cursor: pointer;
+/* A hollow ring marks the member as closed without spelling it out. */
+.project-card-host::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
 }
-.project-card-host button.remote-tag:hover {
+.project-card-host:hover {
   background: #333;
+}
+.project-card-host button {
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
 }
 .project-card-host-remove {
   display: inline-flex;
-  padding: 2px;
-  border-radius: 4px;
   color: #aaa;
-  background: transparent;
+  opacity: 0;
+}
+.project-card-host:hover .project-card-host-remove,
+.project-card-host:focus-within .project-card-host-remove {
+  opacity: 1;
 }
 .project-card-host-remove:hover {
-  background: #333;
   color: #eee;
 }
 .project-card-forget {

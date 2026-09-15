@@ -231,7 +231,9 @@ export function SectionPage({
                   </strong>
                   <p>{entry.cwd}</p>
                   <span>
-                    {entry.closed ? "Reopen" : `${entry.panelCount} panels`}{" "}
+                    {entry.closed
+                      ? "Reopen"
+                      : `${entry.panelCount} ${entry.panelCount === 1 ? "panel" : "panels"}`}{" "}
                     <ArrowUpRight size={13} />
                   </span>
                 </button>
@@ -239,11 +241,13 @@ export function SectionPage({
                   <div className="project-card-hosts">
                     {entry.members.map((member) =>
                       member.closed ? (
-                        <span key={member.id} className="project-card-host">
+                        <span
+                          key={member.id}
+                          className="remote-tag closed project-card-host"
+                        >
                           <button
                             type="button"
-                            className="remote-tag closed"
-                            title={`Reopen ${member.label}`}
+                            title={`${member.label} is closed - click to reopen`}
                             onClick={() => {
                               const project = ws.closedProjects.find(
                                 (p) => p.id === member.id,

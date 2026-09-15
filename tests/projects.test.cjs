@@ -197,6 +197,40 @@ test("dashboardEntries: a closed project merges with an open workspace of the sa
   assert.equal(standalone.id, distractor.id);
 });
 
+test("dashboardEntries: a merged card keeps the main checkout's name while that checkout is closed", async () => {
+  const { dashboardEntries } = await library;
+  const feature = workspace("w-feature", undefined, "/Users/dev/app-feature-x");
+  const featureGit = {
+    ...git(REMOTE, "/Users/dev/app-feature-x", "feature-x"),
+    commonDir: "/Users/dev/app/.git",
+  };
+  const main = closedProject(
+    "closed:local:/Users/dev/app",
+    "app",
+    "/Users/dev/app",
+    undefined,
+    false,
+    git(REMOTE, "/Users/dev/app"),
+  );
+  const entries = dashboardEntries(
+    [feature],
+    [main],
+    { "w-feature": featureGit },
+    [],
+  );
+  assert.equal(entries.length, 1);
+  assert.equal(
+    entries[0].name,
+    "app",
+    "named like the sidebar row, not after the open worktree",
+  );
+  assert.equal(
+    entries[0].primaryId,
+    "w-feature",
+    "the card still opens the member that is open",
+  );
+});
+
 test("dashboardEntries: two hosts closing the same project merge into one fully-closed card", async () => {
   const { dashboardEntries } = await library;
   const closedLocal = closedProject(

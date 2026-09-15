@@ -22,6 +22,16 @@ function closeAction({ quitting, runInMenuBar }) {
   return !quitting && runInMenuBar ? "hide" : "close";
 }
 
+/** Which of the three marks the menu bar wears. Something waiting for you
+ * outranks something merely running, and a bad count reads as quiet. */
+function trayState(waiting, working) {
+  const safe = (value) =>
+    typeof value === "number" && Number.isFinite(value) && value > 0;
+  if (safe(waiting)) return "attention";
+  if (safe(working)) return "working";
+  return "idle";
+}
+
 /** The tray's title badge: empty clears it, otherwise the plain count. */
 function trayTitle(count) {
   return Number.isFinite(count) && count > 0 ? String(Math.trunc(count)) : "";
@@ -63,6 +73,8 @@ function registerAttentionIpc({
   let preferences = { ...DEFAULT_PREFERENCES };
   let tray = null;
   let badgeCount = 0;
+  let workingCount = 0;
+  const trayIcons = new Map();
   let quitting = false;
   const notifications = new Set();
 
@@ -74,11 +86,26 @@ function registerAttentionIpc({
     win.focus();
   }
 
+  /** The state's mark, falling back to the plain one: a build that shipped
+   * only the base icon still gets a tray. */
+  function trayImage(state) {
+    if (!trayIcons.has(state)) {
+      const file =
+        state === "idle"
+          ? trayIconPath
+          : trayIconPath.replace(/\.png$/, `-${state}.png`);
+      const icon = nativeImage.createFromPath(
+        existsSync(file) ? file : trayIconPath,
+      );
+      icon.setTemplateImage(true);
+      trayIcons.set(state, icon);
+    }
+    return trayIcons.get(state);
+  }
+
   function createTray() {
     if (tray || !existsSync(trayIconPath)) return;
-    const icon = nativeImage.createFromPath(trayIconPath);
-    icon.setTemplateImage(true);
-    tray = new Tray(icon);
+    tray = new Tray(trayImage(trayState(badgeCount, workingCount)));
     tray.setToolTip("sushiAI");
     tray.setTitle(trayTitle(badgeCount));
     tray.setContextMenu(
@@ -138,12 +165,16 @@ function registerAttentionIpc({
     return preferences;
   }
 
-  async function setBadge(count) {
+  async function setBadge(count, working = 0) {
     if (typeof count !== "number" || !Number.isFinite(count) || count < 0)
       throw new Error("Invalid attention badge count.");
+    if (typeof working !== "number" || !Number.isFinite(working) || working < 0)
+      throw new Error("Invalid attention working count.");
     badgeCount = Math.trunc(count);
+    workingCount = Math.trunc(working);
     app.setBadgeCount(badgeCount);
     tray?.setTitle(trayTitle(badgeCount));
+    tray?.setImage(trayImage(trayState(badgeCount, workingCount)));
   }
 
   async function notify(rawNotice) {
@@ -170,7 +201,7 @@ function registerAttentionIpc({
   }
 
   handle("attention-notify", (notice) => notify(notice));
-  handle("attention-badge", (count) => setBadge(count));
+  handle("attention-badge", (count, working) => setBadge(count, working));
   handle("app-preferences", () => ({ ...preferences }));
   handle("app-preferences-set", (patch) => setPreferences(patch));
 
@@ -209,6 +240,7 @@ module.exports = {
   normalizePreferences,
   closeAction,
   trayTitle,
+  trayState,
   validateNotice,
   registerAttentionIpc,
 };

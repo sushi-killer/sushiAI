@@ -260,8 +260,7 @@ export function SettingsDialog({
                 <TerminalSquare size={16} />
                 <p>
                   Herdr sessions keep running when you close sushiAI. Local
-                  terminals live for the duration of the app, which keeps
-                  running in the menu bar until you quit it.
+                  terminals live for as long as the app does.
                 </p>
               </div>
               <div className="cli-status">

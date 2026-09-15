@@ -256,7 +256,7 @@ export interface Bridge {
    * is focused. Clicking it shows the window and fires `onAttentionOpen`. */
   attentionNotify(notice: AttentionNotice): Promise<void>;
   /** Waiting count for the Dock badge and the menu bar title; 0 clears both. */
-  attentionBadge(count: number): Promise<void>;
+  attentionBadge(count: number, working: number): Promise<void>;
   onAttentionOpen(callback: (target: AttentionTarget) => void): () => void;
   /** Adds a git worktree on a new branch next to the repository holding
    * `cwd`, on this Mac. Resolves to the new checkout's path. */

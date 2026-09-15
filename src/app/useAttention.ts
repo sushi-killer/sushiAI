@@ -6,6 +6,7 @@ import {
   markSeen,
   observe,
   waitingCount,
+  workingCount,
   type AttentionState,
 } from "./attention.ts";
 import { groupKey, groupLabel } from "./workspaceMerge.ts";
@@ -118,12 +119,14 @@ export function useAttention({
   }, [findPanel]);
 
   const waiting = waitingCount(workspaces, state, connectionProfiles);
-  const lastBadge = useRef(-1);
+  const working = workingCount(workspaces, state, connectionProfiles);
+  const lastBadge = useRef("");
   useEffect(() => {
-    if (lastBadge.current === waiting) return;
-    lastBadge.current = waiting;
-    void window.bridge?.attentionBadge(waiting);
-  }, [waiting]);
+    const badge = `${waiting}:${working}`;
+    if (lastBadge.current === badge) return;
+    lastBadge.current = badge;
+    void window.bridge?.attentionBadge(waiting, working);
+  }, [waiting, working]);
 
   // Seen the moment it can actually be seen: the active workspace, no section
   // page covering the canvas, and this is the selected or zoomed pane.

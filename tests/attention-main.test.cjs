@@ -5,6 +5,7 @@ const {
   normalizePreferences,
   closeAction,
   trayTitle,
+  trayState,
   validateNotice,
 } = require("../electron/attention.cjs");
 
@@ -138,4 +139,14 @@ test("validateNotice rejects an oversized body and empty strings", () => {
       body: "Body",
     }),
   );
+});
+
+test("trayState prefers waiting over working and reads a bad count as quiet", () => {
+  assert.equal(trayState(0, 0), "idle");
+  assert.equal(trayState(0, 4), "working");
+  assert.equal(trayState(2, 0), "attention");
+  assert.equal(trayState(2, 4), "attention");
+  assert.equal(trayState(NaN, NaN), "idle");
+  assert.equal(trayState(undefined, undefined), "idle");
+  assert.equal(trayState(-1, -1), "idle");
 });

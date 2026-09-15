@@ -225,6 +225,22 @@ export function waitingCount(
   return count;
 }
 
+/** How many sessions are running right now: what turns the menu bar mark
+ * from quiet to working. Skips hidden hosts like `waitingCount` does. */
+export function workingCount(
+  workspaces: Workspace[],
+  state: AttentionState,
+  profiles: ConnectionProfile[],
+): number {
+  let count = 0;
+  for (const workspace of workspaces) {
+    if (isHidden(workspace.connection, profiles)) continue;
+    for (const panel of workspace.panels)
+      if (bucketFor(panel, state.unseen) === "working") count++;
+  }
+  return count;
+}
+
 /** The panel ids "Clean up" checks: idle shells and idle/seen-finished
  * agents - never something still blocked or working. */
 export function cleanupSelection(rows: InboxRow[]): string[] {

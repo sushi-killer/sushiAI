@@ -262,6 +262,10 @@ textarea::placeholder {
 .nav-item .count {
   margin-left: auto;
 }
+.nav-item.current .count {
+  background: #333;
+  color: #ddd;
+}
 .count {
   padding: 2px 5px;
   font-size: 10px;

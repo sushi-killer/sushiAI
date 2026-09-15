@@ -321,3 +321,32 @@ test("a terminal with an agent inside is timed, notified and reminded like an ag
   const due = dueReminders(state, 60000 + 5 * 60000);
   assert.deepEqual(due.reminders, [{ panelId: "t", minutes: 5 }]);
 });
+
+test("workingCount counts running sessions and skips hidden hosts", async () => {
+  const { createAttentionState, observe, workingCount } = await library;
+  const ws = [
+    workspace("w1", [
+      panel("a", "agent", { status: "working" }),
+      panel("b", "agent", { status: "blocked" }),
+      panel("c", "terminal"),
+    ]),
+    workspace("w2", [panel("d", "agent", { status: "working" })], {
+      connection: "ssh:lab",
+    }),
+  ];
+  const { state } = observe(createAttentionState(), ws, 0);
+  assert.equal(workingCount(ws, state, []), 2, "both hosts visible");
+  assert.equal(
+    workingCount(ws, state, [
+      {
+        id: "lab",
+        name: "user@devbox",
+        host: "192.0.2.10",
+        socket: "ssh:lab",
+        hidden: true,
+      },
+    ]),
+    1,
+    "a hidden host contributes nothing to the menu bar mark",
+  );
+});

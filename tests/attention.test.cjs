@@ -285,3 +285,20 @@ test("a session already finished when the app starts is not counted as unseen", 
     1,
   );
 });
+
+test("only sessions are listed: a browser, files or chat panel never reaches the Inbox", async () => {
+  const { createAttentionState, inboxGroups, waitingCount } = await library;
+  const ws = [
+    workspace("w1", [
+      panel("term", "terminal", {}),
+      panel("web", "browser", { status: "done" }),
+      panel("files", "files", {}),
+      panel("thread", "chat", {}),
+    ]),
+  ];
+  const listed = inboxGroups(ws, createAttentionState(), [])
+    .flatMap((group) => group.rows)
+    .map((row) => row.panel.id);
+  assert.deepEqual(listed, ["term"]);
+  assert.equal(waitingCount(ws, createAttentionState(), []), 0);
+});

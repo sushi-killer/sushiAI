@@ -78,11 +78,13 @@ function isPlainShell(panel: Panel): boolean {
 }
 
 /** Which Inbox group a panel belongs to, or `null` when it is not listed at
- * all (a chat thread or an extension panel). Kind-agnostic on purpose: a
- * terminal Herdr detected an agent inside can still be `working` or `blocked`
- * the same way a dedicated agent panel is. */
+ * all. Only a session belongs in an attention queue: a terminal or an agent.
+ * A browser, a file tree, a chat thread or an extension surface is a view of
+ * the project, nothing that can wait for you or finish. Terminal and agent
+ * are handled alike, because a terminal Herdr detected an agent inside can
+ * be `working` or `blocked` just like a dedicated agent panel. */
 function bucketFor(panel: Panel, unseen: Set<string>): InboxGroupKey | null {
-  if (panel.kind === "chat" || panel.kind === "extension") return null;
+  if (panel.kind !== "terminal" && panel.kind !== "agent") return null;
   if (panel.status === "blocked") return "blocked";
   if (panel.status === "done") return unseen.has(panel.id) ? "done" : "idle";
   if (panel.status === "working") return "working";

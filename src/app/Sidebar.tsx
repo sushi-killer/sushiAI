@@ -385,30 +385,34 @@ export function Sidebar({
         >
           {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           <span>{anchor.workspace.name}</span>
-          <span
-            className="host-marker-group"
-            role="img"
-            aria-label={markerName}
-            title={markerName}
-          >
-            {collapse ? (
-              <span className="remote-tag">
-                {group.members.length} {group.worktrees ? "worktrees" : "hosts"}
-              </span>
-            ) : (
-              group.members.map((m) => {
-                const MarkerIcon = m.hostKey === LOCAL_GROUP ? Server : Globe;
-                return (
-                  <span className="remote-tag" key={m.workspace.id}>
-                    {(!group.worktrees || m.hostKey !== LOCAL_GROUP) && (
-                      <MarkerIcon size={10} />
-                    )}
-                    {memberLabel(group, m, connectionProfiles)}
-                  </span>
-                );
-              })
-            )}
-          </span>
+          {/* Expanded, every session names its own host - the row repeats none. */}
+          {!expanded && (
+            <span
+              className="host-marker-group"
+              role="img"
+              aria-label={markerName}
+              title={markerName}
+            >
+              {collapse ? (
+                <span className="remote-tag">
+                  {group.members.length}{" "}
+                  {group.worktrees ? "worktrees" : "hosts"}
+                </span>
+              ) : (
+                group.members.map((m) => {
+                  const MarkerIcon = m.hostKey === LOCAL_GROUP ? Server : Globe;
+                  return (
+                    <span className="remote-tag" key={m.workspace.id}>
+                      {(!group.worktrees || m.hostKey !== LOCAL_GROUP) && (
+                        <MarkerIcon size={10} />
+                      )}
+                      {memberLabel(group, m, connectionProfiles)}
+                    </span>
+                  );
+                })
+              )}
+            </span>
+          )}
           <i
             className={`status-dot ${live ? "green" : ""}`}
             title={`Status for ${groupLabel(statusKey, connectionProfiles)}.`}
@@ -435,15 +439,11 @@ export function Sidebar({
                       ? p.url.replace(/^https?:\/\//, "").replace(/\/$/, "")
                       : p.title}
                   </span>
-                  {group.worktrees && (
-                    <span className="remote-tag pane-branch">{label}</span>
-                  )}
-                  {manyHosts && (
-                    <HostIcon
-                      size={10}
-                      className="pane-host-icon"
-                      aria-label={label}
-                    />
+                  {(group.worktrees || manyHosts) && (
+                    <span className="remote-tag pane-branch">
+                      {manyHosts && <HostIcon size={10} />}
+                      {label}
+                    </span>
                   )}
                   {p.status === "working" && (
                     <i className="status-dot green pulse" />

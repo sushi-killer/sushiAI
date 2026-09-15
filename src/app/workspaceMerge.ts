@@ -259,11 +259,29 @@ export function mergedMarkerAccessibleName(
   return `${group.worktrees ? "Checked out as" : "Runs on"} ${joined}.`;
 }
 
+/** The merge group the active workspace belongs to, or `undefined` when it
+ * stands alone - grouped mode always answers `undefined`, because merging is
+ * flat-mode only. Anything drawn per merged project (the sidebar row, pane
+ * provenance, a canvas spanning its members) starts from this. */
+export function activeMergeGroup(
+  workspaces: Workspace[],
+  active: Workspace,
+  projectGit: Record<string, ProjectGit>,
+  connectionProfiles: ConnectionProfile[],
+  workspaceGrouping: "grouped" | "flat",
+): MergeGroup | undefined {
+  if (workspaceGrouping !== "flat") return undefined;
+  const visible = workspaces.filter(
+    (w) => !isHidden(w.connection, connectionProfiles),
+  );
+  return computeMergeGroups(visible, projectGit, connectionProfiles).get(
+    active.id,
+  );
+}
+
 /** Pane provenance (AC23-AC26, D5): the member label a merged workspace's
  * own panes should carry, or `undefined` when the active workspace isn't a
- * member of any merged row - grouped mode always answers `undefined`
- * (merging is flat-mode only), which is what makes AC25 true by
- * construction rather than by a second check at the call site. */
+ * member of any merged row. */
 export function activeMergedHostLabel(
   workspaces: Workspace[],
   active: Workspace,
@@ -271,14 +289,15 @@ export function activeMergedHostLabel(
   connectionProfiles: ConnectionProfile[],
   workspaceGrouping: "grouped" | "flat",
 ): string | undefined {
-  if (workspaceGrouping !== "flat") return undefined;
-  const visible = workspaces.filter(
-    (w) => !isHidden(w.connection, connectionProfiles),
+  const group = activeMergeGroup(
+    workspaces,
+    active,
+    projectGit,
+    connectionProfiles,
+    workspaceGrouping,
   );
-  const group = computeMergeGroups(visible, projectGit, connectionProfiles).get(
-    active.id,
-  );
-  if (!group) return undefined;
-  const member = group.members.find((m) => m.workspace.id === active.id);
-  return member ? memberLabel(group, member, connectionProfiles) : undefined;
+  const member = group?.members.find((m) => m.workspace.id === active.id);
+  return group && member
+    ? memberLabel(group, member, connectionProfiles)
+    : undefined;
 }

@@ -457,13 +457,6 @@ textarea::placeholder {
 .workspace-panels {
   padding: 2px 0 6px 24px;
 }
-.workspace-panels .pane-host-icon {
-  width: 10px;
-  min-width: 10px;
-  opacity: 0.6;
-  /* 4px from the name, not the button's 9px gap - same as a row's host tag. */
-  margin-left: calc(var(--gap-xs) - 9px);
-}
 .workspace-panels button.offline {
   opacity: 0.55;
 }
@@ -491,6 +484,11 @@ textarea::placeholder {
 }
 /* A worktree row's session names its checkout as plain muted text, quieter
    than the row's own chips; a long label shrinks before the title does. */
+.workspace-panels .pane-branch svg {
+  width: 10px;
+  min-width: 10px;
+  opacity: 0.6;
+}
 .workspace-panels button > span.pane-branch {
   flex: 0 1 auto;
   max-width: 45%;

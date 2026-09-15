@@ -15,8 +15,12 @@ export function normalizeRemote(url: string): string {
   if (!url) return "";
   let value = url.trim();
   value = value.replace(/^git@([^:]+):/, "https://$1/");
-  value = value.replace(/^ssh:\/\/(?:[^@/]+@)?/, "https://");
-  value = value.replace(/^https?:\/\//, "");
+  value = value.replace(/^ssh:\/\/(?:[^@/]+@)?/i, "https://");
+  value = value.replace(/^https?:\/\//i, "");
+  // A clone over SSH names the server's SSH port and a login; the same
+  // repository over HTTPS names neither, and neither identifies the repository.
+  value = value.replace(/^[^@/]+@/, "");
+  value = value.replace(/^([^/:]+):\d+\//, "$1/");
   value = value.replace(/\.git$/i, "");
   value = value.replace(/\/+$/, "");
   return value.toLowerCase();

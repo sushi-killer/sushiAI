@@ -64,15 +64,6 @@ function basenameOf(path: string): string {
   return (path || "").replace(/\/+$/, "").split("/").pop() ?? "";
 }
 
-/** The main repository's folder name, read from the shared git dir rather
- * than the cwd, so a worktree named `repo-feature` still reads as `repo`. */
-function repositoryName(commonDir: string): string {
-  const name = basenameOf(commonDir);
-  const folder =
-    name === ".git" ? basenameOf(commonDir.replace(/\/+[^/]*\/*$/, "")) : name;
-  return folder.replace(/\.git$/i, "").toLowerCase();
-}
-
 export type MergedMember = {
   workspace: Workspace;
   hostKey: string;
@@ -129,7 +120,7 @@ function distinctCheckouts(members: MergedMember[]): MergedMember[] {
 
 /** Merge identity (D4): the same folder inside one repository - worktrees
  * sharing a git common dir on one host, or across hosts a non-empty
- * normalized git remote plus an equal repository name (case-insensitive).
+ * normalized git remote, whatever each checkout's folder is called.
  * Separate clones never share a common dir, so they never merge with each
  * other, and a host holding two clones cannot say which one a remote host's
  * checkout matches, so neither joins the cross-host row (product-brief edge
@@ -147,9 +138,7 @@ export function computeMergeGroups(
     const git = projectGit[w.id];
     if (!git?.commonDir || !git.checkout) continue;
     const hostKey = groupKey(w.connection);
-    const repository = git.remote
-      ? `${git.remote}::${repositoryName(git.commonDir)}`
-      : `${hostKey}::${git.commonDir}`;
+    const repository = git.remote || `${hostKey}::${git.commonDir}`;
     const identity = `${repository}::${git.subdir}`;
     const byHost = buckets.get(identity) ?? new Map<string, MergedMember[]>();
     byHost.set(hostKey, [

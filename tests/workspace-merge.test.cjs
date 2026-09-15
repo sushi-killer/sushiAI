@@ -92,14 +92,32 @@ test("one checkout opened twice on a host -> never merges", async () => {
   );
 });
 
-test("same remote, different repository name -> does not merge", async () => {
+test("same remote, different checkout folder names -> merges across hosts", async () => {
   const { computeMergeGroups } = await library;
-  const local = workspace("w-local", undefined, "/Users/dev/sushiai");
-  const remote = workspace("w-lab", "ssh:lab", "/home/dev/sushiai-fork");
+  const local = workspace("w-local", undefined, "/Users/dev/AI Prototype");
+  const remote = workspace("w-lab", "ssh:lab", "/home/dev/prototype");
   const groups = computeMergeGroups([local, remote], gitFor([local, remote]), [
     profile("lab", "Lab"),
   ]);
-  assert.equal(groups.size, 0);
+  assert.equal(groups.size, 2);
+  assert.equal(groups.get("w-local"), groups.get("w-lab"));
+});
+
+test("normalizeRemote: one repository over SSH with a port, scp and HTTPS reads as one key", async () => {
+  const { normalizeRemote } = await import("../src/app/useProjectGit.ts");
+  const key = "git.example.test/team/prototype";
+  for (const url of [
+    "ssh://git@git.example.test:10022/team/prototype.git",
+    "https://git.example.test/team/prototype.git",
+    "https://deploy@git.example.test/team/prototype",
+    "git@git.example.test:team/prototype.git",
+    "HTTPS://git.example.test/Team/Prototype/",
+  ])
+    assert.equal(normalizeRemote(url), key, url);
+  assert.notEqual(
+    normalizeRemote("https://git.example.test/team/other.git"),
+    key,
+  );
 });
 
 test("worktrees of one repository on one host merge, labelled by branch, main checkout first", async () => {

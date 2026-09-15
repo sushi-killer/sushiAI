@@ -516,22 +516,8 @@ export function App() {
               active={active}
               adding={adding}
               system={system}
-              addPanel={async (
-                kind,
-                agent,
-                filesTarget,
-                modelProfile,
-                backend,
-                targetWorkspaceId,
-              ) => {
-                await addPanel(
-                  kind,
-                  agent,
-                  filesTarget,
-                  modelProfile,
-                  backend,
-                  targetWorkspaceId,
-                );
+              addPanel={async (...args) => {
+                await addPanel(...args);
                 closeDialog();
               }}
               addExtensionPanel={addExtensionPanel}

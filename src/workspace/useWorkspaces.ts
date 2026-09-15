@@ -605,7 +605,6 @@ export function useWorkspaces({
       project.cwd,
       project.herdr ? "herdr" : "local",
       "shell",
-      [],
       project.endpoint || socket,
     );
     if (ok) forgetProject(project.id);

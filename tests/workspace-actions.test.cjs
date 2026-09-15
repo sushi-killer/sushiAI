@@ -38,6 +38,15 @@ test("appendPanel adds the panel and splits the existing layout", async () => {
   assert.deepEqual(empty.layout, { type: "leaf", id: "only" });
 });
 
+test("findPanelOwner finds a panel's real owner, not just the active workspace", async () => {
+  const { findPanelOwner } = await library;
+  const first = await workspace([panel("a")]);
+  const second = { ...(await workspace([panel("b")])), id: "w2" };
+  assert.equal(findPanelOwner([first, second], "b"), second);
+  assert.equal(findPanelOwner([first, second], "a"), first);
+  assert.equal(findPanelOwner([first, second], "missing"), undefined);
+});
+
 test("removePanel drops a terminal but keeps Herdr panes and chat threads", async () => {
   const { removePanel } = await library;
   const { contains } = await layoutLibrary;
@@ -271,6 +280,25 @@ test("groupPanelIds and tidyGroupLayout combine every member's code panels, neve
     contains(tidied, "a") && contains(tidied, "b") && contains(tidied, "c"),
   );
   assert.equal(contains(tidied, "distractor"), false);
+});
+
+test("groupPanelIds drops a pane a member hid (still in panels, removed from that member's own layout)", async () => {
+  const { groupPanelIds } = await library;
+  const { remove } = await layoutLibrary;
+  const { group, local } = await mergeGroupFixture();
+  // "b" stays in local.panels (its Herdr session/terminal survives "hide
+  // only") but is gone from local's own layout, the way hidePanel leaves it.
+  const hiddenLocal = { ...local, layout: remove(local.layout, "b") };
+  const hiddenGroup = {
+    ...group,
+    members: group.members.map((m) =>
+      m.workspace.id === "w-local" ? { ...m, workspace: hiddenLocal } : m,
+    ),
+  };
+  // Distractor: "b" is still in panels, proving the filter checks layout
+  // containment and not mere presence in the panel list.
+  assert.ok(hiddenLocal.panels.some((p) => p.id === "b"));
+  assert.deepEqual(groupPanelIds(hiddenGroup), ["a", "c"]);
 });
 
 test("resolveGroupPanes resolves each pane to its own owner's cwd, endpoint and host label", async () => {

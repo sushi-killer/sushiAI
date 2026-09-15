@@ -50,6 +50,51 @@ test("closedProjectId is stable per endpoint+cwd, local when there is no endpoin
   );
 });
 
+test('closedProjectId normalizes a local Herdr socket path to "local" (P2-f)', async () => {
+  const { closedProjectId } = await library;
+  assert.equal(
+    closedProjectId("/tmp/sushiai-local.sock", "/Users/dev/app"),
+    "closed:local:/Users/dev/app",
+    "a local Herdr workspace's own socket is still this Mac, same as no endpoint",
+  );
+});
+
+test("refreshProject updates an entry only while it is still on the list", async () => {
+  const { refreshProject, forgetProject } = await library;
+  const entry = closedProject(
+    "closed:local:/Users/dev/app",
+    "app",
+    "/Users/dev/app",
+    undefined,
+    false,
+    git("", "/Users/dev/app"),
+  );
+  const distractor = closedProject(
+    "closed:local:/Users/dev/other",
+    "other",
+    "/Users/dev/other",
+    undefined,
+    false,
+    git("", "/Users/dev/other"),
+  );
+  const list = [entry, distractor];
+  const refreshed = { ...entry, git: git("example.test/dev/app", entry.cwd) };
+  const updated = refreshProject(list, refreshed);
+  assert.equal(updated.length, 2);
+  assert.equal(
+    updated.find((p) => p.id === entry.id).git.remote,
+    refreshed.git.remote,
+  );
+
+  // The user reopened or forgot the project while the git read was in flight.
+  const gone = forgetProject(list, entry.id);
+  assert.equal(
+    refreshProject(gone, refreshed),
+    gone,
+    "an entry no longer on the list is never resurrected",
+  );
+});
+
 test("rememberProject dedupes by id and keeps the freshest entry first", async () => {
   const { rememberProject } = await library;
   const first = closedProject(
@@ -195,6 +240,47 @@ test("dashboardEntries: a closed project already reopened (same endpoint+cwd as 
   assert.equal(entries[0].id, "w-open");
 });
 
+test("dashboardEntries: a stale closed entry keyed on the local Herdr socket dedupes against the now-open workspace (P2-f)", async () => {
+  const { dashboardEntries } = await library;
+  const open = workspace(
+    "w-open",
+    "/tmp/sushiai-local.sock",
+    "/Users/dev/app",
+    "app",
+  );
+  const staleClosed = closedProject(
+    // Old-style id from before the endpoint was normalized - restore must
+    // still accept it even though closedProjectId no longer produces it.
+    "closed:/tmp/sushiai-local.sock:/Users/dev/app",
+    "app",
+    "/Users/dev/app",
+    "/tmp/sushiai-local.sock",
+    true,
+    git("", "/Users/dev/app"),
+  );
+  // Distractor: closed on the same local host but a different folder, must
+  // still show up as its own card.
+  const distractor = closedProject(
+    "closed:local:/Users/dev/tools",
+    "tools",
+    "/Users/dev/tools",
+    undefined,
+    false,
+    git("", "/Users/dev/tools"),
+  );
+  const entries = dashboardEntries(
+    [open],
+    [staleClosed, distractor],
+    { "w-open": git("", open.cwd) },
+    [],
+  );
+  assert.equal(entries.length, 2, "the reopened project plus the distractor");
+  assert.ok(
+    entries.every((e) => e.id !== staleClosed.id),
+    "the stale closed duplicate never shows next to its now-open workspace",
+  );
+});
+
 test("dashboardEntries: a closed project on a hidden SSH profile never appears", async () => {
   const { dashboardEntries } = await library;
   const closedHidden = closedProject(
@@ -209,4 +295,47 @@ test("dashboardEntries: a closed project on a hidden SSH profile never appears",
     profile("lab", "Lab", { hidden: true }),
   ]);
   assert.equal(entries.length, 0);
+});
+
+test("closedMemberIds: every closed member on a mixed card, every member on an all-closed one", async () => {
+  const { dashboardEntries, closedMemberIds } = await library;
+  const openRemote = workspace(
+    "w-lab",
+    "ssh:lab",
+    "/home/dev/app",
+    "app on lab",
+  );
+  const closedLocal = closedProject(
+    "closed:local:/Users/dev/app",
+    "app",
+    "/Users/dev/app",
+    undefined,
+    true,
+    git(REMOTE, "/Users/dev/app"),
+  );
+  const entries = dashboardEntries(
+    [openRemote],
+    [closedLocal],
+    { "w-lab": git(REMOTE, openRemote.cwd) },
+    [profile("lab", "Lab")],
+  );
+  const mixed = entries.find((e) => e.members.length === 2);
+  assert.deepEqual(closedMemberIds(mixed), [closedLocal.id]);
+
+  const closedLab = closedProject(
+    "closed:ssh:lab:/home/dev/app",
+    "app",
+    "/home/dev/app",
+    "ssh:lab",
+    true,
+    git(REMOTE, "/home/dev/app"),
+  );
+  const allClosed = dashboardEntries([], [closedLocal, closedLab], {}, [
+    profile("lab", "Lab"),
+  ])[0];
+  assert.deepEqual(
+    closedMemberIds(allClosed).sort(),
+    [closedLocal.id, closedLab.id].sort(),
+    "removing an all-closed card drops every member, not just primaryId",
+  );
 });

@@ -41,6 +41,20 @@ export function appendPanel(
   };
 }
 
+/** The workspace that currently owns a panel id, wherever it lives - not
+ * necessarily the active one. Used by anything that acts on a panel by id
+ * (closePanel, renamePanel) so the action always reaches the pane's real
+ * owner instead of silently no-op'ing against whichever workspace happens to
+ * be active. */
+export function findPanelOwner(
+  workspaces: Workspace[],
+  panelId: string,
+): Workspace | undefined {
+  return workspaces.find((workspace) =>
+    workspace.panels.some((panel) => panel.id === panelId),
+  );
+}
+
 /** A pane is a view, a thread is a conversation. Closing the view drops it from
  * the layout; Herdr panes and chat threads stay in `panels` so the session and
  * the transcript survive. */
@@ -128,10 +142,17 @@ export function fixSelection(
 
 /** Every code panel id across a merge group's members, in member order -
  * used to tidy or reconcile the group's combined layout, and to widen
- * `fixSelection` across the group. */
+ * `fixSelection` across the group. Only a panel still in its own member's
+ * layout counts: "hide only" (hidePanel in useWorkspaces.ts) drops a pane
+ * from its owner's layout but leaves it in `panels` so the session survives,
+ * exactly like single-workspace behaviour - counting it here anyway would
+ * have `reconcileGroupLayout` read it as "gained" and append it straight
+ * back into the merged canvas. */
 export function groupPanelIds(group: MergeGroup): string[] {
   return group.members.flatMap((member) =>
-    codePanels(member.workspace).map((panel) => panel.id),
+    codePanels(member.workspace)
+      .filter((panel) => contains(member.workspace.layout, panel.id))
+      .map((panel) => panel.id),
   );
 }
 

@@ -2,18 +2,25 @@ import type { ConnectionProfile, Workspace } from "../types";
 import type { ClosedProject } from "../workspaceState.ts";
 import { codePanels } from "../workspaceState.ts";
 import type { ProjectGit } from "./useProjectGit.ts";
-import { computeMergeGroups, isHidden, memberLabel } from "./workspaceMerge.ts";
+import {
+  computeMergeGroups,
+  groupKey,
+  isHidden,
+  memberLabel,
+} from "./workspaceMerge.ts";
 
 /** A closed project's identity is its host endpoint + cwd - the same pair
  * that decides whether reopening it would just recreate an already-open
  * workspace. Used both as the remembered entry's `id` and as the pseudo
  * workspace id merging keys off (`closed:<endpoint>:<cwd>`), so the two never
- * drift apart. */
+ * drift apart. `groupKey` normalizes the endpoint the same way the sidebar's
+ * host grouping does - a local Herdr workspace's own socket path and "no
+ * connection at all" both mean "this Mac", so both must produce the same id. */
 export function closedProjectId(
   endpoint: string | undefined,
   cwd: string,
 ): string {
-  return `closed:${endpoint || "local"}:${cwd}`;
+  return `closed:${groupKey(endpoint)}:${cwd}`;
 }
 
 function isClosedId(id: string): boolean {
@@ -37,6 +44,19 @@ export function forgetProject(
   id: string,
 ): ClosedProject[] {
   return list.filter((p) => p.id !== id);
+}
+
+/** Refreshes a remembered project's git identity, but only if it is still on
+ * the list. Guards the async git read in `rememberClosed`
+ * (useWorkspaces.ts): the read can resolve after the user already reopened
+ * or removed the entry, and must not resurrect it. */
+export function refreshProject(
+  list: ClosedProject[],
+  entry: ClosedProject,
+): ClosedProject[] {
+  return list.some((p) => p.id === entry.id)
+    ? rememberProject(list, entry)
+    : list;
 }
 
 function pseudoWorkspace(project: ClosedProject): Workspace {
@@ -85,13 +105,17 @@ export function dashboardEntries(
   projectGit: Record<string, ProjectGit>,
   connectionProfiles: ConnectionProfile[],
 ): DashboardEntry[] {
+  // Normalized the same way closedProjectId is (P2-f): a local Herdr
+  // workspace's own socket path and "no connection at all" both mean "this
+  // Mac", so a stale closed entry from before that normalization existed
+  // still dedupes correctly against the now-open workspace.
   const openKeys = new Set(
-    workspaces.map((w) => `${w.connection || ""}::${w.cwd}`),
+    workspaces.map((w) => `${groupKey(w.connection)}::${w.cwd}`),
   );
   const closedVisible = closedProjects.filter(
     (p) =>
       !isHidden(p.endpoint, connectionProfiles) &&
-      !openKeys.has(`${p.endpoint || ""}::${p.cwd}`),
+      !openKeys.has(`${groupKey(p.endpoint)}::${p.cwd}`),
   );
   const visibleWorkspaces = workspaces.filter(
     (w) => !isHidden(w.connection, connectionProfiles),
@@ -138,4 +162,12 @@ export function dashboardEntries(
     }
   }
   return entries;
+}
+
+/** Every closed member's id in a card - a card with an open member still
+ * lets each of its closed members be reopened or removed individually; an
+ * all-closed card's own "Remove from projects" drops every one of them at
+ * once instead of only `primaryId`. */
+export function closedMemberIds(entry: DashboardEntry): string[] {
+  return entry.members.filter((m) => m.closed).map((m) => m.id);
 }

@@ -38,9 +38,11 @@ export function isHidden(
 /** Which projects (by git remote) run on both this Mac and a remote host -
  * every workspace sharing that remote gets a small "mixed" marker, since the
  * point is "this project spans machines," not which specific copy you're
- * looking at. This is coarser than merge identity (no repository-name check),
- * so it still fires for a workspace that is flagged "mixed" but does not
- * qualify to merge - that row keeps today's passive marker. */
+ * looking at. This is coarser than merge identity: it only compares the
+ * remote, not the subdir each checkout runs from or the same-host clone
+ * ambiguity that keeps computeMergeGroups from joining two checkouts - so it
+ * still fires for a workspace that is flagged "mixed" but does not qualify to
+ * merge - that row keeps today's passive marker. */
 export function mixedRemotes(
   visible: Workspace[],
   projectGit: Record<string, ProjectGit>,
@@ -277,27 +279,4 @@ export function activeMergeGroup(
   return computeMergeGroups(visible, projectGit, connectionProfiles).get(
     active.id,
   );
-}
-
-/** Pane provenance (AC23-AC26, D5): the member label a merged workspace's
- * own panes should carry, or `undefined` when the active workspace isn't a
- * member of any merged row. */
-export function activeMergedHostLabel(
-  workspaces: Workspace[],
-  active: Workspace,
-  projectGit: Record<string, ProjectGit>,
-  connectionProfiles: ConnectionProfile[],
-  workspaceGrouping: "grouped" | "flat",
-): string | undefined {
-  const group = activeMergeGroup(
-    workspaces,
-    active,
-    projectGit,
-    connectionProfiles,
-    workspaceGrouping,
-  );
-  const member = group?.members.find((m) => m.workspace.id === active.id);
-  return group && member
-    ? memberLabel(group, member, connectionProfiles)
-    : undefined;
 }

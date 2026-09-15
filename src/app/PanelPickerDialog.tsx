@@ -39,7 +39,11 @@ export function PanelPickerDialog({
     targetWorkspaceId?: string,
   ): void;
   connected: boolean;
-  addExtensionPanel(extensionId: string, contributionId: string): void;
+  addExtensionPanel(
+    extensionId: string,
+    contributionId: string,
+    targetWorkspaceId?: string,
+  ): void;
   extensionRegistry: ExtensionRegistry;
   hostContext: SessionHostContext;
 }) {
@@ -159,7 +163,9 @@ export function PanelPickerDialog({
         ))}
         <ExtensionPanelOptions
           registry={extensionRegistry}
-          onAdd={addExtensionPanel}
+          onAdd={(extensionId, contributionId) =>
+            addExtensionPanel(extensionId, contributionId, targetWorkspaceId)
+          }
         />
       </div>
       <div className="dialog-eyebrow agent-options-label">CODING AGENTS</div>

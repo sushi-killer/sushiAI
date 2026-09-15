@@ -10,10 +10,12 @@ import { normalizeRemote } from "../app/useProjectGit.ts";
 import {
   closedProjectId,
   forgetProject as removeClosedProject,
+  refreshProject,
   rememberProject,
 } from "../app/projects.ts";
 import {
   appendPanel,
+  findPanelOwner,
   fixSelection,
   groupPanelIds,
   movePanel as moveInLayout,
@@ -169,11 +171,11 @@ export function useWorkspaces({
   );
   const renamePanel = useCallback(
     (panelId: string, title: string) => {
-      const current = activeRef.current;
-      const panel = current.panels.find((item) => item.id === panelId);
-      if (!panel) return;
+      const owner = findPanelOwner(workspacesRef.current, panelId);
+      const panel = owner?.panels.find((item) => item.id === panelId);
+      if (!owner || !panel) return;
       if (panel.herdrId) {
-        const endpoint = current.connection || socket;
+        const endpoint = owner.connection || socket;
         window.bridge
           ?.herdr(endpoint, "pane.rename", {
             pane_id: panel.herdrId,
@@ -262,12 +264,21 @@ export function useWorkspaces({
       return false;
     }
   }
-  function insertPanel(panel: Panel) {
-    const current = activeRef.current;
+  /** Places a panel App already built (an extension surface) into a
+   * workspace - the merged row's chosen host (D2) when given, else the
+   * active one, exactly like addPanel. */
+  function insertPanel(panel: Panel, targetWorkspaceId?: string) {
+    const current =
+      (targetWorkspaceId &&
+        workspacesRef.current.find((w) => w.id === targetWorkspaceId)) ||
+      activeRef.current;
     updateWorkspace(current.id, (w) => appendPanel(w, panel));
     setSelected(panel.id);
-    showWorkspace();
-    setZoomed(null);
+    if (current.id !== activeRef.current.id) switchWorkspace(current.id);
+    else {
+      showWorkspace();
+      setZoomed(null);
+    }
   }
   /** The soft variant used by the Chat list: follow the project, but leave the
    * current view and zoom alone. */
@@ -380,9 +391,7 @@ export function useWorkspaces({
   }
   const closePanel = useCallback(
     (panelId: string) => {
-      const owner = workspacesRef.current.find((workspace) =>
-        workspace.panels.some((panel) => panel.id === panelId),
-      );
+      const owner = findPanelOwner(workspacesRef.current, panelId);
       const panel = owner?.panels.find((item) => item.id === panelId);
       if (!owner || !panel) return;
       if (panel.herdrId) {
@@ -611,7 +620,7 @@ export function useWorkspaces({
       })
       .then((result) =>
         setClosedProjects((list) =>
-          rememberProject(list, {
+          refreshProject(list, {
             ...entry,
             git: {
               remote: normalizeRemote(result?.remote || ""),

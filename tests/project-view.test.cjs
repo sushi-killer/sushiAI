@@ -31,6 +31,26 @@ test("rememberView keeps each project's own view and skips no-op writes", async 
   );
 });
 
+test("resolveZoomOnKeyChange keeps an explicit zoom set during the same transition over the stored one", async () => {
+  const { resolveZoomOnKeyChange } = await view;
+  assert.equal(
+    resolveZoomOnKeyChange("p-explicit", "p-stored"),
+    "p-explicit",
+    "a non-null zoom means switchWorkspace's own reset was overridden on purpose",
+  );
+  assert.equal(
+    resolveZoomOnKeyChange("p-explicit", null),
+    "p-explicit",
+    "kept even when the new project had nothing stored",
+  );
+  assert.equal(
+    resolveZoomOnKeyChange(null, "p-stored"),
+    "p-stored",
+    "no explicit zoom (switchWorkspace's reset survived) restores the stored one",
+  );
+  assert.equal(resolveZoomOnKeyChange(null, null), null);
+});
+
 test("restore keeps well-formed project views and drops the rest", async () => {
   const { restore } = await state;
   const saved = {

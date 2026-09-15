@@ -74,7 +74,7 @@ export function WorkspaceCanvas({
         cwd={own ? own.cwd : panel.filesTarget?.root || active.cwd}
         socket={own ? own.socket : activeEndpoint}
         endpoint={own ? own.endpoint : active.connection}
-        hostLabel={own ? own.hostLabel : merged.hostLabel}
+        hostLabel={own?.hostLabel}
         selected={selected === id}
         zoomed={zoomed === id}
         dragging={!!dragId}

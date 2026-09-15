@@ -24,7 +24,7 @@ test("App.tsx owns no domain implementation", () => {
     ["disposeTerminal", "terminal teardown lives in useWorkspaces"],
     ["terminalClose", "terminal teardown lives in useWorkspaces"],
     ["modelProfilesList", "model profiles belong to the panel picker"],
-    ["claudePluginsToggle", "plugin toggles live in useWorkspaces"],
+    ["claudePluginsToggle", "plugin toggles live in ClaudeMcpSettings"],
     ["checkout", "branch checkout is a main-process operation only"],
   ];
   for (const [needle, why] of forbidden)

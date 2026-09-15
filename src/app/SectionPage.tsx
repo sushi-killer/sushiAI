@@ -30,7 +30,7 @@ import type { ConnectionProfile, Workspace } from "../types";
 import type { SkillCatalogItem, SkillManagementAction } from "../types";
 import type { WorkspaceController } from "../workspace/useWorkspaces.ts";
 import type { ProjectGit } from "./useProjectGit.ts";
-import { dashboardEntries } from "./projects.ts";
+import { closedMemberIds, dashboardEntries } from "./projects.ts";
 
 /** The one page in the working area. A core section and a page an extension
  * contributed are both drawn here, in the same frame - there is no second path
@@ -242,21 +242,48 @@ export function SectionPage({
                 </button>
                 {entry.members.length > 1 && (
                   <div className="project-card-hosts">
-                    {entry.members.map((member) => (
-                      <span
-                        key={member.id}
-                        className={`remote-tag${member.closed ? " closed" : ""}`}
-                      >
-                        {member.label}
-                      </span>
-                    ))}
+                    {entry.members.map((member) =>
+                      member.closed ? (
+                        <span key={member.id} className="project-card-host">
+                          <button
+                            type="button"
+                            className="remote-tag closed"
+                            title={`Reopen ${member.label}`}
+                            onClick={() => {
+                              const project = ws.closedProjects.find(
+                                (p) => p.id === member.id,
+                              );
+                              if (project) void ws.reopenProject(project);
+                            }}
+                          >
+                            {member.label}
+                          </button>
+                          <button
+                            type="button"
+                            className="project-card-host-remove"
+                            aria-label={`Remove ${member.label} from projects`}
+                            onClick={() => ws.forgetProject(member.id)}
+                          >
+                            <X size={9} />
+                          </button>
+                        </span>
+                      ) : (
+                        <span key={member.id} className="remote-tag">
+                          {member.label}
+                        </span>
+                      ),
+                    )}
                   </div>
                 )}
                 {entry.closed && (
                   <button
                     className="project-card-forget"
                     title="Remove from projects"
-                    onClick={() => ws.forgetProject(entry.primaryId)}
+                    onClick={() =>
+                      closedMemberIds(entry).forEach((id) =>
+                        ws.forgetProject(id),
+                      )
+                    }
                   >
                     <X size={12} />
                   </button>

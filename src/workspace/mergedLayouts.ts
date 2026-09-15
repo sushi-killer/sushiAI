@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { activeMergeGroup, memberLabel } from "../app/workspaceMerge.ts";
+import { activeMergeGroup } from "../app/workspaceMerge.ts";
 import type { ConnectionProfile, Layout } from "../types";
 import type { ProjectGit } from "../app/useProjectGit.ts";
 import {
@@ -14,12 +14,44 @@ const STORAGE = "sushiai.mergedLayouts.v1";
 
 type StoredGroupLayouts = Record<string, Layout>;
 
+/** localStorage is outside the app's control - a stale format, a hand-edited
+ * value or a future version this build doesn't know could all leave
+ * something that isn't a real layout tree behind. `LayoutView` (and anything
+ * else here) assumes a `leaf`/`split` shape without checking, so a malformed
+ * entry crashes the canvas instead of just being dropped. */
+export function isValidLayout(value: unknown): value is Layout {
+  if (!value || typeof value !== "object") return false;
+  const node = value as { type?: unknown };
+  if (node.type === "leaf")
+    return typeof (node as { id?: unknown }).id === "string";
+  if (node.type === "split") {
+    const split = node as {
+      id?: unknown;
+      axis?: unknown;
+      ratio?: unknown;
+      a?: unknown;
+      b?: unknown;
+    };
+    return (
+      typeof split.id === "string" &&
+      (split.axis === "row" || split.axis === "column") &&
+      typeof split.ratio === "number" &&
+      isValidLayout(split.a) &&
+      isValidLayout(split.b)
+    );
+  }
+  return false;
+}
+
 function load(): StoredGroupLayouts {
   try {
     const value: unknown = JSON.parse(localStorage.getItem(STORAGE) || "{}");
-    return value && typeof value === "object" && !Array.isArray(value)
-      ? (value as StoredGroupLayouts)
-      : {};
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).filter(([, layout]) =>
+        isValidLayout(layout),
+      ),
+    ) as StoredGroupLayouts;
   } catch {
     return {};
   }
@@ -29,7 +61,6 @@ export type MergedCanvas = {
   group: ReturnType<typeof activeMergeGroup>;
   panes: MergedPane[];
   layout: Layout | null;
-  hostLabel: string | undefined;
 };
 
 /** Draws a merged project's panes from every host on one canvas (flat mode
@@ -81,16 +112,9 @@ export function useMergedCanvas(
   ws.groupRef.current = group
     ? { group, layout, setLayout: (next) => setGroupLayout(group.id, next) }
     : undefined;
-  const activeMember = group?.members.find(
-    (m) => m.workspace.id === ws.active.id,
-  );
   return {
     group,
     panes: group ? resolveGroupPanes(group, connectionProfiles, socket) : [],
     layout,
-    hostLabel:
-      group && activeMember
-        ? memberLabel(group, activeMember, connectionProfiles)
-        : undefined,
   };
 }

@@ -21,6 +21,11 @@ export type ClosedProject = {
   git: ProjectGit;
 };
 
+/** How one project is looked at: tabs or split panels, and which pane is
+ * maximized. Kept per project (see `workspace/projectView.ts`). */
+export type ProjectView = { tabMode: boolean; zoomed: string | null };
+export type ProjectViews = Record<string, ProjectView>;
+
 export type Saved = {
   workspaces: Workspace[];
   activeId: string;
@@ -38,6 +43,7 @@ export type Saved = {
    * list with a small tag marking which ones are remote. */
   workspaceGrouping?: "grouped" | "flat";
   closedProjects?: ClosedProject[];
+  views?: ProjectViews;
 };
 
 export type WorkspaceStorage = {
@@ -79,6 +85,25 @@ function normalizeClosedProjects(value: unknown): ClosedProject[] {
     }));
 }
 
+function normalizeViews(value: unknown): ProjectViews {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).flatMap(([key, entry]) => {
+      if (!entry || typeof entry !== "object") return [];
+      const view = entry as Partial<ProjectView>;
+      return [
+        [
+          key,
+          {
+            tabMode: view.tabMode === true,
+            zoomed: typeof view.zoomed === "string" ? view.zoomed : null,
+          },
+        ],
+      ];
+    }),
+  );
+}
+
 export function restore(
   storage?: Pick<WorkspaceStorage, "getItem">,
 ): Saved | null {
@@ -102,6 +127,7 @@ export function restore(
       workspaceGrouping:
         value.workspaceGrouping === "flat" ? "flat" : "grouped",
       closedProjects: normalizeClosedProjects(value.closedProjects),
+      views: normalizeViews(value.views),
       workspaces: value.workspaces.map((w: Workspace) => ({
         ...w,
         connection: w.herdrId ? w.connection || value.socket : undefined,

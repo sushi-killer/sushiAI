@@ -31,6 +31,7 @@ import { useConnectionProfiles } from "./app/useConnectionProfiles";
 import { useHerdr } from "./app/useHerdr";
 import { useProjectGit } from "./app/useProjectGit";
 import { useMergedCanvas } from "./workspace/mergedLayouts";
+import { useProjectView } from "./workspace/projectView";
 import { useSkills } from "./app/useSkills";
 import { useToast } from "./app/useToast";
 import { useUpdates } from "./app/useUpdates";
@@ -105,7 +106,6 @@ export function App() {
     connectionProfiles,
   });
   const skills = useSkills(sectionName, notify);
-  const [tabMode, setTabMode] = useState(saved?.tabMode || false);
   const [sidebar, setSidebar] = useState(
     saved?.sidebar ?? window.innerWidth >= 760,
   );
@@ -182,6 +182,11 @@ export function App() {
     workspaceGrouping,
     socket,
   );
+  const { tabMode, setTabMode, views } = useProjectView(
+    merged.group?.id ?? active.id,
+    ws,
+    saved,
+  );
   /** Clicking a pane inside an expanded merged row (AC21) - unlike a plain
    * row's `showPanel`, the pane's owning workspace need not be active yet. */
   function selectHostPane(workspace: Workspace, panel: Panel) {
@@ -209,6 +214,7 @@ export function App() {
       route,
       workspaceGrouping,
       closedProjects: ws.closedProjects,
+      views,
     },
     notify,
   );

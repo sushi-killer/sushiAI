@@ -1,12 +1,12 @@
 import { useRef } from "react";
 import { Columns2, Plus, X } from "lucide-react";
-import { resize } from "../layout.ts";
 import { codePanels } from "../workspaceState.ts";
 import { Empty } from "../app/Empty.tsx";
 import { LayoutView, PanelHost } from "../WorkspacePanels.tsx";
 import { Icon } from "../PanelIcon.tsx";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import type { WorkspaceController } from "./useWorkspaces.ts";
+import type { MergedCanvas } from "./mergedLayouts.ts";
 
 /** The panel surface: a zoomed panel, the tab strip, the split layout or the
  * empty state. Tab history and the compact breakpoint are its own business. */
@@ -17,7 +17,7 @@ export function WorkspaceCanvas({
   tabMode,
   compact,
   openPanelPicker,
-  hostLabel,
+  merged,
 }: {
   ws: WorkspaceController;
   activeEndpoint: string;
@@ -25,9 +25,10 @@ export function WorkspaceCanvas({
   tabMode: boolean;
   compact: boolean;
   openPanelPicker(): void;
-  /** Pane provenance (AC23): set only when the active workspace is a member
-   * of a merged sidebar row, so every pane on this canvas can name its host. */
-  hostLabel?: string;
+  /** The active workspace's merge group (flat mode only, from
+   * useMergedCanvas). When set (C1), every member's code panels are drawn
+   * together instead of just the active workspace's own. */
+  merged: MergedCanvas;
 }) {
   const {
     active,
@@ -48,26 +49,32 @@ export function WorkspaceCanvas({
     drop,
     sendChat,
     openHTML,
-    updateWorkspace,
+    resizeSplit,
   } = ws;
   const visitedTabs = useRef(new Set<string>());
-  const filteredPanels = codePanels(active);
+  const group = merged.group;
+  const paneById = new Map(merged.panes.map((mp) => [mp.panel.id, mp]));
+  const filteredPanels = group
+    ? merged.panes.map((mp) => mp.panel)
+    : codePanels(active);
   const compactId =
     filteredPanels.find((p) => p.id === selected)?.id || filteredPanels[0]?.id;
   const useTabs = tabMode || compact || filteredPanels.length > 6;
   if (compactId) visitedTabs.current.add(compactId);
-  const visibleLayout = active.layout;
+  const visibleLayout = group ? merged.layout : active.layout;
   function renderPanel(id: string) {
-    const panel = active.panels.find((p) => p.id === id);
+    const own = paneById.get(id);
+    const panel =
+      own?.panel || (!group && active.panels.find((p) => p.id === id));
     if (!panel) return null;
     return (
       <PanelHost
         key={panel.id}
         panel={panel}
-        cwd={panel.filesTarget?.root || active.cwd}
-        socket={activeEndpoint}
-        endpoint={active.connection}
-        hostLabel={hostLabel}
+        cwd={own ? own.cwd : panel.filesTarget?.root || active.cwd}
+        socket={own ? own.socket : activeEndpoint}
+        endpoint={own ? own.endpoint : active.connection}
+        hostLabel={own ? own.hostLabel : merged.hostLabel}
         selected={selected === id}
         zoomed={zoomed === id}
         dragging={!!dragId}
@@ -91,7 +98,7 @@ export function WorkspaceCanvas({
   }
   return (
     <>
-      {zoomed && active.panels.some((p) => p.id === zoomed) ? (
+      {zoomed && filteredPanels.some((p) => p.id === zoomed) ? (
         renderPanel(zoomed)
       ) : useTabs && compactId ? (
         <div className="adaptive-workspace">
@@ -171,12 +178,7 @@ export function WorkspaceCanvas({
         <LayoutView
           layout={visibleLayout}
           renderPanel={renderPanel}
-          onResize={(id, ratio) =>
-            updateWorkspace(active.id, (w) => ({
-              ...w,
-              layout: w.layout ? resize(w.layout, id, ratio) : null,
-            }))
-          }
+          onResize={resizeSplit}
         />
       ) : (
         <Empty

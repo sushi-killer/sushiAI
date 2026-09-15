@@ -216,3 +216,131 @@ test("retitleTerminal follows the agent but never overwrites a typed name", asyn
     "only terminals follow the agent",
   );
 });
+
+const profile = (id, name) => ({
+  id,
+  name,
+  host: "192.0.2.10",
+  socket: `ssh:${id}`,
+});
+
+/** A synthetic two-member merge group (Local + a Lab SSH host), plus a
+ * distractor workspace that is deliberately left out of it. */
+async function mergeGroupFixture() {
+  const local = {
+    ...(await workspace([panel("a"), panel("b")])),
+    id: "w-local",
+    cwd: "/Users/dev/app",
+  };
+  const lab = {
+    ...(await workspace([panel("c")])),
+    id: "w-lab",
+    cwd: "/home/dev/app",
+    connection: "ssh:lab",
+  };
+  const other = {
+    ...(await workspace([panel("distractor")])),
+    id: "w-other",
+    cwd: "/Users/dev/unrelated",
+  };
+  const git = {
+    remote: "example.test/dev/app",
+    commonDir: "",
+    checkout: "",
+    subdir: "",
+    branch: "",
+  };
+  const group = {
+    id: "example.test/dev/app::",
+    worktrees: false,
+    members: [
+      { workspace: local, hostKey: "local", git },
+      { workspace: lab, hostKey: "ssh:lab", git },
+    ],
+  };
+  return { group, local, lab, other };
+}
+
+test("groupPanelIds and tidyGroupLayout combine every member's code panels, never a workspace outside the group", async () => {
+  const { groupPanelIds, tidyGroupLayout } = await library;
+  const { contains } = await layoutLibrary;
+  const { group } = await mergeGroupFixture();
+  assert.deepEqual(groupPanelIds(group), ["a", "b", "c"]);
+  const tidied = tidyGroupLayout(group);
+  assert.ok(
+    contains(tidied, "a") && contains(tidied, "b") && contains(tidied, "c"),
+  );
+  assert.equal(contains(tidied, "distractor"), false);
+});
+
+test("resolveGroupPanes resolves each pane to its own owner's cwd, endpoint and host label", async () => {
+  const { resolveGroupPanes } = await library;
+  const { group } = await mergeGroupFixture();
+  const panes = resolveGroupPanes(
+    group,
+    [profile("lab", "Lab")],
+    "local-socket",
+  );
+  assert.deepEqual(
+    panes.map((p) => p.panel.id),
+    ["a", "b", "c"],
+  );
+  const [a, , c] = panes;
+  assert.equal(a.cwd, "/Users/dev/app");
+  assert.equal(
+    a.socket,
+    "local-socket",
+    "the Local member falls back to the app socket",
+  );
+  assert.equal(a.endpoint, undefined);
+  assert.equal(a.hostLabel, "Local");
+  assert.equal(c.cwd, "/home/dev/app");
+  assert.equal(c.socket, "ssh:lab", "the Lab member uses its own connection");
+  assert.equal(c.endpoint, "ssh:lab");
+  assert.equal(c.hostLabel, "Lab");
+});
+
+test("reconcileGroupLayout drops panels a Herdr poll removed and appends new ones, without touching a workspace outside the group", async () => {
+  const { reconcileGroupLayout } = await library;
+  const { tidy, contains, leafIds } = await layoutLibrary;
+  const first = reconcileGroupLayout(undefined, ["a", "b", "c"]);
+  assert.deepEqual(
+    leafIds(first).sort(),
+    ["a", "b", "c"],
+    "nothing stored yet falls back to tidy",
+  );
+
+  const stored = tidy(["a", "b", "c"]);
+  const reconciled = reconcileGroupLayout(stored, ["a", "c", "d"]);
+  assert.ok(contains(reconciled, "a"));
+  assert.ok(contains(reconciled, "c"));
+  assert.ok(contains(reconciled, "d"), "a pane a member gained is appended");
+  assert.equal(
+    contains(reconciled, "b"),
+    false,
+    "a pane a member lost leaves the layout",
+  );
+  assert.equal(contains(reconciled, "distractor"), false);
+});
+
+test("fixSelection widens aliveness across an active merge group's members, but never to a workspace outside it", async () => {
+  const { fixSelection } = await library;
+  const { local } = await mergeGroupFixture();
+  const groupIds = ["a", "b", "c"];
+
+  assert.deepEqual(
+    fixSelection(local, "c", "c", groupIds),
+    { selected: "c", zoomed: "c" },
+    "a pane owned by a different member of the same group stays selected",
+  );
+  assert.deepEqual(
+    fixSelection(local, "distractor", null, groupIds),
+    { selected: "a", zoomed: null },
+    "a pane from a workspace outside the group is not alive",
+  );
+  assert.deepEqual(
+    fixSelection(local, "c", "c"),
+    { selected: "a", zoomed: null },
+    "without a group, cross-workspace ids fall back exactly like today (C3)",
+  );
+});

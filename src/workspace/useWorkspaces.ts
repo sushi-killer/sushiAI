@@ -15,12 +15,15 @@ import {
 import {
   appendPanel,
   fixSelection,
+  groupPanelIds,
   movePanel as moveInLayout,
   removeClosedPanels,
   removePanel,
   retitleTerminal,
+  tidyGroupLayout,
   tidyWorkspace,
 } from "./workspace-actions.ts";
+import type { GroupCanvasContext } from "./workspace-actions.ts";
 import type { ModelProfile, Panel, PanelKind, Workspace } from "../types";
 
 export type WorkspaceController = ReturnType<typeof useWorkspaces>;
@@ -66,9 +69,20 @@ export function useWorkspaces({
   const dragIdRef = useRef(dragId);
   zoomedRef.current = zoomed;
   dragIdRef.current = dragId;
+  // The active workspace's merge group (flat mode only), kept in a ref
+  // rather than a hook parameter: it depends on git identity data (see
+  // useProjectGit) fetched from App, which in turn needs this hook's own
+  // `active` workspace - App assigns it here, synchronously, right after
+  // calling this hook each render (src/workspace/mergedLayouts.ts).
+  const groupRef = useRef<GroupCanvasContext | undefined>(undefined);
 
   useEffect(() => {
-    const next = fixSelection(active, selected, zoomed);
+    const next = fixSelection(
+      active,
+      selected,
+      zoomed,
+      groupRef.current ? groupPanelIds(groupRef.current.group) : undefined,
+    );
     if (next.selected !== selected) setSelected(next.selected);
     if (next.zoomed !== zoomed) setZoomed(next.zoomed);
   }, [active.id, active.layout, active.panels, selected, zoomed]);
@@ -404,6 +418,23 @@ export function useWorkspaces({
   const drop = useCallback(
     (target: string, edge: string) => {
       const source = dragIdRef.current;
+      const group = groupRef.current;
+      // Drag-swap across members (C2): the combined canvas draws the merge
+      // group's own layout, not the active workspace's, so a drop inside it
+      // moves panes within that layout instead - source and target can each
+      // belong to a different member.
+      if (group) {
+        if (
+          source &&
+          source !== target &&
+          group.layout &&
+          contains(group.layout, source) &&
+          contains(group.layout, target)
+        )
+          group.setLayout(moveInLayout(group.layout, source, target, edge));
+        endPanelDrag();
+        return;
+      }
       const current = activeRef.current;
       if (
         !source ||
@@ -642,6 +673,7 @@ export function useWorkspaces({
     zoomed,
     dragId,
     adding,
+    groupRef,
     setSelected,
     setZoomed,
     setActiveId,
@@ -676,11 +708,21 @@ export function useWorkspaces({
     reopenProject,
     forgetProject,
     openHTML,
-    tidy: () => updateWorkspace(active.id, tidyWorkspace),
-    resizeSplit: (id: string, ratio: number) =>
+    tidy: () => {
+      const group = groupRef.current;
+      if (group) group.setLayout(tidyGroupLayout(group.group));
+      else updateWorkspace(active.id, tidyWorkspace);
+    },
+    resizeSplit: (id: string, ratio: number) => {
+      const group = groupRef.current;
+      if (group) {
+        if (group.layout) group.setLayout(resize(group.layout, id, ratio));
+        return;
+      }
       updateWorkspace(active.id, (w) => ({
         ...w,
         layout: w.layout ? resize(w.layout, id, ratio) : null,
-      })),
+      }));
+    },
   };
 }

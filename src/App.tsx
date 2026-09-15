@@ -30,11 +30,11 @@ import { useExtensions } from "./app/useExtensions";
 import { useConnectionProfiles } from "./app/useConnectionProfiles";
 import { useHerdr } from "./app/useHerdr";
 import { useProjectGit } from "./app/useProjectGit";
-import { activeMergedHostLabel } from "./app/workspaceMerge";
+import { useMergedCanvas } from "./workspace/mergedLayouts";
 import { useSkills } from "./app/useSkills";
 import { useToast } from "./app/useToast";
 import { useUpdates } from "./app/useUpdates";
-import { blockedPanels, tidyWorkspace } from "./workspace/workspace-actions";
+import { blockedPanels } from "./workspace/workspace-actions";
 import {
   activePage,
   resolveNavigation,
@@ -144,7 +144,6 @@ export function App() {
     adding,
     setSelected,
     setZoomed,
-    updateWorkspace,
     updatePanel,
     closePanel,
     showPanel,
@@ -176,12 +175,12 @@ export function App() {
   // member of a merged row, and only in flat mode - the sidebar draws that
   // row, but the canvas is where a Herdr/agent pane actually names its host.
   const projectGit = useProjectGit(workspaces, active.id);
-  const paneHostLabel = activeMergedHostLabel(
-    workspaces,
-    active,
+  const merged = useMergedCanvas(
+    ws,
     projectGit,
     connectionProfiles,
     workspaceGrouping,
+    socket,
   );
   /** Clicking a pane inside an expanded merged row (AC21) - unlike a plain
    * row's `showPanel`, the pane's owning workspace need not be active yet. */
@@ -325,7 +324,7 @@ export function App() {
           panel ? showPanel(panel) : addPanel("files");
         }}
         tidy={() => {
-          updateWorkspace(active.id, tidyWorkspace);
+          ws.tidy();
           setZoomed(null);
           showWorkspace();
           setTabMode(false);
@@ -445,7 +444,7 @@ export function App() {
               tabMode={tabMode}
               compact={compact}
               openPanelPicker={openPanelPicker}
-              hostLabel={paneHostLabel}
+              merged={merged}
             />
           )}
         </main>

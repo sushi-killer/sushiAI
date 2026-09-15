@@ -83,10 +83,10 @@ function registerAttentionIpc({
     tray.setTitle(trayTitle(badgeCount));
     tray.setContextMenu(
       Menu.buildFromTemplate([
-        { label: "Open sushiAI", click: () => showWindow() },
+        { label: "Open", click: () => showWindow() },
         { type: "separator" },
         {
-          label: "Quit sushiAI",
+          label: "Quit",
           click: () => {
             quitting = true;
             app.quit();

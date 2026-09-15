@@ -94,7 +94,6 @@ function registerAttentionIpc({
         },
       ]),
     );
-    tray.on("click", () => showWindow());
   }
 
   function destroyTray() {

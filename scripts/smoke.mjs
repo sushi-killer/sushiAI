@@ -90,6 +90,9 @@ const desktop = await electron.launch({
     ...process.env,
     BRIDGE_DATA_DIR: profile,
     SUSHIAI_EXTENSIONS_DIR: "tests/fixtures/extensions",
+    // The smoke drives a real Electron app: keep its window off screen so a
+    // test run never steals focus or covers what you are working in.
+    SUSHIAI_TEST_HEADLESS: "1",
   },
 });
 const errors = [];

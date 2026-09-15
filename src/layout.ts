@@ -12,6 +12,14 @@ export const contains = (node: Layout | null, id: string): boolean =>
   (node.type === "leaf"
     ? node.id === id
     : contains(node.a, id) || contains(node.b, id));
+/** Every leaf id in a layout, in tree order - used to reconcile a stored
+ * layout (a merge group's combined canvas) against panels that come and go. */
+export const leafIds = (node: Layout | null): string[] =>
+  !node
+    ? []
+    : node.type === "leaf"
+      ? [node.id]
+      : [...leafIds(node.a), ...leafIds(node.b)];
 export function remove(node: Layout | null, id: string): Layout | null {
   if (!node || node.type === "leaf") return node?.id === id ? null : node;
   const a = remove(node.a, id),

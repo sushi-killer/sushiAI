@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowUpRight, FolderOpen } from "lucide-react";
-import type { ClaudePlugin, ConnectionProfile } from "./types";
+import type { ConnectionProfile } from "./types";
 
 /** Every host the new workspace could live on: this Mac, plus every
  * connected, non-hidden SSH profile. Defaults to whatever host the
@@ -51,7 +51,6 @@ export function WorkspaceDialog({
     cwd: string,
     backend: string,
     starter: string,
-    pluginChanges: Array<{ name: string; disabled: boolean }>,
     endpoint?: string,
   ): Promise<void>;
 }) {
@@ -70,16 +69,12 @@ export function WorkspaceDialog({
     [backend, setBackend] = useState(
       host.remote || connected ? "herdr" : "local",
     );
-  const [plugins, setPlugins] = useState<ClaudePlugin[]>([]);
-  const [disabledPlugins, setDisabledPlugins] = useState<string[]>([]);
-  const [pluginsLoading, setPluginsLoading] = useState(false);
   useEffect(() => {
     // A remote host is always Herdr-backed - picking one while "Local · built-in
     // PTY" was selected must not silently create a local workspace instead.
     if (host.remote) setBackend("herdr");
   }, [host.remote]);
   const remote = backend === "herdr" && host.remote;
-  const targetEndpoint = remote ? host.endpoint : undefined;
   useEffect(() => {
     let cancelled = false;
     if (remote)
@@ -94,41 +89,6 @@ export function WorkspaceDialog({
       cancelled = true;
     };
   }, [remote, host.endpoint, defaultCwd]);
-  useEffect(() => {
-    let cancelled = false;
-    setPluginsLoading(true);
-    setPlugins([]);
-    setDisabledPlugins([]);
-    const request = window.bridge?.claudePluginsList(cwd, targetEndpoint);
-    if (!request) {
-      setPluginsLoading(false);
-      return () => {
-        cancelled = true;
-      };
-    }
-    request
-      .then((result) => {
-        if (cancelled) return;
-        setPlugins(result.plugins);
-        setDisabledPlugins(
-          result.plugins
-            .filter((plugin) => plugin.disabled)
-            .map((plugin) => plugin.name),
-        );
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setPlugins([]);
-          setDisabledPlugins([]);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setPluginsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [cwd, targetEndpoint]);
   return (
     <>
       <div className="dialog-eyebrow">A PLACE TO BUILD</div>
@@ -151,12 +111,6 @@ export function WorkspaceDialog({
               cwd,
               backend,
               String(data.get("starter")),
-              plugins.flatMap((plugin) => {
-                const disabled = disabledPlugins.includes(plugin.name);
-                return disabled === plugin.disabled
-                  ? []
-                  : [{ name: plugin.name, disabled }];
-              }),
               backend === "herdr" ? host.endpoint : undefined,
             );
           } finally {
@@ -245,45 +199,12 @@ export function WorkspaceDialog({
             <option value="gemini">Gemini CLI</option>
           </select>
         </label>
-        {plugins.length > 0 ? (
-          <label>
-            Claude Code plugins to disable
-            <select
-              className="workspace-plugin-picker"
-              multiple
-              size={Math.min(5, Math.max(3, plugins.length))}
-              value={disabledPlugins}
-              onChange={(event) =>
-                setDisabledPlugins(
-                  Array.from(
-                    event.currentTarget.selectedOptions,
-                    (option) => option.value,
-                  ),
-                )
-              }
-            >
-              {plugins.map((plugin) => (
-                <option value={plugin.name} key={plugin.name}>
-                  {plugin.name} · {plugin.disabled ? "off" : "on"}
-                </option>
-              ))}
-            </select>
-            <small className="workspace-plugin-hint">
-              Select plugins that should be off in this workspace. Existing
-              selections reflect their current state.
-            </small>
-          </label>
-        ) : null}
         <button
           type="submit"
           className="primary"
-          disabled={busy || pluginsLoading || (host.remote && !connected)}
+          disabled={busy || (host.remote && !connected)}
         >
-          {busy
-            ? "Creating…"
-            : pluginsLoading
-              ? "Finding plugins…"
-              : "Create workspace"}
+          {busy ? "Creating…" : "Create workspace"}
           <ArrowUpRight size={14} />
         </button>
       </form>

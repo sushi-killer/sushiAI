@@ -136,6 +136,60 @@ test("saveWorkspaceState writes the stable key and propagates storage errors", a
   );
 });
 
+test("restore accepts only a well-formed closedProjects array", async () => {
+  const { restore } = await library;
+  const workspaces = [
+    {
+      id: "w",
+      name: "w",
+      cwd: "/a",
+      panels: [],
+      layout: { type: "leaf", id: "w" },
+    },
+  ];
+  const good = {
+    id: "closed:ssh:devbox:/home/dev/app",
+    name: "app",
+    cwd: "/home/dev/app",
+    endpoint: "ssh:devbox",
+    herdr: true,
+    closedAt: 1700000000000,
+    git: {
+      remote: "example.test/team/app",
+      commonDir: "/home/dev/app/.git",
+      checkout: "/home/dev/app",
+      subdir: "",
+      branch: "main",
+    },
+  };
+  const saved = restore({
+    getItem: () =>
+      JSON.stringify({
+        workspaces,
+        socket: "local",
+        closedProjects: [
+          good,
+          { name: "no id or cwd" },
+          "not even an object",
+          null,
+        ],
+      }),
+  });
+  assert.equal(saved.closedProjects.length, 1);
+  assert.deepEqual(saved.closedProjects[0], good);
+
+  const missingArray = restore({
+    getItem: () => JSON.stringify({ workspaces, socket: "local" }),
+  });
+  assert.deepEqual(missingArray.closedProjects, []);
+
+  const notAnArray = restore({
+    getItem: () =>
+      JSON.stringify({ workspaces, socket: "local", closedProjects: "bad" }),
+  });
+  assert.deepEqual(notAnArray.closedProjects, []);
+});
+
 test("initialWorkspace and codePanels preserve layout and panel identity invariants", async () => {
   const { initialWorkspace, codePanels } = await library;
   const workspace = initialWorkspace("/tmp/project");

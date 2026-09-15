@@ -1,20 +1,31 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { contains, leaf, remove, resize, split, uid } from "../layout.ts";
 import { initialWorkspace } from "../workspaceState.ts";
-import type { Routine, Saved } from "../workspaceState.ts";
+import type { ClosedProject, Routine, Saved } from "../workspaceState.ts";
 import { applyChatEvent, startUserTurn } from "../chat-threads.ts";
 import { disposeTerminal } from "../TerminalPanel.tsx";
 import { errorText } from "../app/errors.ts";
 import { agentTitle } from "../app/agent-title.ts";
+import { normalizeRemote } from "../app/useProjectGit.ts";
+import {
+  closedProjectId,
+  forgetProject as removeClosedProject,
+  refreshProject,
+  rememberProject,
+} from "../app/projects.ts";
 import {
   appendPanel,
+  findPanelOwner,
   fixSelection,
+  groupPanelIds,
   movePanel as moveInLayout,
   removeClosedPanels,
   removePanel,
   retitleTerminal,
+  tidyGroupLayout,
   tidyWorkspace,
 } from "./workspace-actions.ts";
+import type { GroupCanvasContext } from "./workspace-actions.ts";
 import type { ModelProfile, Panel, PanelKind, Workspace } from "../types";
 
 export type WorkspaceController = ReturnType<typeof useWorkspaces>;
@@ -48,6 +59,9 @@ export function useWorkspaces({
   const [zoomed, setZoomed] = useState<string | null>(saved?.zoomed || null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [closedProjects, setClosedProjects] = useState<ClosedProject[]>(
+    saved?.closedProjects || [],
+  );
   const active = workspaces.find((w) => w.id === activeId) || workspaces[0];
   const activeRef = useRef(active);
   const workspacesRef = useRef(workspaces);
@@ -57,9 +71,20 @@ export function useWorkspaces({
   const dragIdRef = useRef(dragId);
   zoomedRef.current = zoomed;
   dragIdRef.current = dragId;
+  // The active workspace's merge group (flat mode only), kept in a ref
+  // rather than a hook parameter: it depends on git identity data (see
+  // useProjectGit) fetched from App, which in turn needs this hook's own
+  // `active` workspace - App assigns it here, synchronously, right after
+  // calling this hook each render (src/workspace/mergedLayouts.ts).
+  const groupRef = useRef<GroupCanvasContext | undefined>(undefined);
 
   useEffect(() => {
-    const next = fixSelection(active, selected, zoomed);
+    const next = fixSelection(
+      active,
+      selected,
+      zoomed,
+      groupRef.current ? groupPanelIds(groupRef.current.group) : undefined,
+    );
     if (next.selected !== selected) setSelected(next.selected);
     if (next.zoomed !== zoomed) setZoomed(next.zoomed);
   }, [active.id, active.layout, active.panels, selected, zoomed]);
@@ -146,11 +171,11 @@ export function useWorkspaces({
   );
   const renamePanel = useCallback(
     (panelId: string, title: string) => {
-      const current = activeRef.current;
-      const panel = current.panels.find((item) => item.id === panelId);
-      if (!panel) return;
+      const owner = findPanelOwner(workspacesRef.current, panelId);
+      const panel = owner?.panels.find((item) => item.id === panelId);
+      if (!owner || !panel) return;
       if (panel.herdrId) {
-        const endpoint = current.connection || socket;
+        const endpoint = owner.connection || socket;
         window.bridge
           ?.herdr(endpoint, "pane.rename", {
             pane_id: panel.herdrId,
@@ -190,49 +215,23 @@ export function useWorkspaces({
       );
     updateWorkspace(workspaceId, (w) => ({ ...w, name }));
   }
-  /** Creates a workspace either as a Herdr session or a local one. A failed
-   * plugin toggle rolls the Herdr session back, so a half-configured workspace
-   * is never left behind. Returns false when nothing was created. */
+  /** Creates a workspace either as a Herdr session or a local one. Plugins
+   * are configured afterwards from the workspace's own controls. Returns false
+   * when nothing was created. */
   async function createWorkspace(
     name: string,
     cwd: string,
     backend: string,
     starter: string,
-    pluginChanges: { name: string; disabled: boolean }[],
     endpoint: string = socket,
   ): Promise<boolean> {
     try {
-      const pluginEndpoint =
-        backend === "herdr" && endpoint.startsWith("ssh:")
-          ? endpoint
-          : undefined;
-      const applyPluginChanges = async () => {
-        if (!pluginChanges.length) return;
-        if (!window.bridge) throw new Error("Open the desktop app first.");
-        for (const plugin of pluginChanges)
-          await window.bridge.claudePluginsToggle({
-            cwd,
-            endpoint: pluginEndpoint,
-            name: plugin.name,
-            disabled: plugin.disabled,
-          });
-      };
       if (backend === "herdr") {
         const result = await window.bridge!.herdr(
           endpoint,
           "workspace.create",
           { label: name, cwd, focus: false },
         );
-        try {
-          await applyPluginChanges();
-        } catch (error) {
-          await window.bridge
-            ?.herdr(endpoint, "workspace.close", {
-              workspace_id: result.workspace.workspace_id,
-            })
-            .catch(() => {});
-          throw error;
-        }
         await refreshHerdr(endpoint);
         if (starter !== "shell")
           await window.bridge!.herdr(endpoint, "pane.send_input", {
@@ -245,7 +244,6 @@ export function useWorkspaces({
           `herdr:${endpoint.startsWith("ssh:") ? endpoint : "local"}:${result.workspace.workspace_id}`,
         );
       } else {
-        await applyPluginChanges();
         const w = initialWorkspace(cwd);
         w.name = name;
         const panel: Panel = {
@@ -266,12 +264,21 @@ export function useWorkspaces({
       return false;
     }
   }
-  function insertPanel(panel: Panel) {
-    const current = activeRef.current;
+  /** Places a panel App already built (an extension surface) into a
+   * workspace - the merged row's chosen host (D2) when given, else the
+   * active one, exactly like addPanel. */
+  function insertPanel(panel: Panel, targetWorkspaceId?: string) {
+    const current =
+      (targetWorkspaceId &&
+        workspacesRef.current.find((w) => w.id === targetWorkspaceId)) ||
+      activeRef.current;
     updateWorkspace(current.id, (w) => appendPanel(w, panel));
     setSelected(panel.id);
-    showWorkspace();
-    setZoomed(null);
+    if (current.id !== activeRef.current.id) switchWorkspace(current.id);
+    else {
+      showWorkspace();
+      setZoomed(null);
+    }
   }
   /** The soft variant used by the Chat list: follow the project, but leave the
    * current view and zoom alone. */
@@ -295,9 +302,15 @@ export function useWorkspaces({
     filesTarget?: Panel["filesTarget"],
     modelProfile?: ModelProfile,
     backend?: "herdr" | "local",
+    targetWorkspaceId?: string,
   ) {
     const modelProfileId = modelProfile?.id;
-    const current = activeRef.current;
+    // A merged-row session host choice (D2): defaults to the active
+    // workspace, same as before targetWorkspaceId existed.
+    const current =
+      (targetWorkspaceId &&
+        workspacesRef.current.find((w) => w.id === targetWorkspaceId)) ||
+      activeRef.current;
     if (adding) return;
     setAdding(true);
     try {
@@ -363,8 +376,13 @@ export function useWorkspaces({
         updateWorkspace(current.id, (w) => appendPanel(w, panel));
         setSelected(panel.id);
       }
-      showWorkspace();
-      setZoomed(null);
+      // D2: a chosen host other than the active workspace becomes active too,
+      // so the new pane (just selected above) is actually visible.
+      if (current.id !== activeRef.current.id) switchWorkspace(current.id);
+      else {
+        showWorkspace();
+        setZoomed(null);
+      }
     } catch (error) {
       notify(errorText(error));
     } finally {
@@ -373,9 +391,7 @@ export function useWorkspaces({
   }
   const closePanel = useCallback(
     (panelId: string) => {
-      const owner = workspacesRef.current.find((workspace) =>
-        workspace.panels.some((panel) => panel.id === panelId),
-      );
+      const owner = findPanelOwner(workspacesRef.current, panelId);
       const panel = owner?.panels.find((item) => item.id === panelId);
       if (!owner || !panel) return;
       if (panel.herdrId) {
@@ -411,6 +427,23 @@ export function useWorkspaces({
   const drop = useCallback(
     (target: string, edge: string) => {
       const source = dragIdRef.current;
+      const group = groupRef.current;
+      // Drag-swap across members (C2): the combined canvas draws the merge
+      // group's own layout, not the active workspace's, so a drop inside it
+      // moves panes within that layout instead - source and target can each
+      // belong to a different member.
+      if (group) {
+        if (
+          source &&
+          source !== target &&
+          group.layout &&
+          contains(group.layout, source) &&
+          contains(group.layout, target)
+        )
+          group.setLayout(moveInLayout(group.layout, source, target, edge));
+        endPanelDrag();
+        return;
+      }
       const current = activeRef.current;
       if (
         !source ||
@@ -553,6 +586,7 @@ export function useWorkspaces({
         disposeTerminal(panel.id);
         if (panel.busy) await window.bridge?.cancelChat(panel.id);
       }
+      if (workspace.cwd) rememberClosed(workspace);
       setWorkspaces((list) => {
         const rest = list.filter((w) => w.id !== workspace.id);
         return rest.length ? rest : [initialWorkspace()];
@@ -561,6 +595,62 @@ export function useWorkspaces({
     } catch (error) {
       notify(errorText(error));
     }
+  }
+  /** Keeps the just-closed workspace on the Dashboard (B1): a fresh git
+   * identity read the same way `useProjectGit` reads one, since the
+   * workspace is about to disappear and can no longer be looked up by id. */
+  function rememberClosed(workspace: Workspace) {
+    const endpoint = workspace.herdrId
+      ? workspace.connection || socket
+      : undefined;
+    const entry: ClosedProject = {
+      id: closedProjectId(endpoint, workspace.cwd),
+      name: workspace.name,
+      cwd: workspace.cwd,
+      endpoint,
+      herdr: Boolean(workspace.herdrId),
+      closedAt: Date.now(),
+      git: { remote: "", commonDir: "", checkout: "", subdir: "", branch: "" },
+    };
+    setClosedProjects((list) => rememberProject(list, entry));
+    window.bridge
+      ?.projectInspect(workspace.connection, {
+        operation: "git_remote",
+        root: workspace.cwd,
+      })
+      .then((result) =>
+        setClosedProjects((list) =>
+          refreshProject(list, {
+            ...entry,
+            git: {
+              remote: normalizeRemote(result?.remote || ""),
+              commonDir: result?.commonDir || "",
+              checkout: result?.checkout || "",
+              subdir: result?.subdir || "",
+              branch: result?.branch || "",
+            },
+          }),
+        ),
+      )
+      .catch(() => {});
+  }
+  /** Reopens a remembered project through the path a fresh workspace already
+   * uses - Herdr on its original host when it had one, else local - and
+   * forgets it only once that succeeds, so a host that cannot be reached
+   * (surfaced via `notify` inside `createWorkspace`) leaves the entry in
+   * place to retry. */
+  async function reopenProject(project: ClosedProject) {
+    const ok = await createWorkspace(
+      project.name,
+      project.cwd,
+      project.herdr ? "herdr" : "local",
+      "shell",
+      project.endpoint || socket,
+    );
+    if (ok) forgetProject(project.id);
+  }
+  function forgetProject(id: string) {
+    setClosedProjects((list) => removeClosedProject(list, id));
   }
   const openHTML = useCallback(
     (root: string, file: string, endpoint?: string) => {
@@ -592,6 +682,7 @@ export function useWorkspaces({
     zoomed,
     dragId,
     adding,
+    groupRef,
     setSelected,
     setZoomed,
     setActiveId,
@@ -622,12 +713,25 @@ export function useWorkspaces({
     runRoutine,
     endSessions,
     endWorkspace,
+    closedProjects,
+    reopenProject,
+    forgetProject,
     openHTML,
-    tidy: () => updateWorkspace(active.id, tidyWorkspace),
-    resizeSplit: (id: string, ratio: number) =>
+    tidy: () => {
+      const group = groupRef.current;
+      if (group) group.setLayout(tidyGroupLayout(group.group));
+      else updateWorkspace(active.id, tidyWorkspace);
+    },
+    resizeSplit: (id: string, ratio: number) => {
+      const group = groupRef.current;
+      if (group) {
+        if (group.layout) group.setLayout(resize(group.layout, id, ratio));
+        return;
+      }
       updateWorkspace(active.id, (w) => ({
         ...w,
         layout: w.layout ? resize(w.layout, id, ratio) : null,
-      })),
+      }));
+    },
   };
 }

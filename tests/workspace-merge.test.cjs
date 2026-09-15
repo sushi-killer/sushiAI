@@ -92,14 +92,32 @@ test("one checkout opened twice on a host -> never merges", async () => {
   );
 });
 
-test("same remote, different repository name -> does not merge", async () => {
+test("same remote, different checkout folder names -> merges across hosts", async () => {
   const { computeMergeGroups } = await library;
-  const local = workspace("w-local", undefined, "/Users/dev/sushiai");
-  const remote = workspace("w-lab", "ssh:lab", "/home/dev/sushiai-fork");
+  const local = workspace("w-local", undefined, "/Users/dev/AI Prototype");
+  const remote = workspace("w-lab", "ssh:lab", "/home/dev/prototype");
   const groups = computeMergeGroups([local, remote], gitFor([local, remote]), [
     profile("lab", "Lab"),
   ]);
-  assert.equal(groups.size, 0);
+  assert.equal(groups.size, 2);
+  assert.equal(groups.get("w-local"), groups.get("w-lab"));
+});
+
+test("normalizeRemote: one repository over SSH with a port, scp and HTTPS reads as one key", async () => {
+  const { normalizeRemote } = await import("../src/app/useProjectGit.ts");
+  const key = "git.example.test/team/prototype";
+  for (const url of [
+    "ssh://git@git.example.test:10022/team/prototype.git",
+    "https://git.example.test/team/prototype.git",
+    "https://deploy@git.example.test/team/prototype",
+    "git@git.example.test:team/prototype.git",
+    "HTTPS://git.example.test/Team/Prototype/",
+  ])
+    assert.equal(normalizeRemote(url), key, url);
+  assert.notEqual(
+    normalizeRemote("https://git.example.test/team/other.git"),
+    key,
+  );
 });
 
 test("worktrees of one repository on one host merge, labelled by branch, main checkout first", async () => {
@@ -355,47 +373,4 @@ test("mergedMarkerAccessibleName: two and three hosts, no Oxford comma", async (
     "ssh:lab": "offline",
   });
   assert.equal(name, "Runs on Local (Connected) and Lab (Offline).");
-});
-
-test("activeMergedHostLabel: undefined in grouped mode, undefined when not merged, set for a merged member", async () => {
-  const { activeMergedHostLabel } = await library;
-  const local = workspace("w-local", undefined, "/Users/dev/sushiai");
-  const lab = workspace("w-lab", "ssh:lab", "/home/dev/sushiai");
-  const solo = workspace("w-solo", undefined, "/Users/dev/solo-project");
-  const worktree = workspace("w-wt", undefined, "/Users/dev/solo-project-wt");
-  const projectGit = {
-    ...gitFor([local, lab]),
-    "w-solo": git("", solo.cwd),
-  };
-  const profiles = [profile("lab", "Lab")];
-  const workspaces = [local, lab, solo];
-
-  assert.equal(
-    activeMergedHostLabel(workspaces, local, projectGit, profiles, "grouped"),
-    undefined,
-    "merging is flat-mode only",
-  );
-  assert.equal(
-    activeMergedHostLabel(workspaces, solo, projectGit, profiles, "flat"),
-    undefined,
-    "a workspace with no merged group carries no host label",
-  );
-  assert.equal(
-    activeMergedHostLabel(workspaces, lab, projectGit, profiles, "flat"),
-    "Lab",
-  );
-  assert.equal(
-    activeMergedHostLabel(workspaces, local, projectGit, profiles, "flat"),
-    "Local",
-  );
-  assert.equal(
-    activeMergedHostLabel(
-      [...workspaces, worktree],
-      worktree,
-      { ...projectGit, "w-wt": git("", worktree.cwd, "spike", solo.cwd) },
-      profiles,
-      "flat",
-    ),
-    "spike",
-  );
 });

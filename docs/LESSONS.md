@@ -26,18 +26,15 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 
 ## Open
 
-## 2026-09-15 — Unit fixtures merged worktrees; the real layout did not
+## 2026-09-15 — A gate chain let a failing change commit
 
-Root cause: "a host with two clones joins nothing" was checked per identity, so an unrelated clone beside a worktree pair vetoed the pair too. Every unit fixture held only the pair; the evidence repo set (main, worktree, clone) showed it at once.
-Rule: a merge/grouping fixture includes a realistic distractor next to the members it expects to group.
-
-## 2026-09-15 — Desktop smoke failed, then passed on the same tree
-
-Root cause: smoke asserts after fixed sleeps (panel drag after 200ms, routine output after 500ms); run straight after `npm run ci`, a loaded machine missed them, each on a different check.
-Rule: a smoke failure is only a regression if it repeats on rerun; replace the fixed sleeps with `waitForFunction` on the expected state.
+Root cause: checks were joined with `;`, so `git commit` ran after `tsc` failed; later a zsh variable holding file paths was not word-split, prettier matched nothing and the commit still went through.
+Rule: join every gate to the commit with `&&`, and pass file lists as explicit arguments, never an unquoted variable.
 
 ## Promoted
 
+- 2026-09-15 Desktop smoke failed under load, then passed on the same tree: asserts followed fixed sleeps → wait for the asserted state instead. `scripts/smoke.mjs`.
+- 2026-09-15 Unit fixtures merged worktrees but the real layout (main, worktree, unrelated clone) did not → grouping fixtures include a realistic distractor. `tests/workspace-merge.test.cjs`, `tests/projects.test.cjs`.
 - 2026-09-14 A layout check passed while a label rendered 0px wide: it measured a `flex: 1`-stretched box → measure text ink with a `Range`, assert non-zero label widths. `ui-evidence` skill.
 - 2026-09-14 A test copied from a live debug session carried a real private IP, host alias and ports → examples use 192.0.2.0/24 (RFC 5737); private addresses fail CI. `check-conventions.mjs`.
 - 2026-09-13 Flat workspace list reordered on every poll: reconciliation appended each refresh at the array end, reshuffling other hosts → update in place. `herdrSnapshot.ts`.

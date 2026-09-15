@@ -40,3 +40,9 @@ test("contains finds a leaf anywhere in the tree and nothing in an empty layout"
   assert.equal(contains(layout, "zzz"), false);
   assert.equal(contains(null, "a"), false);
 });
+test("leafIds lists every leaf in tree order and nothing for an empty layout", async () => {
+  const { tidy, leafIds } = await library;
+  assert.deepEqual(leafIds(tidy(["a", "b", "c"])).sort(), ["a", "b", "c"]);
+  assert.deepEqual(leafIds(null), []);
+  assert.deepEqual(leafIds({ type: "leaf", id: "solo" }), ["solo"]);
+});

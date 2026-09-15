@@ -1,6 +1,6 @@
 {
   "name": "sushiai-workspace",
-  "version": "0.0.7",
+  "version": "0.1.0",
   "private": true,
   "description": "A macOS workspace for terminal agents, powered by Herdr",
   "main": "electron/main.cjs",

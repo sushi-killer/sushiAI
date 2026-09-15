@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import {
   Check,
-  Eye,
   Globe,
   Inbox as InboxIcon,
   ListChecks,
@@ -91,6 +90,8 @@ export function InboxPage({
       a === LOCAL_GROUP ? -1 : b === LOCAL_GROUP ? 1 : a.localeCompare(b),
     );
   }, [allRows, connectionProfiles]);
+  // One host in the list means a host mark on every row says nothing.
+  const manyHosts = hosts.length > 1;
   const visibleGroups = groups.map((group) => ({
     ...group,
     rows: group.rows.filter(
@@ -201,7 +202,7 @@ export function InboxPage({
               />{" "}
               Select visible ({visibleRows.length})
             </label>
-            <span>{selected.length} selected</span>
+            {selected.length > 0 && <span>{selected.length} selected</span>}
           </div>
           <div className="inbox-groups">
             {visibleGroups
@@ -223,7 +224,7 @@ export function InboxPage({
                     return (
                       <div className="session-row" key={row.panel.id}>
                         <input
-                          aria-label={`Select ${row.panel.title} ${row.panel.id}`}
+                          aria-label={`Select ${row.panel.title} in ${row.workspace.name}`}
                           type="checkbox"
                           checked={checked.includes(row.panel.id)}
                           onChange={(e) =>
@@ -231,24 +232,32 @@ export function InboxPage({
                           }
                         />
                         <Icon kind={row.panel.kind} agent={row.panel.agent} />
-                        <div>
-                          <strong>{row.panel.title}</strong>
-                          <small>{row.workspace.name}</small>
-                        </div>
-                        <span className="remote-tag">
-                          <HostIcon size={10} />
-                          {hostLabel}
-                        </span>
+                        {/* The row itself is the way back into the session:
+                            the project leads, because that is what tells two
+                            "Claude Code" rows apart, and the icon already
+                            names the agent. */}
+                        <button
+                          className="inbox-row-open"
+                          title={`Open ${row.panel.title} in ${row.workspace.name}`}
+                          aria-label={`Jump to ${row.panel.title} in ${row.workspace.name}`}
+                          onClick={() => jump(row)}
+                        >
+                          <strong>
+                            {row.workspace.name}
+                            {manyHosts && (
+                              <span
+                                className="inbox-row-host"
+                                title={hostLabel}
+                              >
+                                <HostIcon size={11} />
+                              </span>
+                            )}
+                          </strong>
+                          <small>{row.panel.title}</small>
+                        </button>
                         {elapsed && (
                           <span className="inbox-row-time">{elapsed}</span>
                         )}
-                        <button
-                          title={`Jump to ${row.panel.title}`}
-                          aria-label={`Jump to ${row.panel.title}`}
-                          onClick={() => jump(row)}
-                        >
-                          <Eye size={14} />
-                        </button>
                         {group.key === "done" && (
                           <button
                             title={`Mark ${row.panel.title} seen`}
@@ -293,15 +302,14 @@ export function InboxPage({
                 {busy ? "Closing…" : `End ${selected.length} sessions`}
               </button>
             </div>
-          ) : (
+          ) : selected.length > 0 ? (
             <button
               className="danger session-close-button"
-              disabled={!selected.length}
               onClick={() => setConfirming(true)}
             >
               <Trash2 size={13} /> End selected
             </button>
-          )}
+          ) : null}
         </>
       )}
     </PageFrame>

@@ -145,9 +145,11 @@ export function PanelPickerDialog({
             ))}
           </div>
           {checkout === "worktree" && (
-            <label>
-              Branch
+            <>
+              <div className="dialog-eyebrow">BRANCH</div>
               <input
+                className="worktree-branch"
+                aria-label="Branch"
                 value={branch}
                 onChange={(event) => setBranch(event.target.value)}
                 placeholder="feature/my-change"
@@ -155,7 +157,7 @@ export function PanelPickerDialog({
               {branchError && (
                 <small className="inline-error">{branchError}</small>
               )}
-            </label>
+            </>
           )}
         </>
       )}
@@ -301,13 +303,16 @@ export function PanelPickerDialog({
       )}
       <div className="dialog-footer">
         <span>
-          {checkout === "worktree" ? (
-            <>
-              Launches in a new worktree on <strong>{branch}</strong>
-            </>
-          ) : (
+          {checkout !== "worktree" ? (
             <>
               Launches in <strong>{launchLabel}</strong>
+            </>
+          ) : worktreeInvalid ? null : (
+            // Only a terminal or an agent gets the worktree; the other panels
+            // are views of the project and open where they always did.
+            <>
+              Terminal and agents launch in a new worktree on{" "}
+              <strong>{branch}</strong>
             </>
           )}
         </span>

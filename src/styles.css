@@ -3687,6 +3687,33 @@ iframe {
   font-size: 10px;
   color: #777;
 }
+.inbox-row-open {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.inbox-row-open strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.inbox-row-host {
+  display: inline-flex;
+  color: #878d86;
+}
+.session-row:hover {
+  background: #1b1b1b;
+}
+.modal input.worktree-branch {
+  width: 100%;
+}
 .session-row {
   padding: 10px 3px;
   border-bottom: 1px solid #252525;

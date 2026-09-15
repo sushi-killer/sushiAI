@@ -1,4 +1,4 @@
-import { Suspense } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { Check, RefreshCw, TerminalSquare } from "lucide-react";
 import { RenderProfiler } from "../RenderProfiler.tsx";
 import { agentTitle } from "./agent-title.ts";
@@ -10,6 +10,7 @@ import {
   UpdateSettings,
 } from "../dialogs/lazy-settings.ts";
 import type {
+  AppPreferences,
   ConnectionProfile,
   System,
   UpdateState,
@@ -17,6 +18,11 @@ import type {
 } from "../types";
 
 export type SettingsTab = "general" | "connections" | "providers" | "updates";
+
+const DEFAULT_APP_PREFERENCES: AppPreferences = {
+  runInMenuBar: true,
+  notifications: true,
+};
 
 export function SettingsDialog({
   settingsTab,
@@ -61,6 +67,28 @@ export function SettingsDialog({
   refreshConnectionProfiles(): Promise<void>;
   notify(text: string): void;
 }) {
+  const [appPreferences, setAppPreferences] = useState<AppPreferences>(
+    DEFAULT_APP_PREFERENCES,
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    window.bridge
+      ?.appPreferences()
+      .then((value) => {
+        if (!cancelled) setAppPreferences(value);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function setAppPreference(key: keyof AppPreferences, value: boolean) {
+    setAppPreferences((prev) => ({ ...prev, [key]: value }));
+    window.bridge?.appPreferencesSet({ [key]: value }).catch(() => {});
+  }
+
   return (
     <>
       <div className="dialog-eyebrow">PREFERENCES</div>
@@ -190,11 +218,47 @@ export function SettingsDialog({
                   </span>
                 </label>
               </div>
+              <div className="setting-block">
+                <h4>Background</h4>
+                <label className="setting-check">
+                  <input
+                    type="checkbox"
+                    checked={appPreferences.runInMenuBar}
+                    onChange={(event) =>
+                      setAppPreference("runInMenuBar", event.target.checked)
+                    }
+                  />
+                  <span>
+                    Keep sushiAI in the menu bar when the window closes
+                    <em>
+                      Agents keep reporting while the window is closed. Quit
+                      from the menu bar icon or ⌘Q.
+                    </em>
+                  </span>
+                </label>
+                <label className="setting-check">
+                  <input
+                    type="checkbox"
+                    checked={appPreferences.notifications}
+                    onChange={(event) =>
+                      setAppPreference("notifications", event.target.checked)
+                    }
+                  />
+                  <span>
+                    Notify me when an agent needs input or finishes
+                    <em>
+                      If you don't answer, reminders follow at 5, 10 and 20
+                      minutes.
+                    </em>
+                  </span>
+                </label>
+              </div>
               <div className="settings-note">
                 <TerminalSquare size={16} />
                 <p>
                   Herdr sessions keep running when you close sushiAI. Local
-                  terminals live for the duration of the app.
+                  terminals live for the duration of the app, which keeps
+                  running in the menu bar until you quit it.
                 </p>
               </div>
               <div className="cli-status">

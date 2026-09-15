@@ -26,6 +26,15 @@ contextBridge.exposeInMainWorld("bridge", {
     ipcRenderer.on("updates-state", listener);
     return () => ipcRenderer.removeListener("updates-state", listener);
   },
+  attentionNotify: invoke("attention-notify"),
+  attentionBadge: invoke("attention-badge"),
+  appPreferences: invoke("app-preferences"),
+  appPreferencesSet: invoke("app-preferences-set"),
+  onAttentionOpen: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on("attention-open", listener);
+    return () => ipcRenderer.removeListener("attention-open", listener);
+  },
   chooseDirectory: invoke("choose-directory"),
   chooseAttachments: invoke("choose-attachments"),
   pathForFile: (file) => webUtils.getPathForFile(file),

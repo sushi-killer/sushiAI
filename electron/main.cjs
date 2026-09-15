@@ -29,6 +29,7 @@ const { registerTerminalIpc } = require("./ipc/terminals.cjs");
 const { registerChatIpc } = require("./ipc/chat.cjs");
 const { registerAppIpc } = require("./ipc/app.cjs");
 const { registerExtensionIpc } = require("./ipc/extensions.cjs");
+const { registerAttentionIpc } = require("./attention.cjs");
 const { SurfaceStateStore } = require("./extensions/surface-state.cjs");
 const { ExtensionManager } = require("./extensions/extension-manager.cjs");
 const {
@@ -184,6 +185,14 @@ registerAppIpc({
   userDataDir: () => app.getPath("userData"),
   stageModelSettings,
 });
+const attention = registerAttentionIpc({
+  handle,
+  send,
+  app,
+  getMainWindow: () => mainWindow,
+  userDataDir: app.getPath("userData"),
+  trayIconPath: path.join(root, "dist/trayTemplate.png"),
+});
 function validWebURL(value) {
   try {
     return ["http:", "https:"].includes(new URL(value).protocol);
@@ -215,6 +224,7 @@ app.whenReady().then(async () => {
     automatic: app.isPackaged && process.env.SUSHIAI_TEST_HEADLESS !== "1",
   });
   await updates.init();
+  await attention.init();
   preview = new PreviewServer(connections);
   await preview.start();
   if (
@@ -243,6 +253,9 @@ app.whenReady().then(async () => {
       webviewTag: true,
       backgroundThrottling: process.env.SUSHIAI_TEST_HEADLESS !== "1",
     },
+  });
+  mainWindow.on("close", (event) => {
+    if (attention.handleWindowClose(mainWindow)) event.preventDefault();
   });
   mainWindow.webContents.on("will-navigate", (event) => event.preventDefault());
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -300,6 +313,10 @@ app.whenReady().then(async () => {
           { role: "togglefullscreen" },
         ],
       },
+      {
+        label: "Window",
+        submenu: [{ role: "close" }],
+      },
     ]),
   );
   mainWindow.webContents.once("did-finish-load", async () => {
@@ -318,11 +335,14 @@ app.whenReady().then(async () => {
   else mainWindow.loadFile(path.join(root, "dist/index.html"));
 });
 app.on("window-all-closed", () => app.quit());
+app.on("activate", () => attention.showWindow());
 let quitReady = false;
 app.on("before-quit", (event) => {
+  attention.setQuitting(true);
   if (quitReady) return;
   event.preventDefault();
   updates?.close();
+  attention.close();
   preview?.close();
   terminalIpc.close();
   for (const pending of terminalPending.values()) pending.cancelled = true;

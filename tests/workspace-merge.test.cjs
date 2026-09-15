@@ -217,7 +217,7 @@ test("a worktree folder name does not block a cross-host merge", async () => {
   assert.ok(group);
   assert.deepEqual(
     group.members.map((m) => memberLabel(group, m, profiles)),
-    ["This Mac", "Lab"],
+    ["Local", "Lab"],
     "one checkout per host still reads as hosts",
   );
 });
@@ -354,7 +354,7 @@ test("mergedMarkerAccessibleName: two and three hosts, no Oxford comma", async (
     "/tmp/local.sock": "connected",
     "ssh:lab": "offline",
   });
-  assert.equal(name, "Runs on This Mac (Connected) and Lab (Offline).");
+  assert.equal(name, "Runs on Local (Connected) and Lab (Offline).");
 });
 
 test("activeMergedHostLabel: undefined in grouped mode, undefined when not merged, set for a merged member", async () => {
@@ -386,7 +386,7 @@ test("activeMergedHostLabel: undefined in grouped mode, undefined when not merge
   );
   assert.equal(
     activeMergedHostLabel(workspaces, local, projectGit, profiles, "flat"),
-    "This Mac",
+    "Local",
   );
   assert.equal(
     activeMergedHostLabel(

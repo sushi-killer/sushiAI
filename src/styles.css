@@ -420,6 +420,11 @@ textarea::placeholder {
   opacity: 0.9;
   width: 10px;
 }
+.workspace-name .remote-tag svg {
+  opacity: 0.9;
+  width: 10px;
+  margin-left: -1px;
+}
 .remote-tag {
   display: inline-flex;
   align-items: center;

@@ -9,7 +9,7 @@ export function groupKey(connection?: string) {
   return connection?.startsWith("ssh:") ? connection : LOCAL_GROUP;
 }
 export function groupLabel(key: string, profiles: ConnectionProfile[]) {
-  if (key === LOCAL_GROUP) return "This Mac";
+  if (key === LOCAL_GROUP) return "Local";
   return (
     profiles.find((p) => `ssh:${p.id}` === key)?.name ||
     key.replace(/^ssh:/, "")
@@ -208,7 +208,7 @@ export function memberLabel(
 }
 
 /** D2: the merged row's single status dot follows the active member, else
- * This Mac's member, else the first member in AC11 order. Never a third,
+ * the Local member, else the first member in AC11 order. Never a third,
  * "mixed" appearance. */
 export function mergedRowStatusKey(
   group: MergeGroup,
@@ -225,7 +225,7 @@ export function mergedRowStatusKey(
 
 /** Section D of the visual contract: collapse every marker to one `<n>
  * hosts` (or `<n> checkouts`) chip at 3+ members, or when the members'
- * labels total more than 12 characters. A bare This Mac never counts - it is
+ * labels total more than 12 characters. A bare Local never counts - it is
  * a fixed, user-can't-change string - but a branch always does. */
 export function shouldCollapseHostMarkers(
   group: MergeGroup,

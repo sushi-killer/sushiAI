@@ -198,7 +198,7 @@ export function Sidebar({
   selected: string;
   connected: boolean;
   connection: string;
-  /** This Mac's own Herdr socket, so the "This Mac" group can look up its
+  /** This Mac's own Herdr socket, so the "Local" group can look up its
    * real poll status the same way an SSH group looks up its own. */
   localSocket: string;
   connectionProfiles: ConnectionProfile[];
@@ -286,7 +286,12 @@ export function Sidebar({
             <Globe size={10} />
           </span>
         )}
-        {tag && <span className="remote-tag">{tag}</span>}
+        {tag && (
+          <span className="remote-tag">
+            {groupKey(w.connection) !== LOCAL_GROUP && <Globe size={10} />}
+            {tag}
+          </span>
+        )}
         {w.herdrId && (
           <i
             className={`status-dot ${live ? "green" : ""}`}
@@ -391,11 +396,17 @@ export function Sidebar({
                 {group.members.length} {group.worktrees ? "worktrees" : "hosts"}
               </span>
             ) : (
-              group.members.map((m) => (
-                <span className="remote-tag" key={m.workspace.id}>
-                  {memberLabel(group, m, connectionProfiles)}
-                </span>
-              ))
+              group.members.map((m) => {
+                const MarkerIcon = m.hostKey === LOCAL_GROUP ? Server : Globe;
+                return (
+                  <span className="remote-tag" key={m.workspace.id}>
+                    {(!group.worktrees || m.hostKey !== LOCAL_GROUP) && (
+                      <MarkerIcon size={10} />
+                    )}
+                    {memberLabel(group, m, connectionProfiles)}
+                  </span>
+                );
+              })
             )}
           </span>
           <i

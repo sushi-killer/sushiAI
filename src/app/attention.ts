@@ -1,5 +1,24 @@
 import { isHidden } from "./workspaceMerge.ts";
-import type { ConnectionProfile, Panel, Workspace } from "../types";
+import type {
+  AttentionNotice,
+  ConnectionProfile,
+  Panel,
+  Workspace,
+} from "../types";
+
+/** Main validates a notice against its own caps and throws past them, while
+ * the renderer sends fire-and-forget: a pane whose title carries a long command
+ * line would lose its notification and every reminder behind it. Cut to fit
+ * instead - the caps mirror `validateNotice` in electron/attention.cjs. */
+export function fitNotice(notice: AttentionNotice): AttentionNotice {
+  const cut = (text: string, max: number) =>
+    text.length <= max ? text : `${text.slice(0, max - 1)}\u2026`;
+  return {
+    ...notice,
+    title: cut(notice.title, 120),
+    body: cut(notice.body, 300),
+  };
+}
 
 /** Minutes after a panel enters `blocked` that a reminder fires, each once. */
 export const REMINDER_MINUTES = [5, 10, 20] as const;
@@ -73,12 +92,6 @@ function isAgentPanel(panel: Panel): boolean {
   return panel.kind === "agent" || (panel.kind === "terminal" && !!panel.agent);
 }
 
-/** Whether a listed panel (see `bucketFor`) is a plain shell: a terminal that
- * never had an agent detected inside it. */
-function isPlainShell(panel: Panel): boolean {
-  return panel.kind === "terminal" && !panel.agent;
-}
-
 /** Which Inbox group a panel belongs to, or `null` when it is not listed at
  * all. Only a session belongs in an attention queue: a terminal or an agent.
  * A browser, a file tree, a chat thread or an extension surface is a view of
@@ -87,10 +100,13 @@ function isPlainShell(panel: Panel): boolean {
  * be `working` or `blocked` just like a dedicated agent panel. */
 function bucketFor(panel: Panel, unseen: Set<string>): InboxGroupKey | null {
   if (panel.kind !== "terminal" && panel.kind !== "agent") return null;
+  // Only an agent panel is observed, so only an agent panel may enter a status
+  // bucket: a shell filed under "Needs input" would count toward the badge and
+  // the tray, yet never be timed, notified, cleared or cleaned up.
+  if (!isAgentPanel(panel)) return "shells";
   if (panel.status === "blocked") return "blocked";
   if (panel.status === "done") return unseen.has(panel.id) ? "done" : "idle";
   if (panel.status === "working") return "working";
-  if (isPlainShell(panel)) return "shells";
   return "idle";
 }
 

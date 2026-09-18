@@ -18,7 +18,7 @@ test("Herdr reconciliation indexes panes and keeps identical snapshots referenti
         pane_id: "pane-2",
         workspace_id: "ws-1",
         agent: "codex",
-        agent_status: "running",
+        agent_status: "working",
       },
     ],
   };

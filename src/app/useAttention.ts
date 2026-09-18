@@ -5,6 +5,7 @@ import {
   inboxGroups,
   markSeen,
   observe,
+  fitNotice,
   waitingCount,
   workingCount,
   type AttentionState,
@@ -88,11 +89,13 @@ export function useAttention({
               title: `${event.panel.title} finished`,
               body: `${event.workspace.name} · ${hostLabel}`,
             };
-      void window.bridge?.attentionNotify({
-        workspaceId: event.workspace.id,
-        panelId: event.panel.id,
-        ...notice,
-      });
+      void window.bridge?.attentionNotify(
+        fitNotice({
+          workspaceId: event.workspace.id,
+          panelId: event.panel.id,
+          ...notice,
+        }),
+      );
     }
   }, [workspaces, hostLabelFor]);
 
@@ -107,12 +110,14 @@ export function useAttention({
       for (const reminder of reminders) {
         const found = findPanel(reminder.panelId);
         if (!found) continue;
-        void window.bridge?.attentionNotify({
-          workspaceId: found.workspace.id,
-          panelId: found.panel.id,
-          title: `${found.panel.title} is still waiting`,
-          body: `${reminder.minutes} min · ${found.workspace.name}`,
-        });
+        void window.bridge?.attentionNotify(
+          fitNotice({
+            workspaceId: found.workspace.id,
+            panelId: found.panel.id,
+            title: `${found.panel.title} is still waiting`,
+            body: `${reminder.minutes} min · ${found.workspace.name}`,
+          }),
+        );
       }
     }, REMINDER_INTERVAL_MS);
     return () => clearInterval(timer);

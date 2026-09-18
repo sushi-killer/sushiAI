@@ -350,3 +350,86 @@ test("workingCount counts running sessions and skips hidden hosts", async () => 
     "a hidden host contributes nothing to the menu bar mark",
   );
 });
+
+test("fitNotice cuts a title and body to the caps the main process enforces", async () => {
+  const { fitNotice } = await library;
+  const short = {
+    workspaceId: "w1",
+    panelId: "p1",
+    title: "Claude Code needs your input",
+    body: "orchard-api \u00b7 user@devbox",
+  };
+  assert.deepEqual(fitNotice(short), short, "a short notice passes through");
+  const long = fitNotice({
+    workspaceId: "w1",
+    panelId: "p1",
+    title: "x".repeat(400),
+    body: "y".repeat(400),
+  });
+  assert.equal(long.title.length, 120);
+  assert.equal(long.body.length, 300);
+  assert.ok(long.title.endsWith("\u2026"));
+  assert.ok(long.body.endsWith("\u2026"));
+});
+
+test("a shell is never filed under a status bucket, whatever status it carries", async () => {
+  const { createAttentionState, observe, inboxGroups, waitingCount } =
+    await library;
+  // Herdr reports "unknown" for a plain shell, but a stale or surprising value
+  // must not put a pane nobody observes into Needs input.
+  const ws = [
+    workspace("w1", [
+      panel("shell", "terminal", { status: "blocked" }),
+      panel("agent", "agent", { status: "blocked" }),
+    ]),
+  ];
+  const { state } = observe(createAttentionState(), ws, 0);
+  const rows = Object.fromEntries(
+    inboxGroups(ws, state, []).flatMap((group) =>
+      group.rows.map((row) => [row.panel.id, group.key]),
+    ),
+  );
+  assert.equal(rows.shell, "shells");
+  assert.equal(rows.agent, "blocked");
+  assert.equal(waitingCount(ws, state, []), 1, "only the agent is waiting");
+});
+
+test("the statuses Herdr really emits carry through to the Inbox groups", async () => {
+  const { createAttentionState, observe, inboxGroups } = await library;
+  // Values taken from a live `herdr api snapshot`: done, idle, working, and
+  // unknown for a pane with no agent.
+  const ws = [
+    workspace("w1", [
+      panel("finished", "agent", { agent: "claude", status: "done" }),
+      panel("resting", "agent", { agent: "claude", status: "idle" }),
+      panel("busy", "agent", { agent: "codex", status: "working" }),
+      panel("shell", "terminal", { status: "unknown" }),
+    ]),
+  ];
+  let state = createAttentionState();
+  ({ state } = observe(state, ws, 0));
+  ({ state } = observe(
+    state,
+    [
+      workspace("w1", [
+        panel("finished", "agent", { agent: "claude", status: "working" }),
+        panel("resting", "agent", { agent: "claude", status: "idle" }),
+        panel("busy", "agent", { agent: "codex", status: "working" }),
+        panel("shell", "terminal", { status: "unknown" }),
+      ]),
+    ],
+    1000,
+  ));
+  ({ state } = observe(state, ws, 2000));
+  const rows = Object.fromEntries(
+    inboxGroups(ws, state, []).flatMap((group) =>
+      group.rows.map((row) => [row.panel.id, group.key]),
+    ),
+  );
+  assert.deepEqual(rows, {
+    finished: "done",
+    resting: "idle",
+    busy: "working",
+    shell: "shells",
+  });
+});

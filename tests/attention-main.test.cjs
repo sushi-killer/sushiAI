@@ -6,6 +6,7 @@ const {
   closeAction,
   trayTitle,
   trayState,
+  trayIconFile,
   validateNotice,
 } = require("../electron/attention.cjs");
 
@@ -50,9 +51,24 @@ test("normalizePreferences keeps valid booleans and falls back to defaults other
 });
 
 test("closeAction hides only while running in the menu bar and not quitting", () => {
-  assert.equal(closeAction({ quitting: false, runInMenuBar: true }), "hide");
-  assert.equal(closeAction({ quitting: true, runInMenuBar: true }), "close");
-  assert.equal(closeAction({ quitting: false, runInMenuBar: false }), "close");
+  const hasTray = true;
+  assert.equal(
+    closeAction({ quitting: false, runInMenuBar: true, hasTray }),
+    "hide",
+  );
+  assert.equal(
+    closeAction({ quitting: true, runInMenuBar: true, hasTray }),
+    "close",
+  );
+  assert.equal(
+    closeAction({ quitting: false, runInMenuBar: false, hasTray }),
+    "close",
+  );
+  // Nothing to reopen the window with: hiding it would strand the app.
+  assert.equal(
+    closeAction({ quitting: false, runInMenuBar: true, hasTray: false }),
+    "close",
+  );
   assert.equal(closeAction({ quitting: true, runInMenuBar: false }), "close");
 });
 
@@ -149,4 +165,23 @@ test("trayState prefers waiting over working and reads a bad count as quiet", ()
   assert.equal(trayState(NaN, NaN), "idle");
   assert.equal(trayState(undefined, undefined), "idle");
   assert.equal(trayState(-1, -1), "idle");
+});
+
+test("trayIconFile picks the state's mark and falls back to the plain one", () => {
+  const base = "/app/dist/trayTemplate.png";
+  const all = () => true;
+  assert.equal(trayIconFile(base, "idle", all), base);
+  assert.equal(
+    trayIconFile(base, "working", all),
+    "/app/dist/trayTemplate-working.png",
+  );
+  assert.equal(
+    trayIconFile(base, "attention", all),
+    "/app/dist/trayTemplate-attention.png",
+  );
+  // A build that shipped only the base icon still gets a tray.
+  assert.equal(
+    trayIconFile(base, "attention", () => false),
+    base,
+  );
 });

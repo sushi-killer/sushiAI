@@ -89,10 +89,13 @@ export function PanelPickerDialog({
   const canWorktree = canHerdrWorktree || canLocalWorktree;
   const [checkout, setCheckout] = useState<"current" | "worktree">("current");
   const [branch, setBranch] = useState(() => suggestWorktreeBranch(new Date()));
-  const branchError =
-    checkout === "worktree" ? worktreeBranchError(branch) : "";
-  const worktreeArg = checkout === "worktree" ? { branch } : undefined;
-  const worktreeInvalid = checkout === "worktree" && Boolean(branchError);
+  // A backend or host switch can take the worktree option away while it is
+  // selected; the radiogroup unmounts, so the choice has to lapse with it or a
+  // remote path reaches the local git.
+  const wantsWorktree = canWorktree && checkout === "worktree";
+  const branchError = wantsWorktree ? worktreeBranchError(branch) : "";
+  const worktreeArg = wantsWorktree ? { branch } : undefined;
+  const worktreeInvalid = wantsWorktree && Boolean(branchError);
   return (
     <>
       <div className="dialog-eyebrow">MAKE IT YOUR SPACE</div>
@@ -145,7 +148,7 @@ export function PanelPickerDialog({
               </button>
             ))}
           </div>
-          {checkout === "worktree" && (
+          {wantsWorktree && (
             <>
               <div className="dialog-eyebrow">BRANCH</div>
               <input
@@ -304,7 +307,7 @@ export function PanelPickerDialog({
       )}
       <div className="dialog-footer">
         <span>
-          {checkout !== "worktree" ? (
+          {!wantsWorktree ? (
             <>
               Launches in <strong>{launchLabel}</strong>
             </>

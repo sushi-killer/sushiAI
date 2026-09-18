@@ -18,8 +18,16 @@ function normalizePreferences(value) {
 /** Whether the window's `close` event should hide the window or let it
  * proceed: only intercepted while the app keeps running in the menu bar and
  * this isn't a real quit. */
-function closeAction({ quitting, runInMenuBar }) {
-  return !quitting && runInMenuBar ? "hide" : "close";
+function closeAction({ quitting, runInMenuBar, hasTray }) {
+  return !quitting && runInMenuBar && hasTray ? "hide" : "close";
+}
+
+/** The file holding a state's mark: the base icon for idle, a `-state` sibling
+ * otherwise, falling back to the base when a build shipped only one file. */
+function trayIconFile(base, state, exists = existsSync) {
+  if (state === "idle") return base;
+  const sibling = base.replace(/\.png$/, `-${state}.png`);
+  return exists(sibling) ? sibling : base;
 }
 
 /** Which of the three marks the menu bar wears. Something waiting for you
@@ -90,12 +98,8 @@ function registerAttentionIpc({
    * only the base icon still gets a tray. */
   function trayImage(state) {
     if (!trayIcons.has(state)) {
-      const file =
-        state === "idle"
-          ? trayIconPath
-          : trayIconPath.replace(/\.png$/, `-${state}.png`);
       const icon = nativeImage.createFromPath(
-        existsSync(file) ? file : trayIconPath,
+        trayIconFile(trayIconPath, state),
       );
       icon.setTemplateImage(true);
       trayIcons.set(state, icon);
@@ -212,8 +216,11 @@ function registerAttentionIpc({
      * event was intercepted (hidden) so main.cjs can `preventDefault()`. */
     handleWindowClose(win) {
       if (
-        closeAction({ quitting, runInMenuBar: preferences.runInMenuBar }) !==
-        "hide"
+        closeAction({
+          quitting,
+          runInMenuBar: preferences.runInMenuBar,
+          hasTray: Boolean(tray),
+        }) !== "hide"
       )
         return false;
       if (win.isFullScreen()) {
@@ -241,6 +248,7 @@ module.exports = {
   closeAction,
   trayTitle,
   trayState,
+  trayIconFile,
   validateNotice,
   registerAttentionIpc,
 };

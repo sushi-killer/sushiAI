@@ -241,3 +241,28 @@ test("only a terminal or an agent launches in a worktree", () => {
       `${kind} is a view of the project, not a session`,
     );
 });
+
+test("the checkout itself runs without a timeout and reports the repo root", async () => {
+  const calls = [];
+  const execFn = async (file, args, options) => {
+    calls.push({ args, timeout: options.timeout });
+    return args.includes("rev-parse")
+      ? { stdout: "/Users/dev/app\n" }
+      : { stdout: "" };
+  };
+  const result = await createWorktree("/Users/dev/app/service", "feature/x", {
+    execFn,
+    // Only the project folder exists: the worktree path must look free.
+    stat: (target) => {
+      if (target !== "/Users/dev/app/service")
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      return { isDirectory: () => true, isFile: () => false };
+    },
+  });
+  assert.equal(result.root, "/Users/dev/app");
+  assert.equal(result.path, "/Users/dev/app-feature-x");
+  const query = calls.find((call) => call.args.includes("rev-parse"));
+  const add = calls.find((call) => call.args.includes("add"));
+  assert.equal(query.timeout, 15000, "a query may be cut short");
+  assert.equal(add.timeout, 0, "killing the checkout would strand a branch");
+});

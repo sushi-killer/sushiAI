@@ -81,10 +81,10 @@ function pathExists(value, stat) {
   }
 }
 
-async function git(root, args, execFn) {
+async function git(root, args, execFn, timeout = 15000) {
   try {
     const { stdout } = await execFn("git", ["-C", root, ...args], {
-      timeout: 15000,
+      timeout,
       maxBuffer: 1024 * 1024,
     });
     return stdout.trim();
@@ -119,8 +119,14 @@ async function createWorktree(
   const targetPath = worktreePath(root, branch);
   if (pathExists(targetPath, stat))
     throw new Error("A worktree already exists at that path.");
-  await git(root, worktreeAddArgs(branch, targetPath), execFn);
-  return { path: targetPath };
+  // No timeout on the checkout itself: killing `git worktree add` half way
+  // leaves a branch and a partial directory that nothing in the app can
+  // remove. A query can hang and be cut short; the write must be allowed to
+  // finish. The root travels back so the caller can say which repository the
+  // worktree was cut from - `rev-parse` walks upward, so a project folder
+  // inside an outer repository resolves to that outer one.
+  await git(root, worktreeAddArgs(branch, targetPath), execFn, 0);
+  return { path: targetPath, root };
 }
 
 module.exports = {

@@ -26,11 +26,6 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 
 ## Open
 
-## 2026-09-16 — A lane could not prove its own feature end to end
-
-Root cause: a bridge contract split across lanes - the renderer lane called methods the Electron lane implemented on another branch, so its desktop smoke failed until integration.
-Rule: land the contract commit first and give every lane its SHA; the lead re-runs the smoke after integration.
-
 ## Promoted
 
 - 2026-09-15 A `;`-joined gate chain let a failing change commit → join gates with `&&`, pass file lists as explicit arguments.
@@ -54,3 +49,5 @@ Rule: land the contract commit first and give every lane its SHA; the lead re-ru
 - 2026-09-12 CI silently never ran 33 of 52 test files → `package.json` `ci` script
 - 2026-09-12 `scripts/smoke.mjs` discards an external `SUSHIAI_EXTENSIONS_DIR`; manifest fields are non-obvious → `author-and-verify-extension` skill
 - 2026-09-13 Pushed a 31-commit branch to `main` unsquashed → squash-only is a `main`-history invariant. AGENTS.md.
+- 2026-09-16 A lane's smoke failed on a bridge contract another lane held → land the contract commit first, give every lane its SHA, lead re-runs the smoke.
+- 2026-09-18 A fixture invented an agent status Herdr never emits (`running`) → check a vocabulary against the running system (`herdr api snapshot`), not a fixture. `tests/herdr-snapshot.test.cjs`.

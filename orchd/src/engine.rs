@@ -193,11 +193,27 @@ pub fn matches_any_protected(path: &str, globs: &[String]) -> bool {
 /// checked by the strongest model; when the implementer already *is* that
 /// route, the first route on a different harness instead. Explicit id ->
 /// that route; `""` -> no review (handled by the caller before this).
-pub fn select_review_route<'a>(settings: &'a Settings, implementer: &Route) -> Option<&'a Route> {
+pub fn select_review_route<'a>(
+    settings: &'a Settings,
+    implementer: &Route,
+    other_family: bool,
+) -> Option<&'a Route> {
     if settings.review != "auto" {
         return settings.routes.iter().find(|r| r.id == settings.review);
     }
     let hard = settings.tiers.get(&Tier::Hard);
+    if other_family {
+        let other = |r: &&Route| r.harness != implementer.harness;
+        let found = settings
+            .routes
+            .iter()
+            .filter(other)
+            .find(|r| Some(&r.id) == hard)
+            .or_else(|| settings.routes.iter().find(other));
+        if found.is_some() {
+            return found;
+        }
+    }
     settings
         .routes
         .iter()
@@ -2728,6 +2744,11 @@ async fn run_review(
     brief_text.push_str("\n## Diff\n\n```diff\n");
     brief_text.push_str(&diff);
     brief_text.push_str("\n```\n\n## Report format\n\nReply with:\n\n```sushi-review\n{\"verdict\":\"PASS|FAIL\",\"findings\":[]}\n```\n");
+    if task.variant().contract {
+        brief_text.push('\n');
+        brief_text.push_str(brief::REVIEW_CONTRACT);
+        brief_text.push('\n');
+    }
 
     // Its own subdirectory: a review's events/brief/settings must never
     // land in the implement attempt's `runs/<n>/` files.
@@ -3129,9 +3150,9 @@ async fn run_plan_stage(
                 return end_plan_stage(app, task_id, Some(idx)).await;
             }
             let brief_text = if retry == 0 {
-                brief::build_plan_brief(&request_text)
+                brief::build_plan_brief(&request_text, task.variant().contract)
             } else {
-                brief::build_plan_retry_brief(&request_text)
+                brief::build_plan_retry_brief(&request_text, task.variant().contract)
             };
             let file_stem = if retry == 0 { "" } else { "-retry" };
             let _ = std::fs::write(run_dir.join(format!("brief{file_stem}.md")), &brief_text);
@@ -4270,7 +4291,19 @@ async fn run_task_loop(
 
         let mut review_result: Option<ReviewResult> = None;
         if !settings.review.is_empty() {
-            if let Some(review_route) = select_review_route(&settings, &route) {
+            if let Some(review_route) =
+                select_review_route(&settings, &route, task.variant().review_other_family)
+            {
+                if task.variant().review_other_family && review_route.harness == route.harness {
+                    // The A/B arm says other family; record when it wasn't.
+                    let note = format!(
+                        "Orchestrator: no review route on another harness; reviewed by {}",
+                        review_route.id
+                    );
+                    if !task.decisions.contains(&note) {
+                        task.decisions.push(note);
+                    }
+                }
                 let mut review_cost = 0.0;
                 let reviewed = run_review(
                     &app,
@@ -4786,17 +4819,53 @@ mod tests {
         let route = |id: &str| settings.routes.iter().find(|r| r.id == id).unwrap();
         let hard = settings.tiers.get(&Tier::Hard).unwrap();
         assert_eq!(
-            &select_review_route(&settings, route("claude-sonnet"))
+            &select_review_route(&settings, route("claude-sonnet"), false)
                 .unwrap()
                 .id,
             hard
         );
         assert_eq!(
-            &select_review_route(&settings, route("codex")).unwrap().id,
+            &select_review_route(&settings, route("codex"), false)
+                .unwrap()
+                .id,
             hard
         );
-        let for_hard = select_review_route(&settings, route(hard)).unwrap();
+        let for_hard = select_review_route(&settings, route(hard), false).unwrap();
         assert_ne!(for_hard.harness, route(hard).harness);
+    }
+
+    #[test]
+    fn select_review_route_other_family_never_reviews_claude_with_claude() {
+        let settings = Settings::default();
+        let route = |id: &str| settings.routes.iter().find(|r| r.id == id).unwrap();
+        let for_sonnet = select_review_route(&settings, route("claude-sonnet"), true).unwrap();
+        assert_eq!(for_sonnet.harness, Harness::Codex);
+        let for_codex = select_review_route(&settings, route("codex"), true).unwrap();
+        assert_eq!(
+            for_codex.id, "claude-opus",
+            "the hard route when it is the other family"
+        );
+
+        // A hard route on Codex, listed after another Codex route, still wins.
+        let mut settings = Settings::default();
+        settings.routes.push(Route {
+            id: "codex-strong".into(),
+            label: "Codex strong".into(),
+            harness: Harness::Codex,
+            model: Some("gpt-5.3-codex".into()),
+            effort: None,
+            profile_id: None,
+        });
+        settings.tiers.insert(Tier::Hard, "codex-strong".into());
+        let sonnet = settings
+            .routes
+            .iter()
+            .find(|r| r.id == "claude-sonnet")
+            .unwrap();
+        assert_eq!(
+            select_review_route(&settings, sonnet, true).unwrap().id,
+            "codex-strong"
+        );
     }
 
     #[test]
@@ -4806,7 +4875,7 @@ mod tests {
             ..Settings::default()
         };
         let implementer = settings.routes.iter().find(|r| r.id == "codex").unwrap();
-        let route = select_review_route(&settings, implementer).unwrap();
+        let route = select_review_route(&settings, implementer, false).unwrap();
         assert_eq!(route.id, "claude-opus");
     }
 

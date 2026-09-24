@@ -261,33 +261,89 @@ pub fn parse_review(text: &str) -> Option<ReviewResult> {
                 .collect()
         })
         .unwrap_or_default();
-    Some(ReviewResult { verdict, findings })
+    let mut result = ReviewResult { verdict, findings };
+    // Any reply that rules on criteria, asked for or not: a PASS that marks
+    // one unmet contradicts itself, and the ruling on the criterion wins. A
+    // criterion the read-only reviewer could not check (`met: null`) is a
+    // finding, not a failure -- the implementer cannot fix that.
+    for c in v
+        .get("criteria")
+        .and_then(|c| c.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let met = match c.get("met") {
+            Some(serde_json::Value::Bool(b)) => Some(*b),
+            Some(serde_json::Value::String(s)) => match s.to_ascii_lowercase().as_str() {
+                "true" | "yes" => Some(true),
+                "false" | "no" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        };
+        if met == Some(true) {
+            continue;
+        }
+        let name = c
+            .get("criterion")
+            .and_then(|x| x.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| c.to_string());
+        let evidence = c
+            .get("evidence")
+            .and_then(|x| x.as_str())
+            .filter(|e| !e.trim().is_empty())
+            .map(|e| format!(" ({e})"))
+            .unwrap_or_default();
+        if met == Some(false) {
+            result
+                .findings
+                .push(format!("Unmet criterion: {name}{evidence}"));
+            result.verdict = crate::model::Verdict::Fail;
+        } else {
+            result
+                .findings
+                .push(format!("Not checked by review: {name}{evidence}"));
+        }
+    }
+    Some(result)
 }
 
-const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
+const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
 
 const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"tier\":\"mechanical|standard|hard\",\"criteria\":[],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"]}]}\n```\n";
 
+const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app.";
+
 /// The drafting-stage brief: the owner's request verbatim, then the fixed
 /// planning instructions and report format (spec: "harness-agnostic", so
-/// this takes no harness parameter, same as [`build_brief`]).
-pub fn build_plan_brief(request: &str) -> String {
+/// this takes no harness parameter, same as [`build_brief`]). `contract`
+/// is the task's `variant.contract`.
+pub fn build_plan_brief(request: &str, contract: bool) -> String {
+    let contract = if contract {
+        format!("\n\n{PLAN_CONTRACT}")
+    } else {
+        String::new()
+    };
     format!(
-        "## Request\n\n{}\n\n## Instructions\n\n{}\n\n{}",
+        "## Request\n\n{}\n\n## Instructions\n\n{}{contract}\n\n{}",
         request.trim(),
         PLAN_INSTRUCTIONS,
         PLAN_REPORT_FORMAT
     )
 }
 
+/// Asks the reviewer for a ruling on every criterion (`variant.contract`).
+pub const REVIEW_CONTRACT: &str = "Rule on every acceptance criterion, using its `check:` where it has one and the verify results as evidence. Add `\"criteria\":[{\"criterion\":\"...\",\"met\":true|false|null,\"evidence\":\"...\"}]` to your reply, with `null` for a criterion you cannot check read-only. The verdict is PASS only if no criterion is `false`; a claim in the task that the code contradicts is a finding.";
+
 /// Sent instead of [`build_plan_brief`] on the one retry after an
 /// unparseable draft -- a fresh read-only session (planning never resumes,
 /// same as review), so it still needs the full request, just with an
 /// explicit reminder in front of it.
-pub fn build_plan_retry_brief(request: &str) -> String {
+pub fn build_plan_retry_brief(request: &str, contract: bool) -> String {
     format!(
         "Your previous reply did not include a valid ```sushi-plan block. Reply with nothing else.\n\n{}",
-        build_plan_brief(request)
+        build_plan_brief(request, contract)
     )
 }
 
@@ -662,6 +718,47 @@ mod tests {
     }
 
     #[test]
+    fn a_pass_that_marks_a_criterion_unmet_is_a_fail() {
+        let r = parse_review(
+            "```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[],\"criteria\":[{\"criterion\":\"Badge reads 0/N\",\"met\":false,\"evidence\":\"list still starts at 1\"},{\"criterion\":\"Test added\",\"met\":true}]}\n```",
+        )
+        .unwrap();
+        assert_eq!(r.verdict, Verdict::Fail);
+        assert_eq!(
+            r.findings,
+            vec!["Unmet criterion: Badge reads 0/N (list still starts at 1)".to_string()]
+        );
+        let unverified = parse_review(
+            "```sushi-review\n{\"verdict\":\"PASS\",\"criteria\":[{\"criterion\":\"Looks right\",\"met\":null,\"evidence\":\"cannot run the UI\"},{\"name\":\"n\",\"met\":\"no\"}]}\n```",
+        )
+        .unwrap();
+        assert_eq!(unverified.verdict, Verdict::Fail, "\"no\" is unmet");
+        assert_eq!(
+            unverified.findings,
+            vec![
+                "Not checked by review: Looks right (cannot run the UI)".to_string(),
+                "Unmet criterion: {\"met\":\"no\",\"name\":\"n\"}".to_string(),
+            ]
+        );
+        let only_unverified = parse_review(
+            "```sushi-review\n{\"verdict\":\"PASS\",\"criteria\":[{\"criterion\":\"x\",\"met\":null}]}\n```",
+        )
+        .unwrap();
+        assert_eq!(only_unverified.verdict, Verdict::Pass);
+        let clean = parse_review(
+            "```sushi-review\n{\"verdict\":\"PASS\",\"criteria\":[{\"criterion\":\"x\",\"met\":true}]}\n```",
+        )
+        .unwrap();
+        assert_eq!(clean.verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn the_plan_brief_asks_for_a_contract_only_with_the_flag() {
+        assert!(build_plan_brief("r", true).contains("-- check:"));
+        assert!(!build_plan_brief("r", false).contains("-- check:"));
+    }
+
+    #[test]
     fn parse_report_reads_a_null_or_structured_handoff() {
         let report = |handoff: &str| {
             parse_report(&format!(
@@ -811,7 +908,7 @@ mod tests {
 
     #[test]
     fn plan_brief_carries_the_request_verbatim_and_asks_for_the_sushi_plan_fence() {
-        let brief = build_plan_brief("add dark mode to the settings screen");
+        let brief = build_plan_brief("add dark mode to the settings screen", false);
         assert!(brief.contains("add dark mode to the settings screen"));
         assert!(brief.contains("sushi-plan"));
         assert!(brief.contains("AGENTS.md"));
@@ -819,7 +916,7 @@ mod tests {
 
     #[test]
     fn plan_retry_brief_still_carries_the_original_request() {
-        let retry = build_plan_retry_brief("add dark mode");
+        let retry = build_plan_retry_brief("add dark mode", false);
         assert!(retry.contains("add dark mode"));
         assert!(retry.contains("sushi-plan"));
         assert!(retry.to_lowercase().contains("previous reply"));

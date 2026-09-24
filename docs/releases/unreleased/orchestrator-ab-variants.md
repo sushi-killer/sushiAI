@@ -27,3 +27,12 @@
   `gpt-5.3-codex` and `gpt-5.6-luna` built in).
 - `orchd ab` leaves out tasks created before variants existed, so old runs
   don't skew the default arm.
+- `contract: true` has the planner check the request's claims against the
+  code and pair every criterion with a check a read-only reviewer can do,
+  and has the reviewer rule on each criterion: met, unmet, or not
+  checkable. Any review reply that marks a criterion unmet fails the
+  attempt, even one that says PASS; a criterion it could not check is only
+  noted.
+- `reviewOtherFamily: true` (with review `auto`) reviews on the other
+  harness when a route there exists: Claude's work by Codex and Codex's by
+  Claude. When none exists the task says so in its decisions.

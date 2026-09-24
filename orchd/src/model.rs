@@ -211,6 +211,12 @@ pub struct Variant {
     pub stall_timeout_secs: u64,
     /// Route by the tier the planner chose; Jev only when there is none.
     pub planner_tier: bool,
+    /// The planner checks the request's claims against the code and pairs
+    /// every criterion with how to check it; the reviewer rules on each.
+    pub contract: bool,
+    /// With review `auto` and a route on the other harness configured, the
+    /// reviewer runs there (Claude work reviewed by Codex and back).
+    pub review_other_family: bool,
 }
 
 #[cfg(test)]

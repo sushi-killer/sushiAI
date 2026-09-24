@@ -78,6 +78,8 @@ export type Variant = {
   retryMode: "resume" | "fresh";
   stallTimeoutSecs: number;
   plannerTier: boolean;
+  contract: boolean;
+  reviewOtherFamily: boolean;
 };
 
 export type FailureKind =

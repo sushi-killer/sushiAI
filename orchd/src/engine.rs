@@ -1993,6 +1993,9 @@ async fn run_harness(
     cmd.args(&argv)
         .current_dir(worktree)
         .env("PATH", augmented_path())
+        // Lets a repo's own hooks tell an orchd-run agent from a person's
+        // session (sushiAI's lesson reminder stays quiet for it).
+        .env("ORCHD_TASK", task_id)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2774,7 +2777,7 @@ async fn run_review(
     }
     brief_text.push_str("\n## Implementer\n\n");
     brief_text.push_str(implementer_note);
-    brief_text.push_str("\n\nCriteria marked \"Checked by review\" have no command behind them: check them from the diff and the repository yourself.\n");
+    brief_text.push_str("\n\nCriteria marked \"Checked by review\" have no command behind them: check them from the diff and the repository yourself.\n\nThe repository's process rules about commits, pull requests and LESSONS.md entries belong to the orchestrator, not this task: judge the change against the task and its criteria, and do not fail it for those.\n");
     let evidence = task.variant().review_evidence;
     brief_text.push_str("\n## Verify results\n\n");
     for v in verify_results {

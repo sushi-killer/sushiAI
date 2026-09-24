@@ -183,12 +183,14 @@ async fn run_serve(args: &[String]) -> i32 {
     if !already_joined {
         let _ = serve_task.await;
     }
-    // `app.shutdown()` only *starts* cancelling every running task loop
-    // (each one still has to reach its own `cancel.cancelled()` check and
-    // `killpg` its child); give that a bounded window to actually finish
-    // before the process exits out from under them.
+    // `app.shutdown()` only *starts* cancelling every running task loop and
+    // chat turn (each one still has to reach its own `cancel.cancelled()`
+    // check and `killpg` its child); give that a bounded window to actually
+    // finish before the process exits out from under them.
     let drain_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    while app.any_task_loop_running() && tokio::time::Instant::now() < drain_deadline {
+    while (app.any_task_loop_running() || app.any_chat_turn_running())
+        && tokio::time::Instant::now() < drain_deadline
+    {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     let _ = std::fs::remove_file(&pidfile);

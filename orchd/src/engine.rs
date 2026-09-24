@@ -429,11 +429,18 @@ impl App {
     }
 
     /// Cancels every live task loop (each one's own `run_harness`/verify
-    /// call kills its child's process group on seeing this) and stops the
-    /// socket server. Called for both the `shutdown` RPC and SIGTERM.
+    /// call kills its child's process group on seeing this), every live
+    /// orchestrator chat turn (`chat::run` kills its child the same way on
+    /// seeing its own `CancelToken`), and stops the socket server. Called
+    /// for both the `shutdown` RPC and SIGTERM -- a chat turn's `setsid`'d
+    /// child is just as capable of leaking past the daemon exiting as a task
+    /// attempt's, so it needs the same cancel-on-shutdown treatment.
     pub fn shutdown(&self) {
         for ctrl in self.controls.lock().unwrap().values() {
             ctrl.cancel.cancel();
+        }
+        for cancel in self.chat_turns.lock().unwrap().values() {
+            cancel.cancel();
         }
         let _ = self.shutdown_tx.send(());
     }
@@ -448,6 +455,14 @@ impl App {
     /// orphaned by the daemon disappearing out from under it.
     pub fn any_task_loop_running(&self) -> bool {
         !self.controls.lock().unwrap().is_empty()
+    }
+
+    /// Same as `any_task_loop_running`, but for orchestrator chat turns:
+    /// `chat::run_turn` only removes its `chat_turns` entry once `run()` has
+    /// returned (child killed and reaped, or exited on its own), so an
+    /// empty map here means there is no live chat child left to leak.
+    pub fn any_chat_turn_running(&self) -> bool {
+        !self.chat_turns.lock().unwrap().is_empty()
     }
 
     /// `ping`/`hook.stop` are the only methods reachable without the

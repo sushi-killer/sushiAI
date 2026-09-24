@@ -8,6 +8,7 @@ use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 struct Daemon {
@@ -54,6 +55,17 @@ impl Daemon {
         let child = spawn_orchd_raw(data_dir.path(), &socket, extra_env);
         wait_for_socket(&socket);
         let token = read_control_token(data_dir.path());
+        if native_sandbox_unavailable() {
+            let mut settings =
+                request_on(&socket, "settings.get", serde_json::json!({}), Some(&token));
+            fit_sandbox(&mut settings);
+            request_on(
+                &socket,
+                "settings.set",
+                serde_json::json!({"settings": settings}),
+                Some(&token),
+            );
+        }
         Daemon {
             child,
             socket,
@@ -85,6 +97,33 @@ impl Daemon {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+}
+
+/// Whether this process cannot apply a `sandbox-exec` profile. macOS refuses
+/// to nest one inside another (`sandbox_apply: Operation not permitted`),
+/// which is exactly where this suite runs when orchd's own Native-sandboxed
+/// verify runs `npm run test:orchd`: every daemon here would then fail each
+/// verify command it wraps in `sandbox-exec`, so no task could ever pass.
+fn native_sandbox_unavailable() -> bool {
+    static UNAVAILABLE: OnceLock<bool> = OnceLock::new();
+    *UNAVAILABLE.get_or_init(|| {
+        cfg!(target_os = "macos")
+            && !Command::new("sandbox-exec")
+                .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+    })
+}
+
+/// Switches a `settings.get` result to the `host` sandbox when the native
+/// one can't be applied here; anywhere else the tests keep exercising the
+/// real `sandbox-exec` path.
+fn fit_sandbox(settings: &mut serde_json::Value) {
+    if native_sandbox_unavailable() {
+        settings["sandbox"] = serde_json::json!("host");
     }
 }
 
@@ -280,6 +319,67 @@ fn ping_settings_task_create_and_list_round_trip() {
 
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
+}
+
+/// `kill(pid, 0)`: true iff a process with this pid exists and is
+/// signalable by us -- the standard liveness probe, same one
+/// `main.rs::acquire_singleton` uses for the daemon's own pidfile.
+fn is_alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Regression test for the bug where `App::shutdown()` and `main.rs`'s
+/// drain loop only ever looked at `controls` (task attempts), never
+/// `chat_turns`: a `shutdown` mid-conversation left the orchestrator chat's
+/// `setsid`'d harness child running forever, orphaned, with the daemon gone
+/// and nothing left to kill it.
+#[test]
+fn shutdown_kills_a_live_orchestrator_chat_turn_s_child() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let marker = scripts_dir.path().join("chat-pid");
+    // Records its own pid (== the pid tokio spawned, since a shebang script
+    // is exec'd in place, never forked again) then hangs without ever
+    // printing a `result` line -- exactly what a slow chat turn looks like
+    // from orchd's side. The rename keeps the test from reading the marker
+    // between its creation and the pid landing in it.
+    let body = format!(
+        "#!/bin/sh\ncat > /dev/null\necho $$ > {m}.tmp\nmv {m}.tmp {m}\nsleep 30\n",
+        m = marker.display()
+    );
+    let script = fake_harness_script(scripts_dir.path(), "fake-claude-chat.sh", &body);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+
+    let repo = tempfile::tempdir().unwrap();
+    daemon.request(
+        "chat.send",
+        serde_json::json!({"repo": repo.path().to_str().unwrap(), "text": "hello"}),
+    );
+
+    let start = Instant::now();
+    while !marker.exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "chat harness never started"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let pid: i32 = std::fs::read_to_string(&marker)
+        .unwrap()
+        .trim()
+        .parse()
+        .expect("marker should contain the harness pid");
+    assert!(
+        is_alive(pid),
+        "the fake harness should still be running before shutdown"
+    );
+
+    // Same call the acceptance criteria names: `shutdown` mid-conversation.
+    daemon.shutdown_and_wait();
+
+    assert!(
+        !is_alive(pid),
+        "chat turn's child (pid {pid}) leaked past the daemon's own shutdown"
+    );
 }
 
 fn fake_harness_script(dir: &Path, name: &str, body: &str) -> PathBuf {
@@ -584,6 +684,7 @@ fn a_task_waiting_for_its_owner_does_not_hold_a_parallel_slot() {
     settings["maxAttempts"] = serde_json::json!(1);
     settings["parallel"] = serde_json::json!(1);
     settings["review"] = serde_json::json!("");
+    fit_sandbox(&mut settings);
     request_on(
         &socket1,
         "settings.set",
@@ -1016,6 +1117,7 @@ fn a_task_waiting_on_its_plan_question_does_not_hold_a_parallel_slot() {
     );
     settings["parallel"] = serde_json::json!(1);
     settings["review"] = serde_json::json!("");
+    fit_sandbox(&mut settings);
     request_on(
         &socket1,
         "settings.set",
@@ -1674,6 +1776,7 @@ fn a_task_interrupted_by_a_daemon_crash_resumes_on_restart() {
         Some(&token),
     );
     settings["review"] = serde_json::json!("");
+    fit_sandbox(&mut settings);
     request_on(
         &socket1,
         "settings.set",

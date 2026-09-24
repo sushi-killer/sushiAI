@@ -25,6 +25,9 @@ pub enum Event {
         attempt: u32,
         line: String,
     },
+    /// The orchestrator chat thread of one repo, whole, after any change.
+    #[serde(rename = "chat")]
+    Chat { thread: Box<serde_json::Value> },
 }
 
 #[derive(Debug, Deserialize)]

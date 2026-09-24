@@ -25,8 +25,7 @@ import {
   upsertTask,
   type OrchestratorLiveState,
 } from "./helpers";
-import type { Attempt, Settings, Task } from "./types";
-import type { Panel, Workspace } from "../types";
+import type { Attempt, ChatThread, Settings, Task } from "./types";
 import { RichText } from "../agents/AgentsView";
 
 function errorText(error: unknown): string {
@@ -252,37 +251,30 @@ function QuestionCard({
   );
 }
 
-/** The orchestrator agent's own chat thread: a genuinely minimal transcript +
- * composer (not copied from `ChatView` - reuses only its always-loaded global
- * classes so it looks the same without the ~400 lines of model/effort/
- * permission pickers this fixed-role agent doesn't need). One thread persists
- * per project (`useWorkspaces`'s `orchestratorThread`, flagged `orchestrator:
- * true` on an ordinary chat panel), created lazily on first use. */
-function OrchestratorChat({
-  workspace,
-  ensureThread,
-  onSend,
-  onCancel,
-  hidden,
-}: {
-  workspace: Workspace;
-  ensureThread(workspaceId: string): Panel;
-  onSend(panel: Panel, text: string): void;
-  onCancel(panelId: string): void;
-  hidden: boolean;
-}) {
+/** The orchestrator agent's conversation for this repo. The daemon runs each
+ * turn and keeps the thread, so a reply keeps coming and stays readable when
+ * the window closes or the app restarts. */
+function OrchestratorChat({ cwd, hidden }: { cwd: string; hidden: boolean }) {
   const [draft, setDraft] = useState("");
+  const [thread, setThread] = useState<ChatThread | null>(null);
+  const [sendError, setSendError] = useState("");
   const end = useRef<HTMLDivElement>(null);
-  const thread = workspace.panels.find(
-    (p) => p.kind === "chat" && p.orchestrator,
-  );
 
   useEffect(() => {
-    // Created lazily on first visit, not eagerly for every project the
-    // moment this panel is opened - most repos will never talk to the
-    // orchestrator agent at all.
-    if (!thread) ensureThread(workspace.id);
-  }, [thread, ensureThread, workspace.id]);
+    let cancelled = false;
+    orchestratorClient
+      .chatGet(cwd)
+      .then((loaded) => !cancelled && setThread(loaded))
+      .catch((e) => !cancelled && setSendError(errorText(e)));
+    const off = window.bridge?.onOrchestrator((event) => {
+      if (event.event === "chat" && event.thread.repo === cwd)
+        setThread(event.thread);
+    });
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, [cwd]);
 
   useEffect(() => {
     end.current?.scrollIntoView({ block: "end" });
@@ -290,10 +282,14 @@ function OrchestratorChat({
 
   function submit() {
     const text = draft.trim();
-    if (!text || !thread || thread.busy) return;
-    onSend(thread, text);
-    setDraft("");
+    if (!text || thread?.busy) return;
+    setSendError("");
+    orchestratorClient
+      .chatSend(cwd, text)
+      .then(() => setDraft(""))
+      .catch((e) => setSendError(errorText(e)));
   }
+  const error = sendError || thread?.error;
 
   return (
     // Kept mounted behind the other views so a half-typed message and the
@@ -307,15 +303,18 @@ function OrchestratorChat({
               Describe what should happen - it creates, checks and answers tasks
               on your behalf.
             </p>
+            {error && (
+              <div className="chat-error" role="alert">
+                {error}
+              </div>
+            )}
           </div>
         ) : (
           <div className="chat-column">
             {thread.messages.map((message) => (
               <div key={message.id} className={`message ${message.role}`}>
                 {message.role === "assistant" ? (
-                  message.text ? (
-                    <RichText text={message.text} />
-                  ) : null
+                  <RichText text={message.text} />
                 ) : (
                   message.text
                 )}
@@ -330,9 +329,9 @@ function OrchestratorChat({
                 </span>
               </div>
             )}
-            {thread.error && (
+            {error && (
               <div className="chat-error" role="alert">
-                {thread.error}
+                {error}
               </div>
             )}
             <div ref={end} />
@@ -367,7 +366,7 @@ function OrchestratorChat({
             <button
               className="send enabled"
               aria-label="Stop response"
-              onClick={() => onCancel(thread.id)}
+              onClick={() => void orchestratorClient.chatCancel(cwd)}
             >
               <Square size={12} />
             </button>
@@ -375,7 +374,7 @@ function OrchestratorChat({
             <button
               className={`send ${draft.trim() ? "enabled" : ""}`}
               aria-label="Send message"
-              disabled={!draft.trim() || !thread}
+              disabled={!draft.trim()}
               onClick={submit}
             >
               <ArrowUp size={16} />
@@ -387,19 +386,7 @@ function OrchestratorChat({
   );
 }
 
-export function OrchestratorPanel({
-  cwd,
-  workspace,
-  ensureThread,
-  onSend,
-  onCancel,
-}: {
-  cwd: string;
-  workspace: Workspace;
-  ensureThread(workspaceId: string): Panel;
-  onSend(panel: Panel, text: string): void;
-  onCancel(panelId: string): void;
-}) {
+export function OrchestratorPanel({ cwd }: { cwd: string }) {
   const [daemonState, setDaemonState] = useState<DaemonState>("loading");
   const [error, setError] = useState("");
   const [live, setLive] = useState<OrchestratorLiveState>(emptyLiveState);
@@ -566,13 +553,7 @@ export function OrchestratorPanel({
             </button>
           </div>
         )}
-        <OrchestratorChat
-          workspace={workspace}
-          ensureThread={ensureThread}
-          onSend={onSend}
-          onCancel={onCancel}
-          hidden={current.kind !== "chat"}
-        />
+        <OrchestratorChat cwd={cwd} hidden={current.kind !== "chat"} />
         {selected && (
           <div className="orch-detail">
             <div className="orch-detail-head">

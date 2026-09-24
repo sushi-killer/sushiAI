@@ -21,6 +21,9 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, oneshot, Notify, Semaphore};
 
+#[path = "chat.rs"]
+mod chat;
+
 // ===========================================================================
 // Pure helpers (signature, tier-up/waiting, blocked-question, protected
 // globs, review-route selection, task-id validation) -- no IO, unit tested
@@ -319,6 +322,8 @@ pub struct App {
     events_tx: broadcast::Sender<Event>,
     shutdown_tx: broadcast::Sender<()>,
     controls: std::sync::Mutex<HashMap<String, TaskControl>>,
+    /// Keyed by repo: the orchestrator chat turn running for it, if any.
+    chat_turns: std::sync::Mutex<HashMap<String, CancelToken>>,
     hook_tokens: RwLock<HashMap<String, Arc<HookContext>>>,
     /// Keyed by task id: the diff+untracked-list hash a verify run was last
     /// computed for, and its results -- shared by `hook.stop` and the
@@ -388,6 +393,7 @@ impl App {
             events_tx,
             shutdown_tx,
             controls: std::sync::Mutex::new(HashMap::new()),
+            chat_turns: std::sync::Mutex::new(HashMap::new()),
             hook_tokens: RwLock::new(HashMap::new()),
             verify_cache: std::sync::Mutex::new(HashMap::new()),
             pid: std::process::id(),
@@ -580,6 +586,9 @@ impl App {
             "task.answer" => self.handle_task_answer(params).await,
             "task.delete" => self.handle_task_delete(params).await,
             "task.preflight" => self.handle_task_preflight(params).await,
+            "chat.get" => chat::handle_get(self, params).await,
+            "chat.send" => chat::handle_send(self, params).await,
+            "chat.cancel" => chat::handle_cancel(self, params).await,
             "hook.stop" => self.handle_hook_stop(params).await,
             "shutdown" => self.handle_shutdown().await,
             other => Err(format!("unknown method: {other}")),
@@ -589,7 +598,10 @@ impl App {
     async fn handle_ping(&self) -> Result<serde_json::Value, String> {
         // Only slots actually held by a running attempt count -- a task
         // still queued behind the concurrency limit is not "running".
-        let running = self.parallel_limit as usize - self.slots.available_permits();
+        // An orchestrator chat reply in progress counts too: replacing the
+        // daemon under it would lose the reply.
+        let running = self.parallel_limit as usize - self.slots.available_permits()
+            + self.chat_turns.lock().unwrap().len();
         Ok(json!({
             "version": env!("CARGO_PKG_VERSION"),
             "pid": self.pid,

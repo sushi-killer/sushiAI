@@ -28,7 +28,7 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 
 ## Promoted
 
-- 2026-09-24 Orchestrator chat edited code instead of filing tasks → enforce a role with tools, not prompt. `tests/chat.test.cjs`.
+- 2026-09-24 Orchestrator chat edited code instead of filing tasks → enforce a role with tools, not prompt. `orchd/src/chat.rs`.
 - 2026-09-24 Unset `HERDR_SOCKET_PATH` photographed the owner's real Herdr → missing path. `ui-evidence` template.
 - 2026-09-24 Real Claude/Codex output broke `orchd` while self-written fakes passed → parsers assert captured CLI lines. `parses_captured_real_cli_streams`.
 - 2026-09-15 A `;`-joined gate chain let a failing change commit → join gates with `&&`, pass file lists as explicit arguments.

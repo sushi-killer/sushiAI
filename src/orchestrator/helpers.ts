@@ -136,6 +136,7 @@ export function applyOrchestratorEvent(
 ): OrchestratorLiveState {
   if (event.event === "task")
     return { ...state, tasks: upsertTask(state.tasks, event.task) };
+  if (event.event === "chat") return state;
   const lines = [...(state.logLines[event.taskId] || []), event.line].slice(
     -MAX_LOG_LINES,
   );

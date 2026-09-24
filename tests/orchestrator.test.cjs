@@ -179,6 +179,9 @@ test("call() rejects a method outside the protocol allowlist before touching the
     );
   assert.equal(ALLOWED_METHODS.has("task.create"), true);
   assert.equal(ALLOWED_METHODS.has("hook.stop"), false);
+  // The orchestrator chat lives in the daemon, reachable like the tasks.
+  for (const method of ["chat.get", "chat.send", "chat.cancel"])
+    assert.equal(ALLOWED_METHODS.has(method), true);
 });
 
 test("call() reports the daemon as not built rather than hanging on a missing binary", async (t) => {

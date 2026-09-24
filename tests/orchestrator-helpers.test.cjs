@@ -233,6 +233,15 @@ test("upsertTask replaces an existing task in place and keeps newest-updated fir
   );
 });
 
+test("applyOrchestratorEvent leaves the task state alone for a chat event", async () => {
+  const { applyOrchestratorEvent, emptyLiveState } = await library;
+  const next = applyOrchestratorEvent(emptyLiveState, {
+    event: "chat",
+    thread: { repo: "/r", messages: [], busy: true },
+  });
+  assert.equal(next, emptyLiveState);
+});
+
 test("applyOrchestratorEvent folds a task patch and caps accumulated log lines", async () => {
   const { applyOrchestratorEvent, emptyLiveState } = await library;
   let state = applyOrchestratorEvent(emptyLiveState, {

@@ -135,5 +135,20 @@ export type LogEvent = {
   attempt: number;
   line: string;
 };
+/** The orchestrator agent's conversation for one repo, kept by the daemon. */
+export type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  ts: number;
+};
+export type ChatThread = {
+  repo: string;
+  messages: ChatMessage[];
+  busy: boolean;
+  note?: string;
+  error?: string;
+};
+export type ChatEvent = { event: "chat"; thread: ChatThread };
 /** Pushed over `onOrchestrator` from the daemon's one `subscribe` connection. */
-export type OrchestratorEvent = TaskEvent | LogEvent;
+export type OrchestratorEvent = TaskEvent | LogEvent | ChatEvent;

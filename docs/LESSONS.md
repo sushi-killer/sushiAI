@@ -26,15 +26,13 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 
 ## Open
 
-## 2026-09-24 — Orchestrator chat harness leaked past daemon shutdown
-Root cause: `App::shutdown()`/`main.rs`'s drain loop cancelled `controls`
-(task attempts) but never `chat_turns`, so a `shutdown`/SIGTERM mid-chat
-orphaned the child forever.
-Rule: a new "live child" map needs both `shutdown()` and the drain-loop
-wait, not just one. `orchd/src/engine.rs`, `orchd/src/main.rs`.
+## 2026-09-24 — orchd task.create failed on an existing branch name
+Root cause: `create_worktree` (`orchd/src/git.rs`) always runs `worktree add -b`.
+Rule: give each task a new branch, or omit `branch`.
 
 ## Promoted
 
+- 2026-09-24 Chat harness outlived daemon shutdown → drain every live-child map. `shutdown_kills_a_live_orchestrator_chat_turn_s_child`.
 - 2026-09-24 Orchestrator chat edited code instead of filing tasks → enforce a role with tools, not prompt. `orchd/src/chat.rs`.
 - 2026-09-24 Unset `HERDR_SOCKET_PATH` photographed the owner's real Herdr → missing path. `ui-evidence` template.
 - 2026-09-24 Real Claude/Codex output broke `orchd` while self-written fakes passed → parsers assert captured CLI lines. `parses_captured_real_cli_streams`.
@@ -43,7 +41,7 @@ wait, not just one. `orchd/src/engine.rs`, `orchd/src/main.rs`.
 - 2026-09-15 Unit fixtures merged worktrees the real layout (main, worktree, unrelated clone) did not → grouping fixtures include a distractor. `tests/workspace-merge.test.cjs`, `tests/projects.test.cjs`.
 - 2026-09-14 A `flex: 1`-stretched label measured 0px wide → measure text ink with a `Range`, assert non-zero widths. `ui-evidence` skill.
 - 2026-09-14 A copied debug session leaked a real private IP/host/ports → examples use 192.0.2.0/24 (RFC 5737). `check-conventions.mjs`.
-- 2026-09-13 Flat workspace list reordered on every poll: reconciliation appended each refresh at the array end, reshuffling other hosts → update in place. `herdrSnapshot.ts`.
+- 2026-09-13 Flat workspace list reordered on every poll → reconcile in place. `herdrSnapshot.ts`.
 - 2026-09-13 A wrapper printed "All files formatted correctly" for a run that exited 1 → exit code is the verdict, never `npx`. `sushiai-testing` skill.
 - 2026-09-13 A user's ssh_config (`LocalForward`, `/dev/null` known-hosts) broke our tunnel → own `known_hosts`. `connections.cjs`.
 - 2026-09-13 One global `connected` flag colored every host's status dot → per-endpoint `statusByEndpoint`. `useHerdr.ts`.

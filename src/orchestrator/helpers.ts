@@ -32,6 +32,16 @@ export function latestAttempt(task: Task): Attempt | undefined {
   return task.attempts[task.attempts.length - 1];
 }
 
+/** The latest attempt that actually implements the task, skipping the
+ * planning attempt - an attempt count or a "criteria met" read should never
+ * count a still-open plan as if it were real implementation progress. */
+export function latestImplementAttempt(task: Task): Attempt | undefined {
+  for (let i = task.attempts.length - 1; i >= 0; i--) {
+    if (task.attempts[i].stage === "implement") return task.attempts[i];
+  }
+  return undefined;
+}
+
 /** The newest review-stage verdict, if any attempt has reached one. */
 export function reviewOf(task: Task) {
   for (let i = task.attempts.length - 1; i >= 0; i--) {
@@ -57,12 +67,13 @@ function shortReason(task: Task): string {
  * never the question text itself, so a row can't leak a private-looking
  * question into a list glanced at across a room. */
 export function statusLabel(task: Task, maxAttempts?: number): string {
-  const attempt = latestAttempt(task);
   switch (task.status) {
+    case "drafting":
+      return "drafting plan…";
     case "queued":
       return "queued";
     case "running": {
-      const n = attempt?.n ?? 1;
+      const n = latestImplementAttempt(task)?.n ?? 1;
       const max = maxAttempts ?? n;
       return `working · attempt ${n}/${max} · ${formatCost(task.costUsd)}`;
     }
@@ -89,9 +100,11 @@ export function statusLabel(task: Task, maxAttempts?: number): string {
 }
 
 /** Whether a task's acceptance criteria can be shown as met: the task is
- * done, or its latest attempt already passed verify. */
+ * done, or its latest implement attempt already passed verify. */
 export function criteriaMet(task: Task): boolean {
-  return task.status === "done" || latestAttempt(task)?.status === "passed";
+  return (
+    task.status === "done" || latestImplementAttempt(task)?.status === "passed"
+  );
 }
 
 /** Newest-updated first, matching `task.list`'s own order even after a live

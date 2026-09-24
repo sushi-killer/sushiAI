@@ -40,10 +40,20 @@ export type Settings = {
   protectedPaths: string[];
   maxAttempts: number;
   parallel: number;
+  /** Route id that drafts a plan (title/goal/criteria/verify) from a bare
+   * request; "" turns drafting off, so `task.create` always needs the full
+   * form instead. */
+  planner: string;
+  /** Route id that self-answers a blocked question when Jev is confident
+   * it's answerable from the repo, before escalating to the owner; ""
+   * turns this off - same semantics as `planner`. Logged in a task's
+   * `decisions` as `"Orchestrator: ..."`, distinct from Jev's own `"Jev:
+   * ..."` lines. */
+  orchestrator: string;
 };
 
 export type TaskStatus =
-  "queued" | "running" | "waiting" | "done" | "stopped" | "failed";
+  "drafting" | "queued" | "running" | "waiting" | "done" | "stopped" | "failed";
 
 export type Question = { text: string; options: string[] };
 
@@ -72,7 +82,7 @@ export type AttemptStatus =
 
 export type Attempt = {
   n: number;
-  stage: "implement" | "review";
+  stage: "plan" | "implement" | "review";
   routeId: string;
   harness: Harness;
   model: string;
@@ -99,6 +109,9 @@ export type Task = {
   goal: string;
   criteria: string[];
   verify: string[];
+  /** The one-sentence ask a plan was drafted from, when the task started
+   * that way instead of from the full manual form. */
+  request?: string;
   repo: string;
   worktree: string;
   branch: string;
@@ -114,16 +127,6 @@ export type Task = {
   createdAt: number;
   updatedAt: number;
 };
-
-export type PreflightCheck = {
-  id: string;
-  label: string;
-  ok: boolean;
-  /** A classifier probability behind this check, when it has one. */
-  p?: number;
-};
-
-export type PreflightResult = { available: boolean; checks: PreflightCheck[] };
 
 export type TaskEvent = { event: "task"; task: Task };
 export type LogEvent = {

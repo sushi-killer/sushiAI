@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  ArrowUp,
   Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Plus,
+  MessageSquare,
   Square,
   Trash2,
   X,
@@ -18,13 +19,15 @@ import {
   emptyLiveState,
   formatCost,
   formatDuration,
-  latestAttempt,
+  latestImplementAttempt,
   statusLabel,
   totalDurationMs,
   upsertTask,
   type OrchestratorLiveState,
 } from "./helpers";
-import type { Attempt, PreflightResult, Settings, Task } from "./types";
+import type { Attempt, Settings, Task } from "./types";
+import type { Panel, Workspace } from "../types";
+import { RichText } from "../agents/AgentsView";
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -32,12 +35,18 @@ function errorText(error: unknown): string {
 
 type DaemonState = "loading" | "ready" | "not-built" | "unavailable";
 
+/** What the main pane beside the task list shows: the orchestrator chat is
+ * where tasks come from, a task is opened to watch or answer it. */
+type View = { kind: "chat" } | { kind: "task"; id: string };
+
 function classifyError(message: string): DaemonState {
   return message.includes("is not built") ? "not-built" : "unavailable";
 }
 
 function statusDot(task: Task): string {
   switch (task.status) {
+    case "drafting":
+      return "blue";
     case "running":
       return "green";
     case "waiting":
@@ -48,6 +57,42 @@ function statusDot(task: Task): string {
     default:
       return "";
   }
+}
+
+// What needs the owner first, then what's in flight, then queued, then
+// whatever already finished either way.
+const STATUS_RANK: Record<Task["status"], number> = {
+  waiting: 0,
+  drafting: 1,
+  running: 1,
+  queued: 2,
+  done: 3,
+  failed: 3,
+  stopped: 3,
+};
+
+function sortTasks(tasks: Task[]): Task[] {
+  return [...tasks].sort((a, b) => {
+    const byStatus = STATUS_RANK[a.status] - STATUS_RANK[b.status];
+    return byStatus !== 0 ? byStatus : b.updatedAt - a.updatedAt;
+  });
+}
+
+const DECISION_TAGS = ["Jev", "Orchestrator"] as const;
+
+/** Splits a `decisions` line into its automated source (`"Jev: ..."`,
+ * `"Orchestrator: ..."`) and the rest of the text, or `null` for anything
+ * else (an `"Owner: ..."` line, most often) - the owner's own words need no
+ * badge, only the automated decisions do. */
+function decisionTag(
+  line: string,
+): { tag: (typeof DECISION_TAGS)[number]; text: string } | null {
+  for (const tag of DECISION_TAGS) {
+    const prefix = `${tag}: `;
+    if (line.startsWith(prefix))
+      return { tag, text: line.slice(prefix.length) };
+  }
+  return null;
 }
 
 /** Same idea as `statusDot`, one level down: a single attempt's own status. */
@@ -155,9 +200,11 @@ function PendingStageRow({ label }: { label: string }) {
 
 function QuestionCard({
   task,
+  disabled,
   onAnswer,
 }: {
   task: Task;
+  disabled: boolean;
   onAnswer(answer: string): void;
 }) {
   const [freeText, setFreeText] = useState("");
@@ -170,6 +217,7 @@ function QuestionCard({
           <button
             key={option}
             className="secondary"
+            disabled={disabled}
             onClick={() => onAnswer(option)}
           >
             {option}
@@ -192,7 +240,11 @@ function QuestionCard({
           placeholder="Your own answer…"
           aria-label="Your own answer"
         />
-        <button className="primary" type="submit" disabled={!freeText.trim()}>
+        <button
+          className="primary"
+          type="submit"
+          disabled={disabled || !freeText.trim()}
+        >
           Answer
         </button>
       </form>
@@ -200,200 +252,164 @@ function QuestionCard({
   );
 }
 
-function NewTaskForm({
-  repo,
-  onCreated,
+/** The orchestrator agent's own chat thread: a genuinely minimal transcript +
+ * composer (not copied from `ChatView` - reuses only its always-loaded global
+ * classes so it looks the same without the ~400 lines of model/effort/
+ * permission pickers this fixed-role agent doesn't need). One thread persists
+ * per project (`useWorkspaces`'s `orchestratorThread`, flagged `orchestrator:
+ * true` on an ordinary chat panel), created lazily on first use. */
+function OrchestratorChat({
+  workspace,
+  ensureThread,
+  onSend,
   onCancel,
+  hidden,
 }: {
-  repo: string;
-  onCreated(task: Task): void;
-  onCancel(): void;
+  workspace: Workspace;
+  ensureThread(workspaceId: string): Panel;
+  onSend(panel: Panel, text: string): void;
+  onCancel(panelId: string): void;
+  hidden: boolean;
 }) {
-  const [title, setTitle] = useState("");
-  const [goal, setGoal] = useState("");
-  const [criteriaText, setCriteriaText] = useState("");
-  const [verifyText, setVerifyText] = useState("");
-  const [branch, setBranch] = useState("");
-  const [preflight, setPreflight] = useState<PreflightResult | null>(null);
-  const [checking, setChecking] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-
-  const criteria = useMemo(
-    () =>
-      criteriaText
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean),
-    [criteriaText],
-  );
-  const verify = useMemo(
-    () =>
-      verifyText
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean),
-    [verifyText],
+  const [draft, setDraft] = useState("");
+  const end = useRef<HTMLDivElement>(null);
+  const thread = workspace.panels.find(
+    (p) => p.kind === "chat" && p.orchestrator,
   );
 
-  async function runPreflight() {
-    if (!goal.trim()) return;
-    setChecking(true);
-    try {
-      const result = await orchestratorClient.taskPreflight({
-        goal,
-        criteria,
-        verify,
-      });
-      setPreflight(result);
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setChecking(false);
-    }
-  }
+  useEffect(() => {
+    // Created lazily on first visit, not eagerly for every project the
+    // moment this panel is opened - most repos will never talk to the
+    // orchestrator agent at all.
+    if (!thread) ensureThread(workspace.id);
+  }, [thread, ensureThread, workspace.id]);
 
-  async function submit(start: boolean) {
-    if (!goal.trim()) {
-      setError("Describe the goal first.");
-      return;
-    }
-    setSaving(true);
-    setError("");
-    try {
-      const task = await orchestratorClient.taskCreate({
-        repo,
-        title: title.trim() || goal.trim().slice(0, 80),
-        goal: goal.trim(),
-        criteria,
-        verify,
-        // Only when the owner actually typed one - the daemon slugs a
-        // branch from the title itself otherwise.
-        branch: branch.trim() || undefined,
-        start,
-      });
-      onCreated(task);
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setSaving(false);
-    }
+  useEffect(() => {
+    end.current?.scrollIntoView({ block: "end" });
+  }, [thread?.messages, thread?.busy]);
+
+  function submit() {
+    const text = draft.trim();
+    if (!text || !thread || thread.busy) return;
+    onSend(thread, text);
+    setDraft("");
   }
 
   return (
-    <div className="orch-new-task">
-      <div className="dialog-eyebrow">NEW TASK</div>
-      <label>
-        Title
-        <input
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          placeholder="Short summary"
-        />
-      </label>
-      <label>
-        Goal
-        <textarea
-          value={goal}
-          onChange={(event) => setGoal(event.target.value)}
-          onBlur={runPreflight}
-          rows={3}
-          placeholder="What should be true when this is done?"
-          required
-        />
-      </label>
-      <label>
-        Acceptance criteria (one per line)
-        <textarea
-          value={criteriaText}
-          onChange={(event) => setCriteriaText(event.target.value)}
-          onBlur={runPreflight}
-          rows={3}
-        />
-      </label>
-      <label>
-        Verification commands (one per line)
-        <textarea
-          value={verifyText}
-          onChange={(event) => setVerifyText(event.target.value)}
-          onBlur={runPreflight}
-          rows={2}
-          placeholder="npm test -- export"
-        />
-      </label>
-      <label>
-        Branch
-        <input
-          value={branch}
-          onChange={(event) => setBranch(event.target.value)}
-          placeholder="Optional, derived from title"
-        />
-      </label>
-      {preflight && (
-        <div className="orch-preflight-result">
-          {!preflight.available && (
-            <p className="text-muted">
-              Classifier unavailable — checked with rules only.
+    // Kept mounted behind the other views so a half-typed message and the
+    // scroll position survive a look at a task.
+    <div className="orch-chat" hidden={hidden}>
+      <div className="chat-scroll">
+        {!thread?.messages?.length ? (
+          <div className="chat-welcome">
+            <h2>Talk to the orchestrator</h2>
+            <p>
+              Describe what should happen - it creates, checks and answers tasks
+              on your behalf.
             </p>
-          )}
-          {preflight.checks.map((check) => (
-            <p
-              key={check.id}
-              className={check.ok ? "orch-check-ok" : "orch-check-bad"}
+          </div>
+        ) : (
+          <div className="chat-column">
+            {thread.messages.map((message) => (
+              <div key={message.id} className={`message ${message.role}`}>
+                {message.role === "assistant" ? (
+                  message.text ? (
+                    <RichText text={message.text} />
+                  ) : null
+                ) : (
+                  message.text
+                )}
+              </div>
+            ))}
+            {thread.busy && (
+              <div className="chat-progress">
+                <i />
+                <span className="thinking">
+                  {thread.note || "Thinking"}
+                  <span>…</span>
+                </span>
+              </div>
+            )}
+            {thread.error && (
+              <div className="chat-error" role="alert">
+                {thread.error}
+              </div>
+            )}
+            <div ref={end} />
+          </div>
+        )}
+      </div>
+      <div className="chat-composer">
+        <textarea
+          rows={1}
+          aria-label="Message the orchestrator"
+          placeholder="Describe a task…"
+          value={draft}
+          onChange={(event) => {
+            setDraft(event.target.value);
+            const el = event.target;
+            el.style.height = "";
+            el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
+          }}
+          onKeyDown={(event) => {
+            if (
+              event.key === "Enter" &&
+              !event.shiftKey &&
+              !event.nativeEvent.isComposing
+            ) {
+              event.preventDefault();
+              submit();
+            }
+          }}
+        />
+        <div className="chat-toolbar">
+          {thread?.busy ? (
+            <button
+              className="send enabled"
+              aria-label="Stop response"
+              onClick={() => onCancel(thread.id)}
             >
-              {check.ok ? <Check size={12} /> : <X size={12} />} {check.label}
-              {typeof check.p === "number" && ` (${check.p.toFixed(2)})`}
-            </p>
-          ))}
+              <Square size={12} />
+            </button>
+          ) : (
+            <button
+              className={`send ${draft.trim() ? "enabled" : ""}`}
+              aria-label="Send message"
+              disabled={!draft.trim() || !thread}
+              onClick={submit}
+            >
+              <ArrowUp size={16} />
+            </button>
+          )}
         </div>
-      )}
-      {error && (
-        <p className="inline-error" role="alert">
-          {error}
-        </p>
-      )}
-      <div className="form-row orch-form-actions">
-        <button
-          type="button"
-          className="secondary"
-          onClick={runPreflight}
-          disabled={checking || !goal.trim()}
-        >
-          {checking ? "Checking…" : "Check readiness"}
-        </button>
-        <button
-          className="primary"
-          disabled={saving}
-          onClick={() => submit(true)}
-        >
-          {saving ? "Starting…" : "Start"}
-        </button>
-        <button
-          className="orch-ghost"
-          disabled={saving}
-          onClick={() => submit(false)}
-        >
-          Save without starting
-        </button>
-        <button type="button" className="orch-ghost" onClick={onCancel}>
-          Cancel
-        </button>
       </div>
     </div>
   );
 }
 
-export function OrchestratorPanel({ cwd }: { cwd: string }) {
+export function OrchestratorPanel({
+  cwd,
+  workspace,
+  ensureThread,
+  onSend,
+  onCancel,
+}: {
+  cwd: string;
+  workspace: Workspace;
+  ensureThread(workspaceId: string): Panel;
+  onSend(panel: Panel, text: string): void;
+  onCancel(panelId: string): void;
+}) {
   const [daemonState, setDaemonState] = useState<DaemonState>("loading");
   const [error, setError] = useState("");
   const [live, setLive] = useState<OrchestratorLiveState>(emptyLiveState);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [selectedId, setSelectedId] = useState("");
-  const [showNewTask, setShowNewTask] = useState(false);
+  const [view, setView] = useState<View | null>(null);
   const [busy, setBusy] = useState(false);
-  // Which pane a narrow panel shows - ignored by the CSS above ~720px, where
-  // both columns are always visible side by side.
-  const [narrowView, setNarrowView] = useState<"list" | "detail">("list");
+  // Which pane a narrow panel shows - ignored by the CSS above ~640px, where
+  // the list and the main pane sit side by side.
+  const [narrowMain, setNarrowMain] = useState(true);
+  const [reload, setReload] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -420,7 +436,7 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
     return () => {
       cancelled = true;
     };
-  }, [cwd]);
+  }, [cwd, reload]);
 
   useEffect(
     () =>
@@ -434,8 +450,22 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
     [cwd],
   );
 
-  const tasks = live.tasks;
-  const selected = tasks.find((t) => t.id === selectedId) || tasks[0];
+  const tasks = sortTasks(live.tasks);
+  const picked =
+    view?.kind === "task" ? tasks.find((t) => t.id === view.id) : undefined;
+  // Nothing picked (or the picked task was deleted): the orchestrator chat.
+  const current: View =
+    view && (view.kind !== "task" || picked) ? view : { kind: "chat" };
+  const selected =
+    current.kind === "task"
+      ? (picked ?? tasks.find((t) => t.id === current.id))
+      : undefined;
+  const waitingCount = tasks.filter((t) => t.status === "waiting").length;
+
+  function open(next: View) {
+    setView(next);
+    setNarrowMain(true);
+  }
 
   async function act(action: () => Promise<Task>) {
     setBusy(true);
@@ -465,39 +495,43 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
       <div className="empty-state">
         <h2>Can't reach the orchestrator daemon.</h2>
         <p>{error || "It may still be starting."}</p>
+        <button
+          className="secondary"
+          onClick={() => {
+            setDaemonState("loading");
+            setReload((n) => n + 1);
+          }}
+        >
+          Retry
+        </button>
       </div>
     );
 
   return (
-    <div className={`orchestrator-panel view-${narrowView}`}>
+    <div
+      className={`orchestrator-panel ${narrowMain ? "view-main" : "view-list"}`}
+    >
       <div className="orch-tasks">
+        <button
+          className={`orch-nav-row ${current.kind === "chat" ? "selected" : ""}`}
+          onClick={() => open({ kind: "chat" })}
+        >
+          <MessageSquare size={14} /> Orchestrator
+        </button>
         <div className="orch-tasks-head">
           <span className="dialog-eyebrow">TASKS</span>
-          <button
-            className="icon-button"
-            aria-label="New task"
-            onClick={() => {
-              setShowNewTask(true);
-              setNarrowView("detail");
-            }}
-          >
-            <Plus size={14} />
-          </button>
+          {waitingCount > 0 && (
+            <span className="orch-waiting-count">{waitingCount} need you</span>
+          )}
         </div>
-        {tasks.length === 0 && !showNewTask && (
-          <p className="text-muted">No tasks yet.</p>
-        )}
+        {tasks.length === 0 && <p className="orch-empty-list">No tasks yet.</p>}
         {tasks.map((task) => {
           const tone = statusDot(task) || "muted";
           return (
             <button
               key={task.id}
               className={`orch-task-row ${task.id === selected?.id ? "selected" : ""}`}
-              onClick={() => {
-                setSelectedId(task.id);
-                setShowNewTask(false);
-                setNarrowView("detail");
-              }}
+              onClick={() => open({ kind: "task", id: task.id })}
             >
               <span className={`status-dot ${statusDot(task)}`} />
               <span className="orch-task-lines">
@@ -510,38 +544,46 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
           );
         })}
       </div>
-      <div className="orch-detail">
+      <div className="orch-main">
         <button
           className="orch-back-button"
-          onClick={() => setNarrowView("list")}
+          onClick={() => setNarrowMain(false)}
         >
-          <ChevronLeft size={14} /> Back
+          <ChevronLeft size={14} /> Tasks
+          {waitingCount > 0 && (
+            <span className="orch-waiting-count">{waitingCount} need you</span>
+          )}
         </button>
-        {showNewTask || !selected ? (
-          <NewTaskForm
-            repo={cwd}
-            onCancel={() => {
-              setShowNewTask(false);
-              setNarrowView("list");
-            }}
-            onCreated={(task) => {
-              setLive((old) => ({
-                ...old,
-                tasks: upsertTask(old.tasks, task),
-              }));
-              setSelectedId(task.id);
-              setShowNewTask(false);
-            }}
-          />
-        ) : (
-          <>
+        {error && (
+          <div className="orch-error" role="alert">
+            <span>{error}</span>
+            <button
+              className="icon-button"
+              aria-label="Dismiss error"
+              onClick={() => setError("")}
+            >
+              <X size={13} />
+            </button>
+          </div>
+        )}
+        <OrchestratorChat
+          workspace={workspace}
+          ensureThread={ensureThread}
+          onSend={onSend}
+          onCancel={onCancel}
+          hidden={current.kind !== "chat"}
+        />
+        {selected && (
+          <div className="orch-detail">
             <div className="orch-detail-head">
               <div className="orch-detail-title">
                 <h3>{selected.title}</h3>
                 <p className="orch-detail-meta">
-                  attempt {latestAttempt(selected)?.n ?? 0}/
-                  {settings?.maxAttempts ?? latestAttempt(selected)?.n ?? 0} ·{" "}
-                  {formatDuration(totalDurationMs(selected))} ·{" "}
+                  attempt {latestImplementAttempt(selected)?.n ?? 0}/
+                  {settings?.maxAttempts ??
+                    latestImplementAttempt(selected)?.n ??
+                    0}{" "}
+                  · {formatDuration(totalDurationMs(selected))} ·{" "}
                   {formatCost(selected.costUsd)} ·{" "}
                   <span className="orch-branch" title={selected.branch}>
                     {selected.branch}
@@ -549,21 +591,34 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                 </p>
               </div>
               <div className="orch-detail-actions">
-                {(selected.status === "queued" ||
+                {(selected.status === "drafting" ||
+                  selected.status === "queued" ||
                   selected.status === "stopped" ||
                   selected.status === "failed" ||
                   selected.status === "done") && (
                   <button
-                    className="secondary"
+                    // A stopped or failed task is idle, waiting on you -
+                    // restarting it is the one action that matters, so it
+                    // gets the filled/primary treatment.
+                    className={
+                      selected.status === "stopped" ||
+                      selected.status === "failed"
+                        ? "primary"
+                        : "secondary"
+                    }
                     disabled={busy}
                     onClick={() =>
                       act(() => orchestratorClient.taskStart(selected.id))
                     }
                   >
-                    Start
+                    {selected.status === "drafting" ||
+                    selected.status === "queued"
+                      ? "Start"
+                      : "Run again"}
                   </button>
                 )}
-                {(selected.status === "running" ||
+                {(selected.status === "drafting" ||
+                  selected.status === "running" ||
                   selected.status === "queued" ||
                   selected.status === "waiting") && (
                   <button
@@ -594,7 +649,7 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                         ...old,
                         tasks: old.tasks.filter((t) => t.id !== selected.id),
                       }));
-                      setSelectedId("");
+                      setView(null);
                     } catch (e) {
                       setError(errorText(e));
                     } finally {
@@ -606,6 +661,21 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                 </button>
               </div>
             </div>
+            {/* The one thing blocking the task goes first, above everything
+             * that only describes it. */}
+            {selected.question && (
+              <QuestionCard
+                key={selected.id}
+                task={selected}
+                disabled={busy}
+                onAnswer={(answer) =>
+                  act(() => orchestratorClient.taskAnswer(selected.id, answer))
+                }
+              />
+            )}
+            {selected.request && selected.request !== selected.title && (
+              <p className="orch-request">{selected.request}</p>
+            )}
             {selected.criteria.length > 0 && (
               <div className="orch-criteria">
                 {selected.criteria.map((criterion, index) => (
@@ -620,13 +690,24 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                 ))}
               </div>
             )}
-            {selected.question && (
-              <QuestionCard
-                task={selected}
-                onAnswer={(answer) =>
-                  act(() => orchestratorClient.taskAnswer(selected.id, answer))
-                }
-              />
+            {selected.decisions.length > 0 && (
+              <div className="orch-decisions">
+                {selected.decisions.map((line, index) => {
+                  const parsed = decisionTag(line);
+                  return (
+                    <p key={index} className="orch-decision-line">
+                      {parsed && (
+                        <span
+                          className={`orch-decision-tag orch-decision-${parsed.tag.toLowerCase()}`}
+                        >
+                          {parsed.tag}
+                        </span>
+                      )}
+                      {parsed ? parsed.text : line}
+                    </p>
+                  );
+                })}
+              </div>
             )}
             <div className="orch-attempts">
               {selected.attempts.map((attempt) => (
@@ -651,7 +732,7 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                 {live.logLines[selected.id].join("\n")}
               </pre>
             )}
-          </>
+          </div>
         )}
       </div>
     </div>

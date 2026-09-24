@@ -242,6 +242,14 @@ export function OrchestratorSettings() {
             onDelete={() =>
               update({
                 routes: settings.routes.filter((r) => r.id !== route.id),
+                // None of the three should keep pointing at a route that no
+                // longer exists - fall back to "off" rather than a dangling id.
+                review: settings.review === route.id ? "" : settings.review,
+                planner: settings.planner === route.id ? "" : settings.planner,
+                orchestrator:
+                  settings.orchestrator === route.id
+                    ? ""
+                    : settings.orchestrator,
               })
             }
           />
@@ -279,21 +287,51 @@ export function OrchestratorSettings() {
             </label>
           ))}
         </div>
-        <label className="form-row">
-          Review
-          <select
-            value={settings.review}
-            onChange={(event) => update({ review: event.target.value })}
-          >
-            <option value="">Off</option>
-            <option value="auto">Other vendor (auto)</option>
-            {settings.routes.map((route) => (
-              <option key={route.id} value={route.id}>
-                {route.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="orch-review-planner-row">
+          <label className="orch-tier-label">
+            <span>Review</span>
+            <select
+              value={settings.review}
+              onChange={(event) => update({ review: event.target.value })}
+            >
+              <option value="">Off</option>
+              <option value="auto">Other vendor (auto)</option>
+              {settings.routes.map((route) => (
+                <option key={route.id} value={route.id}>
+                  {route.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="orch-tier-label">
+            <span>Planner</span>
+            <select
+              value={settings.planner}
+              onChange={(event) => update({ planner: event.target.value })}
+            >
+              <option value="">Off</option>
+              {settings.routes.map((route) => (
+                <option key={route.id} value={route.id}>
+                  {route.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="orch-tier-label">
+            <span>Orchestrator</span>
+            <select
+              value={settings.orchestrator}
+              onChange={(event) => update({ orchestrator: event.target.value })}
+            >
+              <option value="">Off</option>
+              {settings.routes.map((route) => (
+                <option key={route.id} value={route.id}>
+                  {route.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
       </div>
 
       <div className="setting-block">

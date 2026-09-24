@@ -45,7 +45,7 @@ const {
   applicationPath,
   cleanupCompleted,
 } = require("./installer.cjs");
-let connections, preview, updates;
+let connections, preview, updates, orchestratorService;
 const agents = new AgentRegistry();
 const claudeMcp = new ClaudeMcp({ home: os.homedir() });
 const claudePlugins = new ClaudePlugins({ home: os.homedir() });
@@ -170,6 +170,10 @@ const chatIpc = registerChatIpc({
   directory,
   id,
   chats,
+  // Assigned below, after `registerOrchestratorExtension` constructs the
+  // service - read lazily so registration order here doesn't matter; the
+  // getter is only ever called once a real chat turn comes in.
+  getOrchestrator: () => orchestratorService,
 });
 registerAppIpc({
   handle,
@@ -197,7 +201,7 @@ const attention = registerAttentionIpc({
   userDataDir: app.getPath("userData"),
   trayIconPath: path.join(root, "dist/trayTemplate.png"),
 });
-registerOrchestratorExtension({
+orchestratorService = registerOrchestratorExtension({
   handle,
   send,
   notify: (notice) => attention.notify(notice),

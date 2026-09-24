@@ -206,15 +206,17 @@ pub fn build_claude_settings(
     }
 
     // The daemon commits after the gates pass and nothing is ever pushed, so
-    // the agent may not do either; a host run (debug only) still needs Bash
-    // allowed explicitly, having no sandbox to auto-allow it.
-    let mut permissions = serde_json::json!({
-        "deny": ["Bash(git commit:*)", "Bash(git push:*)"],
-    });
-    if sandbox != SandboxMode::Native {
-        permissions["allow"] = serde_json::json!(["Bash"]);
-    }
-    obj.insert("permissions".to_string(), permissions);
+    // the agent may not do either. Bash is allowed outright: a headless run
+    // has no one to approve a prompt, and `autoAllowBashIfSandboxed` still
+    // prompts for compound commands (`npm test; echo $?`), which then fail.
+    // The sandbox, not the prompt, is the boundary.
+    obj.insert(
+        "permissions".to_string(),
+        serde_json::json!({
+            "allow": ["Bash"],
+            "deny": ["Bash(git commit:*)", "Bash(git push:*)"],
+        }),
+    );
 
     if let Some(hook) = stop_hook {
         let hook_command = format!(
@@ -684,7 +686,7 @@ mod tests {
         let deny = native["permissions"]["deny"].as_array().unwrap();
         assert!(deny.iter().any(|d| d == "Bash(git commit:*)"));
         assert!(deny.iter().any(|d| d == "Bash(git push:*)"));
-        assert!(native["permissions"].get("allow").is_none());
+        assert_eq!(native["permissions"]["allow"], serde_json::json!(["Bash"]));
 
         let host = build_claude_settings(None, SandboxMode::Host, &[], &[], None);
         assert_eq!(host["permissions"]["allow"], serde_json::json!(["Bash"]));

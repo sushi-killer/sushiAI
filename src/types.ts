@@ -51,6 +51,11 @@ type PanelState = {
   permission?: string;
   /** Set when this agent panel was launched against a custom model provider. */
   modelProfileId?: string;
+  /** Marks the one persistent chat thread per project that talks to the
+   * orchestrator agent (`orchd mcp` attached) instead of a plain agent turn -
+   * the Orchestrator panel finds or creates this thread by scanning for the
+   * flag (`useWorkspaces`'s `orchestratorThread`). */
+  orchestrator?: boolean;
 };
 export type CorePanel = PanelState & { kind: PanelKind };
 export type ExtensionPanel = PanelState & {
@@ -336,6 +341,9 @@ export interface Bridge {
     model?: string;
     effort?: string;
     permission?: string;
+    /** Attaches `orchd mcp` to this turn so the agent can create/list/answer
+     * orchestrator tasks; rejected by the main process on a remote endpoint. */
+    orchestrator?: boolean;
   }): Promise<unknown>;
   cancelChat(panelId: string): Promise<void>;
   chatModels(): Promise<ChatModels>;

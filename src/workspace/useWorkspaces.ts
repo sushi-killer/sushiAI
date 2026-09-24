@@ -542,6 +542,7 @@ export function useWorkspaces({
           model: panel.model || undefined,
           effort: panel.effort || undefined,
           permission: panel.permission || undefined,
+          orchestrator: panel.orchestrator || undefined,
         });
       } catch (error) {
         updatePanel(panel.id, { busy: false, error: errorText(error) });
@@ -557,6 +558,36 @@ export function useWorkspaces({
       title: "New thread",
       agent: "claude",
       permission: "acceptEdits",
+      messages: [],
+      updatedAt: Date.now(),
+    };
+    updateWorkspace(workspaceId, (w) => ({
+      ...w,
+      panels: [...w.panels, panel],
+    }));
+    return panel;
+  }
+  /** The one persistent chat thread per project that talks to the
+   * orchestrator agent: found by its `orchestrator` flag rather than created
+   * fresh every time the Orchestrator panel opens, so the conversation
+   * survives leaving and coming back (it lives in the same `panels` array
+   * `newThread` uses, so it already persists the way any other chat thread
+   * does). */
+  function orchestratorThread(workspaceId: string): Panel {
+    const owner =
+      workspacesRef.current.find((w) => w.id === workspaceId) ||
+      activeRef.current;
+    const existing = owner.panels.find(
+      (p) => p.kind === "chat" && p.orchestrator,
+    );
+    if (existing) return existing;
+    const panel: Panel = {
+      id: uid(),
+      kind: "chat",
+      title: "Orchestrator",
+      agent: "claude",
+      permission: "acceptEdits",
+      orchestrator: true,
       messages: [],
       updatedAt: Date.now(),
     };
@@ -768,6 +799,7 @@ export function useWorkspaces({
     drop,
     sendChat,
     newThread,
+    orchestratorThread,
     deleteThread,
     runRoutine,
     endSessions,

@@ -48,6 +48,7 @@ export function WorkspaceCanvas({
     closePanel,
     drop,
     sendChat,
+    orchestratorThread,
     openHTML,
     resizeSplit,
   } = ws;
@@ -93,6 +94,8 @@ export function WorkspaceCanvas({
         onCancel={cancelPanelChat}
         onAgent={setPanelAgent}
         extensionRegistry={extensionRegistry}
+        workspace={active}
+        ensureOrchestratorThread={orchestratorThread}
       />
     );
   }

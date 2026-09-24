@@ -78,8 +78,21 @@ test("totalDurationMs sums every attempt of a task", async () => {
   assert.equal(totalDurationMs(t), 4000);
 });
 
+test("latestImplementAttempt skips a plan attempt, even when it's the newest one", async () => {
+  const { latestImplementAttempt } = await library;
+  const plan = attempt({ n: 1, stage: "plan", status: "passed" });
+  const implement = attempt({ n: 2, stage: "implement" });
+  assert.equal(
+    latestImplementAttempt(task({ attempts: [plan, implement] })),
+    implement,
+  );
+  // A plan-only task (still drafting) has no implement attempt yet.
+  assert.equal(latestImplementAttempt(task({ attempts: [plan] })), undefined);
+});
+
 test("statusLabel names the attempt count and cost, never the question text", async () => {
   const { statusLabel } = await library;
+  assert.equal(statusLabel(task({ status: "drafting" })), "drafting plan…");
   assert.equal(statusLabel(task({ status: "queued" })), "queued");
   assert.equal(
     statusLabel(
@@ -91,6 +104,22 @@ test("statusLabel names the attempt count and cost, never the question text", as
       4,
     ),
     "working · attempt 2/4 · $0.41",
+  );
+  // A drafted plan attempt precedes the real attempts - the count is the
+  // implement attempt's own number, not the plan's.
+  assert.equal(
+    statusLabel(
+      task({
+        status: "running",
+        costUsd: 0.22,
+        attempts: [
+          attempt({ n: 1, stage: "plan", status: "passed" }),
+          attempt({ n: 1, stage: "implement" }),
+        ],
+      }),
+      4,
+    ),
+    "working · attempt 1/4 · $0.22",
   );
   // No maxAttempts passed - falls back to the attempt's own number.
   assert.equal(
@@ -162,6 +191,20 @@ test("criteriaMet is true once the task is done, or once the latest attempt pass
   assert.equal(
     criteriaMet(
       task({ status: "running", attempts: [attempt({ status: "failed" })] }),
+    ),
+    false,
+  );
+  // A passed plan attempt is not an implement pass - drafting a plan (or a
+  // "Draft only" task sitting on one) must not tick every criterion.
+  assert.equal(
+    criteriaMet(
+      task({
+        status: "running",
+        attempts: [
+          attempt({ n: 1, stage: "plan", status: "passed" }),
+          attempt({ n: 1, stage: "implement", status: "failed" }),
+        ],
+      }),
     ),
     false,
   );

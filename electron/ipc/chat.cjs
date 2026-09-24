@@ -1,6 +1,7 @@
 const os = require("node:os");
 const path = require("node:path");
 const { existsSync, statSync } = require("node:fs");
+const fs = require("node:fs/promises");
 const { spawn } = require("node:child_process");
 const { quote } = require("../connections.cjs");
 const {
@@ -9,6 +10,7 @@ const {
   claudeEvent,
   codexEvent,
   IMAGE,
+  ORCHESTRATOR_SERVER,
 } = require("../chat-args.cjs");
 const { chatModels } = require("../agent-models.cjs");
 
@@ -20,6 +22,7 @@ function registerChatIpc({
   directory,
   id,
   chats,
+  getOrchestrator,
 }) {
   function stop(panelId) {
     const proc = chats.get(panelId);
@@ -31,10 +34,32 @@ function registerChatIpc({
     }
   }
 
+  /** Starts the daemon if it isn't already running and writes
+   * `<dataDir>/mcp-config.json` (0600, same access as `control.token` next to
+   * it) fresh for this turn - `command`/`args` never change between turns,
+   * only the daemon's own lifecycle does, so this is cheap to redo every time
+   * rather than caching a config the daemon could have restarted under. */
+  async function orchestratorMcpConfig(cwd) {
+    const service = getOrchestrator?.();
+    if (!service) throw new Error("The orchestrator daemon isn't available.");
+    await service.ensureRunning();
+    const { command, args, env } = await service.mcpServerConfig(cwd);
+    const configPath = path.join(service.dataDir, "mcp-config.json");
+    await fs.mkdir(service.dataDir, { recursive: true });
+    await fs.writeFile(
+      configPath,
+      JSON.stringify({
+        mcpServers: { [ORCHESTRATOR_SERVER]: { command, args, env } },
+      }),
+    );
+    await fs.chmod(configPath, 0o600);
+    return { configPath, command, args, env };
+  }
+
   handle("chat-cancel", (panelId) => stop(id(panelId)));
   handle(
     "chat",
-    ({
+    async ({
       panelId,
       cwd,
       agent,
@@ -43,6 +68,7 @@ function registerChatIpc({
       model,
       effort,
       permission,
+      orchestrator,
     }) => {
       id(panelId);
       const connections = getConnections();
@@ -108,7 +134,18 @@ function registerChatIpc({
       const prompt = chatPrompt(messages);
       if (prompt.length > 200000)
         throw new Error("Conversation is too long. Start a new chat.");
-      let args = chatArgs(agent, { model, effort, permission, dirs, images });
+      const orchestratorMcp = orchestrator
+        ? await orchestratorMcpConfig(cwd)
+        : undefined;
+      let args = chatArgs(agent, {
+        model,
+        effort,
+        permission,
+        dirs,
+        images,
+        orchestratorMcp,
+        remote: Boolean(remote),
+      });
       if (remote)
         args = [
           ...connections.args(remote),

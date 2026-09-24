@@ -2,7 +2,7 @@
 // passthrough - one place that knows the request/response shape of each
 // method in the protocol table, so OrchestratorPanel/Settings never spell out
 // a method string or cast a result themselves.
-import type { PreflightResult, Settings, Task } from "./types";
+import type { Settings, Task } from "./types";
 
 function call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
   if (!window.bridge)
@@ -17,24 +17,10 @@ export const orchestratorClient = {
     call<Settings>("settings.set", { settings }),
   taskList: (repo?: string) => call<Task[]>("task.list", repo ? { repo } : {}),
   taskGet: (id: string) => call<Task>("task.get", { id }),
-  taskCreate: (input: {
-    repo: string;
-    title: string;
-    goal: string;
-    criteria: string[];
-    verify: string[];
-    branch?: string;
-    start?: boolean;
-  }) => call<Task>("task.create", input),
   taskStart: (id: string) => call<Task>("task.start", { id }),
   taskStop: (id: string) => call<Task>("task.stop", { id }),
   taskAnswer: (id: string, answer: string) =>
     call<Task>("task.answer", { id, answer }),
   taskDelete: (id: string) =>
     call<Record<string, never>>("task.delete", { id }),
-  taskPreflight: (input: {
-    goal: string;
-    criteria: string[];
-    verify: string[];
-  }) => call<PreflightResult>("task.preflight", input),
 };

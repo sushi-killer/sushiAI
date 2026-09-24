@@ -215,10 +215,35 @@ fn handle_tools_call(socket: &Path, token: &str, params: &Value) -> Value {
     } else {
         p.arguments
     };
+    let task_mcp = std::env::var("ORCHD_TASK_MCP")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str(&text).ok());
+    let args = with_task_mcp(method, args, task_mcp);
     match call_orchd(socket, token, method, args) {
         Ok(result) => tool_ok(result),
         Err(message) => tool_error(message),
     }
+}
+
+/// A task the agent creates gets the MCP servers the app resolved for its
+/// project (`ORCHD_TASK_MCP` names a `{repo, mcp}` file the app writes), the
+/// same thing the app adds when the owner creates a task directly. Only for
+/// that repo, and never over an `mcp` the caller set itself.
+fn with_task_mcp(method: &str, mut args: Value, task_mcp: Option<Value>) -> Value {
+    let Some(task_mcp) = task_mcp else {
+        return args;
+    };
+    if method == "task.create"
+        && args.get("mcp").is_none()
+        && args.get("repo").is_some()
+        && args.get("repo") == task_mcp.get("repo")
+    {
+        if let (Some(obj), Some(mcp)) = (args.as_object_mut(), task_mcp.get("mcp")) {
+            obj.insert("mcp".to_string(), mcp.clone());
+        }
+    }
+    args
 }
 
 /// Routes one already-parsed method/params pair to its result, or a
@@ -489,5 +514,22 @@ mod tests {
         let out = handle_line(&no_socket(), "t", "not json").unwrap();
         assert_eq!(out["id"], Value::Null);
         assert_eq!(out["error"]["code"], -32700);
+    }
+
+    #[test]
+    fn task_create_gets_the_project_mcp_only_for_its_own_repo() {
+        let file = json!({"repo": "/r", "mcp": {"mcpServers": {"a": {}}}});
+        let got = with_task_mcp("task.create", json!({"repo": "/r"}), Some(file.clone()));
+        assert_eq!(got["mcp"]["mcpServers"]["a"], json!({}));
+        let other = with_task_mcp("task.create", json!({"repo": "/x"}), Some(file.clone()));
+        assert!(other.get("mcp").is_none());
+        let own = with_task_mcp(
+            "task.create",
+            json!({"repo": "/r", "mcp": {"mcpServers": {}}}),
+            Some(file.clone()),
+        );
+        assert_eq!(own["mcp"], json!({"mcpServers": {}}));
+        let start = with_task_mcp("task.start", json!({"repo": "/r"}), Some(file));
+        assert!(start.get("mcp").is_none());
     }
 }

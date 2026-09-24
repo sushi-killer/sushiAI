@@ -44,6 +44,9 @@ open every image you produced before you describe it.
 
 - The driver launches its own Electron with a temporary `BRIDGE_DATA_DIR`.
   Never attach to, restart or kill the owner's running app or dev server.
+- Keep the template's `HERDR_SOCKET_PATH` pointing at a missing file: unset,
+  the app connects to the owner's real Herdr and screenshots show their
+  projects.
 - A temporary `BRIDGE_DATA_DIR` does not isolate Herdr: the daemon and its
   workspaces are machine-wide, and New workspace defaults to the Herdr backend
   when it is connected. Create evidence workspaces with the Local backend only,

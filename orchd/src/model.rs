@@ -104,6 +104,14 @@ pub struct Settings {
     /// rejected -- there is nothing to run it with).
     #[serde(default = "default_planner")]
     pub planner: String,
+    /// Route id used to triage a would-be owner question before it's ever
+    /// shown to them (spec "wake the orchestrator before bothering the
+    /// owner"); `""` or an id that matches no route turns it off -- same
+    /// semantics as `planner`, but a triage failure never fails the task,
+    /// it just falls through to asking the owner as before. Off by default:
+    /// the owner opts in to answers given on their behalf.
+    #[serde(default)]
+    pub orchestrator: String,
 }
 
 fn default_planner() -> String {
@@ -164,6 +172,7 @@ impl Default for Settings {
             max_attempts: 4,
             parallel: 2,
             planner: default_planner(),
+            orchestrator: String::new(),
         }
     }
 }
@@ -371,6 +380,7 @@ mod tests {
         assert_eq!(v["classifier"]["backend"], "openrouter");
         assert_eq!(v["classifier"]["model"], "typesafe/jev-1.13");
         assert_eq!(v["planner"], "claude-sonnet");
+        assert_eq!(v["orchestrator"], "");
         let back: Settings = serde_json::from_value(v).unwrap();
         assert_eq!(back.max_attempts, 4);
         assert_eq!(back.tiers.get(&Tier::Hard).unwrap(), "claude-opus");
@@ -386,6 +396,7 @@ mod tests {
         });
         let s: Settings = serde_json::from_value(old_json).unwrap();
         assert_eq!(s.planner, "claude-sonnet");
+        assert_eq!(s.orchestrator, "");
     }
 
     #[test]

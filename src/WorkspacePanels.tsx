@@ -1,6 +1,6 @@
 import { memo, useRef, useState, type ReactNode } from "react";
 import { Maximize2, Minimize2, MoreHorizontal, Plus, X } from "lucide-react";
-import type { Layout, Panel } from "./types";
+import type { Layout, Panel, Workspace } from "./types";
 import { TerminalPanel } from "./TerminalPanel";
 import { BrowserPanel } from "./BrowserPanel";
 import { ChatPanel } from "./ChatPanel";
@@ -37,6 +37,12 @@ type PanelHostProps = {
   onCancel(panelId: string): void;
   onAgent(panelId: string, agent: string): void;
   extensionRegistry: ExtensionRegistry;
+  /** For the orchestrator panel's own chat thread only - not a cross-host
+   * merge lookup, so a merged pane's chat thread lands on the currently
+   * active workspace rather than its own owning member (a rare case,
+   * orchestrator being local-only anyway). */
+  workspace: Workspace;
+  ensureOrchestratorThread(workspaceId: string): Panel;
 };
 
 export const PanelHost = memo(function PanelHost({
@@ -63,6 +69,8 @@ export const PanelHost = memo(function PanelHost({
   onCancel,
   onAgent,
   extensionRegistry,
+  workspace,
+  ensureOrchestratorThread,
 }: PanelHostProps) {
   return (
     <RenderProfiler id={`panel:${panel.id}`}>
@@ -125,7 +133,13 @@ export const PanelHost = memo(function PanelHost({
               The orchestrator runs local projects only.
             </div>
           ) : (
-            <OrchestratorPanel cwd={cwd} />
+            <OrchestratorPanel
+              cwd={cwd}
+              workspace={workspace}
+              ensureThread={ensureOrchestratorThread}
+              onSend={onSend}
+              onCancel={onCancel}
+            />
           )
         ) : (
           <ChatPanel

@@ -9,7 +9,13 @@ const profile = await fs.mkdtemp("/tmp/sushiai-evidence-");
 const app = await electron.launch({
   args: ["."],
   cwd: root,
-  env: { ...process.env, BRIDGE_DATA_DIR: profile },
+  // An absent HERDR_SOCKET_PATH falls back to the owner's real Herdr socket
+  // (electron/ipc/app.cjs), so point it at a path that does not exist.
+  env: {
+    ...process.env,
+    BRIDGE_DATA_DIR: profile,
+    HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
+  },
 });
 const report = { pageErrors: [] };
 let sshId = null;

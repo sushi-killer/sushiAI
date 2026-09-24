@@ -1601,11 +1601,24 @@ enum RunError {
 /// for it to exit. `cancel` triggers SIGTERM to the group, then SIGKILL
 /// after 5s (spec: "Each child in its own process group; stop = SIGTERM to
 /// the group, SIGKILL after 5s").
+///
+/// `track_attempt` gates the mid-run `pgid`/`session_id` persistence below:
+/// `true` for a session that *is* `task.attempts[_]` with number `attempt_n`
+/// (the implement or plan attempt itself); `false` for a nested session
+/// that merely borrows that attempt's number for its run directory (review,
+/// orchestrator triage) -- otherwise its own pgid/session id would
+/// overwrite the real attempt's, leaving it stuck `running` with a session
+/// id `--resume` should never see and a pgid recovery would `killpg` on a
+/// process that already exited (P1, triage review). A nested session's own
+/// child is still reachable through `cancel` for as long as this call is
+/// awaited, so skipping persistence here only affects recovery after a
+/// daemon crash mid-review/-triage, not the normal stop path.
 #[allow(clippy::too_many_arguments)]
 async fn run_harness(
     app: &Arc<App>,
     task_id: &str,
     attempt_n: u32,
+    track_attempt: bool,
     worktree: &Path,
     req: &harness::RunRequest<'_>,
     brief_text: &str,
@@ -1633,8 +1646,10 @@ async fn run_harness(
         .spawn()
         .map_err(|e| RunError::Io(format!("{bin}: {e}")))?;
     let pgid = child.id().map(|p| p as i32);
-    if let Some(pgid) = pgid {
-        persist_attempt_field(app, task_id, attempt_n, move |a| a.pgid = Some(pgid)).await;
+    if track_attempt {
+        if let Some(pgid) = pgid {
+            persist_attempt_field(app, task_id, attempt_n, move |a| a.pgid = Some(pgid)).await;
+        }
     }
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -1668,7 +1683,7 @@ async fn run_harness(
                         if let Some(note) = harness::feed_stream_line(harness_kind, &l, &mut outcome) {
                             app.broadcast_log(task_id, attempt_n, note);
                         }
-                        if !session_persisted {
+                        if track_attempt && !session_persisted {
                             if let Some(sid) = outcome.session_id.clone() {
                                 session_persisted = true;
                                 persist_attempt_field(app, task_id, attempt_n, move |a| a.session_id = Some(sid)).await;
@@ -1813,7 +1828,10 @@ async fn fail_and_continue(
         return LoopSignal::Continue { answered: false };
     }
     // Not persisted here: `wait_for_answer` does it itself, after the
-    // one-shot is installed (see its doc comment).
+    // one-shot is installed (see its doc comment). Never triaged (P1-2):
+    // this is the "attempts keep failing"/"exhausted" escalation, and
+    // spending more of the owner's budget is the owner's call, not the
+    // orchestrator's.
     match wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await {
         Some(_answer) => {
             *attempt_budget += 2;
@@ -1874,6 +1892,297 @@ async fn wait_for_answer(
         }
     }
     result
+}
+
+// ===========================================================================
+// Orchestrator triage ("wake the orchestrator before bothering the owner")
+// ===========================================================================
+
+/// Owner-visible `task.decisions` lines for a triage outcome, kept as pure
+/// formatting helpers (same convention as the `jev_*` ones above) so
+/// they're unit-testable without a harness run.
+fn orchestrator_answer_line(question: &str, answer: &str, reason: &str) -> String {
+    format!("Orchestrator: {question} -> {answer} ({reason})")
+}
+
+fn orchestrator_escalate_line(reason: &str) -> String {
+    format!("Orchestrator: escalated ({reason})")
+}
+
+/// A decision line produced by [`orchestrator_answer_line`] specifically --
+/// `false` for an escalation line, an owner/agent line, or anything else.
+/// Used to cap triage to one *answer* in a row (P1-2).
+fn is_orchestrator_answer_decision(line: &str) -> bool {
+    line.starts_with("Orchestrator: ") && !line.starts_with("Orchestrator: escalated (")
+}
+
+/// A completed triage session: the decision, plus whatever it cost (the
+/// caller adds this to `task.cost_usd` itself, same as an implement/plan
+/// attempt would).
+struct TriageRun {
+    decision: brief::TriageDecision,
+    cost_usd: Option<f64>,
+}
+
+/// One fresh, read-only session on the `orchestrator` route, asked to
+/// answer or escalate a question that would otherwise go straight to the
+/// owner. `None` means "don't triage this one" -- the route is off or names
+/// no configured route (same semantics as `planner`'s unknown-id case,
+/// except a triage failure never fails the task, it just falls through to
+/// asking the owner as before). A harness error or an unparseable reply
+/// still produces `Some`, escalating with the original question untouched
+/// (`sanitize_triage`) -- fail-open to the owner, never loops.
+#[allow(clippy::too_many_arguments)]
+async fn run_triage(
+    app: &Arc<App>,
+    task_id: &str,
+    attempt_n: u32,
+    task: &Task,
+    worktree: &Path,
+    question: &str,
+    options: &[String],
+    cancel: &CancelToken,
+) -> Option<TriageRun> {
+    // P1-2: at most one consecutive triage *answer* per task -- if the
+    // previous decision recorded is already an orchestrator answer, this
+    // question goes straight to the owner. Without this, a recurring
+    // blocked question (or a planner that keeps re-asking) could let
+    // triage answer every single time with no bound at all.
+    if task
+        .decisions
+        .last()
+        .map(|d| is_orchestrator_answer_decision(d))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let settings = app.settings.read().unwrap().clone();
+    let route = settings
+        .routes
+        .iter()
+        .find(|r| r.id == settings.orchestrator)?
+        .clone();
+
+    let run_dir = app.store.run_dir(task_id, attempt_n).join("triage");
+    let _ = std::fs::create_dir_all(&run_dir);
+    let mcp_path = run_dir.join("mcp.json");
+    let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
+    let settings_path = run_dir.join("settings.json");
+    let key_path = run_dir.join("key");
+    let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
+    if matches!(route.harness, Harness::Claude) {
+        write_readonly_claude_settings_with_profile(
+            &route,
+            app,
+            &key_path,
+            &settings,
+            &deny_read,
+            &settings_path,
+        );
+    }
+    let req = harness::RunRequest {
+        harness: route.harness,
+        worktree,
+        model: route.model.as_deref(),
+        effort: route.effort.as_deref(),
+        resume: None,
+        review: true,
+        mcp_config: Some(&mcp_path),
+        settings_path: Some(&settings_path),
+        network_allowed: false,
+    };
+    let brief_text = brief::build_triage_brief(task, question, options);
+    let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
+    let events_path = run_dir.join("events.jsonl");
+    let run_result = run_harness(
+        app,
+        task_id,
+        attempt_n,
+        false,
+        worktree,
+        &req,
+        &brief_text,
+        &events_path,
+        cancel,
+    )
+    .await;
+    let _ = std::fs::remove_file(&key_path);
+
+    match run_result {
+        // The task was stopped mid-triage: don't manufacture an escalation
+        // for it, just skip triage and let the normal wait pick up the
+        // cancellation itself (its own `cancel.cancelled()` branch).
+        Err(RunError::Cancelled) => None,
+        Ok(o) if o.error.is_none() => {
+            let cost_usd = o.cost_usd;
+            let text = o.final_text.unwrap_or_default();
+            Some(TriageRun {
+                decision: brief::sanitize_triage(brief::parse_triage(&text), question, options),
+                cost_usd,
+            })
+        }
+        Ok(o) => Some(TriageRun {
+            decision: brief::sanitize_triage(None, question, options),
+            cost_usd: o.cost_usd,
+        }),
+        Err(RunError::Io(_)) => Some(TriageRun {
+            decision: brief::sanitize_triage(None, question, options),
+            cost_usd: None,
+        }),
+    }
+}
+
+/// Wraps [`wait_for_answer`] with one shot at orchestrator triage first --
+/// only ever called for the agent's own blocked question (P1-2: never for
+/// the `advance_after_failure` "attempts keep failing"/"exhausted"
+/// escalation, which is the owner's call to spend more budget on, not the
+/// orchestrator's; `run_triage` separately caps triage to one *answer* in a
+/// row for the same reason). `task.question` must already be set by the
+/// caller, exactly as for a plain `wait_for_answer` -- an escalation only
+/// ever sharpens it, it never invents a question from nothing. Never use
+/// this for the protected-path approval question: only the owner may
+/// approve that.
+///
+/// P1-1: on `Answer`, mutates and saves the caller's own `task` in place
+/// (exactly like `wait_for_answer`'s own post-answer step) instead of
+/// reloading from disk -- `task` is this iteration's accumulated attempt
+/// state (failure, cost, usage, summary, changed files, decisions), most of
+/// which is never persisted anywhere until this call's `save_task`; an
+/// independent reload would silently discard all of it and leave the
+/// attempt stuck `running`.
+#[allow(clippy::too_many_arguments)]
+async fn wait_for_answer_with_triage(
+    app: &Arc<App>,
+    task_id: &str,
+    task: &mut Task,
+    idx: usize,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    cancel: &CancelToken,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Option<String> {
+    let question = task.question.clone().unwrap_or(Question {
+        text: String::new(),
+        options: vec![],
+    });
+    let attempt_n = task.attempts[idx].n;
+    let worktree = PathBuf::from(&task.worktree);
+    if let Some(TriageRun { decision, cost_usd }) = run_triage(
+        app,
+        task_id,
+        attempt_n,
+        task,
+        &worktree,
+        &question.text,
+        &question.options,
+        cancel,
+    )
+    .await
+    {
+        if let Some(cost) = cost_usd {
+            task.cost_usd += cost;
+        }
+        match decision.action {
+            brief::TriageAction::Answer => {
+                let line =
+                    orchestrator_answer_line(&question.text, &decision.answer, &decision.reason);
+                app.broadcast_log(task_id, attempt_n, line.clone());
+                task.decisions.push(line);
+                task.question = None;
+                task.status = TaskStatus::Queued;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(task);
+                app.broadcast_task(task);
+                return Some(decision.answer);
+            }
+            brief::TriageAction::Escalate => {
+                task.question = Some(Question {
+                    text: decision.question,
+                    options: decision.options,
+                });
+                task.decisions
+                    .push(orchestrator_escalate_line(&decision.reason));
+            }
+        }
+    }
+    wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await
+}
+
+/// Wraps [`ask_plan_question`] with the same orchestrator-triage shot, for
+/// the planner's own draft questions specifically -- not the "no
+/// verification command" synthesized question or the retry-clarification
+/// question, which still go straight to the owner unchanged. Same P1-1 fix
+/// as [`wait_for_answer_with_triage`]: mutates and saves the caller's own
+/// `task` in place rather than an independent reload.
+#[allow(clippy::too_many_arguments)]
+async fn ask_plan_question_with_triage(
+    app: &Arc<App>,
+    task_id: &str,
+    task: &mut Task,
+    attempt_n: u32,
+    worktree: &Path,
+    question_text: &str,
+    options: Vec<String>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    cancel: &CancelToken,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Option<String> {
+    if let Some(TriageRun { decision, cost_usd }) = run_triage(
+        app,
+        task_id,
+        attempt_n,
+        task,
+        worktree,
+        question_text,
+        &options,
+        cancel,
+    )
+    .await
+    {
+        if let Some(cost) = cost_usd {
+            task.cost_usd += cost;
+        }
+        match decision.action {
+            brief::TriageAction::Answer => {
+                let line =
+                    orchestrator_answer_line(question_text, &decision.answer, &decision.reason);
+                app.broadcast_log(task_id, attempt_n, line.clone());
+                task.decisions.push(line);
+                task.question = None;
+                task.status = TaskStatus::Drafting;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(task);
+                app.broadcast_task(task);
+                return Some(decision.answer);
+            }
+            brief::TriageAction::Escalate => {
+                task.decisions
+                    .push(orchestrator_escalate_line(&decision.reason));
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(task);
+                app.broadcast_task(task);
+                return ask_plan_question(
+                    app,
+                    task_id,
+                    &decision.question,
+                    decision.options,
+                    pending_answer,
+                    cancel,
+                    permit,
+                )
+                .await;
+            }
+        }
+    }
+    ask_plan_question(
+        app,
+        task_id,
+        question_text,
+        options,
+        pending_answer,
+        cancel,
+        permit,
+    )
+    .await
 }
 
 // ===========================================================================
@@ -2077,6 +2386,7 @@ async fn run_review(
         app,
         task_id,
         attempt_n,
+        false,
         worktree,
         &req,
         &brief_text,
@@ -2087,9 +2397,13 @@ async fn run_review(
     {
         Ok(outcome) => {
             let text = outcome.final_text.unwrap_or_default();
+            let why = match outcome.error {
+                Some(error) => format!("review did not run ({error}); treated as pass"),
+                None => "review output unparseable; treated as pass".to_string(),
+            };
             Ok(brief::parse_review(&text).unwrap_or(ReviewResult {
                 verdict: Verdict::Pass,
-                findings: vec!["review output unparseable; treated as pass".to_string()],
+                findings: vec![why],
             }))
         }
         Err(RunError::Cancelled) => Err(RunError::Cancelled),
@@ -2128,6 +2442,58 @@ fn verify_options_from_package_json(worktree: &Path) -> Vec<String> {
         .take(4)
         .map(|k| format!("npm run {k}"))
         .collect()
+}
+
+/// Writes `settings.json` for a read-only Claude session (no Stop hook --
+/// used by the plan stage and orchestrator triage, never the implement
+/// path, which additionally wires one up) that still carries its route's
+/// profile (env/API key) the same way an implement attempt would. A no-op
+/// for a Codex route, which has no such settings file.
+fn write_readonly_claude_settings_with_profile(
+    route: &Route,
+    app: &App,
+    key_path: &Path,
+    settings: &Settings,
+    deny_read: &[String],
+    settings_path: &Path,
+) {
+    let profile = route
+        .profile_id
+        .as_ref()
+        .and_then(|pid| app.secrets.read().unwrap().profiles.get(pid).cloned());
+    let mut profile_obj = serde_json::Map::new();
+    if let Some(p) = &profile {
+        if !p.env.is_empty() {
+            profile_obj.insert(
+                "env".to_string(),
+                serde_json::to_value(&p.env).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        if let Some(key) = &p.key {
+            if store::write_secret_file(key_path, key).is_ok() {
+                profile_obj.insert(
+                    "apiKeyHelper".to_string(),
+                    serde_json::Value::String(format!(
+                        "cat {}",
+                        harness::shell_quote(&key_path.to_string_lossy())
+                    )),
+                );
+            }
+        }
+    }
+    let profile_value = if profile_obj.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(profile_obj))
+    };
+    let claude_settings = harness::build_claude_settings(
+        profile_value.as_ref(),
+        settings.sandbox,
+        &settings.allowed_domains,
+        deny_read,
+        None,
+    );
+    let _ = store::write_json_atomic(settings_path, &claude_settings);
 }
 
 /// Sets the question/waiting state, parks on a fresh one-shot the same way
@@ -2351,43 +2717,14 @@ async fn run_plan_stage(
             // token is ever registered for a drafting session), but the
             // planner route can still carry a profile (env/API key) the
             // same way an implement route can.
-            let profile = route
-                .profile_id
-                .as_ref()
-                .and_then(|pid| app.secrets.read().unwrap().profiles.get(pid).cloned());
-            let mut profile_obj = serde_json::Map::new();
-            if let Some(p) = &profile {
-                if !p.env.is_empty() {
-                    profile_obj.insert(
-                        "env".to_string(),
-                        serde_json::to_value(&p.env).unwrap_or(serde_json::Value::Null),
-                    );
-                }
-                if let Some(key) = &p.key {
-                    if store::write_secret_file(&key_path, key).is_ok() {
-                        profile_obj.insert(
-                            "apiKeyHelper".to_string(),
-                            serde_json::Value::String(format!(
-                                "cat {}",
-                                harness::shell_quote(&key_path.to_string_lossy())
-                            )),
-                        );
-                    }
-                }
-            }
-            let profile_value = if profile_obj.is_empty() {
-                None
-            } else {
-                Some(serde_json::Value::Object(profile_obj))
-            };
-            let claude_settings = harness::build_claude_settings(
-                profile_value.as_ref(),
-                settings.sandbox,
-                &settings.allowed_domains,
+            write_readonly_claude_settings_with_profile(
+                &route,
+                app,
+                &key_path,
+                &settings,
                 &deny_read,
-                None,
+                &settings_path,
             );
-            let _ = store::write_json_atomic(&settings_path, &claude_settings);
         }
         let req = harness::RunRequest {
             harness: route.harness,
@@ -2420,6 +2757,7 @@ async fn run_plan_stage(
                 app,
                 task_id,
                 attempt_n,
+                true,
                 &worktree,
                 &req,
                 &brief_text,
@@ -2587,9 +2925,19 @@ async fn run_plan_stage(
         }
 
         for q in draft.questions.iter().take(3) {
-            match ask_plan_question(
+            // P2: reload before each question -- an earlier question in
+            // this same loop may have gone to the owner and back (or been
+            // triage-answered) since `task` was last captured, and triage's
+            // brief for this one must see that, not a stale snapshot.
+            if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
+                task = reloaded;
+            }
+            match ask_plan_question_with_triage(
                 app,
                 task_id,
+                &mut task,
+                attempt_n,
+                &worktree,
                 &q.text,
                 q.options.clone(),
                 pending_answer,
@@ -2934,6 +3282,7 @@ async fn run_task_loop(
             &app,
             &task_id,
             attempt_n,
+            true,
             &worktree,
             &req,
             &brief_text,
@@ -3060,6 +3409,11 @@ async fn run_task_loop(
             record_failure(&mut task, idx, FailureKind::Blocked, question_text.clone());
             let should_continue = advance_after_failure(&mut task, attempt_budget);
             if !should_continue {
+                // Never triaged (P1-2): same "attempts keep failing"
+                // escalation as `fail_and_continue`'s, just inlined here
+                // because a should_continue==true blocked report falls
+                // through to `classify_answerable` below instead of
+                // looping immediately.
                 match wait_for_answer(&app, &task_id, &task, &pending_answer, &cancel, &mut permit)
                     .await
                 {
@@ -3106,10 +3460,11 @@ async fn run_task_loop(
                     });
                     task.status = TaskStatus::Waiting;
                     task.updated_at = now_ms();
-                    match wait_for_answer(
+                    match wait_for_answer_with_triage(
                         &app,
                         &task_id,
-                        &task,
+                        &mut task,
+                        idx,
                         &pending_answer,
                         &cancel,
                         &mut permit,
@@ -3684,6 +4039,22 @@ mod tests {
         assert_eq!(
             jev_plan_preflight_line(0.9, 0.8, 0.3),
             "Jev: goal 0.90, criteria 0.80, verification 0.30"
+        );
+    }
+
+    #[test]
+    fn orchestrator_answer_line_includes_question_answer_and_reason() {
+        assert_eq!(
+            orchestrator_answer_line("Which theme?", "light", "README says so"),
+            "Orchestrator: Which theme? -> light (README says so)"
+        );
+    }
+
+    #[test]
+    fn orchestrator_escalate_line_includes_the_reason() {
+        assert_eq!(
+            orchestrator_escalate_line("no default anywhere"),
+            "Orchestrator: escalated (no default anywhere)"
         );
     }
 

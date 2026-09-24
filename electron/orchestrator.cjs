@@ -331,6 +331,30 @@ class OrchestratorService {
     ).catch(() => {});
   }
 
+  /** Starts (or confirms) the daemon without making an RPC call of its own -
+   * the orchestrator chat turn needs the daemon and its binary/data-dir
+   * paths before it ever calls a method through `call()`. */
+  async ensureRunning() {
+    return this.#ensureRunning();
+  }
+
+  /** `{command, args, env}` for the orchestrator agent's `orchd mcp` entry
+   * (claude `--mcp-config` or codex `-c mcp_servers...`). `env` names a file
+   * with this repo's MCP launch config, so a task the agent creates gets the
+   * same MCP servers as one the owner creates through `call`. */
+  async mcpServerConfig(repo) {
+    const { mcp } = await this.#withMcp({ repo });
+    const hash = createHash("sha256").update(repo).digest("hex").slice(0, 8);
+    const file = path.join(this.dataDir, `task-mcp-${hash}.json`);
+    await fs.mkdir(this.dataDir, { recursive: true });
+    await fs.writeFile(file, JSON.stringify({ repo, mcp }), { mode: 0o600 });
+    return {
+      command: this.binary,
+      args: ["mcp", "--data", this.dataDir],
+      env: { ORCHD_TASK_MCP: file },
+    };
+  }
+
   async call(method, params = {}) {
     if (!ALLOWED_METHODS.has(method))
       throw new Error("Invalid orchestrator request");

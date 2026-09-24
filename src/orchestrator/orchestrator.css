@@ -67,6 +67,12 @@
   justify-content: space-between;
 }
 
+.orch-tasks-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .orch-task-row {
   display: flex;
   align-items: flex-start;
@@ -107,6 +113,84 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.orch-waiting-count {
+  font-size: 11px;
+  color: var(--tone-warning);
+}
+
+/* The two fixed entries above the task list - chat and new task - share the
+ * task rows' selection treatment but stay a single quiet line each. */
+.orch-nav-row {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  padding: 6px var(--gap-sm);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  text-align: left;
+}
+
+.orch-nav-row:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.orch-nav-row.selected {
+  border-color: var(--line-selected);
+  background: var(--bg-selected);
+  color: var(--text);
+}
+
+.orch-empty-list {
+  margin: var(--gap-sm) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
+
+/* Everything beside the list: exactly one of chat, new task or a task's
+ * detail at a time. */
+.orch-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: var(--gap-sm);
+  min-width: 0;
+  min-height: 0;
+}
+
+.orch-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-sm);
+  padding: var(--gap-xs) var(--gap-sm);
+  border-radius: var(--radius-md);
+  background: var(--tone-danger-bg);
+  color: var(--tone-danger);
+  font-size: var(--text-sm);
+  flex-shrink: 0;
+}
+
+/* The orchestrator agent's own chat thread. Reuses `ChatView.css`/
+ * `styles.css`'s always-loaded `.chat-scroll`/`.chat-welcome`/`.chat-column`/
+ * `.message`/`.chat-progress`/`.thinking`/`.chat-error`/`.chat-composer`/
+ * `.chat-toolbar`/`.send` globals for its transcript and composer, so it
+ * looks like Chat without a second copy of that CSS. */
+.orch-chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: var(--gap-sm);
+}
+
+/* `display: flex` above would otherwise beat the `hidden` attribute. */
+.orch-chat[hidden] {
+  display: none;
 }
 
 .orch-detail {
@@ -182,8 +266,7 @@
   margin-left: 12px;
 }
 
-.orch-criteria p,
-.orch-preflight-result p {
+.orch-criteria p {
   display: flex;
   align-items: center;
   gap: var(--gap-xs);
@@ -192,13 +275,8 @@
   margin: 2px 0;
 }
 
-.orch-check-ok,
 .orch-check-met {
   color: var(--tone-ok);
-}
-
-.orch-check-bad {
-  color: var(--tone-danger);
 }
 
 .orch-check-open {
@@ -236,6 +314,44 @@
 
 .orch-question-free input {
   flex: 1;
+}
+
+/* Who decided what, newest last: Jev (the classifier) and the Orchestrator
+ * route each get a small tag so an automated call reads differently from the
+ * owner's own words (an "Owner: ..." line gets no tag - it's already
+ * understood as theirs). No new heading here on purpose, just a labeled line
+ * per decision, next to the question card it often follows. */
+.orch-decisions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.orch-decision-line {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.orch-decision-tag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.orch-decision-jev {
+  background: var(--tone-info-bg);
+  color: var(--tone-info);
+}
+
+.orch-decision-orchestrator {
+  background: var(--tone-ok-bg);
+  color: var(--tone-ok);
 }
 
 /* A timeline rail, not a stack of cards: one border carries every attempt,
@@ -381,29 +497,15 @@
   color: var(--text-muted);
 }
 
-.orch-new-task {
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-sm);
-  max-width: 720px;
-}
-
-/* Outside `.modal`, a plain `<label>` defaults to inline: its text and the
- * field after it flow on one line instead of stacking, which is what read as
- * a width squeeze in the New Task form (the field just wrapped onto its
- * label's line rather than the label sitting above it). */
-.orch-new-task label {
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-xs);
-  font-size: var(--text-sm);
+/* The original ask a plan was drafted from - shown as a quoted excerpt, not
+ * another form field, since it's read-only once the task exists. */
+.orch-request {
+  border-left: 2px solid var(--line);
+  padding-left: var(--gap-sm);
+  font-style: italic;
   color: var(--text-muted);
-  margin-top: 12px;
-}
-
-.orch-new-task input,
-.orch-new-task textarea {
-  width: 100%;
+  font-size: var(--text-sm);
+  margin: 0;
 }
 
 /* Same fix for the plain (non-`.form-row`) labels in Settings → Orchestration
@@ -421,33 +523,6 @@
   width: 100%;
 }
 
-.orch-preflight-result {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  padding: var(--gap-sm);
-}
-
-.orch-form-actions {
-  flex-wrap: wrap;
-}
-
-/* A quiet button, scoped to this file (there's no app-wide `.ghost` yet) -
- * same height/padding as `.primary`/`.secondary` so a row of the three
- * shares a baseline. */
-.orch-ghost {
-  background: transparent;
-  border: 1px solid transparent;
-  padding: 9px 13px;
-  border-radius: 7px;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.orch-ghost:hover {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
 .orchestrator-settings {
   container-type: inline-size;
   container-name: orchestrator-settings;
@@ -457,6 +532,15 @@
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: var(--gap-sm);
+}
+
+/* Review, Planner and Orchestrator - which route decides what, one select
+ * each. */
+.orch-review-planner-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--gap-sm);
+  margin-top: var(--gap-sm);
 }
 
 .orch-tier-label {
@@ -494,22 +578,19 @@
   grid-column: 6;
 }
 
-/* Below ~720px the panel can't fit both columns readably: fall back to one
- * column at a time, switched by the `view-list`/`view-detail` class the
- * component sets, with the Back control (hidden above this width) as the
- * way back to the list. Only `.orch-tasks`/`.orch-detail` (descendants of
- * the query container) are valid subjects here - a query container can't
- * restyle itself from inside its own `@container` rule, so `.orchestrator-
- * panel`'s own `display: flex` above already covers both widths. */
-@container orchestrator (max-width: 720px) {
+/* Below ~640px the list and the main pane can't sit side by side readably:
+ * show one at a time, switched by the `view-list`/`view-main` class the
+ * component sets, with the Back control (hidden above this width) as the way
+ * back to the list. Only descendants of the query container are valid
+ * subjects here - a query container can't restyle itself from inside its own
+ * `@container` rule. */
+@container orchestrator (max-width: 640px) {
   .orch-tasks,
-  .orch-detail {
+  .orch-main {
     flex: 1 1 auto;
   }
-  .orchestrator-panel.view-list .orch-detail {
-    display: none;
-  }
-  .orchestrator-panel.view-detail .orch-tasks {
+  .orchestrator-panel.view-main .orch-tasks,
+  .orchestrator-panel.view-list .orch-main {
     display: none;
   }
   .orch-back-button {
@@ -531,7 +612,8 @@
   .orch-route-delete {
     grid-column: auto;
   }
-  .orch-tier-row {
+  .orch-tier-row,
+  .orch-review-planner-row {
     grid-template-columns: 1fr;
   }
 }

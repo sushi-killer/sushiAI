@@ -5,6 +5,7 @@ const {
   chatPrompt,
   claudeEvent,
   codexEvent,
+  ORCHESTRATOR_TOOLS,
 } = require("../electron/chat-args.cjs");
 const {
   parseCodexCache,
@@ -142,6 +143,73 @@ test("attachments: claude add-dir stays last, codex images precede flags", () =>
     prompt,
     /^user: look\n\[Attached[^\]]*\/p\/i\.png, \/p\/dir\]\n\nassistant: ok$/,
   );
+});
+test("orchestrator mcp: claude gets strict-mcp-config + allowedTools before --add-dir", () => {
+  const orchestratorMcp = {
+    configPath: "/data/mcp-config.json",
+    command: "/path/to/orchd",
+    args: ["mcp", "--data", "/data"],
+  };
+  const args = chatArgs("claude", {
+    permission: "acceptEdits",
+    dirs: ["/a"],
+    orchestratorMcp,
+  });
+  assert.deepEqual(
+    args.slice(args.indexOf("--strict-mcp-config")),
+    [
+      "--strict-mcp-config",
+      "--mcp-config",
+      "/data/mcp-config.json",
+      "--allowedTools",
+      ...ORCHESTRATOR_TOOLS.map((tool) => `mcp__sushiai-orchestrator__${tool}`),
+      "--add-dir",
+      "/a",
+    ],
+    "allowedTools must end before --add-dir, or it swallows the attachment dirs",
+  );
+  // No Edit/Bash and no bypassed permissions: the orchestrator files tasks
+  // instead of doing the work in the owner's checkout.
+  assert.equal(args[args.indexOf("--tools") + 1], "Read,Grep,Glob");
+  assert.ok(!args.includes("--permission-mode"));
+  assert.ok(args.includes("--append-system-prompt"));
+  assert.equal(ORCHESTRATOR_TOOLS.length, 8);
+  assert.ok(!ORCHESTRATOR_TOOLS.includes("task_delete"));
+  assert.ok(!ORCHESTRATOR_TOOLS.includes("settings_set"));
+});
+test("orchestrator mcp: codex gets fixed-arity -c overrides, no ordering hazard", () => {
+  const orchestratorMcp = {
+    configPath: "/data/mcp-config.json",
+    command: "/path/to/orchd",
+    args: ["mcp", "--data", "/data"],
+    env: { ORCHD_TASK_MCP: "/data/task-mcp.json" },
+  };
+  const args = chatArgs("codex", {
+    orchestratorMcp,
+    permission: "bypassPermissions",
+  });
+  assert.equal(args[args.indexOf("--sandbox") + 1], "read-only");
+  assert.ok(!args.includes("--dangerously-bypass-approvals-and-sandbox"));
+  const mcp = args.indexOf("-c", args.indexOf("-c") + 1);
+  assert.deepEqual(args.slice(mcp, mcp + 6), [
+    "-c",
+    'mcp_servers.sushiai-orchestrator.command="/path/to/orchd"',
+    "-c",
+    'mcp_servers.sushiai-orchestrator.args=["mcp","--data","/data"]',
+    "-c",
+    'mcp_servers.sushiai-orchestrator.env.ORCHD_TASK_MCP="/data/task-mcp.json"',
+  ]);
+  assert.equal(args.at(-1), "-");
+});
+test("orchestrator mcp: a remote turn is rejected outright, for either CLI", () => {
+  const orchestratorMcp = { configPath: "/data/mcp-config.json" };
+  for (const agent of ["claude", "codex"])
+    assert.throws(
+      () => chatArgs(agent, { orchestratorMcp, remote: true }),
+      /orchestrator agent only runs on this machine/,
+    );
+  // Without the flag, a remote turn is unaffected.
+  assert.doesNotThrow(() => chatArgs("claude", { remote: true }));
 });
 test("reasoning levels follow the CLI that offers them", () => {
   assert.ok(chatArgs("claude", { effort: "max" }).includes("max"));

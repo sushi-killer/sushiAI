@@ -193,6 +193,8 @@ pub fn build_claude_settings(
                 // `allowUnixSockets` present, Claude Code denied every Bash
                 // call headlessly (`cargo --version` included), so agents
                 // could never build or test. `["*"]` opens the network.
+                // Unix sockets stay blocked by the sandbox's own default
+                // (checked: a connect from inside fails with EPERM).
                 "network": {
                     "allowedDomains": allowed_domains,
                 },

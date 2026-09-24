@@ -1456,6 +1456,24 @@ async fn run_verify_cached(
     results
 }
 
+/// Regular files only (a symlink could point at `/dev/zero` or outside the
+/// worktree), and at most the first 1 MiB plus the length, so a huge
+/// untracked artifact can't stall the daemon.
+fn untracked_fingerprint(path: &Path) -> String {
+    use std::io::Read;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => {
+            let mut head = Vec::new();
+            if let Ok(file) = std::fs::File::open(path) {
+                let _ = file.take(1 << 20).read_to_end(&mut head);
+            }
+            format!("{}:{}", meta.len(), String::from_utf8_lossy(&head))
+        }
+        Ok(meta) => format!("{:?}", meta.file_type()),
+        Err(_) => String::new(),
+    }
+}
+
 fn diff_hash(worktree: &Path, base: &str) -> String {
     let diff = git::diff_full(worktree, base, usize::MAX).unwrap_or_default();
     let untracked = git::status_porcelain(worktree).unwrap_or_default();
@@ -1467,9 +1485,7 @@ fn diff_hash(worktree: &Path, base: &str) -> String {
     for u in &untracked {
         input.push_str(u);
         input.push('\u{0}');
-        if let Ok(bytes) = std::fs::read(worktree.join(u)) {
-            input.push_str(&String::from_utf8_lossy(&bytes));
-        }
+        input.push_str(&untracked_fingerprint(&worktree.join(u)));
         input.push('\u{0}');
     }
     simple_hash(&input)
@@ -4409,6 +4425,9 @@ mod tests {
         let before = diff_hash(tmp.path(), "HEAD");
         std::fs::write(tmp.path().join("new.rs"), "fixed").unwrap();
         assert_ne!(before, diff_hash(tmp.path(), "HEAD"));
+        // Never followed: reading /dev/zero through it would never finish.
+        std::os::unix::fs::symlink("/dev/zero", tmp.path().join("zero")).unwrap();
+        diff_hash(tmp.path(), "HEAD");
     }
 
     #[test]

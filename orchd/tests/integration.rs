@@ -2312,16 +2312,16 @@ fn the_stall_clock_waits_while_the_stop_hook_runs_verify() {
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
     let repo = init_git_repo();
-    // The hook's verify is silent for 8s, well past the 3s stall timeout;
-    // 3s leaves room for a loaded machine to start the fake harness.
+    // The hook's verify is silent for 12s, well past the 5s stall timeout;
+    // 5s leaves room for a loaded machine to start the fake harness.
     let task = daemon.request(
         "task.create",
         serde_json::json!({
             "repo": repo.path().to_str().unwrap(),
             "title": "Slow hook",
             "goal": "Make a trivial change",
-            "verify": ["sleep 8 && test -f verified-marker.txt"],
-            "variant": {"stallTimeoutSecs": 3},
+            "verify": ["sleep 12 && test -f verified-marker.txt"],
+            "variant": {"stallTimeoutSecs": 5},
             "start": true,
         }),
     );
@@ -2532,6 +2532,10 @@ fn review_evidence_attaches_the_attempt_s_screenshots_to_the_codex_reviewer() {
     assert!(
         brief.contains("## Screenshots") && brief.contains("`artifacts/after.png`"),
         "{brief}"
+    );
+    assert!(
+        brief.contains("The implementer's own account") && brief.contains("<untrusted-data>\ndone"),
+        "the reviewer hears the implementer's summary: {brief}"
     );
 
     let worktree = task["worktree"].as_str().unwrap().to_string();

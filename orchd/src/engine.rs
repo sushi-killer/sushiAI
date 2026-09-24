@@ -3960,6 +3960,25 @@ async fn run_task_loop(
                 .map(|e| format!("; the harness ended with an error: {}", tail_chars(e, 400)))
                 .unwrap_or_default()
         );
+        // What the implementer says it did and decided (e.g. "no lesson
+        // this time", "ran the desktop smoke"): the reviewer weighs these
+        // claims against the evidence instead of never hearing them.
+        let implementer_note = match report.as_ref() {
+            Some(r) if !r.summary.trim().is_empty() || !r.decisions.is_empty() => {
+                let account = std::iter::once(r.summary.trim().to_string())
+                    .chain(r.decisions.iter().map(|d| format!("- {d}")))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "{implementer_note}\n\n{}",
+                    brief::untrusted_block(
+                        "The implementer's own account, a claim to check against the diff and verify results",
+                        &account
+                    )
+                )
+            }
+            _ => implementer_note,
+        };
         task.attempts[idx].summary = report.as_ref().map(|r| r.summary.clone());
         task.attempts[idx].handoff = report
             .as_ref()

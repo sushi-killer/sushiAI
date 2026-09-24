@@ -116,7 +116,7 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
                 attempt.route_id,
                 attempt_outcome_label(attempt)
             ));
-            let fresh = task.variant.retry_mode == RetryMode::Fresh;
+            let fresh = task.variant().retry_mode == RetryMode::Fresh;
             if let Some(handoff) = attempt
                 .handoff
                 .as_deref()
@@ -646,7 +646,10 @@ mod tests {
             "the resume arm keeps the old brief"
         );
         assert!(!resume_brief.contains(&"x".repeat(2000)));
-        task.variant.retry_mode = RetryMode::Fresh;
+        task.variant = Some(crate::model::Variant {
+            retry_mode: RetryMode::Fresh,
+            ..Default::default()
+        });
         let brief = build_brief(&task, "", "");
         assert!(brief.contains("Previous attempts"));
         assert!(brief.contains("Attempt 1 (claude-sonnet): failed"));

@@ -52,6 +52,12 @@ export type Settings = {
   autoAnswer: boolean;
   /** Experiment flags new tasks start with; `task.create` can override them. */
   experiments: Variant;
+  /** Model id -> per-million-token prices, for harnesses (Codex) that
+   * report tokens but no cost. */
+  prices: Record<
+    string,
+    { input: number; cachedInput: number; output: number }
+  >;
 };
 
 export type TaskStatus =
@@ -138,8 +144,9 @@ export type Task = {
   tier: Tier;
   /** The planner's tier; routes the task only with `variant.plannerTier`. */
   plannedTier?: Tier;
-  /** Experiment flags this task runs with (an A/B arm). */
-  variant: Variant;
+  /** Experiment flags this task runs with (an A/B arm); absent on tasks
+   * created before variants existed. */
+  variant?: Variant;
   question?: Question;
   /** Owner and classifier decisions, newest last - includes "Owner: ..."
    * answers to a question. */

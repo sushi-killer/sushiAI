@@ -46,7 +46,7 @@ fn fmt(x: Option<f64>, digits: usize) -> String {
 
 pub fn report(tasks: &[Task]) -> String {
     let mut groups: BTreeMap<String, Vec<&Task>> = BTreeMap::new();
-    for t in tasks {
+    for t in tasks.iter().filter(|t| t.variant.is_some()) {
         let key = serde_json::to_string(&t.variant).unwrap_or_default();
         groups.entry(key).or_default().push(t);
     }
@@ -113,6 +113,12 @@ pub fn report(tasks: &[Task]) -> String {
             owner as f64 / n,
         ));
     }
+    let before = tasks.iter().filter(|t| t.variant.is_none()).count();
+    if before > 0 {
+        out.push_str(&format!(
+            "\n{before} task(s) from before variants left out.\n"
+        ));
+    }
     out
 }
 
@@ -128,7 +134,7 @@ mod tests {
             "status": "queued", "tier": "standard", "createdAt": 0, "updatedAt": 0
         }))
         .unwrap();
-        t.variant = variant;
+        t.variant = Some(variant);
         t.status = status;
         t.cost_usd = cost;
         t.decisions = decisions.iter().map(|d| d.to_string()).collect();
@@ -146,8 +152,15 @@ mod tests {
             task(Variant::default(), TaskStatus::Waiting, 3.0, &[]),
             task(fresh.clone(), TaskStatus::Done, 0.5, &[]),
         ];
+        let mut old = task(Variant::default(), TaskStatus::Done, 9.0, &[]);
+        old.variant = None;
+        let tasks = [tasks, vec![old]].concat();
         let out = report(&tasks);
-        let rows: Vec<&str> = out.lines().skip(2).collect();
+        assert!(
+            out.contains("1 task(s) from before variants left out."),
+            "{out}"
+        );
+        let rows: Vec<&str> = out.lines().skip(2).filter(|l| l.starts_with('|')).collect();
         assert_eq!(rows.len(), 2, "{out}");
         let resume = rows.iter().find(|r| r.contains("\"resume\"")).unwrap();
         assert!(resume.contains("| 2 | 1 |"), "{resume}");

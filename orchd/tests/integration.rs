@@ -2278,6 +2278,12 @@ fn the_planner_s_tier_routes_the_task_only_when_the_variant_asks_for_it() {
         });
         assert_eq!(settled["status"], "done", "{settled}");
         assert_eq!(settled["plannedTier"], "hard", "{settled}");
+        // The plan run's cost counts toward the task, not only the implement run's.
+        assert_eq!(settled["attempts"][0]["costUsd"], 0.01, "{settled}");
+        assert!(
+            (settled["costUsd"].as_f64().unwrap() - 0.02).abs() < 1e-9,
+            "{settled}"
+        );
         assert_eq!(settled["attempts"][1]["routeId"], route, "{settled}");
         let noted = settled["decisions"]
             .as_array()
@@ -2306,20 +2312,21 @@ fn the_stall_clock_waits_while_the_stop_hook_runs_verify() {
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
     let repo = init_git_repo();
-    // The hook's verify is silent for 3s, three times the stall timeout.
+    // The hook's verify is silent for 8s, well past the 3s stall timeout;
+    // 3s leaves room for a loaded machine to start the fake harness.
     let task = daemon.request(
         "task.create",
         serde_json::json!({
             "repo": repo.path().to_str().unwrap(),
             "title": "Slow hook",
             "goal": "Make a trivial change",
-            "verify": ["sleep 3 && test -f verified-marker.txt"],
-            "variant": {"stallTimeoutSecs": 1},
+            "verify": ["sleep 8 && test -f verified-marker.txt"],
+            "variant": {"stallTimeoutSecs": 3},
             "start": true,
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(60));
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
     assert_eq!(
         settled["attempts"].as_array().unwrap().len(),

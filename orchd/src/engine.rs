@@ -894,7 +894,7 @@ impl App {
             cost_usd: 0.0,
             archived: false,
             planned_tier: None,
-            variant,
+            variant: Some(variant),
             created_at: now,
             updated_at: now,
         };
@@ -2047,6 +2047,18 @@ async fn run_harness(
             }
         }
     }
+    if outcome.cost_usd.is_none() && req.harness == Harness::Codex {
+        let price = req
+            .model
+            .and_then(|m| app.settings.read().unwrap().prices.get(m).copied());
+        outcome.cost_usd = price.map(|p| {
+            p.codex_cost(
+                outcome.usage_input,
+                outcome.usage_cached,
+                outcome.usage_output,
+            )
+        });
+    }
     Ok(outcome)
 }
 
@@ -2679,6 +2691,7 @@ async fn run_review(
     review_route: &Route,
     deny_read: &[String],
     cancel: &CancelToken,
+    cost_usd: &mut f64,
 ) -> Result<ReviewResult, RunError> {
     let wt = worktree.to_path_buf();
     let base = base_sha.to_string();
@@ -2763,6 +2776,7 @@ async fn run_review(
     .await
     {
         Ok(outcome) => {
+            *cost_usd += outcome.cost_usd.unwrap_or(0.0);
             let text = outcome.final_text.unwrap_or_default();
             if let Some(result) = brief::parse_review(&text) {
                 return Ok(result);
@@ -3136,6 +3150,19 @@ async fn run_plan_stage(
             }
             match run_result {
                 Ok(o) => {
+                    if let Some(cost) = o.cost_usd {
+                        let a = &mut task.attempts[idx];
+                        a.cost_usd = Some(a.cost_usd.unwrap_or(0.0) + cost);
+                        task.cost_usd += cost;
+                    }
+                    let usage = task.attempts[idx].usage.get_or_insert(Usage {
+                        input: 0,
+                        output: 0,
+                        cached: 0,
+                    });
+                    usage.input += o.usage_input;
+                    usage.output += o.usage_output;
+                    usage.cached += o.usage_cached;
                     // A harness-reported failure (Claude `is_error`, Codex
                     // `turn.failed`) is an infra/tooling problem, not an
                     // ambiguous-request problem -- fail outright rather than
@@ -3458,7 +3485,7 @@ async fn run_task_loop(
         let mut jev_tier_choice = None;
         let mut planner_tier_used = false;
         if implement_attempt_count(&task) == 0 {
-            match task.planned_tier.filter(|_| task.variant.planner_tier) {
+            match task.planned_tier.filter(|_| task.variant().planner_tier) {
                 Some(tier) => {
                     task.tier = tier;
                     planner_tier_used = true;
@@ -3510,7 +3537,7 @@ async fn run_task_loop(
             .rev()
             .find(|a| a.stage == Stage::Implement)
             .cloned();
-        let resume_session = if resume_eligible && task.variant.retry_mode == RetryMode::Resume {
+        let resume_session = if resume_eligible && task.variant().retry_mode == RetryMode::Resume {
             prev.as_ref().and_then(|p| {
                 let route_matches = p.route_id == route.id;
                 let has_session = p.session_id.is_some();
@@ -3703,8 +3730,8 @@ async fn run_task_loop(
             &brief_text,
             &events_path,
             &cancel,
-            (task.variant.stall_timeout_secs > 0).then(|| Stall {
-                limit: Duration::from_secs(task.variant.stall_timeout_secs),
+            (task.variant().stall_timeout_secs > 0).then(|| Stall {
+                limit: Duration::from_secs(task.variant().stall_timeout_secs),
                 paused: registered
                     .as_ref()
                     .map(|(_, ctx)| ctx.hook_running.clone())
@@ -4240,7 +4267,8 @@ async fn run_task_loop(
         let mut review_result: Option<ReviewResult> = None;
         if !settings.review.is_empty() {
             if let Some(review_route) = select_review_route(&settings, &route) {
-                match run_review(
+                let mut review_cost = 0.0;
+                let reviewed = run_review(
                     &app,
                     &task_id,
                     attempt_n,
@@ -4252,9 +4280,13 @@ async fn run_task_loop(
                     review_route,
                     &deny_read,
                     &cancel,
+                    &mut review_cost,
                 )
-                .await
-                {
+                .await;
+                // The task's total only: an attempt's own cost is what later
+                // resumes of its session subtract (`attempt_cost`).
+                task.cost_usd += review_cost;
+                match reviewed {
                     Ok(r) => review_result = Some(r),
                     Err(RunError::Cancelled) => {
                         // A cancelled review is never a PASS: the attempt

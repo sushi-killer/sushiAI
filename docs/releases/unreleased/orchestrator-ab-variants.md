@@ -21,3 +21,9 @@
   as `plannedTier` either way, for comparison with Jev's.
 - All flags are off by default. The only change without a flag: the
   report and plan formats now ask for `handoff` and `tier`.
+- Task costs now include the plan run and the review run, which were
+  reported by the CLI but never added. Codex runs, which report tokens but
+  no cost, are priced from `settings.prices` (list prices for
+  `gpt-5.3-codex` and `gpt-5.6-luna` built in).
+- `orchd ab` leaves out tasks created before variants existed, so old runs
+  don't skew the default arm.

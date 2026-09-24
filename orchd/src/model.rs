@@ -117,6 +117,9 @@ pub struct Settings {
     /// Flags new tasks start with unless `task.create` overrides them.
     #[serde(default)]
     pub experiments: Variant,
+    /// Model id -> price, for harnesses that report no cost.
+    #[serde(default = "default_prices")]
+    pub prices: std::collections::BTreeMap<String, Price>,
 }
 
 fn default_planner() -> String {
@@ -175,6 +178,7 @@ impl Default for Settings {
             orchestrator: String::new(),
             auto_answer: false,
             experiments: Variant::default(),
+            prices: default_prices(),
         }
     }
 }
@@ -207,6 +211,65 @@ pub struct Variant {
     pub stall_timeout_secs: u64,
     /// Route by the tier the planner chose; Jev only when there is none.
     pub planner_tier: bool,
+}
+
+#[cfg(test)]
+mod price_tests {
+    use super::*;
+
+    #[test]
+    fn codex_cost_bills_cached_tokens_at_the_cached_rate_once() {
+        let p = default_prices()["gpt-5.6-luna"];
+        // 359,428 input of which 324,864 cached, 3,869 output (a real run).
+        let cost = p.codex_cost(359_428, 324_864, 3_869);
+        let expected = (34_564.0 * 0.20 + 324_864.0 * 0.02 + 3_869.0 * 1.20) / 1e6;
+        assert!((cost - expected).abs() < 1e-9, "{cost}");
+    }
+}
+
+impl Task {
+    pub fn variant(&self) -> Variant {
+        self.variant.clone().unwrap_or_default()
+    }
+}
+
+/// Per-million-token list prices for a model whose harness reports tokens
+/// but no cost (Codex).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Price {
+    pub input: f64,
+    pub cached_input: f64,
+    pub output: f64,
+}
+
+impl Price {
+    /// Codex's `input_tokens` already includes the cached ones.
+    pub fn codex_cost(&self, input: u64, cached: u64, output: u64) -> f64 {
+        let fresh = input.saturating_sub(cached) as f64;
+        (fresh * self.input + cached as f64 * self.cached_input + output as f64 * self.output)
+            / 1_000_000.0
+    }
+}
+
+// ponytail: list prices as of 2026-09; `settings.prices` overrides them.
+fn default_prices() -> std::collections::BTreeMap<String, Price> {
+    [
+        ("gpt-5.3-codex", 1.75, 0.175, 14.0),
+        ("gpt-5.6-luna", 0.20, 0.02, 1.20),
+    ]
+    .into_iter()
+    .map(|(m, input, cached_input, output)| {
+        (
+            m.to_string(),
+            Price {
+                input,
+                cached_input,
+                output,
+            },
+        )
+    })
+    .collect()
 }
 
 /// Keeps `Instant + timeout` from overflowing.
@@ -275,8 +338,10 @@ pub struct Task {
     /// off so its choice can be compared with Jev's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planned_tier: Option<Tier>,
-    #[serde(default)]
-    pub variant: Variant,
+    /// `None` only on tasks created before variants existed; `orchd ab`
+    /// keeps those out of every arm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<Variant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<Question>,
     #[serde(default)]

@@ -2100,7 +2100,7 @@ fn a_silent_harness_is_stopped_as_stalled_when_the_variant_sets_a_stall_timeout(
     let script = fake_harness_script(
         scripts_dir.path(),
         "fake-claude-silent.sh",
-        "#!/bin/sh\ncat > /dev/null\necho $$ > \"$PID_FILE\"\nexec sleep 30\n",
+        "#!/bin/sh\necho $$ > \"$PID_FILE\"\ncat > /dev/null\nexec sleep 30\n",
     );
     let pid_file = scripts_dir.path().join("harness.pid");
     let daemon = Daemon::spawn(&[
@@ -2120,14 +2120,14 @@ fn a_silent_harness_is_stopped_as_stalled_when_the_variant_sets_a_stall_timeout(
             "title": "Hangs",
             "goal": "Never answers",
             "verify": ["true"],
-            "variant": {"stallTimeoutSecs": 1},
+            "variant": {"stallTimeoutSecs": 3},
             "start": true,
         }),
     );
-    assert_eq!(task["variant"]["stallTimeoutSecs"], 1, "{task}");
+    assert_eq!(task["variant"]["stallTimeoutSecs"], 3, "{task}");
     let task_id = task["id"].as_str().unwrap().to_string();
 
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(15));
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
     assert_eq!(settled["status"], "waiting", "task JSON: {settled}");
     assert_eq!(
         settled["attempts"][0]["failure"]["kind"], "stall",

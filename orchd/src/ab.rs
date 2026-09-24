@@ -36,7 +36,12 @@ fn median(mut xs: Vec<f64>) -> Option<f64> {
         return None;
     }
     xs.sort_by(|a, b| a.total_cmp(b));
-    Some(xs[xs.len() / 2])
+    let mid = xs.len() / 2;
+    Some(if xs.len().is_multiple_of(2) {
+        (xs[mid - 1] + xs[mid]) / 2.0
+    } else {
+        xs[mid]
+    })
 }
 
 fn fmt(x: Option<f64>, digits: usize) -> String {
@@ -139,6 +144,13 @@ mod tests {
         t.cost_usd = cost;
         t.decisions = decisions.iter().map(|d| d.to_string()).collect();
         t
+    }
+
+    #[test]
+    fn median_of_an_even_count_is_the_mean_of_the_middle_two() {
+        assert_eq!(median(vec![6.1, 0.66]), Some((6.1 + 0.66) / 2.0));
+        assert_eq!(median(vec![3.0, 1.0, 2.0]), Some(2.0));
+        assert_eq!(median(vec![]), None);
     }
 
     #[test]

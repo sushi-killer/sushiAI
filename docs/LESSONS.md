@@ -32,6 +32,7 @@ Rule: give each task a new branch, or omit `branch`.
 
 ## Promoted
 
+- 2026-09-24 An unparsed review verdict counted as PASS → no verdict asks the owner. `a_review_without_a_verdict_waits_for_the_owner_instead_of_passing`.
 - 2026-09-24 Chat harness outlived daemon shutdown → drain every live-child map. `shutdown_kills_a_live_orchestrator_chat_turn_s_child`.
 - 2026-09-24 Orchestrator chat edited code instead of filing tasks → enforce a role with tools, not prompt. `orchd/src/chat.rs`.
 - 2026-09-24 Unset `HERDR_SOCKET_PATH` photographed the owner's real Herdr → missing path. `ui-evidence` template.

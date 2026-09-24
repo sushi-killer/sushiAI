@@ -6,6 +6,9 @@
 use crate::model::{Attempt, AttemptStatus, Failure, ReviewResult, Stage, Task};
 
 const MAX_FAILURE_DETAIL: usize = 1500;
+/// The resumed session sees only this one failure, so it gets the whole
+/// verify tail rather than the attempt list's short excerpt.
+const MAX_RESUME_FAILURE_DETAIL: usize = 4500;
 
 /// Truncate to at most `max` bytes on a char boundary, so we never split a
 /// multi-byte UTF-8 sequence.
@@ -18,6 +21,18 @@ fn truncate_chars(s: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}\u{2026}", &s[..end])
+}
+
+/// A failure detail opens with what failed (`<cmd> exited 101.`) and ends
+/// with why (the test runner's summary): keep both ends, drop the middle.
+fn clip_middle(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(200).collect();
+    let tail: String = s.chars().skip(count - (max - 200)).collect();
+    format!("{head}\n\u{2026}\n{tail}")
 }
 
 fn attempt_outcome_label(attempt: &Attempt) -> &'static str {
@@ -98,7 +113,7 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
                 attempt_outcome_label(attempt)
             ));
             if let Some(failure) = &attempt.failure {
-                let detail = truncate_chars(&failure.detail, MAX_FAILURE_DETAIL);
+                let detail = clip_middle(&failure.detail, MAX_FAILURE_DETAIL);
                 out.push_str("  - failure: ");
                 out.push_str(&detail);
                 out.push('\n');
@@ -126,7 +141,7 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
 pub fn build_resume_delta(failure: &Failure) -> String {
     let mut out = String::new();
     out.push_str("## Previous attempt failed\n\n");
-    out.push_str(&truncate_chars(&failure.detail, MAX_FAILURE_DETAIL));
+    out.push_str(&clip_middle(&failure.detail, MAX_RESUME_FAILURE_DETAIL));
     out.push_str("\n\n");
     out.push_str(REPORT_FORMAT_BLOCK);
     out
@@ -165,7 +180,7 @@ pub fn parse_review(text: &str) -> Option<ReviewResult> {
     serde_json::from_str(&body).ok()
 }
 
-const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
+const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
 
 const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"criteria\":[],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"]}]}\n```\n";
 
@@ -404,22 +419,41 @@ pub fn sanitize_triage(
     }
 }
 
-/// Find the last occurrence of a fence opened with ` ```<tag>` (optionally
-/// followed by more characters on the same line, e.g. trailing whitespace)
-/// and closed by the next ` ``` ` on its own line, returning the text
-/// between them.
+/// The body of the last ` ```<tag>` fence or `<tag>...</tag>` block in
+/// `text`, whichever opens later. A fence closes only on a line that is
+/// just ` ``` `, so a JSON string quoting ` ```sushi-review``` ` inline
+/// doesn't cut the body short. Models use both shapes, so either counts.
 fn last_fenced_block(text: &str, tag: &str) -> Option<String> {
-    let open_marker = format!("```{}", tag);
-    let start_of_open = text.rfind(&open_marker)?;
-    let after_open = start_of_open + open_marker.len();
-    // Skip to the end of the opening fence's line.
-    let content_start = match text[after_open..].find('\n') {
-        Some(nl) => after_open + nl + 1,
-        None => return None, // opening fence with nothing after it
-    };
-    let close_offset = text[content_start..].find("```")?;
-    let body = &text[content_start..content_start + close_offset];
-    Some(body.trim().to_string())
+    let fence = format!("```{tag}");
+    let open_tag = format!("<{tag}>");
+    let fence_at = text.rfind(&fence);
+    let tag_at = text.rfind(&open_tag);
+    if tag_at.is_some() && (fence_at.is_none() || tag_at > fence_at) {
+        let content_start = tag_at? + open_tag.len();
+        let close = text[content_start..].find(&format!("</{tag}>"))?;
+        return Some(
+            text[content_start..content_start + close]
+                .trim()
+                .to_string(),
+        );
+    }
+    let after_open = fence_at? + fence.len();
+    let content_start = after_open + text[after_open..].find('\n')? + 1;
+    let mut offset = content_start;
+    for line in text[content_start..].split_inclusive('\n') {
+        if line.trim() == "```" {
+            return Some(text[content_start..offset].trim().to_string());
+        }
+        offset += line.len();
+    }
+    // No bare closing line: the fence was closed at the end of the JSON's
+    // own line (`}```).
+    let close = text[content_start..].rfind("```")?;
+    Some(
+        text[content_start..content_start + close]
+            .trim()
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -535,6 +569,22 @@ mod tests {
     }
 
     #[test]
+    fn resume_delta_keeps_the_end_of_a_long_verify_failure() {
+        let detail = format!(
+            "npm test exited 1.\n{}\ntest foo ... FAILED",
+            "noise\n".repeat(2000)
+        );
+        let failure = Failure {
+            kind: FailureKind::Verify,
+            detail,
+            signature: "s".into(),
+        };
+        let delta = build_resume_delta(&failure);
+        assert!(delta.contains("npm test exited 1."));
+        assert!(delta.contains("test foo ... FAILED"));
+    }
+
+    #[test]
     fn resume_delta_contains_only_failure_and_report_format() {
         let failure = Failure {
             kind: FailureKind::Verify,
@@ -562,6 +612,28 @@ mod tests {
         assert!(parse_report("no fence here").is_none());
         assert!(parse_report("```sushi-report\nnot json\n```").is_none());
         assert!(parse_report("```sushi-report\n{\"outcome\":\"unknown\"}\n```").is_none());
+    }
+
+    #[test]
+    fn parse_review_accepts_a_fence_closed_on_the_json_line() {
+        let r = parse_review("```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}```").unwrap();
+        assert_eq!(r.verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn parse_review_accepts_the_xml_tag_shape_codex_replies_with() {
+        let text = "<sushi-review>\n{\"verdict\":\"FAIL\",\"findings\":[\"x\"]}\n</sushi-review>";
+        let r = parse_review(text).unwrap();
+        assert_eq!(r.verdict, Verdict::Fail);
+    }
+
+    #[test]
+    fn parse_plan_survives_an_inline_triple_backtick_inside_a_json_string() {
+        // Captured from a real planner reply: the goal quoted
+        // ```sushi-review``` inline, which used to close the fence early.
+        let text = "Plan:\n\n```sushi-plan\n{\"title\":\"T\",\"goal\":\"no parseable ```sushi-review``` block\"}\n```\n";
+        let plan = parse_plan(text).unwrap();
+        assert!(plan.goal.contains("```sushi-review```"));
     }
 
     #[test]

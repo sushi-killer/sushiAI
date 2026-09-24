@@ -317,7 +317,9 @@ export function OrchestratorSettings() {
               ))}
             </select>
             {settings.planner && settings.planner !== settings.tiers.hard && (
-              <span className="tone-yellow">Differs from the hard tier's route</span>
+              <span className="tone-yellow">
+                Differs from the hard tier's route
+              </span>
             )}
           </label>
           <label className="orch-tier-label">

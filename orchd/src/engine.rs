@@ -182,18 +182,25 @@ pub fn matches_any_protected(path: &str, globs: &[String]) -> bool {
     globs.iter().any(|g| glob_match(g, path))
 }
 
-/// spec step 6: `review == "auto"` -> first route whose harness differs
-/// from the implement attempt's; explicit id -> that route; `""` -> no
-/// review (handled by the caller before this is reached).
-pub fn select_review_route(settings: &Settings, implement_harness: Harness) -> Option<&Route> {
-    if settings.review == "auto" {
-        settings
-            .routes
-            .iter()
-            .find(|r| r.harness != implement_harness)
-    } else {
-        settings.routes.iter().find(|r| r.id == settings.review)
+/// `review == "auto"` -> the hard tier's route, so a cheaper implementer is
+/// checked by the strongest model; when the implementer already *is* that
+/// route, the first route on a different harness instead. Explicit id ->
+/// that route; `""` -> no review (handled by the caller before this).
+pub fn select_review_route<'a>(settings: &'a Settings, implementer: &Route) -> Option<&'a Route> {
+    if settings.review != "auto" {
+        return settings.routes.iter().find(|r| r.id == settings.review);
     }
+    let hard = settings.tiers.get(&Tier::Hard);
+    settings
+        .routes
+        .iter()
+        .find(|r| Some(&r.id) == hard && r.id != implementer.id)
+        .or_else(|| {
+            settings
+                .routes
+                .iter()
+                .find(|r| r.harness != implementer.harness)
+        })
 }
 
 /// P0: every task id that arrives as a request param must be a valid UUID
@@ -729,6 +736,9 @@ impl App {
             verify: Vec<String>,
             #[serde(default)]
             branch: Option<String>,
+            /// Commit-ish the task branches from; the repo's HEAD if unset.
+            #[serde(default)]
+            base: Option<String>,
             #[serde(default)]
             mcp: Option<serde_json::Value>,
             #[serde(default)]
@@ -781,12 +791,17 @@ impl App {
         let repo_input = PathBuf::from(&p.repo);
         let title_for_branch = title.clone();
         let branch_opt = p.branch.clone();
+        let base = p
+            .base
+            .clone()
+            .filter(|b| !b.trim().is_empty())
+            .unwrap_or_else(|| "HEAD".to_string());
         let created = tokio::task::spawn_blocking(move || {
             let repo_root = git::repo_toplevel(&repo_input)?;
             let branch = branch_opt
                 .unwrap_or_else(|| git::unique_branch_name(&repo_root, &title_for_branch));
             let wt_path = git::worktree_path(&repo_root, &branch);
-            let created = git::create_worktree(&repo_root, &branch, &wt_path)?;
+            let created = git::create_worktree(&repo_root, &branch, &wt_path, &base)?;
             git::bootstrap_worktree(&repo_root, &created.path)
                 .map_err(|e| git::GitError(e.to_string()))?;
             Ok::<_, git::GitError>((repo_root, branch, created))
@@ -1487,6 +1502,59 @@ async fn read_and_wait(
     Ok((status, out_buf, err_buf))
 }
 
+/// Planners sometimes put a check only a person or the reviewer can do into
+/// `verify` ("screenshot the panel", "npm run x (only if ...)"); run as a
+/// shell command it fails every attempt forever. An entry that doesn't
+/// parse as shell, or whose program doesn't exist here, becomes a criterion
+/// for the reviewer instead. Returns `(runnable, for_review)`.
+fn split_verify_commands(cwd: &Path, commands: &[String]) -> (Vec<String>, Vec<String>) {
+    let runs = |args: &[&str]| {
+        std::process::Command::new("/bin/sh")
+            .args(args)
+            .current_dir(cwd)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    commands.iter().cloned().partition(|cmd| {
+        if !runs(&["-n", "-c", cmd]) {
+            return false;
+        }
+        // Only a plain leading word is checked: a path may be created by
+        // the task itself, and grouping/quoting is left to `sh -n` above.
+        match cmd
+            .split_whitespace()
+            .find(|w| !w.contains('=') && !matches!(*w, "(" | "{" | "!"))
+        {
+            Some(p)
+                if p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) =>
+            {
+                runs(&["-c", "command -v \"$1\"", "sh", p])
+            }
+            _ => true,
+        }
+    })
+}
+
+/// Each stream's own tail: concatenated, a noisy stderr (cargo's compile
+/// log) pushed stdout's end -- where test runners list what failed -- out of
+/// the kept window, so a retry never saw which test broke.
+fn verify_tail(stdout: &[u8], stderr: &[u8]) -> String {
+    let out = String::from_utf8_lossy(stdout);
+    let err = String::from_utf8_lossy(stderr);
+    match (out.trim().is_empty(), err.trim().is_empty()) {
+        (true, _) => tail_chars(&err, 4000),
+        (_, true) => tail_chars(&out, 4000),
+        _ => format!(
+            "--- stderr (tail) ---\n{}\n--- stdout (tail) ---\n{}",
+            tail_chars(&err, 1200),
+            tail_chars(&out, 2800)
+        ),
+    }
+}
+
 /// Run one verify command in its own process group (`setsid`, like the
 /// harness). On timeout *or* cancellation, SIGTERM the whole group, SIGKILL
 /// 5s later -- a bare `tokio::time::timeout` around `Command::output()`
@@ -1526,19 +1594,12 @@ async fn run_one_verify_command(
         _ = cancel.cancelled() => Outcome::Cancelled,
     };
     match outcome {
-        Outcome::Done(Ok((status, out_buf, err_buf))) => {
-            let combined = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out_buf),
-                String::from_utf8_lossy(&err_buf)
-            );
-            VerifyOutcome {
-                command: cmd.to_string(),
-                code: status.code(),
-                tail: tail_chars(&combined, 4000),
-                ms: start.elapsed().as_millis() as u64,
-            }
-        }
+        Outcome::Done(Ok((status, out_buf, err_buf))) => VerifyOutcome {
+            command: cmd.to_string(),
+            code: status.code(),
+            tail: verify_tail(&out_buf, &err_buf),
+            ms: start.elapsed().as_millis() as u64,
+        },
         Outcome::Done(Err(e)) => VerifyOutcome {
             command: cmd.to_string(),
             code: None,
@@ -1891,7 +1952,7 @@ async fn fail_and_continue(
 async fn wait_for_answer(
     app: &Arc<App>,
     task_id: &str,
-    task: &Task,
+    task: &mut Task,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
@@ -1909,15 +1970,16 @@ async fn wait_for_answer(
     };
     *pending_answer.lock().unwrap() = None;
     match &result {
+        // The caller keeps using (and later saves) its own copy, so the
+        // transition is applied to it rather than to a fresh load -- a
+        // stale copy used to overwrite it with the question still set.
         Some(answer) => {
-            if let Ok(Some(mut task)) = app.store.load_task(task_id) {
-                task.decisions.push(format!("Owner: {answer}"));
-                task.question = None;
-                task.status = TaskStatus::Queued;
-                task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
-                app.broadcast_task(&task);
-            }
+            task.decisions.push(format!("Owner: {answer}"));
+            task.question = None;
+            task.status = TaskStatus::Queued;
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(task);
+            app.broadcast_task(task);
         }
         None => {
             if let Ok(Some(mut task)) = app.store.load_task(task_id) {
@@ -2357,6 +2419,7 @@ async fn run_review(
     worktree: &Path,
     base_sha: &str,
     verify_results: &[VerifyOutcome],
+    implementer_note: &str,
     review_route: &Route,
     deny_read: &[String],
     cancel: &CancelToken,
@@ -2377,9 +2440,17 @@ async fn run_review(
         brief_text.push_str(c);
         brief_text.push('\n');
     }
+    brief_text.push_str("\n## Implementer\n\n");
+    brief_text.push_str(implementer_note);
+    brief_text.push_str("\n\nCriteria marked \"Checked by review\" have no command behind them: check them from the diff and the repository yourself.\n");
     brief_text.push_str("\n## Verify results\n\n");
     for v in verify_results {
-        brief_text.push_str(&format!("- {} -> exit {:?}\n", v.command, v.code));
+        brief_text.push_str(&format!(
+            "- `{}` -> exit {:?}\n```\n{}\n```\n",
+            v.command,
+            v.code,
+            tail_chars(v.tail.trim(), 800)
+        ));
     }
     brief_text.push_str("\n## Diff\n\n```diff\n");
     brief_text.push_str(&diff);
@@ -2435,22 +2506,18 @@ async fn run_review(
     {
         Ok(outcome) => {
             let text = outcome.final_text.unwrap_or_default();
-            let why = match outcome.error {
-                Some(error) => format!("review did not run ({error}); treated as pass"),
-                None => "review output unparseable; treated as pass".to_string(),
-            };
-            Ok(brief::parse_review(&text).unwrap_or(ReviewResult {
-                verdict: Verdict::Pass,
-                findings: vec![why],
+            if let Some(result) = brief::parse_review(&text) {
+                return Ok(result);
+            }
+            Err(RunError::Io(match outcome.error {
+                Some(error) => format!("review did not run ({error})"),
+                None => format!(
+                    "review reply had no sushi-review verdict: {}",
+                    tail_chars(text.trim(), 600)
+                ),
             }))
         }
-        Err(RunError::Cancelled) => Err(RunError::Cancelled),
-        Err(RunError::Io(msg)) => Ok(ReviewResult {
-            verdict: Verdict::Pass,
-            findings: vec![format!(
-                "review session failed to run ({msg}); treated as pass"
-            )],
-        }),
+        Err(e) => Err(e),
     }
 }
 
@@ -2903,8 +2970,19 @@ async fn run_plan_stage(
 
         task.title = draft.title.clone();
         task.goal = draft.goal.clone();
+        // With review off nobody would check a moved entry: keep it as is.
+        let (verify, judged) = if settings.review.is_empty() {
+            (draft.verify.clone(), Vec::new())
+        } else {
+            split_verify_commands(&worktree, &draft.verify)
+        };
         task.criteria = draft.criteria.clone();
-        task.verify = draft.verify.clone();
+        task.criteria.extend(
+            judged
+                .into_iter()
+                .map(|v| format!("Checked by review (not a shell command): {v}")),
+        );
+        task.verify = verify;
         task.attempts[idx].status = AttemptStatus::Passed;
         task.attempts[idx].ended_at = Some(now_ms());
         task.attempts[idx].summary = Some(format!("Drafted: {}", draft.title));
@@ -3404,6 +3482,23 @@ async fn run_task_loop(
 
         let final_text = outcome.final_text.clone().unwrap_or_default();
         let report = brief::parse_report(&final_text);
+        // Not a gate: the reviewer weighs it. A `partial` or missing report,
+        // or a harness that errored after editing files, is exactly what a
+        // reviewer should look at harder.
+        let implementer_note = format!(
+            "Implementer report: {}{}",
+            match report.as_ref().map(|r| &r.outcome) {
+                Some(brief::Outcome::Complete) => "complete",
+                Some(brief::Outcome::Partial) => "partial",
+                Some(brief::Outcome::Blocked) => "blocked",
+                None => "missing (no parseable sushi-report)",
+            },
+            outcome
+                .error
+                .as_deref()
+                .map(|e| format!("; the harness ended with an error: {}", tail_chars(e, 400)))
+                .unwrap_or_default()
+        );
         task.attempts[idx].summary = report.as_ref().map(|r| r.summary.clone());
         // Agent-reported decisions are trusted less than the owner's: strip
         // any leading "Owner:" the agent might have echoed back, prefix
@@ -3452,8 +3547,15 @@ async fn run_task_loop(
                 // because a should_continue==true blocked report falls
                 // through to `classify_answerable` below instead of
                 // looping immediately.
-                match wait_for_answer(&app, &task_id, &task, &pending_answer, &cancel, &mut permit)
-                    .await
+                match wait_for_answer(
+                    &app,
+                    &task_id,
+                    &mut task,
+                    &pending_answer,
+                    &cancel,
+                    &mut permit,
+                )
+                .await
                 {
                     Some(_) => {
                         attempt_budget += 2;
@@ -3628,8 +3730,15 @@ async fn run_task_loop(
             });
             task.status = TaskStatus::Waiting;
             task.updated_at = now_ms();
-            match wait_for_answer(&app, &task_id, &task, &pending_answer, &cancel, &mut permit)
-                .await
+            match wait_for_answer(
+                &app,
+                &task_id,
+                &mut task,
+                &pending_answer,
+                &cancel,
+                &mut permit,
+            )
+            .await
             {
                 None => {
                     drop(permit);
@@ -3674,7 +3783,7 @@ async fn run_task_loop(
 
         let mut review_result: Option<ReviewResult> = None;
         if !settings.review.is_empty() {
-            if let Some(review_route) = select_review_route(&settings, route.harness) {
+            if let Some(review_route) = select_review_route(&settings, &route) {
                 match run_review(
                     &app,
                     &task_id,
@@ -3683,6 +3792,7 @@ async fn run_task_loop(
                     &worktree,
                     &base_sha,
                     &verify_results,
+                    &implementer_note,
                     review_route,
                     &deny_read,
                     &cancel,
@@ -3703,9 +3813,56 @@ async fn run_task_loop(
                         app.finish_task_loop(&task_id);
                         return;
                     }
-                    Err(RunError::Io(_)) => {
-                        review_result = None; // treated as if review were off for this attempt
+                    Err(RunError::Io(why)) => {
+                        // No verdict is never a PASS: the owner decides
+                        // whether to commit this attempt unreviewed.
+                        task.attempts[idx].status = AttemptStatus::Blocked;
+                        task.attempts[idx].ended_at = Some(now_ms());
+                        task.question = Some(Question {
+                            text: format!("The review gave no verdict ({why}). Commit this attempt unreviewed?"),
+                            options: vec!["approve".into(), "retry".into()],
+                        });
+                        task.status = TaskStatus::Waiting;
+                        task.updated_at = now_ms();
+                        match wait_for_answer(
+                            &app,
+                            &task_id,
+                            &mut task,
+                            &pending_answer,
+                            &cancel,
+                            &mut permit,
+                        )
+                        .await
+                        {
+                            None => {
+                                drop(permit);
+                                app.finish_task_loop(&task_id);
+                                return;
+                            }
+                            Some(answer) => {
+                                if answer == "approve" {
+                                    task.decisions.push(format!(
+                                        "Orchestrator: attempt {attempt_n} committed without a review verdict"
+                                    ));
+                                } else {
+                                    review_result = Some(ReviewResult {
+                                        verdict: Verdict::Fail,
+                                        findings: vec![format!(
+                                            "Owner asked for another attempt: {answer}"
+                                        )],
+                                    });
+                                }
+                            }
+                        }
                     }
+                }
+            } else {
+                let note = format!(
+                    "Orchestrator: review skipped, no route matches review \"{}\"",
+                    settings.review
+                );
+                if !task.decisions.contains(&note) {
+                    task.decisions.push(note);
                 }
             }
         }
@@ -4114,12 +4271,22 @@ mod tests {
     }
 
     #[test]
-    fn select_review_route_auto_picks_other_harness() {
+    fn select_review_route_auto_prefers_the_hard_tier_then_another_harness() {
         let settings = Settings::default();
-        let route = select_review_route(&settings, Harness::Claude).unwrap();
-        assert_eq!(route.harness, Harness::Codex);
-        let route2 = select_review_route(&settings, Harness::Codex).unwrap();
-        assert_eq!(route2.harness, Harness::Claude);
+        let route = |id: &str| settings.routes.iter().find(|r| r.id == id).unwrap();
+        let hard = settings.tiers.get(&Tier::Hard).unwrap();
+        assert_eq!(
+            &select_review_route(&settings, route("claude-sonnet"))
+                .unwrap()
+                .id,
+            hard
+        );
+        assert_eq!(
+            &select_review_route(&settings, route("codex")).unwrap().id,
+            hard
+        );
+        let for_hard = select_review_route(&settings, route(hard)).unwrap();
+        assert_ne!(for_hard.harness, route(hard).harness);
     }
 
     #[test]
@@ -4128,8 +4295,46 @@ mod tests {
             review: "claude-opus".to_string(),
             ..Settings::default()
         };
-        let route = select_review_route(&settings, Harness::Codex).unwrap();
+        let implementer = settings.routes.iter().find(|r| r.id == "codex").unwrap();
+        let route = select_review_route(&settings, implementer).unwrap();
         assert_eq!(route.id, "claude-opus");
+    }
+
+    #[test]
+    fn verify_tail_keeps_stdout_failures_behind_a_long_stderr() {
+        let stderr = "   Compiling crate\n".repeat(500);
+        let tail = verify_tail(
+            b"test foo ... FAILED\nfailures:\n    foo\n",
+            stderr.as_bytes(),
+        );
+        assert!(tail.contains("test foo ... FAILED"));
+        assert!(tail.len() < 4200);
+    }
+
+    #[test]
+    fn split_verify_commands_moves_prose_to_review() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmds: Vec<String> = [
+            "true",
+            "FOO=1 sh -c true",
+            "(cd . && true)",
+            "./scripts/created-by-the-task.sh",
+            "npm run test:desktop (only if src/app/X.tsx ends up touched)",
+            "ui-evidence skill: screenshot the panel's Archive section",
+        ]
+        .map(String::from)
+        .to_vec();
+        let (run, judged) = split_verify_commands(tmp.path(), &cmds);
+        assert_eq!(
+            run,
+            vec![
+                "true",
+                "FOO=1 sh -c true",
+                "(cd . && true)",
+                "./scripts/created-by-the-task.sh"
+            ]
+        );
+        assert_eq!(judged.len(), 2);
     }
 
     #[test]

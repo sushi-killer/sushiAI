@@ -451,6 +451,65 @@ fn engine_loop_passes_when_verify_succeeds() {
 }
 
 #[test]
+fn a_review_without_a_verdict_waits_for_the_owner_instead_of_passing() {
+    // One fake plays both roles: the implementer edits a file and reports;
+    // the reviewer (its brief opens with "## Review") answers in prose with
+    // no sushi-review block, which used to count as PASS.
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n\"## Review\"*) echo '{\"type\":\"result\",\"result\":\"Looks fine to me.\"}' ;;\n*) echo changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}' ;;\nesac\n",
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    // `auto` review of the standard route lands on the hard tier's route,
+    // which is also Claude here, so the same fake answers it.
+    let settings = daemon.request("settings.get", serde_json::json!({}));
+    assert_eq!(settings["review"], "auto");
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Review case",
+            "goal": "Make a trivial change",
+            "criteria": [],
+            "verify": ["true"],
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": task_id}));
+
+    let waiting = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+        s == "waiting" || s == "done" || s == "failed"
+    });
+    assert_eq!(waiting["status"], "waiting", "task JSON: {waiting}");
+    let question = waiting["question"]["text"].as_str().unwrap();
+    assert!(question.contains("no verdict"), "{question}");
+
+    daemon.request(
+        "task.answer",
+        serde_json::json!({"id": task_id, "answer": "approve"}),
+    );
+    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+        s == "done" || s == "failed" || s == "stopped"
+    });
+    assert_eq!(settled["status"], "done", "task JSON: {settled}");
+    assert!(settled["question"].is_null(), "task JSON: {settled}");
+    let decisions = settled["decisions"].to_string();
+    assert!(decisions.contains("Owner: approve"), "{decisions}");
+    assert!(
+        decisions.contains("without a review verdict"),
+        "{decisions}"
+    );
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
 fn engine_loop_waits_after_verify_keeps_failing_and_attempts_are_exhausted() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(

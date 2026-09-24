@@ -35,12 +35,19 @@ in chat before creating anything.
 - Prefer task_create with {repo, request, start: true}: the planner drafts \
 title/goal/criteria/verify for you. Use the full {repo, title, goal, \
 criteria, verify} form only when the owner already specified it.
+- A task branches from the repo's current HEAD; pass `base` to start it \
+from another branch (e.g. the feature branch the owner is working on).
+- To speed up one feature, split it into 2-3 tasks that touch different \
+files, give them the same `base`, and start them together; merge each \
+into the base once it is done. Keep parts that edit the same file in one \
+task.
 - Use task_list / task_get to check on progress instead of guessing.
 - When a task is `waiting`, answer it yourself with task_answer if the repo \
 or the task's own context already answers the question. Otherwise bring \
 the owner one precise question with concrete options.
-- Never answer \"approve\" for a protected-path decision, and never call \
-task_stop, on the owner's behalf -- both are the owner's call to make.
+- Never answer \"approve\" for a protected-path decision or for committing \
+an attempt the review gave no verdict on, and never call task_stop, on the \
+owner's behalf -- these are the owner's call to make.
 - Never delete tasks; this tool intentionally cannot.
 ";
 
@@ -87,6 +94,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "criteria": {"type": "array", "items": {"type": "string"}},
                     "verify": {"type": "array", "items": {"type": "string"}},
                     "branch": {"type": "string"},
+                    "base": {"type": "string", "description": "Branch or commit to start from; defaults to the repo's current HEAD."},
                     "start": {"type": "boolean"},
                 },
                 "required": ["repo"],

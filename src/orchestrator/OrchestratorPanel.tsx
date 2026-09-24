@@ -565,7 +565,10 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                     latestImplementAttempt(selected)?.n ??
                     0}{" "}
                   · {formatDuration(totalDurationMs(selected))} ·{" "}
-                  {formatCost(selected.costUsd)} ·{" "}
+                  <span title="API list price the CLI reports, cache included; a subscription is not billed per token">
+                    {formatCost(selected.costUsd)}
+                  </span>{" "}
+                  ·{" "}
                   <span className="orch-branch" title={selected.branch}>
                     {selected.branch}
                   </span>
@@ -575,8 +578,7 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                 {(selected.status === "drafting" ||
                   selected.status === "queued" ||
                   selected.status === "stopped" ||
-                  selected.status === "failed" ||
-                  selected.status === "done") && (
+                  selected.status === "failed") && (
                   <button
                     // A stopped or failed task is idle, waiting on you -
                     // restarting it is the one action that matters, so it

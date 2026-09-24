@@ -121,11 +121,21 @@ pub struct CreatedWorktree {
 }
 
 /// `git worktree add -b <branch> <path> HEAD`, then records `baseSha`.
+/// `base` is any commit-ish (`HEAD`, a branch, a sha): the new branch
+/// starts there, and `base_sha` is that exact commit, resolved once up
+/// front so a checkout moving meanwhile can't skew the diff base.
 pub fn create_worktree(
     repo_root: &Path,
     branch: &str,
     path: &Path,
+    base: &str,
 ) -> Result<CreatedWorktree, GitError> {
+    let base_sha = run(
+        repo_root,
+        &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+    )?
+    .trim()
+    .to_string();
     run(
         repo_root,
         &[
@@ -135,10 +145,9 @@ pub fn create_worktree(
             branch,
             path.to_str()
                 .ok_or_else(|| GitError("non-utf8 path".into()))?,
-            "HEAD",
+            &base_sha,
         ],
     )?;
-    let base_sha = run(repo_root, &["rev-parse", "HEAD"])?.trim().to_string();
     Ok(CreatedWorktree {
         path: path.to_path_buf(),
         base_sha,
@@ -360,6 +369,33 @@ mod tests {
     }
 
     #[test]
+    fn create_worktree_starts_from_the_given_base_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        init_repo(&repo_root);
+        let git = |args: &[&str]| {
+            let out = StdCommand::new("git")
+                .args(args)
+                .current_dir(&repo_root)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(repo_root.join("feature.txt"), "x\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "feature"]);
+        let feature_sha = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "-"]);
+
+        let wt_path = worktree_path(&repo_root, "task/on-feature");
+        let created = create_worktree(&repo_root, "task/on-feature", &wt_path, "feature").unwrap();
+        assert_eq!(created.base_sha, feature_sha);
+        assert!(wt_path.join("feature.txt").exists());
+    }
+
+    #[test]
     fn create_worktree_and_status_and_commit_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
         let repo_root = tmp.path().join("repo");
@@ -369,7 +405,7 @@ mod tests {
         let branch = unique_branch_name(&repo_root, "Add a button");
         assert_eq!(branch, "task/add-a-button");
         let wt_path = worktree_path(&repo_root, &branch);
-        let created = create_worktree(&repo_root, &branch, &wt_path).unwrap();
+        let created = create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
         assert!(created.path.exists());
         assert!(!created.base_sha.is_empty());
 
@@ -399,7 +435,7 @@ mod tests {
 
         let branch = unique_branch_name(&repo_root, "Hook test");
         let wt_path = worktree_path(&repo_root, &branch);
-        let created = create_worktree(&repo_root, &branch, &wt_path).unwrap();
+        let created = create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
 
         // An agent-writable pre-commit hook that would prove it ran by
         // creating a marker file. `commit()` must never let it run.
@@ -455,7 +491,7 @@ mod tests {
 
         let branch = unique_branch_name(&repo_root, "Bootstrap test");
         let wt_path = worktree_path(&repo_root, &branch);
-        let created = create_worktree(&repo_root, &branch, &wt_path).unwrap();
+        let created = create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
 
         bootstrap_worktree(&repo_root, &wt_path).unwrap();
 
@@ -484,7 +520,7 @@ mod tests {
 
         let branch = unique_branch_name(&repo_root, "No bootstrap test");
         let wt_path = worktree_path(&repo_root, &branch);
-        create_worktree(&repo_root, &branch, &wt_path).unwrap();
+        create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
 
         bootstrap_worktree(&repo_root, &wt_path).unwrap();
 

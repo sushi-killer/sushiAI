@@ -1,7 +1,8 @@
 //! `orchd serve --data <dir> [--socket <path>]` (also the default with no
 //! subcommand), `orchd hook stop --socket <path> --token <t>`, and `orchd
-//! mcp --data <dir> [--socket <path>]`.
+//! mcp --data <dir> [--socket <path>]`, and `orchd ab --data <dir>`.
 
+mod ab;
 mod brief;
 mod classify;
 mod engine;
@@ -25,6 +26,9 @@ fn main() {
 async fn run(args: Vec<String>) -> i32 {
     if args.len() >= 2 && args[1] == "hook" {
         return run_hook(&args[2..]).await;
+    }
+    if args.len() >= 2 && args[1] == "ab" {
+        return ab::run(&args[2..]);
     }
     if args.len() >= 2 && args[1] == "mcp" {
         return mcp::run(&args[2..]);

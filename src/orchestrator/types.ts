@@ -50,6 +50,8 @@ export type Settings = {
   /** The orchestrator answers a stuck agent's question before it reaches
    * the owner, logged in the task as `"Orchestrator: ..."`. */
   autoAnswer: boolean;
+  /** Experiment flags new tasks start with; `task.create` can override them. */
+  experiments: Variant;
 };
 
 export type TaskStatus =
@@ -66,8 +68,20 @@ export type VerifyResult = {
 
 export type ReviewResult = { verdict: "PASS" | "FAIL"; findings: string[] };
 
+export type Variant = {
+  retryMode: "resume" | "fresh";
+  stallTimeoutSecs: number;
+  plannerTier: boolean;
+};
+
 export type FailureKind =
-  "no_deliverable" | "verify" | "review" | "protected" | "blocked" | "error";
+  | "no_deliverable"
+  | "stall"
+  | "verify"
+  | "review"
+  | "protected"
+  | "blocked"
+  | "error";
 
 export type Failure = {
   kind: FailureKind;
@@ -94,6 +108,8 @@ export type Attempt = {
   endedAt?: number;
   status: AttemptStatus;
   summary?: string;
+  /** The agent's note for the next attempt: done, tried, next. */
+  handoff?: string;
   changedFiles: string[];
   verify: VerifyResult[];
   gateBlocks: number;
@@ -120,6 +136,10 @@ export type Task = {
   baseRef?: string;
   status: TaskStatus;
   tier: Tier;
+  /** The planner's tier; routes the task only with `variant.plannerTier`. */
+  plannedTier?: Tier;
+  /** Experiment flags this task runs with (an A/B arm). */
+  variant: Variant;
   question?: Question;
   /** Owner and classifier decisions, newest last - includes "Owner: ..."
    * answers to a question. */

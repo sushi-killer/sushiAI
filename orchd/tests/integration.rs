@@ -821,7 +821,7 @@ case "$input" in
     if [ -n "$PLAN_ASK_QUESTION" ]; then
       json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-plan\n{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"criteria\":[\"Toggle visible in settings\"],\"verify\":[\"true\"],\"questions\":[{\"text\":\"Which default theme?\",\"options\":[\"light\",\"dark\"]}]}\n```"}'
     else
-      json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-plan\n{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"criteria\":[\"Toggle visible in settings\"],\"verify\":[\"true\"],\"questions\":[]}\n```"}'
+      json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-plan\n{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"tier\":\"hard\",\"criteria\":[\"Toggle visible in settings\"],\"verify\":[\"true\"],\"questions\":[]}\n```"}'
     fi
     printf '%s\n' "$json"
     ;;
@@ -2092,4 +2092,242 @@ fn a_message_reaches_a_running_task_with_its_next_attempt_only() {
     for t in [&sender, &receiver] {
         let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
     }
+}
+
+#[test]
+fn a_silent_harness_is_stopped_as_stalled_when_the_variant_sets_a_stall_timeout() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude-silent.sh",
+        "#!/bin/sh\ncat > /dev/null\necho $$ > \"$PID_FILE\"\nexec sleep 30\n",
+    );
+    let pid_file = scripts_dir.path().join("harness.pid");
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("PID_FILE", pid_file.to_str().unwrap()),
+    ]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["maxAttempts"] = serde_json::json!(1);
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Hangs",
+            "goal": "Never answers",
+            "verify": ["true"],
+            "variant": {"stallTimeoutSecs": 1},
+            "start": true,
+        }),
+    );
+    assert_eq!(task["variant"]["stallTimeoutSecs"], 1, "{task}");
+    let task_id = task["id"].as_str().unwrap().to_string();
+
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(15));
+    assert_eq!(settled["status"], "waiting", "task JSON: {settled}");
+    assert_eq!(
+        settled["attempts"][0]["failure"]["kind"], "stall",
+        "{settled}"
+    );
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let start = Instant::now();
+    while is_alive(pid) {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "stalled harness {pid} is still running"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
+fn task_create_rejects_an_unknown_variant_flag() {
+    let daemon = Daemon::spawn(&[]);
+    let repo = init_git_repo();
+    let result = raw_request_with_params(
+        &daemon.socket,
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "t",
+            "goal": "g",
+            "variant": {"retrymode": "fresh"},
+        }),
+        Some(&daemon.token),
+    );
+    assert!(
+        result
+            .to_string()
+            .contains("unknown variant flag: retrymode"),
+        "{result}"
+    );
+    daemon.shutdown_and_wait();
+}
+
+/// First attempt leaves FIRST (verify wants SECOND) and a handoff; the
+/// retry creates SECOND. Every invocation's argv goes to $ARGS_LOG.
+const FAKE_RETRY_SCRIPT: &str = r#"#!/bin/sh
+cat > /dev/null
+printf '%s\n' "$*" >> "$ARGS_LOG"
+if [ -f FIRST ]; then echo x > SECOND; else echo x > FIRST; fi
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"handoff\":\"tried the quick fix\",\"decisions\":[],\"question\":\"\"}\n```"}'
+printf '%s\n' "$json"
+"#;
+
+#[test]
+fn a_fresh_retry_starts_a_new_session_that_reads_the_earlier_handoff() {
+    for (mode, expect_resume) in [("fresh", false), ("resume", true)] {
+        let scripts_dir = tempfile::tempdir().unwrap();
+        let script = fake_harness_script(scripts_dir.path(), "fake-retry.sh", FAKE_RETRY_SCRIPT);
+        let args_log = scripts_dir.path().join("args.log");
+        let daemon = Daemon::spawn(&[
+            ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+            ("ARGS_LOG", args_log.to_str().unwrap()),
+        ]);
+        let mut settings = daemon.request("settings.get", serde_json::json!({}));
+        settings["review"] = serde_json::json!("");
+        daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+        let repo = init_git_repo();
+        let task = daemon.request(
+            "task.create",
+            serde_json::json!({
+                "repo": repo.path().to_str().unwrap(),
+                "title": "Two tries",
+                "goal": "Needs a second attempt",
+                "verify": ["test -f SECOND"],
+                "variant": {"retryMode": mode},
+                "start": true,
+            }),
+        );
+        let task_id = task["id"].as_str().unwrap().to_string();
+        let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+        assert_eq!(settled["status"], "done", "{mode}: {settled}");
+        let attempts = settled["attempts"].as_array().unwrap();
+        assert_eq!(attempts.len(), 2, "{mode}: {settled}");
+        assert_eq!(attempts[0]["handoff"], "tried the quick fix", "{mode}");
+        assert_eq!(attempts[1]["resumed"], expect_resume, "{mode}: {settled}");
+
+        let argv: Vec<String> = std::fs::read_to_string(&args_log)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            argv[1].contains("--resume sess-fake"),
+            expect_resume,
+            "{mode}: {argv:?}"
+        );
+        if !expect_resume {
+            let brief = std::fs::read_to_string(
+                daemon
+                    .data_dir()
+                    .join("tasks")
+                    .join(&task_id)
+                    .join("runs/2/brief.md"),
+            )
+            .unwrap();
+            assert!(brief.contains("## Task"), "not the full brief: {brief}");
+            assert!(brief.contains("handoff: tried the quick fix"), "{brief}");
+            assert!(brief.contains("test -f SECOND exited"), "{brief}");
+        }
+
+        let worktree = task["worktree"].as_str().unwrap().to_string();
+        daemon.shutdown_and_wait();
+        let _ = std::fs::remove_dir_all(worktree);
+    }
+}
+
+#[test]
+fn the_planner_s_tier_routes_the_task_only_when_the_variant_asks_for_it() {
+    for (planner_tier, route) in [(true, "claude-opus"), (false, "claude-sonnet")] {
+        let scripts_dir = tempfile::tempdir().unwrap();
+        let script =
+            fake_harness_script(scripts_dir.path(), "fake-planner.sh", FAKE_PLANNER_SCRIPT);
+        let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+        let mut settings = daemon.request("settings.get", serde_json::json!({}));
+        settings["review"] = serde_json::json!("");
+        daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+        let repo = init_git_repo();
+        let task = daemon.request(
+            "task.create",
+            serde_json::json!({
+                "repo": repo.path().to_str().unwrap(),
+                "request": "add dark mode to the settings screen",
+                "variant": {"plannerTier": planner_tier},
+                "start": true,
+            }),
+        );
+        let task_id = task["id"].as_str().unwrap().to_string();
+        let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+            s == "done" || s == "failed" || s == "stopped" || s == "waiting"
+        });
+        assert_eq!(settled["status"], "done", "{settled}");
+        assert_eq!(settled["plannedTier"], "hard", "{settled}");
+        assert_eq!(settled["attempts"][1]["routeId"], route, "{settled}");
+        let noted = settled["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d == "Planner: tier hard -> route claude-opus");
+        assert_eq!(noted, planner_tier, "{settled}");
+
+        let worktree = task["worktree"].as_str().unwrap().to_string();
+        daemon.shutdown_and_wait();
+        let _ = std::fs::remove_dir_all(worktree);
+    }
+}
+
+#[test]
+fn the_stall_clock_waits_while_the_stop_hook_runs_verify() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude-hook.js",
+        FAKE_CLAUDE_HOOK_SCRIPT,
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    // The hook's verify is silent for 3s, three times the stall timeout.
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Slow hook",
+            "goal": "Make a trivial change",
+            "verify": ["sleep 3 && test -f verified-marker.txt"],
+            "variant": {"stallTimeoutSecs": 1},
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
+    assert_eq!(settled["status"], "done", "task JSON: {settled}");
+    assert_eq!(
+        settled["attempts"].as_array().unwrap().len(),
+        1,
+        "{settled}"
+    );
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
 }

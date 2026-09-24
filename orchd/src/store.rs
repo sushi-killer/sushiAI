@@ -261,6 +261,7 @@ mod tests {
                 ended_at: None,
                 status: attempt_status,
                 summary: None,
+                handoff: None,
                 changed_files: vec![],
                 verify: vec![],
                 gate_blocks: 0,
@@ -271,6 +272,8 @@ mod tests {
             }],
             cost_usd: 0.0,
             archived: false,
+            planned_tier: None,
+            variant: Default::default(),
             created_at: 1,
             updated_at: 1,
         }

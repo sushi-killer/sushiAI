@@ -346,6 +346,8 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             archived: false,
+            planned_tier: None,
+            variant: Default::default(),
             created_at: 1,
             updated_at: 1,
         }

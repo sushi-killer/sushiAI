@@ -114,6 +114,9 @@ pub struct Settings {
     /// answers given on their behalf.
     #[serde(default)]
     pub auto_answer: bool,
+    /// Flags new tasks start with unless `task.create` overrides them.
+    #[serde(default)]
+    pub experiments: Variant,
 }
 
 fn default_planner() -> String {
@@ -171,7 +174,53 @@ impl Default for Settings {
             planner: default_planner(),
             orchestrator: String::new(),
             auto_answer: false,
+            experiments: Variant::default(),
         }
+    }
+}
+
+/// How a retry after a failed attempt starts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RetryMode {
+    /// Continue the failed attempt's session with only the failure.
+    #[default]
+    Resume,
+    /// A new session with the full brief, the earlier attempts' handoffs
+    /// and the last failure.
+    Fresh,
+}
+
+/// The experiment flags a task runs with. `Settings::experiments` is the
+/// default; `task.create {variant}` overrides it per task, and the task
+/// keeps its own copy, so an A/B pair can run side by side and `orchd ab`
+/// groups results by it. A flag that wins becomes the plain behaviour and
+/// leaves this struct.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Variant {
+    pub retry_mode: RetryMode,
+    /// Kill an implement attempt whose harness prints nothing for this
+    /// long; 0 = off. The clock pauses during orchd's own Stop-hook verify,
+    /// but not during an agent's long Bash call (up to 600s), so values
+    /// under ~15 min can kill a busy agent.
+    pub stall_timeout_secs: u64,
+    /// Route by the tier the planner chose; Jev only when there is none.
+    pub planner_tier: bool,
+}
+
+/// Keeps `Instant + timeout` from overflowing.
+const MAX_STALL_TIMEOUT_SECS: u64 = 24 * 3600;
+
+impl Variant {
+    pub fn check(&self) -> Result<(), String> {
+        let s = self.stall_timeout_secs;
+        if s > MAX_STALL_TIMEOUT_SECS {
+            return Err(format!(
+                "stallTimeoutSecs must be at most {MAX_STALL_TIMEOUT_SECS}"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -222,6 +271,12 @@ pub struct Task {
     pub base_ref: Option<String>,
     pub status: TaskStatus,
     pub tier: Tier,
+    /// The tier the planner chose, kept even when `variant.planner_tier` is
+    /// off so its choice can be compared with Jev's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_tier: Option<Tier>,
+    #[serde(default)]
+    pub variant: Variant,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<Question>,
     #[serde(default)]
@@ -287,6 +342,8 @@ pub struct ReviewResult {
 #[serde(rename_all = "snake_case")]
 pub enum FailureKind {
     NoDeliverable,
+    /// The harness printed nothing for `variant.stall_timeout_secs`.
+    Stall,
     Verify,
     Review,
     Protected,
@@ -298,6 +355,7 @@ impl FailureKind {
     pub fn as_str(self) -> &'static str {
         match self {
             FailureKind::NoDeliverable => "no_deliverable",
+            FailureKind::Stall => "stall",
             FailureKind::Verify => "verify",
             FailureKind::Review => "review",
             FailureKind::Protected => "protected",
@@ -349,6 +407,10 @@ pub struct Attempt {
     pub status: AttemptStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// The agent's note for whoever picks the task up next: what is done,
+    /// what was tried, what to do next.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<String>,
     #[serde(default)]
     pub changed_files: Vec<String>,
     #[serde(default)]
@@ -466,6 +528,8 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             archived: false,
+            planned_tier: None,
+            variant: Default::default(),
             created_at: 1,
             updated_at: 1,
         };
@@ -507,6 +571,8 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             archived: false,
+            planned_tier: None,
+            variant: Default::default(),
             created_at: 1,
             updated_at: 1,
         };
@@ -537,6 +603,8 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             archived: true,
+            planned_tier: None,
+            variant: Default::default(),
             created_at: 1,
             updated_at: 1,
         };

@@ -292,6 +292,8 @@ pub struct RunOutcome {
     /// `turn.failed`/`error`), used as the failure detail when the run
     /// produced nothing.
     pub error: Option<String>,
+    /// The run printed nothing for its stall timeout and was killed.
+    pub stalled: bool,
 }
 
 /// Folds one line of a harness's streamed JSON output into `outcome`,

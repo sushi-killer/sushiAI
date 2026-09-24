@@ -324,6 +324,27 @@ struct HookContext {
     base_sha: String,
     verify: Vec<String>,
     blocks: AtomicU32,
+    /// Cancelled when the attempt's run ends, so a Stop-hook verify still
+    /// running for a killed (stalled) agent stops before the next attempt.
+    cancel: CancelToken,
+    /// Set while `hook.stop` runs verify for this attempt: the harness is
+    /// silent then by design, so the stall clock waits.
+    hook_running: Arc<AtomicBool>,
+}
+
+/// An implement attempt's stall watchdog: the silence limit, paused while
+/// `paused` is set.
+struct Stall {
+    limit: Duration,
+    paused: Arc<AtomicBool>,
+}
+
+struct ClearOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for ClearOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 pub struct App {
@@ -667,6 +688,7 @@ impl App {
             settings: Settings,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        p.settings.experiments.check()?;
         self.store
             .save_settings(&p.settings)
             .map_err(|e| e.to_string())?;
@@ -774,8 +796,16 @@ impl App {
             /// stage before anything is queued (spec "drafting stage").
             #[serde(default)]
             request: Option<String>,
+            /// Experiment flags laid over `settings.experiments` for this
+            /// task only (an A/B arm).
+            #[serde(default)]
+            variant: Option<serde_json::Value>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        let variant = resolve_variant(
+            &self.settings.read().unwrap().experiments,
+            p.variant.as_ref(),
+        )?;
         let request_text = p.request.clone().filter(|s| !s.trim().is_empty());
         if request_text.is_some() {
             let planner = self.settings.read().unwrap().planner.clone();
@@ -863,6 +893,8 @@ impl App {
             attempts: vec![],
             cost_usd: 0.0,
             archived: false,
+            planned_tier: None,
+            variant,
             created_at: now,
             updated_at: now,
         };
@@ -1205,6 +1237,8 @@ impl App {
             return Ok(json!({}));
         };
 
+        ctx.hook_running.store(true, Ordering::SeqCst);
+        let _hook_done = ClearOnDrop(&ctx.hook_running);
         let worktree = ctx.worktree.clone();
         let base_sha = ctx.base_sha.clone();
         let wt = worktree.clone();
@@ -1219,7 +1253,7 @@ impl App {
         let verify_results = if verify_configured && has_changed {
             let app = self.arc();
             let run_dir = self.store.run_dir(&ctx.task_id, ctx.attempt_n);
-            let no_cancel = CancelToken::new();
+
             // Budget well under Claude's own 600s hook timeout; on timeout,
             // fail open rather than block the agent forever.
             match tokio::time::timeout(
@@ -1231,7 +1265,7 @@ impl App {
                     &run_dir,
                     &base_sha,
                     &ctx.verify,
-                    &no_cancel,
+                    &ctx.cancel,
                 ),
             )
             .await
@@ -1309,6 +1343,32 @@ impl Dispatcher for App {
     fn check_auth(&self, method: &str, auth: Option<&str>) -> bool {
         App::check_auth(self, method, auth)
     }
+}
+
+/// `overrides` is a partial `Variant` object; its keys replace the defaults'.
+fn resolve_variant(
+    defaults: &Variant,
+    overrides: Option<&serde_json::Value>,
+) -> Result<Variant, String> {
+    let Some(overrides) = overrides else {
+        return Ok(defaults.clone());
+    };
+    let Some(fields) = overrides.as_object() else {
+        return Err("variant must be an object".to_string());
+    };
+    let mut merged = serde_json::to_value(defaults).map_err(|e| e.to_string())?;
+    for (k, v) in fields {
+        // Checked here, not with deny_unknown_fields: a task.json keeps
+        // loading after a flag it names is retired.
+        if merged.get(k).is_none() {
+            return Err(format!("unknown variant flag: {k}"));
+        }
+        merged[k] = v.clone();
+    }
+    let variant: Variant =
+        serde_json::from_value(merged).map_err(|e| format!("invalid variant: {e}"))?;
+    variant.check()?;
+    Ok(variant)
 }
 
 fn which_on_path(program: &str) -> bool {
@@ -1863,6 +1923,7 @@ async fn run_harness(
     brief_text: &str,
     events_path: &Path,
     cancel: &CancelToken,
+    stall: Option<Stall>,
 ) -> Result<harness::RunOutcome, RunError> {
     let argv = harness::build_argv(req);
     let bin = resolve_binary(req.harness);
@@ -1908,6 +1969,15 @@ async fn run_harness(
     let mut stderr_done = false;
     let mut stderr_tail = String::new();
     let mut session_persisted = false;
+    // ponytail: silence is the only stall signal; a long Bash call or the
+    // Stop hook's verify (up to 540s) is silent too, so the timeout must sit
+    // above them.
+    // select! builds a disabled branch's future too: an unset timeout still
+    // needs a deadline that doesn't overflow `Instant`.
+    let stall_limit = stall
+        .as_ref()
+        .map_or(Duration::from_secs(365 * 24 * 3600), |s| s.limit);
+    let mut last_output = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -1915,9 +1985,23 @@ async fn run_harness(
                 kill_group(pgid, &mut child).await;
                 return Err(RunError::Cancelled);
             }
+            _ = tokio::time::sleep_until(last_output + stall_limit), if stall.is_some() => {
+                if stall.as_ref().is_some_and(|s| s.paused.load(Ordering::SeqCst)) {
+                    last_output = tokio::time::Instant::now();
+                    continue;
+                }
+                kill_group(pgid, &mut child).await;
+                outcome.stalled = true;
+                outcome.error = Some(format!(
+                    "No output for {}s; the run was stopped as stalled.",
+                    stall_limit.as_secs()
+                ));
+                break;
+            }
             line = out_lines.next_line(), if !stdout_done => {
                 match line {
                     Ok(Some(l)) => {
+                        last_output = tokio::time::Instant::now();
                         append_line(events_path, &l);
                         if let Some(note) = harness::feed_stream_line(harness_kind, &l, &mut outcome) {
                             app.broadcast_log(task_id, attempt_n, note);
@@ -1935,6 +2019,7 @@ async fn run_harness(
             line = err_lines.next_line(), if !stderr_done => {
                 match line {
                     Ok(Some(l)) => {
+                        last_output = tokio::time::Instant::now();
                         append_line(events_path, &format!("[stderr] {l}"));
                         stderr_tail.push_str(&l);
                         stderr_tail.push('\n');
@@ -2275,6 +2360,7 @@ async fn run_triage(
         &brief_text,
         &events_path,
         cancel,
+        None,
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
@@ -2672,6 +2758,7 @@ async fn run_review(
         &brief_text,
         &events_path,
         cancel,
+        None,
     )
     .await
     {
@@ -2969,6 +3056,7 @@ async fn run_plan_stage(
             ended_at: None,
             status: AttemptStatus::Running,
             summary: None,
+            handoff: None,
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
@@ -3040,6 +3128,7 @@ async fn run_plan_stage(
                 &brief_text,
                 &events_path,
                 cancel,
+                None,
             )
             .await;
             if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
@@ -3142,6 +3231,7 @@ async fn run_plan_stage(
 
         task.title = draft.title.clone();
         task.goal = draft.goal.clone();
+        task.planned_tier = draft.tier;
         // With review off nobody would check a moved entry: keep it as is.
         let (verify, judged) = if settings.review.is_empty() {
             (draft.verify.clone(), Vec::new())
@@ -3366,10 +3456,19 @@ async fn run_task_loop(
         just_answered = false;
 
         let mut jev_tier_choice = None;
+        let mut planner_tier_used = false;
         if implement_attempt_count(&task) == 0 {
-            let (tier, jev) = classify_tier(&app, &task).await;
-            task.tier = tier;
-            jev_tier_choice = jev;
+            match task.planned_tier.filter(|_| task.variant.planner_tier) {
+                Some(tier) => {
+                    task.tier = tier;
+                    planner_tier_used = true;
+                }
+                None => {
+                    let (tier, jev) = classify_tier(&app, &task).await;
+                    task.tier = tier;
+                    jev_tier_choice = jev;
+                }
+            }
         }
 
         let settings = app.settings.read().unwrap().clone();
@@ -3381,6 +3480,12 @@ async fn run_task_loop(
             .unwrap_or_else(|| "codex".to_string());
         if let Some((choice, p)) = jev_tier_choice {
             task.decisions.push(jev_tier_line(&choice, p, &route_id));
+        }
+        if planner_tier_used {
+            task.decisions.push(format!(
+                "Planner: tier {} -> route {route_id}",
+                task.tier.as_str()
+            ));
         }
         let route = settings
             .routes
@@ -3405,7 +3510,7 @@ async fn run_task_loop(
             .rev()
             .find(|a| a.stage == Stage::Implement)
             .cloned();
-        let resume_session = if resume_eligible {
+        let resume_session = if resume_eligible && task.variant.retry_mode == RetryMode::Resume {
             prev.as_ref().and_then(|p| {
                 let route_matches = p.route_id == route.id;
                 let has_session = p.session_id.is_some();
@@ -3464,6 +3569,7 @@ async fn run_task_loop(
             ended_at: None,
             status: AttemptStatus::Running,
             summary: None,
+            handoff: None,
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
@@ -3561,6 +3667,8 @@ async fn run_task_loop(
                 base_sha: base_sha.clone(),
                 verify: task.verify.clone(),
                 blocks: AtomicU32::new(0),
+                cancel: CancelToken::new(),
+                hook_running: Arc::new(AtomicBool::new(false)),
             });
             app.hook_tokens
                 .write()
@@ -3595,11 +3703,19 @@ async fn run_task_loop(
             &brief_text,
             &events_path,
             &cancel,
+            (task.variant.stall_timeout_secs > 0).then(|| Stall {
+                limit: Duration::from_secs(task.variant.stall_timeout_secs),
+                paused: registered
+                    .as_ref()
+                    .map(|(_, ctx)| ctx.hook_running.clone())
+                    .unwrap_or_default(),
+            }),
         )
         .await;
 
         let gate_blocks = if let Some((tok, ctx)) = registered.take() {
             app.hook_tokens.write().unwrap().remove(&tok);
+            ctx.cancel.cancel();
             ctx.blocks.load(Ordering::SeqCst)
         } else {
             0
@@ -3674,6 +3790,41 @@ async fn run_task_loop(
             task.cost_usd += cost;
         }
 
+        if outcome.stalled {
+            let detail = outcome.error.clone().unwrap_or_default();
+            let (wt, base) = (worktree.clone(), base_sha.clone());
+            task.attempts[idx].changed_files = tokio::task::spawn_blocking(move || {
+                git::changed_files(&wt, &base).unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+            match fail_and_continue(
+                &app,
+                &task_id,
+                &mut task,
+                idx,
+                FailureKind::Stall,
+                detail,
+                &mut attempt_budget,
+                &pending_answer,
+                &cancel,
+                &mut permit,
+            )
+            .await
+            {
+                LoopSignal::Continue { answered } => {
+                    just_answered = answered;
+                    drop(permit);
+                    continue;
+                }
+                LoopSignal::Stop => {
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
+            }
+        }
+
         let final_text = outcome.final_text.clone().unwrap_or_default();
         let report = brief::parse_report(&final_text);
         // Not a gate: the reviewer weighs it. A `partial` or missing report,
@@ -3694,6 +3845,10 @@ async fn run_task_loop(
                 .unwrap_or_default()
         );
         task.attempts[idx].summary = report.as_ref().map(|r| r.summary.clone());
+        task.attempts[idx].handoff = report
+            .as_ref()
+            .map(|r| r.handoff.trim().to_string())
+            .filter(|h| !h.is_empty());
         // Agent-reported decisions are trusted less than the owner's: strip
         // any leading "Owner:" the agent might have echoed back, prefix
         // with "Agent:", and never duplicate an identical entry.
@@ -4392,6 +4547,7 @@ mod tests {
             ended_at: None,
             status: AttemptStatus::Failed,
             summary: None,
+            handoff: None,
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
@@ -4497,6 +4653,22 @@ mod tests {
             BlockedDecision::Waiting
         );
         assert_eq!(decide_blocked_question(None), BlockedDecision::Waiting);
+    }
+
+    #[test]
+    fn resolve_variant_lays_known_flags_over_the_defaults() {
+        let defaults = Variant {
+            stall_timeout_secs: 900,
+            ..Variant::default()
+        };
+        let v = resolve_variant(&defaults, Some(&json!({"retryMode": "fresh"}))).unwrap();
+        assert_eq!(v.retry_mode, RetryMode::Fresh);
+        assert_eq!(v.stall_timeout_secs, 900);
+        assert_eq!(resolve_variant(&defaults, None).unwrap(), defaults);
+        assert!(resolve_variant(&defaults, Some(&json!({"nope": 1}))).is_err());
+        assert!(resolve_variant(&defaults, Some(&json!({"retryMode": "sideways"}))).is_err());
+        assert!(resolve_variant(&defaults, Some(&json!("fresh"))).is_err());
+        assert!(resolve_variant(&defaults, Some(&json!({"stallTimeoutSecs": u64::MAX}))).is_err());
     }
 
     #[test]
@@ -4755,6 +4927,8 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             archived: false,
+            planned_tier: None,
+            variant: Default::default(),
             created_at: 1,
             updated_at: 1,
         }

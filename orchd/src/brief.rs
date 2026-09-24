@@ -4,7 +4,8 @@
 //! harness (spec step 3).
 
 use crate::model::{
-    Attempt, AttemptStatus, Failure, Message, MessageKind, ReviewResult, Stage, Task,
+    Attempt, AttemptStatus, Failure, Message, MessageKind, RetryMode, ReviewResult, Stage, Task,
+    Tier,
 };
 
 const MAX_FAILURE_DETAIL: usize = 1500;
@@ -47,7 +48,7 @@ fn attempt_outcome_label(attempt: &Attempt) -> &'static str {
     }
 }
 
-const REPORT_FORMAT_BLOCK: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-report\n{\"outcome\":\"complete|partial|blocked\",\"summary\":\"...\",\"decisions\":[],\"question\":\"\"}\n```\n";
+const REPORT_FORMAT_BLOCK: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-report\n{\"outcome\":\"complete|partial|blocked\",\"summary\":\"...\",\"handoff\":\"...\",\"decisions\":[],\"question\":\"\"}\n```\n\n`handoff` is for whoever continues this task if the attempt fails verification or review: what is done, what you tried that did not work, what to do next.\n";
 
 const RULES_BLOCK: &str = "## Rules\n\n- Work only in this directory; do not touch other checkouts.\n- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, PRs, release notes or review loops do not apply inside this task.\n- Run the verification commands yourself before finishing. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.\n- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`.\n";
 
@@ -107,15 +108,33 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
         .collect();
     if !implement_attempts.is_empty() {
         out.push_str("## Previous attempts\n\n");
-        for attempt in implement_attempts {
+        let last = implement_attempts.len() - 1;
+        for (i, attempt) in implement_attempts.into_iter().enumerate() {
             out.push_str(&format!(
                 "- Attempt {} ({}): {}\n",
                 attempt.n,
                 attempt.route_id,
                 attempt_outcome_label(attempt)
             ));
+            let fresh = task.variant.retry_mode == RetryMode::Fresh;
+            if let Some(handoff) = attempt
+                .handoff
+                .as_deref()
+                .filter(|h| fresh && !h.trim().is_empty())
+            {
+                out.push_str("  - handoff: ");
+                out.push_str(&clip_middle(handoff, MAX_FAILURE_DETAIL));
+                out.push('\n');
+            }
             if let Some(failure) = &attempt.failure {
-                let detail = clip_middle(&failure.detail, MAX_FAILURE_DETAIL);
+                // The latest failure is what this attempt has to fix: give it
+                // the same room a resumed session gets.
+                let max = if fresh && i == last {
+                    MAX_RESUME_FAILURE_DETAIL
+                } else {
+                    MAX_FAILURE_DETAIL
+                };
+                let detail = clip_middle(&failure.detail, max);
                 out.push_str("  - failure: ");
                 out.push_str(&detail);
                 out.push('\n');
@@ -196,6 +215,8 @@ pub struct Report {
     pub outcome: Outcome,
     #[serde(default)]
     pub summary: String,
+    #[serde(default, deserialize_with = "lenient_text")]
+    pub handoff: String,
     #[serde(default)]
     pub decisions: Vec<String>,
     #[serde(default)]
@@ -243,9 +264,9 @@ pub fn parse_review(text: &str) -> Option<ReviewResult> {
     Some(ReviewResult { verdict, findings })
 }
 
-const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
+const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
 
-const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"criteria\":[],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"]}]}\n```\n";
+const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"tier\":\"mechanical|standard|hard\",\"criteria\":[],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"]}]}\n```\n";
 
 /// The drafting-stage brief: the owner's request verbatim, then the fixed
 /// planning instructions and report format (spec: "harness-agnostic", so
@@ -288,6 +309,25 @@ pub struct PlanDraft {
     pub verify: Vec<String>,
     #[serde(default)]
     pub questions: Vec<PlanQuestion>,
+    /// Unknown or missing -> `None`: routing falls back to Jev.
+    #[serde(default, deserialize_with = "lenient_tier")]
+    pub tier: Option<Tier>,
+}
+
+/// A handoff the agent wrote as null or as an object/array still reads:
+/// null is empty, structure is kept as its JSON text.
+fn lenient_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let v: serde_json::Value = serde::Deserialize::deserialize(d)?;
+    Ok(match v {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(s) => s,
+        other => other.to_string(),
+    })
+}
+
+fn lenient_tier<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Tier>, D::Error> {
+    let v: Option<serde_json::Value> = serde::Deserialize::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// Same last-fence-wins, malformed-is-`None` rule as [`parse_report`]/
@@ -544,6 +584,8 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             archived: false,
+            planned_tier: None,
+            variant: Default::default(),
             created_at: 1,
             updated_at: 1,
         }
@@ -581,6 +623,7 @@ mod tests {
             ended_at: Some(2),
             status: AttemptStatus::Failed,
             summary: None,
+            handoff: None,
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
@@ -593,12 +636,55 @@ mod tests {
             usage: None,
             cost_usd: None,
         });
+        let mut second = task.attempts[0].clone();
+        second.n = 2;
+        second.handoff = Some("tried bumping the timeout".into());
+        task.attempts.push(second);
+        let resume_brief = build_brief(&task, "", "");
+        assert!(
+            !resume_brief.contains("handoff:"),
+            "the resume arm keeps the old brief"
+        );
+        assert!(!resume_brief.contains(&"x".repeat(2000)));
+        task.variant.retry_mode = RetryMode::Fresh;
         let brief = build_brief(&task, "", "");
         assert!(brief.contains("Previous attempts"));
         assert!(brief.contains("Attempt 1 (claude-sonnet): failed"));
-        // truncated to MAX_FAILURE_DETAIL chars plus the ellipsis marker
-        let failure_line = brief.lines().find(|l| l.contains("failure:")).unwrap();
-        assert!(failure_line.len() < 2000);
+        assert!(brief.contains("  - handoff: tried bumping the timeout"));
+        // An older failure is clipped to MAX_FAILURE_DETAIL; the latest one,
+        // the one to fix now, keeps the resume budget.
+        let failures: Vec<&str> = brief.lines().filter(|l| l.contains("failure:")).collect();
+        assert!(failures[0].len() < 2000, "{}", failures[0].len());
+        assert!(failures[1].contains(&"x".repeat(2000)));
+    }
+
+    #[test]
+    fn parse_report_reads_a_null_or_structured_handoff() {
+        let report = |handoff: &str| {
+            parse_report(&format!(
+                "```sushi-report\n{{\"outcome\":\"blocked\",\"handoff\":{handoff},\"question\":\"Which?\"}}\n```"
+            ))
+            .expect("the report still parses")
+        };
+        assert_eq!(report("null").handoff, "");
+        assert_eq!(report("\"next: x\"").handoff, "next: x");
+        let structured = report("{\"next\":\"fix y\"}");
+        assert_eq!(structured.outcome, Outcome::Blocked);
+        assert!(structured.handoff.contains("fix y"));
+    }
+
+    #[test]
+    fn parse_plan_keeps_a_known_tier_and_drops_an_unknown_one() {
+        let plan = |tier: &str| {
+            parse_plan(&format!(
+                "```sushi-plan\n{{\"title\":\"t\",\"tier\":{tier}}}\n```"
+            ))
+            .unwrap()
+            .tier
+        };
+        assert_eq!(plan("\"hard\""), Some(Tier::Hard));
+        assert_eq!(plan("\"extreme\""), None);
+        assert_eq!(plan("3"), None);
     }
 
     #[test]
@@ -618,6 +704,7 @@ mod tests {
             ended_at: Some(2),
             status: AttemptStatus::Passed,
             summary: Some("Drafted: Add a button".into()),
+            handoff: None,
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
@@ -784,6 +871,7 @@ mod tests {
             ended_at: Some(2),
             status: AttemptStatus::Failed,
             summary: None,
+            handoff: None,
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,

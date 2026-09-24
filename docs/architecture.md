@@ -98,8 +98,9 @@ stateDiagram-v2
 flowchart TD
   plan["Plan<br/>planner route (Opus) drafts goal, criteria, verify"]
   split["Verify entries that are not shell commands<br/>become review criteria"]
-  tier["Tier<br/>Jev: mechanical / standard / hard"]
-  impl["Implement<br/>route = tiers[tier]; resume session on retry"]
+  tier["Tier<br/>planner's tier (variant.plannerTier), else Jev"]
+  impl["Implement<br/>route = tiers[tier]; retry resumes the session,<br/>or starts fresh with handoffs (variant.retryMode)"]
+  stall["Stall watchdog<br/>no output for variant.stallTimeoutSecs -> kill"]
   rebase["Carry onto moved base<br/>conflicts go back to the agent"]
   verify["Verify<br/>task.verify in the worktree<br/>cached by diff + untracked contents"]
   protect["Protected paths<br/>owner approves"]
@@ -108,10 +109,13 @@ flowchart TD
   done([done])
   fail["Failure<br/>signature dedup, maybe escalate tier"]
   budget{"Budget left?"}
+  ab[["orchd ab<br/>metrics per variant"]]
   triage["Orchestrator triages, max 2 per task<br/>continue / reject finding / escalate"]
   ownerQ(["Owner question"])
 
   plan --> split --> tier --> impl --> rebase --> verify
+  impl -.- stall
+  stall -->|stalled| fail
   verify -->|all exit 0| protect --> review
   review -->|PASS| commit --> done
   review -->|no verdict| ownerQ
@@ -121,6 +125,7 @@ flowchart TD
   budget -->|yes| impl
   budget -->|no| triage --> ownerQ
   triage -->|continue| impl
+  commit -.-> ab
 
   classDef planned stroke-dasharray: 5 5
 ```

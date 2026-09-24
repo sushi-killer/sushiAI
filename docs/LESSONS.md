@@ -27,11 +27,13 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 ## Open
 
 ## 2026-09-24 — orchd task.create failed on an existing branch name
+
 Root cause: `create_worktree` (`orchd/src/git.rs`) always runs `worktree add -b`.
 Rule: give each task a new branch, or omit `branch`.
 
 ## Promoted
 
+- 2026-09-25 Disabled `select!` branch still built `Instant + Duration::MAX`, panicking the loop → bounded deadline. `run_harness`.
 - 2026-09-24 An unparsed review verdict counted as PASS → no verdict asks the owner. `a_review_without_a_verdict_waits_for_the_owner_instead_of_passing`.
 - 2026-09-24 Chat harness outlived daemon shutdown → drain every live-child map. `shutdown_kills_a_live_orchestrator_chat_turn_s_child`.
 - 2026-09-24 Orchestrator chat edited code instead of filing tasks → enforce a role with tools, not prompt. `orchd/src/chat.rs`.
@@ -39,7 +41,7 @@ Rule: give each task a new branch, or omit `branch`.
 - 2026-09-24 Real Claude/Codex output broke `orchd` while self-written fakes passed → parsers assert captured CLI lines. `parses_captured_real_cli_streams`.
 - 2026-09-15 A `;`-joined gate chain let a failing change commit → join gates with `&&`, pass file lists as explicit arguments.
 - 2026-09-15 Desktop smoke flaked under load: asserts followed fixed sleeps → wait for the asserted state instead. `scripts/smoke.mjs`.
-- 2026-09-15 Unit fixtures merged worktrees the real layout (main, worktree, unrelated clone) did not → grouping fixtures include a distractor. `tests/workspace-merge.test.cjs`, `tests/projects.test.cjs`.
+- 2026-09-15 Unit fixtures lacked the real layout's unrelated clone → grouping fixtures include a distractor. `tests/workspace-merge.test.cjs`, `tests/projects.test.cjs`.
 - 2026-09-14 A `flex: 1`-stretched label measured 0px wide → measure text ink with a `Range`, assert non-zero widths. `ui-evidence` skill.
 - 2026-09-14 A copied debug session leaked a real private IP/host/ports → examples use 192.0.2.0/24 (RFC 5737). `check-conventions.mjs`.
 - 2026-09-13 Flat workspace list reordered on every poll → reconcile in place. `herdrSnapshot.ts`.
@@ -48,8 +50,7 @@ Rule: give each task a new branch, or omit `branch`.
 - 2026-09-13 One global `connected` flag colored every host's status dot → per-endpoint `statusByEndpoint`. `useHerdr.ts`.
 - 2026-09-12 Duplicate manifest labels broke a Playwright selector → `manifest.cjs`, `extension-contract-coverage.test.cjs`
 - 2026-09-12 Commands without a `surfaceId` silently did nothing at runtime → AGENTS.md, `manifest.cjs`
-- 2026-09-12 `webUtils.getPathForFile()` empty for dropped files (Electron 30-33 regression) → AGENTS.md
-- 2026-09-12 Drag highlight flickered crossing a child element's boundary → AGENTS.md
+- 2026-09-12 Empty `getPathForFile()` paths (Electron 30-33); drag highlight flicker → AGENTS.md
 - 2026-09-12 A copy-pasted duplicate in `ACTION_PLACEMENTS`/`ICONS` shipped silently → `extension-contract-coverage.test.cjs`
 - 2026-09-12 CI silently never ran 33 of 52 test files → `package.json` `ci` script
 - 2026-09-12 `scripts/smoke.mjs` discards an external `SUSHIAI_EXTENSIONS_DIR` → `author-and-verify-extension` skill

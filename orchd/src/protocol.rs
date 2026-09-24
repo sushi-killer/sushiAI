@@ -239,6 +239,7 @@ mod tests {
             goal: "G".into(),
             criteria: vec![],
             verify: vec![],
+            request: None,
             repo: "/r".into(),
             worktree: "/r-t".into(),
             branch: "task/t".into(),

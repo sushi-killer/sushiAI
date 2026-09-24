@@ -488,7 +488,32 @@ impl App {
         let _ = self.store.append_decision_line(&line);
     }
 
+    /// Appends a `"Jev: ..."` line to a task's `decisions` and persists it
+    /// right away -- for classifier call sites that don't otherwise hold the
+    /// task in memory (`handle_hook_stop`'s stop-gate check). Call sites that
+    /// already hold `&mut Task` push the line onto their own copy instead, so
+    /// it rides along with their next save instead of racing a reload.
+    fn append_jev_decision(&self, task_id: &str, line: String) {
+        if let Ok(Some(mut task)) = self.store.load_task(task_id) {
+            task.decisions.push(line);
+            task.updated_at = now_ms();
+            let _ = self.store.save_task(&task);
+            self.broadcast_task(&task);
+        }
+    }
+
     fn start_task_loop(&self, task_id: String) {
+        self.spawn_task_loop(task_id, true);
+    }
+
+    /// `auto_start_after_plan` only matters for a task still `drafting`: once
+    /// planning finishes, `true` lets the loop fall straight through into
+    /// the implement stage, `false` leaves it `stopped` (fields filled in)
+    /// for the owner to review before calling `task.start` themselves. Every
+    /// caller except the `{repo, request}` form of `task.create` wants the
+    /// former, since for them planning has either already happened or never
+    /// applies.
+    fn spawn_task_loop(&self, task_id: String, auto_start_after_plan: bool) {
         let mut controls = self.controls.lock().unwrap();
         if controls.contains_key(&task_id) {
             return;
@@ -500,7 +525,14 @@ impl App {
         let pending_for_loop = pending_answer.clone();
         let tid = task_id.clone();
         let handle = tokio::spawn(async move {
-            run_task_loop(app, tid, pending_for_loop, cancel_for_loop).await;
+            run_task_loop(
+                app,
+                tid,
+                pending_for_loop,
+                cancel_for_loop,
+                auto_start_after_plan,
+            )
+            .await;
         });
         controls.insert(
             task_id,
@@ -648,8 +680,10 @@ impl App {
         #[derive(Deserialize)]
         struct P {
             repo: String,
-            title: String,
-            goal: String,
+            #[serde(default)]
+            title: Option<String>,
+            #[serde(default)]
+            goal: Option<String>,
             #[serde(default)]
             criteria: Vec<String>,
             #[serde(default)]
@@ -660,14 +694,58 @@ impl App {
             mcp: Option<serde_json::Value>,
             #[serde(default)]
             start: Option<bool>,
+            /// The `{repo, request}` form: a one-sentence ask instead of a
+            /// filled-in title/goal/criteria/verify, drafted by the plan
+            /// stage before anything is queued (spec "drafting stage").
+            #[serde(default)]
+            request: Option<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        let request_text = p.request.clone().filter(|s| !s.trim().is_empty());
+        if request_text.is_some() {
+            let planner = self.settings.read().unwrap().planner.clone();
+            if planner.is_empty() {
+                return Err(
+                    "planner is disabled; task.create needs title/goal instead of request"
+                        .to_string(),
+                );
+            }
+            // Same "off, not a silent fallback" rule `run_plan_stage` applies
+            // at drafting time -- reject up front instead of creating a
+            // worktree for a task that can only ever fail to plan.
+            let known = self
+                .settings
+                .read()
+                .unwrap()
+                .routes
+                .iter()
+                .any(|r| r.id == planner);
+            if !known {
+                return Err(format!("planner route \"{planner}\" is not configured"));
+            }
+        }
+        let title = match (&request_text, &p.title) {
+            (Some(r), _) => truncate_chars(r, 60),
+            (None, Some(t)) => t.clone(),
+            (None, None) => {
+                return Err("task.create requires either request or title/goal".to_string())
+            }
+        };
+        let goal = if request_text.is_some() {
+            String::new()
+        } else {
+            p.goal
+                .clone()
+                .ok_or_else(|| "task.create requires goal".to_string())?
+        };
+
         let repo_input = PathBuf::from(&p.repo);
-        let title = p.title.clone();
+        let title_for_branch = title.clone();
         let branch_opt = p.branch.clone();
         let created = tokio::task::spawn_blocking(move || {
             let repo_root = git::repo_toplevel(&repo_input)?;
-            let branch = branch_opt.unwrap_or_else(|| git::unique_branch_name(&repo_root, &title));
+            let branch = branch_opt
+                .unwrap_or_else(|| git::unique_branch_name(&repo_root, &title_for_branch));
             let wt_path = git::worktree_path(&repo_root, &branch);
             let created = git::create_worktree(&repo_root, &branch, &wt_path)?;
             git::bootstrap_worktree(&repo_root, &created.path)
@@ -683,15 +761,20 @@ impl App {
         let now = now_ms();
         let task = Task {
             id: id.clone(),
-            title: p.title,
-            goal: p.goal,
+            title,
+            goal,
             criteria: p.criteria,
             verify: p.verify,
+            request: request_text.clone(),
             repo: repo_root.to_string_lossy().to_string(),
             worktree: created.path.to_string_lossy().to_string(),
             branch,
             base_sha: created.base_sha,
-            status: TaskStatus::Queued,
+            status: if request_text.is_some() {
+                TaskStatus::Drafting
+            } else {
+                TaskStatus::Queued
+            },
             tier: Tier::Standard,
             question: None,
             decisions: vec![],
@@ -706,7 +789,12 @@ impl App {
             store::write_json_atomic(&path, mcp).map_err(|e| e.to_string())?;
         }
         self.broadcast_task(&task);
-        if p.start.unwrap_or(false) {
+        if request_text.is_some() {
+            // Planning always runs regardless of `start`; only whether the
+            // loop falls through into implementing once it's done depends
+            // on it (spec step 6).
+            self.spawn_task_loop(id.clone(), p.start.unwrap_or(true));
+        } else if p.start.unwrap_or(false) {
             self.start_task_loop(id.clone());
         }
         serde_json::to_value(&task).map_err(|e| e.to_string())
@@ -731,9 +819,15 @@ impl App {
                 .ok_or_else(|| "task not found".to_string())?;
             if matches!(
                 task.status,
-                TaskStatus::Queued | TaskStatus::Stopped | TaskStatus::Failed
+                TaskStatus::Queued
+                    | TaskStatus::Stopped
+                    | TaskStatus::Failed
+                    | TaskStatus::Drafting
             ) {
-                self.start_task_loop(p.id.clone());
+                // A manual `task.start` on a still-drafting task (e.g. one
+                // left there by a daemon that died mid-plan) means proceed
+                // straight to implementing once planning finishes.
+                self.spawn_task_loop(p.id.clone(), true);
             }
         }
         let latest = self
@@ -1039,7 +1133,13 @@ impl App {
             verify_configured,
             verify_results: &verify_results,
         };
-        match hook::decide_stop(&facts, classifier_answers.as_ref()) {
+        let decision = hook::decide_stop(&facts, classifier_answers.as_ref());
+        if let Some(a) = classifier_answers.as_ref() {
+            let blocked = matches!(decision, hook::StopDecision::Block { .. });
+            let line = jev_stop_gate_line(blocked, a.claims_done, a.claims_verified);
+            self.append_jev_decision(&ctx.task_id, line);
+        }
+        match decision {
             hook::StopDecision::Allow => Ok(json!({})),
             hook::StopDecision::Block { reason } => {
                 ctx.blocks.fetch_add(1, Ordering::SeqCst);
@@ -1627,6 +1727,15 @@ fn record_failure(task: &mut Task, idx: usize, kind: FailureKind, detail: String
     });
 }
 
+/// How many *implement* attempts a task has made -- the plan attempt (if
+/// any) never counts against `maxAttempts`.
+fn implement_attempt_count(task: &Task) -> u32 {
+    task.attempts
+        .iter()
+        .filter(|a| a.stage == Stage::Implement)
+        .count() as u32
+}
+
 fn advance_after_failure(task: &mut Task, max_attempts: u32) -> bool {
     let last = task.attempts.last().expect("failure just recorded");
     let signature = last
@@ -1648,7 +1757,7 @@ fn advance_after_failure(task: &mut Task, max_attempts: u32) -> bool {
         signature: &signature,
         previous_signature: previous_signature.as_deref(),
         consecutive_same: consecutive,
-        attempt_n: task.attempts.len() as u32,
+        attempt_n: implement_attempt_count(task),
         max_attempts,
     };
     match decide_after_failure(&input) {
@@ -1698,12 +1807,14 @@ async fn fail_and_continue(
 ) -> LoopSignal {
     record_failure(task, idx, kind, detail);
     let should_continue = advance_after_failure(task, *attempt_budget);
-    let _ = app.store.save_task(task);
-    app.broadcast_task(task);
     if should_continue {
+        let _ = app.store.save_task(task);
+        app.broadcast_task(task);
         return LoopSignal::Continue { answered: false };
     }
-    match wait_for_answer(app, task_id, pending_answer, cancel, permit).await {
+    // Not persisted here: `wait_for_answer` does it itself, after the
+    // one-shot is installed (see its doc comment).
+    match wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await {
         Some(_answer) => {
             *attempt_budget += 2;
             LoopSignal::Continue { answered: true }
@@ -1713,11 +1824,17 @@ async fn fail_and_continue(
 }
 
 /// Parks on a fresh one-shot channel until either `task.answer` delivers an
-/// answer or `cancel` fires. Persists the decision/status transition either
-/// way, so a caller never has to duplicate that bookkeeping.
+/// answer or `cancel` fires. `task` must already have its `question`/
+/// `status: Waiting` set by the caller -- it's persisted here, *after* the
+/// one-shot is installed, so a `task.answer` that arrives the instant the
+/// broadcast reaches a client can never beat the one-shot into existence
+/// and get wrongly rejected as "no live parked loop". Persists the
+/// decision/status transition either way afterwards, so a caller never has
+/// to duplicate that bookkeeping.
 async fn wait_for_answer(
     app: &Arc<App>,
     task_id: &str,
+    task: &Task,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
@@ -1727,6 +1844,8 @@ async fn wait_for_answer(
     permit.take();
     let (tx, rx) = oneshot::channel();
     *pending_answer.lock().unwrap() = Some(tx);
+    let _ = app.store.save_task(task);
+    app.broadcast_task(task);
     let result = tokio::select! {
         _ = cancel.cancelled() => None,
         answer = rx => answer.ok(),
@@ -1761,7 +1880,49 @@ async fn wait_for_answer(
 // Classifier calls used by the engine loop
 // ===========================================================================
 
-async fn classify_tier(app: &Arc<App>, task: &Task) -> Tier {
+/// Owner-visible `task.decisions` lines for a successful classifier call,
+/// kept as pure formatting helpers so they're unit-testable without a
+/// network call. Never fed anything but probabilities/choices/route ids --
+/// no key, base URL, or raw response body ever reaches these.
+fn jev_tier_line(choice: &str, p: f64, route_id: &str) -> String {
+    format!("Jev: tier {choice} (p {p:.2}) -> route {route_id}")
+}
+
+fn jev_answerable_line(p: f64, answer_self: bool) -> String {
+    let outcome = if answer_self {
+        "agent sent back"
+    } else {
+        "asked owner"
+    };
+    format!("Jev: answerable from repo (p {p:.2}) -> {outcome}")
+}
+
+fn jev_stop_gate_line(blocked: bool, claims_done: f64, claims_verified: f64) -> String {
+    if blocked {
+        format!("Jev: premature finish (p {claims_done:.2}) -> sent back")
+    } else {
+        format!("Jev: verification looks fine (p {claims_verified:.2}) -> allowed")
+    }
+}
+
+fn jev_plan_preflight_line(
+    goal_specific: f64,
+    criteria_checkable: f64,
+    has_verification: f64,
+) -> String {
+    format!(
+        "Jev: goal {goal_specific:.2}, criteria {criteria_checkable:.2}, verification {has_verification:.2}"
+    )
+}
+
+/// The effective tier plus, only when the classifier call itself succeeded
+/// with a usable choice, the raw `(choice, probability)` for the caller to
+/// turn into a `task.decisions` line once it knows the resolved route --
+/// this function doesn't persist anything itself so the caller can push the
+/// line onto the same in-memory `Task` it's about to save (see
+/// `append_jev_decision` for why a call site with no live `Task` in scope
+/// has to do it differently).
+async fn classify_tier(app: &Arc<App>, task: &Task) -> (Tier, Option<(String, f64)>) {
     let settings = app.settings.read().unwrap().classifier.clone();
     let key = app.secrets.read().unwrap().classifier_key.clone();
     let base_url = app.secrets.read().unwrap().classifier_base_url.clone();
@@ -1784,13 +1945,13 @@ async fn classify_tier(app: &Arc<App>, task: &Task) -> Tier {
     .unwrap_or_else(|e| Err(classify::ClassifyError(e.to_string())));
     app.journal(&task.id, "tier", &result, start.elapsed());
     let Ok(answers) = result else {
-        return Tier::Standard;
+        return (Tier::Standard, None);
     };
     let Some(a) = answers.get("tier") else {
-        return Tier::Standard;
+        return (Tier::Standard, None);
     };
     let Some(choice) = &a.choice else {
-        return Tier::Standard;
+        return (Tier::Standard, None);
     };
     let p = a
         .probabilities
@@ -1799,13 +1960,14 @@ async fn classify_tier(app: &Arc<App>, task: &Task) -> Tier {
         .copied()
         .unwrap_or(1.0);
     if p < 0.5 {
-        return Tier::Standard;
+        return (Tier::Standard, Some((choice.clone(), p)));
     }
-    match choice.as_str() {
+    let tier = match choice.as_str() {
         "mechanical" => Tier::Mechanical,
         "hard" => Tier::Hard,
         _ => Tier::Standard,
-    }
+    };
+    (tier, Some((choice.clone(), p)))
 }
 
 async fn classify_answerable(app: &Arc<App>, task: &Task, question: &str) -> Option<f64> {
@@ -1941,6 +2103,553 @@ async fn run_review(
 }
 
 // ===========================================================================
+// Drafting / plan stage
+// ===========================================================================
+
+/// Suggested quick-reply options for the synthesized "no verification
+/// command" question: each of the target repo's own `package.json` scripts,
+/// as `npm run <script>`, `test`-named scripts ranked first (they're by far
+/// the most likely answer). Empty (not an error) when there's no
+/// `package.json` or no `scripts` -- the question still accepts free text.
+fn verify_options_from_package_json(worktree: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(worktree.join("package.json")) else {
+        return vec![];
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return vec![];
+    };
+    let Some(scripts) = v.get("scripts").and_then(|s| s.as_object()) else {
+        return vec![];
+    };
+    let mut names: Vec<&String> = scripts.keys().collect();
+    names.sort_by_key(|k| (!k.to_ascii_lowercase().contains("test"), k.as_str()));
+    names
+        .into_iter()
+        .take(4)
+        .map(|k| format!("npm run {k}"))
+        .collect()
+}
+
+/// Sets the question/waiting state, parks on a fresh one-shot the same way
+/// [`wait_for_answer`] does, then records the decision as `"Owner: <question>
+/// -> <answer>"` (spec step 5) instead of the generic attempt-failure
+/// phrasing. `"stop"` is still handled centrally by `handle_task_answer`
+/// before it ever reaches here.
+async fn ask_plan_question(
+    app: &Arc<App>,
+    task_id: &str,
+    question_text: &str,
+    options: Vec<String>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    cancel: &CancelToken,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Option<String> {
+    // Same as wait_for_answer: a task parked on a question holds no slot.
+    permit.take();
+    // Install the one-shot *before* the state that makes this externally
+    // visible as "waiting" is even persisted: otherwise a `task.answer`
+    // that arrives the instant the broadcast reaches a client could beat
+    // this into existence and get rejected as "no live parked loop" even
+    // though a loop genuinely is about to park.
+    let (tx, rx) = oneshot::channel();
+    *pending_answer.lock().unwrap() = Some(tx);
+    if let Ok(Some(mut task)) = app.store.load_task(task_id) {
+        task.question = Some(Question {
+            text: question_text.to_string(),
+            options,
+        });
+        task.status = TaskStatus::Waiting;
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(&task);
+        app.broadcast_task(&task);
+    }
+
+    let result = tokio::select! {
+        _ = cancel.cancelled() => None,
+        answer = rx => answer.ok(),
+    };
+    *pending_answer.lock().unwrap() = None;
+
+    match &result {
+        Some(answer) => {
+            if let Ok(Some(mut task)) = app.store.load_task(task_id) {
+                task.decisions
+                    .push(format!("Owner: {question_text} -> {answer}"));
+                task.question = None;
+                task.status = TaskStatus::Drafting;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+            }
+        }
+        None => {
+            if let Ok(Some(mut task)) = app.store.load_task(task_id) {
+                if task.status != TaskStatus::Stopped {
+                    task.status = TaskStatus::Stopped;
+                    task.updated_at = now_ms();
+                    let _ = app.store.save_task(&task);
+                    app.broadcast_task(&task);
+                }
+            }
+        }
+    }
+    result
+}
+
+pub enum PlanOutcome {
+    /// Planning finished and `auto_start_after_plan` was set: the task is
+    /// now `queued`, fall straight through to the implement stage.
+    Proceed,
+    /// Planning finished but `auto_start_after_plan` was not set: the task
+    /// is `stopped` with everything filled in for the owner to review.
+    StoppedForReview,
+    /// Cancelled, or ended in `failed`/`stopped` some other way -- the task
+    /// loop itself is done, the caller should return.
+    Ended,
+}
+
+/// Whether a task still needs to run (or re-run) the plan stage, derived
+/// purely from data -- never from `task.status` -- so a stop-then-start
+/// while drafting, an owner answer that arrives with no live loop to catch
+/// it (daemon restart), or a manual `task.start` on a task recovery left
+/// `stopped`/`failed` mid-draft, all correctly go back through planning
+/// instead of quietly falling through to implement with blank fields. Once
+/// one plan attempt has *passed*, this is permanently `false` for the rest
+/// of the task's life -- planning runs at most once, ever.
+fn needs_planning(task: &Task) -> bool {
+    task.request.is_some()
+        && !task
+            .attempts
+            .iter()
+            .any(|a| a.stage == Stage::Plan && a.status == AttemptStatus::Passed)
+}
+
+/// Common cleanup before returning `PlanOutcome::Ended`: if the plan
+/// attempt at `idx` is still `running` (cut short by cancellation between
+/// its own steps, rather than already concluded `passed`/`failed` by the
+/// caller), mark it `interrupted`; either way, make sure the task itself
+/// ends up `stopped` unless it's already some other terminal status.
+async fn end_plan_stage(app: &Arc<App>, task_id: &str, idx: Option<usize>) -> PlanOutcome {
+    if let Some(idx) = idx {
+        if let Ok(Some(mut t)) = app.store.load_task(task_id) {
+            if let Some(a) = t.attempts.get_mut(idx) {
+                if a.status == AttemptStatus::Running {
+                    a.status = AttemptStatus::Interrupted;
+                    a.ended_at = Some(now_ms());
+                    t.updated_at = now_ms();
+                    let _ = app.store.save_task(&t);
+                    app.broadcast_task(&t);
+                }
+            }
+        }
+    }
+    mark_stopped_if_not_already(app, task_id).await;
+    PlanOutcome::Ended
+}
+
+/// Runs the drafting stage (spec "Plan stage" steps 1-6) for a task created
+/// via the `{repo, request}` form: a fresh read-only planner session drafts
+/// title/goal/criteria/verify from the owner's one-sentence request (one
+/// retry if the reply doesn't parse, then the owner is asked directly, up
+/// to 2 such clarification rounds before giving up), runs the classifier
+/// preflight on the draft, and asks any of the planner's own questions
+/// (plus a verification question whenever the draft still has none) one at
+/// a time before handing off to the ordinary implement loop.
+async fn run_plan_stage(
+    app: &Arc<App>,
+    task_id: &str,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    cancel: &CancelToken,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    auto_start_after_plan: bool,
+) -> PlanOutcome {
+    let mut clarify_rounds: u32 = 0;
+    loop {
+        if cancel.is_cancelled() {
+            return end_plan_stage(app, task_id, None).await;
+        }
+        // The very first round already holds the slot `run_task_loop`
+        // acquired before calling in; a round that starts fresh right after
+        // releasing one to park on a clarifying question needs its own, or
+        // it would run the next harness session with no permit at all.
+        if permit.is_none() {
+            let acquired = tokio::select! {
+                _ = cancel.cancelled() => None,
+                p = app.slots.clone().acquire_owned() => p.ok(),
+            };
+            match acquired {
+                Some(p) => *permit = Some(p),
+                None => return end_plan_stage(app, task_id, None).await,
+            }
+        }
+
+        let mut task = match app.store.load_task(task_id) {
+            Ok(Some(t)) => t,
+            _ => return end_plan_stage(app, task_id, None).await,
+        };
+
+        let settings = app.settings.read().unwrap().clone();
+        let Some(route) = settings
+            .routes
+            .iter()
+            .find(|r| r.id == settings.planner)
+            .cloned()
+        else {
+            // An unconfigured planner id is treated exactly like planner ==
+            // "" -- never a silent fallback to some route the owner never
+            // chose for this.
+            if let Ok(Some(mut t)) = app.store.load_task(task_id) {
+                t.status = TaskStatus::Failed;
+                t.updated_at = now_ms();
+                let _ = app.store.save_task(&t);
+                app.broadcast_task(&t);
+            }
+            return end_plan_stage(app, task_id, None).await;
+        };
+
+        let request_text = task.request.clone().unwrap_or_default();
+        let attempt_n = task.attempts.len() as u32 + 1;
+        let worktree = PathBuf::from(&task.worktree);
+        let run_dir = app.store.run_dir(task_id, attempt_n).join("plan");
+        let _ = std::fs::create_dir_all(&run_dir);
+
+        let attempt = Attempt {
+            n: attempt_n,
+            stage: Stage::Plan,
+            route_id: route.id.clone(),
+            harness: route.harness,
+            model: route.model.clone().unwrap_or_default(),
+            reason: "drafting".to_string(),
+            session_id: None,
+            pgid: None,
+            resumed: false,
+            started_at: now_ms(),
+            ended_at: None,
+            status: AttemptStatus::Running,
+            summary: None,
+            changed_files: vec![],
+            verify: vec![],
+            gate_blocks: 0,
+            review: None,
+            failure: None,
+            usage: None,
+            cost_usd: None,
+        };
+        task.attempts.push(attempt);
+        let idx = task.attempts.len() - 1;
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(&task);
+        app.broadcast_task(&task);
+
+        let mcp_path = run_dir.join("mcp.json");
+        let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
+        let settings_path = run_dir.join("settings.json");
+        let key_path = run_dir.join("key");
+        let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
+        if matches!(route.harness, Harness::Claude) {
+            // Same lean shape as review (read-only, no Stop hook -- no
+            // token is ever registered for a drafting session), but the
+            // planner route can still carry a profile (env/API key) the
+            // same way an implement route can.
+            let profile = route
+                .profile_id
+                .as_ref()
+                .and_then(|pid| app.secrets.read().unwrap().profiles.get(pid).cloned());
+            let mut profile_obj = serde_json::Map::new();
+            if let Some(p) = &profile {
+                if !p.env.is_empty() {
+                    profile_obj.insert(
+                        "env".to_string(),
+                        serde_json::to_value(&p.env).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                if let Some(key) = &p.key {
+                    if store::write_secret_file(&key_path, key).is_ok() {
+                        profile_obj.insert(
+                            "apiKeyHelper".to_string(),
+                            serde_json::Value::String(format!(
+                                "cat {}",
+                                harness::shell_quote(&key_path.to_string_lossy())
+                            )),
+                        );
+                    }
+                }
+            }
+            let profile_value = if profile_obj.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(profile_obj))
+            };
+            let claude_settings = harness::build_claude_settings(
+                profile_value.as_ref(),
+                settings.sandbox,
+                &settings.allowed_domains,
+                &deny_read,
+                None,
+            );
+            let _ = store::write_json_atomic(&settings_path, &claude_settings);
+        }
+        let req = harness::RunRequest {
+            harness: route.harness,
+            worktree: &worktree,
+            model: route.model.as_deref(),
+            effort: route.effort.as_deref(),
+            resume: None,
+            review: true,
+            mcp_config: Some(&mcp_path),
+            settings_path: Some(&settings_path),
+            network_allowed: false,
+        };
+
+        let mut draft: Option<brief::PlanDraft> = None;
+        let mut hard_failure = false;
+        for retry in 0..2 {
+            if cancel.is_cancelled() {
+                let _ = std::fs::remove_file(&key_path);
+                return end_plan_stage(app, task_id, Some(idx)).await;
+            }
+            let brief_text = if retry == 0 {
+                brief::build_plan_brief(&request_text)
+            } else {
+                brief::build_plan_retry_brief(&request_text)
+            };
+            let file_stem = if retry == 0 { "" } else { "-retry" };
+            let _ = std::fs::write(run_dir.join(format!("brief{file_stem}.md")), &brief_text);
+            let events_path = run_dir.join(format!("events{file_stem}.jsonl"));
+            let run_result = run_harness(
+                app,
+                task_id,
+                attempt_n,
+                &worktree,
+                &req,
+                &brief_text,
+                &events_path,
+                cancel,
+            )
+            .await;
+            if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
+                task = reloaded;
+            }
+            match run_result {
+                Ok(o) => {
+                    // A harness-reported failure (Claude `is_error`, Codex
+                    // `turn.failed`) is an infra/tooling problem, not an
+                    // ambiguous-request problem -- fail outright rather than
+                    // spend a clarification round asking the owner "more
+                    // detail" about something they can't fix by replying.
+                    if let Some(err) = o.error {
+                        record_failure(&mut task, idx, FailureKind::Error, err);
+                        task.status = TaskStatus::Failed;
+                        task.updated_at = now_ms();
+                        let _ = app.store.save_task(&task);
+                        app.broadcast_task(&task);
+                        hard_failure = true;
+                        break;
+                    }
+                    let text = o.final_text.unwrap_or_default();
+                    if let Some(d) = brief::parse_plan(&text) {
+                        draft = Some(d);
+                        break;
+                    }
+                }
+                Err(RunError::Cancelled) => {
+                    let _ = std::fs::remove_file(&key_path);
+                    return end_plan_stage(app, task_id, Some(idx)).await;
+                }
+                Err(RunError::Io(msg)) => {
+                    record_failure(&mut task, idx, FailureKind::Error, msg);
+                    task.status = TaskStatus::Failed;
+                    task.updated_at = now_ms();
+                    let _ = app.store.save_task(&task);
+                    app.broadcast_task(&task);
+                    hard_failure = true;
+                    break;
+                }
+            }
+        }
+        // Delete the per-run key file the moment the run(s) end, same as
+        // the implement path; recovery also deletes it for an attempt
+        // interrupted by an unclean shutdown.
+        let _ = std::fs::remove_file(&key_path);
+        if hard_failure {
+            return end_plan_stage(app, task_id, Some(idx)).await;
+        }
+
+        let Some(draft) = draft else {
+            record_failure(
+                &mut task,
+                idx,
+                FailureKind::NoDeliverable,
+                "planner did not return a parseable sushi-plan block".to_string(),
+            );
+            if clarify_rounds >= 2 {
+                // Already asked the owner twice for more detail; a third
+                // unparseable round in a row means this isn't going anywhere.
+                task.status = TaskStatus::Failed;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+                return end_plan_stage(app, task_id, Some(idx)).await;
+            }
+            clarify_rounds += 1;
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
+            let question =
+                "The planner could not draft this task: edit it or answer with more detail";
+            match ask_plan_question(
+                app,
+                task_id,
+                question,
+                vec![],
+                pending_answer,
+                cancel,
+                permit,
+            )
+            .await
+            {
+                Some(answer) => {
+                    if let Ok(Some(mut t)) = app.store.load_task(task_id) {
+                        let combined = format!(
+                            "{}\n\n(Owner clarification: {answer})",
+                            t.request.clone().unwrap_or_default()
+                        );
+                        t.request = Some(combined);
+                        t.status = TaskStatus::Drafting;
+                        t.updated_at = now_ms();
+                        let _ = app.store.save_task(&t);
+                        app.broadcast_task(&t);
+                    }
+                    continue;
+                }
+                None => return end_plan_stage(app, task_id, Some(idx)).await,
+            }
+        };
+
+        task.title = draft.title.clone();
+        task.goal = draft.goal.clone();
+        task.criteria = draft.criteria.clone();
+        task.verify = draft.verify.clone();
+        task.attempts[idx].status = AttemptStatus::Passed;
+        task.attempts[idx].ended_at = Some(now_ms());
+        task.attempts[idx].summary = Some(format!("Drafted: {}", draft.title));
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(&task);
+        app.broadcast_task(&task);
+
+        // Classifier preflight on the draft (spec step 4), same three
+        // checks as `task.preflight`, journaled under its own point --
+        // still run for its goal/criteria signal even though it no longer
+        // gates the verify question (that's unconditional on
+        // `verify.is_empty()` now, review item P2e).
+        let classifier_settings = settings.classifier.clone();
+        let key = app.secrets.read().unwrap().classifier_key.clone();
+        let base_url = app.secrets.read().unwrap().classifier_base_url.clone();
+        if classifier_settings.backend != ClassifierBackend::None && key.is_some() {
+            let state =
+                json!({"goal": task.goal, "criteria": task.criteria, "verify": task.verify});
+            let questions = vec![
+                classify::QuestionSpec::Noul {
+                    name: "goal_specific".to_string(),
+                    prompt: "Is the goal specific enough to act on without asking?".to_string(),
+                },
+                classify::QuestionSpec::Noul {
+                    name: "criteria_checkable".to_string(),
+                    prompt: "Can each acceptance criterion be checked objectively from outside?"
+                        .to_string(),
+                },
+                classify::QuestionSpec::Noul {
+                    name: "has_verification".to_string(),
+                    prompt: "Do the verification commands actually exercise the criteria?"
+                        .to_string(),
+                },
+            ];
+            let start = std::time::Instant::now();
+            let s2 = classifier_settings.clone();
+            let k2 = key.clone();
+            let b2 = base_url.clone();
+            let q2 = questions.clone();
+            let state2 = state.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                classify::decide(&s2, k2.as_deref(), b2.as_deref(), &state2, &q2)
+            })
+            .await
+            .unwrap_or_else(|e| Err(classify::ClassifyError(e.to_string())));
+            app.journal(task_id, "plan_preflight", &result, start.elapsed());
+            if let Ok(answers) = &result {
+                if let (Some(g), Some(c), Some(v)) = (
+                    answers.get("goal_specific").and_then(|a| a.noul),
+                    answers.get("criteria_checkable").and_then(|a| a.noul),
+                    answers.get("has_verification").and_then(|a| a.noul),
+                ) {
+                    app.append_jev_decision(task_id, jev_plan_preflight_line(g, c, v));
+                }
+            }
+        }
+
+        for q in draft.questions.iter().take(3) {
+            match ask_plan_question(
+                app,
+                task_id,
+                &q.text,
+                q.options.clone(),
+                pending_answer,
+                cancel,
+                permit,
+            )
+            .await
+            {
+                Some(_) => {}
+                None => return end_plan_stage(app, task_id, Some(idx)).await,
+            }
+        }
+
+        // Unconditional on an empty `verify` now (review item P2e): a
+        // classifier that's off, missing a key, or simply unsure is no
+        // reason to skip asking outright.
+        if task.verify.is_empty() {
+            let options = verify_options_from_package_json(&worktree);
+            match ask_plan_question(
+                app,
+                task_id,
+                "No verification command was found. Which command proves this task?",
+                options,
+                pending_answer,
+                cancel,
+                permit,
+            )
+            .await
+            {
+                Some(answer) => {
+                    if let Ok(Some(mut t)) = app.store.load_task(task_id) {
+                        t.verify = vec![answer];
+                        t.updated_at = now_ms();
+                        let _ = app.store.save_task(&t);
+                        app.broadcast_task(&t);
+                    }
+                }
+                None => return end_plan_stage(app, task_id, Some(idx)).await,
+            }
+        }
+
+        if let Ok(Some(mut t)) = app.store.load_task(task_id) {
+            t.status = if auto_start_after_plan {
+                TaskStatus::Queued
+            } else {
+                TaskStatus::Stopped
+            };
+            t.updated_at = now_ms();
+            let _ = app.store.save_task(&t);
+            app.broadcast_task(&t);
+        }
+        return if auto_start_after_plan {
+            PlanOutcome::Proceed
+        } else {
+            PlanOutcome::StoppedForReview
+        };
+    }
+}
+
+// ===========================================================================
 // The attempt loop
 // ===========================================================================
 
@@ -1954,6 +2663,7 @@ async fn run_task_loop(
     task_id: String,
     pending_answer: Arc<StdMutex<Option<oneshot::Sender<String>>>>,
     cancel: CancelToken,
+    auto_start_after_plan: bool,
 ) {
     let mut attempt_budget = app.settings.read().unwrap().max_attempts;
     // Never resume immediately after a waiting/answer cycle -- a fresh
@@ -1993,20 +2703,49 @@ async fn run_task_loop(
             }
         };
 
+        if needs_planning(&task) {
+            match run_plan_stage(
+                &app,
+                &task_id,
+                &pending_answer,
+                &cancel,
+                &mut permit,
+                auto_start_after_plan,
+            )
+            .await
+            {
+                PlanOutcome::Proceed => {
+                    drop(permit);
+                    continue;
+                }
+                PlanOutcome::StoppedForReview | PlanOutcome::Ended => {
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
+            }
+        }
+
         let resume_eligible = !just_answered;
         just_answered = false;
 
-        if task.attempts.is_empty() {
-            task.tier = classify_tier(&app, &task).await;
+        let mut jev_tier_choice = None;
+        if implement_attempt_count(&task) == 0 {
+            let (tier, jev) = classify_tier(&app, &task).await;
+            task.tier = tier;
+            jev_tier_choice = jev;
         }
 
         let settings = app.settings.read().unwrap().clone();
-        let attempt_n = task.attempts.len() as u32 + 1;
+        let attempt_n = implement_attempt_count(&task) + 1;
         let route_id = settings
             .tiers
             .get(&task.tier)
             .cloned()
             .unwrap_or_else(|| "codex".to_string());
+        if let Some((choice, p)) = jev_tier_choice {
+            task.decisions.push(jev_tier_line(&choice, p, &route_id));
+        }
         let route = settings
             .routes
             .iter()
@@ -2021,7 +2760,15 @@ async fn run_task_loop(
                 profile_id: None,
             });
 
-        let prev = task.attempts.last().cloned();
+        // The plan attempt (if any) is never a resume candidate -- it's a
+        // different route/harness shape entirely, and has nothing to do
+        // with the implement route's own session history.
+        let prev = task
+            .attempts
+            .iter()
+            .rev()
+            .find(|a| a.stage == Stage::Implement)
+            .cloned();
         let resume_session = if resume_eligible {
             prev.as_ref().and_then(|p| {
                 let route_matches = p.route_id == route.id;
@@ -2313,9 +3060,9 @@ async fn run_task_loop(
             record_failure(&mut task, idx, FailureKind::Blocked, question_text.clone());
             let should_continue = advance_after_failure(&mut task, attempt_budget);
             if !should_continue {
-                let _ = app.store.save_task(&task);
-                app.broadcast_task(&task);
-                match wait_for_answer(&app, &task_id, &pending_answer, &cancel, &mut permit).await {
+                match wait_for_answer(&app, &task_id, &task, &pending_answer, &cancel, &mut permit)
+                    .await
+                {
                     Some(_) => {
                         attempt_budget += 2;
                         just_answered = true;
@@ -2331,7 +3078,14 @@ async fn run_task_loop(
             }
 
             let answerable_p = classify_answerable(&app, &task, &question_text).await;
-            match decide_blocked_question(answerable_p) {
+            let blocked_decision = decide_blocked_question(answerable_p);
+            if let Some(p) = answerable_p {
+                task.decisions.push(jev_answerable_line(
+                    p,
+                    blocked_decision == BlockedDecision::AnswerSelf,
+                ));
+            }
+            match blocked_decision {
                 BlockedDecision::AnswerSelf => {
                     let decision =
                         format!("Answer it yourself from the repository: {question_text}");
@@ -2352,10 +3106,15 @@ async fn run_task_loop(
                     });
                     task.status = TaskStatus::Waiting;
                     task.updated_at = now_ms();
-                    let _ = app.store.save_task(&task);
-                    app.broadcast_task(&task);
-                    match wait_for_answer(&app, &task_id, &pending_answer, &cancel, &mut permit)
-                        .await
+                    match wait_for_answer(
+                        &app,
+                        &task_id,
+                        &task,
+                        &pending_answer,
+                        &cancel,
+                        &mut permit,
+                    )
+                    .await
                     {
                         Some(_) => {
                             just_answered = true;
@@ -2476,9 +3235,9 @@ async fn run_task_loop(
             });
             task.status = TaskStatus::Waiting;
             task.updated_at = now_ms();
-            let _ = app.store.save_task(&task);
-            app.broadcast_task(&task);
-            match wait_for_answer(&app, &task_id, &pending_answer, &cancel, &mut permit).await {
+            match wait_for_answer(&app, &task_id, &task, &pending_answer, &cancel, &mut permit)
+                .await
+            {
                 None => {
                     drop(permit);
                     app.finish_task_loop(&task_id);
@@ -2886,6 +3645,46 @@ mod tests {
             BlockedDecision::Waiting
         );
         assert_eq!(decide_blocked_question(None), BlockedDecision::Waiting);
+    }
+
+    #[test]
+    fn jev_tier_line_formats_choice_probability_and_route() {
+        assert_eq!(
+            jev_tier_line("mechanical", 0.82, "codex"),
+            "Jev: tier mechanical (p 0.82) -> route codex"
+        );
+    }
+
+    #[test]
+    fn jev_answerable_line_names_the_outcome() {
+        assert_eq!(
+            jev_answerable_line(0.9, true),
+            "Jev: answerable from repo (p 0.90) -> agent sent back"
+        );
+        assert_eq!(
+            jev_answerable_line(0.4, false),
+            "Jev: answerable from repo (p 0.40) -> asked owner"
+        );
+    }
+
+    #[test]
+    fn jev_stop_gate_line_names_the_outcome() {
+        assert_eq!(
+            jev_stop_gate_line(true, 0.9, 0.1),
+            "Jev: premature finish (p 0.90) -> sent back"
+        );
+        assert_eq!(
+            jev_stop_gate_line(false, 0.9, 0.85),
+            "Jev: verification looks fine (p 0.85) -> allowed"
+        );
+    }
+
+    #[test]
+    fn jev_plan_preflight_line_reports_all_three_scores() {
+        assert_eq!(
+            jev_plan_preflight_line(0.9, 0.8, 0.3),
+            "Jev: goal 0.90, criteria 0.80, verification 0.30"
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! binary-only crate, so this is a separate process from the start.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -192,8 +193,17 @@ fn init_git_repo() -> tempfile::TempDir {
 /// Sends a raw request without going through `request_on` (which panics on
 /// an error response) so the "unauthorized" error itself can be asserted on.
 fn raw_request(socket: &Path, method: &str, auth: Option<&str>) -> serde_json::Value {
+    raw_request_with_params(socket, method, serde_json::json!({}), auth)
+}
+
+fn raw_request_with_params(
+    socket: &Path,
+    method: &str,
+    params: serde_json::Value,
+    auth: Option<&str>,
+) -> serde_json::Value {
     let mut stream = UnixStream::connect(socket).unwrap();
-    let mut req = serde_json::json!({"id": "1", "method": method, "params": {}});
+    let mut req = serde_json::json!({"id": "1", "method": method, "params": params});
     if let Some(token) = auth {
         req["auth"] = serde_json::json!(token);
     }
@@ -292,7 +302,7 @@ fn poll_task_status(daemon: &Daemon, task_id: &str, timeout: Duration) -> serde_
             return task;
         }
         if start.elapsed() > timeout {
-            panic!("task {task_id} did not settle in time, last status: {status}");
+            panic!("task {task_id} did not settle in time, last status: {status}: {task}");
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -629,4 +639,721 @@ fn a_task_waiting_for_its_owner_does_not_hold_a_parallel_slot() {
     for t in [&waiting, &passing] {
         let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
     }
+}
+
+/// A fake planner/implement harness in one script: it can tell which stage
+/// it was invoked for from the brief text on its own stdin (a plan brief is
+/// the only one that ever mentions "sushi-plan"), and replies with a
+/// ```sushi-plan fenced draft -- with one question when `PLAN_ASK_QUESTION`
+/// is set, none otherwise -- or a normal ```sushi-report implement reply.
+// `printf '%s\n' "$var"` rather than `echo '...'`: this machine's `/bin/sh`
+// (bash running in sh-compatibility mode) has its builtin `echo` interpret
+// backslash escapes like `\n` by default, which would silently split a
+// single JSON line's embedded `\n` into a real newline -- breaking the line
+// framing the harness reads on stdout. `printf`'s `%s` does no such
+// interpretation on its argument, only on the (separate, literal) format
+// string.
+const FAKE_PLANNER_SCRIPT: &str = r#"#!/bin/sh
+input="$(cat)"
+case "$input" in
+  *sushi-plan*)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'
+    if [ -n "$PLAN_ASK_QUESTION" ]; then
+      json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-plan\n{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"criteria\":[\"Toggle visible in settings\"],\"verify\":[\"true\"],\"questions\":[{\"text\":\"Which default theme?\",\"options\":[\"light\",\"dark\"]}]}\n```"}'
+    else
+      json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-plan\n{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"criteria\":[\"Toggle visible in settings\"],\"verify\":[\"true\"],\"questions\":[]}\n```"}'
+    fi
+    printf '%s\n' "$json"
+    ;;
+  *)
+    echo "changed" > CHANGED_MARKER.txt
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+    json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}'
+    printf '%s\n' "$json"
+    ;;
+esac
+"#;
+
+fn poll_until(
+    daemon: &Daemon,
+    task_id: &str,
+    timeout: Duration,
+    pred: impl Fn(&str) -> bool,
+) -> serde_json::Value {
+    let start = Instant::now();
+    loop {
+        let task = daemon.request("task.get", serde_json::json!({"id": task_id}));
+        let status = task["status"].as_str().unwrap_or("").to_string();
+        if pred(&status) {
+            return task;
+        }
+        assert!(
+            start.elapsed() < timeout,
+            "task {task_id} did not reach the expected status in time, stuck at {status}: {task}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn drafting_task_asks_its_planner_question_then_implements_and_passes() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-planner.sh", FAKE_PLANNER_SCRIPT);
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("PLAN_ASK_QUESTION", "1"),
+    ]);
+
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "add dark mode to the settings screen",
+            "start": true,
+        }),
+    );
+    assert_eq!(task["status"], "drafting");
+    let task_id = task["id"].as_str().unwrap().to_string();
+
+    let waiting = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+        s == "waiting"
+    });
+    assert_eq!(waiting["question"]["text"], "Which default theme?");
+    assert_eq!(
+        waiting["question"]["options"],
+        serde_json::json!(["light", "dark"])
+    );
+    // The plan attempt is recorded but must never count against maxAttempts
+    // or show up as an implement attempt.
+    assert_eq!(waiting["attempts"][0]["stage"], "plan");
+
+    daemon.request(
+        "task.answer",
+        serde_json::json!({"id": task_id, "answer": "dark"}),
+    );
+
+    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+        s == "done" || s == "failed" || s == "stopped"
+    });
+    assert_eq!(settled["status"], "done", "task JSON: {settled}");
+    assert_eq!(settled["title"], "Add dark mode");
+    assert_eq!(
+        settled["criteria"],
+        serde_json::json!(["Toggle visible in settings"])
+    );
+    assert!(settled["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d.as_str().unwrap().contains("Which default theme? -> dark")));
+    let attempts = settled["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2, "one plan attempt, one implement attempt");
+    assert_eq!(attempts[0]["stage"], "plan");
+    assert_eq!(attempts[1]["stage"], "implement");
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
+fn drafting_task_with_no_questions_goes_straight_to_done() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-planner.sh", FAKE_PLANNER_SCRIPT);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "add dark mode to the settings screen",
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+
+    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+        s == "done" || s == "failed" || s == "stopped" || s == "waiting"
+    });
+    assert_eq!(settled["status"], "done", "task JSON: {settled}");
+    assert_eq!(settled["title"], "Add dark mode");
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
+fn drafting_task_created_with_start_false_stops_after_planning_for_review() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-planner.sh", FAKE_PLANNER_SCRIPT);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "add dark mode to the settings screen",
+            "start": false,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+
+    // Planning runs regardless of `start: false` -- only whether it then
+    // proceeds into implementing depends on it.
+    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+        s == "stopped" || s == "done" || s == "failed"
+    });
+    assert_eq!(settled["status"], "stopped", "task JSON: {settled}");
+    assert_eq!(settled["title"], "Add dark mode");
+    assert_eq!(
+        settled["criteria"],
+        serde_json::json!(["Toggle visible in settings"])
+    );
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
+fn task_create_rejects_request_form_when_the_planner_is_disabled() {
+    let daemon = Daemon::spawn(&[]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["planner"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let result = raw_request_with_params(
+        &daemon.socket,
+        "task.create",
+        serde_json::json!({"repo": repo.path().to_str().unwrap(), "request": "add a widget"}),
+        Some(&daemon.token),
+    );
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("planner is disabled"),
+        "{result}"
+    );
+
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn task_create_rejects_neither_request_nor_title_and_goal() {
+    let daemon = Daemon::spawn(&[]);
+    let repo = init_git_repo();
+    let result = raw_request_with_params(
+        &daemon.socket,
+        "task.create",
+        serde_json::json!({"repo": repo.path().to_str().unwrap()}),
+        Some(&daemon.token),
+    );
+    assert!(result.get("error").is_some(), "{result}");
+
+    daemon.shutdown_and_wait();
+}
+
+/// The plan branch never produces a valid ```sushi-plan fence, no matter how
+/// many times it's asked -- for exercising the "could not draft this task"
+/// clarification path itself (as opposed to [`CLARIFY_THEN_SUCCEED_SCRIPT`],
+/// which uses the clarification to recover).
+const GARBAGE_PLANNER_SCRIPT: &str = r#"#!/bin/sh
+input="$(cat)"
+case "$input" in
+  *sushi-plan*)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'
+    json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"no fenced block here, sorry"}'
+    printf '%s\n' "$json"
+    ;;
+  *)
+    echo "changed" > CHANGED_MARKER.txt
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+    json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}'
+    printf '%s\n' "$json"
+    ;;
+esac
+"#;
+
+/// The plan branch fails to parse until the brief it's given contains the
+/// owner's clarification (which `run_plan_stage` folds into `task.request`
+/// verbatim as `"(Owner clarification: ...)"`), then succeeds -- for
+/// exercising "ask -> answer -> replan -> succeeds" end to end.
+const CLARIFY_THEN_SUCCEED_SCRIPT: &str = r#"#!/bin/sh
+input="$(cat)"
+case "$input" in
+  *sushi-plan*)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'
+    case "$input" in
+      *"Owner clarification"*)
+        json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-plan\n{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"criteria\":[\"Toggle visible in settings\"],\"verify\":[\"true\"],\"questions\":[]}\n```"}'
+        ;;
+      *)
+        json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"no fenced block here, sorry"}'
+        ;;
+    esac
+    printf '%s\n' "$json"
+    ;;
+  *)
+    echo "changed" > CHANGED_MARKER.txt
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+    json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}'
+    printf '%s\n' "$json"
+    ;;
+esac
+"#;
+
+/// Like [`FAKE_PLANNER_SCRIPT`] but the draft's own `verify` always fails,
+/// for exercising the implement loop's own attempt budget on top of a
+/// drafted task (spec review item P1-3: the plan attempt must never count
+/// against `maxAttempts`).
+const FAILING_VERIFY_PLANNER_SCRIPT: &str = r#"#!/bin/sh
+input="$(cat)"
+case "$input" in
+  *sushi-plan*)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'
+    json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-plan\n{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"criteria\":[\"Toggle visible in settings\"],\"verify\":[\"false\"],\"questions\":[]}\n```"}'
+    printf '%s\n' "$json"
+    ;;
+  *)
+    echo "changed" > CHANGED_MARKER.txt
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+    json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}'
+    printf '%s\n' "$json"
+    ;;
+esac
+"#;
+
+#[test]
+fn maxattempts_one_still_gives_the_implement_stage_its_own_one_attempt() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-planner-failing-verify.sh",
+        FAILING_VERIFY_PLANNER_SCRIPT,
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    settings["maxAttempts"] = serde_json::json!(1);
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "add dark mode to the settings screen",
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+
+    // If the plan attempt wrongly counted against maxAttempts, the implement
+    // stage would already be "exhausted" before it ever got to try -- this
+    // proves it actually got its own single attempt instead.
+    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+        s == "waiting"
+    });
+    let attempts = settled["attempts"].as_array().unwrap();
+    assert_eq!(
+        attempts.len(),
+        2,
+        "one plan attempt, one implement attempt: {settled}"
+    );
+    assert_eq!(attempts[0]["stage"], "plan");
+    assert_eq!(attempts[1]["stage"], "implement");
+    assert_eq!(attempts[1]["failure"]["kind"], "verify");
+    assert!(settled["question"]["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("Attempts keep failing with"));
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
+fn a_task_waiting_on_its_plan_question_does_not_hold_a_parallel_slot() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-planner.sh", FAKE_PLANNER_SCRIPT);
+    let fake_bins = [
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("PLAN_ASK_QUESTION", "1"),
+    ];
+    let data_holder = tempfile::tempdir().unwrap();
+    let data = data_holder.path().to_path_buf();
+    // `parallel` is read at startup: save it with a first daemon, then
+    // restart onto the saved settings in the same data dir.
+    let socket1 = data.join("orchd1.sock");
+    let first = spawn_orchd_raw(&data, &socket1, &fake_bins);
+    wait_for_socket(&socket1);
+    let token1 = read_control_token(&data);
+    let mut settings = request_on(
+        &socket1,
+        "settings.get",
+        serde_json::json!({}),
+        Some(&token1),
+    );
+    settings["parallel"] = serde_json::json!(1);
+    settings["review"] = serde_json::json!("");
+    request_on(
+        &socket1,
+        "settings.set",
+        serde_json::json!({"settings": settings}),
+        Some(&token1),
+    );
+    let _ = request_on(&socket1, "shutdown", serde_json::json!({}), Some(&token1));
+    let _ = wait_for_exit(first, Duration::from_secs(5));
+
+    let socket = data.join("orchd2.sock");
+    let child = spawn_orchd_raw(&data, &socket, &fake_bins);
+    wait_for_socket(&socket);
+    let token = read_control_token(&data);
+    let call = |m: &str, p: serde_json::Value| request_on(&socket, m, p, Some(&token));
+
+    let repo = init_git_repo();
+    let drafting = call(
+        "task.create",
+        serde_json::json!({"repo": repo.path().to_str().unwrap(), "request": "add dark mode", "start": true}),
+    );
+    let drafting_id = drafting["id"].as_str().unwrap().to_string();
+    let start = Instant::now();
+    while call("task.get", serde_json::json!({"id": drafting_id}))["status"] != "waiting" {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "drafting task never reached waiting on its plan question"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(call("ping", serde_json::json!({}))["running"], 0);
+
+    let passing = call(
+        "task.create",
+        serde_json::json!({"repo": repo.path().to_str().unwrap(),
+        "title": "Passes", "goal": "g", "criteria": [], "verify": ["true"], "start": true}),
+    );
+    let passing_id = passing["id"].as_str().unwrap().to_string();
+    let start = Instant::now();
+    loop {
+        let status = call("task.get", serde_json::json!({"id": passing_id}))["status"].clone();
+        if status == "done" {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "second task starved while the first sat on a plan question: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = call("shutdown", serde_json::json!({}));
+    let _ = wait_for_exit(child, Duration::from_secs(5));
+    for t in [&drafting, &passing] {
+        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+    }
+}
+
+#[test]
+fn stop_then_start_while_drafting_replans_from_scratch() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-planner-garbage.sh",
+        GARBAGE_PLANNER_SCRIPT,
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "add dark mode to the settings screen",
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+
+    let first_wait = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+        s == "waiting"
+    });
+    assert!(first_wait["question"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("could not draft"));
+    let plan_attempts_before = first_wait["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["stage"] == "plan")
+        .count();
+    assert_eq!(plan_attempts_before, 1);
+
+    daemon.request("task.stop", serde_json::json!({"id": task_id}));
+    let stopped = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+        s == "stopped" || s == "failed"
+    });
+    assert_eq!(stopped["status"], "stopped", "task JSON: {stopped}");
+
+    daemon.request("task.start", serde_json::json!({"id": task_id}));
+    let second_wait = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+        s == "waiting"
+    });
+    let plan_attempts_after = second_wait["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["stage"] == "plan")
+        .count();
+    assert_eq!(
+        plan_attempts_after, 2,
+        "task.start on a stopped, never-passed draft should re-run the plan stage from scratch: {second_wait}"
+    );
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
+fn unparseable_plan_then_owner_clarification_leads_to_a_successful_replan() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-planner-clarify.sh",
+        CLARIFY_THEN_SUCCEED_SCRIPT,
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "add dark mode to the settings screen",
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+
+    let waiting = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+        s == "waiting"
+    });
+    assert!(waiting["question"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("could not draft"));
+
+    daemon.request(
+        "task.answer",
+        serde_json::json!({"id": task_id, "answer": "it's the settings screen's theme picker"}),
+    );
+
+    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+        s == "done" || s == "failed" || s == "stopped"
+    });
+    assert_eq!(settled["status"], "done", "task JSON: {settled}");
+    assert_eq!(settled["title"], "Add dark mode");
+    let plan_attempts = settled["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["stage"] == "plan")
+        .count();
+    assert_eq!(
+        plan_attempts, 2,
+        "the first (unparseable) round and the successful replan: {settled}"
+    );
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
+fn drafted_task_still_gets_classified_despite_the_plan_attempt() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-planner.sh", FAKE_PLANNER_SCRIPT);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "add dark mode to the settings screen",
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+
+    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+        s == "done" || s == "failed" || s == "stopped"
+    });
+    assert_eq!(settled["status"], "done", "task JSON: {settled}");
+
+    // Before the P1-3 fix, `task.attempts.is_empty()` was already false once
+    // the plan attempt existed, so `classify_tier` (and its "tier" journal
+    // entry) was silently skipped for the task's very first implement try.
+    let decisions_path = daemon.data_dir().join("decisions.jsonl");
+    let decisions_text = std::fs::read_to_string(&decisions_path).unwrap_or_default();
+    assert!(
+        decisions_text
+            .lines()
+            .any(|l| l.contains("\"point\":\"tier\"")),
+        "expected a tier classification journal entry: {decisions_text}"
+    );
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+/// A one-shot-per-connection fake HTTP server that always answers with
+/// `answers_json` wrapped as an OpenAI chat-completion envelope -- a local,
+/// deterministic stand-in for `classify::decide`'s `Openai` backend (the
+/// only backend whose base URL is a runtime setting rather than hardcoded),
+/// so a test can drive a real classifier success without a network call.
+/// Runs on a detached thread for the test process's lifetime -- ponytail:
+/// nothing ever joins it, since the process exit is what reclaims it.
+fn find_double_crlf(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+fn spawn_fake_openai_classifier(answers_json: &str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let body = serde_json::json!({
+        "choices": [{"message": {"content": answers_json}}]
+    })
+    .to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            // Drain the full request (headers + declared Content-Length)
+            // before writing anything back: closing on a socket that still
+            // has unread bytes queued can RST the connection and truncate
+            // our own response, which showed up as an intermittent ureq
+            // "invalid header" parse failure on the client side.
+            let mut received = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        received.extend_from_slice(&chunk[..n]);
+                        let Some(header_end) = find_double_crlf(&received) else {
+                            continue;
+                        };
+                        let headers = String::from_utf8_lossy(&received[..header_end]);
+                        let content_length: usize = headers
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().to_string())
+                            })
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                        if received.len() >= header_end + 4 + content_length {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[test]
+fn jev_tier_decision_lands_in_task_decisions_on_classifier_success() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        "#!/bin/sh\ncat > /dev/null\necho \"changed\" > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n",
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+
+    // "standard" routes to the Claude harness (default `tiers` map), which
+    // is the one faked above via `ORCHD_CLAUDE_BIN` -- "mechanical" would
+    // route to Codex and hang waiting on a real `codex` binary.
+    let base_url = spawn_fake_openai_classifier(
+        r#"{"answers":{"tier":{"choice":"standard","probabilities":{"mechanical":0.08,"standard":0.82,"hard":0.1}}}}"#,
+    );
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    settings["classifier"] =
+        serde_json::json!({"backend": "openai", "model": "fake", "providerId": "fake"});
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    daemon.request(
+        "secrets.set",
+        serde_json::json!({"classifier": {"key": "test-key", "baseUrl": base_url}}),
+    );
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Pass case",
+            "goal": "Make a trivial change",
+            "criteria": [],
+            "verify": ["true"],
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": task_id}));
+
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(15));
+    assert_eq!(settled["status"], "done", "task JSON: {settled}");
+    let decisions = settled["decisions"].as_array().unwrap();
+    assert!(
+        decisions.iter().any(|d| d
+            .as_str()
+            .unwrap_or("")
+            .starts_with("Jev: tier standard (p 0.82) -> route ")),
+        "expected a Jev tier decision: {decisions:?}"
+    );
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
 }

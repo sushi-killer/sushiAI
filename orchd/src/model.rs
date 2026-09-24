@@ -99,6 +99,15 @@ pub struct Settings {
     pub protected_paths: Vec<String>,
     pub max_attempts: u32,
     pub parallel: u32,
+    /// Route id used for the drafting/plan stage of a `{repo, request}`
+    /// `task.create`; `""` turns planning off (that create form is then
+    /// rejected -- there is nothing to run it with).
+    #[serde(default = "default_planner")]
+    pub planner: String,
+}
+
+fn default_planner() -> String {
+    "claude-sonnet".to_string()
 }
 
 impl Default for Settings {
@@ -154,6 +163,7 @@ impl Default for Settings {
             protected_paths: vec![],
             max_attempts: 4,
             parallel: 2,
+            planner: default_planner(),
         }
     }
 }
@@ -161,6 +171,10 @@ impl Default for Settings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
+    /// A `{repo, request}` task.create is drafting its own title/goal/
+    /// criteria/verify (and asking any clarifying questions) before it ever
+    /// reaches `queued`.
+    Drafting,
     Queued,
     Running,
     Waiting,
@@ -184,6 +198,11 @@ pub struct Task {
     pub goal: String,
     pub criteria: Vec<String>,
     pub verify: Vec<String>,
+    /// The owner's raw one-sentence ask, set only by the `{repo, request}`
+    /// form of `task.create`; the drafting stage fills `title`/`goal`/
+    /// `criteria`/`verify` from it and leaves this as the original text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
     pub repo: String,
     pub worktree: String,
     pub branch: String,
@@ -205,6 +224,9 @@ pub struct Task {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Stage {
+    /// Drafting: a fresh read-only session that fills in title/goal/
+    /// criteria/verify from the owner's one-sentence request.
+    Plan,
     Implement,
     Review,
 }
@@ -348,9 +370,54 @@ mod tests {
         assert_eq!(v["parallel"], 2);
         assert_eq!(v["classifier"]["backend"], "openrouter");
         assert_eq!(v["classifier"]["model"], "typesafe/jev-1.13");
+        assert_eq!(v["planner"], "claude-sonnet");
         let back: Settings = serde_json::from_value(v).unwrap();
         assert_eq!(back.max_attempts, 4);
         assert_eq!(back.tiers.get(&Tier::Hard).unwrap(), "claude-opus");
+    }
+
+    #[test]
+    fn settings_without_a_planner_field_defaults_to_claude_sonnet() {
+        // An older settings.json on disk (written before this field existed)
+        // must still load, with planning on by default.
+        let old_json = serde_json::json!({
+            "routes": [], "tiers": {}, "review": "", "classifier": {"backend": "none", "model": "", "providerId": ""},
+            "sandbox": "host", "allowedDomains": [], "protectedPaths": [], "maxAttempts": 4, "parallel": 2,
+        });
+        let s: Settings = serde_json::from_value(old_json).unwrap();
+        assert_eq!(s.planner, "claude-sonnet");
+    }
+
+    #[test]
+    fn task_request_field_is_camel_case_and_omitted_when_absent() {
+        let task = Task {
+            id: "t1".into(),
+            title: "Fix the thing".into(),
+            goal: String::new(),
+            criteria: vec![],
+            verify: vec![],
+            request: Some("fix the thing that's broken".into()),
+            repo: "/repo".into(),
+            worktree: "/repo-task".into(),
+            branch: "task/x".into(),
+            base_sha: "abc".into(),
+            status: TaskStatus::Drafting,
+            tier: Tier::Standard,
+            question: None,
+            decisions: vec![],
+            attempts: vec![],
+            cost_usd: 0.0,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let v = serde_json::to_value(&task).unwrap();
+        assert_eq!(v["request"], "fix the thing that's broken");
+        assert_eq!(v["status"], "drafting");
+
+        let mut without_request = task;
+        without_request.request = None;
+        let v2 = serde_json::to_value(&without_request).unwrap();
+        assert!(v2.get("request").is_none());
     }
 
     #[test]
@@ -368,6 +435,7 @@ mod tests {
             goal: "Goal".into(),
             criteria: vec![],
             verify: vec![],
+            request: None,
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
             branch: "task/x".into(),

@@ -3,7 +3,7 @@
 //! Codex-specific wording, so the same text is sent on stdin to either
 //! harness (spec step 3).
 
-use crate::model::{Attempt, AttemptStatus, Failure, ReviewResult, Task};
+use crate::model::{Attempt, AttemptStatus, Failure, ReviewResult, Stage, Task};
 
 const MAX_FAILURE_DETAIL: usize = 1500;
 
@@ -81,9 +81,16 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
         out.push('\n');
     }
 
-    if !task.attempts.is_empty() {
+    // The plan attempt (if any) drafted the brief the agent is reading right
+    // now, not a previous *implement* try -- it has no place in this list.
+    let implement_attempts: Vec<&Attempt> = task
+        .attempts
+        .iter()
+        .filter(|a| a.stage == Stage::Implement)
+        .collect();
+    if !implement_attempts.is_empty() {
         out.push_str("## Previous attempts\n\n");
-        for attempt in &task.attempts {
+        for attempt in implement_attempts {
             out.push_str(&format!(
                 "- Attempt {} ({}): {}\n",
                 attempt.n,
@@ -158,6 +165,60 @@ pub fn parse_review(text: &str) -> Option<ReviewResult> {
     serde_json::from_str(&body).ok()
 }
 
+const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
+
+const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"criteria\":[],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"]}]}\n```\n";
+
+/// The drafting-stage brief: the owner's request verbatim, then the fixed
+/// planning instructions and report format (spec: "harness-agnostic", so
+/// this takes no harness parameter, same as [`build_brief`]).
+pub fn build_plan_brief(request: &str) -> String {
+    format!(
+        "## Request\n\n{}\n\n## Instructions\n\n{}\n\n{}",
+        request.trim(),
+        PLAN_INSTRUCTIONS,
+        PLAN_REPORT_FORMAT
+    )
+}
+
+/// Sent instead of [`build_plan_brief`] on the one retry after an
+/// unparseable draft -- a fresh read-only session (planning never resumes,
+/// same as review), so it still needs the full request, just with an
+/// explicit reminder in front of it.
+pub fn build_plan_retry_brief(request: &str) -> String {
+    format!(
+        "Your previous reply did not include a valid ```sushi-plan block. Reply with nothing else.\n\n{}",
+        build_plan_brief(request)
+    )
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct PlanQuestion {
+    pub text: String,
+    #[serde(default)]
+    pub options: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PlanDraft {
+    pub title: String,
+    #[serde(default)]
+    pub goal: String,
+    #[serde(default)]
+    pub criteria: Vec<String>,
+    #[serde(default)]
+    pub verify: Vec<String>,
+    #[serde(default)]
+    pub questions: Vec<PlanQuestion>,
+}
+
+/// Same last-fence-wins, malformed-is-`None` rule as [`parse_report`]/
+/// [`parse_review`].
+pub fn parse_plan(text: &str) -> Option<PlanDraft> {
+    let body = last_fenced_block(text, "sushi-plan")?;
+    serde_json::from_str(&body).ok()
+}
+
 /// Find the last occurrence of a fence opened with ` ```<tag>` (optionally
 /// followed by more characters on the same line, e.g. trailing whitespace)
 /// and closed by the next ` ``` ` on its own line, returning the text
@@ -188,6 +249,7 @@ mod tests {
             goal: "Add a Save button to the settings dialog".into(),
             criteria: vec!["Button visible".into(), "Click saves settings".into()],
             verify: vec!["npm test".into()],
+            request: None,
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
             branch: "task/add-a-button".into(),
@@ -256,6 +318,38 @@ mod tests {
     }
 
     #[test]
+    fn brief_previous_attempts_never_lists_the_plan_attempt() {
+        let mut task = sample_task();
+        task.attempts.push(Attempt {
+            n: 1,
+            stage: Stage::Plan,
+            route_id: "claude-sonnet".into(),
+            harness: Harness::Claude,
+            model: "sonnet".into(),
+            reason: "drafting".into(),
+            session_id: None,
+            pgid: None,
+            resumed: false,
+            started_at: 1,
+            ended_at: Some(2),
+            status: AttemptStatus::Passed,
+            summary: Some("Drafted: Add a button".into()),
+            changed_files: vec![],
+            verify: vec![],
+            gate_blocks: 0,
+            review: None,
+            failure: None,
+            usage: None,
+            cost_usd: None,
+        });
+        let brief = build_brief(&task, "", "");
+        assert!(
+            !brief.contains("Previous attempts"),
+            "a plan-only history should never render the section at all: {brief}"
+        );
+    }
+
+    #[test]
     fn resume_delta_contains_only_failure_and_report_format() {
         let failure = Failure {
             kind: FailureKind::Verify,
@@ -291,5 +385,51 @@ mod tests {
         let review = parse_review(text).unwrap();
         assert_eq!(review.verdict, Verdict::Fail);
         assert_eq!(review.findings, vec!["missing test".to_string()]);
+    }
+
+    #[test]
+    fn plan_brief_carries_the_request_verbatim_and_asks_for_the_sushi_plan_fence() {
+        let brief = build_plan_brief("add dark mode to the settings screen");
+        assert!(brief.contains("add dark mode to the settings screen"));
+        assert!(brief.contains("sushi-plan"));
+        assert!(brief.contains("AGENTS.md"));
+    }
+
+    #[test]
+    fn plan_retry_brief_still_carries_the_original_request() {
+        let retry = build_plan_retry_brief("add dark mode");
+        assert!(retry.contains("add dark mode"));
+        assert!(retry.contains("sushi-plan"));
+        assert!(retry.to_lowercase().contains("previous reply"));
+    }
+
+    #[test]
+    fn parse_plan_reads_title_goal_criteria_verify_and_questions() {
+        let text = "```sushi-plan\n{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"criteria\":[\"Toggle visible in settings\"],\"verify\":[\"npm test\"],\"questions\":[{\"text\":\"Which default?\",\"options\":[\"light\",\"dark\",\"system\"]}]}\n```";
+        let draft = parse_plan(text).unwrap();
+        assert_eq!(draft.title, "Add dark mode");
+        assert_eq!(
+            draft.criteria,
+            vec!["Toggle visible in settings".to_string()]
+        );
+        assert_eq!(draft.verify, vec!["npm test".to_string()]);
+        assert_eq!(draft.questions.len(), 1);
+        assert_eq!(draft.questions[0].text, "Which default?");
+        assert_eq!(draft.questions[0].options.len(), 3);
+    }
+
+    #[test]
+    fn parse_plan_returns_none_when_malformed_or_missing() {
+        assert!(parse_plan("no fence here").is_none());
+        assert!(parse_plan("```sushi-plan\nnot json\n```").is_none());
+    }
+
+    #[test]
+    fn parse_plan_defaults_missing_optional_fields() {
+        let text = "```sushi-plan\n{\"title\":\"Add dark mode\",\"goal\":\"Add it\"}\n```";
+        let draft = parse_plan(text).unwrap();
+        assert!(draft.criteria.is_empty());
+        assert!(draft.verify.is_empty());
+        assert!(draft.questions.is_empty());
     }
 }

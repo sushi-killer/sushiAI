@@ -233,6 +233,7 @@ mod tests {
             goal: "Do the thing".into(),
             criteria: vec!["works".into()],
             verify: vec!["true".into()],
+            request: None,
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
             branch: "task/do-thing".into(),

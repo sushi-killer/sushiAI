@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { Plus, RotateCcw, Trash2 } from "lucide-react";
 import "./orchestrator.css";
 import { orchestratorClient } from "./client";
+import {
+  type DefaultableSetting,
+  resetSettingToDefault,
+  settingValue,
+  settingsDifferingFromDefaults,
+} from "./helpers";
 import type { ChatModels, ModelProfile, ModelProvider } from "../types";
 import type {
   ClassifierBackend,
@@ -23,6 +29,60 @@ const CLASSIFIER_BACKENDS: { value: ClassifierBackend; label: string }[] = [
   { value: "typesafe", label: "TypeSafe" },
   { value: "openai", label: "OpenAI-compatible (Ollama / LM Studio)" },
 ];
+
+const SETTING_LABELS: Record<DefaultableSetting, string> = {
+  "tiers.mechanical": "Mechanical tier",
+  "tiers.standard": "Standard tier",
+  "tiers.hard": "Hard tier",
+  review: "Review",
+  planner: "Planner",
+  orchestrator: "Orchestrator",
+  autoAnswer: "Answer stuck questions",
+  "classifier.backend": "Classifier backend",
+  "classifier.model": "Classifier model",
+  sandbox: "Sandbox",
+  codexNetwork: "Codex network access",
+  allowedDomains: "Allowed network domains",
+  protectedPaths: "Protected paths",
+  maxAttempts: "Max attempts",
+  parallel: "Parallel tasks",
+};
+
+/** The route id a route-valued setting points at, or `null` when its value
+ * is one of the non-route choices ("" or "auto") or it isn't a route field. */
+function routeIdOf(field: DefaultableSetting, value: unknown): string | null {
+  const isRouteField =
+    field.startsWith("tiers.") ||
+    field === "review" ||
+    field === "planner" ||
+    field === "orchestrator";
+  if (!isRouteField || typeof value !== "string") return null;
+  return value && value !== "auto" ? value : null;
+}
+
+/** How a default reads in its marker: a route's label rather than its id,
+ * and the same words the control's own options use. */
+function defaultText(
+  field: DefaultableSetting,
+  value: unknown,
+  routes: Route[],
+): string {
+  const routeId = routeIdOf(field, value);
+  if (routeId)
+    return routes.find((route) => route.id === routeId)?.label || routeId;
+  if (field === "review")
+    return value === "auto" ? "Other vendor (auto)" : "Off";
+  if (field === "planner") return "Off";
+  if (field === "orchestrator") return "Standard route";
+  if (field === "classifier.backend")
+    return (
+      CLASSIFIER_BACKENDS.find((backend) => backend.value === value)?.label ||
+      String(value)
+    );
+  if (typeof value === "boolean") return value ? "On" : "Off";
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "None";
+  return String(value) || "None";
+}
 
 function newRoute(harness: Harness): Route {
   return {
@@ -156,6 +216,9 @@ export function OrchestratorSettings() {
   // into `settings` on blur and again at save time.
   const [domainsText, setDomainsText] = useState("");
   const [pathsText, setPathsText] = useState("");
+  // orchd's built-in defaults; stays null on an older orchd without
+  // `settings.defaults`, which just means no default markers.
+  const [defaults, setDefaults] = useState<Settings | null>(null);
 
   useEffect(() => {
     Promise.all([
@@ -177,6 +240,12 @@ export function OrchestratorSettings() {
         setError(message);
         setNotBuilt(message.includes("is not built"));
       });
+    orchestratorClient
+      .settingsDefaults()
+      .then(setDefaults)
+      .catch(() => {
+        // An older orchd binary: the panel works exactly as before.
+      });
   }, []);
 
   if (notBuilt)
@@ -197,6 +266,61 @@ export function OrchestratorSettings() {
 
   function update(patch: Partial<Settings>) {
     setSettings((old) => (old ? { ...old, ...patch } : old));
+  }
+
+  const differing = defaults
+    ? settingsDifferingFromDefaults(settings, defaults)
+    : [];
+
+  function resetToDefault(field: DefaultableSetting) {
+    if (!defaults) return;
+    setSettings((old) =>
+      old ? resetSettingToDefault(old, defaults, field) : old,
+    );
+    if (field === "allowedDomains")
+      setDomainsText(defaults.allowedDomains.join("\n"));
+    if (field === "protectedPaths")
+      setPathsText(defaults.protectedPaths.join("\n"));
+  }
+
+  /** The "Default: ..." marker and reset button beside a control whose
+   * saved value differs from orchd's default. Reset only stages the value;
+   * Save still writes it, like every other edit here. */
+  function defaultMarker(field: DefaultableSetting) {
+    if (!defaults || !settings || !differing.includes(field)) return null;
+    const label = SETTING_LABELS[field];
+    const value = settingValue(defaults, field);
+    // The built-in route's label first: a same-id route the owner renamed
+    // should not relabel orchd's default.
+    const text = defaultText(field, value, [
+      ...defaults.routes,
+      ...settings.routes,
+    ]);
+    // Resetting to a route the owner has since removed would leave a
+    // dangling id - show the default, but don't offer to restore it.
+    const routeId = routeIdOf(field, value);
+    const missing =
+      routeId !== null &&
+      !settings.routes.some((route) => route.id === routeId);
+    return (
+      <span className="orch-default-marker">
+        Default: {text}
+        <button
+          type="button"
+          className="icon-button"
+          aria-label={`Reset ${label} to default`}
+          title={
+            missing
+              ? `Route ${text} is not configured`
+              : `Reset ${label} to default`
+          }
+          disabled={missing}
+          onClick={() => resetToDefault(field)}
+        >
+          <RotateCcw size={12} />
+        </button>
+      </span>
+    );
   }
 
   async function save() {
@@ -268,16 +392,38 @@ export function OrchestratorSettings() {
         <p className="dialog-eyebrow">TIER → ROUTE</p>
         <div className="orch-tier-row">
           {TIERS.map((tier) => (
-            <label key={tier} className="orch-tier-label">
-              <span>{tier}</span>
+            <div key={tier} className="orch-tier-label">
+              <label>
+                <span>{tier}</span>
+                <select
+                  value={settings.tiers[tier] || ""}
+                  onChange={(event) =>
+                    update({
+                      tiers: { ...settings.tiers, [tier]: event.target.value },
+                    })
+                  }
+                >
+                  {settings.routes.map((route) => (
+                    <option key={route.id} value={route.id}>
+                      {route.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {defaultMarker(`tiers.${tier}`)}
+            </div>
+          ))}
+        </div>
+        <div className="orch-review-planner-row">
+          <div className="orch-tier-label">
+            <label>
+              <span>Review</span>
               <select
-                value={settings.tiers[tier] || ""}
-                onChange={(event) =>
-                  update({
-                    tiers: { ...settings.tiers, [tier]: event.target.value },
-                  })
-                }
+                value={settings.review}
+                onChange={(event) => update({ review: event.target.value })}
               >
+                <option value="">Off</option>
+                <option value="auto">Other vendor (auto)</option>
                 {settings.routes.map((route) => (
                   <option key={route.id} value={route.id}>
                     {route.label}
@@ -285,57 +431,49 @@ export function OrchestratorSettings() {
                 ))}
               </select>
             </label>
-          ))}
-        </div>
-        <div className="orch-review-planner-row">
-          <label className="orch-tier-label">
-            <span>Review</span>
-            <select
-              value={settings.review}
-              onChange={(event) => update({ review: event.target.value })}
-            >
-              <option value="">Off</option>
-              <option value="auto">Other vendor (auto)</option>
-              {settings.routes.map((route) => (
-                <option key={route.id} value={route.id}>
-                  {route.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="orch-tier-label">
-            <span>Planner</span>
-            <select
-              value={settings.planner}
-              onChange={(event) => update({ planner: event.target.value })}
-            >
-              <option value="">Off</option>
-              {settings.routes.map((route) => (
-                <option key={route.id} value={route.id}>
-                  {route.label}
-                </option>
-              ))}
-            </select>
-            {settings.planner && settings.planner !== settings.tiers.hard && (
-              <span className="tone-yellow">
-                Differs from the hard tier's route
-              </span>
-            )}
-          </label>
-          <label className="orch-tier-label">
-            <span>Orchestrator</span>
-            <select
-              value={settings.orchestrator}
-              onChange={(event) => update({ orchestrator: event.target.value })}
-            >
-              <option value="">Standard route</option>
-              {settings.routes.map((route) => (
-                <option key={route.id} value={route.id}>
-                  {route.label}
-                </option>
-              ))}
-            </select>
-          </label>
+            {defaultMarker("review")}
+          </div>
+          <div className="orch-tier-label">
+            <label>
+              <span>Planner</span>
+              <select
+                value={settings.planner}
+                onChange={(event) => update({ planner: event.target.value })}
+              >
+                <option value="">Off</option>
+                {settings.routes.map((route) => (
+                  <option key={route.id} value={route.id}>
+                    {route.label}
+                  </option>
+                ))}
+              </select>
+              {settings.planner && settings.planner !== settings.tiers.hard && (
+                <span className="tone-yellow">
+                  Differs from the hard tier's route
+                </span>
+              )}
+            </label>
+            {defaultMarker("planner")}
+          </div>
+          <div className="orch-tier-label">
+            <label>
+              <span>Orchestrator</span>
+              <select
+                value={settings.orchestrator}
+                onChange={(event) =>
+                  update({ orchestrator: event.target.value })
+                }
+              >
+                <option value="">Standard route</option>
+                {settings.routes.map((route) => (
+                  <option key={route.id} value={route.id}>
+                    {route.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {defaultMarker("orchestrator")}
+          </div>
         </div>
         <label className="setting-check">
           <input
@@ -352,6 +490,7 @@ export function OrchestratorSettings() {
             </em>
           </span>
         </label>
+        {defaultMarker("autoAnswer")}
       </div>
 
       <div className="setting-block">
@@ -376,6 +515,7 @@ export function OrchestratorSettings() {
             ))}
           </select>
         </label>
+        {defaultMarker("classifier.backend")}
         {settings.classifier.backend !== "none" && (
           <>
             <label className="form-row">
@@ -393,6 +533,7 @@ export function OrchestratorSettings() {
                 placeholder="typesafe/jev-1.13"
               />
             </label>
+            {defaultMarker("classifier.model")}
             <label className="form-row">
               Provider (API key)
               <select
@@ -443,6 +584,7 @@ export function OrchestratorSettings() {
             </button>
           ))}
         </div>
+        {defaultMarker("sandbox")}
         <label className="setting-check">
           <input
             type="checkbox"
@@ -457,6 +599,7 @@ export function OrchestratorSettings() {
             </em>
           </span>
         </label>
+        {defaultMarker("codexNetwork")}
         <label>
           Allowed network domains (Claude's sandbox only, one per line)
           <textarea
@@ -466,6 +609,7 @@ export function OrchestratorSettings() {
             rows={3}
           />
         </label>
+        {defaultMarker("allowedDomains")}
         <label>
           Protected paths (globs, one per line)
           <textarea
@@ -476,29 +620,36 @@ export function OrchestratorSettings() {
             placeholder="src/app/**"
           />
         </label>
+        {defaultMarker("protectedPaths")}
         <div className="form-row">
-          <label>
-            Max attempts
-            <input
-              type="number"
-              min={1}
-              value={settings.maxAttempts}
-              onChange={(event) =>
-                update({ maxAttempts: Number(event.target.value) || 1 })
-              }
-            />
-          </label>
-          <label>
-            Parallel tasks
-            <input
-              type="number"
-              min={1}
-              value={settings.parallel}
-              onChange={(event) =>
-                update({ parallel: Number(event.target.value) || 1 })
-              }
-            />
-          </label>
+          <div className="orch-default-field">
+            <label>
+              Max attempts
+              <input
+                type="number"
+                min={1}
+                value={settings.maxAttempts}
+                onChange={(event) =>
+                  update({ maxAttempts: Number(event.target.value) || 1 })
+                }
+              />
+            </label>
+            {defaultMarker("maxAttempts")}
+          </div>
+          <div className="orch-default-field">
+            <label>
+              Parallel tasks
+              <input
+                type="number"
+                min={1}
+                value={settings.parallel}
+                onChange={(event) =>
+                  update({ parallel: Number(event.target.value) || 1 })
+                }
+              />
+            </label>
+            {defaultMarker("parallel")}
+          </div>
         </div>
       </div>
 

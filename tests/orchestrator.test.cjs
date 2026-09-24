@@ -203,6 +203,8 @@ test("call() rejects a method outside the protocol allowlist before touching the
     assert.equal(ALLOWED_METHODS.has(method), true, method);
   // Agent-to-agent message threads are reachable the same way as tasks/chat.
   assert.equal(ALLOWED_METHODS.has("message.list"), true);
+  // Read-only built-in defaults, compared against the saved settings.
+  assert.equal(ALLOWED_METHODS.has("settings.defaults"), true);
   assert.equal(ALLOWED_METHODS.has("hook.stop"), false);
 });
 

@@ -1,6 +1,13 @@
 // Pure helpers the renderer bends the protocol into a screen with - no
 // window.bridge access here, so they're cheap to unit test directly.
-import type { Attempt, Message, OrchestratorEvent, Task } from "./types";
+import type {
+  Attempt,
+  Message,
+  OrchestratorEvent,
+  Settings,
+  Task,
+  Tier,
+} from "./types";
 
 export type TaskCreateParams = {
   request?: string;
@@ -248,4 +255,112 @@ export function participantLabel(id: string, tasks: Task[]): string {
   if (id === "orchestrator") return "Orchestrator";
   const task = tasks.find((t) => t.id === id);
   return task ? task.title : `Task ${id.slice(0, 8)}`;
+}
+
+/** Every setting the panel shows a default marker for. `routes` is left out
+ * (the owner's own route list), and so are `classifier.providerId` (a
+ * pointer to a stored key, not a choice with a default) and `experiments`/
+ * `prices` (not shown in the panel). */
+export type DefaultableSetting =
+  | "tiers.mechanical"
+  | "tiers.standard"
+  | "tiers.hard"
+  | "review"
+  | "planner"
+  | "orchestrator"
+  | "autoAnswer"
+  | "classifier.backend"
+  | "classifier.model"
+  | "sandbox"
+  | "codexNetwork"
+  | "allowedDomains"
+  | "protectedPaths"
+  | "maxAttempts"
+  | "parallel";
+
+/** One setting's value, read by its dotted `DefaultableSetting` path. */
+export function settingValue(
+  settings: Settings,
+  field: DefaultableSetting,
+): unknown {
+  switch (field) {
+    case "tiers.mechanical":
+      return settings.tiers.mechanical;
+    case "tiers.standard":
+      return settings.tiers.standard;
+    case "tiers.hard":
+      return settings.tiers.hard;
+    case "classifier.backend":
+      return settings.classifier.backend;
+    case "classifier.model":
+      return settings.classifier.model;
+    default:
+      return settings[field];
+  }
+}
+
+const DEFAULTABLE_SETTINGS: DefaultableSetting[] = [
+  "tiers.mechanical",
+  "tiers.standard",
+  "tiers.hard",
+  "review",
+  "planner",
+  "orchestrator",
+  "autoAnswer",
+  "classifier.backend",
+  "classifier.model",
+  "sandbox",
+  "codexNetwork",
+  "allowedDomains",
+  "protectedPaths",
+  "maxAttempts",
+  "parallel",
+];
+
+/** The settings whose saved value differs from orchd's built-in default -
+ * a save made before a default changed keeps the old value frozen. Route
+ * fields compare route ids, never labels. */
+export function settingsDifferingFromDefaults(
+  saved: Settings,
+  defaults: Settings,
+): DefaultableSetting[] {
+  return DEFAULTABLE_SETTINGS.filter(
+    (field) =>
+      JSON.stringify(settingValue(saved, field)) !==
+      JSON.stringify(settingValue(defaults, field)),
+  );
+}
+
+/** `saved` with one setting put back to its value in `defaults`. */
+export function resetSettingToDefault(
+  saved: Settings,
+  defaults: Settings,
+  field: DefaultableSetting,
+): Settings {
+  switch (field) {
+    case "tiers.mechanical":
+    case "tiers.standard":
+    case "tiers.hard": {
+      const tier = field.slice("tiers.".length) as Tier;
+      return {
+        ...saved,
+        tiers: { ...saved.tiers, [tier]: defaults.tiers[tier] },
+      };
+    }
+    case "classifier.backend":
+      return {
+        ...saved,
+        classifier: {
+          ...saved.classifier,
+          backend: defaults.classifier.backend,
+        },
+      };
+    case "classifier.model":
+      return {
+        ...saved,
+        classifier: { ...saved.classifier, model: defaults.classifier.model },
+      };
+    default:
+      return { ...saved, [field]: defaults[field] };
+  }
 }

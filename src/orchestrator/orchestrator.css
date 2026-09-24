@@ -858,6 +858,34 @@
   text-transform: capitalize;
 }
 
+/* "Default: ..." beside a setting saved away from orchd's default, with its
+ * reset button on the same line. */
+.orch-default-marker {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-xs);
+  font-size: var(--text-xs);
+  color: var(--tone-warning);
+  text-transform: none;
+}
+.orch-default-marker .icon-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Max attempts / Parallel: a field plus its default marker, keeping the
+ * row's 2:1 split. */
+.orch-default-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-xs);
+  flex: 1;
+  min-width: 0;
+}
+.orch-default-field:first-child {
+  flex: 2;
+}
+
 .orch-route-row {
   display: grid;
   grid-template-columns: minmax(120px, 1fr) repeat(4, minmax(96px, auto)) 28px;

@@ -321,6 +321,22 @@ fn ping_settings_task_create_and_list_round_trip() {
     let _ = std::fs::remove_dir_all(worktree);
 }
 
+#[test]
+fn settings_defaults_reports_the_built_in_defaults_not_the_saved_settings() {
+    let daemon = Daemon::spawn(&[]);
+
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["planner"] = serde_json::json!("claude-sonnet");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let defaults = daemon.request("settings.defaults", serde_json::json!({}));
+    assert_eq!(defaults["planner"], "claude-opus");
+    let saved = daemon.request("settings.get", serde_json::json!({}));
+    assert_eq!(saved["planner"], "claude-sonnet");
+
+    daemon.shutdown_and_wait();
+}
+
 /// `kill(pid, 0)`: true iff a process with this pid exists and is
 /// signalable by us -- the standard liveness probe, same one
 /// `main.rs::acquire_singleton` uses for the daemon's own pidfile.

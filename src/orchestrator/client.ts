@@ -21,6 +21,7 @@ export const orchestratorClient = {
   settingsGet: () => call<Settings>("settings.get"),
   settingsSet: (settings: Settings) =>
     call<Settings>("settings.set", { settings }),
+  settingsDefaults: () => call<Settings>("settings.defaults"),
   taskList: (repo?: string, includeArchived?: boolean) =>
     call<Task[]>("task.list", {
       ...(repo ? { repo } : {}),

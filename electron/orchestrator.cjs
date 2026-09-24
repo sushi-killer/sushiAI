@@ -27,6 +27,7 @@ const ALLOWED_METHODS = new Set([
   "ping",
   "settings.get",
   "settings.set",
+  "settings.defaults",
   "task.list",
   "task.get",
   "task.create",

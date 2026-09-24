@@ -422,3 +422,179 @@ test("participantLabel names the orchestrator, a known task's title, or a short 
   assert.equal(participantLabel("abcdefgh12345", tasks), "Export CSV");
   assert.equal(participantLabel("zzzzzzzzunknown", tasks), "Task zzzzzzzz");
 });
+
+function settings(overrides = {}) {
+  return {
+    routes: [
+      { id: "claude-sonnet", label: "Claude Sonnet", harness: "claude" },
+      { id: "claude-opus", label: "Claude Opus", harness: "claude" },
+      { id: "codex", label: "Codex", harness: "codex" },
+    ],
+    tiers: {
+      mechanical: "codex",
+      standard: "claude-sonnet",
+      hard: "claude-opus",
+    },
+    review: "auto",
+    classifier: {
+      backend: "openrouter",
+      model: "typesafe/jev-1.13",
+      providerId: "",
+    },
+    sandbox: "native",
+    allowedDomains: ["*"],
+    codexNetwork: false,
+    protectedPaths: [],
+    maxAttempts: 4,
+    parallel: 2,
+    planner: "claude-opus",
+    orchestrator: "",
+    autoAnswer: false,
+    experiments: {},
+    prices: {},
+    ...overrides,
+  };
+}
+
+test("settingsDifferingFromDefaults flags a planner saved before the default changed", async () => {
+  const { settingsDifferingFromDefaults } = await library;
+  assert.deepEqual(
+    settingsDifferingFromDefaults(
+      settings({ planner: "claude-sonnet" }),
+      settings(),
+    ),
+    ["planner"],
+  );
+});
+
+test("settingsDifferingFromDefaults flags nothing for identical settings", async () => {
+  const { settingsDifferingFromDefaults } = await library;
+  assert.deepEqual(settingsDifferingFromDefaults(settings(), settings()), []);
+  // Equal lists compare by value, not by reference.
+  assert.deepEqual(
+    settingsDifferingFromDefaults(
+      settings({ allowedDomains: ["*"] }),
+      settings({ allowedDomains: ["*"] }),
+    ),
+    [],
+  );
+});
+
+test("settingsDifferingFromDefaults never flags routes or the classifier's provider", async () => {
+  const { settingsDifferingFromDefaults } = await library;
+  assert.deepEqual(
+    settingsDifferingFromDefaults(
+      settings({
+        routes: [{ id: "mine", label: "Mine", harness: "codex" }],
+      }),
+      settings(),
+    ),
+    [],
+  );
+  assert.deepEqual(
+    settingsDifferingFromDefaults(
+      settings({
+        classifier: {
+          backend: "openrouter",
+          model: "typesafe/jev-1.13",
+          providerId: "openrouter-key",
+        },
+      }),
+      settings(),
+    ),
+    [],
+  );
+  // Nor the fields the panel doesn't show.
+  assert.deepEqual(
+    settingsDifferingFromDefaults(
+      settings({ experiments: { retry: "fresh" }, prices: { x: {} } }),
+      settings(),
+    ),
+    [],
+  );
+});
+
+test("settingsDifferingFromDefaults flags each compared field on its own", async () => {
+  const { settingsDifferingFromDefaults } = await library;
+  const differs = (overrides) =>
+    settingsDifferingFromDefaults(settings(overrides), settings());
+  assert.deepEqual(
+    differs({
+      tiers: {
+        mechanical: "claude-sonnet",
+        standard: "claude-opus",
+        hard: "codex",
+      },
+    }),
+    ["tiers.mechanical", "tiers.standard", "tiers.hard"],
+  );
+  assert.deepEqual(
+    differs({
+      classifier: { backend: "none", model: "other", providerId: "" },
+    }),
+    ["classifier.backend", "classifier.model"],
+  );
+  assert.deepEqual(
+    differs({
+      review: "",
+      orchestrator: "codex",
+      autoAnswer: true,
+      sandbox: "host",
+      codexNetwork: true,
+      allowedDomains: ["github.com"],
+      protectedPaths: ["src/app/**"],
+      maxAttempts: 6,
+      parallel: 3,
+    }),
+    [
+      "review",
+      "orchestrator",
+      "autoAnswer",
+      "sandbox",
+      "codexNetwork",
+      "allowedDomains",
+      "protectedPaths",
+      "maxAttempts",
+      "parallel",
+    ],
+  );
+});
+
+test("resetSettingToDefault restores one setting and leaves the rest alone", async () => {
+  const { resetSettingToDefault, settingsDifferingFromDefaults } =
+    await library;
+  const saved = settings({
+    planner: "claude-sonnet",
+    tiers: {
+      mechanical: "codex",
+      standard: "claude-opus",
+      hard: "claude-opus",
+    },
+    classifier: { backend: "none", model: "x", providerId: "key" },
+  });
+  const defaults = settings();
+
+  const planner = resetSettingToDefault(saved, defaults, "planner");
+  assert.equal(planner.planner, "claude-opus");
+  assert.deepEqual(settingsDifferingFromDefaults(planner, defaults), [
+    "tiers.standard",
+    "classifier.backend",
+    "classifier.model",
+  ]);
+
+  const tier = resetSettingToDefault(saved, defaults, "tiers.standard");
+  assert.deepEqual(tier.tiers, {
+    mechanical: "codex",
+    standard: "claude-sonnet",
+    hard: "claude-opus",
+  });
+
+  const backend = resetSettingToDefault(saved, defaults, "classifier.backend");
+  assert.deepEqual(backend.classifier, {
+    backend: "openrouter",
+    model: "x",
+    providerId: "key",
+  });
+  // The input itself is never mutated.
+  assert.equal(saved.planner, "claude-sonnet");
+});

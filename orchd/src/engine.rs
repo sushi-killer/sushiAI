@@ -650,6 +650,7 @@ impl App {
             "ping" => self.handle_ping().await,
             "settings.get" => self.handle_settings_get().await,
             "settings.set" => self.handle_settings_set(params).await,
+            "settings.defaults" => self.handle_settings_defaults().await,
             "secrets.set" => self.handle_secrets_set(params).await,
             "task.list" => self.handle_task_list(params).await,
             "task.get" => self.handle_task_get(params).await,
@@ -697,6 +698,12 @@ impl App {
     async fn handle_settings_get(&self) -> Result<serde_json::Value, String> {
         let s = self.settings.read().unwrap().clone();
         serde_json::to_value(&s).map_err(|e| e.to_string())
+    }
+
+    /// The built-in defaults, never the saved settings: the panel compares
+    /// against these to show what an owner's older save has frozen.
+    async fn handle_settings_defaults(&self) -> Result<serde_json::Value, String> {
+        serde_json::to_value(Settings::default()).map_err(|e| e.to_string())
     }
 
     async fn handle_settings_set(

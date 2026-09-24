@@ -67,6 +67,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                 "type": "object",
                 "properties": {
                     "repo": {"type": "string", "description": "Absolute path; only list tasks for this repo."},
+                    "includeArchived": {"type": "boolean", "description": "Include archived tasks; omitted or false hides them."},
                 },
             }),
         ),
@@ -148,6 +149,26 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
             "settings.get",
             "Read the orchd settings (parallelism, planner, classifier, profiles).",
             json!({"type": "object", "properties": {}}),
+        ),
+        (
+            "task_archive",
+            "task.archive",
+            "Archive a task, hiding it from the default task_list without deleting it. Refused for a running, drafting, or waiting task.",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            }),
+        ),
+        (
+            "task_unarchive",
+            "task.unarchive",
+            "Restore an archived task so it appears in the default task_list again.",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            }),
         ),
     ]
 }
@@ -442,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_has_exactly_the_eight_tools_and_no_delete_or_settings_set() {
+    fn tools_list_has_exactly_the_ten_tools_and_no_delete_or_settings_set() {
         let result = dispatch(&no_socket(), "t", "tools/list", &json!({})).unwrap();
         let tools = result["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -457,6 +478,8 @@ mod tests {
                 "task_answer",
                 "task_preflight",
                 "settings_get",
+                "task_archive",
+                "task_unarchive",
             ]
         );
         for t in tools {

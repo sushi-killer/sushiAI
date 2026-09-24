@@ -224,6 +224,11 @@ pub struct Task {
     pub attempts: Vec<Attempt>,
     #[serde(default)]
     pub cost_usd: f64,
+    /// Hides the task from the default `task.list` without deleting it.
+    /// `#[serde(default)]` so a `task.json` written before this field
+    /// existed still loads, with `archived: false`.
+    #[serde(default)]
+    pub archived: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -418,6 +423,7 @@ mod tests {
             decisions: vec![],
             attempts: vec![],
             cost_usd: 0.0,
+            archived: false,
             created_at: 1,
             updated_at: 1,
         };
@@ -457,6 +463,7 @@ mod tests {
             decisions: vec![],
             attempts: vec![],
             cost_usd: 0.0,
+            archived: false,
             created_at: 1,
             updated_at: 1,
         };
@@ -464,5 +471,43 @@ mod tests {
         assert_eq!(v["baseSha"], "abc");
         assert_eq!(v["createdAt"], 1);
         assert!(v.get("base_sha").is_none());
+    }
+
+    #[test]
+    fn task_archived_field_is_camel_case_and_defaults_to_false_when_absent() {
+        let mut task = Task {
+            id: "t1".into(),
+            title: "Title".into(),
+            goal: "Goal".into(),
+            criteria: vec![],
+            verify: vec![],
+            request: None,
+            repo: "/repo".into(),
+            worktree: "/repo-task".into(),
+            branch: "task/x".into(),
+            base_sha: "abc".into(),
+            status: TaskStatus::Done,
+            tier: Tier::Standard,
+            question: None,
+            decisions: vec![],
+            attempts: vec![],
+            cost_usd: 0.0,
+            archived: true,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let v = serde_json::to_value(&task).unwrap();
+        assert_eq!(v["archived"], true);
+
+        // A pre-existing task.json written before this field existed must
+        // still load, defaulting to `archived: false`.
+        let mut without_archived = v.clone();
+        without_archived.as_object_mut().unwrap().remove("archived");
+        let loaded: Task = serde_json::from_value(without_archived).unwrap();
+        assert!(!loaded.archived);
+
+        task.archived = false;
+        let v2 = serde_json::to_value(&task).unwrap();
+        assert_eq!(v2["archived"], false);
     }
 }

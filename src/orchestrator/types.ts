@@ -124,6 +124,8 @@ export type Task = {
   decisions: string[];
   attempts: Attempt[];
   costUsd: number;
+  /** Hides the task from the default task list without deleting it. */
+  archived: boolean;
   createdAt: number;
   updatedAt: number;
 };

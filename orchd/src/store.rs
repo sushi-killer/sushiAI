@@ -269,6 +269,7 @@ mod tests {
                 cost_usd: None,
             }],
             cost_usd: 0.0,
+            archived: false,
             created_at: 1,
             updated_at: 1,
         }
@@ -285,6 +286,35 @@ mod tests {
         assert_eq!(loaded.branch, "task/do-thing");
         assert_eq!(loaded.attempts.len(), 1);
         assert!(store.load_task("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn archived_flag_round_trips_and_defaults_false_for_a_pre_existing_task_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+
+        let mut task = sample_task("t1", TaskStatus::Done, AttemptStatus::Passed);
+        task.archived = true;
+        store.save_task(&task).unwrap();
+        let loaded = store.load_task("t1").unwrap().unwrap();
+        assert!(loaded.archived);
+
+        // A task.json written before `archived` existed has no such key at
+        // all -- simulate that directly rather than via `Task`, which would
+        // always serialize the field.
+        let old_dir = store.task_dir("old");
+        fs::create_dir_all(&old_dir).unwrap();
+        let mut value =
+            serde_json::to_value(sample_task("old", TaskStatus::Done, AttemptStatus::Passed))
+                .unwrap();
+        value.as_object_mut().unwrap().remove("archived");
+        fs::write(
+            old_dir.join("task.json"),
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+        let old_loaded = store.load_task("old").unwrap().unwrap();
+        assert!(!old_loaded.archived);
     }
 
     #[test]

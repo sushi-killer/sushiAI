@@ -34,6 +34,8 @@ const ALLOWED_METHODS = new Set([
   "task.stop",
   "task.answer",
   "task.delete",
+  "task.archive",
+  "task.unarchive",
   "task.preflight",
   "chat.get",
   "chat.send",

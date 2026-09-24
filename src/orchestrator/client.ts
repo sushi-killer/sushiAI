@@ -15,7 +15,11 @@ export const orchestratorClient = {
   settingsGet: () => call<Settings>("settings.get"),
   settingsSet: (settings: Settings) =>
     call<Settings>("settings.set", { settings }),
-  taskList: (repo?: string) => call<Task[]>("task.list", repo ? { repo } : {}),
+  taskList: (repo?: string, includeArchived?: boolean) =>
+    call<Task[]>("task.list", {
+      ...(repo ? { repo } : {}),
+      ...(includeArchived ? { includeArchived } : {}),
+    }),
   taskGet: (id: string) => call<Task>("task.get", { id }),
   taskCreate: (
     repo: string,
@@ -34,6 +38,8 @@ export const orchestratorClient = {
     call<Task>("task.answer", { id, answer }),
   taskDelete: (id: string) =>
     call<Record<string, never>>("task.delete", { id }),
+  taskArchive: (id: string) => call<Task>("task.archive", { id }),
+  taskUnarchive: (id: string) => call<Task>("task.unarchive", { id }),
   chatGet: (repo: string) => call<ChatThread>("chat.get", { repo }),
   chatSend: (repo: string, text: string) =>
     call<Record<string, never>>("chat.send", { repo, text }),

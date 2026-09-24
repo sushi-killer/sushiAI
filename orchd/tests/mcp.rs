@@ -193,13 +193,15 @@ fn initialize_tools_list_and_tools_call_over_stdio() {
         "task_answer",
         "task_preflight",
         "settings_get",
+        "task_archive",
+        "task_unarchive",
     ] {
         assert!(
             names.contains(&expected),
             "missing tool {expected}: {names:?}"
         );
     }
-    assert_eq!(names.len(), 8, "unexpected extra tools: {names:?}");
+    assert_eq!(names.len(), 10, "unexpected extra tools: {names:?}");
     assert!(
         !names.contains(&"task_delete"),
         "task_delete must never be exposed: {names:?}"

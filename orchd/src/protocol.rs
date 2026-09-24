@@ -253,6 +253,7 @@ mod tests {
             decisions: vec![],
             attempts: vec![],
             cost_usd: 0.0,
+            archived: false,
             created_at: 1,
             updated_at: 1,
         };

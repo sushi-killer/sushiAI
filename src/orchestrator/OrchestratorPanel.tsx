@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import {
+  Archive,
+  ArchiveRestore,
   ArrowUp,
   Check,
   ChevronDown,
@@ -39,8 +41,10 @@ function errorText(error: unknown): string {
 type DaemonState = "loading" | "ready" | "not-built" | "unavailable";
 
 /** What the main pane beside the task list shows: the orchestrator chat is
- * where tasks come from, a task is opened to watch or answer it. */
-type View = { kind: "chat" } | { kind: "task"; id: string };
+ * where tasks come from, a task is opened to watch or answer it, the archive
+ * lists what's been hidden from the main list. */
+type View =
+  { kind: "chat" } | { kind: "task"; id: string } | { kind: "archive" };
 
 function classifyError(message: string): DaemonState {
   return message.includes("is not built") ? "not-built" : "unavailable";
@@ -451,7 +455,7 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
     // (maxAttempts, the configured reviewer) - a failure here shouldn't block
     // the task list from showing.
     Promise.all([
-      orchestratorClient.taskList(cwd),
+      orchestratorClient.taskList(cwd, true),
       orchestratorClient.settingsGet().catch(() => null),
     ])
       .then(([tasks, loadedSettings]) => {
@@ -484,7 +488,8 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
     [cwd],
   );
 
-  const tasks = sortTasks(live.tasks);
+  const tasks = sortTasks(live.tasks.filter((t) => !t.archived));
+  const archivedTasks = sortTasks(live.tasks.filter((t) => t.archived));
   const picked =
     view?.kind === "task" ? tasks.find((t) => t.id === view.id) : undefined;
   // Nothing picked (or the picked task was deleted): the orchestrator chat.
@@ -624,6 +629,15 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
             </button>
           </form>
         )}
+        <button
+          className={`orch-nav-row ${current.kind === "archive" ? "selected" : ""}`}
+          onClick={() => open({ kind: "archive" })}
+        >
+          <Archive size={14} /> Archive
+          {archivedTasks.length > 0 && (
+            <span className="orch-archive-count">{archivedTasks.length}</span>
+          )}
+        </button>
         <div className="orch-tasks-head">
           <span className="dialog-eyebrow">TASKS</span>
           {waitingCount > 0 && (
@@ -692,6 +706,30 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
           settings={settings}
           onRouteChange={setOrchestratorRoute}
         />
+        {current.kind === "archive" && (
+          <div className="orch-archive">
+            <h3>Archive</h3>
+            {archivedTasks.length === 0 ? (
+              <p className="orch-empty-list">No archived tasks.</p>
+            ) : (
+              archivedTasks.map((task) => (
+                <div key={task.id} className="orch-archive-row">
+                  <span className="orch-task-title">{task.title}</span>
+                  <button
+                    className="icon-button"
+                    title="Restore task"
+                    disabled={busy}
+                    onClick={() =>
+                      act(() => orchestratorClient.taskUnarchive(task.id))
+                    }
+                  >
+                    <ArchiveRestore size={13} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        )}
         {selected && (
           <div className="orch-detail">
             <div className="orch-detail-head">
@@ -752,6 +790,21 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                     <Square size={12} /> Stop
                   </button>
                 )}
+                <button
+                  className="icon-button orch-archive-button"
+                  title="Archive task"
+                  disabled={
+                    busy ||
+                    selected.status === "running" ||
+                    selected.status === "drafting" ||
+                    selected.status === "waiting"
+                  }
+                  onClick={() =>
+                    act(() => orchestratorClient.taskArchive(selected.id))
+                  }
+                >
+                  <Archive size={13} />
+                </button>
                 <button
                   className="icon-button orch-delete-button"
                   title="Delete task"

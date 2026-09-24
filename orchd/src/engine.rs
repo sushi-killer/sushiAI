@@ -495,6 +495,9 @@ impl App {
             self.broadcast_task(&t);
         }
         for t in self.store.list_tasks()? {
+            if t.archived {
+                continue;
+            }
             if matches!(
                 t.status,
                 TaskStatus::Queued | TaskStatus::Running | TaskStatus::Drafting
@@ -607,6 +610,8 @@ impl App {
             "task.stop" => self.handle_task_stop(params).await,
             "task.answer" => self.handle_task_answer(params).await,
             "task.delete" => self.handle_task_delete(params).await,
+            "task.archive" => self.handle_task_archive(params).await,
+            "task.unarchive" => self.handle_task_unarchive(params).await,
             "task.preflight" => self.handle_task_preflight(params).await,
             "chat.get" => chat::handle_get(self, params).await,
             "chat.send" => chat::handle_send(self, params).await,
@@ -690,13 +695,19 @@ impl App {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         #[derive(Deserialize, Default)]
+        #[serde(rename_all = "camelCase")]
         struct P {
             repo: Option<String>,
+            #[serde(default)]
+            include_archived: bool,
         }
         let p: P = serde_json::from_value(params).unwrap_or_default();
         let mut tasks = self.store.list_tasks().map_err(|e| e.to_string())?;
         if let Some(repo) = p.repo {
             tasks.retain(|t| t.repo == repo);
+        }
+        if !p.include_archived {
+            tasks.retain(|t| !t.archived);
         }
         serde_json::to_value(&tasks).map_err(|e| e.to_string())
     }
@@ -834,6 +845,7 @@ impl App {
             decisions: vec![],
             attempts: vec![],
             cost_usd: 0.0,
+            archived: false,
             created_at: now,
             updated_at: now,
         };
@@ -871,6 +883,9 @@ impl App {
                 .load_task(&p.id)
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| "task not found".to_string())?;
+            if task.archived {
+                return Err("task is archived; unarchive it first".to_string());
+            }
             if matches!(
                 task.status,
                 TaskStatus::Queued
@@ -1000,6 +1015,68 @@ impl App {
             std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
         }
         Ok(json!({}))
+    }
+
+    /// Hides a task from the default `task.list` without touching its
+    /// worktree, branch, or record -- refused while a loop could still be
+    /// mutating it (running, drafting a plan, or parked waiting for an
+    /// answer), same as `task.delete` would need to stop it first, except
+    /// this is never destructive so there's nothing to reconcile after. Also
+    /// refused while a loop is merely queued behind the concurrency limit
+    /// (present in `controls` even though `status` still reads `Queued`) --
+    /// that loop is still going to run and mutate the task the moment a
+    /// slot frees up, same hazard as an already-running one.
+    async fn handle_task_archive(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            id: String,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        validate_task_id(&self.store, &p.id)?;
+        let mut task = self
+            .store
+            .load_task(&p.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        if matches!(
+            task.status,
+            TaskStatus::Running | TaskStatus::Drafting | TaskStatus::Waiting
+        ) {
+            return Err("cannot archive a running, drafting, or waiting task".to_string());
+        }
+        if self.controls.lock().unwrap().contains_key(&p.id) {
+            return Err("cannot archive a task with a live loop".to_string());
+        }
+        task.archived = true;
+        task.updated_at = now_ms();
+        self.store.save_task(&task).map_err(|e| e.to_string())?;
+        self.broadcast_task(&task);
+        serde_json::to_value(&task).map_err(|e| e.to_string())
+    }
+
+    async fn handle_task_unarchive(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            id: String,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        validate_task_id(&self.store, &p.id)?;
+        let mut task = self
+            .store
+            .load_task(&p.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        task.archived = false;
+        task.updated_at = now_ms();
+        self.store.save_task(&task).map_err(|e| e.to_string())?;
+        self.broadcast_task(&task);
+        serde_json::to_value(&task).map_err(|e| e.to_string())
     }
 
     async fn handle_task_preflight(
@@ -4434,5 +4511,227 @@ mod tests {
     fn simple_hash_is_stable_and_sensitive_to_content() {
         assert_eq!(simple_hash("abc"), simple_hash("abc"));
         assert_ne!(simple_hash("abc"), simple_hash("abd"));
+    }
+
+    // -- task.archive / task.unarchive --------------------------------------
+    //
+    // These drive `App::dispatch` directly (no real socket, no real harness
+    // process): the validate-then-mutate logic under test only ever looks at
+    // a task's stored `status`, so a task written straight into the store
+    // with the status under test is equivalent to -- and far faster than --
+    // getting a real attempt loop into that same state.
+
+    /// The `TempDir` must stay alive for as long as the `App` does (dropping
+    /// it deletes the directory `App` reads and writes) -- callers keep the
+    /// tuple bound for the whole test, not just the `Arc<App>`.
+    fn test_app() -> (Arc<App>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::new(
+            dir.path().join("data"),
+            dir.path().join("orchd.sock"),
+            "orchd".to_string(),
+        )
+        .unwrap();
+        (app, dir)
+    }
+
+    fn task_with_status(status: TaskStatus) -> Task {
+        Task {
+            id: uuid::Uuid::new_v4().to_string(),
+            title: "Do thing".into(),
+            goal: "Do the thing".into(),
+            criteria: vec![],
+            verify: vec![],
+            request: None,
+            repo: "/repo".into(),
+            worktree: "/repo-task".into(),
+            branch: "task/do-thing".into(),
+            base_sha: "deadbeef".into(),
+            status,
+            tier: Tier::Standard,
+            question: None,
+            decisions: vec![],
+            attempts: vec![],
+            cost_usd: 0.0,
+            archived: false,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn task_archive_refuses_running_drafting_and_waiting_tasks() {
+        let (app, _dir) = test_app();
+        for status in [
+            TaskStatus::Running,
+            TaskStatus::Drafting,
+            TaskStatus::Waiting,
+        ] {
+            let task = task_with_status(status);
+            app.store.save_task(&task).unwrap();
+            let err = app
+                .dispatch("task.archive", json!({"id": task.id}))
+                .await
+                .unwrap_err();
+            assert!(
+                err.contains("running, drafting, or waiting"),
+                "status {status:?}: unexpected error {err}"
+            );
+            let reloaded = app.store.load_task(&task.id).unwrap().unwrap();
+            assert!(!reloaded.archived, "status {status:?} must not be archived");
+        }
+    }
+
+    #[tokio::test]
+    async fn task_archive_succeeds_on_queued_stopped_failed_and_done_tasks() {
+        let (app, _dir) = test_app();
+        for status in [
+            TaskStatus::Queued,
+            TaskStatus::Stopped,
+            TaskStatus::Failed,
+            TaskStatus::Done,
+        ] {
+            let task = task_with_status(status);
+            app.store.save_task(&task).unwrap();
+            let result = app
+                .dispatch("task.archive", json!({"id": task.id}))
+                .await
+                .unwrap();
+            assert_eq!(result["archived"], true, "status {status:?}");
+            let reloaded = app.store.load_task(&task.id).unwrap().unwrap();
+            assert!(
+                reloaded.archived,
+                "status {status:?} should now be archived"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn task_list_hides_archived_tasks_unless_include_archived_is_set() {
+        let (app, _dir) = test_app();
+        let task = task_with_status(TaskStatus::Done);
+        app.store.save_task(&task).unwrap();
+        app.dispatch("task.archive", json!({"id": task.id}))
+            .await
+            .unwrap();
+
+        let default_list = app.dispatch("task.list", json!({})).await.unwrap();
+        assert!(default_list.as_array().unwrap().is_empty());
+
+        let with_archived = app
+            .dispatch("task.list", json!({"includeArchived": true}))
+            .await
+            .unwrap();
+        let listed = with_archived.as_array().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["id"], task.id);
+        assert_eq!(listed[0]["archived"], true);
+    }
+
+    #[tokio::test]
+    async fn task_unarchive_makes_a_task_reappear_in_the_default_task_list() {
+        let (app, _dir) = test_app();
+        let task = task_with_status(TaskStatus::Done);
+        app.store.save_task(&task).unwrap();
+        app.dispatch("task.archive", json!({"id": task.id}))
+            .await
+            .unwrap();
+        assert!(app
+            .dispatch("task.list", json!({}))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        let result = app
+            .dispatch("task.unarchive", json!({"id": task.id}))
+            .await
+            .unwrap();
+        assert_eq!(result["archived"], false);
+
+        let default_list = app.dispatch("task.list", json!({})).await.unwrap();
+        let listed = default_list.as_array().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["id"], task.id);
+    }
+
+    /// Like `test_app`, but writes `parallel: 1` before `App::new` reads
+    /// settings -- `parallel_limit`/`slots` are fixed at construction time
+    /// (a live `settings.set` only takes effect on the next restart), so
+    /// this is the only way to get a single-slot app for a "second task
+    /// holds the only slot" test.
+    fn test_app_parallel_one() -> (Arc<App>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let store = Store::new(&data_dir).unwrap();
+        let mut settings = store.load_settings().unwrap();
+        settings.parallel = 1;
+        store.save_settings(&settings).unwrap();
+        let app = App::new(data_dir, dir.path().join("orchd.sock"), "orchd".to_string()).unwrap();
+        (app, dir)
+    }
+
+    #[tokio::test]
+    async fn task_archive_refuses_a_queued_task_with_a_live_loop() {
+        let (app, _dir) = test_app_parallel_one();
+
+        // A second task holds the app's only slot, so the task under test
+        // stays parked at the top of `run_task_loop` (permit acquired
+        // before anything else) instead of ever reaching the harness.
+        let holder = task_with_status(TaskStatus::Running);
+        app.store.save_task(&holder).unwrap();
+        let held_permit = app.slots.clone().try_acquire_owned().unwrap();
+
+        let task = task_with_status(TaskStatus::Queued);
+        app.store.save_task(&task).unwrap();
+        app.spawn_task_loop(task.id.clone(), true);
+        assert!(
+            app.controls.lock().unwrap().contains_key(&task.id),
+            "spawn_task_loop registers its control entry synchronously"
+        );
+
+        let err = app
+            .dispatch("task.archive", json!({"id": task.id}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("live loop"), "unexpected error: {err}");
+        let reloaded = app.store.load_task(&task.id).unwrap().unwrap();
+        assert!(!reloaded.archived);
+
+        drop(held_permit);
+    }
+
+    #[tokio::test]
+    async fn recover_on_start_skips_archived_tasks() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Queued);
+        task.archived = true;
+        app.store.save_task(&task).unwrap();
+
+        app.recover_on_start().unwrap();
+
+        assert!(
+            !app.controls.lock().unwrap().contains_key(&task.id),
+            "an archived task must not get a loop started on recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_start_refuses_an_archived_task() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Stopped);
+        task.archived = true;
+        app.store.save_task(&task).unwrap();
+
+        let err = app
+            .dispatch("task.start", json!({"id": task.id}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("archived") && err.contains("unarchive"),
+            "unexpected error: {err}"
+        );
+        assert!(!app.controls.lock().unwrap().contains_key(&task.id));
     }
 }

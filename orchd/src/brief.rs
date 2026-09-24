@@ -506,6 +506,7 @@ mod tests {
             decisions: vec!["Owner: use the primary button style".into()],
             attempts: vec![],
             cost_usd: 0.0,
+            archived: false,
             created_at: 1,
             updated_at: 1,
         }

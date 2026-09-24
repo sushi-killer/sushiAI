@@ -178,6 +178,8 @@ test("call() rejects a method outside the protocol allowlist before touching the
       method,
     );
   assert.equal(ALLOWED_METHODS.has("task.create"), true);
+  assert.equal(ALLOWED_METHODS.has("task.archive"), true);
+  assert.equal(ALLOWED_METHODS.has("task.unarchive"), true);
   assert.equal(ALLOWED_METHODS.has("hook.stop"), false);
   // The orchestrator chat lives in the daemon, reachable like the tasks.
   for (const method of ["chat.get", "chat.send", "chat.cancel"])

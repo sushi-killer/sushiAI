@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowUp,
   Check,
@@ -6,6 +6,7 @@ import {
   ChevronLeft,
   ChevronRight,
   MessageSquare,
+  Plus,
   Square,
   Trash2,
   X,
@@ -15,18 +16,21 @@ import { orchestratorClient } from "./client";
 import {
   applyOrchestratorEvent,
   attemptDurationMs,
+  attemptProgress,
   criteriaMet,
   emptyLiveState,
   formatCost,
   formatDuration,
   latestImplementAttempt,
-  statusLabel,
+  statusBadgeLabel,
+  statusDetail,
   totalDurationMs,
   upsertTask,
   type OrchestratorLiveState,
 } from "./helpers";
 import type { Attempt, ChatThread, Settings, Task } from "./types";
-import { RichText } from "../agents/AgentsView";
+import { ChatTranscript } from "../ChatTranscript";
+import { ChipPicker } from "../ChipPicker";
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -42,19 +46,23 @@ function classifyError(message: string): DaemonState {
   return message.includes("is not built") ? "not-built" : "unavailable";
 }
 
-function statusDot(task: Task): string {
+/** One tone per status family, shared by a row's dot and its pill badge:
+ * in flight reads blue, needs-you yellow, finished well green, went wrong
+ * red, not started yet muted. */
+function statusTone(task: Task): string {
   switch (task.status) {
     case "drafting":
-      return "blue";
     case "running":
-      return "green";
+      return "blue";
     case "waiting":
       return "yellow";
+    case "done":
+      return "green";
     case "failed":
     case "stopped":
       return "red";
     default:
-      return "";
+      return "muted";
   }
 }
 
@@ -94,7 +102,7 @@ function decisionTag(
   return null;
 }
 
-/** Same idea as `statusDot`, one level down: a single attempt's own status. */
+/** Same idea as `statusTone`, one level down: a single attempt's own status. */
 function attemptTone(status: Attempt["status"]): string {
   switch (status) {
     case "passed":
@@ -254,11 +262,22 @@ function QuestionCard({
 /** The orchestrator agent's conversation for this repo. The daemon runs each
  * turn and keeps the thread, so a reply keeps coming and stays readable when
  * the window closes or the app restarts. */
-function OrchestratorChat({ cwd, hidden }: { cwd: string; hidden: boolean }) {
+function OrchestratorChat({
+  cwd,
+  hidden,
+  settings,
+  onRouteChange,
+}: {
+  cwd: string;
+  hidden: boolean;
+  /** `null` while Settings is still loading - the route chip waits for it
+   * rather than guessing at a harness icon. */
+  settings: Settings | null;
+  onRouteChange: (routeId: string) => void;
+}) {
   const [draft, setDraft] = useState("");
   const [thread, setThread] = useState<ChatThread | null>(null);
   const [sendError, setSendError] = useState("");
-  const end = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -276,10 +295,6 @@ function OrchestratorChat({ cwd, hidden }: { cwd: string; hidden: boolean }) {
     };
   }, [cwd]);
 
-  useEffect(() => {
-    end.current?.scrollIntoView({ block: "end" });
-  }, [thread?.messages, thread?.busy]);
-
   function submit() {
     const text = draft.trim();
     if (!text || thread?.busy) return;
@@ -290,54 +305,34 @@ function OrchestratorChat({ cwd, hidden }: { cwd: string; hidden: boolean }) {
       .catch((e) => setSendError(errorText(e)));
   }
   const error = sendError || thread?.error;
+  // "" means the standard tier's own route - resolved here so the chip can
+  // still show a harness icon and a real label instead of a blank default.
+  const routeId = settings?.orchestrator || "";
+  const resolvedRoute = settings
+    ? settings.routes.find((r) => r.id === routeId) ||
+      settings.routes.find((r) => r.id === settings.tiers.standard)
+    : undefined;
+  const harness = resolvedRoute?.harness || "claude";
 
   return (
     // Kept mounted behind the other views so a half-typed message and the
     // scroll position survive a look at a task.
     <div className="orch-chat" hidden={hidden}>
-      <div className="chat-scroll">
-        {!thread?.messages?.length ? (
-          <div className="chat-welcome">
+      <ChatTranscript
+        messages={thread?.messages}
+        busy={thread?.busy}
+        note={thread?.note}
+        error={error}
+        welcome={
+          <>
             <h2>Talk to the orchestrator</h2>
             <p>
               Describe what should happen - it creates, checks and answers tasks
               on your behalf.
             </p>
-            {error && (
-              <div className="chat-error" role="alert">
-                {error}
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="chat-column">
-            {thread.messages.map((message) => (
-              <div key={message.id} className={`message ${message.role}`}>
-                {message.role === "assistant" ? (
-                  <RichText text={message.text} />
-                ) : (
-                  message.text
-                )}
-              </div>
-            ))}
-            {thread.busy && (
-              <div className="chat-progress">
-                <i />
-                <span className="thinking">
-                  {thread.note || "Thinking"}
-                  <span>…</span>
-                </span>
-              </div>
-            )}
-            {error && (
-              <div className="chat-error" role="alert">
-                {error}
-              </div>
-            )}
-            <div ref={end} />
-          </div>
-        )}
-      </div>
+          </>
+        }
+      />
       <div className="chat-composer">
         <textarea
           rows={1}
@@ -362,28 +357,77 @@ function OrchestratorChat({ cwd, hidden }: { cwd: string; hidden: boolean }) {
           }}
         />
         <div className="chat-toolbar">
-          {thread?.busy ? (
-            <button
-              className="send enabled"
-              aria-label="Stop response"
-              onClick={() => void orchestratorClient.chatCancel(cwd)}
-            >
-              <Square size={12} />
-            </button>
-          ) : (
-            <button
-              className={`send ${draft.trim() ? "enabled" : ""}`}
-              aria-label="Send message"
-              disabled={!draft.trim()}
-              onClick={submit}
-            >
-              <ArrowUp size={16} />
-            </button>
+          {settings && (
+            <ChipPicker
+              icon={
+                <img
+                  className="harness-icon"
+                  src={`./agents/${harness}.svg`}
+                  width={12}
+                  height={12}
+                  alt=""
+                />
+              }
+              label={
+                routeId ? (resolvedRoute?.label ?? routeId) : "Standard route"
+              }
+              ariaLabel="Orchestrator route"
+              value={routeId}
+              onChange={onRouteChange}
+              options={[
+                { value: "", label: "Standard route" },
+                ...settings.routes.map((r) => ({
+                  value: r.id,
+                  label: r.label,
+                })),
+              ]}
+            />
           )}
+          <span className="chat-toolbar-right">
+            {thread?.busy ? (
+              <button
+                className="send enabled"
+                aria-label="Stop response"
+                onClick={() => void orchestratorClient.chatCancel(cwd)}
+              >
+                <Square size={12} />
+              </button>
+            ) : (
+              <button
+                className={`send ${draft.trim() ? "enabled" : ""}`}
+                aria-label="Send message"
+                disabled={!draft.trim()}
+                onClick={submit}
+              >
+                <ArrowUp size={16} />
+              </button>
+            )}
+          </span>
         </div>
       </div>
     </div>
   );
+}
+
+/** '+ New task' creates a task directly through `task.create`, not a
+ * chat round-trip with the orchestrator agent. It prefers the `request`
+ * form (the planner drafts title/goal/criteria/verify), but a disabled
+ * planner shouldn't dead-end the control - falling back to the plain
+ * title/goal form keeps it working either way. */
+async function createTask(cwd: string, text: string): Promise<Task> {
+  try {
+    return await orchestratorClient.taskCreate(cwd, {
+      request: text,
+      start: true,
+    });
+  } catch (e) {
+    if (!errorText(e).includes("planner is disabled")) throw e;
+    return orchestratorClient.taskCreate(cwd, {
+      title: text.length > 60 ? `${text.slice(0, 59)}…` : text,
+      goal: text,
+      start: true,
+    });
+  }
 }
 
 export function OrchestratorPanel({ cwd }: { cwd: string }) {
@@ -397,6 +441,9 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
   // the list and the main pane sit side by side.
   const [narrowMain, setNarrowMain] = useState(true);
   const [reload, setReload] = useState(0);
+  const [creatingTask, setCreatingTask] = useState(false);
+  const [taskDraft, setTaskDraft] = useState("");
+  const [creatingBusy, setCreatingBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -466,6 +513,34 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
     }
   }
 
+  function setOrchestratorRoute(routeId: string) {
+    if (!settings) return;
+    const next = { ...settings, orchestrator: routeId };
+    setSettings(next);
+    orchestratorClient
+      .settingsSet(next)
+      .then(setSettings)
+      .catch((e) => setError(errorText(e)));
+  }
+
+  async function submitNewTask() {
+    const text = taskDraft.trim();
+    if (!text || creatingBusy) return;
+    setCreatingBusy(true);
+    setError("");
+    try {
+      const task = await createTask(cwd, text);
+      setLive((old) => ({ ...old, tasks: upsertTask(old.tasks, task) }));
+      setTaskDraft("");
+      setCreatingTask(false);
+      open({ kind: "task", id: task.id });
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setCreatingBusy(false);
+    }
+  }
+
   if (daemonState === "loading")
     return <div className="loading">Connecting to the orchestrator…</div>;
   if (daemonState === "not-built")
@@ -505,6 +580,50 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
         >
           <MessageSquare size={14} /> Orchestrator
         </button>
+        <button
+          className="orch-nav-row"
+          aria-expanded={creatingTask}
+          onClick={() => setCreatingTask((v) => !v)}
+        >
+          <Plus size={14} /> New task
+        </button>
+        {creatingTask && (
+          <form
+            className="orch-new-task"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitNewTask();
+            }}
+          >
+            <input
+              autoFocus
+              value={taskDraft}
+              onChange={(event) => setTaskDraft(event.target.value)}
+              placeholder="What should happen?"
+              aria-label="New task request"
+              disabled={creatingBusy}
+            />
+            <button
+              className="icon-button"
+              type="submit"
+              aria-label="Create task"
+              disabled={creatingBusy || !taskDraft.trim()}
+            >
+              <ArrowUp size={14} />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="Cancel new task"
+              onClick={() => {
+                setCreatingTask(false);
+                setTaskDraft("");
+              }}
+            >
+              <X size={13} />
+            </button>
+          </form>
+        )}
         <div className="orch-tasks-head">
           <span className="dialog-eyebrow">TASKS</span>
           {waitingCount > 0 && (
@@ -513,19 +632,33 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
         </div>
         {tasks.length === 0 && <p className="orch-empty-list">No tasks yet.</p>}
         {tasks.map((task) => {
-          const tone = statusDot(task) || "muted";
+          const tone = statusTone(task);
+          const progress = attemptProgress(task, settings?.maxAttempts);
+          const detail = statusDetail(task);
           return (
             <button
               key={task.id}
               className={`orch-task-row ${task.id === selected?.id ? "selected" : ""}`}
               onClick={() => open({ kind: "task", id: task.id })}
             >
-              <span className={`status-dot ${statusDot(task)}`} />
+              <span className={`status-dot ${tone}`} />
               <span className="orch-task-lines">
                 <span className="orch-task-title">{task.title}</span>
-                <span className={`orch-task-status tone-${tone}`}>
-                  {statusLabel(task, settings?.maxAttempts)}
+                <span className="orch-task-badges">
+                  <span className={`orch-status-badge tone-${tone}`}>
+                    {statusBadgeLabel(task)}
+                  </span>
+                  {progress && (
+                    <span className="orch-attempt-progress">
+                      attempt {progress}
+                    </span>
+                  )}
                 </span>
+                {detail && (
+                  <span className={`orch-task-status tone-${tone}`}>
+                    {detail}
+                  </span>
+                )}
               </span>
             </button>
           );
@@ -553,7 +686,12 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
             </button>
           </div>
         )}
-        <OrchestratorChat cwd={cwd} hidden={current.kind !== "chat"} />
+        <OrchestratorChat
+          cwd={cwd}
+          hidden={current.kind !== "chat"}
+          settings={settings}
+          onRouteChange={setOrchestratorRoute}
+        />
         {selected && (
           <div className="orch-detail">
             <div className="orch-detail-head">

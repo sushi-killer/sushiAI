@@ -90,44 +90,18 @@ test("latestImplementAttempt skips a plan attempt, even when it's the newest one
   assert.equal(latestImplementAttempt(task({ attempts: [plan] })), undefined);
 });
 
-test("statusLabel names the attempt count and cost, never the question text", async () => {
-  const { statusLabel } = await library;
-  assert.equal(statusLabel(task({ status: "drafting" })), "drafting plan…");
-  assert.equal(statusLabel(task({ status: "queued" })), "queued");
+test("statusDetail adds only what the pill and progress don't say, never the question text", async () => {
+  const { statusDetail } = await library;
+  assert.equal(statusDetail(task({ status: "drafting" })), "");
+  assert.equal(statusDetail(task({ status: "queued" })), "");
   assert.equal(
-    statusLabel(
-      task({
-        status: "running",
-        costUsd: 0.41,
-        attempts: [attempt({ n: 2 })],
-      }),
-      4,
+    statusDetail(
+      task({ status: "running", costUsd: 0.41, attempts: [attempt({ n: 2 })] }),
     ),
-    "working · attempt 2/4 · $0.41",
-  );
-  // A drafted plan attempt precedes the real attempts - the count is the
-  // implement attempt's own number, not the plan's.
-  assert.equal(
-    statusLabel(
-      task({
-        status: "running",
-        costUsd: 0.22,
-        attempts: [
-          attempt({ n: 1, stage: "plan", status: "passed" }),
-          attempt({ n: 1, stage: "implement" }),
-        ],
-      }),
-      4,
-    ),
-    "working · attempt 1/4 · $0.22",
-  );
-  // No maxAttempts passed - falls back to the attempt's own number.
-  assert.equal(
-    statusLabel(task({ status: "running", attempts: [attempt({ n: 1 })] })),
-    "working · attempt 1/1 · $0.00",
+    "$0.41",
   );
   assert.equal(
-    statusLabel(
+    statusDetail(
       task({
         status: "waiting",
         question: {
@@ -136,14 +110,11 @@ test("statusLabel names the attempt count and cost, never the question text", as
         },
       }),
     ),
-    "waiting for you · 1 question",
+    "1 question for you",
   );
+  assert.equal(statusDetail(task({ status: "done", costUsd: 0.18 })), "$0.18");
   assert.equal(
-    statusLabel(task({ status: "done", costUsd: 0.18 })),
-    "done · $0.18",
-  );
-  assert.equal(
-    statusLabel(
+    statusDetail(
       task({
         status: "done",
         costUsd: 0.18,
@@ -156,10 +127,10 @@ test("statusLabel names the attempt count and cost, never the question text", as
         ],
       }),
     ),
-    "done · review PASS · $0.18",
+    "review PASS · $0.18",
   );
   assert.equal(
-    statusLabel(
+    statusDetail(
       task({
         status: "stopped",
         attempts: [
@@ -173,9 +144,52 @@ test("statusLabel names the attempt count and cost, never the question text", as
         ],
       }),
     ),
-    "stopped · npm test failed",
+    "npm test failed",
   );
-  assert.equal(statusLabel(task({ status: "stopped" })), "stopped");
+  assert.equal(statusDetail(task({ status: "stopped" })), "");
+});
+
+test("attemptProgress counts the implement attempt while running or queued, null otherwise", async () => {
+  const { attemptProgress } = await library;
+  assert.equal(
+    attemptProgress(
+      task({ status: "running", attempts: [attempt({ n: 2 })] }),
+      4,
+    ),
+    "2/4",
+  );
+  // A drafted plan attempt precedes the real attempts - the count is the
+  // implement attempt's own number, not the plan's.
+  assert.equal(
+    attemptProgress(
+      task({
+        status: "running",
+        attempts: [
+          attempt({ n: 1, stage: "plan", status: "passed" }),
+          attempt({ n: 1, stage: "implement" }),
+        ],
+      }),
+      4,
+    ),
+    "1/4",
+  );
+  // No maxAttempts passed - falls back to the attempt's own number.
+  assert.equal(
+    attemptProgress(task({ status: "running", attempts: [attempt({ n: 1 })] })),
+    "1/1",
+  );
+  // Queued but nothing has run yet: the about-to-run attempt is #1.
+  assert.equal(attemptProgress(task({ status: "queued" }), 5), "1/5");
+  assert.equal(attemptProgress(task({ status: "done" }), 5), null);
+  assert.equal(attemptProgress(task({ status: "waiting" }), 5), null);
+});
+
+test("statusBadgeLabel names each status a short word for the list row's pill", async () => {
+  const { statusBadgeLabel } = await library;
+  assert.equal(statusBadgeLabel(task({ status: "running" })), "Running");
+  assert.equal(statusBadgeLabel(task({ status: "waiting" })), "Waiting");
+  assert.equal(statusBadgeLabel(task({ status: "done" })), "Done");
+  assert.equal(statusBadgeLabel(task({ status: "failed" })), "Failed");
 });
 
 test("criteriaMet is true once the task is done, or once the latest attempt passed", async () => {

@@ -17,6 +17,17 @@ export const orchestratorClient = {
     call<Settings>("settings.set", { settings }),
   taskList: (repo?: string) => call<Task[]>("task.list", repo ? { repo } : {}),
   taskGet: (id: string) => call<Task>("task.get", { id }),
+  taskCreate: (
+    repo: string,
+    params: {
+      request?: string;
+      title?: string;
+      goal?: string;
+      criteria?: string[];
+      verify?: string[];
+      start?: boolean;
+    },
+  ) => call<Task>("task.create", { repo, ...params }),
   taskStart: (id: string) => call<Task>("task.start", { id }),
   taskStop: (id: string) => call<Task>("task.stop", { id }),
   taskAnswer: (id: string, answer: string) =>

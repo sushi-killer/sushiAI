@@ -115,9 +115,70 @@
   white-space: nowrap;
 }
 
+.orch-task-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The pill itself: `tone-*` (shared with the attempt rail below) sets the
+ * color, this sets the shape. */
+.orch-status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.orch-status-badge.tone-green {
+  background: var(--tone-ok-bg);
+  color: var(--tone-ok);
+}
+.orch-status-badge.tone-yellow {
+  background: var(--tone-warning-bg);
+  color: var(--tone-warning);
+}
+.orch-status-badge.tone-red {
+  background: var(--tone-danger-bg);
+  color: var(--tone-danger);
+}
+.orch-status-badge.tone-blue {
+  background: var(--tone-info-bg);
+  color: var(--tone-info);
+}
+.orch-status-badge.tone-muted {
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+}
+
+.orch-attempt-progress {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .orch-waiting-count {
   font-size: 11px;
   color: var(--tone-warning);
+}
+
+/* The '+ New task' inline form, opened by the New task row above the list -
+ * a single request line, not a full title/goal/criteria form, so creating a
+ * task stays as quick as starting a chat thread. */
+.orch-new-task {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.orch-new-task input {
+  flex: 1;
+  min-width: 0;
 }
 
 /* The two fixed entries above the task list - chat and new task - share the

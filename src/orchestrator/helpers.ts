@@ -51,6 +51,35 @@ export function reviewOf(task: Task) {
   return undefined;
 }
 
+/** "2/5"-style attempt progress for a task's list row - `null` once the task
+ * is no longer actively working (there is nothing to count toward). A queued
+ * task that hasn't run yet counts its first attempt. */
+export function attemptProgress(
+  task: Task,
+  maxAttempts?: number,
+): string | null {
+  if (task.status !== "running" && task.status !== "queued") return null;
+  const n = latestImplementAttempt(task)?.n ?? 1;
+  const max = maxAttempts ?? n;
+  return `${n}/${max}`;
+}
+
+const STATUS_BADGE_LABELS: Record<Task["status"], string> = {
+  drafting: "Drafting",
+  queued: "Queued",
+  running: "Running",
+  waiting: "Waiting",
+  done: "Done",
+  stopped: "Stopped",
+  failed: "Failed",
+};
+
+/** The short word a task-list pill badge shows - `statusDetail` carries
+ * whatever else the row has to say underneath it. */
+export function statusBadgeLabel(task: Task): string {
+  return STATUS_BADGE_LABELS[task.status];
+}
+
 const REASON_MAX = 60;
 
 function shortReason(task: Task): string {
@@ -63,39 +92,26 @@ function shortReason(task: Task): string {
     : detail;
 }
 
-/** One line describing a task's current state, for the task-list row -
- * never the question text itself, so a row can't leak a private-looking
- * question into a list glanced at across a room. */
-export function statusLabel(task: Task, maxAttempts?: number): string {
+/** The task-list row's line under its pill: only what the pill and the
+ * attempt progress don't already say, `""` when that is nothing. Never the
+ * question text itself, so a row can't leak a private-looking question into
+ * a list glanced at across a room. */
+export function statusDetail(task: Task): string {
   switch (task.status) {
-    case "drafting":
-      return "drafting plan…";
-    case "queued":
-      return "queued";
-    case "running": {
-      const n = latestImplementAttempt(task)?.n ?? 1;
-      const max = maxAttempts ?? n;
-      return `working · attempt ${n}/${max} · ${formatCost(task.costUsd)}`;
-    }
+    case "running":
+      return formatCost(task.costUsd);
     case "waiting":
-      return "waiting for you · 1 question";
+      return "1 question for you";
     case "done": {
       const review = reviewOf(task);
-      const parts = ["done"];
-      if (review) parts.push(`review ${review.verdict}`);
-      parts.push(formatCost(task.costUsd));
-      return parts.join(" · ");
+      const cost = formatCost(task.costUsd);
+      return review ? `review ${review.verdict} · ${cost}` : cost;
     }
-    case "stopped": {
-      const reason = shortReason(task);
-      return reason ? `stopped · ${reason}` : "stopped";
-    }
-    case "failed": {
-      const reason = shortReason(task);
-      return reason ? `failed · ${reason}` : "failed";
-    }
+    case "stopped":
+    case "failed":
+      return shortReason(task);
     default:
-      return task.status;
+      return "";
   }
 }
 

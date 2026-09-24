@@ -227,8 +227,18 @@ pub struct Report {
 /// `text`. Missing or malformed -> `None` (spec: "last fence wins, malformed
 /// -> None").
 pub fn parse_report(text: &str) -> Option<Report> {
-    let body = last_fenced_block(text, "sushi-report")?;
-    serde_json::from_str(&body).ok()
+    serde_json::from_str(&tagged_json(text, "sushi-report")?).ok()
+}
+
+/// The JSON a reply hands back: the last ```tag (or <tag>) block, else the
+/// outermost `{...}` -- Codex has been seen to drop the backticks and send
+/// the bare tag line followed by the JSON.
+fn tagged_json(text: &str, tag: &str) -> Option<String> {
+    last_fenced_block(text, tag).or_else(|| {
+        let start = text.find('{')?;
+        let end = text.rfind('}')?;
+        (start < end).then(|| text[start..=end].to_string())
+    })
 }
 
 /// Same idea for the review's ```sushi-review fenced JSON, but more
@@ -236,7 +246,7 @@ pub fn parse_report(text: &str) -> Option<Report> {
 /// that is nothing but the JSON counts, and a finding may be an object
 /// (`{"severity","file","issue"}`, as Codex writes them) instead of a string.
 pub fn parse_review(text: &str) -> Option<ReviewResult> {
-    let body = last_fenced_block(text, "sushi-review").unwrap_or_else(|| text.trim().to_string());
+    let body = tagged_json(text, "sushi-review")?;
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
     let verdict = serde_json::from_value(v.get("verdict")?.clone()).ok()?;
     let findings = v
@@ -715,6 +725,21 @@ mod tests {
         let failures: Vec<&str> = brief.lines().filter(|l| l.contains("failure:")).collect();
         assert!(failures[0].len() < 2000, "{}", failures[0].len());
         assert!(failures[1].contains(&"x".repeat(2000)));
+    }
+
+    #[test]
+    fn a_reply_that_drops_the_backticks_still_parses() {
+        // Captured from a real Codex review.
+        let r = parse_review(
+            "sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[{\"severity\":\"P1\",\"finding\":\"note is wrong\"}]}",
+        )
+        .unwrap();
+        assert_eq!(r.verdict, Verdict::Fail);
+        assert_eq!(r.findings, vec!["note is wrong: P1".to_string()]);
+        let report =
+            parse_report("sushi-report\n{\"outcome\":\"blocked\",\"question\":\"Which?\"}")
+                .unwrap();
+        assert_eq!(report.outcome, Outcome::Blocked);
     }
 
     #[test]

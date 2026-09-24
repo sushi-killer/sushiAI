@@ -323,7 +323,7 @@ export function OrchestratorSettings() {
               value={settings.orchestrator}
               onChange={(event) => update({ orchestrator: event.target.value })}
             >
-              <option value="">Off</option>
+              <option value="">Standard route</option>
               {settings.routes.map((route) => (
                 <option key={route.id} value={route.id}>
                   {route.label}
@@ -332,6 +332,21 @@ export function OrchestratorSettings() {
             </select>
           </label>
         </div>
+        <label className="setting-check">
+          <input
+            type="checkbox"
+            checked={settings.autoAnswer}
+            onChange={(event) => update({ autoAnswer: event.target.checked })}
+          />
+          <span>
+            Answer stuck questions for me
+            <em>
+              The orchestrator answers an agent's question when the repository
+              or your earlier decisions settle it, and asks you otherwise. It
+              never approves protected paths, stops a task or adds attempts.
+            </em>
+          </span>
+        </label>
       </div>
 
       <div className="setting-block">

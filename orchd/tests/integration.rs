@@ -1404,6 +1404,7 @@ fn triage_answer_lets_the_task_continue_without_the_owner() {
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     settings["orchestrator"] = serde_json::json!("claude-sonnet");
+    settings["autoAnswer"] = serde_json::json!(true);
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
     let repo = init_git_repo();
@@ -1480,6 +1481,7 @@ fn triage_escalate_waits_for_the_owner_with_the_sharpened_question() {
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     settings["orchestrator"] = serde_json::json!("claude-sonnet");
+    settings["autoAnswer"] = serde_json::json!(true);
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
     let repo = init_git_repo();
@@ -1554,6 +1556,7 @@ fn protected_path_approval_is_never_triaged() {
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     settings["orchestrator"] = serde_json::json!("claude-sonnet");
+    settings["autoAnswer"] = serde_json::json!(true);
     settings["protectedPaths"] = serde_json::json!(["PROTECTED.txt"]);
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
@@ -1606,7 +1609,7 @@ fn orchestrator_off_goes_straight_to_the_owner() {
 
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
-    settings["orchestrator"] = serde_json::json!("");
+    settings["autoAnswer"] = serde_json::json!(false);
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
     let repo = init_git_repo();

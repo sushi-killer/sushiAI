@@ -140,7 +140,8 @@ pub async fn handle_send(
         .ok_or("text is required")?
         .to_string();
     let settings = app.settings.read().unwrap().clone();
-    let route = chat_route(&settings).ok_or("no route is configured for standard tasks")?;
+    let route =
+        orchestrator_route(&settings).ok_or("no route is configured for the orchestrator")?;
     let cancel = CancelToken::new();
     {
         let mut turns = app.chat_turns.lock().unwrap();
@@ -169,10 +170,11 @@ pub async fn handle_send(
     Ok(json!({}))
 }
 
-/// The orchestrator agent runs on the route that handles standard tasks.
-fn chat_route(settings: &Settings) -> Option<Route> {
-    let id = settings.tiers.get(&Tier::Standard)?;
-    settings.routes.iter().find(|r| &r.id == id).cloned()
+/// The orchestrator agent's route: the one the owner picked, else the route
+/// that handles standard tasks.
+pub(super) fn orchestrator_route(settings: &Settings) -> Option<Route> {
+    let find = |id: &str| settings.routes.iter().find(|r| r.id == id).cloned();
+    find(&settings.orchestrator).or_else(|| find(settings.tiers.get(&Tier::Standard)?))
 }
 
 fn mcp_server(app: &App, task_mcp_file: Option<&Path>) -> serde_json::Value {
@@ -502,6 +504,17 @@ mod tests {
         assert!(resumed.contains(&"sandbox_mode=\"read-only\"".to_string()));
         assert!(!resumed.contains(&"-C".to_string()));
         assert_eq!(resumed.last().unwrap(), "-");
+    }
+
+    #[test]
+    fn the_orchestrator_uses_its_own_route_else_the_standard_one() {
+        let mut settings = Settings::default();
+        let standard = settings.tiers.get(&Tier::Standard).unwrap().clone();
+        assert_eq!(orchestrator_route(&settings).unwrap().id, standard);
+        settings.orchestrator = "claude-opus".into();
+        assert_eq!(orchestrator_route(&settings).unwrap().id, "claude-opus");
+        settings.orchestrator = "gone".into();
+        assert_eq!(orchestrator_route(&settings).unwrap().id, standard);
     }
 
     #[test]

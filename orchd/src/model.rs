@@ -104,14 +104,16 @@ pub struct Settings {
     /// rejected -- there is nothing to run it with).
     #[serde(default = "default_planner")]
     pub planner: String,
-    /// Route id used to triage a would-be owner question before it's ever
-    /// shown to them (spec "wake the orchestrator before bothering the
-    /// owner"); `""` or an id that matches no route turns it off -- same
-    /// semantics as `planner`, but a triage failure never fails the task,
-    /// it just falls through to asking the owner as before. Off by default:
-    /// the owner opts in to answers given on their behalf.
+    /// Route the orchestrator agent runs on: its chat with the owner and,
+    /// with `auto_answer`, its triage of stuck questions. `""` (or an id that
+    /// matches no route) means the standard tier's route.
     #[serde(default)]
     pub orchestrator: String,
+    /// Whether the orchestrator answers a stuck agent's question itself
+    /// before it reaches the owner. Off by default: the owner opts in to
+    /// answers given on their behalf.
+    #[serde(default)]
+    pub auto_answer: bool,
 }
 
 fn default_planner() -> String {
@@ -173,6 +175,7 @@ impl Default for Settings {
             parallel: 2,
             planner: default_planner(),
             orchestrator: String::new(),
+            auto_answer: false,
         }
     }
 }
@@ -397,6 +400,7 @@ mod tests {
         let s: Settings = serde_json::from_value(old_json).unwrap();
         assert_eq!(s.planner, "claude-sonnet");
         assert_eq!(s.orchestrator, "");
+        assert!(!s.auto_answer);
     }
 
     #[test]

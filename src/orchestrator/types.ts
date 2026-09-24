@@ -44,12 +44,12 @@ export type Settings = {
    * request; "" turns drafting off, so `task.create` always needs the full
    * form instead. */
   planner: string;
-  /** Route id that self-answers a blocked question when Jev is confident
-   * it's answerable from the repo, before escalating to the owner; ""
-   * turns this off - same semantics as `planner`. Logged in a task's
-   * `decisions` as `"Orchestrator: ..."`, distinct from Jev's own `"Jev:
-   * ..."` lines. */
+  /** Route the orchestrator agent runs on (its chat and, with `autoAnswer`,
+   * its answers to stuck questions); "" means the standard tier's route. */
   orchestrator: string;
+  /** The orchestrator answers a stuck agent's question before it reaches
+   * the owner, logged in the task as `"Orchestrator: ..."`. */
+  autoAnswer: boolean;
 };
 
 export type TaskStatus =

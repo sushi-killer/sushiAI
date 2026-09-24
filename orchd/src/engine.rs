@@ -1981,11 +1981,10 @@ async fn run_triage(
         return None;
     }
     let settings = app.settings.read().unwrap().clone();
-    let route = settings
-        .routes
-        .iter()
-        .find(|r| r.id == settings.orchestrator)?
-        .clone();
+    if !settings.auto_answer {
+        return None;
+    }
+    let route = chat::orchestrator_route(&settings)?;
 
     let run_dir = app.store.run_dir(task_id, attempt_n).join("triage");
     let _ = std::fs::create_dir_all(&run_dir);

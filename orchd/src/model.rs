@@ -161,14 +161,9 @@ impl Default for Settings {
                 provider_id: String::new(),
             },
             sandbox: SandboxMode::Native,
-            allowed_domains: vec![
-                "registry.npmjs.org".to_string(),
-                "pypi.org".to_string(),
-                "files.pythonhosted.org".to_string(),
-                "github.com".to_string(),
-                "codeload.github.com".to_string(),
-                "objects.githubusercontent.com".to_string(),
-            ],
+            // Open network by default: the sandbox's job is keeping writes
+            // inside the worktree, not blocking package registries.
+            allowed_domains: vec!["*".to_string()],
             codex_network: false,
             protected_paths: vec![],
             max_attempts: 4,

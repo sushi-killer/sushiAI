@@ -20,3 +20,9 @@
   inflated task costs several times over.
 - A review reply that is bare JSON, or lists findings as objects, is read as
   a verdict instead of asking the owner.
+- Claude task agents can run commands again: the sandbox's network block
+  carried keys that made Claude Code deny every Bash call headlessly, so
+  agents could not build, test or screenshot. The sandbox now only keeps
+  writes inside the task's worktree, and the network is open by default.
+- A verify result is no longer reused after the agent edits a file it
+  created: untracked files' contents now count toward the cache key.

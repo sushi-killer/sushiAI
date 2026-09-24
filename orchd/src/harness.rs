@@ -189,12 +189,12 @@ pub fn build_claude_settings(
                 // none`), so without this every sandboxed command is denied.
                 "autoAllowBashIfSandboxed": true,
                 "allowUnsandboxedCommands": false,
+                // Only `allowedDomains`: with `strictAllowlist` /
+                // `allowUnixSockets` present, Claude Code denied every Bash
+                // call headlessly (`cargo --version` included), so agents
+                // could never build or test. `["*"]` opens the network.
                 "network": {
                     "allowedDomains": allowed_domains,
-                    "strictAllowlist": true,
-                    // The daemon's own control channel: an agent has no
-                    // business opening unix sockets from inside its sandbox.
-                    "allowUnixSockets": false,
                 },
                 // Keeps the agent from reading `control.token` / per-run key
                 // files even if it somehow finds the data dir's path.
@@ -540,8 +540,13 @@ mod tests {
         );
         assert_eq!(native["apiKeyHelper"], "helper.sh");
         assert_eq!(native["sandbox"]["enabled"], true);
-        assert_eq!(native["sandbox"]["network"]["strictAllowlist"], true);
-        assert_eq!(native["sandbox"]["network"]["allowUnixSockets"], false);
+        assert_eq!(
+            native["sandbox"]["network"]["allowedDomains"][0],
+            "github.com"
+        );
+        assert!(native["sandbox"]["network"]
+            .get("strictAllowlist")
+            .is_none());
         assert_eq!(native["sandbox"]["filesystem"]["denyRead"][0], "/data");
         assert_eq!(native["hooks"]["Stop"][0]["hooks"][0]["timeout"], 600);
         assert!(native["hooks"]["Stop"][0]["hooks"][0]["command"]

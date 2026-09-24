@@ -1461,8 +1461,15 @@ fn diff_hash(worktree: &Path, base: &str) -> String {
     let untracked = git::status_porcelain(worktree).unwrap_or_default();
     let mut input = diff;
     input.push_str("\u{0}untracked\u{0}");
+    // Contents too: `git diff` never shows an untracked file, so hashing
+    // only its name reused a stale failing result after the agent fixed a
+    // file it had created.
     for u in &untracked {
         input.push_str(u);
+        input.push('\u{0}');
+        if let Ok(bytes) = std::fs::read(worktree.join(u)) {
+            input.push_str(&String::from_utf8_lossy(&bytes));
+        }
         input.push('\u{0}');
     }
     simple_hash(&input)
@@ -4374,6 +4381,34 @@ mod tests {
         assert!((attempt_cost(&paid, &third, 3.04) - 0.10).abs() < 1e-9);
         // A fresh session is never discounted.
         assert_eq!(attempt_cost(&paid, &with(4, false, None), 1.5), 1.5);
+    }
+
+    #[test]
+    fn diff_hash_changes_when_an_untracked_file_is_edited() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(tmp.path())
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
+        std::fs::write(tmp.path().join("new.rs"), "broken").unwrap();
+        let before = diff_hash(tmp.path(), "HEAD");
+        std::fs::write(tmp.path().join("new.rs"), "fixed").unwrap();
+        assert_ne!(before, diff_hash(tmp.path(), "HEAD"));
     }
 
     #[test]

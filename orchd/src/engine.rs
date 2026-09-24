@@ -1538,6 +1538,21 @@ fn split_verify_commands(cwd: &Path, commands: &[String]) -> (Vec<String>, Vec<S
     })
 }
 
+/// Claude's `total_cost_usd` covers the whole session, so a resumed
+/// attempt's figure already includes every earlier attempt on that session;
+/// adding it as-is counted the first attempt's cost once per resume.
+fn attempt_cost(earlier: &[Attempt], attempt: &Attempt, session_total: f64) -> f64 {
+    if !attempt.resumed || attempt.session_id.is_none() {
+        return session_total;
+    }
+    let already: f64 = earlier
+        .iter()
+        .filter(|a| a.session_id == attempt.session_id)
+        .filter_map(|a| a.cost_usd)
+        .sum();
+    (session_total - already).max(0.0)
+}
+
 /// Each stream's own tail: concatenated, a noisy stderr (cargo's compile
 /// log) pushed stdout's end -- where test runners list what failed -- out of
 /// the kept window, so a retry never saw which test broke.
@@ -3475,8 +3490,11 @@ async fn run_task_loop(
             output: outcome.usage_output,
             cached: outcome.usage_cached,
         });
-        task.attempts[idx].cost_usd = outcome.cost_usd;
-        if let Some(cost) = outcome.cost_usd {
+        let cost = outcome
+            .cost_usd
+            .map(|total| attempt_cost(&task.attempts[..idx], &task.attempts[idx], total));
+        task.attempts[idx].cost_usd = cost;
+        if let Some(cost) = cost {
             task.cost_usd += cost;
         }
 
@@ -4335,6 +4353,26 @@ mod tests {
             ]
         );
         assert_eq!(judged.len(), 2);
+    }
+
+    #[test]
+    fn attempt_cost_subtracts_what_earlier_attempts_on_the_session_already_paid() {
+        // Real figures from one task: fresh $2.13, resumed $2.94, resumed $3.04.
+        let with = |n, resumed, cost: Option<f64>| Attempt {
+            session_id: Some("s1".into()),
+            resumed,
+            cost_usd: cost,
+            ..attempt_with_failure(n, "x")
+        };
+        let first = with(1, false, Some(2.13));
+        let second = with(2, true, None);
+        let second_cost = attempt_cost(std::slice::from_ref(&first), &second, 2.94);
+        assert!((second_cost - 0.81).abs() < 1e-9);
+        let third = with(3, true, None);
+        let paid = [first, with(2, true, Some(second_cost))];
+        assert!((attempt_cost(&paid, &third, 3.04) - 0.10).abs() < 1e-9);
+        // A fresh session is never discounted.
+        assert_eq!(attempt_cost(&paid, &with(4, false, None), 1.5), 1.5);
     }
 
     #[test]

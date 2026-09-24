@@ -174,10 +174,37 @@ pub fn parse_report(text: &str) -> Option<Report> {
     serde_json::from_str(&body).ok()
 }
 
-/// Same idea for the review's ```sushi-review fenced JSON.
+/// Same idea for the review's ```sushi-review fenced JSON, but more
+/// forgiving, since the verdict decides whether work is committed: a reply
+/// that is nothing but the JSON counts, and a finding may be an object
+/// (`{"severity","file","issue"}`, as Codex writes them) instead of a string.
 pub fn parse_review(text: &str) -> Option<ReviewResult> {
-    let body = last_fenced_block(text, "sushi-review")?;
-    serde_json::from_str(&body).ok()
+    let body = last_fenced_block(text, "sushi-review").unwrap_or_else(|| text.trim().to_string());
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let verdict = serde_json::from_value(v.get("verdict")?.clone()).ok()?;
+    let findings = v
+        .get("findings")
+        .and_then(|f| f.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| match item {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Object(o) => o
+                        .values()
+                        .map(|x| {
+                            x.as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| x.to_string())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(": "),
+                    other => other.to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ReviewResult { verdict, findings })
 }
 
 const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
@@ -618,6 +645,16 @@ mod tests {
     fn parse_review_accepts_a_fence_closed_on_the_json_line() {
         let r = parse_review("```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}```").unwrap();
         assert_eq!(r.verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn parse_review_accepts_bare_json_with_object_findings() {
+        // Captured Codex reply: no fence, no tag, findings as objects.
+        let text = r#"{"verdict":"FAIL","findings":[{"severity":"P1","file":"ui-evidence","issue":"Required UI evidence is missing"}]}"#;
+        let r = parse_review(text).unwrap();
+        assert_eq!(r.verdict, Verdict::Fail);
+        assert!(r.findings[0].contains("Required UI evidence is missing"));
+        assert!(parse_review("Looks fine to me.").is_none());
     }
 
     #[test]

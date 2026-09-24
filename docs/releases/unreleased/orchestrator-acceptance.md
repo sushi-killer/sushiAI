@@ -5,7 +5,7 @@
 - With review `auto`, the hard tier's route reviews every other route's
   work; hard-tier work is reviewed on a different harness.
 - Plan and review replies are read in either the fenced or the
-  `<sushi-review>`-tag shape, and a ```` ``` ```` quoted inside a JSON string no
+  `<sushi-review>`-tag shape, and a ` ``` ` quoted inside a JSON string no
   longer cuts a plan short.
 - A drafted verify entry that isn't a runnable shell command (a screenshot
   instruction, "only if ..." notes) becomes a criterion for the reviewer
@@ -15,3 +15,8 @@
 - `task.create` takes `base` to branch a task from another branch; the
   orchestrator can split one feature into parallel tasks on the same base.
 - Done tasks no longer show a "Run again" button that did nothing.
+- A resumed attempt's cost is its own share of the session: Claude reports
+  the session's running total, which was added again on every resume and
+  inflated task costs several times over.
+- A review reply that is bare JSON, or lists findings as objects, is read as
+  a verdict instead of asking the owner.

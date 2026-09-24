@@ -49,9 +49,7 @@ try {
       .locator(".connection-card.selected")
       .filter({ hasText: "Remote" })
       .waitFor({ timeout: 30000 });
-    const profiles = await page.evaluate(() =>
-      window.bridge.connectionsList(),
-    );
+    const profiles = await page.evaluate(() => window.bridge.connectionsList());
     sshId = profiles.find((item) => item.name === "Remote")?.id ?? null;
     await page.getByRole("button", { name: "Close dialog" }).click();
   }
@@ -69,7 +67,8 @@ try {
         return {
           name: name.textContent,
           gap: Math.round(
-            tag.getBoundingClientRect().left - ink.getBoundingClientRect().right,
+            tag.getBoundingClientRect().left -
+              ink.getBoundingClientRect().right,
           ),
         };
       }),
@@ -89,6 +88,17 @@ try {
       .catch((error) => (report.cleanupError = String(error)));
   }
   await app.close();
+  // orchd outlives the app on purpose; this throwaway profile's daemon must not.
+  const orchdPid = await fs
+    .readFile(`${profile}/orchestrator/orchd.pid`, "utf8")
+    .catch(() => "");
+  if (Number(orchdPid)) {
+    try {
+      process.kill(Number(orchdPid), "SIGTERM");
+    } catch {
+      // already gone
+    }
+  }
   await fs.rm(profile, { recursive: true, force: true });
   console.log(JSON.stringify(report, null, 2));
 }

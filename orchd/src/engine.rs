@@ -3523,8 +3523,9 @@ async fn run_task_loop(
         // with "Agent:", and never duplicate an identical entry.
         if let Some(r) = &report {
             for d in &r.decisions {
-                let cleaned = d
-                    .strip_prefix("Owner:")
+                let cleaned = ["Owner:", "Agent:"]
+                    .iter()
+                    .find_map(|p| d.strip_prefix(p))
                     .map(|s| s.trim_start())
                     .unwrap_or(d.as_str());
                 let entry = format!("Agent: {cleaned}");

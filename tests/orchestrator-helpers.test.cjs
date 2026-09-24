@@ -25,6 +25,20 @@ function task(overrides = {}) {
   };
 }
 
+function message(overrides = {}) {
+  return {
+    id: "m1",
+    repo: "/Users/sushi/project",
+    from: "orchestrator",
+    to: "t1",
+    kind: "message",
+    text: "Go ahead",
+    ts: 1000,
+    delivered: false,
+    ...overrides,
+  };
+}
+
 function attempt(overrides = {}) {
   return {
     n: 1,
@@ -276,4 +290,76 @@ test("applyOrchestratorEvent folds a task patch and caps accumulated log lines",
   assert.equal(state.logLines.a.length, 200);
   assert.equal(state.logLines.a[0], "line 5");
   assert.equal(state.logLines.a[199], "line 204");
+});
+
+test("applyOrchestratorEvent leaves the task state alone for a message event", async () => {
+  const { applyOrchestratorEvent, emptyLiveState } = await library;
+  const next = applyOrchestratorEvent(emptyLiveState, {
+    event: "message",
+    message: message(),
+  });
+  assert.equal(next, emptyLiveState);
+});
+
+test("upsertMessage replaces an existing message by id (a delivery flip) and keeps ts ascending", async () => {
+  const { upsertMessage } = await library;
+  const a = message({ id: "a", ts: 1000, delivered: false });
+  const b = message({ id: "b", ts: 2000, delivered: false });
+  let list = upsertMessage(
+    [a, b],
+    message({ id: "a", ts: 1000, delivered: true }),
+  );
+  assert.deepEqual(
+    list.map((m) => [m.id, m.delivered]),
+    [
+      ["a", true],
+      ["b", false],
+    ],
+  );
+  // A brand-new id is appended and the list stays sorted by ts.
+  list = upsertMessage(list, message({ id: "c", ts: 500, delivered: false }));
+  assert.deepEqual(
+    list.map((m) => m.id),
+    ["c", "a", "b"],
+  );
+});
+
+test("messageThreads groups by the unordered participant pair, newest thread first, messages oldest first", async () => {
+  const { messageThreads } = await library;
+  const threads = messageThreads([
+    message({ id: "1", from: "t1", to: "orchestrator", ts: 1000 }),
+    message({
+      id: "2",
+      from: "orchestrator",
+      to: "t1",
+      ts: 2000,
+      kind: "reply",
+      replyTo: "1",
+      delivered: true,
+    }),
+    message({ id: "3", from: "t2", to: "orchestrator", ts: 1500 }),
+  ]);
+  assert.equal(threads.length, 2);
+  // The t1<->orchestrator thread has the newest message (ts 2000), so it
+  // sorts first even though t2's own message came earlier chronologically.
+  assert.deepEqual(threads[0].participants.slice().sort(), [
+    "orchestrator",
+    "t1",
+  ]);
+  assert.deepEqual(
+    threads[0].messages.map((m) => m.id),
+    ["1", "2"],
+  );
+  assert.equal(threads[0].lastTs, 2000);
+  assert.equal(threads[0].pending, 1); // only message "1" is undelivered
+  assert.equal(threads[1].messages[0].id, "3");
+  assert.equal(threads[1].pending, 1);
+});
+
+test("participantLabel names the orchestrator, a known task's title, or a short id fallback", async () => {
+  const { participantLabel } = await library;
+  const tasks = [task({ id: "abcdefgh12345", title: "Export CSV" })];
+  assert.equal(participantLabel("orchestrator", tasks), "Orchestrator");
+  assert.equal(participantLabel("abcdefgh12345", tasks), "Export CSV");
+  assert.equal(participantLabel("zzzzzzzzunknown", tasks), "Task zzzzzzzz");
 });

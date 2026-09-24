@@ -68,9 +68,9 @@ impl Drop for Daemon {
 }
 
 impl Daemon {
-    fn spawn() -> Daemon {
+    fn spawn(label: &str) -> Daemon {
         let data_dir = tempfile::tempdir().unwrap();
-        let socket = short_socket_path("daemon");
+        let socket = short_socket_path(label);
         let bin = env!("CARGO_BIN_EXE_orchd");
         let child = Command::new(bin)
             .args([
@@ -117,6 +117,10 @@ impl Drop for McpClient {
 
 impl McpClient {
     fn spawn(data_dir: &Path, socket: &Path) -> McpClient {
+        McpClient::spawn_with(data_dir, socket, &[])
+    }
+
+    fn spawn_with(data_dir: &Path, socket: &Path, extra: &[&str]) -> McpClient {
         let bin = env!("CARGO_BIN_EXE_orchd");
         let mut child = Command::new(bin)
             .args([
@@ -126,6 +130,7 @@ impl McpClient {
                 "--socket",
                 socket.to_str().unwrap(),
             ])
+            .args(extra)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -164,7 +169,7 @@ impl McpClient {
 
 #[test]
 fn initialize_tools_list_and_tools_call_over_stdio() {
-    let daemon = Daemon::spawn();
+    let daemon = Daemon::spawn("daemon");
     let mut mcp = McpClient::spawn(daemon.data_dir(), &daemon.socket);
 
     let init = mcp.request(
@@ -195,13 +200,24 @@ fn initialize_tools_list_and_tools_call_over_stdio() {
         "settings_get",
         "task_archive",
         "task_unarchive",
+        "peer_list",
+        "peer_send",
+        "inbox_read",
+        "ask_orchestrator",
+        "orchestrator_reply",
     ] {
         assert!(
             names.contains(&expected),
             "missing tool {expected}: {names:?}"
         );
     }
-    assert_eq!(names.len(), 10, "unexpected extra tools: {names:?}");
+    assert_eq!(names.len(), 15, "unexpected extra tools: {names:?}");
+    for tool in tools {
+        assert!(
+            !tool["inputSchema"]["properties"].is_null(),
+            "{tool} has no inputSchema"
+        );
+    }
     assert!(
         !names.contains(&"task_delete"),
         "task_delete must never be exposed: {names:?}"
@@ -240,4 +256,53 @@ fn initialize_tools_list_and_tools_call_over_stdio() {
         bogus["result"]["isError"], true,
         "a bogus task id should come back as a tool error: {bogus}"
     );
+
+    let unknown = mcp.request(
+        6,
+        "tools/call",
+        serde_json::json!({"name": "peer_send", "arguments": {"to": "nobody", "text": "hi"}}),
+    );
+    assert_eq!(unknown["result"]["isError"], true, "{unknown}");
+    let to_self = mcp.request(
+        7,
+        "tools/call",
+        serde_json::json!({"name": "ask_orchestrator", "arguments": {"text": "hi"}}),
+    );
+    assert_eq!(to_self["result"]["isError"], true, "{to_self}");
+    assert!(!daemon.data_dir().join("messages.json").exists());
+}
+
+#[test]
+fn a_task_scoped_bridge_offers_only_the_messaging_tools() {
+    let daemon = Daemon::spawn("task");
+    let task = "11111111-1111-4111-8111-111111111111";
+    let mut mcp = McpClient::spawn_with(daemon.data_dir(), &daemon.socket, &["--task", task]);
+
+    let init = mcp.request(1, "initialize", serde_json::json!({}));
+    assert_eq!(init["result"]["serverInfo"]["name"], "sushiai-messages");
+    let list = mcp.request(2, "tools/list", serde_json::json!({}));
+    let names: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names.join(","),
+        "peer_list,peer_send,inbox_read,ask_orchestrator"
+    );
+
+    let create = mcp.request(
+        3,
+        "tools/call",
+        serde_json::json!({"name": "task_create", "arguments": {"repo": "/"}}),
+    );
+    assert_eq!(create["result"]["isError"], true, "{create}");
+    // The task doesn't exist in this daemon, so it can't send as it either.
+    let ask = mcp.request(
+        4,
+        "tools/call",
+        serde_json::json!({"name": "ask_orchestrator", "arguments": {"text": "hi"}}),
+    );
+    assert_eq!(ask["result"]["isError"], true, "{ask}");
 }

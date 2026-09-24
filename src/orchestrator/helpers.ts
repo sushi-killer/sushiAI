@@ -1,6 +1,6 @@
 // Pure helpers the renderer bends the protocol into a screen with - no
 // window.bridge access here, so they're cheap to unit test directly.
-import type { Attempt, OrchestratorEvent, Task } from "./types";
+import type { Attempt, Message, OrchestratorEvent, Task } from "./types";
 
 export function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return "0s";
@@ -152,9 +152,72 @@ export function applyOrchestratorEvent(
 ): OrchestratorLiveState {
   if (event.event === "task")
     return { ...state, tasks: upsertTask(state.tasks, event.task) };
-  if (event.event === "chat") return state;
+  if (event.event === "chat" || event.event === "message") return state;
   const lines = [...(state.logLines[event.taskId] || []), event.line].slice(
     -MAX_LOG_LINES,
   );
   return { ...state, logLines: { ...state.logLines, [event.taskId]: lines } };
+}
+
+/** Replaces a message by id (a `delivered` flip upserts in place) or appends
+ * it, keeping the list sorted oldest-first - the same order `message.list`
+ * returns and `MessagesView` renders threads in. */
+export function upsertMessage(
+  messages: Message[],
+  message: Message,
+): Message[] {
+  const next = messages.filter((item) => item.id !== message.id);
+  next.push(message);
+  next.sort((a, b) => a.ts - b.ts);
+  return next;
+}
+
+export type MessageThread = {
+  /** The unordered participant pair, joined so both orderings hash alike. */
+  key: string;
+  participants: [string, string];
+  /** Oldest first. */
+  messages: Message[];
+  lastTs: number;
+  /** Count of messages not yet delivered. */
+  pending: number;
+};
+
+function threadKey(a: string, b: string): string {
+  return [a, b].sort().join("::");
+}
+
+/** Groups a flat message list into per-conversation threads, keyed by the
+ * unordered {from, to} pair - a question and its reply flow the same way
+ * whichever side sent which message. Threads are sorted newest-first by
+ * their last message, and each thread's own messages stay oldest-first. */
+export function messageThreads(messages: Message[]): MessageThread[] {
+  const byKey = new Map<string, MessageThread>();
+  for (const message of messages) {
+    const key = threadKey(message.from, message.to);
+    let thread = byKey.get(key);
+    if (!thread) {
+      thread = {
+        key,
+        participants: [message.from, message.to],
+        messages: [],
+        lastTs: message.ts,
+        pending: 0,
+      };
+      byKey.set(key, thread);
+    }
+    thread.messages.push(message);
+    thread.lastTs = Math.max(thread.lastTs, message.ts);
+    if (!message.delivered) thread.pending++;
+  }
+  return [...byKey.values()].sort((a, b) => b.lastTs - a.lastTs);
+}
+
+/** How a participant id reads in the Messages view: the orchestrator's own
+ * name, a task's title when it's still known, or a short id fallback for a
+ * deleted/unknown task. */
+export function participantLabel(id: string, tasks: Task[]): string {
+  if (id === "orchestrator") return "Orchestrator";
+  const task = tasks.find((t) => t.id === id);
+  return task ? task.title : `Task ${id.slice(0, 8)}`;
 }

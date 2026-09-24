@@ -152,5 +152,26 @@ export type ChatThread = {
   error?: string;
 };
 export type ChatEvent = { event: "chat"; thread: ChatThread };
+
+/** One agent-to-agent (or agent-to-orchestrator) message, kept by the daemon
+ * per repo. `from`/`to` are either a task id or the literal `"orchestrator"`.
+ * `delivered` flips true once the recipient actually receives it on its next
+ * attempt/turn - until then the message is only pending. */
+export type Message = {
+  id: string;
+  repo: string;
+  from: string;
+  to: string;
+  kind: "message" | "question" | "reply";
+  text: string;
+  /** Id of the message this one answers - only set when `kind` is "reply". */
+  replyTo?: string;
+  ts: number;
+  delivered: boolean;
+  deliveredAt?: number;
+};
+/** Pushed both when a message is created and again when it flips to
+ * delivered - an upsert by id, same as `TaskEvent`. */
+export type MessageEvent = { event: "message"; message: Message };
 /** Pushed over `onOrchestrator` from the daemon's one `subscribe` connection. */
-export type OrchestratorEvent = TaskEvent | LogEvent | ChatEvent;
+export type OrchestratorEvent = TaskEvent | LogEvent | ChatEvent | MessageEvent;

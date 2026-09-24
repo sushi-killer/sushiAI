@@ -23,6 +23,8 @@ use tokio::sync::{broadcast, oneshot, Notify, Semaphore};
 
 #[path = "chat.rs"]
 mod chat;
+#[path = "messages.rs"]
+mod messages;
 
 // ===========================================================================
 // Pure helpers (signature, tier-up/waiting, blocked-question, protected
@@ -331,6 +333,8 @@ pub struct App {
     controls: std::sync::Mutex<HashMap<String, TaskControl>>,
     /// Keyed by repo: the orchestrator chat turn running for it, if any.
     chat_turns: std::sync::Mutex<HashMap<String, CancelToken>>,
+    /// Every agent-to-agent message, mirrored to `<data>/messages.json`.
+    messages: StdMutex<Vec<Message>>,
     hook_tokens: RwLock<HashMap<String, Arc<HookContext>>>,
     /// Keyed by task id: the diff+untracked-list hash a verify run was last
     /// computed for, and its results -- shared by `hook.stop` and the
@@ -390,6 +394,7 @@ impl App {
         let parallel_limit = settings.parallel.max(1);
         let slots = Arc::new(Semaphore::new(parallel_limit as usize));
 
+        let messages = messages::load(&data_dir);
         let app = Arc::new(App {
             store,
             data_dir,
@@ -401,6 +406,7 @@ impl App {
             shutdown_tx,
             controls: std::sync::Mutex::new(HashMap::new()),
             chat_turns: std::sync::Mutex::new(HashMap::new()),
+            messages: StdMutex::new(messages),
             hook_tokens: RwLock::new(HashMap::new()),
             verify_cache: std::sync::Mutex::new(HashMap::new()),
             pid: std::process::id(),
@@ -616,6 +622,10 @@ impl App {
             "chat.get" => chat::handle_get(self, params).await,
             "chat.send" => chat::handle_send(self, params).await,
             "chat.cancel" => chat::handle_cancel(self, params).await,
+            "peer.list" => messages::handle_peers(self, params).await,
+            "message.send" => messages::handle_send(self, params).await,
+            "message.inbox" => messages::handle_inbox(self, params).await,
+            "message.list" => messages::handle_list(self, params).await,
             "hook.stop" => self.handle_hook_stop(params).await,
             "shutdown" => self.handle_shutdown().await,
             other => Err(format!("unknown method: {other}")),
@@ -2205,6 +2215,7 @@ async fn run_triage(
         mcp_config: Some(&mcp_path),
         settings_path: Some(&settings_path),
         network_allowed: false,
+        codex_mcp: None,
     };
     let brief_text = brief::build_triage_brief(task, question, options);
     let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
@@ -2605,6 +2616,7 @@ async fn run_review(
         mcp_config: Some(&mcp_path),
         settings_path: Some(&settings_path),
         network_allowed: false,
+        codex_mcp: None,
     };
     match run_harness(
         app,
@@ -2956,6 +2968,7 @@ async fn run_plan_stage(
             mcp_config: Some(&mcp_path),
             settings_path: Some(&settings_path),
             network_allowed: false,
+            codex_mcp: None,
         };
 
         let mut draft: Option<brief::PlanDraft> = None;
@@ -3385,6 +3398,12 @@ async fn run_task_loop(
             (Some(_), Some(failure)) => brief::build_resume_delta(failure),
             _ => brief::build_brief(&task, &status_short, &diff_stat),
         };
+        // The messages sent to this task since its last attempt are
+        // delivered here, with the attempt about to start.
+        let brief_text = brief::with_block_before_report(
+            &brief_text,
+            &messages::brief_block_for_task(&app, &task_id),
+        );
 
         let reason = format!("tier {} -> route {}", task.tier.as_str(), route.id);
         let attempt = Attempt {
@@ -3420,11 +3439,16 @@ async fn run_task_loop(
         let _ = std::fs::create_dir_all(&run_dir);
         let mcp_path = run_dir.join("mcp.json");
         let task_mcp_path = app.store.task_dir(&task_id).join("mcp.json");
-        if task_mcp_path.exists() {
-            let _ = std::fs::copy(&task_mcp_path, &mcp_path);
-        } else {
-            let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
-        }
+        // The project's own servers, plus orchd's messaging bridge scoped to
+        // this task.
+        let messages_server = messages::task_server(&app, &task_id);
+        let mut mcp_config = std::fs::read_to_string(&task_mcp_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .filter(|v| v.get("mcpServers").is_some_and(|s| s.is_object()))
+            .unwrap_or_else(|| json!({"mcpServers": {}}));
+        mcp_config["mcpServers"][messages::SERVER] = messages_server.clone();
+        let _ = store::write_json_atomic(&mcp_path, &mcp_config);
 
         let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
         let token = uuid::Uuid::new_v4().to_string();
@@ -3471,13 +3495,20 @@ async fn run_task_loop(
                 socket_path: &socket_path_str,
                 token: &token,
             };
-            let claude_settings = harness::build_claude_settings(
+            let mut claude_settings = harness::build_claude_settings(
                 profile_value.as_ref(),
                 settings.sandbox,
                 &settings.allowed_domains,
                 &deny_read,
                 Some(stop_hook),
             );
+            // A headless run answers no prompts, so the messaging tools must
+            // be allowed up front to be usable at all.
+            if let Some(allow) = claude_settings["permissions"]["allow"].as_array_mut() {
+                for tool in crate::mcp::TASK_TOOLS {
+                    allow.push(json!(format!("mcp__{}__{tool}", messages::SERVER)));
+                }
+            }
             let _ = store::write_json_atomic(&settings_path, &claude_settings);
             let ctx = Arc::new(HookContext {
                 task_id: task_id.clone(),
@@ -3505,6 +3536,7 @@ async fn run_task_loop(
             mcp_config: Some(&mcp_path),
             settings_path: Some(&settings_path),
             network_allowed,
+            codex_mcp: Some((messages::SERVER, &messages_server)),
         };
 
         let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);

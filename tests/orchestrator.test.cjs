@@ -177,13 +177,29 @@ test("call() rejects a method outside the protocol allowlist before touching the
       /Invalid orchestrator request/,
       method,
     );
-  assert.equal(ALLOWED_METHODS.has("task.create"), true);
-  assert.equal(ALLOWED_METHODS.has("task.archive"), true);
-  assert.equal(ALLOWED_METHODS.has("task.unarchive"), true);
+  // Every pre-existing method stays reachable.
+  for (const method of [
+    "ping",
+    "settings.get",
+    "settings.set",
+    "task.list",
+    "task.get",
+    "task.create",
+    "task.start",
+    "task.stop",
+    "task.answer",
+    "task.delete",
+    "task.archive",
+    "task.unarchive",
+    "task.preflight",
+    "chat.get",
+    "chat.send",
+    "chat.cancel",
+  ])
+    assert.equal(ALLOWED_METHODS.has(method), true, method);
+  // Agent-to-agent message threads are reachable the same way as tasks/chat.
+  assert.equal(ALLOWED_METHODS.has("message.list"), true);
   assert.equal(ALLOWED_METHODS.has("hook.stop"), false);
-  // The orchestrator chat lives in the daemon, reachable like the tasks.
-  for (const method of ["chat.get", "chat.send", "chat.cancel"])
-    assert.equal(ALLOWED_METHODS.has(method), true);
 });
 
 test("call() reports the daemon as not built rather than hanging on a missing binary", async (t) => {

@@ -21,6 +21,27 @@ pub struct RunRequest<'a> {
     /// Codex only: whether the sandbox has network access
     /// (`sandbox_workspace_write.network_access`).
     pub network_allowed: bool,
+    /// Codex only: an MCP server (name, `{command, args, env?}`) passed as
+    /// `-c mcp_servers.*` flags; Claude reads its servers from `mcp_config`.
+    pub codex_mcp: Option<(&'a str, &'a serde_json::Value)>,
+}
+
+/// `-c mcp_servers.<name>.{command,args,env.*}` for one MCP server. JSON
+/// strings and string arrays are valid TOML values as they are.
+pub fn codex_mcp_flags(name: &str, server: &serde_json::Value) -> Vec<String> {
+    let mut flags = vec![
+        "-c".to_string(),
+        format!("mcp_servers.{name}.command={}", server["command"]),
+        "-c".to_string(),
+        format!("mcp_servers.{name}.args={}", server["args"]),
+    ];
+    if let Some(env) = server.get("env").and_then(|e| e.as_object()) {
+        for (key, value) in env {
+            flags.push("-c".to_string());
+            flags.push(format!("mcp_servers.{name}.env.{key}={value}"));
+        }
+    }
+    flags
 }
 
 /// `claude -p --output-format stream-json --verbose --setting-sources
@@ -104,6 +125,9 @@ pub fn codex_argv(req: &RunRequest) -> Vec<String> {
                     req.network_allowed
                 ),
             ];
+            if let Some((name, server)) = req.codex_mcp {
+                argv.extend(codex_mcp_flags(name, server));
+            }
             if let Some(model) = req.model {
                 argv.push("-m".to_string());
                 argv.push(model.to_string());
@@ -133,6 +157,9 @@ pub fn codex_argv(req: &RunRequest) -> Vec<String> {
             "sandbox_workspace_write.network_access={}",
             req.network_allowed
         ));
+    }
+    if let Some((name, server)) = req.codex_mcp {
+        argv.extend(codex_mcp_flags(name, server));
     }
     if let Some(model) = req.model {
         argv.push("--model".to_string());
@@ -430,7 +457,25 @@ mod tests {
             mcp_config: None,
             settings_path: None,
             network_allowed: true,
+            codex_mcp: None,
         }
+    }
+
+    #[test]
+    fn codex_gets_the_messages_server_fresh_and_resumed() {
+        let wt = PathBuf::from("/repo-task");
+        let server = serde_json::json!({"command": "/o", "args": ["mcp", "--task", "t"]});
+        let mut req = base_req(Harness::Codex, &wt);
+        req.codex_mcp = Some(("sushiai-messages", &server));
+        let command = "mcp_servers.sushiai-messages.command=\"/o\"".to_string();
+        let args = "mcp_servers.sushiai-messages.args=[\"mcp\",\"--task\",\"t\"]".to_string();
+        let fresh = codex_argv(&req);
+        assert!(fresh.contains(&command));
+        assert!(fresh.contains(&args));
+        req.resume = Some("thread-1");
+        let resumed = codex_argv(&req);
+        assert!(resumed.contains(&command));
+        assert_eq!(resumed.last().unwrap(), "-");
     }
 
     #[test]

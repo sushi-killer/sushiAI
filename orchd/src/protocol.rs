@@ -3,7 +3,7 @@
 //! The actual method implementations live behind the [`Dispatcher`] trait so
 //! this module only knows about framing, not engine/store internals.
 
-use crate::model::Task;
+use crate::model::{Message, Task};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::path::Path;
@@ -28,6 +28,9 @@ pub enum Event {
     /// The orchestrator chat thread of one repo, whole, after any change.
     #[serde(rename = "chat")]
     Chat { thread: Box<serde_json::Value> },
+    /// An agent-to-agent message, when it is sent and again when delivered.
+    #[serde(rename = "message")]
+    Message { message: Box<Message> },
 }
 
 #[derive(Debug, Deserialize)]

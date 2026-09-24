@@ -40,6 +40,7 @@ const ALLOWED_METHODS = new Set([
   "chat.get",
   "chat.send",
   "chat.cancel",
+  "message.list",
 ]);
 
 const NOT_BUILT =

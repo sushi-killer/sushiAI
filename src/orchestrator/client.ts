@@ -2,7 +2,7 @@
 // passthrough - one place that knows the request/response shape of each
 // method in the protocol table, so OrchestratorPanel/Settings never spell out
 // a method string or cast a result themselves.
-import type { ChatThread, Settings, Task } from "./types";
+import type { ChatThread, Message, Settings, Task } from "./types";
 
 function call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
   if (!window.bridge)
@@ -45,4 +45,5 @@ export const orchestratorClient = {
     call<Record<string, never>>("chat.send", { repo, text }),
   chatCancel: (repo: string) =>
     call<Record<string, never>>("chat.cancel", { repo }),
+  messageList: (repo: string) => call<Message[]>("message.list", { repo }),
 };

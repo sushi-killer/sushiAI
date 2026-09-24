@@ -254,6 +254,129 @@
   display: none;
 }
 
+/* Agent-to-agent message threads. Same scroll/gap density as `.orch-detail`
+ * beside it, laid out as a list of thread cards rather than one long
+ * timeline since each thread is its own independent conversation. */
+.orch-messages {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: var(--gap-sm);
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: var(--gap-xs);
+}
+
+.orch-messages[hidden] {
+  display: none;
+}
+
+.orch-thread-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-md);
+}
+
+.orch-thread-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  padding: var(--gap-sm);
+}
+
+.orch-thread-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-sm);
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+.orch-thread-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.orch-message-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--gap-xs) 0;
+}
+
+/* Only a divider between messages, never above the first one - an adjacent-
+ * sibling selector instead of `:first-of-type`, since the thread-head div
+ * ahead of every message row would otherwise be what "first" means. */
+.orch-message-row + .orch-message-row {
+  border-top: 1px solid var(--line);
+}
+
+/* A reply reads as answering its question: indented under the thread's own
+ * left edge, with a small marker above it instead of sitting flush with
+ * every other message. The compound selector (not just `.orch-message-reply`
+ * alone) matches the two-class specificity of the divider rule above it, so
+ * this `border-top: none` actually wins instead of losing to source order. */
+.orch-message-row.orch-message-reply {
+  margin-left: var(--gap-md);
+  padding-left: var(--gap-sm);
+  border-top: none;
+  border-left: 2px solid var(--line);
+}
+
+.orch-message-reply-marker {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.orch-message-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.orch-message-from {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.orch-message-kind-question {
+  background: var(--tone-info-bg);
+  color: var(--tone-info);
+}
+
+.orch-message-time {
+  margin-left: auto;
+}
+
+.orch-message-text {
+  font-size: var(--text-sm);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.orch-message-delivery {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.orch-message-delivery.pending {
+  color: var(--tone-warning);
+}
+
 .orch-detail {
   display: flex;
   flex-direction: column;

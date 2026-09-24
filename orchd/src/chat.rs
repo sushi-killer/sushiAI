@@ -14,16 +14,6 @@ use serde::Serialize;
 const ROLE: &str = "You are the owner's task orchestrator in sushiAI. You never change files or run commands yourself: every piece of work becomes an orchd task through the sushiai-orchestrator tools, which run it in an isolated worktree, verify it and report back. Follow that server's instructions. You are not woken up between turns, so never promise to watch or report later: say the task is in the Orchestrator panel. Reply in the owner's language, briefly.";
 
 const SERVER: &str = "sushiai-orchestrator";
-const TOOLS: [&str; 8] = [
-    "task_list",
-    "task_get",
-    "task_create",
-    "task_start",
-    "task_stop",
-    "task_answer",
-    "task_preflight",
-    "settings_get",
-];
 const MAX_MESSAGES: usize = 200;
 const MAX_TEXT: usize = 20_000;
 
@@ -127,6 +117,41 @@ pub async fn handle_cancel(
     Ok(json!({}))
 }
 
+/// Who a turn answers: the owner's chat message, or the questions tasks sent
+/// meanwhile (their message ids). A question turn leaves the chat's messages
+/// alone; its reply goes back to the tasks instead.
+enum Turn {
+    Owner,
+    Questions(Vec<String>),
+}
+
+const QUESTIONS_INTRO: &str = "Tasks asked you the questions below while they keep working. Answer each with orchestrator_reply {question, text}; a task reads the answer on its next attempt.";
+const QUESTION_TURN_REPLY: &str =
+    "Your final message is sent back to each task you did not answer that way.";
+
+/// Claims the repo's one turn slot and loads its thread, starting a fresh
+/// session when the orchestrator's route changed since the last turn.
+fn begin_turn(app: &App, repo: &str) -> Result<(ChatThread, Route, CancelToken), String> {
+    let settings = app.settings.read().unwrap().clone();
+    let route =
+        orchestrator_route(&settings).ok_or("no route is configured for the orchestrator")?;
+    let cancel = CancelToken::new();
+    {
+        let mut turns = app.chat_turns.lock().unwrap();
+        if turns.contains_key(repo) {
+            return Err("the orchestrator is still answering".to_string());
+        }
+        turns.insert(repo.to_string(), cancel.clone());
+    }
+    let mut thread = load(app, repo);
+    // A session belongs to one harness; switching routes starts fresh.
+    if thread.route_id.as_deref() != Some(route.id.as_str()) {
+        thread.session_id = None;
+        thread.route_id = Some(route.id.clone());
+    }
+    Ok((thread, route, cancel))
+}
+
 pub async fn handle_send(
     app: &App,
     params: serde_json::Value,
@@ -139,35 +164,48 @@ pub async fn handle_send(
         .filter(|t| !t.is_empty())
         .ok_or("text is required")?
         .to_string();
-    let settings = app.settings.read().unwrap().clone();
-    let route =
-        orchestrator_route(&settings).ok_or("no route is configured for the orchestrator")?;
-    let cancel = CancelToken::new();
-    {
-        let mut turns = app.chat_turns.lock().unwrap();
-        if turns.contains_key(&repo) {
-            return Err("the orchestrator is still answering".to_string());
-        }
-        turns.insert(repo.clone(), cancel.clone());
-    }
-    let mut thread = load(app, &repo);
+    let (mut thread, route, cancel) = begin_turn(app, &repo)?;
     if let Some(mcp) = params.get("mcp") {
         thread.task_mcp = Some(mcp.clone());
-    }
-    // A session belongs to one harness; switching routes starts fresh.
-    if thread.route_id.as_deref() != Some(route.id.as_str()) {
-        thread.session_id = None;
-        thread.route_id = Some(route.id.clone());
     }
     push(&mut thread, "user", &text);
     thread.busy = true;
     thread.error = None;
     save(app, &thread);
+    // Questions waiting for the orchestrator ride along with the owner's
+    // message; the chat shows only what the owner wrote.
+    let prompt = match messages::take_for_orchestrator(app, &repo) {
+        Some((_, questions)) => format!("{text}\n\n---\n\n{QUESTIONS_INTRO}\n\n{questions}"),
+        None => text,
+    };
     let app = app.arc();
     tokio::spawn(async move {
-        run_turn(&app, thread, route, text, cancel).await;
+        run_turn(&app, thread, route, prompt, cancel, Turn::Owner).await;
     });
     Ok(json!({}))
+}
+
+/// Starts a turn for the questions tasks sent the orchestrator in `repo`,
+/// in the same session the owner's chat uses. A turn already running picks
+/// them up when it ends; with no route configured they wait for one.
+pub(super) fn wake(app: &App, repo: &str) {
+    if !Path::new(repo).is_dir() || !messages::has_pending_for_orchestrator(app, repo) {
+        return;
+    }
+    let Ok((mut thread, route, cancel)) = begin_turn(app, repo) else {
+        return;
+    };
+    let Some((ids, questions)) = messages::take_for_orchestrator(app, repo) else {
+        app.chat_turns.lock().unwrap().remove(repo);
+        return;
+    };
+    thread.busy = true;
+    save(app, &thread);
+    let prompt = format!("{QUESTIONS_INTRO} {QUESTION_TURN_REPLY}\n\n{questions}");
+    let app = app.arc();
+    tokio::spawn(async move {
+        run_turn(&app, thread, route, prompt, cancel, Turn::Questions(ids)).await;
+    });
 }
 
 /// The orchestrator agent's route: the one the owner picked, else the route
@@ -200,7 +238,7 @@ fn claude_argv(
     settings_path: &Path,
     session: Option<&str>,
 ) -> Vec<String> {
-    let tools = TOOLS
+    let tools = crate::mcp::ORCHESTRATOR_TOOLS
         .iter()
         .map(|t| format!("mcp__{SERVER}__{t}"))
         .collect::<Vec<_>>()
@@ -276,22 +314,7 @@ fn codex_argv(
     let toml = |v: &serde_json::Value| v.to_string();
     argv.push("-c".into());
     argv.push(format!("developer_instructions={}", toml(&json!(ROLE))));
-    argv.push("-c".into());
-    argv.push(format!(
-        "mcp_servers.{SERVER}.command={}",
-        toml(&server["command"])
-    ));
-    argv.push("-c".into());
-    argv.push(format!(
-        "mcp_servers.{SERVER}.args={}",
-        toml(&server["args"])
-    ));
-    if let Some(env) = server.get("env").and_then(|e| e.as_object()) {
-        for (key, value) in env {
-            argv.push("-c".into());
-            argv.push(format!("mcp_servers.{SERVER}.env.{key}={}", toml(value)));
-        }
-    }
+    argv.extend(harness::codex_mcp_flags(SERVER, server));
     if let Some(model) = &route.model {
         argv.push("-m".into());
         argv.push(model.clone());
@@ -310,6 +333,7 @@ async fn run_turn(
     route: Route,
     text: String,
     cancel: CancelToken,
+    turn: Turn,
 ) {
     let repo = thread.repo.clone();
     let dir = app.data_dir.join("chats").join(simple_hash(&repo));
@@ -350,28 +374,40 @@ async fn run_turn(
     // owner may have been shown a fresher note: keep this turn's thread.
     thread.busy = false;
     thread.note = None;
-    match result {
-        Ok(outcome) => {
+    match (result, &turn) {
+        (Ok(outcome), _) => {
             if outcome.session_id.is_some() {
                 thread.session_id = outcome.session_id.clone();
             }
             match (
                 outcome.final_text.filter(|t| !t.trim().is_empty()),
                 outcome.error,
+                &turn,
             ) {
-                (Some(reply), _) => push(&mut thread, "assistant", &reply),
-                (None, Some(error)) => {
+                (Some(reply), _, Turn::Owner) => push(&mut thread, "assistant", &reply),
+                (Some(reply), _, Turn::Questions(ids)) => {
+                    messages::reply_where_unanswered(app, ids, &reply)
+                }
+                (None, Some(error), _) => {
                     // A session the CLI no longer knows fails every resume.
                     thread.session_id = None;
-                    thread.error = Some(truncate_chars(&error, 2000));
+                    if matches!(turn, Turn::Owner) {
+                        thread.error = Some(truncate_chars(&error, 2000));
+                    }
                 }
-                (None, None) => thread.error = Some("The orchestrator gave no reply.".into()),
+                (None, None, Turn::Owner) => {
+                    thread.error = Some("The orchestrator gave no reply.".into())
+                }
+                (None, None, Turn::Questions(_)) => {}
             }
         }
-        Err(RunError::Cancelled) => thread.error = Some("Stopped.".into()),
-        Err(RunError::Io(error)) => thread.error = Some(error),
+        (Err(RunError::Cancelled), Turn::Owner) => thread.error = Some("Stopped.".into()),
+        (Err(RunError::Io(error)), Turn::Owner) => thread.error = Some(error),
+        (Err(_), Turn::Questions(_)) => {}
     }
     save(app, &thread);
+    // Questions that arrived during this turn get the next one.
+    wake(app, &repo);
 }
 
 async fn run(
@@ -481,7 +517,8 @@ mod tests {
         assert_eq!(at("--tools"), "Read,Grep,Glob");
         assert_eq!(at("--mcp-config"), "/d/mcp.json");
         assert_eq!(at("--resume"), "sess");
-        assert_eq!(at("--allowedTools").split(',').count(), 8);
+        assert_eq!(at("--allowedTools").split(',').count(), 15);
+        assert!(at("--allowedTools").contains("mcp__sushiai-orchestrator__orchestrator_reply"));
         assert!(!at("--allowedTools").contains("task_delete"));
         assert!(!argv.iter().any(|a| a == "acceptEdits"));
     }

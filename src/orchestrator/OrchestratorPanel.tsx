@@ -7,7 +7,9 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  CornerDownRight,
   MessageSquare,
+  MessagesSquare,
   Plus,
   Square,
   Trash2,
@@ -24,15 +26,20 @@ import {
   formatCost,
   formatDuration,
   latestImplementAttempt,
+  messageThreads,
+  participantLabel,
   statusBadgeLabel,
   statusDetail,
   totalDurationMs,
+  upsertMessage,
   upsertTask,
+  type MessageThread,
   type OrchestratorLiveState,
 } from "./helpers";
-import type { Attempt, ChatThread, Settings, Task } from "./types";
+import type { Attempt, ChatThread, Message, Settings, Task } from "./types";
 import { ChatTranscript } from "../ChatTranscript";
 import { ChipPicker } from "../ChipPicker";
+import { RichText } from "../agents/AgentsView";
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -42,9 +49,13 @@ type DaemonState = "loading" | "ready" | "not-built" | "unavailable";
 
 /** What the main pane beside the task list shows: the orchestrator chat is
  * where tasks come from, a task is opened to watch or answer it, the archive
- * lists what's been hidden from the main list. */
+ * lists what's been hidden from the main list, and "messages" watches the
+ * agent-to-agent threads the daemon keeps. */
 type View =
-  { kind: "chat" } | { kind: "task"; id: string } | { kind: "archive" };
+  | { kind: "chat" }
+  | { kind: "task"; id: string }
+  | { kind: "archive" }
+  | { kind: "messages" };
 
 function classifyError(message: string): DaemonState {
   return message.includes("is not built") ? "not-built" : "unavailable";
@@ -434,6 +445,147 @@ async function createTask(cwd: string, text: string): Promise<Task> {
   }
 }
 
+/** A small badge on a question to the orchestrator - the same look as a
+ * decision tag (`orch-decision-tag`). A reply already carries its own
+ * "↳ reply" marker, so it gets no second badge. */
+function MessageKindTag({ kind }: { kind: Message["kind"] }) {
+  if (kind !== "question") return null;
+  return (
+    <span className="orch-decision-tag orch-message-kind-question">{kind}</span>
+  );
+}
+
+/** One message inside a thread card. A reply reads as answering its question
+ * with an indent and a small "↳ reply" marker, rather than just another line
+ * in the same column as everything else. */
+function MessageRow({ message, tasks }: { message: Message; tasks: Task[] }) {
+  const when = new Date(message.ts);
+  return (
+    <div
+      className={`orch-message-row ${message.kind === "reply" ? "orch-message-reply" : ""}`}
+    >
+      {message.kind === "reply" && (
+        <span className="orch-message-reply-marker">
+          <CornerDownRight size={12} /> reply
+        </span>
+      )}
+      <div className="orch-message-meta">
+        <span className="orch-message-from">
+          {participantLabel(message.from, tasks)}
+        </span>
+        <MessageKindTag kind={message.kind} />
+        <time
+          className="orch-message-time"
+          dateTime={when.toISOString()}
+          title={when.toLocaleString("en-US")}
+        >
+          {when.toLocaleTimeString("en-US", {
+            hour: "2-digit",
+            minute: "2-digit",
+          })}
+        </time>
+      </div>
+      <div className="orch-message-text">
+        <RichText text={message.text} />
+      </div>
+      <span
+        className={`orch-message-delivery ${message.delivered ? "delivered" : "pending"}`}
+      >
+        {message.delivered ? "delivered" : "pending — arrives on its next turn"}
+      </span>
+    </div>
+  );
+}
+
+/** One conversation between two participants (a task and the orchestrator,
+ * or two tasks), newest thread first, its own messages oldest first. */
+function MessageThreadCard({
+  thread,
+  tasks,
+}: {
+  thread: MessageThread;
+  tasks: Task[];
+}) {
+  const [a, b] = thread.participants;
+  return (
+    <div className="orch-thread-card">
+      <div className="orch-thread-head">
+        <span className="orch-thread-title">
+          {participantLabel(a, tasks)} ↔ {participantLabel(b, tasks)}
+        </span>
+        <span className="orch-thread-count">
+          {thread.messages.length} message
+          {thread.messages.length === 1 ? "" : "s"}
+        </span>
+      </div>
+      {thread.messages.map((message) => (
+        <MessageRow key={message.id} message={message} tasks={tasks} />
+      ))}
+    </div>
+  );
+}
+
+/** Agent-to-agent (and agent-to-orchestrator) message threads the daemon
+ * keeps for this repo - read-only, the owner only watches. Self-contained
+ * like `OrchestratorChat`: it loads and live-updates its own state instead of
+ * riding the panel's shared `live` state (`applyOrchestratorEvent` leaves a
+ * `message` event untouched, same as it does for `chat`). */
+function MessagesView({
+  cwd,
+  tasks,
+  hidden,
+}: {
+  cwd: string;
+  tasks: Task[];
+  hidden: boolean;
+}) {
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [loadError, setLoadError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    orchestratorClient
+      .messageList(cwd)
+      .then((loaded) => !cancelled && setMessages(loaded))
+      .catch((e) => !cancelled && setLoadError(errorText(e)));
+    const off = window.bridge?.onOrchestrator((event) => {
+      if (event.event === "message" && event.message.repo === cwd)
+        setMessages((old) => upsertMessage(old, event.message));
+    });
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, [cwd]);
+
+  const threads = messageThreads(messages);
+
+  return (
+    <div className="orch-messages" hidden={hidden}>
+      {loadError && (
+        <div className="orch-error" role="alert">
+          <span>{loadError}</span>
+        </div>
+      )}
+      {threads.length === 0 ? (
+        <div className="chat-welcome">
+          <h2>Agent messages</h2>
+          <p>
+            Tasks message each other and ask the orchestrator here - watch each
+            thread as it happens, no need to answer on their behalf.
+          </p>
+        </div>
+      ) : (
+        <div className="orch-thread-list">
+          {threads.map((thread) => (
+            <MessageThreadCard key={thread.key} thread={thread} tasks={tasks} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function OrchestratorPanel({ cwd }: { cwd: string }) {
   const [daemonState, setDaemonState] = useState<DaemonState>("loading");
   const [error, setError] = useState("");
@@ -448,6 +600,11 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
   const [creatingTask, setCreatingTask] = useState(false);
   const [taskDraft, setTaskDraft] = useState("");
   const [creatingBusy, setCreatingBusy] = useState(false);
+  // Tracked here, separately from `MessagesView`'s own copy, only so the nav
+  // row can show a pending count before that view is ever opened - the same
+  // reason `waitingCount` below reads from `live.tasks` instead of the task
+  // detail pane.
+  const [messages, setMessages] = useState<Message[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -483,10 +640,29 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
       // only needs to exist for a task's live state to update.
       window.bridge?.onOrchestrator((event) => {
         if (event.event === "task" && event.task.repo !== cwd) return;
+        if (event.event === "message") {
+          if (event.message.repo === cwd)
+            setMessages((old) => upsertMessage(old, event.message));
+          return;
+        }
         setLive((old) => applyOrchestratorEvent(old, event));
       }),
     [cwd],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    orchestratorClient
+      .messageList(cwd)
+      .then((loaded) => !cancelled && setMessages(loaded))
+      .catch(() => {
+        // Silent: the badge just stays at 0 until the next successful load,
+        // never blocking the rest of the panel from showing.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, reload]);
 
   const tasks = sortTasks(live.tasks.filter((t) => !t.archived));
   const archivedTasks = sortTasks(live.tasks.filter((t) => t.archived));
@@ -500,6 +676,7 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
       ? (picked ?? tasks.find((t) => t.id === current.id))
       : undefined;
   const waitingCount = tasks.filter((t) => t.status === "waiting").length;
+  const pendingMessages = messages.filter((m) => !m.delivered).length;
 
   function open(next: View) {
     setView(next);
@@ -638,6 +815,17 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
             <span className="orch-archive-count">{archivedTasks.length}</span>
           )}
         </button>
+        <button
+          className={`orch-nav-row ${current.kind === "messages" ? "selected" : ""}`}
+          onClick={() => open({ kind: "messages" })}
+        >
+          <MessagesSquare size={14} /> Messages
+          {pendingMessages > 0 && (
+            <span className="orch-waiting-count">
+              {pendingMessages} pending
+            </span>
+          )}
+        </button>
         <div className="orch-tasks-head">
           <span className="dialog-eyebrow">TASKS</span>
           {waitingCount > 0 && (
@@ -705,6 +893,11 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
           hidden={current.kind !== "chat"}
           settings={settings}
           onRouteChange={setOrchestratorRoute}
+        />
+        <MessagesView
+          cwd={cwd}
+          tasks={tasks}
+          hidden={current.kind !== "messages"}
         />
         {current.kind === "archive" && (
           <div className="orch-archive">

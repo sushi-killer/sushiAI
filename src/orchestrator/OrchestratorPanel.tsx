@@ -30,6 +30,7 @@ import {
   participantLabel,
   statusBadgeLabel,
   statusDetail,
+  taskCreateParams,
   totalDurationMs,
   upsertMessage,
   upsertTask,
@@ -524,19 +525,29 @@ function OrchestratorChat({
  * form (the planner drafts title/goal/criteria/verify), but a disabled
  * planner shouldn't dead-end the control - falling back to the plain
  * title/goal form keeps it working either way. */
-async function createTask(cwd: string, text: string): Promise<Task> {
+async function createTask(
+  cwd: string,
+  text: string,
+  base: string,
+): Promise<Task> {
   try {
-    return await orchestratorClient.taskCreate(cwd, {
-      request: text,
-      start: true,
-    });
+    return await orchestratorClient.taskCreate(
+      cwd,
+      taskCreateParams({ request: text, start: true }, base),
+    );
   } catch (e) {
     if (!errorText(e).includes("planner is disabled")) throw e;
-    return orchestratorClient.taskCreate(cwd, {
-      title: text.length > 60 ? `${text.slice(0, 59)}…` : text,
-      goal: text,
-      start: true,
-    });
+    return orchestratorClient.taskCreate(
+      cwd,
+      taskCreateParams(
+        {
+          title: text.length > 60 ? `${text.slice(0, 59)}…` : text,
+          goal: text,
+          start: true,
+        },
+        base,
+      ),
+    );
   }
 }
 
@@ -694,6 +705,7 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
   const [reload, setReload] = useState(0);
   const [creatingTask, setCreatingTask] = useState(false);
   const [taskDraft, setTaskDraft] = useState("");
+  const [baseBranchDraft, setBaseBranchDraft] = useState("");
   const [creatingBusy, setCreatingBusy] = useState(false);
   // Tracked here, separately from `MessagesView`'s own copy, only so the nav
   // row can show a pending count before that view is ever opened - the same
@@ -806,9 +818,10 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
     setCreatingBusy(true);
     setError("");
     try {
-      const task = await createTask(cwd, text);
+      const task = await createTask(cwd, text, baseBranchDraft);
       setLive((old) => ({ ...old, tasks: upsertTask(old.tasks, task) }));
       setTaskDraft("");
+      setBaseBranchDraft("");
       setCreatingTask(false);
       open({ kind: "task", id: task.id });
     } catch (e) {
@@ -880,25 +893,35 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
               aria-label="New task request"
               disabled={creatingBusy}
             />
-            <button
-              className="icon-button"
-              type="submit"
-              aria-label="Create task"
-              disabled={creatingBusy || !taskDraft.trim()}
-            >
-              <ArrowUp size={14} />
-            </button>
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="Cancel new task"
-              onClick={() => {
-                setCreatingTask(false);
-                setTaskDraft("");
-              }}
-            >
-              <X size={13} />
-            </button>
+            <div className="orch-new-task-row">
+              <input
+                value={baseBranchDraft}
+                onChange={(event) => setBaseBranchDraft(event.target.value)}
+                placeholder="Defaults to the current branch"
+                aria-label="Base branch"
+                disabled={creatingBusy}
+              />
+              <button
+                className="icon-button"
+                type="submit"
+                aria-label="Create task"
+                disabled={creatingBusy || !taskDraft.trim()}
+              >
+                <ArrowUp size={14} />
+              </button>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="Cancel new task"
+                onClick={() => {
+                  setCreatingTask(false);
+                  setTaskDraft("");
+                  setBaseBranchDraft("");
+                }}
+              >
+                <X size={13} />
+              </button>
+            </div>
           </form>
         )}
         <button
@@ -1034,6 +1057,14 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                   <span className="orch-branch" title={selected.branch}>
                     {selected.branch}
                   </span>
+                  {selected.baseRef && (
+                    <>
+                      {" "}
+                      <span className="orch-branch" title={selected.baseRef}>
+                        from {selected.baseRef}
+                      </span>
+                    </>
+                  )}
                 </p>
               </div>
               <div className="orch-detail-actions">

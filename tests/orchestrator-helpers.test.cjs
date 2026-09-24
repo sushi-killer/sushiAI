@@ -57,6 +57,45 @@ function attempt(overrides = {}) {
   };
 }
 
+test("taskCreateParams adds a trimmed base on the request path, omits the key when blank", async () => {
+  const { taskCreateParams } = await library;
+  assert.deepEqual(
+    taskCreateParams({ request: "Add CSV export", start: true }, "  main  "),
+    { request: "Add CSV export", start: true, base: "main" },
+  );
+  assert.deepEqual(
+    taskCreateParams({ request: "Add CSV export", start: true }, ""),
+    { request: "Add CSV export", start: true },
+  );
+  assert.deepEqual(
+    taskCreateParams({ request: "Add CSV export", start: true }, "   "),
+    { request: "Add CSV export", start: true },
+  );
+});
+
+test("taskCreateParams adds a trimmed base on the title/goal fallback path too", async () => {
+  const { taskCreateParams } = await library;
+  assert.deepEqual(
+    taskCreateParams(
+      { title: "Add CSV export", goal: "Add CSV export", start: true },
+      "feature/base-demo",
+    ),
+    {
+      title: "Add CSV export",
+      goal: "Add CSV export",
+      start: true,
+      base: "feature/base-demo",
+    },
+  );
+  assert.deepEqual(
+    taskCreateParams(
+      { title: "Add CSV export", goal: "Add CSV export", start: true },
+      "",
+    ),
+    { title: "Add CSV export", goal: "Add CSV export", start: true },
+  );
+});
+
 test("formatDuration renders the coarsest unit that fits, zero for anything non-positive", async () => {
   const { formatDuration } = await library;
   assert.equal(formatDuration(0), "0s");

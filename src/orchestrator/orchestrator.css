@@ -168,9 +168,17 @@
 }
 
 /* The '+ New task' inline form, opened by the New task row above the list -
- * a single request line, not a full title/goal/criteria form, so creating a
- * task stays as quick as starting a chat thread. */
+ * a request line and an optional base-branch line, not a full
+ * title/goal/criteria form, so creating a task stays as quick as starting a
+ * chat thread. The two inputs sit on separate rows so a typed base branch
+ * never squeezes the request input. */
 .orch-new-task {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.orch-new-task-row {
   display: flex;
   align-items: center;
   gap: 4px;

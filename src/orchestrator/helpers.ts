@@ -2,6 +2,28 @@
 // window.bridge access here, so they're cheap to unit test directly.
 import type { Attempt, Message, OrchestratorEvent, Task } from "./types";
 
+export type TaskCreateParams = {
+  request?: string;
+  title?: string;
+  goal?: string;
+  criteria?: string[];
+  verify?: string[];
+  base?: string;
+  start?: boolean;
+};
+
+/** Adds a trimmed `base` to a task.create params object, only when the field
+ * isn't blank - an empty or whitespace-only base must send no `base` key at
+ * all, so orchd's own HEAD fallback (the checked-out branch) applies instead
+ * of an explicit empty string. */
+export function taskCreateParams(
+  params: Omit<TaskCreateParams, "base">,
+  base: string,
+): TaskCreateParams {
+  const trimmed = base.trim();
+  return trimmed ? { ...params, base: trimmed } : { ...params };
+}
+
 export function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return "0s";
   const totalSeconds = Math.round(ms / 1000);

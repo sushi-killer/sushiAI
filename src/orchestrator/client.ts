@@ -35,6 +35,7 @@ export const orchestratorClient = {
       goal?: string;
       criteria?: string[];
       verify?: string[];
+      base?: string;
       start?: boolean;
     },
   ) => call<Task>("task.create", { repo, ...params }),

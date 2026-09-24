@@ -117,7 +117,7 @@ pub struct Settings {
 }
 
 fn default_planner() -> String {
-    "claude-sonnet".to_string()
+    "claude-opus".to_string()
 }
 
 impl Default for Settings {
@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(v["parallel"], 2);
         assert_eq!(v["classifier"]["backend"], "openrouter");
         assert_eq!(v["classifier"]["model"], "typesafe/jev-1.13");
-        assert_eq!(v["planner"], "claude-sonnet");
+        assert_eq!(v["planner"], "claude-opus");
         assert_eq!(v["orchestrator"], "");
         let back: Settings = serde_json::from_value(v).unwrap();
         assert_eq!(back.max_attempts, 4);
@@ -390,15 +390,16 @@ mod tests {
     }
 
     #[test]
-    fn settings_without_a_planner_field_defaults_to_claude_sonnet() {
+    fn settings_default_without_a_planner_field_defaults_to_claude_opus() {
         // An older settings.json on disk (written before this field existed)
-        // must still load, with planning on by default.
+        // must still load, with planning on by default and on the hard
+        // tier's route - the strongest model plans best.
         let old_json = serde_json::json!({
             "routes": [], "tiers": {}, "review": "", "classifier": {"backend": "none", "model": "", "providerId": ""},
             "sandbox": "host", "allowedDomains": [], "protectedPaths": [], "maxAttempts": 4, "parallel": 2,
         });
         let s: Settings = serde_json::from_value(old_json).unwrap();
-        assert_eq!(s.planner, "claude-sonnet");
+        assert_eq!(s.planner, "claude-opus");
         assert_eq!(s.orchestrator, "");
         assert!(!s.auto_answer);
     }

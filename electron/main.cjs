@@ -37,6 +37,10 @@ const {
   registerHerdrExtension,
 } = require("./extensions/builtin-herdr.cjs");
 const {
+  ORCHESTRATOR_MANIFEST,
+  registerOrchestratorExtension,
+} = require("./orchestrator.cjs");
+const {
   install,
   applicationPath,
   cleanupCompleted,
@@ -55,7 +59,7 @@ const dataDir = process.env.BRIDGE_DATA_DIR;
 if (dataDir) app.setPath("userData", path.resolve(dataDir));
 const extensions = new ExtensionManager({
   dataDir: app.getPath("userData"),
-  builtins: [HERDR_MANIFEST],
+  builtins: [HERDR_MANIFEST, ORCHESTRATOR_MANIFEST],
   // Folders dropped here are read as JSON manifests, never executed. The
   // override exists so the desktop smoke can point at its own fixtures.
   localDir: process.env.SUSHIAI_EXTENSIONS_DIR
@@ -192,6 +196,17 @@ const attention = registerAttentionIpc({
   getMainWindow: () => mainWindow,
   userDataDir: app.getPath("userData"),
   trayIconPath: path.join(root, "dist/trayTemplate.png"),
+});
+registerOrchestratorExtension({
+  handle,
+  send,
+  notify: (notice) => attention.notify(notice),
+  dataDir: path.join(app.getPath("userData"), "orchestrator"),
+  root,
+  resourcesPath: process.resourcesPath,
+  packaged: app.isPackaged,
+  getClaudeMcp: () => claudeMcp,
+  getModelProviders: () => modelProviders,
 });
 function validWebURL(value) {
   try {

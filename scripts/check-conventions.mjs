@@ -12,8 +12,8 @@ import { addsMarkdownFragment } from "./lib/release-notes.mjs";
 const run = promisify(execFile);
 const root = process.cwd();
 const CYRILLIC = /[Ѐ-ӿ]/;
-const SOURCE_DIRS = ["src", "electron"];
-const SOURCE_FILES = /\.(ts|tsx|cjs|mjs|js|css|html)$/;
+const SOURCE_DIRS = ["src", "electron", "orchd/src"];
+const SOURCE_FILES = /\.(ts|tsx|cjs|mjs|js|css|html|rs)$/;
 const TRAILERS = [
   /^\s*co-authored-by:/im,
   /generated with \[?claude/i,

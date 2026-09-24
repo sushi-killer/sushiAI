@@ -9,6 +9,7 @@ import { RenderProfiler } from "./RenderProfiler";
 import { Icon } from "./PanelIcon";
 import type { ExtensionRegistry } from "./extensions/registry";
 import { ExtensionSurface } from "./extensions/SurfaceRenderer";
+import { OrchestratorPanel } from "./orchestrator/OrchestratorPanel";
 
 type PanelHostProps = {
   panel: Panel;
@@ -115,6 +116,17 @@ export const PanelHost = memo(function PanelHost({
             connection={endpoint}
             registry={extensionRegistry}
           />
+        ) : panel.kind === "orchestrator" ? (
+          // A Herdr-backed workspace can still be a local checkout (Herdr
+          // just manages its sessions); only an SSH-remote `cwd` is out of
+          // reach for the local daemon this panel talks to.
+          endpoint?.startsWith("ssh:") ? (
+            <div className="orchestrator-remote">
+              The orchestrator runs local projects only.
+            </div>
+          ) : (
+            <OrchestratorPanel cwd={cwd} />
+          )
         ) : (
           <ChatPanel
             panel={panel}

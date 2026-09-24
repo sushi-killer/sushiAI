@@ -1,0 +1,537 @@
+/* Orchestrator panel + settings. Scoped by the `orch-` prefix (and the one
+ * unprefixed panel-level class below) so this file can be dropped without
+ * hunting for stragglers elsewhere. `.status-dot.red`/`.blue` live in
+ * styles.css next to their green/yellow siblings, not here. */
+
+.orchestrator-remote {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  padding: var(--gap-xl);
+  text-align: center;
+}
+
+.orchestrator-panel {
+  /* A query container can't restyle its own `display`/`flex-direction` from
+   * inside its own `@container` rule - only a descendant is a valid subject,
+   * so the wide/narrow switch below lives entirely on `.orch-tasks`/
+   * `.orch-detail`, never on this element. Flex row, always. */
+  container-type: inline-size;
+  container-name: orchestrator;
+  display: flex;
+  gap: var(--gap-md);
+  /* `.panel-content` is a row flex container with this as its only child:
+   * `flex: 1` is what actually makes it fill the panel's width - `min-width:
+   * 0` alone only lets it shrink, it doesn't make it grow. */
+  flex: 1;
+  height: 100%;
+  min-width: 0;
+  padding: var(--gap-md);
+  overflow: hidden;
+}
+
+/* Shared by any status word colored like its dot - the task-list status line
+ * and an attempt's inline route status alike. */
+.tone-green {
+  color: var(--tone-ok);
+}
+.tone-yellow {
+  color: var(--tone-warning);
+}
+.tone-red {
+  color: var(--tone-danger);
+}
+.tone-blue {
+  color: var(--tone-info);
+}
+.tone-muted {
+  color: var(--text-muted);
+}
+
+.orch-tasks {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 260px;
+  gap: var(--gap-sm);
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.orch-tasks-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.orch-task-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--gap-sm);
+  padding: var(--gap-sm);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  text-align: left;
+}
+
+.orch-task-row.selected {
+  border-color: var(--line-selected);
+  background: var(--bg-selected);
+}
+
+.orch-task-row .status-dot {
+  margin-top: 5px;
+}
+
+.orch-task-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.orch-task-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+.orch-task-status {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.orch-detail {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: var(--gap-sm);
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: var(--gap-xs);
+}
+
+.orch-back-button {
+  display: none;
+  align-items: center;
+  gap: var(--gap-xs);
+  align-self: flex-start;
+  color: var(--text-muted);
+}
+
+.orch-detail-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+  gap: var(--gap-sm);
+  min-width: 0;
+}
+
+.orch-detail-title {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.orch-detail-head h3 {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--text-md);
+  font-weight: 500;
+  color: var(--text);
+}
+
+.orch-detail-meta {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.orch-branch {
+  font-family: monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.orch-detail-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--gap-xs);
+}
+
+.orch-delete-button {
+  margin-left: 12px;
+}
+
+.orch-criteria p,
+.orch-preflight-result p {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-xs);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  margin: 2px 0;
+}
+
+.orch-check-ok,
+.orch-check-met {
+  color: var(--tone-ok);
+}
+
+.orch-check-bad {
+  color: var(--tone-danger);
+}
+
+.orch-check-open {
+  color: var(--text-faint);
+}
+
+.orch-question {
+  border: 1px solid var(--tone-info);
+  background: var(--tone-info-bg);
+  border-radius: var(--radius-md);
+  padding: var(--gap-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+}
+
+.orch-question-text {
+  margin: 0;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.orch-question-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.orch-question-free {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-xs);
+}
+
+.orch-question-free input {
+  flex: 1;
+}
+
+/* A timeline rail, not a stack of cards: one border carries every attempt,
+ * a small dot per row marks its status, and only the live row gets any
+ * background at all. */
+.orch-attempts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-md);
+  border-left: 1px solid var(--line);
+  margin-left: 3px;
+  padding-left: var(--gap-md);
+}
+
+.orch-attempt {
+  position: relative;
+}
+
+.orch-attempt::before {
+  content: "";
+  position: absolute;
+  left: calc(-1 * var(--gap-md) - 4px);
+  top: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.orch-attempt-green::before {
+  background: var(--tone-ok);
+}
+.orch-attempt-red::before {
+  background: var(--tone-danger);
+}
+.orch-attempt-yellow::before {
+  background: var(--tone-warning);
+}
+.orch-attempt-blue::before {
+  background: var(--tone-info);
+}
+
+.orch-attempt-blue {
+  background: var(--bg-hover);
+  margin: -4px -8px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+}
+
+.orch-attempt-pending {
+  opacity: 0.5;
+}
+
+.orch-attempt-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-sm);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.orch-attempt-route {
+  overflow-wrap: anywhere;
+}
+
+.orch-attempt-n {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.orch-attempt-reason,
+.orch-attempt-meta {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  margin: 4px 0;
+}
+
+.orch-verify-row {
+  margin: 4px 0;
+}
+
+.orch-verify-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-xs);
+  font-size: var(--text-xs);
+  width: 100%;
+  text-align: left;
+}
+
+.orch-verify-command {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.orch-verify-exit {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+}
+
+.orch-verify-exit.failed {
+  background: var(--tone-danger-bg);
+  color: var(--tone-danger);
+}
+
+.orch-tail {
+  background: var(--bg-sunken);
+  border-radius: var(--radius-sm);
+  padding: var(--gap-xs) var(--gap-sm);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.orch-review-fail {
+  color: var(--tone-danger);
+}
+
+.orch-failure {
+  color: var(--tone-danger);
+  font-size: var(--text-sm);
+}
+
+.orch-log {
+  background: var(--bg-sunken);
+  border-radius: var(--radius-sm);
+  padding: var(--gap-sm);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 160px;
+  overflow-y: auto;
+  color: var(--text-muted);
+}
+
+.orch-new-task {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  max-width: 720px;
+}
+
+/* Outside `.modal`, a plain `<label>` defaults to inline: its text and the
+ * field after it flow on one line instead of stacking, which is what read as
+ * a width squeeze in the New Task form (the field just wrapped onto its
+ * label's line rather than the label sitting above it). */
+.orch-new-task label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-xs);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  margin-top: 12px;
+}
+
+.orch-new-task input,
+.orch-new-task textarea {
+  width: 100%;
+}
+
+/* Same fix for the plain (non-`.form-row`) labels in Settings → Orchestration
+ * - the domains/paths textareas and the attempts/parallel number fields. */
+.orchestrator-settings label:not(.form-row) {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-xs);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.orchestrator-settings label:not(.form-row) input,
+.orchestrator-settings label:not(.form-row) textarea {
+  width: 100%;
+}
+
+.orch-preflight-result {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--gap-sm);
+}
+
+.orch-form-actions {
+  flex-wrap: wrap;
+}
+
+/* A quiet button, scoped to this file (there's no app-wide `.ghost` yet) -
+ * same height/padding as `.primary`/`.secondary` so a row of the three
+ * shares a baseline. */
+.orch-ghost {
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 9px 13px;
+  border-radius: 7px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.orch-ghost:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.orchestrator-settings {
+  container-type: inline-size;
+  container-name: orchestrator-settings;
+}
+
+.orch-tier-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--gap-sm);
+}
+
+.orch-tier-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
+
+.orch-route-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) repeat(4, minmax(96px, auto)) 28px;
+  gap: var(--gap-xs);
+  align-items: center;
+}
+
+.orch-route-label {
+  grid-column: 1;
+}
+.orch-route-harness {
+  grid-column: 2;
+}
+.orch-route-model {
+  grid-column: 3;
+}
+.orch-route-effort {
+  grid-column: 4;
+}
+.orch-route-profile {
+  grid-column: 5;
+}
+.orch-route-delete {
+  grid-column: 6;
+}
+
+/* Below ~720px the panel can't fit both columns readably: fall back to one
+ * column at a time, switched by the `view-list`/`view-detail` class the
+ * component sets, with the Back control (hidden above this width) as the
+ * way back to the list. Only `.orch-tasks`/`.orch-detail` (descendants of
+ * the query container) are valid subjects here - a query container can't
+ * restyle itself from inside its own `@container` rule, so `.orchestrator-
+ * panel`'s own `display: flex` above already covers both widths. */
+@container orchestrator (max-width: 720px) {
+  .orch-tasks,
+  .orch-detail {
+    flex: 1 1 auto;
+  }
+  .orchestrator-panel.view-list .orch-detail {
+    display: none;
+  }
+  .orchestrator-panel.view-detail .orch-tasks {
+    display: none;
+  }
+  .orch-back-button {
+    display: inline-flex;
+  }
+}
+
+/* Below ~560px a route row can't fit all four selects on one line without
+ * cutting them off - drop to two per row instead, in source order. */
+@container orchestrator-settings (max-width: 560px) {
+  .orch-route-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .orch-route-label,
+  .orch-route-harness,
+  .orch-route-model,
+  .orch-route-effort,
+  .orch-route-profile,
+  .orch-route-delete {
+    grid-column: auto;
+  }
+  .orch-tier-row {
+    grid-template-columns: 1fr;
+  }
+}

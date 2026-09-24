@@ -716,6 +716,12 @@ textarea::placeholder {
 .status-dot.yellow {
   background: #e4c671;
 }
+.status-dot.red {
+  background: var(--tone-danger);
+}
+.status-dot.blue {
+  background: var(--tone-info);
+}
 .status-dot.pulse {
   animation: pulse 1.8s infinite;
 }

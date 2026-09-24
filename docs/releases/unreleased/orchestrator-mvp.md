@@ -1,0 +1,9 @@
+## Orchestrator: tasks carried to a verified done
+
+- A new panel type, **Orchestrator**, turns a goal into a task that agents carry to done without you watching. You give the goal, the acceptance criteria and the commands that prove it; sushiAI creates a branch `task/<name>` and a worktree next to the repository, then runs fresh Claude Code or Codex sessions in it until the checks pass.
+- "Done" is decided by the app, not by the agent: the changed files come from git, the verification commands must exit 0, and an independent read-only review by the other vendor's model has to pass. A passing attempt is committed on the task branch with `Task-Id:` and `Attempt:` trailers. Nothing is pushed.
+- When an agent says it is finished while a check still fails, a stop hook sends it back with the failing output, at most three times per session.
+- A failed attempt starts a fresh session with the failure in its brief; the same failure twice moves the task to a stronger model, three times (or running out of attempts) asks you one question with options. Answering continues the task; answering "stop" ends it. A waiting task raises a notification.
+- Agent sessions run in the macOS sandbox by default, with only the project's own MCP servers and no personal plugins, hooks or skills. Verification commands run sandboxed too.
+- Tasks run in a separate background service, so they keep going when the window closes or sushiAI quits, and the panel shows their live state when it opens again.
+- Settings → Orchestration sets the routes (Claude or Codex, model, effort, or a custom Claude model from Providers), which route handles simple, standard and hard tasks, the reviewer, an optional decision model (Jev through OpenRouter or TypeSafe, or any OpenAI-compatible endpoint from Providers), the sandbox and its allowed domains, Codex network access, attempts, parallel tasks and paths that need your approval.

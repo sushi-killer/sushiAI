@@ -1,0 +1,2932 @@
+//! The attempt loop, gates, review, commit and failure rules (spec
+//! "Engine"), plus the `Dispatcher` implementation (`App`) that wires the
+//! protocol methods to the store, git, harness and classifier. Pure
+//! decision helpers live at the top with their own unit tests; `App` and
+//! the async run loop are below.
+
+use crate::brief;
+use crate::classify;
+use crate::git;
+use crate::harness;
+use crate::hook;
+use crate::model::*;
+use crate::protocol::{CallFuture, Dispatcher, Event};
+use crate::store::{self, Store};
+use serde::Deserialize;
+use serde_json::json;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
+use std::time::Duration;
+use tokio::sync::{broadcast, oneshot, Notify, Semaphore};
+
+// ===========================================================================
+// Pure helpers (signature, tier-up/waiting, blocked-question, protected
+// globs, review-route selection, task-id validation) -- no IO, unit tested
+// at the bottom.
+// ===========================================================================
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max).collect()
+}
+
+fn tail_chars(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        return s.to_string();
+    }
+    s.chars().skip(count - max).collect()
+}
+
+const ERROR_KEYWORDS: &[&str] = &["error", "fail", "assert", "panic", "exception"];
+
+/// The first line that looks like it's reporting a failure (contains one of
+/// `ERROR_KEYWORDS`, case-insensitive); `None` when nothing in `text` does.
+fn find_error_line(text: &str) -> Option<&str> {
+    text.lines().find(|l| {
+        let lower = l.to_ascii_lowercase();
+        ERROR_KEYWORDS.iter().any(|k| lower.contains(k))
+    })
+}
+
+/// Strips digits and absolute-path-looking tokens (so `/tmp/xyz123/a.ts:42`
+/// across two runs still normalizes to the same signature) and collapses
+/// whitespace.
+fn normalize_signature_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '/' {
+            while let Some(&next) = chars.peek() {
+                if next.is_whitespace() {
+                    break;
+                }
+                chars.next();
+            }
+            continue;
+        }
+        if c.is_ascii_digit() {
+            continue;
+        }
+        out.push(c);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// spec step 8 (as sharpened by review): "kind + normalized first
+/// error-looking line of the tail (lines containing
+/// error|fail|assert|panic|exception, case-insensitive; strip digits and
+/// absolute paths), fallback to first tail line."
+pub fn failure_signature(kind: FailureKind, detail: &str) -> String {
+    let line = find_error_line(detail).unwrap_or_else(|| detail.lines().next().unwrap_or(""));
+    let normalized = normalize_signature_line(line.trim());
+    format!("{}:{}", kind.as_str(), truncate_chars(&normalized, 120))
+}
+
+/// Count trailing attempts (including the most recent) whose failure
+/// signature matches, i.e. how many times in a row this exact failure has
+/// happened.
+pub fn consecutive_same_signature(attempts: &[Attempt], signature: &str) -> u32 {
+    let mut count = 0;
+    for a in attempts.iter().rev() {
+        match &a.failure {
+            Some(f) if f.signature == signature => count += 1,
+            _ => break,
+        }
+    }
+    count
+}
+
+pub struct FailureDecisionInput<'a> {
+    pub tier: Tier,
+    pub signature: &'a str,
+    pub previous_signature: Option<&'a str>,
+    pub consecutive_same: u32,
+    pub attempt_n: u32,
+    pub max_attempts: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FailureDecision {
+    NextAttempt { tier: Tier },
+    Waiting { question: String },
+}
+
+/// spec step 8: same signature as previous -> tier up; same signature 3x in
+/// a row, or attempts exhausted -> waiting.
+pub fn decide_after_failure(input: &FailureDecisionInput) -> FailureDecision {
+    if input.consecutive_same >= 3 || input.attempt_n >= input.max_attempts {
+        return FailureDecision::Waiting {
+            question: format!(
+                "Attempts keep failing with {}: continue, change approach, or stop?",
+                input.signature
+            ),
+        };
+    }
+    let tier = if input.previous_signature == Some(input.signature) {
+        input.tier.up()
+    } else {
+        input.tier
+    };
+    FailureDecision::NextAttempt { tier }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BlockedDecision {
+    AnswerSelf,
+    Waiting,
+}
+
+/// spec step 8, blocked branch: classifier p >= 0.7 -> agent answers itself.
+pub fn decide_blocked_question(answerable_p: Option<f64>) -> BlockedDecision {
+    match answerable_p {
+        Some(p) if p >= 0.7 => BlockedDecision::AnswerSelf,
+        _ => BlockedDecision::Waiting,
+    }
+}
+
+/// Simple glob match: `*` matches any run of characters (including `/`,
+/// deliberately simpler than shell globbing since protected paths are
+/// meant to be broad, e.g. `src/app/**`), `?` matches one character,
+/// anything else matches literally.
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    glob_match_chars(&p, &t)
+}
+
+fn glob_match_chars(p: &[char], t: &[char]) -> bool {
+    if p.is_empty() {
+        return t.is_empty();
+    }
+    match p[0] {
+        '*' => {
+            if glob_match_chars(&p[1..], t) {
+                return true;
+            }
+            !t.is_empty() && glob_match_chars(p, &t[1..])
+        }
+        '?' => !t.is_empty() && glob_match_chars(&p[1..], &t[1..]),
+        c => !t.is_empty() && t[0] == c && glob_match_chars(&p[1..], &t[1..]),
+    }
+}
+
+pub fn matches_any_protected(path: &str, globs: &[String]) -> bool {
+    globs.iter().any(|g| glob_match(g, path))
+}
+
+/// spec step 6: `review == "auto"` -> first route whose harness differs
+/// from the implement attempt's; explicit id -> that route; `""` -> no
+/// review (handled by the caller before this is reached).
+pub fn select_review_route(settings: &Settings, implement_harness: Harness) -> Option<&Route> {
+    if settings.review == "auto" {
+        settings
+            .routes
+            .iter()
+            .find(|r| r.harness != implement_harness)
+    } else {
+        settings.routes.iter().find(|r| r.id == settings.review)
+    }
+}
+
+/// P0: every task id that arrives as a request param must be a valid UUID
+/// (the only shape `task.create` ever generates) *and* resolve to a path
+/// that actually stays under `<data>/tasks` -- defense in depth, since a
+/// non-UUID id can never produce a path outside that directory anyway, but
+/// this makes the invariant an assertion rather than an assumption.
+fn validate_task_id(store: &Store, id: &str) -> Result<(), String> {
+    uuid::Uuid::parse_str(id).map_err(|_| "invalid task id".to_string())?;
+    let dir = store.task_dir(id);
+    let tasks_root = store.data_dir().join("tasks");
+    if !dir.starts_with(&tasks_root) {
+        return Err("invalid task id".to_string());
+    }
+    Ok(())
+}
+
+/// FNV-1a 64-bit -- fast, dependency-free, plenty for a cache key (not a
+/// security boundary).
+fn simple_hash(s: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+// ===========================================================================
+// Cancellation
+// ===========================================================================
+
+/// A cancellation flag that (unlike a bare `Notify`) keeps its state: any
+/// number of callers can synchronously ask `is_cancelled()` at any point --
+/// "check it between every step" -- without racing a lost wakeup, and
+/// `cancelled()` still resolves immediately for anyone who starts waiting
+/// after `cancel()` already ran.
+#[derive(Clone)]
+struct CancelToken(Arc<CancelInner>);
+
+struct CancelInner {
+    flag: AtomicBool,
+    notify: Notify,
+}
+
+impl CancelToken {
+    fn new() -> Self {
+        CancelToken(Arc::new(CancelInner {
+            flag: AtomicBool::new(false),
+            notify: Notify::new(),
+        }))
+    }
+
+    fn cancel(&self) {
+        self.0.flag.store(true, Ordering::SeqCst);
+        self.0.notify.notify_waiters();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.0.flag.load(Ordering::SeqCst)
+    }
+
+    async fn cancelled(&self) {
+        // Register interest *before* checking the flag, so a cancel() that
+        // lands in between can't be missed (the documented tokio::Notify
+        // pattern for exactly this race).
+        let notified = self.0.notify.notified();
+        if self.is_cancelled() {
+            return;
+        }
+        notified.await;
+    }
+}
+
+// ===========================================================================
+// App / Dispatcher
+// ===========================================================================
+
+/// A Claude model profile's secrets (spec `secrets.set`): env vars merged
+/// into the run's `settings.json`, and an API key written to a per-run key
+/// file the daemon points `apiKeyHelper` at (never inlined into JSON on
+/// disk).
+#[derive(Debug, Clone, Deserialize, Default)]
+struct ProfileSecret {
+    #[serde(default)]
+    env: HashMap<String, String>,
+    #[serde(default)]
+    key: Option<String>,
+}
+
+/// In-memory only (spec: "travel from Electron to the daemon in memory
+/// only"); `secrets.set` is a full replace, never a merge.
+#[derive(Default)]
+struct Secrets {
+    classifier_key: Option<String>,
+    classifier_base_url: Option<String>,
+    profiles: HashMap<String, ProfileSecret>,
+}
+
+struct TaskControl {
+    cancel: CancelToken,
+    /// One-shot per question: created fresh by `wait_for_answer` each time
+    /// the loop actually waits, taken (and consumed) by `task.answer`. No
+    /// long-lived queue -- an answer that arrives when nobody is waiting is
+    /// simply not delivered (`task.answer` rejects it before it gets here).
+    pending_answer: Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+struct HookContext {
+    task_id: String,
+    attempt_n: u32,
+    worktree: PathBuf,
+    base_sha: String,
+    verify: Vec<String>,
+    blocks: AtomicU32,
+}
+
+pub struct App {
+    pub store: Store,
+    pub data_dir: PathBuf,
+    pub socket_path: PathBuf,
+    pub orchd_path: String,
+    settings: RwLock<Settings>,
+    secrets: RwLock<Secrets>,
+    events_tx: broadcast::Sender<Event>,
+    shutdown_tx: broadcast::Sender<()>,
+    controls: std::sync::Mutex<HashMap<String, TaskControl>>,
+    hook_tokens: RwLock<HashMap<String, Arc<HookContext>>>,
+    /// Keyed by task id: the diff+untracked-list hash a verify run was last
+    /// computed for, and its results -- shared by `hook.stop` and the
+    /// post-session gate so an unchanged diff never re-runs verify twice.
+    verify_cache: std::sync::Mutex<HashMap<String, (String, Vec<VerifyOutcome>)>>,
+    pid: u32,
+    /// The executable's mtime at startup, so the app can tell a rebuilt
+    /// binary from the one this daemon is running.
+    binary_mtime_ms: u64,
+    /// Random per-start control-channel secret (`<data>/control.token`,
+    /// mode 0600): every request but `ping`/`hook.stop` must carry it.
+    control_token: String,
+    /// Concurrency limit (`settings.parallel` at startup -- a live
+    /// `settings.set` change takes effect on the next restart, not
+    /// immediately; resizing a `Semaphore` down isn't a thing tokio
+    /// supports, and the spec explicitly allows skipping this).
+    slots: Arc<Semaphore>,
+    parallel_limit: u32,
+    self_ref: OnceLock<std::sync::Weak<App>>,
+}
+
+fn generate_control_token() -> String {
+    // 32 bytes of randomness as 64 hex chars, built from two v4 UUIDs
+    // rather than a `rand` dependency the crate list doesn't include --
+    // `uuid`'s v4 feature already pulls in a real CSPRNG (`getrandom`).
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+impl App {
+    pub fn new(
+        data_dir: PathBuf,
+        socket_path: PathBuf,
+        orchd_path: String,
+    ) -> std::io::Result<Arc<App>> {
+        let store = Store::new(&data_dir)?;
+        let settings = store.load_settings()?;
+        let (events_tx, _) = broadcast::channel(1024);
+        let (shutdown_tx, _) = broadcast::channel(4);
+        let binary = PathBuf::from(&orchd_path);
+        let binary_mtime_ms = std::fs::metadata(&binary)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let control_token = generate_control_token();
+        store::write_secret_file(
+            &data_dir.join("control.token"),
+            &format!("{control_token}\n"),
+        )?;
+
+        let parallel_limit = settings.parallel.max(1);
+        let slots = Arc::new(Semaphore::new(parallel_limit as usize));
+
+        let app = Arc::new(App {
+            store,
+            data_dir,
+            socket_path,
+            orchd_path,
+            settings: RwLock::new(settings),
+            secrets: RwLock::new(Secrets::default()),
+            events_tx,
+            shutdown_tx,
+            controls: std::sync::Mutex::new(HashMap::new()),
+            hook_tokens: RwLock::new(HashMap::new()),
+            verify_cache: std::sync::Mutex::new(HashMap::new()),
+            pid: std::process::id(),
+            binary_mtime_ms,
+            control_token,
+            slots,
+            parallel_limit,
+            self_ref: OnceLock::new(),
+        });
+        let _ = app.self_ref.set(Arc::downgrade(&app));
+        Ok(app)
+    }
+
+    fn arc(&self) -> Arc<App> {
+        self.self_ref
+            .get()
+            .and_then(|w| w.upgrade())
+            .expect("App is always constructed behind an Arc")
+    }
+
+    pub fn broadcast_task(&self, task: &Task) {
+        let _ = self.events_tx.send(Event::Task {
+            task: Box::new(task.clone()),
+        });
+    }
+
+    pub fn broadcast_log(&self, task_id: &str, attempt: u32, line: String) {
+        let _ = self.events_tx.send(Event::Log {
+            task_id: task_id.to_string(),
+            attempt,
+            line,
+        });
+    }
+
+    /// Cancels every live task loop (each one's own `run_harness`/verify
+    /// call kills its child's process group on seeing this) and stops the
+    /// socket server. Called for both the `shutdown` RPC and SIGTERM.
+    pub fn shutdown(&self) {
+        for ctrl in self.controls.lock().unwrap().values() {
+            ctrl.cancel.cancel();
+        }
+        let _ = self.shutdown_tx.send(());
+    }
+
+    pub fn subscribe_shutdown(&self) -> broadcast::Receiver<()> {
+        self.shutdown_tx.subscribe()
+    }
+
+    /// Whether any task loop is still winding down after `shutdown()` --
+    /// `main.rs` polls this briefly before actually exiting the process, so
+    /// a cancelled child gets a real chance to be killed instead of just
+    /// orphaned by the daemon disappearing out from under it.
+    pub fn any_task_loop_running(&self) -> bool {
+        !self.controls.lock().unwrap().is_empty()
+    }
+
+    /// `ping`/`hook.stop` are the only methods reachable without the
+    /// control token: `ping` so Electron can probe/tell daemons apart
+    /// before it has read the token file, `hook.stop` because it's only
+    /// ever invoked by `orchd hook stop` over the same trusted local
+    /// machine, matched by its own per-run token instead.
+    fn check_auth(&self, method: &str, auth: Option<&str>) -> bool {
+        if method == "ping" || method == "hook.stop" {
+            return true;
+        }
+        auth.map(|a| a == self.control_token).unwrap_or(false)
+    }
+
+    /// spec step 10: attempts left `running` from a previous process
+    /// become `interrupted`; their tasks become `stopped`.
+    pub fn recover_on_start(&self) -> std::io::Result<()> {
+        for t in self.store.recover_interrupted()? {
+            self.broadcast_task(&t);
+        }
+        Ok(())
+    }
+
+    fn journal(
+        &self,
+        task_id: &str,
+        point: &str,
+        result: &Result<classify::Answers, classify::ClassifyError>,
+        elapsed: Duration,
+    ) {
+        // A classifier the owner switched off is not a failed decision.
+        if self.settings.read().unwrap().classifier.backend == ClassifierBackend::None {
+            return;
+        }
+        let entry = classify::DecisionLogEntry {
+            ts: now_ms(),
+            point,
+            task_id,
+            answers: result.as_ref().ok(),
+            error: result.as_ref().err().map(|e| e.0.as_str()),
+            ms: elapsed.as_millis() as u64,
+        };
+        let line = classify::journal_line(&entry);
+        let _ = self.store.append_decision_line(&line);
+    }
+
+    fn start_task_loop(&self, task_id: String) {
+        let mut controls = self.controls.lock().unwrap();
+        if controls.contains_key(&task_id) {
+            return;
+        }
+        let cancel = CancelToken::new();
+        let pending_answer = Arc::new(StdMutex::new(None));
+        let app = self.arc();
+        let cancel_for_loop = cancel.clone();
+        let pending_for_loop = pending_answer.clone();
+        let tid = task_id.clone();
+        let handle = tokio::spawn(async move {
+            run_task_loop(app, tid, pending_for_loop, cancel_for_loop).await;
+        });
+        controls.insert(
+            task_id,
+            TaskControl {
+                cancel,
+                pending_answer,
+                handle,
+            },
+        );
+    }
+
+    fn finish_task_loop(&self, task_id: &str) {
+        self.controls.lock().unwrap().remove(task_id);
+    }
+
+    // -- protocol methods --------------------------------------------------
+
+    async fn dispatch(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        match method {
+            "ping" => self.handle_ping().await,
+            "settings.get" => self.handle_settings_get().await,
+            "settings.set" => self.handle_settings_set(params).await,
+            "secrets.set" => self.handle_secrets_set(params).await,
+            "task.list" => self.handle_task_list(params).await,
+            "task.get" => self.handle_task_get(params).await,
+            "task.create" => self.handle_task_create(params).await,
+            "task.start" => self.handle_task_start(params).await,
+            "task.stop" => self.handle_task_stop(params).await,
+            "task.answer" => self.handle_task_answer(params).await,
+            "task.delete" => self.handle_task_delete(params).await,
+            "task.preflight" => self.handle_task_preflight(params).await,
+            "hook.stop" => self.handle_hook_stop(params).await,
+            "shutdown" => self.handle_shutdown().await,
+            other => Err(format!("unknown method: {other}")),
+        }
+    }
+
+    async fn handle_ping(&self) -> Result<serde_json::Value, String> {
+        // Only slots actually held by a running attempt count -- a task
+        // still queued behind the concurrency limit is not "running".
+        let running = self.parallel_limit as usize - self.slots.available_permits();
+        Ok(json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "pid": self.pid,
+            "dataDir": self.data_dir.to_string_lossy(),
+            "binaryMtimeMs": self.binary_mtime_ms,
+            "running": running,
+        }))
+    }
+
+    async fn handle_settings_get(&self) -> Result<serde_json::Value, String> {
+        let s = self.settings.read().unwrap().clone();
+        serde_json::to_value(&s).map_err(|e| e.to_string())
+    }
+
+    async fn handle_settings_set(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            settings: Settings,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        self.store
+            .save_settings(&p.settings)
+            .map_err(|e| e.to_string())?;
+        *self.settings.write().unwrap() = p.settings.clone();
+        serde_json::to_value(&p.settings).map_err(|e| e.to_string())
+    }
+
+    /// A *full* replace (spec): every call overwrites the whole in-memory
+    /// secrets state, it never merges into what's already there.
+    async fn handle_secrets_set(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize, Default)]
+        #[serde(rename_all = "camelCase")]
+        struct ClassifierSecretIn {
+            #[serde(default)]
+            key: Option<String>,
+            #[serde(default)]
+            base_url: Option<String>,
+        }
+        #[derive(Deserialize, Default)]
+        struct P {
+            #[serde(default)]
+            classifier: Option<ClassifierSecretIn>,
+            #[serde(default)]
+            profiles: HashMap<String, ProfileSecret>,
+        }
+        let p: P = serde_json::from_value(params).unwrap_or_default();
+        let mut secrets = self.secrets.write().unwrap();
+        *secrets = Secrets {
+            classifier_key: p.classifier.as_ref().and_then(|c| c.key.clone()),
+            classifier_base_url: p.classifier.as_ref().and_then(|c| c.base_url.clone()),
+            profiles: p.profiles,
+        };
+        Ok(json!({}))
+    }
+
+    async fn handle_task_list(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize, Default)]
+        struct P {
+            repo: Option<String>,
+        }
+        let p: P = serde_json::from_value(params).unwrap_or_default();
+        let mut tasks = self.store.list_tasks().map_err(|e| e.to_string())?;
+        if let Some(repo) = p.repo {
+            tasks.retain(|t| t.repo == repo);
+        }
+        serde_json::to_value(&tasks).map_err(|e| e.to_string())
+    }
+
+    async fn handle_task_get(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            id: String,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        validate_task_id(&self.store, &p.id)?;
+        let task = self
+            .store
+            .load_task(&p.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        serde_json::to_value(&task).map_err(|e| e.to_string())
+    }
+
+    async fn handle_task_create(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            repo: String,
+            title: String,
+            goal: String,
+            #[serde(default)]
+            criteria: Vec<String>,
+            #[serde(default)]
+            verify: Vec<String>,
+            #[serde(default)]
+            branch: Option<String>,
+            #[serde(default)]
+            mcp: Option<serde_json::Value>,
+            #[serde(default)]
+            start: Option<bool>,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        let repo_input = PathBuf::from(&p.repo);
+        let title = p.title.clone();
+        let branch_opt = p.branch.clone();
+        let created = tokio::task::spawn_blocking(move || {
+            let repo_root = git::repo_toplevel(&repo_input)?;
+            let branch = branch_opt.unwrap_or_else(|| git::unique_branch_name(&repo_root, &title));
+            let wt_path = git::worktree_path(&repo_root, &branch);
+            let created = git::create_worktree(&repo_root, &branch, &wt_path)?;
+            git::bootstrap_worktree(&repo_root, &created.path)
+                .map_err(|e| git::GitError(e.to_string()))?;
+            Ok::<_, git::GitError>((repo_root, branch, created))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        let (repo_root, branch, created) = created;
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = now_ms();
+        let task = Task {
+            id: id.clone(),
+            title: p.title,
+            goal: p.goal,
+            criteria: p.criteria,
+            verify: p.verify,
+            repo: repo_root.to_string_lossy().to_string(),
+            worktree: created.path.to_string_lossy().to_string(),
+            branch,
+            base_sha: created.base_sha,
+            status: TaskStatus::Queued,
+            tier: Tier::Standard,
+            question: None,
+            decisions: vec![],
+            attempts: vec![],
+            cost_usd: 0.0,
+            created_at: now,
+            updated_at: now,
+        };
+        self.store.save_task(&task).map_err(|e| e.to_string())?;
+        if let Some(mcp) = &p.mcp {
+            let path = self.store.task_dir(&id).join("mcp.json");
+            store::write_json_atomic(&path, mcp).map_err(|e| e.to_string())?;
+        }
+        self.broadcast_task(&task);
+        if p.start.unwrap_or(false) {
+            self.start_task_loop(id.clone());
+        }
+        serde_json::to_value(&task).map_err(|e| e.to_string())
+    }
+
+    async fn handle_task_start(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            id: String,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        validate_task_id(&self.store, &p.id)?;
+        let already_running = self.controls.lock().unwrap().contains_key(&p.id);
+        if !already_running {
+            let task = self
+                .store
+                .load_task(&p.id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "task not found".to_string())?;
+            if matches!(
+                task.status,
+                TaskStatus::Queued | TaskStatus::Stopped | TaskStatus::Failed
+            ) {
+                self.start_task_loop(p.id.clone());
+            }
+        }
+        let latest = self
+            .store
+            .load_task(&p.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        serde_json::to_value(&latest).map_err(|e| e.to_string())
+    }
+
+    /// Works in every state, including a task still queued behind the
+    /// concurrency limit or parked waiting for an answer -- both select
+    /// against the same `CancelToken`.
+    async fn handle_task_stop(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            id: String,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        validate_task_id(&self.store, &p.id)?;
+        if let Some(ctrl) = self.controls.lock().unwrap().get(&p.id) {
+            ctrl.cancel.cancel();
+        }
+        let task = self
+            .store
+            .load_task(&p.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        serde_json::to_value(&task).map_err(|e| e.to_string())
+    }
+
+    async fn handle_task_answer(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            id: String,
+            answer: String,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        validate_task_id(&self.store, &p.id)?;
+        let mut task = self
+            .store
+            .load_task(&p.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        if task.status != TaskStatus::Waiting || task.question.is_none() {
+            return Err("task is not waiting for an answer".to_string());
+        }
+
+        if p.answer.trim().eq_ignore_ascii_case("stop") {
+            if let Some(ctrl) = self.controls.lock().unwrap().get(&p.id) {
+                ctrl.cancel.cancel();
+            }
+            task.decisions.push("Owner: stop".to_string());
+            task.question = None;
+            task.status = TaskStatus::Stopped;
+            task.updated_at = now_ms();
+            self.store.save_task(&task).map_err(|e| e.to_string())?;
+            self.broadcast_task(&task);
+            return serde_json::to_value(&task).map_err(|e| e.to_string());
+        }
+
+        let delivered = {
+            let controls = self.controls.lock().unwrap();
+            controls
+                .get(&p.id)
+                .and_then(|c| c.pending_answer.lock().unwrap().take())
+                .map(|tx| tx.send(p.answer.clone()).is_ok())
+                .unwrap_or(false)
+        };
+        if !delivered {
+            // No live parked loop (e.g. after a daemon restart): apply the
+            // decision synchronously and relaunch (spec step 9: "status
+            // queued, loop continues").
+            task.decisions.push(format!("Owner: {}", p.answer));
+            task.question = None;
+            task.status = TaskStatus::Queued;
+            task.updated_at = now_ms();
+            self.store.save_task(&task).map_err(|e| e.to_string())?;
+            self.broadcast_task(&task);
+            self.start_task_loop(p.id.clone());
+        }
+        let latest = self
+            .store
+            .load_task(&p.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        serde_json::to_value(&latest).map_err(|e| e.to_string())
+    }
+
+    /// Cancels the loop and waits for it to actually exit before touching
+    /// the filesystem, so a still-running attempt can never write into a
+    /// directory that's mid-deletion.
+    async fn handle_task_delete(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            id: String,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        validate_task_id(&self.store, &p.id)?;
+        let removed = self.controls.lock().unwrap().remove(&p.id);
+        if let Some(ctrl) = removed {
+            ctrl.cancel.cancel();
+            let _ = ctrl.handle.await;
+        }
+        let dir = self.store.task_dir(&p.id);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+        }
+        Ok(json!({}))
+    }
+
+    async fn handle_task_preflight(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize, Default)]
+        struct P {
+            #[serde(default)]
+            goal: String,
+            #[serde(default)]
+            criteria: Vec<String>,
+            #[serde(default)]
+            verify: Vec<String>,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+
+        let classifier_settings = self.settings.read().unwrap().classifier.clone();
+        let key = self.secrets.read().unwrap().classifier_key.clone();
+        let base_url = self.secrets.read().unwrap().classifier_base_url.clone();
+        let classifier_available =
+            classifier_settings.backend != ClassifierBackend::None && key.is_some();
+
+        if classifier_available {
+            let state = json!({"goal": p.goal, "criteria": p.criteria, "verify": p.verify});
+            let questions = vec![
+                classify::QuestionSpec::Noul {
+                    name: "goal_specific".to_string(),
+                    prompt: "Is the goal specific enough to act on without asking?".to_string(),
+                },
+                classify::QuestionSpec::Noul {
+                    name: "criteria_checkable".to_string(),
+                    prompt: "Can each acceptance criterion be checked objectively from outside?"
+                        .to_string(),
+                },
+                classify::QuestionSpec::Noul {
+                    name: "has_verification".to_string(),
+                    prompt: "Do the verification commands actually exercise the criteria?"
+                        .to_string(),
+                },
+            ];
+            let start = std::time::Instant::now();
+            let s2 = classifier_settings.clone();
+            let k2 = key.clone();
+            let b2 = base_url.clone();
+            let q2 = questions.clone();
+            let state2 = state.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                classify::decide(&s2, k2.as_deref(), b2.as_deref(), &state2, &q2)
+            })
+            .await
+            .unwrap_or_else(|e| Err(classify::ClassifyError(e.to_string())));
+            // No task exists yet at preflight time -- journaled with an
+            // empty task id, the only place that happens.
+            self.journal("", "preflight", &result, start.elapsed());
+            if let Ok(answers) = result {
+                let labels: [(&str, &str); 3] = [
+                    ("goal_specific", "Goal is specific enough to act on"),
+                    (
+                        "criteria_checkable",
+                        "Each criterion is objectively checkable",
+                    ),
+                    (
+                        "has_verification",
+                        "Verification commands exercise the criteria",
+                    ),
+                ];
+                let checks: Vec<serde_json::Value> = labels
+                    .iter()
+                    .map(|(id, label)| {
+                        let p = answers.get(*id).and_then(|a| a.noul).unwrap_or(0.0);
+                        json!({"id": id, "label": label, "ok": p >= 0.5, "p": p})
+                    })
+                    .collect();
+                return Ok(json!({"available": true, "checks": checks}));
+            }
+            // Classifier configured but the call itself failed (timeout,
+            // network, bad key): fall back to the deterministic checks
+            // below rather than blocking progress.
+        }
+
+        let mut checks = Vec::new();
+        for (i, cmd) in p.verify.iter().enumerate() {
+            let program = cmd.split_whitespace().next().unwrap_or("");
+            let ok = !program.is_empty() && which_on_path(program);
+            checks.push(json!({"id": format!("verify-{i}"), "label": cmd, "ok": ok, "p": if ok {1.0} else {0.0}}));
+        }
+        Ok(json!({"available": false, "checks": checks}))
+    }
+
+    async fn handle_shutdown(&self) -> Result<serde_json::Value, String> {
+        self.shutdown();
+        Ok(json!({}))
+    }
+
+    async fn handle_hook_stop(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            token: String,
+            #[serde(default)]
+            payload: serde_json::Value,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        let ctx = { self.hook_tokens.read().unwrap().get(&p.token).cloned() };
+        let Some(ctx) = ctx else {
+            return Ok(json!({}));
+        };
+
+        let worktree = ctx.worktree.clone();
+        let base_sha = ctx.base_sha.clone();
+        let wt = worktree.clone();
+        let base = base_sha.clone();
+        let changed =
+            tokio::task::spawn_blocking(move || git::changed_files(&wt, &base).unwrap_or_default())
+                .await
+                .unwrap_or_default();
+        let has_changed = !changed.is_empty();
+        let verify_configured = !ctx.verify.is_empty();
+
+        let verify_results = if verify_configured && has_changed {
+            let app = self.arc();
+            let run_dir = self.store.run_dir(&ctx.task_id, ctx.attempt_n);
+            let no_cancel = CancelToken::new();
+            // Budget well under Claude's own 600s hook timeout; on timeout,
+            // fail open rather than block the agent forever.
+            match tokio::time::timeout(
+                Duration::from_secs(540),
+                run_verify_cached(
+                    &app,
+                    &ctx.task_id,
+                    &worktree,
+                    &run_dir,
+                    &base_sha,
+                    &ctx.verify,
+                    &no_cancel,
+                ),
+            )
+            .await
+            {
+                Ok(results) => results,
+                Err(_) => return Ok(json!({})),
+            }
+        } else {
+            vec![]
+        };
+
+        let classifier_answers = if !verify_configured && has_changed {
+            let last_msg = extract_last_assistant_message(&p.payload).unwrap_or_default();
+            let wt2 = worktree.clone();
+            let base2 = base_sha.clone();
+            let diff_stat = tokio::task::spawn_blocking(move || {
+                git::diff_stat(&wt2, &base2).unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+            let state = json!({"last_assistant_message": last_msg, "diff_stat": diff_stat});
+            let questions = jev_belay_questions();
+            let settings = self.settings.read().unwrap().classifier.clone();
+            let key = self.secrets.read().unwrap().classifier_key.clone();
+            let base_url = self.secrets.read().unwrap().classifier_base_url.clone();
+            let start = std::time::Instant::now();
+            let result = tokio::task::spawn_blocking(move || {
+                classify::decide(
+                    &settings,
+                    key.as_deref(),
+                    base_url.as_deref(),
+                    &state,
+                    &questions,
+                )
+            })
+            .await
+            .unwrap_or_else(|e| Err(classify::ClassifyError(e.to_string())));
+            self.journal(&ctx.task_id, "stop_gate", &result, start.elapsed());
+            result.ok().as_ref().and_then(to_jev_belay)
+        } else {
+            None
+        };
+
+        let facts = hook::StopFacts {
+            blocks_so_far: ctx.blocks.load(Ordering::SeqCst),
+            has_changed_files: has_changed,
+            verify_configured,
+            verify_results: &verify_results,
+        };
+        match hook::decide_stop(&facts, classifier_answers.as_ref()) {
+            hook::StopDecision::Allow => Ok(json!({})),
+            hook::StopDecision::Block { reason } => {
+                ctx.blocks.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({"decision": "block", "reason": reason}))
+            }
+        }
+    }
+}
+
+impl Dispatcher for App {
+    fn call<'a>(&'a self, method: String, params: serde_json::Value) -> CallFuture<'a> {
+        Box::pin(async move { self.dispatch(&method, params).await })
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<Event> {
+        self.events_tx.subscribe()
+    }
+
+    fn check_auth(&self, method: &str, auth: Option<&str>) -> bool {
+        App::check_auth(self, method, auth)
+    }
+}
+
+fn which_on_path(program: &str) -> bool {
+    if program.contains('/') {
+        return Path::new(program).is_file();
+    }
+    let path = std::env::var("PATH").unwrap_or_default();
+    path.split(':')
+        .any(|dir| Path::new(dir).join(program).is_file())
+}
+
+fn jev_belay_questions() -> Vec<classify::QuestionSpec> {
+    vec![
+        classify::QuestionSpec::Noul {
+            name: "claims_done".to_string(),
+            prompt: "Does the assistant's last message claim the work is done?".to_string(),
+        },
+        classify::QuestionSpec::Noul {
+            name: "claims_verified".to_string(),
+            prompt:
+                "Does the message show the work was actually verified (tests run, checks passed)?"
+                    .to_string(),
+        },
+        classify::QuestionSpec::Noul {
+            name: "verification_applies".to_string(),
+            prompt: "Does a verification step meaningfully apply to this task?".to_string(),
+        },
+        classify::QuestionSpec::Choice {
+            name: "outcome".to_string(),
+            prompt: "What outcome does the message report?".to_string(),
+            options: vec!["complete", "partial", "blocked", "other"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        },
+    ]
+}
+
+fn to_jev_belay(answers: &classify::Answers) -> Option<hook::JevBelayAnswers> {
+    let claims_done = answers.get("claims_done")?.noul?;
+    let claims_verified = answers.get("claims_verified")?.noul?;
+    let verification_applies = answers.get("verification_applies")?.noul?;
+    let outcome = match answers.get("outcome").and_then(|a| a.choice.as_deref()) {
+        Some("complete") => hook::ClassifiedOutcome::Complete,
+        Some("partial") => hook::ClassifiedOutcome::Partial,
+        Some("blocked") => hook::ClassifiedOutcome::Blocked,
+        _ => hook::ClassifiedOutcome::Other,
+    };
+    Some(hook::JevBelayAnswers {
+        claims_done,
+        claims_verified,
+        verification_applies,
+        outcome,
+    })
+}
+
+fn extract_last_assistant_message(payload: &serde_json::Value) -> Option<String> {
+    if let Some(s) = payload
+        .get("last_assistant_message")
+        .and_then(|v| v.as_str())
+    {
+        return Some(s.to_string());
+    }
+    let transcript_path = payload.get("transcript_path").and_then(|v| v.as_str())?;
+    let text = std::fs::read_to_string(transcript_path).ok()?;
+    for line in text.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let role = v
+            .get("role")
+            .or_else(|| v.get("message").and_then(|m| m.get("role")))
+            .and_then(|r| r.as_str());
+        if role != Some("assistant") {
+            continue;
+        }
+        let content = v
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .or_else(|| v.get("content"));
+        if let Some(content) = content {
+            if let Some(text) = content.as_str() {
+                return Some(text.to_string());
+            }
+            if let Some(arr) = content.as_array() {
+                let joined: String = arr
+                    .iter()
+                    .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !joined.is_empty() {
+                    return Some(joined);
+                }
+            }
+        }
+    }
+    None
+}
+
+// ===========================================================================
+// Verify commands: sandboxed on macOS, cached by diff hash, cancellable.
+// ===========================================================================
+
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// Every path a verify command is allowed to write under when sandboxed:
+/// the worktree and its own run dir, plus the usual OS/package-manager temp
+/// and cache locations a build/test command routinely touches. Network is
+/// deliberately left open (verify commands may need to hit a registry, run
+/// a dev server, etc.) -- only the filesystem is restricted.
+fn verify_allow_write_paths(worktree: &Path, run_dir: &Path) -> Vec<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let tmp_dir = std::env::var("TMPDIR").unwrap_or_default();
+    let mut paths = vec![
+        worktree.to_path_buf(),
+        run_dir.to_path_buf(),
+        PathBuf::from("/private/var/folders"),
+        PathBuf::from("/private/tmp"),
+        PathBuf::from("/dev"),
+        PathBuf::from(format!("{home}/Library/Caches")),
+        PathBuf::from(format!("{home}/.npm")),
+        PathBuf::from(format!("{home}/.cache")),
+        PathBuf::from(format!("{home}/.cargo/registry")),
+    ];
+    if !tmp_dir.is_empty() {
+        paths.push(PathBuf::from(tmp_dir));
+    }
+    paths
+}
+
+#[cfg(target_os = "macos")]
+fn build_verify_sandbox_profile(allow_write: &[PathBuf]) -> String {
+    let mut profile =
+        String::from("(version 1)\n(allow default)\n(deny file-write* (subpath \"/\"))\n");
+    for p in allow_write {
+        profile.push_str(&format!(
+            "(allow file-write* (subpath \"{}\"))\n",
+            p.to_string_lossy().replace('"', "")
+        ));
+    }
+    profile
+}
+
+/// `sandbox-exec`-wraps the command on macOS when `sandbox == Native`;
+/// plain `/bin/sh -c` for `Host`, and on non-macOS (`sandbox-exec` doesn't
+/// exist there -- a documented limitation, not a bug).
+fn build_verify_command(
+    cwd: &Path,
+    cmd: &str,
+    sandbox: SandboxMode,
+    allow_write: &[PathBuf],
+) -> tokio::process::Command {
+    let mut command;
+    #[cfg(target_os = "macos")]
+    {
+        if sandbox == SandboxMode::Native {
+            let profile = build_verify_sandbox_profile(allow_write);
+            command = tokio::process::Command::new("sandbox-exec");
+            command
+                .arg("-p")
+                .arg(profile)
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg(cmd);
+        } else {
+            command = tokio::process::Command::new("/bin/sh");
+            command.arg("-c").arg(cmd);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (sandbox, allow_write);
+        command = tokio::process::Command::new("/bin/sh");
+        command.arg("-c").arg(cmd);
+    }
+    command
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    command
+}
+
+async fn run_verify_commands(
+    cwd: &Path,
+    run_dir: &Path,
+    commands: &[String],
+    sandbox: SandboxMode,
+    cancel: &CancelToken,
+) -> Vec<VerifyOutcome> {
+    let allow_write = verify_allow_write_paths(cwd, run_dir);
+    let mut results = Vec::new();
+    for cmd in commands {
+        results.push(
+            run_one_verify_command(cwd, cmd, VERIFY_TIMEOUT, sandbox, &allow_write, cancel).await,
+        );
+    }
+    results
+}
+
+/// Cached by a hash of `git diff <base>` + the untracked-file list: if
+/// nothing has changed since the last run (by the hook or the previous
+/// gate check), reuse its result instead of re-running the commands.
+async fn run_verify_cached(
+    app: &Arc<App>,
+    task_id: &str,
+    worktree: &Path,
+    run_dir: &Path,
+    base: &str,
+    commands: &[String],
+    cancel: &CancelToken,
+) -> Vec<VerifyOutcome> {
+    let wt = worktree.to_path_buf();
+    let b = base.to_string();
+    let hash = tokio::task::spawn_blocking(move || diff_hash(&wt, &b))
+        .await
+        .unwrap_or_default();
+    {
+        let cache = app.verify_cache.lock().unwrap();
+        if let Some((h, results)) = cache.get(task_id) {
+            if *h == hash {
+                return results.clone();
+            }
+        }
+    }
+    let sandbox = app.settings.read().unwrap().sandbox;
+    let results = run_verify_commands(worktree, run_dir, commands, sandbox, cancel).await;
+    app.verify_cache
+        .lock()
+        .unwrap()
+        .insert(task_id.to_string(), (hash, results.clone()));
+    results
+}
+
+fn diff_hash(worktree: &Path, base: &str) -> String {
+    let diff = git::diff_full(worktree, base, usize::MAX).unwrap_or_default();
+    let untracked = git::status_porcelain(worktree).unwrap_or_default();
+    let mut input = diff;
+    input.push_str("\u{0}untracked\u{0}");
+    for u in &untracked {
+        input.push_str(u);
+        input.push('\u{0}');
+    }
+    simple_hash(&input)
+}
+
+/// Shared by verify commands and the harness: SIGTERM the process group,
+/// give it 5s, then SIGKILL, then reap it.
+async fn kill_group(pgid: Option<i32>, child: &mut tokio::process::Child) {
+    if let Some(pgid) = pgid {
+        unsafe {
+            libc::killpg(pgid, libc::SIGTERM);
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        unsafe {
+            libc::killpg(pgid, libc::SIGKILL);
+        }
+    }
+    let _ = child.wait().await;
+}
+
+/// Concurrently drain a child's stdout/stderr and wait for it to exit,
+/// without moving `child` -- so the caller still owns it (and can kill its
+/// process group) if this gets dropped by an outer timeout/cancellation.
+async fn read_and_wait(
+    child: &mut tokio::process::Child,
+) -> std::io::Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
+    use tokio::io::AsyncReadExt;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let mut out_buf = Vec::new();
+    let mut err_buf = Vec::new();
+    let (status, _, _) = tokio::try_join!(
+        child.wait(),
+        stdout.read_to_end(&mut out_buf),
+        stderr.read_to_end(&mut err_buf),
+    )?;
+    Ok((status, out_buf, err_buf))
+}
+
+/// Run one verify command in its own process group (`setsid`, like the
+/// harness). On timeout *or* cancellation, SIGTERM the whole group, SIGKILL
+/// 5s later -- a bare `tokio::time::timeout` around `Command::output()`
+/// only stops *waiting*, it never touches the still-running process (or any
+/// children it spawned), which is the bug this replaces.
+async fn run_one_verify_command(
+    cwd: &Path,
+    cmd: &str,
+    timeout: Duration,
+    sandbox: SandboxMode,
+    allow_write: &[PathBuf],
+    cancel: &CancelToken,
+) -> VerifyOutcome {
+    let start = std::time::Instant::now();
+    let mut command = build_verify_command(cwd, cmd, sandbox, allow_write);
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return VerifyOutcome {
+                command: cmd.to_string(),
+                code: None,
+                tail: format!("failed to run: {e}"),
+                ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    };
+    let pgid = child.id().map(|p| p as i32);
+
+    enum Outcome {
+        Done(std::io::Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>)>),
+        TimedOut,
+        Cancelled,
+    }
+    let outcome = tokio::select! {
+        r = read_and_wait(&mut child) => Outcome::Done(r),
+        _ = tokio::time::sleep(timeout) => Outcome::TimedOut,
+        _ = cancel.cancelled() => Outcome::Cancelled,
+    };
+    match outcome {
+        Outcome::Done(Ok((status, out_buf, err_buf))) => {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out_buf),
+                String::from_utf8_lossy(&err_buf)
+            );
+            VerifyOutcome {
+                command: cmd.to_string(),
+                code: status.code(),
+                tail: tail_chars(&combined, 4000),
+                ms: start.elapsed().as_millis() as u64,
+            }
+        }
+        Outcome::Done(Err(e)) => VerifyOutcome {
+            command: cmd.to_string(),
+            code: None,
+            tail: format!("internal error: {e}"),
+            ms: start.elapsed().as_millis() as u64,
+        },
+        Outcome::TimedOut => {
+            kill_group(pgid, &mut child).await;
+            VerifyOutcome {
+                command: cmd.to_string(),
+                code: None,
+                tail: "timed out after 20 minutes".to_string(),
+                ms: start.elapsed().as_millis() as u64,
+            }
+        }
+        Outcome::Cancelled => {
+            kill_group(pgid, &mut child).await;
+            VerifyOutcome {
+                command: cmd.to_string(),
+                code: None,
+                tail: "cancelled".to_string(),
+                ms: start.elapsed().as_millis() as u64,
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// Harness process
+// ===========================================================================
+
+fn resolve_binary(harness: Harness) -> String {
+    match harness {
+        Harness::Claude => {
+            std::env::var("ORCHD_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string())
+        }
+        Harness::Codex => std::env::var("ORCHD_CODEX_BIN").unwrap_or_else(|_| "codex".to_string()),
+    }
+}
+
+fn augmented_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let extra = [
+        format!("{home}/.local/bin"),
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+    ];
+    let base = std::env::var("PATH").unwrap_or_default();
+    let mut parts: Vec<String> = base.split(':').map(|s| s.to_string()).collect();
+    for e in extra {
+        if !parts.contains(&e) {
+            parts.push(e);
+        }
+    }
+    parts.join(":")
+}
+
+fn append_line(path: &Path, line: &str) {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Loads the task, applies `f` to the named attempt if it's still there,
+/// and saves + broadcasts -- used to persist `session_id`/`pgid` as soon as
+/// they're known, mid-run, rather than only after the harness exits (so a
+/// killed daemon can still recover/resume from them).
+async fn persist_attempt_field(
+    app: &Arc<App>,
+    task_id: &str,
+    attempt_n: u32,
+    f: impl FnOnce(&mut Attempt),
+) {
+    if let Ok(Some(mut t)) = app.store.load_task(task_id) {
+        if let Some(a) = t.attempts.iter_mut().find(|a| a.n == attempt_n) {
+            f(a);
+            t.updated_at = now_ms();
+            let _ = app.store.save_task(&t);
+            app.broadcast_task(&t);
+        }
+    }
+}
+
+enum RunError {
+    Cancelled,
+    Io(String),
+}
+
+/// Spawn `claude`/`codex` in its own process group, write `brief` to
+/// stdin, stream stdout into `events.jsonl` and the log broadcast, and wait
+/// for it to exit. `cancel` triggers SIGTERM to the group, then SIGKILL
+/// after 5s (spec: "Each child in its own process group; stop = SIGTERM to
+/// the group, SIGKILL after 5s").
+#[allow(clippy::too_many_arguments)]
+async fn run_harness(
+    app: &Arc<App>,
+    task_id: &str,
+    attempt_n: u32,
+    worktree: &Path,
+    req: &harness::RunRequest<'_>,
+    brief_text: &str,
+    events_path: &Path,
+    cancel: &CancelToken,
+) -> Result<harness::RunOutcome, RunError> {
+    let argv = harness::build_argv(req);
+    let bin = resolve_binary(req.harness);
+    let mut cmd = tokio::process::Command::new(&bin);
+    cmd.args(&argv)
+        .current_dir(worktree)
+        .env("PATH", augmented_path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| RunError::Io(format!("{bin}: {e}")))?;
+    let pgid = child.id().map(|p| p as i32);
+    if let Some(pgid) = pgid {
+        persist_attempt_field(app, task_id, attempt_n, move |a| a.pgid = Some(pgid)).await;
+    }
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(brief_text.as_bytes()).await;
+        drop(stdin);
+    }
+
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let mut out_lines = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(stdout));
+    let mut err_lines = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(stderr));
+
+    let mut outcome = harness::RunOutcome::default();
+    let harness_kind = req.harness;
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+    let mut stderr_tail = String::new();
+    let mut session_persisted = false;
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                kill_group(pgid, &mut child).await;
+                return Err(RunError::Cancelled);
+            }
+            line = out_lines.next_line(), if !stdout_done => {
+                match line {
+                    Ok(Some(l)) => {
+                        append_line(events_path, &l);
+                        if let Some(note) = harness::feed_stream_line(harness_kind, &l, &mut outcome) {
+                            app.broadcast_log(task_id, attempt_n, note);
+                        }
+                        if !session_persisted {
+                            if let Some(sid) = outcome.session_id.clone() {
+                                session_persisted = true;
+                                persist_attempt_field(app, task_id, attempt_n, move |a| a.session_id = Some(sid)).await;
+                            }
+                        }
+                    }
+                    _ => { stdout_done = true; }
+                }
+            }
+            line = err_lines.next_line(), if !stderr_done => {
+                match line {
+                    Ok(Some(l)) => {
+                        append_line(events_path, &format!("[stderr] {l}"));
+                        stderr_tail.push_str(&l);
+                        stderr_tail.push('\n');
+                        if stderr_tail.len() > 4000 {
+                            let cut = stderr_tail.len() - 4000;
+                            let cut = (cut..stderr_tail.len()).find(|i| stderr_tail.is_char_boundary(*i)).unwrap_or(0);
+                            stderr_tail.drain(..cut);
+                        }
+                    }
+                    _ => { stderr_done = true; }
+                }
+            }
+            status = child.wait(), if stdout_done && stderr_done => {
+                if let Ok(status) = status {
+                    if !status.success() && outcome.error.is_none() {
+                        let tail = stderr_tail.trim();
+                        outcome.error = Some(if tail.is_empty() {
+                            format!("{:?} exited with {status}.", req.harness)
+                        } else {
+                            tail.to_string()
+                        });
+                    }
+                }
+                break;
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+// ===========================================================================
+// Failure / waiting bookkeeping
+// ===========================================================================
+
+fn record_failure(task: &mut Task, idx: usize, kind: FailureKind, detail: String) {
+    let signature = failure_signature(kind, &detail);
+    let a = &mut task.attempts[idx];
+    a.status = AttemptStatus::Failed;
+    a.ended_at = Some(now_ms());
+    a.failure = Some(Failure {
+        kind,
+        detail,
+        signature,
+    });
+}
+
+fn advance_after_failure(task: &mut Task, max_attempts: u32) -> bool {
+    let last = task.attempts.last().expect("failure just recorded");
+    let signature = last
+        .failure
+        .as_ref()
+        .map(|f| f.signature.clone())
+        .unwrap_or_default();
+    let consecutive = consecutive_same_signature(&task.attempts, &signature);
+    let previous_signature = if task.attempts.len() >= 2 {
+        task.attempts[task.attempts.len() - 2]
+            .failure
+            .as_ref()
+            .map(|f| f.signature.clone())
+    } else {
+        None
+    };
+    let input = FailureDecisionInput {
+        tier: task.tier,
+        signature: &signature,
+        previous_signature: previous_signature.as_deref(),
+        consecutive_same: consecutive,
+        attempt_n: task.attempts.len() as u32,
+        max_attempts,
+    };
+    match decide_after_failure(&input) {
+        FailureDecision::NextAttempt { tier } => {
+            task.tier = tier;
+            task.status = TaskStatus::Queued;
+            true
+        }
+        FailureDecision::Waiting { question } => {
+            task.question = Some(Question {
+                text: question,
+                options: vec!["continue".into(), "change approach".into(), "stop".into()],
+            });
+            task.status = TaskStatus::Waiting;
+            false
+        }
+    }
+}
+
+enum LoopSignal {
+    /// `answered` is `true` when this iteration ends because the owner just
+    /// answered a waiting question -- the caller uses it to decide whether
+    /// the *next* attempt is still allowed to resume a previous session
+    /// (spec: "never resume after a waiting/answer cycle").
+    Continue {
+        answered: bool,
+    },
+    Stop,
+}
+
+/// Record a failure, apply the tier/waiting rules, and -- when now waiting
+/// -- park for the owner's answer, extending the attempt budget by 2 on any
+/// answer (spec step 9; every waiting state `advance_after_failure` reaches
+/// is the "attempts exhausted" kind).
+#[allow(clippy::too_many_arguments)]
+async fn fail_and_continue(
+    app: &Arc<App>,
+    task_id: &str,
+    task: &mut Task,
+    idx: usize,
+    kind: FailureKind,
+    detail: String,
+    attempt_budget: &mut u32,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    cancel: &CancelToken,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> LoopSignal {
+    record_failure(task, idx, kind, detail);
+    let should_continue = advance_after_failure(task, *attempt_budget);
+    let _ = app.store.save_task(task);
+    app.broadcast_task(task);
+    if should_continue {
+        return LoopSignal::Continue { answered: false };
+    }
+    match wait_for_answer(app, task_id, pending_answer, cancel, permit).await {
+        Some(_answer) => {
+            *attempt_budget += 2;
+            LoopSignal::Continue { answered: true }
+        }
+        None => LoopSignal::Stop,
+    }
+}
+
+/// Parks on a fresh one-shot channel until either `task.answer` delivers an
+/// answer or `cancel` fires. Persists the decision/status transition either
+/// way, so a caller never has to duplicate that bookkeeping.
+async fn wait_for_answer(
+    app: &Arc<App>,
+    task_id: &str,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    cancel: &CancelToken,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Option<String> {
+    // A task waiting for its owner holds no slot: parallel limits running
+    // agents, not open questions.
+    permit.take();
+    let (tx, rx) = oneshot::channel();
+    *pending_answer.lock().unwrap() = Some(tx);
+    let result = tokio::select! {
+        _ = cancel.cancelled() => None,
+        answer = rx => answer.ok(),
+    };
+    *pending_answer.lock().unwrap() = None;
+    match &result {
+        Some(answer) => {
+            if let Ok(Some(mut task)) = app.store.load_task(task_id) {
+                task.decisions.push(format!("Owner: {answer}"));
+                task.question = None;
+                task.status = TaskStatus::Queued;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+            }
+        }
+        None => {
+            if let Ok(Some(mut task)) = app.store.load_task(task_id) {
+                if task.status != TaskStatus::Stopped {
+                    task.status = TaskStatus::Stopped;
+                    task.updated_at = now_ms();
+                    let _ = app.store.save_task(&task);
+                    app.broadcast_task(&task);
+                }
+            }
+        }
+    }
+    result
+}
+
+// ===========================================================================
+// Classifier calls used by the engine loop
+// ===========================================================================
+
+async fn classify_tier(app: &Arc<App>, task: &Task) -> Tier {
+    let settings = app.settings.read().unwrap().classifier.clone();
+    let key = app.secrets.read().unwrap().classifier_key.clone();
+    let base_url = app.secrets.read().unwrap().classifier_base_url.clone();
+    let state = json!({"goal": task.goal, "criteria": task.criteria});
+    let questions = vec![classify::QuestionSpec::Choice {
+        name: "tier".to_string(),
+        prompt: "How hard is this task: mechanical, standard, or hard?".to_string(),
+        options: vec!["mechanical".into(), "standard".into(), "hard".into()],
+    }];
+    let start = std::time::Instant::now();
+    let s2 = settings.clone();
+    let k2 = key.clone();
+    let b2 = base_url.clone();
+    let q2 = questions.clone();
+    let state2 = state.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        classify::decide(&s2, k2.as_deref(), b2.as_deref(), &state2, &q2)
+    })
+    .await
+    .unwrap_or_else(|e| Err(classify::ClassifyError(e.to_string())));
+    app.journal(&task.id, "tier", &result, start.elapsed());
+    let Ok(answers) = result else {
+        return Tier::Standard;
+    };
+    let Some(a) = answers.get("tier") else {
+        return Tier::Standard;
+    };
+    let Some(choice) = &a.choice else {
+        return Tier::Standard;
+    };
+    let p = a
+        .probabilities
+        .as_ref()
+        .and_then(|p| p.get(choice))
+        .copied()
+        .unwrap_or(1.0);
+    if p < 0.5 {
+        return Tier::Standard;
+    }
+    match choice.as_str() {
+        "mechanical" => Tier::Mechanical,
+        "hard" => Tier::Hard,
+        _ => Tier::Standard,
+    }
+}
+
+async fn classify_answerable(app: &Arc<App>, task: &Task, question: &str) -> Option<f64> {
+    let settings = app.settings.read().unwrap().classifier.clone();
+    let key = app.secrets.read().unwrap().classifier_key.clone();
+    let base_url = app.secrets.read().unwrap().classifier_base_url.clone();
+    let state = json!({"goal": task.goal, "criteria": task.criteria, "question": question});
+    let questions = vec![classify::QuestionSpec::Noul {
+        name: "answerable".to_string(),
+        prompt: "Is this question answerable from the repository and task, without the owner?"
+            .to_string(),
+    }];
+    let start = std::time::Instant::now();
+    let s2 = settings.clone();
+    let k2 = key.clone();
+    let b2 = base_url.clone();
+    let q2 = questions.clone();
+    let state2 = state.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        classify::decide(&s2, k2.as_deref(), b2.as_deref(), &state2, &q2)
+    })
+    .await
+    .unwrap_or_else(|e| Err(classify::ClassifyError(e.to_string())));
+    app.journal(&task.id, "blocked_question", &result, start.elapsed());
+    result
+        .ok()
+        .and_then(|answers| answers.get("answerable").and_then(|a| a.noul))
+}
+
+// ===========================================================================
+// Review
+// ===========================================================================
+
+#[allow(clippy::too_many_arguments)]
+async fn run_review(
+    app: &Arc<App>,
+    task_id: &str,
+    attempt_n: u32,
+    task: &Task,
+    worktree: &Path,
+    base_sha: &str,
+    verify_results: &[VerifyOutcome],
+    review_route: &Route,
+    deny_read: &[String],
+    cancel: &CancelToken,
+) -> Result<ReviewResult, RunError> {
+    let wt = worktree.to_path_buf();
+    let base = base_sha.to_string();
+    let diff =
+        tokio::task::spawn_blocking(move || git::diff_full(&wt, &base, 60_000).unwrap_or_default())
+            .await
+            .unwrap_or_default();
+
+    let mut brief_text = String::new();
+    brief_text.push_str("## Review\n\n");
+    brief_text.push_str(&task.goal);
+    brief_text.push_str("\n\n## Acceptance criteria\n\n");
+    for c in &task.criteria {
+        brief_text.push_str("- ");
+        brief_text.push_str(c);
+        brief_text.push('\n');
+    }
+    brief_text.push_str("\n## Verify results\n\n");
+    for v in verify_results {
+        brief_text.push_str(&format!("- {} -> exit {:?}\n", v.command, v.code));
+    }
+    brief_text.push_str("\n## Diff\n\n```diff\n");
+    brief_text.push_str(&diff);
+    brief_text.push_str("\n```\n\n## Report format\n\nReply with:\n\n```sushi-review\n{\"verdict\":\"PASS|FAIL\",\"findings\":[]}\n```\n");
+
+    // Its own subdirectory: a review's events/brief/settings must never
+    // land in the implement attempt's `runs/<n>/` files.
+    let run_dir = app.store.run_dir(task_id, attempt_n).join("review");
+    let _ = std::fs::create_dir_all(&run_dir);
+    let mcp_path = run_dir.join("mcp.json");
+    let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
+    let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
+    let events_path = run_dir.join("events.jsonl");
+    let settings_snapshot = app.settings.read().unwrap().clone();
+    let settings_path = run_dir.join("settings.json");
+    if matches!(review_route.harness, Harness::Claude) {
+        // No token is ever registered for a review run (it's read-only and
+        // never gated), so it must not get a Stop hook either -- installing
+        // one would just be a guaranteed fail-open round trip.
+        let claude_settings = harness::build_claude_settings(
+            None,
+            settings_snapshot.sandbox,
+            &settings_snapshot.allowed_domains,
+            deny_read,
+            None,
+        );
+        let _ = store::write_json_atomic(&settings_path, &claude_settings);
+    }
+
+    let req = harness::RunRequest {
+        harness: review_route.harness,
+        worktree,
+        model: review_route.model.as_deref(),
+        effort: review_route.effort.as_deref(),
+        resume: None,
+        review: true,
+        mcp_config: Some(&mcp_path),
+        settings_path: Some(&settings_path),
+        network_allowed: false,
+    };
+    match run_harness(
+        app,
+        task_id,
+        attempt_n,
+        worktree,
+        &req,
+        &brief_text,
+        &events_path,
+        cancel,
+    )
+    .await
+    {
+        Ok(outcome) => {
+            let text = outcome.final_text.unwrap_or_default();
+            Ok(brief::parse_review(&text).unwrap_or(ReviewResult {
+                verdict: Verdict::Pass,
+                findings: vec!["review output unparseable; treated as pass".to_string()],
+            }))
+        }
+        Err(RunError::Cancelled) => Err(RunError::Cancelled),
+        Err(RunError::Io(msg)) => Ok(ReviewResult {
+            verdict: Verdict::Pass,
+            findings: vec![format!(
+                "review session failed to run ({msg}); treated as pass"
+            )],
+        }),
+    }
+}
+
+// ===========================================================================
+// The attempt loop
+// ===========================================================================
+
+/// The per-task attempt loop (spec "Engine", steps 1-10). Runs as its own
+/// tokio task from `task.start` until the task reaches `done`/`failed`, is
+/// stopped, or the daemon shuts down; `waiting` parks it on `pending_answer`
+/// rather than exiting, so the in-memory attempt-budget extension (step 9)
+/// survives across a wait/answer cycle.
+async fn run_task_loop(
+    app: Arc<App>,
+    task_id: String,
+    pending_answer: Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    cancel: CancelToken,
+) {
+    let mut attempt_budget = app.settings.read().unwrap().max_attempts;
+    // Never resume immediately after a waiting/answer cycle -- a fresh
+    // brief carries the owner's answer instead (spec item 11). Reset each
+    // iteration; set back to `true` only when this iteration itself ends
+    // via an answered wait.
+    let mut just_answered = false;
+
+    loop {
+        if cancel.is_cancelled() {
+            mark_stopped_if_not_already(&app, &task_id).await;
+            app.finish_task_loop(&task_id);
+            return;
+        }
+
+        let mut task = match app.store.load_task(&task_id) {
+            Ok(Some(t)) => t,
+            _ => {
+                app.finish_task_loop(&task_id);
+                return;
+            }
+        };
+
+        // Concurrency limit: stays `queued` while waiting for a slot, and
+        // `task.stop` (via `cancel`) works here too.
+        let mut permit = tokio::select! {
+            _ = cancel.cancelled() => {
+                mark_stopped_if_not_already(&app, &task_id).await;
+                app.finish_task_loop(&task_id);
+                return;
+            }
+            permit = app.slots.clone().acquire_owned() => {
+                match permit {
+                    Ok(p) => Some(p),
+                    Err(_) => { app.finish_task_loop(&task_id); return; }
+                }
+            }
+        };
+
+        let resume_eligible = !just_answered;
+        just_answered = false;
+
+        if task.attempts.is_empty() {
+            task.tier = classify_tier(&app, &task).await;
+        }
+
+        let settings = app.settings.read().unwrap().clone();
+        let attempt_n = task.attempts.len() as u32 + 1;
+        let route_id = settings
+            .tiers
+            .get(&task.tier)
+            .cloned()
+            .unwrap_or_else(|| "codex".to_string());
+        let route = settings
+            .routes
+            .iter()
+            .find(|r| r.id == route_id)
+            .cloned()
+            .unwrap_or(Route {
+                id: "codex".to_string(),
+                label: "Codex".to_string(),
+                harness: Harness::Codex,
+                model: None,
+                effort: None,
+                profile_id: None,
+            });
+
+        let prev = task.attempts.last().cloned();
+        let resume_session = if resume_eligible {
+            prev.as_ref().and_then(|p| {
+                let route_matches = p.route_id == route.id;
+                let has_session = p.session_id.is_some();
+                let verify_failure =
+                    p.failure.as_ref().map(|f| f.kind) == Some(FailureKind::Verify);
+                let was_interrupted = p.status == AttemptStatus::Interrupted;
+                if route_matches && has_session && (verify_failure || was_interrupted) {
+                    p.session_id.clone()
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
+        let worktree = PathBuf::from(&task.worktree);
+        let base_sha = task.base_sha.clone();
+        let wt2 = worktree.clone();
+        let base2 = base_sha.clone();
+        let (status_short, diff_stat) = tokio::task::spawn_blocking(move || {
+            (
+                git::status_short(&wt2).unwrap_or_default(),
+                git::diff_stat(&wt2, &base2).unwrap_or_default(),
+            )
+        })
+        .await
+        .unwrap_or_default();
+
+        let brief_text = match (
+            &resume_session,
+            prev.as_ref().and_then(|p| p.failure.as_ref()),
+        ) {
+            (Some(_), Some(failure)) => brief::build_resume_delta(failure),
+            _ => brief::build_brief(&task, &status_short, &diff_stat),
+        };
+
+        let reason = format!("tier {} -> route {}", task.tier.as_str(), route.id);
+        let attempt = Attempt {
+            n: attempt_n,
+            stage: Stage::Implement,
+            route_id: route.id.clone(),
+            harness: route.harness,
+            model: route.model.clone().unwrap_or_default(),
+            reason,
+            session_id: None,
+            pgid: None,
+            resumed: resume_session.is_some(),
+            started_at: now_ms(),
+            ended_at: None,
+            status: AttemptStatus::Running,
+            summary: None,
+            changed_files: vec![],
+            verify: vec![],
+            gate_blocks: 0,
+            review: None,
+            failure: None,
+            usage: None,
+            cost_usd: None,
+        };
+        task.attempts.push(attempt);
+        let idx = task.attempts.len() - 1;
+        task.status = TaskStatus::Running;
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(&task);
+        app.broadcast_task(&task);
+
+        let run_dir = app.store.run_dir(&task_id, attempt_n);
+        let _ = std::fs::create_dir_all(&run_dir);
+        let mcp_path = run_dir.join("mcp.json");
+        let task_mcp_path = app.store.task_dir(&task_id).join("mcp.json");
+        if task_mcp_path.exists() {
+            let _ = std::fs::copy(&task_mcp_path, &mcp_path);
+        } else {
+            let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
+        }
+
+        let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
+        let token = uuid::Uuid::new_v4().to_string();
+        let settings_path = run_dir.join("settings.json");
+        let key_path = run_dir.join("key");
+        // Keep our own clone of the hook context alongside the one handed
+        // to `hook.stop` lookups, so we can read back how many times it
+        // blocked into `attempt.gateBlocks` once the run ends.
+        let mut registered: Option<(String, Arc<HookContext>)> = None;
+        if matches!(route.harness, Harness::Claude) {
+            let profile = route
+                .profile_id
+                .as_ref()
+                .and_then(|pid| app.secrets.read().unwrap().profiles.get(pid).cloned());
+            let mut profile_obj = serde_json::Map::new();
+            if let Some(p) = &profile {
+                if !p.env.is_empty() {
+                    profile_obj.insert(
+                        "env".to_string(),
+                        serde_json::to_value(&p.env).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                if let Some(key) = &p.key {
+                    if store::write_secret_file(&key_path, key).is_ok() {
+                        profile_obj.insert(
+                            "apiKeyHelper".to_string(),
+                            serde_json::Value::String(format!(
+                                "cat {}",
+                                harness::shell_quote(&key_path.to_string_lossy())
+                            )),
+                        );
+                    }
+                }
+            }
+            let profile_value = if profile_obj.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(profile_obj))
+            };
+
+            let socket_path_str = app.socket_path.to_string_lossy().to_string();
+            let stop_hook = harness::StopHook {
+                orchd_path: &app.orchd_path,
+                socket_path: &socket_path_str,
+                token: &token,
+            };
+            let claude_settings = harness::build_claude_settings(
+                profile_value.as_ref(),
+                settings.sandbox,
+                &settings.allowed_domains,
+                &deny_read,
+                Some(stop_hook),
+            );
+            let _ = store::write_json_atomic(&settings_path, &claude_settings);
+            let ctx = Arc::new(HookContext {
+                task_id: task_id.clone(),
+                attempt_n,
+                worktree: worktree.clone(),
+                base_sha: base_sha.clone(),
+                verify: task.verify.clone(),
+                blocks: AtomicU32::new(0),
+            });
+            app.hook_tokens
+                .write()
+                .unwrap()
+                .insert(token.clone(), ctx.clone());
+            registered = Some((token.clone(), ctx));
+        }
+
+        let network_allowed = settings.codex_network;
+        let req = harness::RunRequest {
+            harness: route.harness,
+            worktree: &worktree,
+            model: route.model.as_deref(),
+            effort: route.effort.as_deref(),
+            resume: resume_session.as_deref(),
+            review: false,
+            mcp_config: Some(&mcp_path),
+            settings_path: Some(&settings_path),
+            network_allowed,
+        };
+
+        let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
+        let events_path = run_dir.join("events.jsonl");
+        let run_result = run_harness(
+            &app,
+            &task_id,
+            attempt_n,
+            &worktree,
+            &req,
+            &brief_text,
+            &events_path,
+            &cancel,
+        )
+        .await;
+
+        let gate_blocks = if let Some((tok, ctx)) = registered.take() {
+            app.hook_tokens.write().unwrap().remove(&tok);
+            ctx.blocks.load(Ordering::SeqCst)
+        } else {
+            0
+        };
+        // Delete the per-run key file the moment the run ends (spec item
+        // B); recovery also deletes it for an attempt interrupted by an
+        // unclean shutdown.
+        let _ = std::fs::remove_file(&key_path);
+
+        // `run_harness` may have persisted `session_id`/`pgid` mid-run;
+        // reload so we don't clobber that with our stale in-memory copy --
+        // then reapply `gate_blocks`, which is never itself persisted
+        // mid-run and so isn't on the reloaded copy at all.
+        if let Ok(Some(reloaded)) = app.store.load_task(&task_id) {
+            task = reloaded;
+        }
+        task.attempts[idx].gate_blocks = gate_blocks;
+
+        let outcome = match run_result {
+            Ok(o) => o,
+            Err(RunError::Cancelled) => {
+                task.attempts[idx].status = AttemptStatus::Interrupted;
+                task.attempts[idx].ended_at = Some(now_ms());
+                task.status = TaskStatus::Stopped;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+                drop(permit);
+                app.finish_task_loop(&task_id);
+                return;
+            }
+            Err(RunError::Io(msg)) => {
+                match fail_and_continue(
+                    &app,
+                    &task_id,
+                    &mut task,
+                    idx,
+                    FailureKind::Error,
+                    msg,
+                    &mut attempt_budget,
+                    &pending_answer,
+                    &cancel,
+                    &mut permit,
+                )
+                .await
+                {
+                    LoopSignal::Continue { answered } => {
+                        just_answered = answered;
+                        drop(permit);
+                        continue;
+                    }
+                    LoopSignal::Stop => {
+                        drop(permit);
+                        app.finish_task_loop(&task_id);
+                        return;
+                    }
+                }
+            }
+        };
+
+        task.attempts[idx].session_id = outcome.session_id.clone();
+        task.attempts[idx].usage = Some(Usage {
+            input: outcome.usage_input,
+            output: outcome.usage_output,
+            cached: outcome.usage_cached,
+        });
+        task.attempts[idx].cost_usd = outcome.cost_usd;
+        if let Some(cost) = outcome.cost_usd {
+            task.cost_usd += cost;
+        }
+
+        let final_text = outcome.final_text.clone().unwrap_or_default();
+        let report = brief::parse_report(&final_text);
+        task.attempts[idx].summary = report.as_ref().map(|r| r.summary.clone());
+        // Agent-reported decisions are trusted less than the owner's: strip
+        // any leading "Owner:" the agent might have echoed back, prefix
+        // with "Agent:", and never duplicate an identical entry.
+        if let Some(r) = &report {
+            for d in &r.decisions {
+                let cleaned = d
+                    .strip_prefix("Owner:")
+                    .map(|s| s.trim_start())
+                    .unwrap_or(d.as_str());
+                let entry = format!("Agent: {cleaned}");
+                if !task.decisions.contains(&entry) {
+                    task.decisions.push(entry);
+                }
+            }
+        }
+
+        let wt3 = worktree.clone();
+        let base3 = base_sha.clone();
+        let changed = tokio::task::spawn_blocking(move || {
+            git::changed_files(&wt3, &base3).unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default();
+        task.attempts[idx].changed_files = changed.clone();
+
+        let outcome_blocked = report
+            .as_ref()
+            .map(|r| r.outcome == brief::Outcome::Blocked)
+            .unwrap_or(false);
+
+        if outcome_blocked {
+            let question_text = report
+                .as_ref()
+                .map(|r| r.question.clone())
+                .unwrap_or_default();
+            // Routed through the same signature/budget accounting as any
+            // other failure (spec item 8), so a recurring "blocked"
+            // question can't loop forever even when the classifier keeps
+            // saying it's answerable.
+            record_failure(&mut task, idx, FailureKind::Blocked, question_text.clone());
+            let should_continue = advance_after_failure(&mut task, attempt_budget);
+            if !should_continue {
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+                match wait_for_answer(&app, &task_id, &pending_answer, &cancel, &mut permit).await {
+                    Some(_) => {
+                        attempt_budget += 2;
+                        just_answered = true;
+                        drop(permit);
+                        continue;
+                    }
+                    None => {
+                        drop(permit);
+                        app.finish_task_loop(&task_id);
+                        return;
+                    }
+                }
+            }
+
+            let answerable_p = classify_answerable(&app, &task, &question_text).await;
+            match decide_blocked_question(answerable_p) {
+                BlockedDecision::AnswerSelf => {
+                    let decision =
+                        format!("Answer it yourself from the repository: {question_text}");
+                    if !task.decisions.contains(&decision) {
+                        task.decisions.push(decision);
+                    }
+                    task.status = TaskStatus::Queued;
+                    task.updated_at = now_ms();
+                    let _ = app.store.save_task(&task);
+                    app.broadcast_task(&task);
+                    drop(permit);
+                    continue;
+                }
+                BlockedDecision::Waiting => {
+                    task.question = Some(Question {
+                        text: question_text,
+                        options: vec![],
+                    });
+                    task.status = TaskStatus::Waiting;
+                    task.updated_at = now_ms();
+                    let _ = app.store.save_task(&task);
+                    app.broadcast_task(&task);
+                    match wait_for_answer(&app, &task_id, &pending_answer, &cancel, &mut permit)
+                        .await
+                    {
+                        Some(_) => {
+                            just_answered = true;
+                            drop(permit);
+                            continue;
+                        }
+                        None => {
+                            drop(permit);
+                            app.finish_task_loop(&task_id);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        if changed.is_empty() {
+            let (kind, detail) = match &outcome.error {
+                Some(error) => (FailureKind::Error, error.clone()),
+                None => (FailureKind::NoDeliverable, "No files changed.".to_string()),
+            };
+            match fail_and_continue(
+                &app,
+                &task_id,
+                &mut task,
+                idx,
+                kind,
+                detail,
+                &mut attempt_budget,
+                &pending_answer,
+                &cancel,
+                &mut permit,
+            )
+            .await
+            {
+                LoopSignal::Continue { answered } => {
+                    just_answered = answered;
+                    drop(permit);
+                    continue;
+                }
+                LoopSignal::Stop => {
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
+            }
+        }
+
+        if cancel.is_cancelled() {
+            task.attempts[idx].status = AttemptStatus::Interrupted;
+            task.attempts[idx].ended_at = Some(now_ms());
+            task.status = TaskStatus::Stopped;
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
+            drop(permit);
+            app.finish_task_loop(&task_id);
+            return;
+        }
+
+        let verify_results = run_verify_cached(
+            &app,
+            &task_id,
+            &worktree,
+            &run_dir,
+            &base_sha,
+            &task.verify,
+            &cancel,
+        )
+        .await;
+        task.attempts[idx].verify = verify_results.clone();
+        if let Some(failed) = verify_results.iter().find(|v| v.code != Some(0)) {
+            let detail = format!(
+                "{} exited {}.\n{}",
+                failed.command,
+                failed
+                    .code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "null".to_string()),
+                failed.tail
+            );
+            match fail_and_continue(
+                &app,
+                &task_id,
+                &mut task,
+                idx,
+                FailureKind::Verify,
+                detail,
+                &mut attempt_budget,
+                &pending_answer,
+                &cancel,
+                &mut permit,
+            )
+            .await
+            {
+                LoopSignal::Continue { answered } => {
+                    just_answered = answered;
+                    drop(permit);
+                    continue;
+                }
+                LoopSignal::Stop => {
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
+            }
+        }
+
+        if let Some(path) = changed
+            .iter()
+            .find(|f| matches_any_protected(f, &settings.protected_paths))
+        {
+            task.attempts[idx].status = AttemptStatus::Blocked;
+            task.attempts[idx].ended_at = Some(now_ms());
+            task.question = Some(Question {
+                text: format!("Change touches protected path {path}: approve or reject?"),
+                options: vec!["approve".into(), "reject".into()],
+            });
+            task.status = TaskStatus::Waiting;
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
+            match wait_for_answer(&app, &task_id, &pending_answer, &cancel, &mut permit).await {
+                None => {
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
+                Some(answer) => {
+                    just_answered = true;
+                    // Proceeds only on an exact "approve"; anything else --
+                    // "reject", a typo, free text -- rejects the change.
+                    if answer != "approve" {
+                        match fail_and_continue(
+                            &app,
+                            &task_id,
+                            &mut task,
+                            idx,
+                            FailureKind::Protected,
+                            format!("Owner rejected change to protected path {path}"),
+                            &mut attempt_budget,
+                            &pending_answer,
+                            &cancel,
+                            &mut permit,
+                        )
+                        .await
+                        {
+                            LoopSignal::Continue { answered } => {
+                                just_answered = just_answered || answered;
+                                drop(permit);
+                                continue;
+                            }
+                            LoopSignal::Stop => {
+                                drop(permit);
+                                app.finish_task_loop(&task_id);
+                                return;
+                            }
+                        }
+                    }
+                    // approved: fall through to review/commit
+                }
+            }
+        }
+
+        let mut review_result: Option<ReviewResult> = None;
+        if !settings.review.is_empty() {
+            if let Some(review_route) = select_review_route(&settings, route.harness) {
+                match run_review(
+                    &app,
+                    &task_id,
+                    attempt_n,
+                    &task,
+                    &worktree,
+                    &base_sha,
+                    &verify_results,
+                    review_route,
+                    &deny_read,
+                    &cancel,
+                )
+                .await
+                {
+                    Ok(r) => review_result = Some(r),
+                    Err(RunError::Cancelled) => {
+                        // A cancelled review is never a PASS: the attempt
+                        // (and the task) is simply stopped.
+                        task.attempts[idx].status = AttemptStatus::Interrupted;
+                        task.attempts[idx].ended_at = Some(now_ms());
+                        task.status = TaskStatus::Stopped;
+                        task.updated_at = now_ms();
+                        let _ = app.store.save_task(&task);
+                        app.broadcast_task(&task);
+                        drop(permit);
+                        app.finish_task_loop(&task_id);
+                        return;
+                    }
+                    Err(RunError::Io(_)) => {
+                        review_result = None; // treated as if review were off for this attempt
+                    }
+                }
+            }
+        }
+        task.attempts[idx].review = review_result.clone();
+
+        if let Some(r) = &review_result {
+            if r.verdict == Verdict::Fail {
+                match fail_and_continue(
+                    &app,
+                    &task_id,
+                    &mut task,
+                    idx,
+                    FailureKind::Review,
+                    r.findings.join("; "),
+                    &mut attempt_budget,
+                    &pending_answer,
+                    &cancel,
+                    &mut permit,
+                )
+                .await
+                {
+                    LoopSignal::Continue { answered } => {
+                        just_answered = answered;
+                        drop(permit);
+                        continue;
+                    }
+                    LoopSignal::Stop => {
+                        drop(permit);
+                        app.finish_task_loop(&task_id);
+                        return;
+                    }
+                }
+            }
+        }
+
+        let wt4 = worktree.clone();
+        let title = task.title.clone();
+        let tid = task_id.clone();
+        let commit_res =
+            tokio::task::spawn_blocking(move || git::commit(&wt4, &title, &tid, attempt_n)).await;
+        match commit_res {
+            Ok(Ok(())) => {
+                task.attempts[idx].status = AttemptStatus::Passed;
+                task.attempts[idx].ended_at = Some(now_ms());
+                task.status = TaskStatus::Done;
+            }
+            Ok(Err(e)) => {
+                record_failure(&mut task, idx, FailureKind::Error, e.to_string());
+                task.status = TaskStatus::Failed;
+            }
+            Err(e) => {
+                record_failure(
+                    &mut task,
+                    idx,
+                    FailureKind::Error,
+                    format!("commit task panicked: {e}"),
+                );
+                task.status = TaskStatus::Failed;
+            }
+        }
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(&task);
+        app.broadcast_task(&task);
+        drop(permit);
+        app.finish_task_loop(&task_id);
+        return;
+    }
+}
+
+async fn mark_stopped_if_not_already(app: &Arc<App>, task_id: &str) {
+    if let Ok(Some(mut task)) = app.store.load_task(task_id) {
+        if !matches!(
+            task.status,
+            TaskStatus::Stopped | TaskStatus::Done | TaskStatus::Failed
+        ) {
+            task.status = TaskStatus::Stopped;
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn run_one_verify_command_kills_the_whole_process_group_on_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pidfile = tmp.path().join("child.pid");
+        // `wait` keeps the `sh -c` process itself alive for the full sleep,
+        // so the 300ms timeout fires while both it and the backgrounded
+        // `sleep` are still running and share its process group (killpg's
+        // target). A naive `timeout(...)` around `Command::output()` would
+        // stop waiting here but leave the whole group running.
+        let cmd = format!("sleep 60 & echo $! > {}; wait", pidfile.display());
+
+        let cancel = CancelToken::new();
+        let outcome = run_one_verify_command(
+            tmp.path(),
+            &cmd,
+            Duration::from_millis(300),
+            SandboxMode::Host,
+            &[],
+            &cancel,
+        )
+        .await;
+        assert!(outcome.tail.contains("timed out"));
+
+        let pid_text = std::fs::read_to_string(&pidfile).expect("child wrote its pid");
+        let pid: i32 = pid_text.trim().parse().expect("valid pid");
+        let start = std::time::Instant::now();
+        loop {
+            let alive = unsafe { libc::kill(pid, 0) == 0 };
+            if !alive {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "backgrounded sleep {pid} is still alive after the verify command timed out"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn run_one_verify_command_kills_the_group_on_cancellation_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pidfile = tmp.path().join("child.pid");
+        let cmd = format!("sleep 60 & echo $! > {}; wait", pidfile.display());
+        let cancel = CancelToken::new();
+        let cancel2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel2.cancel();
+        });
+        let outcome = run_one_verify_command(
+            tmp.path(),
+            &cmd,
+            Duration::from_secs(60),
+            SandboxMode::Host,
+            &[],
+            &cancel,
+        )
+        .await;
+        assert_eq!(outcome.tail, "cancelled");
+    }
+
+    #[test]
+    fn cancel_token_is_visible_synchronously_after_cancel() {
+        let cancel = CancelToken::new();
+        assert!(!cancel.is_cancelled());
+        cancel.cancel();
+        assert!(cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancel_token_wakes_a_waiter_registered_after_cancel() {
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        // Must resolve immediately, not hang -- this is exactly the "check
+        // between every step" use case.
+        tokio::time::timeout(Duration::from_millis(200), cancel.cancelled())
+            .await
+            .expect("cancelled() must resolve immediately once already cancelled");
+    }
+
+    #[test]
+    fn validate_task_id_rejects_path_traversal_and_non_uuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        assert!(validate_task_id(&store, "../../etc/passwd").is_err());
+        assert!(validate_task_id(&store, "not-a-uuid").is_err());
+        assert!(validate_task_id(&store, "").is_err());
+        let real_id = uuid::Uuid::new_v4().to_string();
+        assert!(validate_task_id(&store, &real_id).is_ok());
+    }
+
+    #[test]
+    fn failure_signature_prefers_an_error_looking_line_over_the_first_line() {
+        let detail = "Compiling...\nWarning: unused variable\nError: assertion failed at line 42\nmore noise";
+        let sig = failure_signature(FailureKind::Verify, detail);
+        assert!(sig.contains("assertion failed at line"));
+        assert!(!sig.contains("Compiling"));
+        // Digits and the line number are stripped so two runs at different
+        // line numbers still normalize to the same signature.
+        assert!(!sig.contains("42"));
+    }
+
+    #[test]
+    fn failure_signature_strips_absolute_paths() {
+        let detail = "Error at /Users/me/repo/src/foo.ts:10: boom";
+        let sig = failure_signature(FailureKind::Verify, detail);
+        assert!(!sig.contains("/Users/me/repo"));
+        assert!(sig.contains("boom"));
+    }
+
+    #[test]
+    fn failure_signature_falls_back_to_first_line_without_error_keywords() {
+        let sig = failure_signature(FailureKind::NoDeliverable, "nothing changed\nsecond line");
+        assert!(sig.contains("nothing changed"));
+    }
+
+    #[test]
+    fn failure_signature_uses_kind_and_truncates_to_120_chars() {
+        let long = "error: ".to_string() + &"x".repeat(200);
+        let sig = failure_signature(FailureKind::NoDeliverable, &long);
+        assert!(sig.starts_with("no_deliverable:"));
+        assert_eq!(sig.len(), "no_deliverable:".len() + 120);
+    }
+
+    fn attempt_with_failure(n: u32, signature: &str) -> Attempt {
+        Attempt {
+            n,
+            stage: Stage::Implement,
+            route_id: "claude-sonnet".into(),
+            harness: Harness::Claude,
+            model: "sonnet".into(),
+            reason: "r".into(),
+            session_id: None,
+            pgid: None,
+            resumed: false,
+            started_at: 0,
+            ended_at: None,
+            status: AttemptStatus::Failed,
+            summary: None,
+            changed_files: vec![],
+            verify: vec![],
+            gate_blocks: 0,
+            review: None,
+            failure: Some(Failure {
+                kind: FailureKind::Verify,
+                detail: "d".into(),
+                signature: signature.to_string(),
+            }),
+            usage: None,
+            cost_usd: None,
+        }
+    }
+
+    #[test]
+    fn consecutive_same_signature_counts_trailing_run_only() {
+        let attempts = vec![
+            attempt_with_failure(1, "sig-a"),
+            attempt_with_failure(2, "sig-b"),
+            attempt_with_failure(3, "sig-b"),
+            attempt_with_failure(4, "sig-b"),
+        ];
+        assert_eq!(consecutive_same_signature(&attempts, "sig-b"), 3);
+        assert_eq!(consecutive_same_signature(&attempts, "sig-a"), 0);
+    }
+
+    #[test]
+    fn decide_after_failure_ties_up_on_repeat_signature() {
+        let input = FailureDecisionInput {
+            tier: Tier::Mechanical,
+            signature: "sig-b",
+            previous_signature: Some("sig-b"),
+            consecutive_same: 2,
+            attempt_n: 2,
+            max_attempts: 4,
+        };
+        match decide_after_failure(&input) {
+            FailureDecision::NextAttempt { tier } => assert_eq!(tier, Tier::Standard),
+            _ => panic!("expected next attempt"),
+        }
+    }
+
+    #[test]
+    fn decide_after_failure_stays_same_tier_on_new_signature() {
+        let input = FailureDecisionInput {
+            tier: Tier::Standard,
+            signature: "sig-c",
+            previous_signature: Some("sig-b"),
+            consecutive_same: 1,
+            attempt_n: 2,
+            max_attempts: 4,
+        };
+        match decide_after_failure(&input) {
+            FailureDecision::NextAttempt { tier } => assert_eq!(tier, Tier::Standard),
+            _ => panic!("expected next attempt"),
+        }
+    }
+
+    #[test]
+    fn decide_after_failure_waits_after_three_consecutive() {
+        let input = FailureDecisionInput {
+            tier: Tier::Standard,
+            signature: "sig-b",
+            previous_signature: Some("sig-b"),
+            consecutive_same: 3,
+            attempt_n: 3,
+            max_attempts: 10,
+        };
+        match decide_after_failure(&input) {
+            FailureDecision::Waiting { question } => assert!(question.contains("sig-b")),
+            _ => panic!("expected waiting"),
+        }
+    }
+
+    #[test]
+    fn decide_after_failure_waits_when_attempts_exhausted() {
+        let input = FailureDecisionInput {
+            tier: Tier::Standard,
+            signature: "sig-x",
+            previous_signature: None,
+            consecutive_same: 1,
+            attempt_n: 4,
+            max_attempts: 4,
+        };
+        match decide_after_failure(&input) {
+            FailureDecision::Waiting { .. } => {}
+            _ => panic!("expected waiting"),
+        }
+    }
+
+    #[test]
+    fn decide_blocked_question_answers_self_above_threshold() {
+        assert_eq!(
+            decide_blocked_question(Some(0.7)),
+            BlockedDecision::AnswerSelf
+        );
+        assert_eq!(
+            decide_blocked_question(Some(0.9)),
+            BlockedDecision::AnswerSelf
+        );
+        assert_eq!(
+            decide_blocked_question(Some(0.69)),
+            BlockedDecision::Waiting
+        );
+        assert_eq!(decide_blocked_question(None), BlockedDecision::Waiting);
+    }
+
+    #[test]
+    fn glob_match_supports_double_star_suffix() {
+        assert!(glob_match("src/app/**", "src/app/SectionPage.tsx"));
+        assert!(glob_match("src/app/**", "src/app/nested/Deep.tsx"));
+        assert!(!glob_match("src/app/**", "src/extensions/registry.ts"));
+        assert!(glob_match("*.md", "README.md"));
+        assert!(!glob_match("*.md", "README.txt"));
+    }
+
+    #[test]
+    fn matches_any_protected_checks_every_glob() {
+        let globs = vec!["src/app/**".to_string(), "electron/main.cjs".to_string()];
+        assert!(matches_any_protected("src/app/SectionPage.tsx", &globs));
+        assert!(matches_any_protected("electron/main.cjs", &globs));
+        assert!(!matches_any_protected("src/extensions/registry.ts", &globs));
+    }
+
+    #[test]
+    fn select_review_route_auto_picks_other_harness() {
+        let settings = Settings::default();
+        let route = select_review_route(&settings, Harness::Claude).unwrap();
+        assert_eq!(route.harness, Harness::Codex);
+        let route2 = select_review_route(&settings, Harness::Codex).unwrap();
+        assert_eq!(route2.harness, Harness::Claude);
+    }
+
+    #[test]
+    fn select_review_route_explicit_id() {
+        let settings = Settings {
+            review: "claude-opus".to_string(),
+            ..Settings::default()
+        };
+        let route = select_review_route(&settings, Harness::Codex).unwrap();
+        assert_eq!(route.id, "claude-opus");
+    }
+
+    #[test]
+    fn simple_hash_is_stable_and_sensitive_to_content() {
+        assert_eq!(simple_hash("abc"), simple_hash("abc"));
+        assert_ne!(simple_hash("abc"), simple_hash("abd"));
+    }
+}

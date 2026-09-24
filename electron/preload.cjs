@@ -45,6 +45,12 @@ contextBridge.exposeInMainWorld("bridge", {
   terminalClose: invoke("terminal-close"),
   terminalScroll: invoke("terminal-scroll"),
   herdr: invoke("herdr"),
+  orchestrator: invoke("orchestrator"),
+  onOrchestrator: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on("orchestrator-event", listener);
+    return () => ipcRenderer.removeListener("orchestrator-event", listener);
+  },
   chat: invoke("chat"),
   chatModels: invoke("chat-models"),
   cancelChat: invoke("chat-cancel"),

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   FolderOpen,
   Globe,
+  ListChecks,
   Plus,
   Sparkles,
   TerminalSquare,
@@ -215,6 +216,12 @@ export function PanelPickerDialog({
               title: "Thread",
               detail: "Talk to Claude Code or Codex",
               icon: Sparkles,
+            },
+            {
+              kind: "orchestrator",
+              title: "Orchestrator",
+              detail: "Tasks carried to done",
+              icon: ListChecks,
             },
           ] as const
         ).map((item) => (

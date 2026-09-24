@@ -7,6 +7,7 @@ import { ExtensionSectionSlot } from "../extensions/ExtensionSlots.tsx";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import {
   ConnectionsSettings,
+  OrchestratorSettings,
   ProvidersSettings,
   UpdateSettings,
 } from "../dialogs/lazy-settings.ts";
@@ -18,7 +19,8 @@ import type {
   Workspace,
 } from "../types";
 
-export type SettingsTab = "general" | "connections" | "providers" | "updates";
+export type SettingsTab =
+  "general" | "connections" | "providers" | "orchestration" | "updates";
 
 const DEFAULT_APP_PREFERENCES: AppPreferences = {
   runInMenuBar: true,
@@ -102,6 +104,7 @@ export function SettingsDialog({
             ["general", "General"],
             ["connections", "Connections"],
             ["providers", "Providers"],
+            ["orchestration", "Orchestration"],
             ["updates", "Updates"],
           ] as const
         ).map(([key, label]) => (
@@ -167,6 +170,8 @@ export function SettingsDialog({
             />
           ) : settingsTab === "providers" ? (
             <ProvidersSettings />
+          ) : settingsTab === "orchestration" ? (
+            <OrchestratorSettings />
           ) : settingsTab === "updates" ? (
             <UpdateSettings state={updates} />
           ) : (

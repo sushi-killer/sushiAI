@@ -423,7 +423,9 @@ export function useWorkspaces({
                   ? "Browser"
                   : kind === "files"
                     ? "Files & Git"
-                    : "Thread",
+                    : kind === "orchestrator"
+                      ? "Orchestrator"
+                      : "Thread",
           agent: kind === "agent" || kind === "chat" ? agent : undefined,
           started: kind === "agent",
           messages: kind === "chat" ? [] : undefined,

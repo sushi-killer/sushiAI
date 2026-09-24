@@ -17,3 +17,6 @@ promo/assets/frame-*.png
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+
+# Rust build output of the orchestrator daemon.
+orchd/target/

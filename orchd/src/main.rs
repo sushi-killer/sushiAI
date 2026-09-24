@@ -1,0 +1,264 @@
+//! `orchd serve --data <dir> [--socket <path>]` (also the default with no
+//! subcommand) and `orchd hook stop --socket <path> --token <t>`.
+
+mod brief;
+mod classify;
+mod engine;
+mod git;
+mod harness;
+mod hook;
+mod model;
+mod protocol;
+mod store;
+
+use std::path::{Path, PathBuf};
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let rt = tokio::runtime::Runtime::new().expect("failed to start the tokio runtime");
+    let code = rt.block_on(run(args));
+    std::process::exit(code);
+}
+
+async fn run(args: Vec<String>) -> i32 {
+    if args.len() >= 2 && args[1] == "hook" {
+        return run_hook(&args[2..]).await;
+    }
+    let sub_args: &[String] = if args.len() >= 2 && args[1] == "serve" {
+        &args[2..]
+    } else {
+        &args[1..]
+    };
+    run_serve(sub_args).await
+}
+
+async fn run_hook(args: &[String]) -> i32 {
+    if args.is_empty() || args[0] != "stop" {
+        println!("{{}}");
+        return 0;
+    }
+    let mut socket: Option<String> = None;
+    let mut token: Option<String> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--socket" if i + 1 < args.len() => {
+                socket = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--token" if i + 1 < args.len() => {
+                token = Some(args[i + 1].clone());
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    match run_hook_inner(socket, token).await {
+        Some(v) => println!("{v}"),
+        None => println!("{{}}"),
+    }
+    0
+}
+
+/// Reads the hook JSON on stdin, sends `hook.stop`, prints the result.
+/// Fails open (`None` -> caller prints `{}`) on any error: missing flags,
+/// bad stdin, no daemon listening, malformed response.
+async fn run_hook_inner(socket: Option<String>, token: Option<String>) -> Option<String> {
+    let socket = socket?;
+    let token = token?;
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).ok()?;
+    let payload: serde_json::Value =
+        serde_json::from_str(&input).unwrap_or(serde_json::Value::Null);
+    let result = crate::protocol::client_request(
+        Path::new(&socket),
+        "hook.stop",
+        serde_json::json!({"token": token, "payload": payload}),
+    )
+    .await
+    .ok()?;
+    Some(result.to_string())
+}
+
+async fn run_serve(args: &[String]) -> i32 {
+    let mut data_dir_arg: Option<String> = None;
+    let mut socket_arg: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--data" if i + 1 < args.len() => {
+                data_dir_arg = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--socket" if i + 1 < args.len() => {
+                socket_arg = Some(args[i + 1].clone());
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+
+    let Some(data_dir_arg) = data_dir_arg else {
+        eprintln!("orchd serve: --data <dir> is required");
+        return 2;
+    };
+    let data_dir = PathBuf::from(data_dir_arg);
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        eprintln!("orchd: cannot create data dir {}: {e}", data_dir.display());
+        return 1;
+    }
+    let socket_path = socket_arg
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("orchd.sock"));
+
+    let pidfile = data_dir.join("orchd.pid");
+    if let Err(msg) = acquire_singleton(&pidfile) {
+        eprintln!("orchd: {msg}");
+        return 1;
+    }
+    if let Err(e) = std::fs::write(&pidfile, std::process::id().to_string()) {
+        eprintln!("orchd: cannot write pidfile: {e}");
+        return 1;
+    }
+
+    let orchd_path = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "orchd".to_string());
+
+    let app = match engine::App::new(data_dir.clone(), socket_path.clone(), orchd_path) {
+        Ok(app) => app,
+        Err(e) => {
+            eprintln!("orchd: failed to start: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = app.recover_on_start() {
+        eprintln!("orchd: restart recovery failed: {e}");
+    }
+
+    let dispatcher: std::sync::Arc<dyn protocol::Dispatcher> = app.clone();
+    let serve_shutdown_rx = app.subscribe_shutdown();
+    let socket_path2 = socket_path.clone();
+    let mut serve_task =
+        tokio::spawn(
+            async move { protocol::serve(&socket_path2, dispatcher, serve_shutdown_rx).await },
+        );
+
+    let mut shutdown_rx = app.subscribe_shutdown();
+    let mut already_joined = false;
+    let exit_code;
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        exit_code = tokio::select! {
+            _ = sigterm.recv() => { app.shutdown(); 0 }
+            _ = shutdown_rx.recv() => { 0 }
+            // The socket server can also end on its own -- most notably
+            // when `UnixListener::bind` fails (e.g. the socket path is too
+            // long). Without this branch the daemon would sit here forever
+            // waiting for a shutdown signal nobody will ever send.
+            joined = &mut serve_task => {
+                already_joined = true;
+                report_serve_outcome(&socket_path, joined)
+            }
+        };
+    }
+    #[cfg(not(unix))]
+    {
+        exit_code = tokio::select! {
+            _ = shutdown_rx.recv() => { 0 }
+            joined = &mut serve_task => {
+                already_joined = true;
+                report_serve_outcome(&socket_path, joined)
+            }
+        };
+    }
+
+    if !already_joined {
+        let _ = serve_task.await;
+    }
+    // `app.shutdown()` only *starts* cancelling every running task loop
+    // (each one still has to reach its own `cancel.cancelled()` check and
+    // `killpg` its child); give that a bounded window to actually finish
+    // before the process exits out from under them.
+    let drain_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app.any_task_loop_running() && tokio::time::Instant::now() < drain_deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let _ = std::fs::remove_file(&pidfile);
+    exit_code
+}
+
+fn report_serve_outcome(
+    socket_path: &Path,
+    joined: Result<std::io::Result<()>, tokio::task::JoinError>,
+) -> i32 {
+    match joined {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => {
+            eprintln!("orchd: failed to listen on {}: {e}", socket_path.display());
+            1
+        }
+        Err(e) => {
+            eprintln!("orchd: socket server task panicked: {e}");
+            1
+        }
+    }
+}
+
+/// Pidfile lock in the data dir: if it names a process that is (a) alive
+/// and (b) actually looks like an `orchd`, refuse to start a second
+/// instance. This does not depend on the socket path at all -- two
+/// invocations can legitimately choose different `--socket` paths for the
+/// same `--data` dir (Electron falls back to a `$TMPDIR` path when the
+/// natural one is too long), so pinging "the" socket is not a reliable
+/// singleton check. A stale pidfile (dead process, or a pid recycled by an
+/// unrelated program) is ignored; the socket file itself is removed by
+/// `protocol::serve` before binding.
+fn acquire_singleton(pidfile: &Path) -> Result<(), String> {
+    let Ok(contents) = std::fs::read_to_string(pidfile) else {
+        return Ok(());
+    };
+    let Ok(pid) = contents.trim().parse::<i32>() else {
+        return Ok(());
+    };
+    if pid <= 0 {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    let alive = unsafe { libc::kill(pid, 0) == 0 };
+    #[cfg(not(unix))]
+    let alive = false;
+    if !alive {
+        return Ok(());
+    }
+    if !process_looks_like_orchd(pid) {
+        return Ok(());
+    }
+    Err(format!(
+        "another orchd is already running (pid {pid}); not starting a second instance"
+    ))
+}
+
+/// Best-effort identity check so a pid recycled by an unrelated program
+/// after `orchd` died doesn't wrongly block a new daemon forever. If `ps`
+/// itself is unavailable or unparseable, fail closed (treat it as an
+/// `orchd`) rather than risk two daemons racing over the same data dir.
+#[cfg(unix)]
+fn process_looks_like_orchd(pid: i32) -> bool {
+    match std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+    {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .contains("orchd"),
+        _ => true,
+    }
+}
+
+#[cfg(not(unix))]
+fn process_looks_like_orchd(_pid: i32) -> bool {
+    true
+}

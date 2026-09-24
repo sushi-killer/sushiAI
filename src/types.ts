@@ -1,4 +1,5 @@
-export type PanelKind = "agent" | "terminal" | "browser" | "chat" | "files";
+export type PanelKind =
+  "agent" | "terminal" | "browser" | "chat" | "files" | "orchestrator";
 export type ConnectionProfile = {
   id: string;
   name: string;
@@ -314,6 +315,18 @@ export interface Bridge {
     params?: Record<string, unknown>,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic RPC passthrough, callers narrow the result themselves
   ): Promise<any>;
+  /** Raw NDJSON-RPC passthrough to the orchestrator daemon; the renderer's
+   * typed wrapper is `src/orchestrator/client.ts`. */
+  orchestrator(
+    method: string,
+    params?: Record<string, unknown>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic RPC passthrough, callers narrow the result themselves
+  ): Promise<any>;
+  onOrchestrator(
+    callback: (
+      event: import("./orchestrator/types.ts").OrchestratorEvent,
+    ) => void,
+  ): () => void;
   chat(options: {
     panelId: string;
     cwd: string;

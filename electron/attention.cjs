@@ -212,6 +212,10 @@ function registerAttentionIpc({
   return {
     init,
     showWindow,
+    /** The same notifier `attention-notify` wires to IPC, for a main-process
+     * caller (the orchestrator's waiting-task notice) that has no renderer
+     * round trip to make. */
+    notify,
     /** Called from the window's `close` listener; returns true when the
      * event was intercepted (hidden) so main.cjs can `preventDefault()`. */
     handleWindowClose(win) {

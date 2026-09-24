@@ -1,6 +1,21 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { watch } from "node:fs";
 import { createServer } from "vite";
+
+// The orchestrator daemon is a Rust binary the app spawns; build it first so
+// the panel talks to current code. A machine without cargo still gets a dev
+// window, with the panel showing its "not built" state.
+const cargo = spawnSync(
+  "cargo",
+  ["build", "--release", "--manifest-path", "orchd/Cargo.toml"],
+  {
+    stdio: "inherit",
+  },
+);
+if (cargo.error || cargo.status !== 0)
+  console.warn(
+    "[dev] orchd build skipped or failed; the Orchestrator panel will say so.",
+  );
 
 // Renderer (src/**) hot-reloads through Vite HMR.
 // Main/preload (electron/**) can't hot-swap inside a running Electron,

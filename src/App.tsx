@@ -69,7 +69,7 @@ export function App() {
     saved?.workspaces || [initialWorkspace()],
   );
   const [settingsTab, setSettingsTab] = useState<
-    "general" | "connections" | "providers" | "updates"
+    "general" | "connections" | "providers" | "orchestration" | "updates"
   >("general");
   const {
     mode,

@@ -28,6 +28,7 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 
 ## Promoted
 
+- 2026-09-24 Real Claude/Codex output broke `orchd` while self-written fakes passed → parsers assert captured CLI lines. `parses_captured_real_cli_streams`.
 - 2026-09-15 A `;`-joined gate chain let a failing change commit → join gates with `&&`, pass file lists as explicit arguments.
 - 2026-09-15 Desktop smoke failed under load, then passed on the same tree: asserts followed fixed sleeps → wait for the asserted state instead. `scripts/smoke.mjs`.
 - 2026-09-15 Unit fixtures merged worktrees but the real layout (main, worktree, unrelated clone) did not → grouping fixtures include a realistic distractor. `tests/workspace-merge.test.cjs`, `tests/projects.test.cjs`.
@@ -37,7 +38,6 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 - 2026-09-13 A wrapper printed "All files formatted correctly" for a run that exited 1 → exit code is the verdict, never `npx`. `sushiai-testing` skill.
 - 2026-09-13 A user's ssh_config (`LocalForward`, `/dev/null` known-hosts) broke our SSH tunnel → own `known_hosts`, private connection. `connections.cjs`.
 - 2026-09-13 One global `connected` flag colored every host's status dot → per-endpoint `statusByEndpoint`. `useHerdr.ts`.
-- 2026-09-12 Extension page opened in Agent/Chat mode left the sidebar blank → AGENTS.md, `toggleSection`/`src/app/navigation.ts`
 - 2026-09-12 Duplicate manifest labels broke a Playwright selector → `manifest.cjs`, `extension-contract-coverage.test.cjs`
 - 2026-09-12 Commands without a `surfaceId` silently did nothing at runtime → AGENTS.md, `manifest.cjs`
 - 2026-09-12 `webUtils.getPathForFile()` empty for dropped files (Electron 30-33 regression) → AGENTS.md

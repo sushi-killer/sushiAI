@@ -1,0 +1,474 @@
+// The orchestrator daemon (`orchd/`, Rust) outlives the app: this module only
+// finds/spawns it, speaks its NDJSON protocol, and relays its `subscribe`
+// stream to the renderer. It never stops the daemon - a running task must
+// survive both a window close and an app quit.
+const net = require("node:net");
+const path = require("node:path");
+const os = require("node:os");
+const fs = require("node:fs/promises");
+const { existsSync } = require("node:fs");
+const { spawn } = require("node:child_process");
+const { createHash, randomUUID } = require("node:crypto");
+
+const ORCHESTRATOR_MANIFEST = {
+  id: "builtin.orchestrator",
+  name: "Orchestrator",
+  version: "1.0.0",
+  apiVersion: 1,
+  source: { kind: "builtin" },
+  scope: "app",
+  description: "Carries tasks to a verified, committed done.",
+  contributions: { surfaces: [], navigation: [], actions: [], commands: [] },
+};
+
+// The renderer only ever reaches these; `hook.stop` (the Claude Stop hook)
+// and `shutdown` are daemon-internal / CLI-only, never IPC-reachable.
+const ALLOWED_METHODS = new Set([
+  "ping",
+  "settings.get",
+  "settings.set",
+  "task.list",
+  "task.get",
+  "task.create",
+  "task.start",
+  "task.stop",
+  "task.answer",
+  "task.delete",
+  "task.preflight",
+]);
+
+const NOT_BUILT =
+  "The orchestrator daemon is not built. Run npm run build:orchd.";
+const FAILED_TO_START = "The orchestrator daemon failed to start.";
+
+function orchdBinaryPath({ root, resourcesPath, packaged }) {
+  return packaged
+    ? path.join(resourcesPath, "orchd")
+    : path.join(root, "orchd", "target", "release", "orchd");
+}
+
+// A unix socket path is capped around 100 bytes on macOS; userData can nest
+// deep enough (a long account name, iCloud Drive, ...) to blow past that, so
+// a too-long path falls back to a short, stable name under $TMPDIR instead.
+function socketPathFor(dataDir, tmpDir = os.tmpdir()) {
+  const candidate = path.join(dataDir, "orchd.sock");
+  if (Buffer.byteLength(candidate, "utf8") <= 100) return candidate;
+  const hash = createHash("sha256").update(dataDir).digest("hex").slice(0, 8);
+  return path.join(tmpDir, `sushi-orchd-${hash}.sock`);
+}
+
+// A small NDJSON-RPC client dedicated to orchd's own control-auth envelope
+// (`herdr.cjs`'s `request()` has no `auth` field and Herdr's own protocol
+// must not gain one just for this). Every request but `ping` carries the
+// current control token alongside id/method/params.
+function orchdRequest(socketPath, method, params, token, timeout = 5000) {
+  return new Promise((resolve, reject) => {
+    const id = randomUUID();
+    const socket = net.createConnection(socketPath);
+    let buffer = "",
+      settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      error ? reject(error) : resolve(value);
+    };
+    socket.setEncoding("utf8");
+    socket.setTimeout(timeout, () =>
+      finish(new Error("The orchestrator daemon did not respond.")),
+    );
+    socket.on("error", (error) => finish(error));
+    socket.on("close", () => {
+      if (!settled)
+        finish(
+          new Error("The orchestrator daemon disconnected before responding."),
+        );
+    });
+    socket.on("connect", () => {
+      const envelope = { id, method, params };
+      if (method !== "ping" && token) envelope.auth = token;
+      socket.write(JSON.stringify(envelope) + "\n");
+    });
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      if (buffer.length > 16 * 1024 * 1024)
+        return finish(new Error("Orchestrator response exceeds 16 MB."));
+      let boundary;
+      while ((boundary = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 1);
+        if (!line.trim()) continue;
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          return finish(
+            new Error("Invalid JSON from the orchestrator daemon."),
+          );
+        }
+        if (message.id !== id) continue;
+        if (message.error) return finish(new Error(message.error.message));
+        finish(null, message.result);
+      }
+    });
+  });
+}
+
+/** Whether a running daemon's own binary has since been rebuilt: true only
+ * when it reported no in-flight attempts (a busy one keeps running its tasks
+ * on the old code until a later call finds it idle) and the binary on disk is
+ * more than a second newer than the one it loaded. */
+function isStalePing(ping, actualBinaryMtimeMs) {
+  if (!ping?.binaryMtimeMs || ping.running > 0) return false;
+  return actualBinaryMtimeMs > ping.binaryMtimeMs + 1000;
+}
+
+/** Polls `killFn` (default: a zero-signal `kill`, which throws once the pid
+ * is gone) until the process exits or `timeoutMs` passes. Best-effort: never
+ * rejects, since a stuck old process just means the next call retries. */
+async function waitForExit(
+  pid,
+  {
+    killFn = (p) => process.kill(p, 0),
+    timeoutMs = 5000,
+    intervalMs = 100,
+  } = {},
+) {
+  if (!pid) return;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      killFn(pid);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+class OrchestratorService {
+  constructor({
+    dataDir,
+    root,
+    resourcesPath,
+    packaged,
+    send,
+    notify,
+    getClaudeMcp,
+    getModelProviders,
+    spawnRetries = 50,
+    spawnIntervalMs = 100,
+  }) {
+    this.dataDir = dataDir;
+    this.socketPath = socketPathFor(dataDir);
+    this.binary = orchdBinaryPath({ root, resourcesPath, packaged });
+    this.send = send;
+    this.notify = notify;
+    this.getClaudeMcp = getClaudeMcp;
+    this.getModelProviders = getModelProviders;
+    this.spawnRetries = spawnRetries;
+    this.spawnIntervalMs = spawnIntervalMs;
+    this.token = null;
+    this.subscribeSocket = null;
+    this.backoff = 500;
+    this.closed = false;
+    this.starting = null;
+    // One notice per (taskId, question text): a task re-entering `waiting`
+    // with the same question never re-notifies.
+    this.notifiedWaiting = new Set();
+  }
+
+  async #refreshToken() {
+    try {
+      this.token = (
+        await fs.readFile(path.join(this.dataDir, "control.token"), "utf8")
+      ).trim();
+    } catch {
+      this.token = null;
+    }
+  }
+
+  async #isStale(ping) {
+    if (!ping?.binaryMtimeMs || ping.running > 0) return false;
+    try {
+      const { mtimeMs } = await fs.stat(this.binary);
+      return isStalePing(ping, mtimeMs);
+    } catch {
+      return false;
+    }
+  }
+
+  async #ensureRunning() {
+    if (!existsSync(this.binary)) throw new Error(NOT_BUILT);
+    await this.#refreshToken();
+    try {
+      const ping = await orchdRequest(
+        this.socketPath,
+        "ping",
+        {},
+        this.token,
+        2000,
+      );
+      if (!(await this.#isStale(ping))) return ping;
+      // A rebuilt binary replaces an idle daemon; wait for the old process to
+      // actually exit before spawning the new one on the same socket path.
+      await orchdRequest(
+        this.socketPath,
+        "shutdown",
+        {},
+        this.token,
+        5000,
+      ).catch(() => {});
+      await waitForExit(ping.pid);
+    } catch {
+      // Fall through to spawn: one in-flight spawn per service, so a burst of
+      // calls before the daemon is up doesn't race several children.
+    }
+    if (!this.starting) this.starting = this.#spawnAndWait();
+    try {
+      return await this.starting;
+    } finally {
+      this.starting = null;
+    }
+  }
+
+  async #spawnAndWait() {
+    await fs.mkdir(this.dataDir, { recursive: true });
+    const child = spawn(
+      this.binary,
+      ["--data", this.dataDir, "--socket", this.socketPath],
+      { detached: true, stdio: "ignore" },
+    );
+    // Detached and unref'd on purpose: this process must outlive the app.
+    child.unref();
+    for (let attempt = 0; attempt < this.spawnRetries; attempt++) {
+      await this.#refreshToken();
+      try {
+        return await orchdRequest(
+          this.socketPath,
+          "ping",
+          {},
+          this.token,
+          2000,
+        );
+      } catch {
+        await new Promise((resolve) =>
+          setTimeout(resolve, this.spawnIntervalMs),
+        );
+      }
+    }
+    throw new Error(FAILED_TO_START);
+  }
+
+  async #withMcp(params) {
+    if (!this.getClaudeMcp || typeof params?.repo !== "string") return params;
+    try {
+      const mcp = await this.getClaudeMcp().launchConfig(params.repo);
+      return { ...params, mcp };
+    } catch {
+      // No .mcp.json / no readable project: the task still starts, just
+      // without MCP servers wired into the Claude run.
+      return params;
+    }
+  }
+
+  /** Full replace, always pushed (connect + after every `settings.set`):
+   * `classifier` is the selected provider's key/baseUrl or null, `profiles`
+   * is every route's resolved model-profile env + key. Nothing is staged to
+   * disk - `resolveEnv` hands the env map and key back in memory. */
+  async #pushSecrets() {
+    if (!this.getModelProviders) return;
+    let settings;
+    try {
+      settings = await orchdRequest(
+        this.socketPath,
+        "settings.get",
+        {},
+        this.token,
+        5000,
+      );
+    } catch {
+      return;
+    }
+    const providers = this.getModelProviders();
+    let classifier = null;
+    const providerId = settings?.classifier?.providerId;
+    if (providerId) {
+      try {
+        const [key, list] = await Promise.all([
+          providers.keyFor(providerId),
+          providers.listProviders(),
+        ]);
+        const provider = list.find((p) => p.id === providerId);
+        if (key && provider) classifier = { key, baseUrl: provider.baseUrl };
+      } catch {
+        classifier = null;
+      }
+    }
+    const profileIds = [
+      ...new Set(
+        (settings?.routes || [])
+          .map((route) => route.profileId)
+          .filter((id) => typeof id === "string" && id),
+      ),
+    ];
+    const profiles = {};
+    for (const id of profileIds) {
+      try {
+        const { settings: env, key } = await providers.resolveEnv(id);
+        profiles[id] = { env, key };
+      } catch {
+        // Missing key / deleted profile: omitted, so that route falls back
+        // to the tier's plain route, per the profile-fallback contract.
+      }
+    }
+    await orchdRequest(
+      this.socketPath,
+      "secrets.set",
+      { classifier, profiles },
+      this.token,
+      5000,
+    ).catch(() => {});
+  }
+
+  async call(method, params = {}) {
+    if (!ALLOWED_METHODS.has(method))
+      throw new Error("Invalid orchestrator request");
+    await this.#ensureRunning();
+    const sendParams =
+      method === "task.create" ? await this.#withMcp(params) : params;
+    const result = await orchdRequest(
+      this.socketPath,
+      method,
+      sendParams,
+      this.token,
+      20000,
+    );
+    // Awaited (not fire-and-forget) so a caller who follows this with another
+    // settings-dependent call never races the push.
+    if (method === "settings.set") await this.#pushSecrets().catch(() => {});
+    return result;
+  }
+
+  connect() {
+    this.closed = false;
+    this.#subscribeLoop();
+  }
+
+  async #subscribeLoop() {
+    if (this.closed) return;
+    try {
+      await this.#ensureRunning();
+      await this.#pushSecrets();
+      await this.#subscribeOnce();
+    } catch {
+      // Daemon not built / not reachable yet: retry with backoff below.
+    }
+    if (this.closed) return;
+    this.backoff = Math.min(this.backoff * 2, 15000);
+    setTimeout(() => this.#subscribeLoop(), this.backoff).unref?.();
+  }
+
+  /** A task that just entered `waiting` raises one attention notice - trimmed
+   * to the caps `attention.cjs` enforces, so a long goal/question never turns
+   * a real notice into a thrown validation error. */
+  #notifyWaiting(message) {
+    if (!this.notify || message.event !== "task") return;
+    const task = message.task;
+    if (!task || task.status !== "waiting") return;
+    const key = `${task.id}:${task.question?.text || ""}`;
+    if (this.notifiedWaiting.has(key)) return;
+    this.notifiedWaiting.add(key);
+    this.notify({
+      workspaceId: String(task.repo || task.id || "").slice(0, 200),
+      panelId: String(task.id || "").slice(0, 200),
+      title: String(task.title || "Orchestrator").slice(0, 120),
+      body: String(task.question?.text || "Needs your input.").slice(0, 300),
+    }).catch(() => {});
+  }
+
+  #subscribeOnce() {
+    return new Promise((resolve) => {
+      const socket = net.createConnection(this.socketPath);
+      this.subscribeSocket = socket;
+      let buffer = "";
+      socket.setEncoding("utf8");
+      socket.on("connect", () => {
+        this.backoff = 500;
+        const envelope = { id: "subscribe", method: "subscribe" };
+        if (this.token) envelope.auth = this.token;
+        socket.write(JSON.stringify(envelope) + "\n");
+      });
+      socket.on("data", (chunk) => {
+        buffer += chunk;
+        let boundary;
+        while ((boundary = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 1);
+          if (!line.trim()) continue;
+          let message;
+          try {
+            message = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (!message.event) continue;
+          this.send("orchestrator-event", message);
+          this.#notifyWaiting(message);
+        }
+      });
+      const done = () => {
+        if (this.subscribeSocket === socket) this.subscribeSocket = null;
+        resolve();
+      };
+      socket.on("error", done);
+      socket.on("close", done);
+    });
+  }
+
+  // Closes only this app's subscribe connection, never the daemon: tasks
+  // must keep running after the window (or the app) closes.
+  close() {
+    this.closed = true;
+    this.subscribeSocket?.destroy();
+  }
+}
+
+function registerOrchestratorExtension({
+  handle,
+  send,
+  notify,
+  dataDir,
+  root,
+  resourcesPath,
+  packaged,
+  getClaudeMcp,
+  getModelProviders,
+}) {
+  const service = new OrchestratorService({
+    dataDir,
+    root,
+    resourcesPath,
+    packaged,
+    send,
+    notify,
+    getClaudeMcp,
+    getModelProviders,
+  });
+  handle("orchestrator", (method, params) => service.call(method, params));
+  service.connect();
+  return service;
+}
+
+module.exports = {
+  ORCHESTRATOR_MANIFEST,
+  OrchestratorService,
+  registerOrchestratorExtension,
+  orchdBinaryPath,
+  socketPathFor,
+  isStalePing,
+  waitForExit,
+  ALLOWED_METHODS,
+  NOT_BUILT,
+  FAILED_TO_START,
+};

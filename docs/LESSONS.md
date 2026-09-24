@@ -28,6 +28,8 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 
 ## Promoted
 
+- 2026-09-24 Orchestrator chat edited code instead of filing tasks → enforce a role with tools, not prompt. `tests/chat.test.cjs`.
+- 2026-09-24 Unset `HERDR_SOCKET_PATH` photographed the owner's real Herdr → missing path. `ui-evidence` template.
 - 2026-09-24 Real Claude/Codex output broke `orchd` while self-written fakes passed → parsers assert captured CLI lines. `parses_captured_real_cli_streams`.
 - 2026-09-15 A `;`-joined gate chain let a failing change commit → join gates with `&&`, pass file lists as explicit arguments.
 - 2026-09-15 Desktop smoke failed under load, then passed on the same tree: asserts followed fixed sleeps → wait for the asserted state instead. `scripts/smoke.mjs`.
@@ -43,9 +45,6 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 - 2026-09-12 `webUtils.getPathForFile()` empty for dropped files (Electron 30-33 regression) → AGENTS.md
 - 2026-09-12 Drag highlight flickered crossing a child element's boundary → AGENTS.md
 - 2026-09-12 A copy-pasted duplicate in `ACTION_PLACEMENTS`/`ICONS` shipped silently → `extension-contract-coverage.test.cjs`
-- 2026-09-12 Smoke test failed ("expected 1, got 2") after deleting a fixture → `scripts/smoke.mjs`
-- 2026-09-12 `types.ts` drifted from the manifest validator mid-session → `extension-manifest-change` skill
-- 2026-09-12 Import-isolation check caught one import style → `check-conventions.mjs`
 - 2026-09-12 CI silently never ran 33 of 52 test files → `package.json` `ci` script
 - 2026-09-12 `scripts/smoke.mjs` discards an external `SUSHIAI_EXTENSIONS_DIR`; manifest fields are non-obvious → `author-and-verify-extension` skill
 - 2026-09-13 Pushed a 31-commit branch to `main` unsquashed → squash-only is a `main`-history invariant. AGENTS.md.

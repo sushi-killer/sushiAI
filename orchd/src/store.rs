@@ -139,8 +139,12 @@ impl Store {
                     changed = true;
                 }
             }
+            // A running attempt at startup means the daemon died under it (an
+            // owner's stop marks its attempt interrupted right away), so the
+            // task is queued again and resumes, rather than waiting for the
+            // owner to notice and press Start.
             if changed {
-                task.status = TaskStatus::Stopped;
+                task.status = TaskStatus::Queued;
                 task.updated_at = crate::model::now_ms();
                 self.save_task(&task)?;
                 recovered.push(task);
@@ -335,7 +339,7 @@ mod tests {
         assert_eq!(recovered[0].id, "running");
 
         let reloaded = store.load_task("running").unwrap().unwrap();
-        assert_eq!(reloaded.status, TaskStatus::Stopped);
+        assert_eq!(reloaded.status, TaskStatus::Queued);
         assert_eq!(reloaded.attempts[0].status, AttemptStatus::Interrupted);
 
         // Untouched task stays as-is.

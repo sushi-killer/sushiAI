@@ -458,9 +458,21 @@ impl App {
 
     /// spec step 10: attempts left `running` from a previous process
     /// become `interrupted`; their tasks become `stopped`.
+    /// Every task that was in flight when the daemon stopped gets its loop
+    /// back: interrupted attempts are marked and requeued by the store, and
+    /// queued or drafting tasks simply resume. A `waiting` task needs no loop
+    /// until its answer arrives (`task.answer` relaunches one).
     pub fn recover_on_start(&self) -> std::io::Result<()> {
         for t in self.store.recover_interrupted()? {
             self.broadcast_task(&t);
+        }
+        for t in self.store.list_tasks()? {
+            if matches!(
+                t.status,
+                TaskStatus::Queued | TaskStatus::Running | TaskStatus::Drafting
+            ) {
+                self.start_task_loop(t.id);
+            }
         }
         Ok(())
     }

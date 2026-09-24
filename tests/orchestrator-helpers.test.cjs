@@ -104,6 +104,26 @@ test("latestImplementAttempt skips a plan attempt, even when it's the newest one
   assert.equal(latestImplementAttempt(task({ attempts: [plan] })), undefined);
 });
 
+test("implementAttemptCount counts only implementation attempts", async () => {
+  const { implementAttemptCount } = await library;
+  const plan = attempt({ n: 1, stage: "plan", status: "passed" });
+  const firstImplement = attempt({ n: 2, stage: "implement" });
+  const secondImplement = attempt({ n: 3, stage: "implement" });
+
+  assert.equal(implementAttemptCount(task()), 0);
+  assert.equal(implementAttemptCount(task({ attempts: [plan] })), 0);
+  assert.equal(
+    implementAttemptCount(task({ attempts: [plan, firstImplement] })),
+    1,
+  );
+  assert.equal(
+    implementAttemptCount(
+      task({ attempts: [plan, firstImplement, secondImplement] }),
+    ),
+    2,
+  );
+});
+
 test("statusDetail adds only what the pill and progress don't say, never the question text", async () => {
   const { statusDetail } = await library;
   assert.equal(statusDetail(task({ status: "drafting" })), "");
@@ -170,17 +190,17 @@ test("attemptProgress counts the implement attempt while running or queued, null
       task({ status: "running", attempts: [attempt({ n: 2 })] }),
       4,
     ),
-    "2/4",
+    "1/4",
   );
-  // A drafted plan attempt precedes the real attempts - the count is the
-  // implement attempt's own number, not the plan's.
+  // The daemon's attempt numbers are global across stages, so the first
+  // implementation is n=2 after a plan at n=1.
   assert.equal(
     attemptProgress(
       task({
         status: "running",
         attempts: [
           attempt({ n: 1, stage: "plan", status: "passed" }),
-          attempt({ n: 1, stage: "implement" }),
+          attempt({ n: 2, stage: "implement" }),
         ],
       }),
       4,
@@ -192,8 +212,8 @@ test("attemptProgress counts the implement attempt while running or queued, null
     attemptProgress(task({ status: "running", attempts: [attempt({ n: 1 })] })),
     "1/1",
   );
-  // Queued but nothing has run yet: the about-to-run attempt is #1.
-  assert.equal(attemptProgress(task({ status: "queued" }), 5), "1/5");
+  // Queued but nothing has run yet: no implementation attempt has started.
+  assert.equal(attemptProgress(task({ status: "queued" }), 5), "0/5");
   assert.equal(attemptProgress(task({ status: "done" }), 5), null);
   assert.equal(attemptProgress(task({ status: "waiting" }), 5), null);
 });

@@ -25,7 +25,7 @@ import {
   emptyLiveState,
   formatCost,
   formatDuration,
-  latestImplementAttempt,
+  implementAttemptCount,
   messageThreads,
   participantLabel,
   statusBadgeLabel,
@@ -929,11 +929,9 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
               <div className="orch-detail-title">
                 <h3>{selected.title}</h3>
                 <p className="orch-detail-meta">
-                  attempt {latestImplementAttempt(selected)?.n ?? 0}/
-                  {settings?.maxAttempts ??
-                    latestImplementAttempt(selected)?.n ??
-                    0}{" "}
-                  · {formatDuration(totalDurationMs(selected))} ·{" "}
+                  attempt {implementAttemptCount(selected)}/
+                  {settings?.maxAttempts ?? implementAttemptCount(selected)} ·{" "}
+                  {formatDuration(totalDurationMs(selected))} ·{" "}
                   <span title="API list price the CLI reports, cache included; a subscription is not billed per token">
                     {formatCost(selected.costUsd)}
                   </span>{" "}

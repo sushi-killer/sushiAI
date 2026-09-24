@@ -42,6 +42,13 @@ export function latestImplementAttempt(task: Task): Attempt | undefined {
   return undefined;
 }
 
+/** Number of implementation attempts, independent of the daemon's global
+ * cross-stage attempt sequence. */
+export function implementAttemptCount(task: Task): number {
+  return task.attempts.filter((attempt) => attempt.stage === "implement")
+    .length;
+}
+
 /** The newest review-stage verdict, if any attempt has reached one. */
 export function reviewOf(task: Task) {
   for (let i = task.attempts.length - 1; i >= 0; i--) {
@@ -52,14 +59,13 @@ export function reviewOf(task: Task) {
 }
 
 /** "2/5"-style attempt progress for a task's list row - `null` once the task
- * is no longer actively working (there is nothing to count toward). A queued
- * task that hasn't run yet counts its first attempt. */
+ * is no longer actively working (there is nothing to count toward). */
 export function attemptProgress(
   task: Task,
   maxAttempts?: number,
 ): string | null {
   if (task.status !== "running" && task.status !== "queued") return null;
-  const n = latestImplementAttempt(task)?.n ?? 1;
+  const n = implementAttemptCount(task);
   const max = maxAttempts ?? n;
   return `${n}/${max}`;
 }

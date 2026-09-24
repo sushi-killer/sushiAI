@@ -32,3 +32,5 @@
 - "Attempts keep failing" is answered by the orchestrator first (at most
   twice per task): it can say what to fix or that a review finding is wrong,
   and the owner hears only what it cannot settle.
+- The attempt counter reads 0/N before a task's first attempt, in the task
+  list and the task header alike (the list showed 1/N).

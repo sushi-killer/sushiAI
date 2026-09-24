@@ -80,6 +80,7 @@ export type Variant = {
   plannerTier: boolean;
   contract: boolean;
   reviewOtherFamily: boolean;
+  reviewEvidence: boolean;
 };
 
 export type FailureKind =

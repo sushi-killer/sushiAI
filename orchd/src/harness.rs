@@ -24,6 +24,9 @@ pub struct RunRequest<'a> {
     /// Codex only: an MCP server (name, `{command, args, env?}`) passed as
     /// `-c mcp_servers.*` flags; Claude reads its servers from `mcp_config`.
     pub codex_mcp: Option<(&'a str, &'a serde_json::Value)>,
+    /// Codex only: images attached to the prompt (`--image`); Claude opens
+    /// image files itself with its Read tool.
+    pub images: &'a [std::path::PathBuf],
 }
 
 /// `-c mcp_servers.<name>.{command,args,env.*}` for one MCP server. JSON
@@ -142,6 +145,11 @@ pub fn codex_argv(req: &RunRequest) -> Vec<String> {
     }
 
     let mut argv = vec!["exec".to_string()];
+    // `--image=` right after `exec`: the flag takes several values, so it
+    // must not sit where it could swallow the trailing `-`.
+    for image in req.images {
+        argv.push(format!("--image={}", image.to_string_lossy()));
+    }
     argv.push("--json".to_string());
     argv.push("--skip-git-repo-check".to_string());
     argv.push("-C".to_string());
@@ -460,6 +468,7 @@ mod tests {
             settings_path: None,
             network_allowed: true,
             codex_mcp: None,
+            images: &[],
         }
     }
 
@@ -532,6 +541,17 @@ mod tests {
         let argv = codex_argv(&req);
         assert!(argv.contains(&"workspace-write".to_string()));
         assert!(argv.contains(&"sandbox_workspace_write.network_access=false".to_string()));
+        assert_eq!(argv.last().unwrap(), "-");
+    }
+
+    #[test]
+    fn codex_review_attaches_images_before_the_other_flags() {
+        let images = vec![std::path::PathBuf::from("/w/artifacts/a.png")];
+        let mut req = base_req(Harness::Codex, Path::new("/w"));
+        req.review = true;
+        req.images = &images;
+        let argv = codex_argv(&req);
+        assert_eq!(argv[1], "--image=/w/artifacts/a.png");
         assert_eq!(argv.last().unwrap(), "-");
     }
 

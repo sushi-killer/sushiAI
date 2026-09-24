@@ -217,6 +217,9 @@ pub struct Variant {
     /// With review `auto` and a route on the other harness configured, the
     /// reviewer runs there (Claude work reviewed by Codex and back).
     pub review_other_family: bool,
+    /// The reviewer gets the screenshots the attempt saved (Codex as
+    /// attachments, Claude as paths to open) and longer verify output.
+    pub review_evidence: bool,
 }
 
 #[cfg(test)]

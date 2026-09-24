@@ -2487,3 +2487,54 @@ fn review_other_family_sends_claude_work_to_the_codex_reviewer() {
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
 }
+
+#[test]
+fn review_evidence_attaches_the_attempt_s_screenshots_to_the_codex_reviewer() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let claude = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        "#!/bin/sh\ncat > /dev/null\necho changed > CHANGED_MARKER.txt\nmkdir -p artifacts\necho png > artifacts/after.png\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n",
+    );
+    let args_log = scripts_dir.path().join("codex-args");
+    let codex = fake_harness_script(
+        scripts_dir.path(),
+        "fake-codex.sh",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$CODEX_ARGS\"\ncat > \"$CODEX_ARGS.brief\"\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"```sushi-review\\n{\\\"verdict\\\":\\\"PASS\\\",\\\"findings\\\":[]}\\n```\"}}'\n",
+    );
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", claude.to_str().unwrap()),
+        ("ORCHD_CODEX_BIN", codex.to_str().unwrap()),
+        ("CODEX_ARGS", args_log.to_str().unwrap()),
+    ]);
+    let repo = init_git_repo();
+    std::fs::write(repo.path().join(".gitignore"), "artifacts/\n").unwrap();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Evidence",
+            "goal": "Save a screenshot",
+            "verify": ["true"],
+            "variant": {"reviewOtherFamily": true, "reviewEvidence": true},
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    assert_eq!(settled["status"], "done", "{settled}");
+    let argv = std::fs::read_to_string(&args_log).unwrap();
+    assert!(
+        argv.starts_with("exec --image=") && argv.contains("artifacts/after.png"),
+        "{argv}"
+    );
+    let brief = std::fs::read_to_string(format!("{}.brief", args_log.display())).unwrap();
+    assert!(
+        brief.contains("## Screenshots") && brief.contains("`artifacts/after.png`"),
+        "{brief}"
+    );
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}

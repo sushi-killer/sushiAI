@@ -36,3 +36,6 @@
 - `reviewOtherFamily: true` (with review `auto`) reviews on the other
   harness when a route there exists: Claude's work by Codex and Codex's by
   Claude. When none exists the task says so in its decisions.
+- `reviewEvidence: true` shows the reviewer the screenshots the attempt
+  saved under `artifacts/` (attached to a Codex reviewer's prompt, listed
+  for a Claude reviewer to open) and longer verify output.

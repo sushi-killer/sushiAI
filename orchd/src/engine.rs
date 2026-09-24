@@ -1391,6 +1391,48 @@ fn resolve_variant(
     Ok(variant)
 }
 
+const MAX_REVIEW_SCREENSHOTS: usize = 8;
+
+/// Images under the worktree's `artifacts/` (gitignored, so never in the
+/// diff) written since `since_ms`, newest first.
+fn attempt_screenshots(worktree: &Path, since_ms: i64) -> Vec<PathBuf> {
+    let mut found: Vec<(i64, PathBuf)> = Vec::new();
+    let mut dirs = vec![worktree.join("artifacts")];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            let is_image = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                matches!(
+                    e.to_ascii_lowercase().as_str(),
+                    "png" | "jpg" | "jpeg" | "webp"
+                )
+            });
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_millis() as i64);
+            if is_image && modified >= since_ms {
+                found.push((modified, path));
+            }
+        }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found
+        .into_iter()
+        .take(MAX_REVIEW_SCREENSHOTS)
+        .map(|(_, p)| p)
+        .collect()
+}
+
 fn which_on_path(program: &str) -> bool {
     if program.contains('/') {
         return Path::new(program).is_file();
@@ -2378,6 +2420,7 @@ async fn run_triage(
         settings_path: Some(&settings_path),
         network_allowed: false,
         codex_mcp: None,
+        images: &[],
     };
     let brief_text = brief::build_triage_brief(task, question, options);
     let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
@@ -2732,14 +2775,32 @@ async fn run_review(
     brief_text.push_str("\n## Implementer\n\n");
     brief_text.push_str(implementer_note);
     brief_text.push_str("\n\nCriteria marked \"Checked by review\" have no command behind them: check them from the diff and the repository yourself.\n");
+    let evidence = task.variant().review_evidence;
     brief_text.push_str("\n## Verify results\n\n");
     for v in verify_results {
         brief_text.push_str(&format!(
             "- `{}` -> exit {:?}\n```\n{}\n```\n",
             v.command,
             v.code,
-            tail_chars(v.tail.trim(), 800)
+            tail_chars(v.tail.trim(), if evidence { 3000 } else { 800 })
         ));
+    }
+    let images = if evidence {
+        let since = task
+            .attempts
+            .iter()
+            .find(|a| a.n == attempt_n && a.stage == Stage::Implement)
+            .map_or(0, |a| a.started_at);
+        attempt_screenshots(worktree, since)
+    } else {
+        Vec::new()
+    };
+    if !images.is_empty() {
+        brief_text.push_str("\n## Screenshots\n\nSaved by this attempt. Open each one and check it against the criteria it is meant to prove; a screenshot that does not show what a criterion claims is a finding.\n\n");
+        for image in &images {
+            let shown = image.strip_prefix(worktree).unwrap_or(image);
+            brief_text.push_str(&format!("- `{}`\n", shown.display()));
+        }
     }
     brief_text.push_str("\n## Diff\n\n```diff\n");
     brief_text.push_str(&diff);
@@ -2785,6 +2846,7 @@ async fn run_review(
         settings_path: Some(&settings_path),
         network_allowed: false,
         codex_mcp: None,
+        images: &images,
     };
     match run_harness(
         app,
@@ -3140,6 +3202,7 @@ async fn run_plan_stage(
             settings_path: Some(&settings_path),
             network_allowed: false,
             codex_mcp: None,
+            images: &[],
         };
 
         let mut draft: Option<brief::PlanDraft> = None;
@@ -3741,6 +3804,7 @@ async fn run_task_loop(
             settings_path: Some(&settings_path),
             network_allowed,
             codex_mcp: Some((messages::SERVER, &messages_server)),
+            images: &[],
         };
 
         let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
@@ -4722,6 +4786,19 @@ mod tests {
             BlockedDecision::Waiting
         );
         assert_eq!(decide_blocked_question(None), BlockedDecision::Waiting);
+    }
+
+    #[test]
+    fn attempt_screenshots_lists_new_images_under_artifacts_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shots = tmp.path().join("artifacts/ui");
+        std::fs::create_dir_all(&shots).unwrap();
+        std::fs::write(shots.join("after.png"), b"x").unwrap();
+        std::fs::write(shots.join("notes.txt"), b"x").unwrap();
+        std::fs::write(tmp.path().join("root.png"), b"x").unwrap();
+        let found = attempt_screenshots(tmp.path(), 0);
+        assert_eq!(found, vec![shots.join("after.png")]);
+        assert!(attempt_screenshots(tmp.path(), i64::MAX).is_empty());
     }
 
     #[test]

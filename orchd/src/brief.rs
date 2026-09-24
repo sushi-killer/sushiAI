@@ -297,7 +297,7 @@ pub fn parse_plan(text: &str) -> Option<PlanDraft> {
     serde_json::from_str(&body).ok()
 }
 
-const TRIAGE_INSTRUCTIONS: &str = "You are triaging a question this task's own agent could not answer, on the owner's behalf. Answer only if the repository, the task, or earlier owner decisions already settle it. Otherwise escalate, and sharpen the question into one precise question with 2-4 concrete options a person can pick from.";
+const TRIAGE_INSTRUCTIONS: &str = "You are triaging a question this task's own agent could not answer, on the owner's behalf. Answer only if the repository, the task, or earlier owner decisions already settle it. Otherwise escalate, and sharpen the question into one precise question with 2-4 concrete options a person can pick from.\n\nWhen the question is that attempts keep failing: read the last failure. If it is fixable, answer `continue - ` followed by exactly what to fix; if a review finding is wrong (it contradicts the code or the repository), answer `continue - ` and say which finding to disregard and why. Escalate when the task itself looks wrong or the same failure keeps coming back.";
 
 const TRIAGE_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-triage\n{\"action\":\"answer\"|\"escalate\",\"answer\":\"...\",\"question\":\"...\",\"options\":[],\"reason\":\"...\"}\n```\n";
 
@@ -536,6 +536,7 @@ mod tests {
             worktree: "/repo-task".into(),
             branch: "task/add-a-button".into(),
             base_sha: "abc123".into(),
+            base_ref: None,
             status: TaskStatus::Running,
             tier: Tier::Standard,
             question: None,

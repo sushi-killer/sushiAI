@@ -26,3 +26,9 @@
   writes inside the task's worktree, and the network is open by default.
 - A verify result is no longer reused after the agent edits a file it
   created: untracked files' contents now count toward the cache key.
+- When a task's base branch moves ahead while an agent works, orchd carries
+  the work onto it before verify, so review and verify see the tree that
+  would land. Conflicts come back to the agent to resolve.
+- "Attempts keep failing" is answered by the orchestrator first (at most
+  twice per task): it can say what to fix or that a review finding is wrong,
+  and the owner hears only what it cannot settle.

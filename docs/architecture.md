@@ -100,7 +100,7 @@ flowchart TD
   split["Verify entries that are not shell commands<br/>become review criteria"]
   tier["Tier<br/>Jev: mechanical / standard / hard"]
   impl["Implement<br/>route = tiers[tier]; resume session on retry"]
-  rebase["Rebase onto moved base<br/>conflicts go back to the agent"]:::planned
+  rebase["Carry onto moved base<br/>conflicts go back to the agent"]
   verify["Verify<br/>task.verify in the worktree<br/>cached by diff + untracked contents"]
   protect["Protected paths<br/>owner approves"]
   review["Review<br/>hard-tier route, sees diff, verify tails,<br/>implementer report"]
@@ -108,7 +108,7 @@ flowchart TD
   done([done])
   fail["Failure<br/>signature dedup, maybe escalate tier"]
   budget{"Budget left?"}
-  triage["Orchestrator triages<br/>continue / reject finding / stop"]:::planned
+  triage["Orchestrator triages, max 2 per task<br/>continue / reject finding / escalate"]
   ownerQ(["Owner question"])
 
   plan --> split --> tier --> impl --> rebase --> verify
@@ -120,7 +120,7 @@ flowchart TD
   fail --> budget
   budget -->|yes| impl
   budget -->|no| triage --> ownerQ
-  triage -.->|continue| impl
+  triage -->|continue| impl
 
   classDef planned stroke-dasharray: 5 5
 ```
@@ -182,10 +182,8 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  a["Rebase step before verify"]:::planned
-  b["Exhausted-attempts question<br/>triaged by the orchestrator"]:::planned
   c["Parallel tasks on one feature base<br/>(task.create base + merge order)"]:::planned
   d["Base-branch field in the new-task form"]:::planned
-  a --> c
+  c --> d
   classDef planned stroke-dasharray: 5 5
 ```

@@ -154,6 +154,173 @@ pub fn create_worktree(
     })
 }
 
+/// The local branch `rev` names (for `HEAD`, the checked-out branch), or
+/// `None` for a sha or a detached checkout.
+pub fn branch_of(repo_root: &Path, rev: &str) -> Option<String> {
+    if rev == "HEAD" {
+        return run(repo_root, &["symbolic-ref", "--short", "-q", "HEAD"])
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+    }
+    run(
+        repo_root,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{rev}"),
+        ],
+    )
+    .ok()
+    .map(|_| rev.to_string())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Rebase {
+    Unchanged,
+    Moved {
+        new_sha: String,
+    },
+    /// The worktree now sits on `new_sha` with conflicts in `files`.
+    Conflicts {
+        new_sha: String,
+        files: Vec<String>,
+    },
+    /// Left as it was, on purpose: `reason` says why.
+    Skipped {
+        reason: String,
+    },
+}
+
+pub fn wip_ref(task_id: &str) -> String {
+    format!("refs/orchd/wip/{task_id}")
+}
+
+/// Carries the agent's uncommitted work from `base_sha` onto wherever
+/// `base_ref` points now. The work is first saved as a commit kept at
+/// [`wip_ref`], the branch moves to the new base, and the work is applied
+/// back uncommitted; conflicts are left for the agent. Anything that would
+/// lose work is skipped instead: commits of the agent's own on the branch,
+/// a rewritten base, or ignored local files the new base starts tracking.
+/// A failure midway restores the worktree exactly as it was.
+pub fn carry_onto_moved_base(
+    worktree: &Path,
+    base_ref: &str,
+    base_sha: &str,
+    task_id: &str,
+) -> Result<Rebase, GitError> {
+    let skipped = |reason: &str| {
+        Ok(Rebase::Skipped {
+            reason: reason.to_string(),
+        })
+    };
+    let new_sha = run(
+        worktree,
+        &["rev-parse", "--verify", &format!("{base_ref}^{{commit}}")],
+    )?
+    .trim()
+    .to_string();
+    if new_sha == base_sha {
+        return Ok(Rebase::Unchanged);
+    }
+    let head = run(worktree, &["rev-parse", "HEAD"])?.trim().to_string();
+    if head != base_sha {
+        return skipped("the task branch has commits of its own");
+    }
+    if run(
+        worktree,
+        &["merge-base", "--is-ancestor", base_sha, &new_sha],
+    )
+    .is_err()
+    {
+        return skipped("the base was rewritten, not moved ahead");
+    }
+    let tracked_there: std::collections::HashSet<String> =
+        run(worktree, &["ls-tree", "-r", "--name-only", &new_sha])?
+            .lines()
+            .map(str::to_string)
+            .collect();
+    let clobbered: Vec<String> = run(
+        worktree,
+        &["ls-files", "-o", "-i", "--exclude-standard", "--directory"],
+    )?
+    .lines()
+    .filter(|f| tracked_there.contains(*f))
+    .map(str::to_string)
+    .collect();
+    if !clobbered.is_empty() {
+        return skipped(&format!(
+            "the new base tracks ignored local files: {}",
+            clobbered.join(", ")
+        ));
+    }
+    let dirty = !run(worktree, &["status", "--porcelain"])?.trim().is_empty();
+    if !dirty {
+        run(worktree, &["reset", "-q", "--hard", &new_sha])?;
+        return Ok(Rebase::Moved { new_sha });
+    }
+    let quiet = [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "user.name=orchd",
+        "-c",
+        "user.email=orchd@localhost",
+        "-c",
+        "commit.gpgsign=false",
+    ];
+    run(worktree, &[&quiet[..], &["add", "-A"]].concat())?;
+    run(
+        worktree,
+        &[
+            &quiet[..],
+            &["commit", "-q", "--no-verify", "-m", "orchd wip"],
+        ]
+        .concat(),
+    )?;
+    let wip = run(worktree, &["rev-parse", "HEAD"])?.trim().to_string();
+    run(worktree, &["update-ref", &wip_ref(task_id), &wip])?;
+    let apply = || -> Result<Rebase, GitError> {
+        run(worktree, &["reset", "-q", "--hard", &new_sha])?;
+        let picked = run(
+            worktree,
+            &[&quiet[..], &["cherry-pick", "--no-commit", &wip]].concat(),
+        );
+        let files: Vec<String> = run(worktree, &["diff", "--name-only", "--diff-filter=U"])?
+            .lines()
+            .map(str::to_string)
+            .collect();
+        if let (Err(e), true) = (picked, files.is_empty()) {
+            return Err(e);
+        }
+        let _ = run(worktree, &["cherry-pick", "--quit"]);
+        run(worktree, &["reset", "-q"])?;
+        Ok(if files.is_empty() {
+            Rebase::Moved {
+                new_sha: new_sha.clone(),
+            }
+        } else {
+            Rebase::Conflicts {
+                new_sha: new_sha.clone(),
+                files,
+            }
+        })
+    };
+    apply().inspect_err(|_| {
+        // Back to the agent's uncommitted work on the old base.
+        let _ = run(worktree, &["cherry-pick", "--quit"]);
+        let _ = run(worktree, &["reset", "-q", "--hard", &wip]);
+        let _ = run(worktree, &["reset", "-q", "--soft", base_sha]);
+        let _ = run(worktree, &["reset", "-q"]);
+    })
+}
+
+/// Drops the saved work of a task that no longer needs it.
+pub fn delete_wip_ref(worktree: &Path, task_id: &str) {
+    let _ = run(worktree, &["update-ref", "-d", &wip_ref(task_id)]);
+}
+
 /// `git check-ignore` reports true only when the main checkout actually
 /// ignores the path (its own `.gitignore`, global excludes, ...) -- being
 /// merely untracked isn't enough, or an ordinary WIP file someone forgot to
@@ -393,6 +560,151 @@ mod tests {
         let created = create_worktree(&repo_root, "task/on-feature", &wt_path, "feature").unwrap();
         assert_eq!(created.base_sha, feature_sha);
         assert!(wt_path.join("feature.txt").exists());
+    }
+
+    #[test]
+    fn carry_onto_moved_base_moves_clean_work_and_marks_conflicts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        init_repo(&repo_root);
+        let git = |dir: &Path, args: &[&str]| {
+            let out = StdCommand::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let base = branch_of(&repo_root, "HEAD").unwrap();
+        let wt = worktree_path(&repo_root, "task/carry");
+        let created = create_worktree(&repo_root, "task/carry", &wt, "HEAD").unwrap();
+
+        // The agent edits README and adds a file; meanwhile the base gains
+        // an unrelated file.
+        std::fs::write(wt.join("README.md"), "hello from the task\n").unwrap();
+        std::fs::write(wt.join("new.txt"), "new\n").unwrap();
+        std::fs::write(repo_root.join("other.txt"), "base\n").unwrap();
+        git(&repo_root, &["add", "."]);
+        git(&repo_root, &["commit", "-q", "-m", "base moves"]);
+        let moved = git(&repo_root, &["rev-parse", "HEAD"]);
+
+        let r = carry_onto_moved_base(&wt, &base, &created.base_sha, "t1").unwrap();
+        assert_eq!(
+            r,
+            Rebase::Moved {
+                new_sha: moved.clone()
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("README.md")).unwrap(),
+            "hello from the task\n"
+        );
+        assert!(wt.join("new.txt").exists() && wt.join("other.txt").exists());
+        assert!(
+            !git(&wt, &["status", "--porcelain"]).is_empty(),
+            "work stays uncommitted"
+        );
+        assert_eq!(
+            carry_onto_moved_base(&wt, &base, &moved, "t1").unwrap(),
+            Rebase::Unchanged
+        );
+
+        // Now the base edits the same line of README.
+        std::fs::write(repo_root.join("README.md"), "hello from the base\n").unwrap();
+        git(&repo_root, &["commit", "-qam", "base edits README"]);
+        match carry_onto_moved_base(&wt, &base, &moved, "t1").unwrap() {
+            Rebase::Conflicts { files, .. } => assert_eq!(files, vec!["README.md"]),
+            other => panic!("expected conflicts, got {other:?}"),
+        }
+        assert!(std::fs::read_to_string(wt.join("README.md"))
+            .unwrap()
+            .contains("<<<<<<<"));
+        assert!(!git(&wt, &["rev-parse", "refs/orchd/wip/t1"]).is_empty());
+    }
+
+    #[test]
+    fn carry_onto_moved_base_skips_what_would_lose_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        init_repo(&repo_root);
+        let git = |dir: &Path, args: &[&str]| {
+            let out = StdCommand::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let base = branch_of(&repo_root, "HEAD").unwrap();
+        let first = git(&repo_root, &["rev-parse", "HEAD"]);
+        let wt = worktree_path(&repo_root, "task/skip");
+        let created = create_worktree(&repo_root, "task/skip", &wt, "HEAD").unwrap();
+        std::fs::write(repo_root.join("b.txt"), "b\n").unwrap();
+        git(&repo_root, &["add", "."]);
+        git(&repo_root, &["commit", "-q", "-m", "base moves"]);
+
+        // An ignored local file the new base would start tracking.
+        std::fs::write(wt.join(".gitignore"), "secret.env\n").unwrap();
+        std::fs::write(wt.join("secret.env"), "mine\n").unwrap();
+        std::fs::write(repo_root.join("secret.env"), "template\n").unwrap();
+        git(&repo_root, &["add", "secret.env"]);
+        git(&repo_root, &["commit", "-q", "-m", "track secret.env"]);
+        let r = carry_onto_moved_base(&wt, &base, &created.base_sha, "t2").unwrap();
+        assert!(
+            matches!(r, Rebase::Skipped { ref reason } if reason.contains("secret.env")),
+            "{r:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("secret.env")).unwrap(),
+            "mine\n"
+        );
+        std::fs::remove_file(wt.join("secret.env")).unwrap();
+        std::fs::remove_file(wt.join(".gitignore")).unwrap();
+
+        // Commits of the agent's own on the task branch.
+        std::fs::write(wt.join("a.txt"), "a\n").unwrap();
+        git(&wt, &["add", "."]);
+        git(
+            &wt,
+            &[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "agent",
+            ],
+        );
+        let r = carry_onto_moved_base(&wt, &base, &created.base_sha, "t2").unwrap();
+        assert!(matches!(r, Rebase::Skipped { .. }), "{r:?}");
+        assert!(wt.join("a.txt").exists());
+
+        // A base rewritten so the task's base is no longer in its history.
+        git(&wt, &["reset", "-q", "--hard", &created.base_sha]);
+        git(&repo_root, &["reset", "-q", "--hard", &first]);
+        git(
+            &repo_root,
+            &["commit", "-q", "--amend", "-m", "rewritten root"],
+        );
+        let r = carry_onto_moved_base(&wt, &base, &created.base_sha, "t2").unwrap();
+        assert!(
+            matches!(r, Rebase::Skipped { ref reason } if reason.contains("rewritten")),
+            "{r:?}"
+        );
     }
 
     #[test]

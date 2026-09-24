@@ -242,6 +242,7 @@ mod tests {
             worktree: "/repo-task".into(),
             branch: "task/do-thing".into(),
             base_sha: "deadbeef".into(),
+            base_ref: None,
             status,
             tier: Tier::Standard,
             question: None,

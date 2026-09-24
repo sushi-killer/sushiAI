@@ -116,6 +116,8 @@ export type Task = {
   worktree: string;
   branch: string;
   baseSha: string;
+  /** Branch the task started from; its work is carried onto it when it moves. */
+  baseRef?: string;
   status: TaskStatus;
   tier: Tier;
   question?: Question;

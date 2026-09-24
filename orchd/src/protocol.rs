@@ -250,6 +250,7 @@ mod tests {
             worktree: "/r-t".into(),
             branch: "task/t".into(),
             base_sha: "abc".into(),
+            base_ref: None,
             status: crate::model::TaskStatus::Running,
             tier: crate::model::Tier::Standard,
             question: None,

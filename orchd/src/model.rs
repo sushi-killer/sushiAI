@@ -214,6 +214,12 @@ pub struct Task {
     pub worktree: String,
     pub branch: String,
     pub base_sha: String,
+    /// The branch the task was started from (`base`, or the repo's checked-out
+    /// branch). When it moves ahead, the task's work is carried onto it before
+    /// verify; `None` (a detached checkout, or a task from before this field)
+    /// never rebases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
     pub status: TaskStatus,
     pub tier: Tier,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -452,6 +458,7 @@ mod tests {
             worktree: "/repo-task".into(),
             branch: "task/x".into(),
             base_sha: "abc".into(),
+            base_ref: None,
             status: TaskStatus::Drafting,
             tier: Tier::Standard,
             question: None,
@@ -492,6 +499,7 @@ mod tests {
             worktree: "/repo-task".into(),
             branch: "task/x".into(),
             base_sha: "abc".into(),
+            base_ref: None,
             status: TaskStatus::Queued,
             tier: Tier::Standard,
             question: None,
@@ -521,6 +529,7 @@ mod tests {
             worktree: "/repo-task".into(),
             branch: "task/x".into(),
             base_sha: "abc".into(),
+            base_ref: None,
             status: TaskStatus::Done,
             tier: Tier::Standard,
             question: None,

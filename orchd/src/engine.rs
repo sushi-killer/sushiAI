@@ -123,11 +123,16 @@ pub enum FailureDecision {
 
 /// spec step 8: same signature as previous -> tier up; same signature 3x in
 /// a row, or attempts exhausted -> waiting.
+const EXHAUSTED_QUESTION: &str = "Attempts keep failing";
+/// The decision line an orchestrator answer to that question leaves
+/// (see `orchestrator_answer_line`).
+const EXHAUSTED_ANSWER_PREFIX: &str = "Orchestrator: Attempts keep failing";
+
 pub fn decide_after_failure(input: &FailureDecisionInput) -> FailureDecision {
     if input.consecutive_same >= 3 || input.attempt_n >= input.max_attempts {
         return FailureDecision::Waiting {
             question: format!(
-                "Attempts keep failing with {}: continue, change approach, or stop?",
+                "{EXHAUSTED_QUESTION} with {}: continue, change approach, or stop?",
                 input.signature
             ),
         };
@@ -822,15 +827,16 @@ impl App {
             let branch = branch_opt
                 .unwrap_or_else(|| git::unique_branch_name(&repo_root, &title_for_branch));
             let wt_path = git::worktree_path(&repo_root, &branch);
+            let base_ref = git::branch_of(&repo_root, &base);
             let created = git::create_worktree(&repo_root, &branch, &wt_path, &base)?;
             git::bootstrap_worktree(&repo_root, &created.path)
                 .map_err(|e| git::GitError(e.to_string()))?;
-            Ok::<_, git::GitError>((repo_root, branch, created))
+            Ok::<_, git::GitError>((repo_root, branch, created, base_ref))
         })
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
-        let (repo_root, branch, created) = created;
+        let (repo_root, branch, created, base_ref) = created;
 
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_ms();
@@ -845,6 +851,7 @@ impl App {
             worktree: created.path.to_string_lossy().to_string(),
             branch,
             base_sha: created.base_sha,
+            base_ref,
             status: if request_text.is_some() {
                 TaskStatus::Drafting
             } else {
@@ -1564,7 +1571,10 @@ fn untracked_fingerprint(path: &Path) -> String {
 fn diff_hash(worktree: &Path, base: &str) -> String {
     let diff = git::diff_full(worktree, base, usize::MAX).unwrap_or_default();
     let untracked = git::status_porcelain(worktree).unwrap_or_default();
-    let mut input = diff;
+    // The base is part of the key: after the work is carried onto a moved
+    // base, `git diff` of the task's own files can be byte-identical while
+    // the tree that would land is not.
+    let mut input = format!("{base}\u{0}{diff}");
     input.push_str("\u{0}untracked\u{0}");
     // Contents too: `git diff` never shows an untracked file, so hashing
     // only its name reused a stale failing result after the agent fixed a
@@ -1661,6 +1671,10 @@ fn attempt_cost(earlier: &[Attempt], attempt: &Attempt, session_total: f64) -> f
         .filter_map(|a| a.cost_usd)
         .sum();
     (session_total - already).max(0.0)
+}
+
+fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(8)]
 }
 
 /// Each stream's own tail: concatenated, a noisy stderr (cargo's compile
@@ -2029,7 +2043,8 @@ enum LoopSignal {
 }
 
 /// Record a failure, apply the tier/waiting rules, and -- when now waiting
-/// -- park for the owner's answer, extending the attempt budget by 2 on any
+/// -- park for an answer (the orchestrator's, within its bound, else the
+/// owner's), extending the attempt budget by 2 on any
 /// answer (spec step 9; every waiting state `advance_after_failure` reaches
 /// is the "attempts exhausted" kind).
 #[allow(clippy::too_many_arguments)]
@@ -2052,17 +2067,45 @@ async fn fail_and_continue(
         app.broadcast_task(task);
         return LoopSignal::Continue { answered: false };
     }
-    // Not persisted here: `wait_for_answer` does it itself, after the
-    // one-shot is installed (see its doc comment). Never triaged (P1-2):
-    // this is the "attempts keep failing"/"exhausted" escalation, and
-    // spending more of the owner's budget is the owner's call, not the
-    // orchestrator's.
-    match wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await {
+    // Not persisted here: the wait does it itself, after the one-shot is
+    // installed (see `wait_for_answer`).
+    match wait_for_exhausted_answer(app, task_id, task, idx, pending_answer, cancel, permit).await {
         Some(_answer) => {
             *attempt_budget += 2;
             LoopSignal::Continue { answered: true }
         }
         None => LoopSignal::Stop,
+    }
+}
+
+/// How many times the orchestrator may extend a task's budget on its own
+/// before "attempts keep failing" goes to the owner: enough to push past a
+/// fixable failure or a wrong review finding, not enough to burn the
+/// budget in a loop.
+const MAX_ORCHESTRATOR_CONTINUES: usize = 2;
+
+/// The "attempts keep failing" question: the orchestrator triages it first
+/// (it sees the last failure, e.g. the review findings, and can say what to
+/// fix or that a finding is wrong), up to [`MAX_ORCHESTRATOR_CONTINUES`]
+/// times per task; after that, or with auto-answer off, only the owner.
+async fn wait_for_exhausted_answer(
+    app: &Arc<App>,
+    task_id: &str,
+    task: &mut Task,
+    idx: usize,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    cancel: &CancelToken,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Option<String> {
+    let continues = task
+        .decisions
+        .iter()
+        .filter(|d| d.starts_with(EXHAUSTED_ANSWER_PREFIX))
+        .count();
+    if continues < MAX_ORCHESTRATOR_CONTINUES {
+        wait_for_answer_with_triage(app, task_id, task, idx, pending_answer, cancel, permit).await
+    } else {
+        wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await
     }
 }
 
@@ -2139,7 +2182,7 @@ fn orchestrator_escalate_line(reason: &str) -> String {
 /// `false` for an escalation line, an owner/agent line, or anything else.
 /// Used to cap triage to one *answer* in a row (P1-2).
 fn is_orchestrator_answer_decision(line: &str) -> bool {
-    line.starts_with("Orchestrator: ") && !line.starts_with("Orchestrator: escalated (")
+    line.starts_with("Orchestrator: ") && line.contains(" -> ")
 }
 
 /// A completed triage session: the decision, plus whatever it cost (the
@@ -2174,11 +2217,13 @@ async fn run_triage(
     // question goes straight to the owner. Without this, a recurring
     // blocked question (or a planner that keeps re-asking) could let
     // triage answer every single time with no bound at all.
-    if task
-        .decisions
-        .last()
-        .map(|d| is_orchestrator_answer_decision(d))
-        .unwrap_or(false)
+    // "Attempts keep failing" has its own bound (MAX_ORCHESTRATOR_CONTINUES).
+    if !question.starts_with(EXHAUSTED_QUESTION)
+        && task
+            .decisions
+            .last()
+            .map(|d| is_orchestrator_answer_decision(d))
+            .unwrap_or(false)
     {
         return None;
     }
@@ -2259,11 +2304,10 @@ async fn run_triage(
 }
 
 /// Wraps [`wait_for_answer`] with one shot at orchestrator triage first --
-/// only ever called for the agent's own blocked question (P1-2: never for
-/// the `advance_after_failure` "attempts keep failing"/"exhausted"
-/// escalation, which is the owner's call to spend more budget on, not the
-/// orchestrator's; `run_triage` separately caps triage to one *answer* in a
-/// row for the same reason). `task.question` must already be set by the
+/// for the agent's own blocked question, and for "attempts keep failing"
+/// through [`wait_for_exhausted_answer`], which bounds how often the
+/// orchestrator may extend the budget. `run_triage` caps any other question
+/// to one *answer* in a row. `task.question` must already be set by the
 /// caller, exactly as for a plain `wait_for_answer` -- an escalation only
 /// ever sharpens it, it never invents a question from nothing. Never use
 /// this for the protected-path approval question: only the owner may
@@ -3693,15 +3737,15 @@ async fn run_task_loop(
             record_failure(&mut task, idx, FailureKind::Blocked, question_text.clone());
             let should_continue = advance_after_failure(&mut task, attempt_budget);
             if !should_continue {
-                // Never triaged (P1-2): same "attempts keep failing"
-                // escalation as `fail_and_continue`'s, just inlined here
-                // because a should_continue==true blocked report falls
-                // through to `classify_answerable` below instead of
-                // looping immediately.
-                match wait_for_answer(
+                // Same "attempts keep failing" escalation as
+                // `fail_and_continue`'s, inlined because a
+                // should_continue==true blocked report falls through to
+                // `classify_answerable` below instead of looping.
+                match wait_for_exhausted_answer(
                     &app,
                     &task_id,
                     &mut task,
+                    idx,
                     &pending_answer,
                     &cancel,
                     &mut permit,
@@ -3819,6 +3863,112 @@ async fn run_task_loop(
             drop(permit);
             app.finish_task_loop(&task_id);
             return;
+        }
+
+        // The base branch may have moved while the agent worked (another
+        // task merged, the owner committed): carry the work onto it so verify
+        // and review judge the tree that would actually land. Conflicts go
+        // back to the agent as a failure; it resolves them, not this code.
+        let mut base_sha = base_sha;
+        let mut changed = changed;
+        if let Some(base_ref) = task.base_ref.clone() {
+            let (wt, from, tid, r) = (
+                worktree.clone(),
+                base_sha.clone(),
+                task_id.clone(),
+                base_ref.clone(),
+            );
+            let carried = tokio::task::spawn_blocking(move || {
+                git::carry_onto_moved_base(&wt, &r, &from, &tid)
+            })
+            .await
+            .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
+            match carried {
+                Ok(git::Rebase::Unchanged) => {}
+                Ok(git::Rebase::Moved { new_sha }) => {
+                    task.decisions.push(format!(
+                        "Rebase: carried the work onto {base_ref} at {}",
+                        short_sha(&new_sha)
+                    ));
+                    task.base_sha = new_sha.clone();
+                    base_sha = new_sha;
+                    let (wt, b) = (worktree.clone(), base_sha.clone());
+                    changed = tokio::task::spawn_blocking(move || {
+                        git::changed_files(&wt, &b).unwrap_or_default()
+                    })
+                    .await
+                    .unwrap_or_default();
+                    task.attempts[idx].changed_files = changed.clone();
+                    if changed.is_empty() {
+                        // The base already holds this work: nothing left to commit.
+                        task.decisions.push(format!(
+                            "Rebase: {base_ref} already contains this work; nothing to commit"
+                        ));
+                        task.attempts[idx].status = AttemptStatus::Passed;
+                        task.attempts[idx].ended_at = Some(now_ms());
+                        task.status = TaskStatus::Done;
+                        task.updated_at = now_ms();
+                        let _ = app.store.save_task(&task);
+                        app.broadcast_task(&task);
+                        drop(permit);
+                        app.finish_task_loop(&task_id);
+                        return;
+                    }
+                }
+                Ok(git::Rebase::Skipped { reason }) => {
+                    let note = format!("Rebase: not carried onto {base_ref} ({reason})");
+                    if !task.decisions.contains(&note) {
+                        task.decisions.push(note);
+                    }
+                }
+                Ok(git::Rebase::Conflicts { new_sha, files }) => {
+                    task.base_sha = new_sha.clone();
+                    let detail = format!(
+                        "{base_ref} moved ahead to {}, and your changes were carried onto it. \
+                         These files conflict: {}. Text files carry <<<<<<< / >>>>>>> markers; \
+                         for a binary or deleted file, your version is `git show {}:<path>`. \
+                         Resolve each one so both the base's change and yours survive, then finish the task.",
+                        short_sha(&new_sha),
+                        files.join(", "),
+                        git::wip_ref(&task_id)
+                    );
+                    match fail_and_continue(
+                        &app,
+                        &task_id,
+                        &mut task,
+                        idx,
+                        FailureKind::Verify,
+                        detail,
+                        &mut attempt_budget,
+                        &pending_answer,
+                        &cancel,
+                        &mut permit,
+                    )
+                    .await
+                    {
+                        LoopSignal::Continue { answered } => {
+                            just_answered = answered;
+                            drop(permit);
+                            continue;
+                        }
+                        LoopSignal::Stop => {
+                            drop(permit);
+                            app.finish_task_loop(&task_id);
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    // carry_onto_moved_base restored the worktree, so the old
+                    // base is still what the diff is against.
+                    let note = format!(
+                        "Rebase: could not carry the work onto {base_ref} ({e}); verifying on the old base"
+                    );
+                    if !task.decisions.contains(&note) {
+                        task.decisions.push(note);
+                    }
+                }
+            }
         }
 
         let verify_results = run_verify_cached(
@@ -4056,6 +4206,7 @@ async fn run_task_loop(
             tokio::task::spawn_blocking(move || git::commit(&wt4, &title, &tid, attempt_n)).await;
         match commit_res {
             Ok(Ok(())) => {
+                git::delete_wip_ref(&worktree, &task_id);
                 task.attempts[idx].status = AttemptStatus::Passed;
                 task.attempts[idx].ended_at = Some(now_ms());
                 task.status = TaskStatus::Done;
@@ -4534,6 +4685,23 @@ mod tests {
         let before = diff_hash(tmp.path(), "HEAD");
         std::fs::write(tmp.path().join("new.rs"), "fixed").unwrap();
         assert_ne!(before, diff_hash(tmp.path(), "HEAD"));
+        // A moved base is a different tree to verify, even when the task's
+        // own diff reads the same.
+        git(&[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "base moves",
+        ]);
+        assert_ne!(
+            diff_hash(tmp.path(), "HEAD~1"),
+            diff_hash(tmp.path(), "HEAD")
+        );
         // Never followed: reading /dev/zero through it would never finish.
         std::os::unix::fs::symlink("/dev/zero", tmp.path().join("zero")).unwrap();
         diff_hash(tmp.path(), "HEAD");
@@ -4579,6 +4747,7 @@ mod tests {
             worktree: "/repo-task".into(),
             branch: "task/do-thing".into(),
             base_sha: "deadbeef".into(),
+            base_ref: None,
             status,
             tier: Tier::Standard,
             question: None,

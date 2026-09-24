@@ -338,6 +338,7 @@ mod tests {
             worktree: "/wt".into(),
             branch: "b".into(),
             base_sha: "s".into(),
+            base_ref: None,
             status: TaskStatus::Running,
             tier: Tier::Standard,
             question: None,

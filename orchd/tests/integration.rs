@@ -1610,6 +1610,123 @@ fn triage_answer_lets_the_task_continue_without_the_owner() {
     let _ = std::fs::remove_dir_all(worktree);
 }
 
+#[test]
+fn a_task_is_carried_onto_its_base_when_the_base_moves_mid_attempt() {
+    // The fake agent commits to the base branch of the main checkout while
+    // it works, as another merged task would.
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        "#!/bin/sh\ncat > /dev/null\nroot=\"$(git rev-parse --git-common-dir)/..\"\ngit -C \"$root\" -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m 'base moves'\necho changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n",
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Carry case",
+            "goal": "Make a trivial change",
+            "criteria": [],
+            "verify": ["test -f CHANGED_MARKER.txt"],
+        }),
+    );
+    assert!(task["baseRef"].is_string(), "task JSON: {task}");
+    let task_id = task["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": task_id}));
+
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(15));
+    assert_eq!(settled["status"], "done", "task JSON: {settled}");
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    assert_eq!(settled["baseSha"], head.as_str(), "task JSON: {settled}");
+    assert!(
+        settled["decisions"]
+            .to_string()
+            .contains("carried the work onto"),
+        "task JSON: {settled}"
+    );
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+/// Fails verify until its brief carries the orchestrator's instruction;
+/// as the orchestrator it answers the exhausted question with that fix.
+const EXHAUSTED_TRIAGE_SCRIPT: &str = r#"#!/bin/sh
+input="$(cat)"
+case "$input" in
+  *sushi-triage*)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-triage"}'
+    json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-triage\n{\"action\":\"answer\",\"answer\":\"continue - create fixed.txt\",\"reason\":\"the verify only checks that file\"}\n```"}'
+    printf '%s\n' "$json"
+    ;;
+  *)
+    echo "changed" > CHANGED_MARKER.txt
+    case "$input" in *"continue - create fixed.txt"*) echo ok > fixed.txt ;; esac
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+    json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}'
+    printf '%s\n' "$json"
+    ;;
+esac
+"#;
+
+#[test]
+fn the_orchestrator_answers_attempts_keep_failing_and_the_task_passes() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        EXHAUSTED_TRIAGE_SCRIPT,
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    settings["orchestrator"] = serde_json::json!("claude-sonnet");
+    settings["autoAnswer"] = serde_json::json!(true);
+    settings["maxAttempts"] = serde_json::json!(1);
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Exhausted case",
+            "goal": "Make verify pass",
+            "criteria": [],
+            "verify": ["test -f fixed.txt"],
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": task_id}));
+
+    let settled = poll_until(&daemon, &task_id, Duration::from_secs(20), |s| {
+        s == "done" || s == "waiting" || s == "failed" || s == "stopped"
+    });
+    assert_eq!(settled["status"], "done", "task JSON: {settled}");
+    let decisions = settled["decisions"].to_string();
+    assert!(
+        decisions.contains("Orchestrator: Attempts keep failing")
+            && decisions.contains("continue - create fixed.txt"),
+        "{decisions}"
+    );
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
 /// Always reports `blocked`; triage always escalates with a sharpened
 /// question and its own options.
 const TRIAGE_ESCALATES_WITH_SHARPENED_QUESTION_SCRIPT: &str = r#"#!/bin/sh

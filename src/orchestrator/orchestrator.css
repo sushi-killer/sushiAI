@@ -254,6 +254,84 @@
   display: none;
 }
 
+/* The repo's chat sessions above the transcript: the same row look as
+ * `.orch-nav-row`, capped so a long history scrolls instead of pushing the
+ * transcript down. */
+.orch-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 148px;
+  padding-bottom: var(--gap-sm);
+  border-bottom: 1px solid var(--line);
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.orch-session-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+}
+
+.orch-session-row:hover {
+  background: var(--bg-hover);
+}
+
+.orch-session-row.selected {
+  border-color: var(--line-selected);
+  background: var(--bg-selected);
+}
+
+.orch-session-open {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  gap: var(--gap-sm);
+  min-width: 0;
+  padding: 6px var(--gap-sm);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  text-align: left;
+}
+
+.orch-session-row:hover .orch-session-open,
+.orch-session-row.selected .orch-session-open {
+  color: var(--text);
+}
+
+.orch-session-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.orch-session-title.untitled {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.orch-session-open .status-dot {
+  margin-left: auto;
+}
+
+.orch-session-clear {
+  margin-right: 2px;
+}
+
+/* While a reply runs; the tooltip says why. */
+.orch-sessions button:disabled {
+  cursor: not-allowed;
+}
+
+.orch-sessions .orch-nav-row:disabled:hover,
+.orch-session-row:has(.orch-session-open:disabled):hover {
+  background: transparent;
+  color: var(--text-muted);
+}
+
 /* Agent-to-agent message threads. Same scroll/gap density as `.orch-detail`
  * beside it, laid out as a list of thread cards rather than one long
  * timeline since each thread is its own independent conversation. */

@@ -166,7 +166,8 @@ export type LogEvent = {
   attempt: number;
   line: string;
 };
-/** The orchestrator agent's conversation for one repo, kept by the daemon. */
+/** One of the orchestrator agent's chat sessions for a repo, kept by the
+ * daemon. `chat.get`/`chat.send` act on the repo's current session. */
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
@@ -175,12 +176,23 @@ export type ChatMessage = {
 };
 export type ChatThread = {
   repo: string;
+  id: string;
+  /** Set from the session's first owner message; absent until then. */
+  title?: string;
   messages: ChatMessage[];
   busy: boolean;
   note?: string;
   error?: string;
 };
-export type ChatEvent = { event: "chat"; thread: ChatThread };
+/** A session as the session list shows it - no message bodies. */
+export type ChatSessionSummary = { id: string; title?: string; busy: boolean };
+export type ChatSessionList = {
+  current: string;
+  sessions: ChatSessionSummary[];
+};
+/** `thread` is the current session, whole; `current`/`sessions` are what
+ * `chat.list` would return at the same moment. */
+export type ChatEvent = { event: "chat"; thread: ChatThread } & ChatSessionList;
 
 /** One agent-to-agent (or agent-to-orchestrator) message, kept by the daemon
  * per repo. `from`/`to` are either a task id or the literal `"orchestrator"`.

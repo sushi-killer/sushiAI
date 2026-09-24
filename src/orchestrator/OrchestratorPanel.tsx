@@ -36,13 +36,27 @@ import {
   type MessageThread,
   type OrchestratorLiveState,
 } from "./helpers";
-import type { Attempt, ChatThread, Message, Settings, Task } from "./types";
+import type {
+  Attempt,
+  ChatSessionList,
+  ChatThread,
+  Message,
+  Settings,
+  Task,
+} from "./types";
 import { ChatTranscript } from "../ChatTranscript";
 import { ChipPicker } from "../ChipPicker";
 import { RichText } from "../agents/AgentsView";
 
+/** Electron wraps a rejected IPC call as "Error invoking remote method
+ * 'orchestrator': Error: <daemon message>"; the owner only needs the last
+ * part. */
 function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(
+    /^Error invoking remote method '[^']*': (Error: )?/,
+    "",
+  );
 }
 
 type DaemonState = "loading" | "ready" | "not-built" | "unavailable";
@@ -274,9 +288,11 @@ function QuestionCard({
   );
 }
 
-/** The orchestrator agent's conversation for this repo. The daemon runs each
- * turn and keeps the thread, so a reply keeps coming and stays readable when
- * the window closes or the app restarts. */
+/** The orchestrator agent's conversations for this repo. The daemon runs each
+ * turn and keeps every session, so a reply keeps coming and stays readable
+ * when the window closes or the app restarts. A live reply pins the current
+ * session: New chat, switching and Clear are disabled meanwhile, and the
+ * daemon's refusal still shows if a click races the reply's first event. */
 function OrchestratorChat({
   cwd,
   hidden,
@@ -292,17 +308,28 @@ function OrchestratorChat({
 }) {
   const [draft, setDraft] = useState("");
   const [thread, setThread] = useState<ChatThread | null>(null);
+  const [list, setList] = useState<ChatSessionList | null>(null);
   const [sendError, setSendError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
-    orchestratorClient
-      .chatGet(cwd)
-      .then((loaded) => !cancelled && setThread(loaded))
+    Promise.all([
+      orchestratorClient.chatGet(cwd),
+      orchestratorClient.chatList(cwd),
+    ])
+      .then(([loaded, sessions]) => {
+        if (cancelled) return;
+        setThread(loaded);
+        setList(sessions);
+      })
       .catch((e) => !cancelled && setSendError(errorText(e)));
     const off = window.bridge?.onOrchestrator((event) => {
-      if (event.event === "chat" && event.thread.repo === cwd)
+      if (event.event === "chat" && event.thread.repo === cwd) {
+        // A refusal ("still answering") is stale once the reply is in.
+        if (!event.thread.busy) setSendError("");
         setThread(event.thread);
+        setList({ current: event.current, sessions: event.sessions });
+      }
     });
     return () => {
       cancelled = true;
@@ -319,7 +346,14 @@ function OrchestratorChat({
       .then(() => setDraft(""))
       .catch((e) => setSendError(errorText(e)));
   }
+  /** New chat, switch and Clear all answer with the now-current session;
+   * the chat event that follows refreshes the session list. */
+  function changeSession(request: Promise<ChatThread>) {
+    setSendError("");
+    request.then(setThread).catch((e) => setSendError(errorText(e)));
+  }
   const error = sendError || thread?.error;
+  const busy = Boolean(thread?.busy);
   // "" means the standard tier's own route - resolved here so the chip can
   // still show a harness icon and a real label instead of a blank default.
   const routeId = settings?.orchestrator || "";
@@ -333,6 +367,67 @@ function OrchestratorChat({
     // Kept mounted behind the other views so a half-typed message and the
     // scroll position survive a look at a task.
     <div className="orch-chat" hidden={hidden}>
+      <div className="orch-sessions" aria-label="Chat sessions">
+        <button
+          className="orch-nav-row"
+          disabled={busy}
+          title={busy ? "Wait for the reply to finish" : undefined}
+          onClick={() => changeSession(orchestratorClient.chatNew(cwd))}
+        >
+          <Plus size={14} /> New chat
+        </button>
+        {/* Newest first, so a new chat lands right under its button. */}
+        {[...(list?.sessions ?? [])].reverse().map((session) => {
+          const current = session.id === list?.current;
+          return (
+            <div
+              key={session.id}
+              className={`orch-session-row ${current ? "selected" : ""}`}
+            >
+              <button
+                className="orch-session-open"
+                aria-current={current || undefined}
+                disabled={busy && !current}
+                title={
+                  busy && !current ? "Wait for the reply to finish" : undefined
+                }
+                onClick={() =>
+                  !current &&
+                  changeSession(orchestratorClient.chatSwitch(cwd, session.id))
+                }
+              >
+                <MessageSquare size={13} />
+                <span
+                  className={`orch-session-title ${session.title ? "" : "untitled"}`}
+                >
+                  {session.title || "New chat"}
+                </span>
+                {session.busy && (
+                  <span
+                    className="status-dot blue pulse"
+                    aria-label="Answering"
+                  />
+                )}
+              </button>
+              {current && (
+                <button
+                  className="icon-button orch-session-clear"
+                  aria-label="Clear chat"
+                  disabled={busy}
+                  title={
+                    busy ? "Wait for the reply to finish" : "Clear this chat"
+                  }
+                  onClick={() =>
+                    changeSession(orchestratorClient.chatClear(cwd))
+                  }
+                >
+                  <Trash2 size={13} />
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
       <ChatTranscript
         messages={thread?.messages}
         busy={thread?.busy}

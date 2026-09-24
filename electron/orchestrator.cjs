@@ -40,6 +40,10 @@ const ALLOWED_METHODS = new Set([
   "chat.get",
   "chat.send",
   "chat.cancel",
+  "chat.list",
+  "chat.new",
+  "chat.switch",
+  "chat.clear",
   "message.list",
 ]);
 

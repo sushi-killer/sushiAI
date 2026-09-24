@@ -195,6 +195,10 @@ test("call() rejects a method outside the protocol allowlist before touching the
     "chat.get",
     "chat.send",
     "chat.cancel",
+    "chat.list",
+    "chat.new",
+    "chat.switch",
+    "chat.clear",
   ])
     assert.equal(ALLOWED_METHODS.has(method), true, method);
   // Agent-to-agent message threads are reachable the same way as tasks/chat.

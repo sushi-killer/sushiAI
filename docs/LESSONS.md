@@ -37,7 +37,7 @@ Rule: give each task a new branch, or omit `branch`.
 - 2026-09-24 An unparsed review verdict counted as PASS → no verdict asks the owner. `a_review_without_a_verdict_waits_for_the_owner_instead_of_passing`.
 - 2026-09-24 Chat harness outlived daemon shutdown → drain every live-child map. `shutdown_kills_a_live_orchestrator_chat_turn_s_child`.
 - 2026-09-24 Orchestrator chat edited code instead of filing tasks → enforce a role with tools, not prompt. `orchd/src/chat.rs`.
-- 2026-09-24 Unset `HERDR_SOCKET_PATH` photographed the owner's real Herdr → missing path. `ui-evidence` template.
+- 2026-09-24 Unset `HERDR_SOCKET_PATH`/inherited `BRIDGE_DEV_URL` photographed the owner's Herdr/dev server → override both. `ui-evidence` template.
 - 2026-09-24 Real Claude/Codex output broke `orchd` while self-written fakes passed → parsers assert captured CLI lines. `parses_captured_real_cli_streams`.
 - 2026-09-15 A `;`-joined gate chain let a failing change commit → join gates with `&&`, pass file lists as explicit arguments.
 - 2026-09-15 Desktop smoke flaked under load: asserts followed fixed sleeps → wait for the asserted state instead. `scripts/smoke.mjs`.

@@ -1,8 +1,9 @@
-//! The orchestrator agent's conversation: one thread per repository, run by
-//! the daemon so a reply keeps coming (and stays readable) when the app
-//! window closes or restarts. Each turn is one CLI run that only reads the
-//! repository and manages tasks through `orchd mcp`; the harness session id
-//! carries the conversation from turn to turn.
+//! The orchestrator agent's conversations: several named chat sessions per
+//! repository, run by the daemon so a reply keeps coming (and stays readable)
+//! when the app window closes or restarts. Each turn is one CLI run that only
+//! reads the repository and manages tasks through `orchd mcp`; the harness
+//! session id carries a session's conversation from turn to turn. A repo has
+//! one live turn at most, and it always belongs to the `current` session.
 
 use super::*;
 use serde::Serialize;
@@ -16,6 +17,10 @@ const ROLE: &str = "You are the owner's task orchestrator in sushiAI. You never 
 const SERVER: &str = "sushiai-orchestrator";
 const MAX_MESSAGES: usize = 200;
 const MAX_TEXT: usize = 20_000;
+/// Same length a task title gets when the planner is off (`createTask` in
+/// OrchestratorPanel.tsx).
+const MAX_TITLE: usize = 60;
+const BUSY: &str = "the orchestrator is still answering";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -26,14 +31,18 @@ pub struct ChatMessage {
     pub ts: i64,
 }
 
+/// One conversation with the orchestrator agent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ChatThread {
-    pub repo: String,
+pub struct ChatSession {
+    pub id: String,
+    /// Set once from the session's first owner message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(default)]
     pub messages: Vec<ChatMessage>,
-    /// True only while a turn is live in this daemon; a thread saved as busy
-    /// by a daemon that died reads back as idle.
+    /// True only for the current session while a turn is live in this
+    /// daemon; a session saved as busy by a daemon that died reads back idle.
     #[serde(default)]
     pub busy: bool,
     /// The last progress line of a live turn (a tool call, "session started").
@@ -51,43 +60,269 @@ pub struct ChatThread {
     pub task_mcp: Option<serde_json::Value>,
 }
 
-fn thread_path(app: &App, repo: &str) -> PathBuf {
+impl ChatSession {
+    fn new() -> Self {
+        ChatSession {
+            id: uuid::Uuid::new_v4().to_string(),
+            ..Default::default()
+        }
+    }
+}
+
+/// A repo's chat sessions, kept in `chats/<hash>.json`. `chat.get` and
+/// `chat.send` act on `current`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatStore {
+    pub repo: String,
+    pub current: String,
+    pub sessions: Vec<ChatSession>,
+}
+
+/// The one thread per repo daemons kept before sessions, at the same path.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyThread {
+    #[allow(dead_code)]
+    repo: String,
+    #[serde(default)]
+    messages: Vec<ChatMessage>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    route_id: Option<String>,
+    #[serde(default)]
+    task_mcp: Option<serde_json::Value>,
+}
+
+/// A session as the sidebar lists it: no message bodies.
+#[derive(Debug, Serialize, PartialEq)]
+struct SessionSummary {
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    busy: bool,
+}
+
+impl ChatStore {
+    fn fresh(repo: &str) -> Self {
+        let session = ChatSession::new();
+        ChatStore {
+            repo: repo.to_string(),
+            current: session.id.clone(),
+            sessions: vec![session],
+        }
+    }
+
+    fn current(&self) -> &ChatSession {
+        self.sessions
+            .iter()
+            .find(|s| s.id == self.current)
+            .expect("parse_store keeps current pointing at a session")
+    }
+
+    fn current_mut(&mut self) -> &mut ChatSession {
+        let current = self.current.clone();
+        self.sessions
+            .iter_mut()
+            .find(|s| s.id == current)
+            .expect("parse_store keeps current pointing at a session")
+    }
+
+    /// Marks the current session busy while a turn is live; a note only
+    /// means something on a live turn.
+    fn mark_busy(&mut self, live: bool) {
+        for session in &mut self.sessions {
+            session.busy = live && session.id == self.current;
+            if !session.busy {
+                session.note = None;
+            }
+        }
+    }
+
+    fn summaries(&self) -> Vec<SessionSummary> {
+        self.sessions
+            .iter()
+            .map(|s| SessionSummary {
+                id: s.id.clone(),
+                title: s.title.clone(),
+                busy: s.busy,
+            })
+            .collect()
+    }
+
+    /// The current session as `chat.get` returns it: the session plus its repo.
+    fn thread_json(&self) -> serde_json::Value {
+        let mut value = serde_json::to_value(self.current()).unwrap_or_default();
+        value["repo"] = json!(self.repo);
+        value
+    }
+
+    fn list_json(&self) -> serde_json::Value {
+        json!({"current": self.current, "sessions": self.summaries()})
+    }
+}
+
+fn title_for(text: &str) -> String {
+    if text.chars().count() > MAX_TITLE {
+        format!(
+            "{}\u{2026}",
+            text.chars().take(MAX_TITLE - 1).collect::<String>()
+        )
+    } else {
+        text.to_string()
+    }
+}
+
+/// The repo's store from its file's text: the current shape, else a legacy
+/// thread wrapped into one session, else one empty session. The flag says
+/// the result differs from what's on disk and should be written back.
+fn parse_store(repo: &str, text: Option<&str>) -> (ChatStore, bool) {
+    let parsed = text.and_then(|t| serde_json::from_str::<ChatStore>(t).ok());
+    let mut changed = parsed.is_none();
+    let mut chats = parsed
+        .or_else(|| {
+            let legacy = serde_json::from_str::<LegacyThread>(text?).ok()?;
+            let title = legacy
+                .messages
+                .iter()
+                .find(|m| m.role == "user")
+                .map(|m| title_for(&m.text));
+            let session = ChatSession {
+                title,
+                messages: legacy.messages,
+                error: legacy.error,
+                session_id: legacy.session_id,
+                route_id: legacy.route_id,
+                task_mcp: legacy.task_mcp,
+                ..ChatSession::new()
+            };
+            Some(ChatStore {
+                repo: repo.to_string(),
+                current: session.id.clone(),
+                sessions: vec![session],
+            })
+        })
+        .unwrap_or_else(|| ChatStore::fresh(repo));
+    if chats.sessions.is_empty() {
+        chats = ChatStore::fresh(repo);
+        changed = true;
+    }
+    if !chats.sessions.iter().any(|s| s.id == chats.current) {
+        chats.current = chats.sessions.last().unwrap().id.clone();
+        changed = true;
+    }
+    chats.repo = repo.to_string();
+    (chats, changed)
+}
+
+/// Where a repo's turns keep their MCP config, settings and event log.
+fn turn_dir(app: &App, repo: &str) -> PathBuf {
+    app.data_dir.join("chats").join(simple_hash(repo))
+}
+
+fn store_path(app: &App, repo: &str) -> PathBuf {
     app.data_dir
         .join("chats")
         .join(format!("{}.json", simple_hash(repo)))
 }
 
-fn load(app: &App, repo: &str) -> ChatThread {
-    let mut thread = std::fs::read_to_string(thread_path(app, repo))
-        .ok()
-        .and_then(|text| serde_json::from_str::<ChatThread>(&text).ok())
-        .unwrap_or_else(|| ChatThread {
-            repo: repo.to_string(),
-            ..Default::default()
-        });
-    thread.busy = app.chat_turns.lock().unwrap().contains_key(repo);
-    if !thread.busy {
-        thread.note = None;
+/// Reads the repo's store, writing it straight back when it had to be built
+/// or migrated so every caller sees the same session ids. Callers hold
+/// `chat_turns`, which serialises all store reads and writes.
+fn read_store(app: &App, repo: &str) -> ChatStore {
+    let path = store_path(app, repo);
+    let text = std::fs::read_to_string(&path).ok();
+    let (chats, changed) = parse_store(repo, text.as_deref());
+    if changed {
+        let _ = store::write_json_atomic(&path, &chats);
     }
-    thread
+    chats
 }
 
-fn save(app: &App, thread: &ChatThread) {
-    let _ = store::write_json_atomic(&thread_path(app, &thread.repo), thread);
+fn load(app: &App, repo: &str) -> ChatStore {
+    let turns = app.chat_turns.lock().unwrap();
+    let mut chats = read_store(app, repo);
+    chats.mark_busy(turns.contains_key(repo));
+    chats
+}
+
+fn broadcast(app: &App, chats: &ChatStore) {
     let _ = app.events_tx.send(Event::Chat {
-        thread: Box::new(serde_json::to_value(thread).unwrap_or_default()),
+        thread: Box::new(chats.thread_json()),
+        current: chats.current.clone(),
+        sessions: Box::new(serde_json::to_value(chats.summaries()).unwrap_or_default()),
     });
 }
 
-fn push(thread: &mut ChatThread, role: &str, text: &str) {
-    thread.messages.push(ChatMessage {
+/// Writes a turn's session back into its repo's store and broadcasts it.
+fn save(app: &App, repo: &str, session: &ChatSession) {
+    write_session(app, repo, session, false);
+}
+
+/// Saves a turn's final session and frees the repo's turn slot under one
+/// lock, so no new/switch/clear can slip in between and be overwritten by
+/// the reply (or have cleared messages restored by it).
+fn finish_turn(app: &App, repo: &str, session: &ChatSession) {
+    write_session(app, repo, session, true);
+}
+
+fn write_session(app: &App, repo: &str, session: &ChatSession, end_turn: bool) {
+    let chats = {
+        let mut turns = app.chat_turns.lock().unwrap();
+        if end_turn {
+            turns.remove(repo);
+        }
+        let mut chats = read_store(app, repo);
+        match chats.sessions.iter_mut().find(|s| s.id == session.id) {
+            Some(slot) => *slot = session.clone(),
+            None => chats.sessions.push(session.clone()),
+        }
+        chats.mark_busy(turns.contains_key(repo));
+        let _ = store::write_json_atomic(&store_path(app, repo), &chats);
+        chats
+    };
+    broadcast(app, &chats);
+}
+
+/// Applies `change` to the repo's store, saves and broadcasts it - refused
+/// while a turn is live, since that turn belongs to the current session and
+/// moving `current` under it would orphan the reply. Holding `chat_turns`
+/// throughout keeps a turn from starting halfway through.
+fn change_idle(
+    app: &App,
+    repo: &str,
+    change: impl FnOnce(&mut ChatStore) -> Result<(), String>,
+) -> Result<ChatStore, String> {
+    let chats = {
+        let turns = app.chat_turns.lock().unwrap();
+        if turns.contains_key(repo) {
+            return Err(BUSY.to_string());
+        }
+        let mut chats = read_store(app, repo);
+        change(&mut chats)?;
+        chats.mark_busy(false);
+        store::write_json_atomic(&store_path(app, repo), &chats).map_err(|e| e.to_string())?;
+        chats
+    };
+    broadcast(app, &chats);
+    Ok(chats)
+}
+
+fn push(session: &mut ChatSession, role: &str, text: &str) {
+    if role == "user" && session.title.is_none() {
+        session.title = Some(title_for(text));
+    }
+    session.messages.push(ChatMessage {
         id: uuid::Uuid::new_v4().to_string(),
         role: role.to_string(),
         text: truncate_chars(text, MAX_TEXT),
         ts: now_ms(),
     });
-    let excess = thread.messages.len().saturating_sub(MAX_MESSAGES);
-    thread.messages.drain(..excess);
+    let excess = session.messages.len().saturating_sub(MAX_MESSAGES);
+    session.messages.drain(..excess);
 }
 
 fn repo_param(params: &serde_json::Value) -> Result<String, String> {
@@ -103,7 +338,65 @@ fn repo_param(params: &serde_json::Value) -> Result<String, String> {
 
 pub async fn handle_get(app: &App, params: serde_json::Value) -> Result<serde_json::Value, String> {
     let repo = repo_param(&params)?;
-    serde_json::to_value(load(app, &repo)).map_err(|e| e.to_string())
+    Ok(load(app, &repo).thread_json())
+}
+
+pub async fn handle_list(
+    app: &App,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let repo = repo_param(&params)?;
+    Ok(load(app, &repo).list_json())
+}
+
+pub async fn handle_new(app: &App, params: serde_json::Value) -> Result<serde_json::Value, String> {
+    let repo = repo_param(&params)?;
+    let chats = change_idle(app, &repo, |chats| {
+        let session = ChatSession::new();
+        chats.current = session.id.clone();
+        chats.sessions.push(session);
+        Ok(())
+    })?;
+    Ok(chats.thread_json())
+}
+
+pub async fn handle_switch(
+    app: &App,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let repo = repo_param(&params)?;
+    let id = params
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or("id is required")?
+        .to_string();
+    let chats = change_idle(app, &repo, |chats| {
+        if !chats.sessions.iter().any(|s| s.id == id) {
+            return Err("no such chat session".to_string());
+        }
+        chats.current = id;
+        Ok(())
+    })?;
+    Ok(chats.thread_json())
+}
+
+/// Empties the current session and forgets its harness session, so the next
+/// reply carries no prior context. The title goes too: it named a message
+/// that is gone.
+pub async fn handle_clear(
+    app: &App,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let repo = repo_param(&params)?;
+    let chats = change_idle(app, &repo, |chats| {
+        let session = chats.current_mut();
+        session.messages.clear();
+        session.title = None;
+        session.session_id = None;
+        session.error = None;
+        Ok(())
+    })?;
+    Ok(chats.thread_json())
 }
 
 pub async fn handle_cancel(
@@ -129,9 +422,10 @@ const QUESTIONS_INTRO: &str = "Tasks asked you the questions below while they ke
 const QUESTION_TURN_REPLY: &str =
     "Your final message is sent back to each task you did not answer that way.";
 
-/// Claims the repo's one turn slot and loads its thread, starting a fresh
-/// session when the orchestrator's route changed since the last turn.
-fn begin_turn(app: &App, repo: &str) -> Result<(ChatThread, Route, CancelToken), String> {
+/// Claims the repo's one turn slot and loads its current session, starting a
+/// fresh harness session when the orchestrator's route changed since the
+/// session's last turn.
+fn begin_turn(app: &App, repo: &str) -> Result<(ChatSession, Route, CancelToken), String> {
     let settings = app.settings.read().unwrap().clone();
     let route =
         orchestrator_route(&settings).ok_or("no route is configured for the orchestrator")?;
@@ -139,17 +433,17 @@ fn begin_turn(app: &App, repo: &str) -> Result<(ChatThread, Route, CancelToken),
     {
         let mut turns = app.chat_turns.lock().unwrap();
         if turns.contains_key(repo) {
-            return Err("the orchestrator is still answering".to_string());
+            return Err(BUSY.to_string());
         }
         turns.insert(repo.to_string(), cancel.clone());
     }
-    let mut thread = load(app, repo);
-    // A session belongs to one harness; switching routes starts fresh.
-    if thread.route_id.as_deref() != Some(route.id.as_str()) {
-        thread.session_id = None;
-        thread.route_id = Some(route.id.clone());
+    let mut session = load(app, repo).current().clone();
+    // A harness session belongs to one harness; switching routes starts fresh.
+    if session.route_id.as_deref() != Some(route.id.as_str()) {
+        session.session_id = None;
+        session.route_id = Some(route.id.clone());
     }
-    Ok((thread, route, cancel))
+    Ok((session, route, cancel))
 }
 
 pub async fn handle_send(
@@ -164,14 +458,13 @@ pub async fn handle_send(
         .filter(|t| !t.is_empty())
         .ok_or("text is required")?
         .to_string();
-    let (mut thread, route, cancel) = begin_turn(app, &repo)?;
+    let (mut session, route, cancel) = begin_turn(app, &repo)?;
     if let Some(mcp) = params.get("mcp") {
-        thread.task_mcp = Some(mcp.clone());
+        session.task_mcp = Some(mcp.clone());
     }
-    push(&mut thread, "user", &text);
-    thread.busy = true;
-    thread.error = None;
-    save(app, &thread);
+    push(&mut session, "user", &text);
+    session.error = None;
+    save(app, &repo, &session);
     // Questions waiting for the orchestrator ride along with the owner's
     // message; the chat shows only what the owner wrote.
     let prompt = match messages::take_for_orchestrator(app, &repo) {
@@ -180,31 +473,40 @@ pub async fn handle_send(
     };
     let app = app.arc();
     tokio::spawn(async move {
-        run_turn(&app, thread, route, prompt, cancel, Turn::Owner).await;
+        run_turn(&app, repo, session, route, prompt, cancel, Turn::Owner).await;
     });
     Ok(json!({}))
 }
 
 /// Starts a turn for the questions tasks sent the orchestrator in `repo`,
-/// in the same session the owner's chat uses. A turn already running picks
+/// in the owner's current chat session. A turn already running picks
 /// them up when it ends; with no route configured they wait for one.
 pub(super) fn wake(app: &App, repo: &str) {
     if !Path::new(repo).is_dir() || !messages::has_pending_for_orchestrator(app, repo) {
         return;
     }
-    let Ok((mut thread, route, cancel)) = begin_turn(app, repo) else {
+    let Ok((session, route, cancel)) = begin_turn(app, repo) else {
         return;
     };
     let Some((ids, questions)) = messages::take_for_orchestrator(app, repo) else {
         app.chat_turns.lock().unwrap().remove(repo);
         return;
     };
-    thread.busy = true;
-    save(app, &thread);
+    save(app, repo, &session);
     let prompt = format!("{QUESTIONS_INTRO} {QUESTION_TURN_REPLY}\n\n{questions}");
     let app = app.arc();
+    let repo = repo.to_string();
     tokio::spawn(async move {
-        run_turn(&app, thread, route, prompt, cancel, Turn::Questions(ids)).await;
+        run_turn(
+            &app,
+            repo,
+            session,
+            route,
+            prompt,
+            cancel,
+            Turn::Questions(ids),
+        )
+        .await;
     });
 }
 
@@ -329,14 +631,14 @@ fn codex_argv(
 
 async fn run_turn(
     app: &Arc<App>,
-    mut thread: ChatThread,
+    repo: String,
+    mut thread: ChatSession,
     route: Route,
     text: String,
     cancel: CancelToken,
     turn: Turn,
 ) {
-    let repo = thread.repo.clone();
-    let dir = app.data_dir.join("chats").join(simple_hash(&repo));
+    let dir = turn_dir(app, &repo);
     let _ = std::fs::create_dir_all(&dir);
     let task_mcp_file = thread.task_mcp.as_ref().and_then(|mcp| {
         let file = dir.join("task-mcp.json");
@@ -366,13 +668,22 @@ async fn run_turn(
         Harness::Codex => codex_argv(&route, &repo, &server, session.as_deref()),
     };
 
-    let result = run(app, &mut thread, route.harness, &argv, &text, &dir, &cancel).await;
+    let result = run(
+        app,
+        &repo,
+        &mut thread,
+        route.harness,
+        &argv,
+        &text,
+        &cancel,
+    )
+    .await;
     let _ = std::fs::remove_file(&key_path);
-    app.chat_turns.lock().unwrap().remove(&repo);
 
-    // Messages sent meanwhile are impossible (one turn per repo), but the
-    // owner may have been shown a fresher note: keep this turn's thread.
-    thread.busy = false;
+    // Messages sent meanwhile are impossible (the turn slot stays held until
+    // `finish_turn`, so the session can't be switched or cleared under it),
+    // but the owner may have been shown a fresher note: keep this turn's
+    // session.
     thread.note = None;
     match (result, &turn) {
         (Ok(outcome), _) => {
@@ -405,24 +716,24 @@ async fn run_turn(
         (Err(RunError::Io(error)), Turn::Owner) => thread.error = Some(error),
         (Err(_), Turn::Questions(_)) => {}
     }
-    save(app, &thread);
+    finish_turn(app, &repo, &thread);
     // Questions that arrived during this turn get the next one.
     wake(app, &repo);
 }
 
 async fn run(
     app: &Arc<App>,
-    thread: &mut ChatThread,
+    repo: &str,
+    thread: &mut ChatSession,
     harness_kind: Harness,
     argv: &[String],
     text: &str,
-    dir: &Path,
     cancel: &CancelToken,
 ) -> Result<harness::RunOutcome, RunError> {
     let bin = resolve_binary(harness_kind);
     let mut cmd = tokio::process::Command::new(&bin);
     cmd.args(argv)
-        .current_dir(&thread.repo)
+        .current_dir(repo)
         .env("PATH", augmented_path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -446,7 +757,7 @@ async fn run(
     let stderr = child.stderr.take().expect("piped stderr");
     let mut out = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(stdout));
     let mut err = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(stderr));
-    let events = dir.join("events.jsonl");
+    let events = turn_dir(app, repo).join("events.jsonl");
     let mut outcome = harness::RunOutcome::default();
     let mut stderr_tail = String::new();
     let (mut out_done, mut err_done) = (false, false);
@@ -461,7 +772,7 @@ async fn run(
                     append_line(&events, &l);
                     if let Some(note) = harness::feed_stream_line(harness_kind, &l, &mut outcome) {
                         thread.note = Some(note);
-                        save(app, thread);
+                        save(app, repo, thread);
                     }
                 }
                 _ => out_done = true,
@@ -554,9 +865,229 @@ mod tests {
         assert_eq!(orchestrator_route(&settings).unwrap().id, standard);
     }
 
+    fn test_app() -> (Arc<App>, tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::new(
+            dir.path().join("data"),
+            dir.path().join("orchd.sock"),
+            "orchd".to_string(),
+        )
+        .unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        (app, dir, repo.to_string_lossy().to_string())
+    }
+
+    /// Writes `session` into the repo's store as a finished turn would.
+    fn converse(app: &App, repo: &str, text: &str, harness_session: &str) {
+        let mut session = load(app, repo).current().clone();
+        push(&mut session, "user", text);
+        push(&mut session, "assistant", "ok");
+        session.session_id = Some(harness_session.to_string());
+        save(app, repo, &session);
+    }
+
+    #[tokio::test]
+    async fn a_new_repo_starts_with_one_empty_current_session() {
+        let (app, _dir, repo) = test_app();
+        let list = handle_list(&app, json!({"repo": repo})).await.unwrap();
+        let thread = handle_get(&app, json!({"repo": repo})).await.unwrap();
+        assert_eq!(list["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(list["current"], thread["id"]);
+        assert_eq!(thread["messages"], json!([]));
+        assert!(thread.get("sessionId").is_none());
+        assert_eq!(thread["repo"], json!(repo));
+    }
+
+    #[tokio::test]
+    async fn a_new_session_is_empty_current_and_titled_by_its_first_owner_message() {
+        let (app, _dir, repo) = test_app();
+        converse(&app, &repo, "Fix the login page", "harness-1");
+        let first = load(&app, &repo).current.clone();
+
+        let created = handle_new(&app, json!({"repo": repo})).await.unwrap();
+        assert_ne!(created["id"], json!(first));
+        assert_eq!(created["messages"], json!([]));
+        assert!(created.get("title").is_none());
+        assert!(created.get("sessionId").is_none());
+
+        let long = "x".repeat(80);
+        converse(&app, &repo, &long, "harness-2");
+        let list = handle_list(&app, json!({"repo": repo})).await.unwrap();
+        assert_eq!(list["current"], created["id"]);
+        let titles: Vec<_> = list["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["title"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(titles[0], "Fix the login page");
+        assert_eq!(titles[1], format!("{}\u{2026}", "x".repeat(59)));
+        assert!(list["sessions"][0].get("messages").is_none());
+    }
+
+    #[tokio::test]
+    async fn switching_brings_back_that_sessions_own_messages_and_harness_session() {
+        let (app, _dir, repo) = test_app();
+        converse(&app, &repo, "first chat", "harness-1");
+        let first = load(&app, &repo).current.clone();
+        handle_new(&app, json!({"repo": repo})).await.unwrap();
+        converse(&app, &repo, "second chat", "harness-2");
+
+        let back = handle_switch(&app, json!({"repo": repo, "id": first}))
+            .await
+            .unwrap();
+        assert_eq!(back["id"], json!(first));
+        assert_eq!(back["messages"][0]["text"], "first chat");
+        assert_eq!(back["sessionId"], "harness-1");
+        assert_eq!(load(&app, &repo).current, first);
+
+        let unknown = handle_switch(&app, json!({"repo": repo, "id": "nope"})).await;
+        assert!(unknown.is_err());
+        assert_eq!(load(&app, &repo).current, first);
+    }
+
+    #[tokio::test]
+    async fn clearing_empties_the_current_session_and_forgets_its_harness_session() {
+        let (app, _dir, repo) = test_app();
+        converse(&app, &repo, "keep me", "harness-1");
+        let kept = load(&app, &repo).current.clone();
+        handle_new(&app, json!({"repo": repo})).await.unwrap();
+        converse(&app, &repo, "clear me", "harness-2");
+
+        let cleared = handle_clear(&app, json!({"repo": repo})).await.unwrap();
+        assert_eq!(cleared["messages"], json!([]));
+        assert!(cleared.get("sessionId").is_none());
+        assert!(cleared.get("title").is_none());
+        let chats = load(&app, &repo);
+        assert_eq!(chats.sessions.len(), 2);
+        let other = chats.sessions.iter().find(|s| s.id == kept).unwrap();
+        assert_eq!(other.messages.len(), 2);
+        assert_eq!(other.session_id.as_deref(), Some("harness-1"));
+    }
+
+    #[tokio::test]
+    async fn new_switch_and_clear_are_refused_while_a_turn_is_running() {
+        let (app, _dir, repo) = test_app();
+        converse(&app, &repo, "first chat", "harness-1");
+        let first = load(&app, &repo).current.clone();
+        handle_new(&app, json!({"repo": repo})).await.unwrap();
+        converse(&app, &repo, "second chat", "harness-2");
+        let second = load(&app, &repo).current.clone();
+
+        app.chat_turns
+            .lock()
+            .unwrap()
+            .insert(repo.clone(), CancelToken::new());
+        let list = handle_list(&app, json!({"repo": repo})).await.unwrap();
+        let busy: Vec<_> = list["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["busy"].as_bool().unwrap())
+            .collect();
+        assert_eq!(busy, vec![false, true]);
+        for result in [
+            handle_new(&app, json!({"repo": repo})).await,
+            handle_switch(&app, json!({"repo": repo, "id": first})).await,
+            handle_clear(&app, json!({"repo": repo})).await,
+        ] {
+            assert_eq!(result.unwrap_err(), BUSY);
+        }
+        let chats = load(&app, &repo);
+        assert_eq!(chats.sessions.len(), 2);
+        assert_eq!(chats.current, second);
+        assert_eq!(chats.current().messages.len(), 2);
+
+        // The turn's final save frees the slot in the same step, so the reply
+        // lands in the session it belongs to and the same requests go through.
+        let mut reply = chats.current().clone();
+        push(&mut reply, "assistant", "done");
+        finish_turn(&app, &repo, &reply);
+        assert!(!app.chat_turns.lock().unwrap().contains_key(&repo));
+        let chats = load(&app, &repo);
+        assert_eq!(chats.current().messages.len(), 3);
+        assert!(!chats.current().busy);
+        handle_switch(&app, json!({"repo": repo, "id": first}))
+            .await
+            .unwrap();
+        let cleared = handle_clear(&app, json!({"repo": repo})).await.unwrap();
+        assert_eq!(cleared["id"], json!(first));
+        assert_eq!(cleared["messages"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_legacy_single_thread_file_becomes_a_one_session_store() {
+        let (app, _dir, repo) = test_app();
+        let legacy = json!({
+            "repo": repo,
+            "messages": [
+                {"id": "a", "role": "user", "text": "Old question", "ts": 1},
+                {"id": "b", "role": "assistant", "text": "Old answer", "ts": 2},
+                {"id": "c", "role": "user", "text": "Follow-up", "ts": 3},
+            ],
+            "busy": true,
+            "sessionId": "legacy-harness",
+            "routeId": "claude-opus",
+            "taskMcp": {"servers": {}},
+        });
+        let path = store_path(&app, &repo);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, legacy.to_string()).unwrap();
+
+        let thread = handle_get(&app, json!({"repo": repo})).await.unwrap();
+        let list = handle_list(&app, json!({"repo": repo})).await.unwrap();
+        assert_eq!(list["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(list["current"], thread["id"]);
+        assert_eq!(list["sessions"][0]["title"], "Old question");
+        let texts: Vec<_> = thread["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, vec!["Old question", "Old answer", "Follow-up"]);
+        assert_eq!(thread["sessionId"], "legacy-harness");
+        assert_eq!(thread["routeId"], "claude-opus");
+        assert_eq!(thread["taskMcp"], json!({"servers": {}}));
+        assert_eq!(thread["busy"], false);
+
+        // The migrated shape is on disk, so the ids hold across reads.
+        let on_disk: ChatStore =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json!(on_disk.current), thread["id"]);
+        assert_eq!(on_disk.sessions[0].messages.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_turn_in_a_new_session_does_not_resume_the_previous_harness_session() {
+        let (app, _dir, repo) = test_app();
+        converse(&app, &repo, "first chat", "harness-1");
+        let created = handle_new(&app, json!({"repo": repo})).await.unwrap();
+        let (session, route, _cancel) = begin_turn(&app, &repo).unwrap();
+        assert_eq!(json!(session.id), created["id"]);
+        assert_eq!(session.session_id, None);
+        assert_eq!(session.route_id.as_deref(), Some(route.id.as_str()));
+        assert_eq!(begin_turn(&app, &repo).err(), Some(BUSY.to_string()));
+    }
+
     #[test]
-    fn a_thread_keeps_its_latest_messages_only() {
-        let mut thread = ChatThread::default();
+    fn a_store_pointing_at_a_missing_session_falls_back_to_the_last_one() {
+        let text = json!({"repo": "/r", "current": "gone", "sessions": [{"id": "a"}, {"id": "b"}]})
+            .to_string();
+        let (chats, changed) = parse_store("/r", Some(&text));
+        assert!(changed);
+        assert_eq!(chats.current, "b");
+        let (fresh, changed) =
+            parse_store("/r", Some(r#"{"repo":"/r","current":"x","sessions":[]}"#));
+        assert!(changed);
+        assert_eq!(fresh.sessions.len(), 1);
+        assert_eq!(fresh.current, fresh.sessions[0].id);
+    }
+
+    #[test]
+    fn a_session_keeps_its_latest_messages_only() {
+        let mut thread = ChatSession::default();
         for i in 0..(MAX_MESSAGES + 5) {
             push(&mut thread, "user", &i.to_string());
         }

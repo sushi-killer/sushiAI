@@ -25,9 +25,14 @@ pub enum Event {
         attempt: u32,
         line: String,
     },
-    /// The orchestrator chat thread of one repo, whole, after any change.
+    /// A repo's current orchestrator chat session, whole, after any change,
+    /// with the id of that session and a light summary of all of them.
     #[serde(rename = "chat")]
-    Chat { thread: Box<serde_json::Value> },
+    Chat {
+        thread: Box<serde_json::Value>,
+        current: String,
+        sessions: Box<serde_json::Value>,
+    },
     /// An agent-to-agent message, when it is sent and again when delivered.
     #[serde(rename = "message")]
     Message { message: Box<Message> },

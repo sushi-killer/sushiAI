@@ -15,6 +15,9 @@ const app = await electron.launch({
     ...process.env,
     BRIDGE_DATA_DIR: profile,
     HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
+    // An agent started from `npm run dev` inherits this; set, the app loads
+    // the owner's dev server instead of dist/ (electron/main.cjs).
+    BRIDGE_DEV_URL: "",
   },
 });
 const report = { pageErrors: [] };

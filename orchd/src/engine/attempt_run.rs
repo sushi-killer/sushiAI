@@ -34,6 +34,7 @@ pub(super) async fn run_harness(
     events_path: &Path,
     cancel: &CancelToken,
     stall: Option<Stall>,
+    mut detector: Option<LoopDetector>,
 ) -> Result<harness::RunOutcome, RunError> {
     let argv = harness::build_argv(req);
     let bin = resolve_binary(req.harness);
@@ -118,6 +119,14 @@ pub(super) async fn run_harness(
                         append_line(events_path, &l);
                         if let Some(note) = harness::feed_stream_line(harness_kind, &l, &mut outcome) {
                             app.broadcast_log(task_id, attempt_n, note);
+                        }
+                        if let Some(hit) = detector.as_mut().and_then(|d| d.feed(&l)) {
+                            kill_group(pgid, &mut child).await;
+                            outcome.looped = Some(format!(
+                                "{} Do not repeat it; change approach.",
+                                hit.detail
+                            ));
+                            break;
                         }
                         if track_attempt && !session_persisted {
                             if let Some(sid) = outcome.session_id.clone() {

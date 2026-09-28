@@ -9,6 +9,7 @@ use crate::classify;
 use crate::git;
 use crate::harness;
 use crate::hook;
+use crate::loop_detect::LoopDetector;
 use crate::model::*;
 use crate::protocol::{CallFuture, Dispatcher, Event};
 use crate::store::{self, Store};

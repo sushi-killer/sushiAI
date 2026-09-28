@@ -197,6 +197,7 @@ async fn run(
                 &dir.join("events.jsonl"),
                 &cancel,
                 None,
+                None,
             )
             .await;
             let _ = std::fs::remove_file(&key_path);

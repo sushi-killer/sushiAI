@@ -115,7 +115,10 @@ pub struct Settings {
     #[serde(default)]
     pub auto_answer: bool,
     /// Flags new tasks start with unless `task.create` overrides them.
-    #[serde(default)]
+    #[serde(
+        default = "default_experiments",
+        deserialize_with = "experiments_or_default"
+    )]
     pub experiments: Variant,
     /// Model id -> price, for harnesses that report no cost.
     #[serde(default = "default_prices")]
@@ -193,7 +196,7 @@ impl Default for Settings {
             planner: default_planner(),
             orchestrator: String::new(),
             auto_answer: false,
-            experiments: Variant::default(),
+            experiments: default_experiments(),
             prices: default_prices(),
             work_buckets: WorkBuckets::default(),
         }
@@ -210,6 +213,24 @@ pub enum RetryMode {
     /// A new session with the full brief, the earlier attempts' handoffs
     /// and the last failure.
     Fresh,
+}
+
+fn default_experiments() -> Variant {
+    Variant {
+        loop_detect: true,
+        ..Variant::default()
+    }
+}
+
+/// A settings file written before `loopDetect` existed keeps the detector on:
+/// a missing flag in `experiments` reads as the settings default, not false.
+fn experiments_or_default<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Variant, D::Error> {
+    let mut v = serde_json::Value::deserialize(d)?;
+    if let Some(o) = v.as_object_mut() {
+        o.entry("loopDetect")
+            .or_insert(serde_json::Value::Bool(true));
+    }
+    serde_json::from_value(v).map_err(serde::de::Error::custom)
 }
 
 /// The experiment flags a task runs with. `Settings::experiments` is the
@@ -252,6 +273,10 @@ pub struct Variant {
     /// After an implement attempt fails, one read-only call on the planner's
     /// route diagnoses it; the answer goes into the next attempt's brief.
     pub advisor: bool,
+    /// Kill an implement attempt that repeats itself (the same tool call
+    /// three times, three error results, or eight edits of one file with no
+    /// command run between) and record failure kind `loop`. On in the settings defaults.
+    pub loop_detect: bool,
     /// Route id the plan stage runs on instead of `settings.planner`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub planner_route: Option<String>,
@@ -617,6 +642,8 @@ pub enum FailureKind {
     NoDeliverable,
     /// The harness printed nothing for `variant.stall_timeout_secs`.
     Stall,
+    /// The loop detector stopped the run (`variant.loop_detect`).
+    Loop,
     Verify,
     Review,
     Protected,
@@ -629,6 +656,7 @@ impl FailureKind {
         match self {
             FailureKind::NoDeliverable => "no_deliverable",
             FailureKind::Stall => "stall",
+            FailureKind::Loop => "loop",
             FailureKind::Verify => "verify",
             FailureKind::Review => "review",
             FailureKind::Protected => "protected",
@@ -944,10 +972,31 @@ mod tests {
     }
 
     #[test]
+    fn old_settings_without_loop_detect_keep_it_on() {
+        let parse = |experiments: Option<&str>| -> Settings {
+            let mut v = serde_json::to_value(Settings::default()).unwrap();
+            let o = v.as_object_mut().unwrap();
+            match experiments {
+                Some(e) => o.insert("experiments".into(), serde_json::from_str(e).unwrap()),
+                None => o.remove("experiments"),
+            };
+            serde_json::from_value(v).unwrap()
+        };
+        let s = parse(Some(r#"{"advisor":true}"#));
+        assert!(s.experiments.loop_detect && s.experiments.advisor);
+        assert!(parse(None).experiments.loop_detect);
+        assert!(
+            !parse(Some(r#"{"loopDetect":false}"#))
+                .experiments
+                .loop_detect
+        );
+    }
+
+    #[test]
     fn a_variant_without_route_overrides_serializes_as_before() {
         assert_eq!(
             serde_json::to_string(&Variant::default()).unwrap(),
-            r#"{"retryMode":"resume","stallTimeoutSecs":0,"plannerTier":false,"contract":false,"reviewOtherFamily":false,"reviewEvidence":false,"deferHeavyChecks":false,"leanOutput":false,"reviewBlind":false,"advisor":false}"#
+            r#"{"retryMode":"resume","stallTimeoutSecs":0,"plannerTier":false,"contract":false,"reviewOtherFamily":false,"reviewEvidence":false,"deferHeavyChecks":false,"leanOutput":false,"reviewBlind":false,"advisor":false,"loopDetect":false}"#
         );
     }
 

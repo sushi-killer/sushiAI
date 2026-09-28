@@ -244,6 +244,7 @@ pub(super) async fn run_review(
         &events_path,
         cancel,
         None,
+        None,
     )
     .await
     {

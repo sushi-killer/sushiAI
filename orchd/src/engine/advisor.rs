@@ -97,6 +97,7 @@ pub(super) async fn run_advisor_before_retry(
         &events_path,
         cancel,
         None,
+        None,
     )
     .await;
     let _ = std::fs::remove_file(&key_path);

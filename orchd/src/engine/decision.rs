@@ -64,6 +64,9 @@ pub struct FailureDecisionInput<'a> {
     pub signature: &'a str,
     pub previous_signature: Option<&'a str>,
     pub consecutive_same: u32,
+    /// Implement attempts on this task the loop detector stopped, this one
+    /// included.
+    pub loops: u32,
     pub attempt_n: u32,
     pub max_attempts: u32,
 }
@@ -74,7 +77,7 @@ pub enum FailureDecision {
     Waiting { question: String },
 }
 
-/// spec step 8: same signature as previous -> tier up; same signature 3x in
+/// spec step 8: same signature as previous, or a second loop -> tier up; same signature 3x in
 /// a row, or attempts exhausted -> waiting.
 pub(super) const EXHAUSTED_QUESTION: &str = "Attempts keep failing";
 
@@ -91,7 +94,7 @@ pub fn decide_after_failure(input: &FailureDecisionInput) -> FailureDecision {
             ),
         };
     }
-    let tier = if input.previous_signature == Some(input.signature) {
+    let tier = if input.previous_signature == Some(input.signature) || input.loops >= 2 {
         input.tier.up()
     } else {
         input.tier
@@ -155,6 +158,11 @@ pub(super) fn advance_after_failure(task: &mut Task, max_attempts: u32) -> bool 
         signature: &signature,
         previous_signature: previous_signature.as_deref(),
         consecutive_same: consecutive,
+        loops: task
+            .attempts
+            .iter()
+            .filter(|a| a.failure.as_ref().map(|f| f.kind) == Some(FailureKind::Loop))
+            .count() as u32,
         attempt_n: implement_attempt_count(task),
         max_attempts,
     };

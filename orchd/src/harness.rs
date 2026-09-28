@@ -361,6 +361,8 @@ pub struct RunOutcome {
     pub error: Option<String>,
     /// The run printed nothing for its stall timeout and was killed.
     pub stalled: bool,
+    /// The loop detector killed the run; the failure detail.
+    pub looped: Option<String>,
     /// Claude only: input + cache creation + cache read tokens of the first
     /// `assistant` event, i.e. the whole prompt the first turn was sent,
     /// whether or not an earlier run left it in the prompt cache.

@@ -66,6 +66,7 @@ fn decide_after_failure_ties_up_on_repeat_signature() {
         signature: "sig-b",
         previous_signature: Some("sig-b"),
         consecutive_same: 2,
+        loops: 0,
         attempt_n: 2,
         max_attempts: 4,
     };
@@ -82,6 +83,7 @@ fn decide_after_failure_stays_same_tier_on_new_signature() {
         signature: "sig-c",
         previous_signature: Some("sig-b"),
         consecutive_same: 1,
+        loops: 0,
         attempt_n: 2,
         max_attempts: 4,
     };
@@ -98,6 +100,7 @@ fn decide_after_failure_waits_after_three_consecutive() {
         signature: "sig-b",
         previous_signature: Some("sig-b"),
         consecutive_same: 3,
+        loops: 0,
         attempt_n: 3,
         max_attempts: 10,
     };
@@ -114,6 +117,7 @@ fn decide_after_failure_waits_when_attempts_exhausted() {
         signature: "sig-x",
         previous_signature: None,
         consecutive_same: 1,
+        loops: 0,
         attempt_n: 4,
         max_attempts: 4,
     };
@@ -138,4 +142,27 @@ fn decide_blocked_question_answers_self_above_threshold() {
         BlockedDecision::Waiting
     );
     assert_eq!(decide_blocked_question(None), BlockedDecision::Waiting);
+}
+
+#[test]
+fn a_second_loop_escalates_the_tier_even_with_a_different_signature() {
+    let input = |loops| FailureDecisionInput {
+        tier: Tier::Standard,
+        signature: "loop:b",
+        previous_signature: Some("loop:a"),
+        consecutive_same: 1,
+        loops,
+        attempt_n: 2,
+        max_attempts: 4,
+    };
+    assert_eq!(
+        decide_after_failure(&input(1)),
+        FailureDecision::NextAttempt {
+            tier: Tier::Standard
+        }
+    );
+    assert_eq!(
+        decide_after_failure(&input(2)),
+        FailureDecision::NextAttempt { tier: Tier::Hard }
+    );
 }

@@ -599,3 +599,79 @@ fn a_claude_implement_run_trims_delegation_tools_and_keeps_the_configured_mcp_se
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
 }
+
+/// Emits the same `Bash` call three times, a different one on the second
+/// run so the two failures do not share a signature, then hangs.
+const FAKE_LOOPING_CLAUDE: &str = r#"#!/bin/sh
+cat > /dev/null
+if [ -f RAN ]; then word=beta; else word=alpha; fi
+touch RAN
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-loop"}'
+for i in 1 2 3; do
+  printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"id\":\"m$i\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t$i\",\"name\":\"Bash\",\"input\":{\"command\":\"echo $word\"}}]}}"
+done
+exec sleep 60
+"#;
+
+#[test]
+fn a_looping_harness_is_stopped_and_a_second_loop_escalates_the_tier() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude-loop.sh",
+        FAKE_LOOPING_CLAUDE,
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["maxAttempts"] = serde_json::json!(3);
+    settings["review"] = serde_json::json!("");
+    assert_eq!(settings["experiments"]["loopDetect"], true, "{settings}");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Loops",
+            "goal": "Repeat yourself",
+            "verify": ["true"],
+            "variant": {"retryMode": "fresh", "plannerTier": false},
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(60));
+    assert_eq!(settled["status"], "waiting", "task JSON: {settled}");
+    let attempts = settled["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 3, "{settled}");
+    for a in attempts {
+        assert_eq!(a["failure"]["kind"], "loop", "{settled}");
+    }
+    let detail = attempts[0]["failure"]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("repeated_call") && detail.contains("echo alpha"),
+        "{detail}"
+    );
+    let second = attempts[1]["failure"]["detail"].as_str().unwrap();
+    assert!(second.contains("echo beta"), "{second}");
+
+    let brief = std::fs::read_to_string(
+        daemon
+            .data_dir()
+            .join("tasks")
+            .join(&task_id)
+            .join("runs/2/brief.md"),
+    )
+    .unwrap();
+    assert!(
+        brief.contains("stopped as a loop") && brief.contains("echo alpha"),
+        "{brief}"
+    );
+    // The second loop moved the task up a tier; a third attempt ran on it.
+    assert_eq!(settled["tier"], "hard", "{settled}");
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}

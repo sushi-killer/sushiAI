@@ -146,6 +146,9 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
                 };
                 let detail = clip_middle(&failure.detail, max);
                 out.push_str("  - failure: ");
+                if failure.kind == crate::model::FailureKind::Loop {
+                    out.push_str("stopped as a loop. ");
+                }
                 out.push_str(&detail);
                 out.push('\n');
             }

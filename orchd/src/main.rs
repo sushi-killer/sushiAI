@@ -12,6 +12,7 @@ mod eval;
 mod git;
 mod harness;
 mod hook;
+mod loop_detect;
 mod mcp;
 mod model;
 mod protocol;

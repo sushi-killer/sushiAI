@@ -92,6 +92,7 @@ export type Variant = {
   leanOutput: boolean;
   reviewBlind: boolean;
   advisor: boolean;
+  loopDetect: boolean;
   /** Route id the plan stage runs on instead of `settings.planner`. */
   plannerRoute?: string;
   /** Route ids the implement stage uses instead of `settings.tiers`. */
@@ -105,6 +106,7 @@ export type Variant = {
 export type FailureKind =
   | "no_deliverable"
   | "stall"
+  | "loop"
   | "verify"
   | "review"
   | "protected"

@@ -178,6 +178,7 @@ async fn run_triage(
         &events_path,
         cancel,
         None,
+        None,
     )
     .await;
     let _ = std::fs::remove_file(&key_path);

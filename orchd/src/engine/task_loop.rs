@@ -486,6 +486,7 @@ pub(super) async fn run_task_loop(
                     .map(|(_, ctx)| ctx.hook_running.clone())
                     .unwrap_or_default(),
             }),
+            task.variant().loop_detect.then(LoopDetector::new),
         )
         .await;
 
@@ -591,6 +592,40 @@ pub(super) async fn run_task_loop(
                 &mut task,
                 idx,
                 FailureKind::Stall,
+                detail,
+                &mut attempt_budget,
+                &pending_answer,
+                &cancel,
+                &mut permit,
+            )
+            .await
+            {
+                LoopSignal::Continue { answered } => {
+                    just_answered = answered;
+                    drop(permit);
+                    continue;
+                }
+                LoopSignal::Stop => {
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
+            }
+        }
+
+        if let Some(detail) = outcome.looped.clone() {
+            let (wt, base) = (worktree.clone(), base_sha.clone());
+            task.attempts[idx].changed_files = tokio::task::spawn_blocking(move || {
+                git::changed_files(&wt, &base).unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+            match fail_and_continue(
+                &app,
+                &task_id,
+                &mut task,
+                idx,
+                FailureKind::Loop,
                 detail,
                 &mut attempt_budget,
                 &pending_answer,

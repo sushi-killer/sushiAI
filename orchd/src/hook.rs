@@ -133,9 +133,16 @@ pub fn skills_query(payload: &serde_json::Value) -> Option<SkillsQuery> {
     if text.trim().is_empty() {
         return None;
     }
+    // A prompt is the brief: its head carries the goal. A tool's output
+    // carries its news at the end.
+    let text = if event == "UserPromptSubmit" {
+        text.chars().take(MAX_SKILLS_TEXT_CHARS).collect()
+    } else {
+        tail_chars(&text, MAX_SKILLS_TEXT_CHARS)
+    };
     Some(SkillsQuery {
         event: event.to_string(),
-        text: tail_chars(&text, MAX_SKILLS_TEXT_CHARS),
+        text,
     })
 }
 
@@ -251,7 +258,7 @@ pub fn load_skill_catalog(worktree: &Path) -> std::io::Result<Vec<Skill>> {
     let mut skills: Vec<Skill> = Vec::new();
     for entry in entries.flatten() {
         let dir_name = entry.file_name().to_string_lossy().to_string();
-        let Ok(text) = std::fs::read_to_string(entry.path().join("SKILL.md")) else {
+        let Some(text) = read_skill_file(&entry.path().join("SKILL.md")) else {
             continue;
         };
         if let Some(skill) = parse_skill(&text, &dir_name) {
@@ -261,6 +268,30 @@ pub fn load_skill_catalog(worktree: &Path) -> std::io::Result<Vec<Skill>> {
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills.dedup_by(|a, b| a.name == b.name);
     Ok(skills)
+}
+
+/// A skill file bigger than this is skipped rather than read: the catalog is
+/// read on every hook call, and the file comes from the task's worktree.
+const MAX_SKILL_FILE_BYTES: u64 = 64 * 1024;
+
+/// A regular file's text, at most `MAX_SKILL_FILE_BYTES`; `None` for a
+/// FIFO, a device, an oversized or a non-UTF-8 file.
+fn read_skill_file(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_SKILL_FILE_BYTES {
+        return None;
+    }
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_SKILL_FILE_BYTES + 1)
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.len() as u64 > MAX_SKILL_FILE_BYTES {
+        return None;
+    }
+    String::from_utf8(buf).ok()
 }
 
 /// One Noul question per skill, named after it. The framing lets Jev turn
@@ -467,6 +498,36 @@ mod tests {
     }
 
     // -- skills hook --
+
+    #[test]
+    fn prompt_query_keeps_the_head_tool_query_the_tail() {
+        let brief = format!("GOAL{}", "x".repeat(MAX_SKILLS_TEXT_CHARS));
+        let q = skills_query(&serde_json::json!({
+            "hook_event_name": "UserPromptSubmit", "prompt": brief
+        }))
+        .unwrap();
+        assert!(q.text.starts_with("GOAL"));
+        let out = format!("{}END", "y".repeat(MAX_SKILLS_TEXT_CHARS));
+        let q = skills_query(&serde_json::json!({
+            "hook_event_name": "PostToolUse", "tool_response": {"stdout": out}
+        }))
+        .unwrap();
+        assert!(q.text.ends_with("END"));
+    }
+
+    #[test]
+    fn oversized_or_non_regular_skill_files_are_skipped() {
+        let dir = std::env::temp_dir().join(format!("orchd-skillfile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big.md");
+        std::fs::write(&big, vec![b'a'; MAX_SKILL_FILE_BYTES as usize + 1]).unwrap();
+        let ok = dir.join("ok.md");
+        std::fs::write(&ok, "fine").unwrap();
+        assert_eq!(read_skill_file(&big), None);
+        assert_eq!(read_skill_file(&dir), None);
+        assert_eq!(read_skill_file(&ok).as_deref(), Some("fine"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     use crate::classify::Answer;
 

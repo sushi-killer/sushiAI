@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, oneshot, Notify, Semaphore};
 
 #[path = "chat.rs"]
@@ -357,7 +357,16 @@ struct SkillState {
     seen: HashSet<String>,
     /// What this attempt injected, in order: `attempt.skills`.
     injected: Vec<String>,
+    /// When a PostToolUse last reached the classifier; see
+    /// `SKILLS_TOOL_INTERVAL`.
+    last_tool_query: Option<Instant>,
 }
+
+/// At most one PostToolUse classifier call per session this often: each one
+/// blocks the agent for up to the classifier timeout, and an agent runs a
+/// tool every few seconds.
+// ponytail: fixed interval; make it a variant field if A/B shows it matters.
+const SKILLS_TOOL_INTERVAL: Duration = Duration::from_secs(60);
 
 /// An implement attempt's stall watchdog: the silence limit, paused while
 /// `paused` is set.
@@ -1402,6 +1411,16 @@ impl App {
         };
         if p.event.is_empty() || p.text.trim().is_empty() {
             return Ok(json!({}));
+        }
+        if p.event == "PostToolUse" {
+            let mut session = skills.lock().unwrap();
+            if session
+                .last_tool_query
+                .is_some_and(|t| t.elapsed() < SKILLS_TOOL_INTERVAL)
+            {
+                return Ok(json!({}));
+            }
+            session.last_tool_query = Some(Instant::now());
         }
         let wt = ctx.worktree.clone();
         let Ok(Ok(catalog)) =
@@ -4116,6 +4135,7 @@ async fn run_task_loop(
                     StdMutex::new(SkillState {
                         seen: session_skills(&task.attempts, resume_session.as_deref()),
                         injected: vec![],
+                        last_tool_query: None,
                     })
                 }),
             });

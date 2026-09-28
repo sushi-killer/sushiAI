@@ -178,15 +178,26 @@
   gap: 4px;
 }
 
+.orch-new-task label {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  gap: var(--gap-xs);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
 .orch-new-task-row {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 4px;
 }
 
 .orch-new-task input {
   flex: 1;
   min-width: 0;
+  width: 100%;
 }
 
 /* The two fixed entries above the task list - chat and new task - share the

@@ -885,22 +885,26 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
               void submitNewTask();
             }}
           >
-            <input
-              autoFocus
-              value={taskDraft}
-              onChange={(event) => setTaskDraft(event.target.value)}
-              placeholder="What should happen?"
-              aria-label="New task request"
-              disabled={creatingBusy}
-            />
-            <div className="orch-new-task-row">
+            <label>
+              Request
               <input
-                value={baseBranchDraft}
-                onChange={(event) => setBaseBranchDraft(event.target.value)}
-                placeholder="Defaults to the current branch"
-                aria-label="Base branch"
+                autoFocus
+                value={taskDraft}
+                onChange={(event) => setTaskDraft(event.target.value)}
+                placeholder="What should happen?"
                 disabled={creatingBusy}
               />
+            </label>
+            <div className="orch-new-task-row">
+              <label>
+                Base branch (optional)
+                <input
+                  value={baseBranchDraft}
+                  onChange={(event) => setBaseBranchDraft(event.target.value)}
+                  placeholder="Defaults to the current branch"
+                  disabled={creatingBusy}
+                />
+              </label>
               <button
                 className="icon-button"
                 type="submit"

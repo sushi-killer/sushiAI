@@ -231,7 +231,7 @@ pub struct Variant {
     pub lean_context: bool,
     /// A Claude implement run's `settings.json` gets a PreToolUse hook
     /// (`orchd hook rtk`) that offers `rtk rewrite`'s shorter form of a
-    /// `Bash` command, and `env.BASH_MAX_OUTPUT_LENGTH` caps how much of a
+    /// `Bash` command, and `bashOutputMaxChars` caps how much of a
     /// command's own output comes back. Independent of `lean_context`, and
     /// combinable with it. Codex runs and review/plan sessions are
     /// untouched either way.

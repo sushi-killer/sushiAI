@@ -410,6 +410,20 @@ pub fn touches_denied_bash_command(command: &str) -> bool {
 /// way; `None` (caller prints `{}`) for everything else -- a non-zero exit
 /// (rtk's common "nothing to rewrite" answer), a timeout, rtk missing from
 /// PATH, the same command echoed back, or a denied rewrite.
+/// rtk subcommands that only condense a build/test tool's output and keep
+/// its exit code. `rtk read`/`grep`/`ls` reshape content itself (`rtk read`
+/// drops comment lines, and `tail -n` becomes a different `-n`), so a
+/// rewrite into them would show the agent code that is not on disk.
+const RTK_CONDENSING: [&str; 6] = ["cargo", "npm", "pnpm", "tsc", "pytest", "go"];
+
+fn only_condensing_rtk(command: &str) -> bool {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    words
+        .windows(2)
+        .all(|w| w[0] != "rtk" || RTK_CONDENSING.contains(&w[1]))
+        && words.last() != Some(&"rtk")
+}
+
 pub fn rtk_rewrite_output(
     tool_input: &serde_json::Value,
     original_command: &str,
@@ -424,6 +438,9 @@ pub fn rtk_rewrite_output(
         return None;
     }
     if touches_denied_bash_command(original_command) || touches_denied_bash_command(rewritten) {
+        return None;
+    }
+    if original_command.contains('>') || !only_condensing_rtk(rewritten) {
         return None;
     }
     let mut updated_input = tool_input.clone();
@@ -881,13 +898,13 @@ mod tests {
     fn rtk_rewrite_output_allows_only_a_clean_different_rewrite() {
         let input =
             serde_json::json!({"command": "npm test", "description": "run tests", "timeout": 1000});
-        let out = rtk_rewrite_output(&input, "npm test", true, "npm test --silent\n").unwrap();
+        let out = rtk_rewrite_output(&input, "npm test", true, "rtk npm test\n").unwrap();
         assert_eq!(out["hookSpecificOutput"]["hookEventName"], "PreToolUse");
         assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "allow");
         assert_eq!(
             out["hookSpecificOutput"]["updatedInput"],
             serde_json::json!({
-                "command": "npm test --silent",
+                "command": "rtk npm test",
                 "description": "run tests",
                 "timeout": 1000
             })
@@ -898,6 +915,40 @@ mod tests {
         assert!(rtk_rewrite_output(&input, "npm test", false, "npm test --silent").is_none());
         assert!(rtk_rewrite_output(&input, "npm test", true, "").is_none());
         assert!(rtk_rewrite_output(&input, "npm test", true, "   ").is_none());
+    }
+
+    #[test]
+    fn rtk_rewrite_output_declines_content_changing_rewrites() {
+        // Real rtk 0.28 rewrites that alter what the agent sees or writes.
+        for (orig, rewritten) in [
+            ("cat a.rs > b.rs", "rtk read a.rs > b.rs"),
+            ("cat a.rs", "rtk read a.rs"),
+            ("tail -n 50 log", "rtk read -n 50 log"),
+            ("rg foo", "rtk grep foo"),
+            ("ls -la", "rtk ls -la"),
+            ("npx eslint .", "rtk lint ."),
+            ("cargo test > out.txt", "rtk cargo test > out.txt"),
+        ] {
+            let input = serde_json::json!({ "command": orig });
+            assert!(
+                rtk_rewrite_output(&input, orig, true, rewritten).is_none(),
+                "{orig}"
+            );
+        }
+        for (orig, rewritten) in [
+            ("cargo test", "rtk cargo test"),
+            (
+                "cargo build && git status | head -5",
+                "rtk cargo build && git status | head -5",
+            ),
+            ("tsc --noEmit", "rtk tsc --noEmit"),
+        ] {
+            let input = serde_json::json!({ "command": orig });
+            assert!(
+                rtk_rewrite_output(&input, orig, true, rewritten).is_some(),
+                "{orig}"
+            );
+        }
     }
 
     #[test]

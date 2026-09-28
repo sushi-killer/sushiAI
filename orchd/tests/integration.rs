@@ -3269,7 +3269,7 @@ fn lean_output_gives_a_claude_implement_run_the_rtk_hook_and_output_cap() {
     );
     assert!(pre["hooks"][0]["timeout"].as_u64().unwrap() > 0);
     assert!(
-        settings["env"]["BASH_MAX_OUTPUT_LENGTH"].is_string(),
+        settings["bashOutputMaxChars"].as_u64() == Some(10_000),
         "{settings}"
     );
 

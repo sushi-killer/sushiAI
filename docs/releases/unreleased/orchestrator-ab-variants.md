@@ -61,8 +61,11 @@
   skills injected on the first prompt, so it understates the trim.
 - `leanOutput: true` gives a Claude implement run a PreToolUse hook
   (`orchd hook rtk`) that offers `rtk rewrite`'s shorter form of a `Bash`
-  command before it runs, and caps a command's own reported output at
-  `env.BASH_MAX_OUTPUT_LENGTH` characters. The hook needs no socket or
+  command before it runs (only for build, test and lint commands, whose
+  output rtk condenses without changing the exit code: never a file read,
+  a search, a listing or a command that redirects output), and caps a
+  command's inline output at 10,000 characters (`bashOutputMaxChars`; the
+  rest is saved to a file the agent can read). The hook needs no socket or
   token -- it never contacts the daemon -- and never rewrites a command
   containing `git commit` or `git push`, so a rewrite can never launder past
   those same deny rules. Independent of `leanContext`, and combinable with

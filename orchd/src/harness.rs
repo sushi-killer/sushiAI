@@ -206,7 +206,7 @@ pub fn build_argv(req: &RunRequest) -> Vec<String> {
 /// socket, and the token that maps this run's `hook.stop` calls back to its
 /// task/attempt. `skills` also wires `orchd hook skills` (same socket and
 /// token) to UserPromptSubmit and PostToolUse. `lean_output` wires `orchd
-/// hook rtk` to PreToolUse and sets `env.BASH_MAX_OUTPUT_LENGTH` -- neither
+/// hook rtk` to PreToolUse and sets `bashOutputMaxChars` -- neither
 /// needs the socket or token, since the hook never contacts the daemon.
 pub struct StopHook<'a> {
     pub orchd_path: &'a str,
@@ -232,12 +232,15 @@ const RTK_HOOK_TIMEOUT_SECS: u64 = 5;
 /// same deny rules through the hook's own `permissionDecision: allow`.
 pub const DENIED_BASH_COMMANDS: [&str; 2] = ["git commit", "git push"];
 
-/// `env.BASH_MAX_OUTPUT_LENGTH` under `variant.lean_output`: bigger than the
+/// `bashOutputMaxChars` under `variant.lean_output` (Claude Code's inline
+/// Bash limit; `BASH_MAX_OUTPUT_LENGTH` only sizes the read-back of an
+/// output saved to a file, so it would cap nothing): bigger than the
 /// 2000-char failure tail orchd itself feeds back in a Stop-hook block
 /// (`hook::TAIL_CHARS`), so a failing command's own reported output still
 /// fits, and well below Claude Code's 30000-char default, so it actually
-/// shrinks what a noisy command bills.
-pub const BASH_MAX_OUTPUT_LENGTH: u32 = 10_000;
+/// shrinks what a noisy command bills. Output past it is saved to a file
+/// the agent can read.
+pub const BASH_OUTPUT_MAX_CHARS: u32 = 10_000;
 
 /// The `settings.json` written alongside a Claude run: profile
 /// env/apiKeyHelper (opaque, passed through) + sandbox block (omitted for
@@ -334,22 +337,10 @@ pub fn build_claude_settings(
                     {"type": "command", "command": rtk_command, "timeout": RTK_HOOK_TIMEOUT_SECS}
                 ]
             }]);
-            match obj.get_mut("env") {
-                Some(serde_json::Value::Object(env)) => {
-                    env.insert(
-                        "BASH_MAX_OUTPUT_LENGTH".to_string(),
-                        serde_json::Value::String(BASH_MAX_OUTPUT_LENGTH.to_string()),
-                    );
-                }
-                _ => {
-                    obj.insert(
-                        "env".to_string(),
-                        serde_json::json!({
-                            "BASH_MAX_OUTPUT_LENGTH": BASH_MAX_OUTPUT_LENGTH.to_string()
-                        }),
-                    );
-                }
-            }
+            obj.insert(
+                "bashOutputMaxChars".to_string(),
+                serde_json::json!(BASH_OUTPUT_MAX_CHARS),
+            );
         }
         obj.insert("hooks".to_string(), hooks);
     }
@@ -838,11 +829,7 @@ mod tests {
         );
         let keys: Vec<&String> = off["hooks"].as_object().unwrap().keys().collect();
         assert_eq!(keys, ["Stop"], "the Stop hook only: {off}");
-        assert!(off
-            .get("env")
-            .unwrap()
-            .get("BASH_MAX_OUTPUT_LENGTH")
-            .is_none());
+        assert!(off.get("bashOutputMaxChars").is_none());
         assert_eq!(off["env"]["ANTHROPIC_API_KEY_HELPER"], "x");
 
         let on = build_claude_settings(
@@ -858,19 +845,9 @@ mod tests {
         let rtk = &pre["hooks"][0];
         assert_eq!(rtk["command"], "'/bin/orchd' hook rtk");
         assert!(rtk["timeout"].as_u64().unwrap() > 0);
-        // A profile's own env keys stay; the cap is only merged in.
+        // A profile's own env keys stay.
         assert_eq!(on["env"]["ANTHROPIC_API_KEY_HELPER"], "x");
-        assert_eq!(
-            on["env"]["BASH_MAX_OUTPUT_LENGTH"],
-            BASH_MAX_OUTPUT_LENGTH.to_string()
-        );
-
-        // No profile env at all: the cap still lands under a fresh `env`.
-        let no_profile = build_claude_settings(None, SandboxMode::Host, &[], &[], Some(hook(true)));
-        assert_eq!(
-            no_profile["env"]["BASH_MAX_OUTPUT_LENGTH"],
-            BASH_MAX_OUTPUT_LENGTH.to_string()
-        );
+        assert_eq!(on["bashOutputMaxChars"], BASH_OUTPUT_MAX_CHARS);
     }
 
     #[test]

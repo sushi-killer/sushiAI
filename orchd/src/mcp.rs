@@ -150,7 +150,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "branch": {"type": "string"},
                     "base": {"type": "string", "description": "Branch or commit to start from; defaults to the repo's current HEAD."},
                     "variant": {"type": "object", "description": "Experiment flags for this task only, over the settings defaults: retryMode (\"resume\"|\"fresh\"), stallTimeoutSecs (0 = off), plannerTier, contract, reviewOtherFamily, reviewEvidence, deferHeavyChecks, leanOutput, reviewBlind, advisor (bool). Create the same task twice with different variants to A/B them."},
-                    "start": {"type": "boolean"},
+                    "start": {"type": "boolean", "description": "Start right away (default true); false leaves the task stopped for review."},
                 },
                 "required": ["repo"],
             }),

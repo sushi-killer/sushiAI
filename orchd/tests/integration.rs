@@ -454,7 +454,7 @@ fn engine_loop_passes_when_verify_succeeds() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    daemon.request("task.start", serde_json::json!({"id": task_id}));
+    // No `task.start`: the full form starts by default, like the request form.
 
     let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(15));
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
@@ -2136,7 +2136,7 @@ fn a_message_reaches_a_running_task_with_its_next_attempt_only() {
     let repo_path = repo.path().to_str().unwrap();
     let sender = daemon.request(
         "task.create",
-        serde_json::json!({"repo": repo_path, "title": "Sender", "goal": "g"}),
+        serde_json::json!({"repo": repo_path, "title": "Sender", "goal": "g", "start": false}),
     );
     let receiver = daemon.request(
         "task.create",

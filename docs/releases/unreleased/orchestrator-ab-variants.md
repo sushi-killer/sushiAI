@@ -89,3 +89,7 @@
   `events.jsonl`), and the tool calls per attempt. Common build/test tools and
   the task's own verify commands count as verify; repository-specific process
   and evidence paths come from `settings.workBuckets` (empty by default).
+- `task.create` with a title and goal now starts the task by default, like
+  the request form; pass `start: false` to leave it stopped. Before, such a
+  task sat `queued` until something called `task.start` or the daemon
+  restarted.

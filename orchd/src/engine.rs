@@ -948,7 +948,9 @@ impl App {
             // loop falls through into implementing once it's done depends
             // on it (spec step 6).
             self.spawn_task_loop(id.clone(), p.start.unwrap_or(true));
-        } else if p.start.unwrap_or(false) {
+        } else if p.start.unwrap_or(true) {
+            // Same default as the request form: a `queued` task that never
+            // starts until a daemon restart looks like work in progress.
             self.start_task_loop(id.clone());
         }
         serde_json::to_value(&task).map_err(|e| e.to_string())

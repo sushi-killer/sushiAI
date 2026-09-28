@@ -858,8 +858,8 @@
   text-transform: capitalize;
 }
 
-/* "Default: ..." beside a setting saved away from orchd's default, with its
- * reset button on the same line. */
+/* "Differs from the default (...)" beside a setting saved away from orchd's
+ * default, with its reset button on the same line. */
 .orch-default-marker {
   display: inline-flex;
   align-items: center;

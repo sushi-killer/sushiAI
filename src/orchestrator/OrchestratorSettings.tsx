@@ -283,9 +283,9 @@ export function OrchestratorSettings() {
       setPathsText(defaults.protectedPaths.join("\n"));
   }
 
-  /** The "Default: ..." marker and reset button beside a control whose
-   * saved value differs from orchd's default. Reset only stages the value;
-   * Save still writes it, like every other edit here. */
+  /** The marker and reset button beside a control whose saved value differs
+   * from orchd's default. Reset only stages the value; Save still writes it,
+   * like every other edit here. */
   function defaultMarker(field: DefaultableSetting) {
     if (!defaults || !settings || !differing.includes(field)) return null;
     const label = SETTING_LABELS[field];
@@ -304,7 +304,9 @@ export function OrchestratorSettings() {
       !settings.routes.some((route) => route.id === routeId);
     return (
       <span className="orch-default-marker">
-        Default: {text}
+        {missing
+          ? `Differs from the default (${text}).`
+          : `Differs from the default (${text}). Reset restores it.`}
         <button
           type="button"
           className="icon-button"

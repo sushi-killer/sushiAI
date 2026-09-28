@@ -142,6 +142,10 @@ don't invent detail beyond what's stated here.
 
 ## Product and validation — Definition of Done
 
+Inside an orchd task (`ORCHD_TASK` is set) the task brief is the definition
+of done: orchd runs the checks, reviews and commits, and the lead session
+owns release fragments and `docs/LESSONS.md`. The list below is for the lead.
+
 - `npm run ci` is green.
 - Desktop smoke (`npm run test:desktop`) was run if `src/app`,
   `src/extensions`, or `electron/` changed.

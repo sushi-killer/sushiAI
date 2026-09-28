@@ -14,11 +14,11 @@ use crate::protocol::{CallFuture, Dispatcher, Event};
 use crate::store::{self, Store};
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{broadcast, oneshot, Notify, Semaphore};
 
 #[path = "chat.rs"]
@@ -346,27 +346,7 @@ struct HookContext {
     /// Set while `hook.stop` runs verify for this attempt: the harness is
     /// silent then by design, so the stall clock waits.
     hook_running: Arc<AtomicBool>,
-    /// `variant.lean_context` only: the skills hook's session state.
-    skills: Option<StdMutex<SkillState>>,
 }
-
-/// The skills a session already has, so `hook.skills` injects each once.
-#[derive(Default)]
-struct SkillState {
-    /// Seeded, when resuming, with what earlier attempts on the session got.
-    seen: HashSet<String>,
-    /// What this attempt injected, in order: `attempt.skills`.
-    injected: Vec<String>,
-    /// When a PostToolUse last reached the classifier; see
-    /// `SKILLS_TOOL_INTERVAL`.
-    last_tool_query: Option<Instant>,
-}
-
-/// At most one PostToolUse classifier call per session this often: each one
-/// blocks the agent for up to the classifier timeout, and an agent runs a
-/// tool every few seconds.
-// ponytail: fixed interval; make it a variant field if A/B shows it matters.
-const SKILLS_TOOL_INTERVAL: Duration = Duration::from_secs(60);
 
 /// An implement attempt's stall watchdog: the silence limit, paused while
 /// `paused` is set.
@@ -540,13 +520,13 @@ impl App {
         !self.chat_turns.lock().unwrap().is_empty()
     }
 
-    /// `ping`/`hook.stop`/`hook.skills` are the only methods reachable
-    /// without the control token: `ping` so Electron can probe/tell daemons
-    /// apart before it has read the token file, the hooks because they're
-    /// only ever invoked by `orchd hook stop|skills` over the same trusted
-    /// local machine, matched by their own per-run token instead.
+    /// `ping`/`hook.stop` are the only methods reachable without the
+    /// control token: `ping` so Electron can probe/tell daemons apart
+    /// before it has read the token file, `hook.stop` because it's only
+    /// ever invoked by `orchd hook stop` over the same trusted local
+    /// machine, matched by its own per-run token instead.
     fn check_auth(&self, method: &str, auth: Option<&str>) -> bool {
-        if matches!(method, "ping" | "hook.stop" | "hook.skills") {
+        if method == "ping" || method == "hook.stop" {
             return true;
         }
         auth.map(|a| a == self.control_token).unwrap_or(false)
@@ -694,7 +674,6 @@ impl App {
             "message.inbox" => messages::handle_inbox(self, params).await,
             "message.list" => messages::handle_list(self, params).await,
             "hook.stop" => self.handle_hook_stop(params).await,
-            "hook.skills" => self.handle_hook_skills(params).await,
             "shutdown" => self.handle_shutdown().await,
             other => Err(format!("unknown method: {other}")),
         }
@@ -1381,77 +1360,6 @@ impl App {
                 Ok(json!({"decision": "block", "reason": reason}))
             }
         }
-    }
-}
-
-impl App {
-    /// `variant.lean_context`'s skills hook: of the worktree's skills this
-    /// session does not have yet, the ones Jev says the agent's recent text
-    /// calls for. Anything that goes wrong answers `{}`.
-    async fn handle_hook_skills(
-        &self,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
-        #[derive(Deserialize)]
-        struct P {
-            token: String,
-            #[serde(default)]
-            event: String,
-            #[serde(default)]
-            text: String,
-        }
-        let Ok(p) = serde_json::from_value::<P>(params) else {
-            return Ok(json!({}));
-        };
-        let ctx = { self.hook_tokens.read().unwrap().get(&p.token).cloned() };
-        let Some(ctx) = ctx else {
-            return Ok(json!({}));
-        };
-        let Some(skills) = ctx.skills.as_ref() else {
-            return Ok(json!({}));
-        };
-        if p.event.is_empty() || p.text.trim().is_empty() {
-            return Ok(json!({}));
-        }
-        if p.event == "PostToolUse" {
-            let mut session = skills.lock().unwrap();
-            if session
-                .last_tool_query
-                .is_some_and(|t| t.elapsed() < SKILLS_TOOL_INTERVAL)
-            {
-                return Ok(json!({}));
-            }
-            session.last_tool_query = Some(Instant::now());
-        }
-        let wt = ctx.worktree.clone();
-        let Ok(Ok(catalog)) =
-            tokio::task::spawn_blocking(move || hook::load_skill_catalog(&wt)).await
-        else {
-            return Ok(json!({}));
-        };
-        let candidates: Vec<hook::Skill> = {
-            let seen = &skills.lock().unwrap().seen;
-            catalog
-                .into_iter()
-                .filter(|s| !seen.contains(&s.name))
-                .collect()
-        };
-        if candidates.is_empty() {
-            return Ok(json!({}));
-        }
-        let state = json!({
-            "event": p.event,
-            "recent": tail_chars(&p.text, hook::MAX_SKILLS_TEXT_CHARS),
-        });
-        let answers = classify_skills(self, &ctx.task_id, &candidates, state).await;
-        let mut session = skills.lock().unwrap();
-        // Re-checked under the lock: a parallel call may have injected one.
-        let picked = hook::select_skills(&candidates, answers.as_ref(), &session.seen);
-        for skill in &picked {
-            session.seen.insert(skill.name.clone());
-            session.injected.push(skill.name.clone());
-        }
-        Ok(hook::skills_hook_output(&p.event, &picked))
     }
 }
 
@@ -2532,7 +2440,6 @@ async fn run_triage(
         network_allowed: false,
         codex_mcp: None,
         images: &[],
-        lean_context: false,
     };
     let brief_text = brief::build_triage_brief(task, question, options);
     let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
@@ -2896,209 +2803,6 @@ async fn classify_answerable(app: &Arc<App>, task: &Task, question: &str) -> Opt
         .and_then(|answers| answers.get("answerable").and_then(|a| a.noul))
 }
 
-// -- `variant.lean_context`: skills and MCP servers picked by Jev ----------
-
-/// One `skills` classifier call over `candidates`; `None` on any error.
-async fn classify_skills(
-    app: &App,
-    task_id: &str,
-    candidates: &[hook::Skill],
-    state: serde_json::Value,
-) -> Option<classify::Answers> {
-    let settings = app.settings.read().unwrap().classifier.clone();
-    let key = app.secrets.read().unwrap().classifier_key.clone();
-    let base_url = app.secrets.read().unwrap().classifier_base_url.clone();
-    let questions = hook::skill_questions(candidates);
-    let start = std::time::Instant::now();
-    let result = tokio::task::spawn_blocking(move || {
-        classify::decide(
-            &settings,
-            key.as_deref(),
-            base_url.as_deref(),
-            &state,
-            &questions,
-        )
-    })
-    .await
-    .unwrap_or_else(|e| Err(classify::ClassifyError(e.to_string())));
-    app.journal(task_id, "skills", &result, start.elapsed());
-    result.ok()
-}
-
-/// A fresh Codex attempt's skills: Codex runs no hooks, so Jev is asked
-/// once, against the brief (its head, where the task is), with the skills
-/// hook's rules.
-async fn pick_brief_skills(
-    app: &App,
-    task_id: &str,
-    worktree: &Path,
-    brief_text: &str,
-) -> Vec<hook::Skill> {
-    let wt = worktree.to_path_buf();
-    let Ok(Ok(catalog)) = tokio::task::spawn_blocking(move || hook::load_skill_catalog(&wt)).await
-    else {
-        return vec![];
-    };
-    if catalog.is_empty() {
-        return vec![];
-    }
-    let brief = truncate_chars(brief_text, hook::MAX_SKILLS_TEXT_CHARS);
-    let answers = classify_skills(app, task_id, &catalog, json!({"brief": brief})).await;
-    hook::select_skills(&catalog, answers.as_ref(), &HashSet::new())
-        .into_iter()
-        .cloned()
-        .collect()
-}
-
-/// The skills a resumed session already holds: what every earlier attempt
-/// on it was given. A fresh session holds none.
-fn session_skills(attempts: &[Attempt], session: Option<&str>) -> HashSet<String> {
-    let Some(session) = session else {
-        return HashSet::new();
-    };
-    attempts
-        .iter()
-        .filter(|a| a.session_id.as_deref() == Some(session))
-        .flat_map(|a| a.skills.iter().cloned())
-        .collect()
-}
-
-/// An `mcp.json`-shaped file's value, when it has an `mcpServers` object.
-fn read_mcp_file(path: &Path) -> Option<serde_json::Value> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .filter(|v| v.get("mcpServers").is_some_and(|s| s.is_object()))
-}
-
-/// The servers a Claude implement attempt can be given: the task's own
-/// `mcp.json` (which the app already fills with the owner's user, local and
-/// project servers), or for a task created without one, the worktree's
-/// `.mcp.json`; the task file wins on a name clash. Never orchd's own
-/// messaging server, which every run gets anyway.
-fn mcp_candidates(
-    task_mcp: Option<&serde_json::Value>,
-    worktree_mcp: Option<&serde_json::Value>,
-) -> serde_json::Map<String, serde_json::Value> {
-    let servers = |v: Option<&serde_json::Value>| {
-        v.and_then(|v| v["mcpServers"].as_object().cloned())
-            .unwrap_or_default()
-    };
-    let mut candidates = if task_mcp.is_none() {
-        servers(worktree_mcp)
-    } else {
-        serde_json::Map::new()
-    };
-    candidates.extend(servers(task_mcp));
-    candidates.remove(messages::SERVER);
-    candidates
-}
-
-/// What an MCP server runs, for Jev to judge it by; never its env.
-fn mcp_server_summary(server: &serde_json::Value) -> String {
-    let text = match server.get("url").and_then(|u| u.as_str()) {
-        Some(url) => url.to_string(),
-        None => {
-            let mut parts = vec![server["command"].as_str().unwrap_or("").to_string()];
-            if let Some(args) = server["args"].as_array() {
-                parts.extend(args.iter().filter_map(|a| a.as_str().map(str::to_string)));
-            }
-            parts.join(" ")
-        }
-    };
-    truncate_chars(text.trim(), 200)
-}
-
-/// Dropping a server the agent needs costs more than keeping one it does
-/// not, so a server stays unless Jev puts it under even odds.
-const MCP_KEEP_P: f64 = 0.5;
-
-/// The candidates Jev keeps, and the names of the ones it drops. `None`
-/// (a classifier error) keeps every server, as without the flag; a server
-/// Jev gave no answer for is kept too.
-fn keep_mcp_servers(
-    candidates: &serde_json::Map<String, serde_json::Value>,
-    answers: Option<&classify::Answers>,
-) -> (serde_json::Map<String, serde_json::Value>, Vec<String>) {
-    let mut kept = serde_json::Map::new();
-    let mut dropped = Vec::new();
-    for (name, server) in candidates {
-        let p = answers.and_then(|a| a.get(name)).and_then(|a| a.noul);
-        if p.is_some_and(|p| p < MCP_KEEP_P) {
-            dropped.push(name.clone());
-        } else {
-            kept.insert(name.clone(), server.clone());
-        }
-    }
-    (kept, dropped)
-}
-
-fn mcp_pick_line(kept: &[String], dropped: &[String], classified: bool) -> String {
-    let list = |names: &[String]| {
-        if names.is_empty() {
-            "none".to_string()
-        } else {
-            names.join(", ")
-        }
-    };
-    if classified {
-        format!(
-            "Jev: MCP servers picked {}; dropped {}",
-            list(kept),
-            list(dropped)
-        )
-    } else {
-        format!(
-            "Jev: MCP pick unavailable -> kept every server ({})",
-            list(kept)
-        )
-    }
-}
-
-/// One `mcp` classifier call: which candidates this task's agent needs.
-/// Returns the servers to write and the task decision line.
-async fn pick_mcp_servers(
-    app: &App,
-    task: &Task,
-    candidates: serde_json::Map<String, serde_json::Value>,
-) -> (serde_json::Map<String, serde_json::Value>, String) {
-    let settings = app.settings.read().unwrap().classifier.clone();
-    let key = app.secrets.read().unwrap().classifier_key.clone();
-    let base_url = app.secrets.read().unwrap().classifier_base_url.clone();
-    let summaries: serde_json::Map<String, serde_json::Value> = candidates
-        .iter()
-        .map(|(name, server)| (name.clone(), json!(mcp_server_summary(server))))
-        .collect();
-    let state = json!({"goal": task.goal, "criteria": task.criteria, "servers": summaries});
-    let questions: Vec<classify::QuestionSpec> = candidates
-        .keys()
-        .map(|name| classify::QuestionSpec::Noul {
-            name: name.clone(),
-            prompt: format!(
-                "An agent is about to implement this task. Will it need the tools of the MCP server \"{name}\" (what it runs is under servers)? It gets the server only if so."
-            ),
-        })
-        .collect();
-    let start = std::time::Instant::now();
-    let result = tokio::task::spawn_blocking(move || {
-        classify::decide(
-            &settings,
-            key.as_deref(),
-            base_url.as_deref(),
-            &state,
-            &questions,
-        )
-    })
-    .await
-    .unwrap_or_else(|e| Err(classify::ClassifyError(e.to_string())));
-    app.journal(&task.id, "mcp", &result, start.elapsed());
-    let answers = result.ok();
-    let (kept, dropped) = keep_mcp_servers(&candidates, answers.as_ref());
-    let kept_names: Vec<String> = kept.keys().cloned().collect();
-    let line = mcp_pick_line(&kept_names, &dropped, answers.is_some());
-    (kept, line)
-}
-
 // ===========================================================================
 // Review
 // ===========================================================================
@@ -3209,7 +2913,6 @@ async fn run_review(
         network_allowed: false,
         codex_mcp: None,
         images: &images,
-        lean_context: false,
     };
     match run_harness(
         app,
@@ -3524,7 +3227,6 @@ async fn run_plan_stage(
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
-            skills: vec![],
             prefix_tokens: None,
             review: None,
             failure: None,
@@ -3569,7 +3271,6 @@ async fn run_plan_stage(
             network_allowed: false,
             codex_mcp: None,
             images: &[],
-            lean_context: false,
         };
 
         let mut draft: Option<brief::PlanDraft> = None;
@@ -4050,42 +3751,10 @@ async fn run_task_loop(
         };
         // The messages sent to this task since its last attempt are
         // delivered here, with the attempt about to start.
-        let mut brief_text = brief::with_block_before_report(
+        let brief_text = brief::with_block_before_report(
             &brief_text,
             &messages::brief_block_for_task(&app, &task_id),
         );
-
-        let lean = task.variant().lean_context;
-        // Codex runs no hooks: a fresh Codex attempt reads its skills in the
-        // brief. A resumed one keeps what its session already read.
-        let mut brief_skills = Vec::new();
-        if lean && route.harness == Harness::Codex && resume_session.is_none() {
-            let picked = pick_brief_skills(&app, &task_id, &worktree, &brief_text).await;
-            let refs: Vec<&hook::Skill> = picked.iter().collect();
-            brief_text =
-                brief::with_block_before_report(&brief_text, &hook::skills_brief_section(&refs));
-            brief_skills = picked.into_iter().map(|s| s.name).collect();
-        }
-
-        // The project's own servers, plus (below) orchd's messaging bridge
-        // scoped to this task. With `lean_context` a Claude run keeps only
-        // the servers Jev picks for the task.
-        let task_mcp = read_mcp_file(&app.store.task_dir(&task_id).join("mcp.json"));
-        let mut mcp_config = task_mcp
-            .clone()
-            .unwrap_or_else(|| json!({"mcpServers": {}}));
-        if lean && route.harness == Harness::Claude {
-            let worktree_mcp = task_mcp
-                .is_none()
-                .then(|| read_mcp_file(&worktree.join(".mcp.json")))
-                .flatten();
-            let candidates = mcp_candidates(task_mcp.as_ref(), worktree_mcp.as_ref());
-            if !candidates.is_empty() {
-                let (kept, line) = pick_mcp_servers(&app, &task, candidates).await;
-                mcp_config["mcpServers"] = serde_json::Value::Object(kept);
-                task.decisions.push(line);
-            }
-        }
 
         let reason = format!("tier {} -> route {}", task.tier.as_str(), route.id);
         let attempt = Attempt {
@@ -4106,7 +3775,6 @@ async fn run_task_loop(
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
-            skills: brief_skills,
             prefix_tokens: None,
             review: None,
             failure: None,
@@ -4124,7 +3792,15 @@ async fn run_task_loop(
         let run_dir = app.store.run_dir(&task_id, attempt_n);
         let _ = std::fs::create_dir_all(&run_dir);
         let mcp_path = run_dir.join("mcp.json");
+        let task_mcp_path = app.store.task_dir(&task_id).join("mcp.json");
+        // The project's own servers, plus orchd's messaging bridge scoped to
+        // this task.
         let messages_server = messages::task_server(&app, &task_id);
+        let mut mcp_config = std::fs::read_to_string(&task_mcp_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .filter(|v| v.get("mcpServers").is_some_and(|s| s.is_object()))
+            .unwrap_or_else(|| json!({"mcpServers": {}}));
         mcp_config["mcpServers"][messages::SERVER] = messages_server.clone();
         let _ = store::write_json_atomic(&mcp_path, &mcp_config);
 
@@ -4172,7 +3848,6 @@ async fn run_task_loop(
                 orchd_path: &app.orchd_path,
                 socket_path: &socket_path_str,
                 token: &token,
-                skills: lean,
                 lean_output: task.variant().lean_output,
             };
             let mut claude_settings = harness::build_claude_settings(
@@ -4199,13 +3874,6 @@ async fn run_task_loop(
                 blocks: AtomicU32::new(0),
                 cancel: CancelToken::new(),
                 hook_running: Arc::new(AtomicBool::new(false)),
-                skills: lean.then(|| {
-                    StdMutex::new(SkillState {
-                        seen: session_skills(&task.attempts, resume_session.as_deref()),
-                        injected: vec![],
-                        last_tool_query: None,
-                    })
-                }),
             });
             app.hook_tokens
                 .write()
@@ -4227,7 +3895,6 @@ async fn run_task_loop(
             network_allowed,
             codex_mcp: Some((messages::SERVER, &messages_server)),
             images: &[],
-            lean_context: lean && route.harness == Harness::Claude,
         };
 
         let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
@@ -4252,17 +3919,12 @@ async fn run_task_loop(
         )
         .await;
 
-        let (gate_blocks, hook_skills) = if let Some((tok, ctx)) = registered.take() {
+        let gate_blocks = if let Some((tok, ctx)) = registered.take() {
             app.hook_tokens.write().unwrap().remove(&tok);
             ctx.cancel.cancel();
-            let skills = ctx
-                .skills
-                .as_ref()
-                .map(|s| s.lock().unwrap().injected.clone())
-                .unwrap_or_default();
-            (ctx.blocks.load(Ordering::SeqCst), skills)
+            ctx.blocks.load(Ordering::SeqCst)
         } else {
-            (0, vec![])
+            0
         };
         // Delete the per-run key file the moment the run ends (spec item
         // B); recovery also deletes it for an attempt interrupted by an
@@ -4271,15 +3933,12 @@ async fn run_task_loop(
 
         // `run_harness` may have persisted `session_id`/`pgid` mid-run;
         // reload so we don't clobber that with our stale in-memory copy --
-        // then reapply `gate_blocks` and the hook's skills, which are never
-        // persisted mid-run and so aren't on the reloaded copy at all.
+        // then reapply `gate_blocks`, which is never itself persisted
+        // mid-run and so isn't on the reloaded copy at all.
         if let Ok(Some(reloaded)) = app.store.load_task(&task_id) {
             task = reloaded;
         }
         task.attempts[idx].gate_blocks = gate_blocks;
-        if route.harness == Harness::Claude {
-            task.attempts[idx].skills = hook_skills;
-        }
 
         let outcome = match run_result {
             Ok(o) => o,
@@ -5194,7 +4853,6 @@ mod tests {
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
-            skills: vec![],
             prefix_tokens: None,
             review: None,
             failure: Some(Failure {
@@ -5483,99 +5141,6 @@ mod tests {
         assert_eq!(
             jev_plan_preflight_line(0.9, 0.8, 0.3),
             "Jev: goal 0.90, criteria 0.80, verification 0.30"
-        );
-    }
-
-    #[test]
-    fn a_resumed_session_is_seeded_with_the_skills_its_earlier_attempts_got() {
-        let with = |n: u32, session: &str, skills: &[&str]| {
-            let mut a = attempt_with_failure(n, "sig");
-            a.session_id = Some(session.to_string());
-            a.skills = skills.iter().map(|s| s.to_string()).collect();
-            a
-        };
-        let attempts = [
-            with(1, "s1", &["deslop"]),
-            with(2, "s2", &["ui-evidence"]),
-            with(3, "s1", &["autoreview"]),
-        ];
-        let seeded = session_skills(&attempts, Some("s1"));
-        assert_eq!(
-            seeded,
-            HashSet::from(["deslop".to_string(), "autoreview".to_string()])
-        );
-        assert!(session_skills(&attempts, None).is_empty());
-    }
-
-    #[test]
-    fn mcp_candidates_are_the_task_servers_or_else_the_worktree_s_never_messages() {
-        let task = json!({"mcpServers": {"github": {"command": "gh"}, "sushiai-messages": {"command": "o"}}});
-        let worktree =
-            json!({"mcpServers": {"figma": {"url": "https://f"}, "github": {"command": "wt"}}});
-        let only_task = mcp_candidates(Some(&task), Some(&worktree));
-        assert_eq!(only_task.keys().collect::<Vec<_>>(), ["github"]);
-        assert_eq!(only_task["github"]["command"], "gh");
-        let from_worktree = mcp_candidates(None, Some(&worktree));
-        assert_eq!(
-            from_worktree.keys().collect::<Vec<_>>(),
-            ["figma", "github"]
-        );
-        assert!(mcp_candidates(None, None).is_empty());
-    }
-
-    #[test]
-    fn keep_mcp_servers_drops_only_what_jev_rules_out() {
-        let candidates =
-            json!({"a": {"command": "a"}, "b": {"command": "b"}, "c": {"command": "c"}})
-                .as_object()
-                .unwrap()
-                .clone();
-        let mut answers = classify::Answers::new();
-        for (name, p) in [("a", 0.9), ("b", 0.2)] {
-            answers.insert(
-                name.to_string(),
-                classify::Answer {
-                    noul: Some(p),
-                    ..Default::default()
-                },
-            );
-        }
-        let (kept, dropped) = keep_mcp_servers(&candidates, Some(&answers));
-        assert_eq!(
-            kept.keys().collect::<Vec<_>>(),
-            ["a", "c"],
-            "unanswered c stays"
-        );
-        assert_eq!(dropped, ["b"]);
-        let (all, none) = keep_mcp_servers(&candidates, None);
-        assert_eq!(all.len(), 3, "a classifier error keeps every server");
-        assert!(none.is_empty());
-    }
-
-    #[test]
-    fn mcp_pick_line_names_picked_and_dropped_servers() {
-        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        assert_eq!(
-            mcp_pick_line(&s(&["github"]), &s(&["figma", "slack"]), true),
-            "Jev: MCP servers picked github; dropped figma, slack"
-        );
-        assert_eq!(
-            mcp_pick_line(&[], &s(&["figma"]), true),
-            "Jev: MCP servers picked none; dropped figma"
-        );
-        assert_eq!(
-            mcp_pick_line(&s(&["github", "figma"]), &[], false),
-            "Jev: MCP pick unavailable -> kept every server (github, figma)"
-        );
-    }
-
-    #[test]
-    fn mcp_server_summary_shows_what_runs_but_not_the_env() {
-        let stdio = json!({"command": "npx", "args": ["-y", "server"], "env": {"TOKEN": "t0p"}});
-        assert_eq!(mcp_server_summary(&stdio), "npx -y server");
-        assert_eq!(
-            mcp_server_summary(&json!({"type": "http", "url": "https://mcp.example"})),
-            "https://mcp.example"
         );
     }
 

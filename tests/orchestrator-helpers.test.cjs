@@ -623,7 +623,6 @@ function variant(overrides = {}) {
     reviewOtherFamily: false,
     reviewEvidence: false,
     deferHeavyChecks: false,
-    leanContext: false,
     leanOutput: false,
     ...overrides,
   };
@@ -648,10 +647,10 @@ test("variantLabel says 'default' when the task's variant matches the current ex
 test("variantLabel lists only the differing flags, in Variant's field order, booleans as on/off", async () => {
   const { variantLabel } = await library;
   const experiments = variant();
-  const taskVariant = variant({ retryMode: "fresh", leanContext: true });
+  const taskVariant = variant({ retryMode: "fresh", leanOutput: true });
   assert.equal(
     variantLabel(task({ variant: taskVariant }), experiments),
-    "retryMode fresh · leanContext on",
+    "retryMode fresh · leanOutput on",
   );
 });
 

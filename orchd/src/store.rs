@@ -266,7 +266,6 @@ mod tests {
                 changed_files: vec![],
                 verify: vec![],
                 gate_blocks: 0,
-                skills: vec![],
                 prefix_tokens: None,
                 review: None,
                 failure: None,
@@ -324,6 +323,32 @@ mod tests {
         .unwrap();
         let old_loaded = store.load_task("old").unwrap().unwrap();
         assert!(!old_loaded.archived);
+    }
+
+    /// A task.json written with fields since removed from `Variant` and
+    /// `Attempt` must still load: serde ignores unknown fields by default,
+    /// so dropping them from the structs is not a breaking change for a
+    /// task already on disk.
+    #[test]
+    fn a_task_json_with_fields_since_removed_from_variant_and_attempt_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        let task_dir = store.task_dir("old");
+        fs::create_dir_all(&task_dir).unwrap();
+        let mut value =
+            serde_json::to_value(sample_task("old", TaskStatus::Done, AttemptStatus::Passed))
+                .unwrap();
+        // A flag removed from `Variant` (2026-09-28) must not break loading.
+        value["variant"]["leanContext"] = serde_json::json!(true);
+        value["attempts"][0]["skills"] = serde_json::json!(["deslop"]);
+        fs::write(
+            task_dir.join("task.json"),
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+        let loaded = store.load_task("old").unwrap().unwrap();
+        assert_eq!(loaded.id, "old");
+        assert_eq!(loaded.attempts.len(), 1);
     }
 
     #[test]

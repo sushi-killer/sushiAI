@@ -44,21 +44,19 @@
   hook run only the fast `verify`; orchd runs `finalVerify` once, after
   review passes and before the commit, and a failure there is a normal
   retry. `task.create` also takes `finalVerify` directly.
-- `leanContext: true` gives implement agents the skills and MCP servers Jev
-  picks for the task instead of a fixed set. A Claude agent gets a skill's
-  `SKILL.md` body through a hook when its prompt or a tool's output calls
-  for it: at most 3 per call, each once per session, at most one check
-  after a tool call per minute, and never a skill marked
-  `disable-model-invocation`. A fresh Codex attempt gets the picked
-  skills in its brief. A Claude run's MCP servers are cut to the ones Jev
-  picks (orchd's messaging server always stays; if Jev can't be reached,
-  every server stays), and its prompt drops the subagent and other
-  delegation tools, which took the fixed prompt prefix from about 29.9k to
-  19.6k tokens in one measurement.
+- A/B runs of an earlier per-turn-skills experiment flag showed that
+  injecting repo skills into task agents and letting Jev pick a task's MCP
+  servers added work instead of saving it, while trimming the fixed prompt
+  prefix cut the first turn by about 30% with no downside. The trim is now
+  the unconditional default for every Claude implement run (never review or
+  plan): its prompt drops the subagent and other delegation tools via
+  `--disallowedTools`, which took the fixed prompt prefix from about 29.9k
+  to 19.6k tokens in one measurement. Skills are no longer injected into a
+  running agent at all, and the flag itself is gone; `mcp.json` again
+  carries the same servers it did before the flag existed.
 - `orchd ab` has two more columns: the median first-turn prompt tokens of
   fresh Claude implement attempts, and mean cache-read tokens per implement
-  attempt. In the `leanContext` arm the first-turn figure also counts the
-  skills injected on the first prompt, so it understates the trim.
+  attempt.
 - `leanOutput: true` gives a Claude implement run a PreToolUse hook
   (`orchd hook rtk`) that offers `rtk rewrite`'s shorter form of a `Bash`
   command before it runs (only for build, test and lint commands, whose
@@ -68,5 +66,5 @@
   rest is saved to a file the agent can read). The hook needs no socket or
   token -- it never contacts the daemon -- and never rewrites a command
   containing `git commit` or `git push`, so a rewrite can never launder past
-  those same deny rules. Independent of `leanContext`, and combinable with
-  it; Codex runs and review/plan sessions are unaffected either way.
+  those same deny rules. Codex runs and review/plan sessions are unaffected
+  either way.

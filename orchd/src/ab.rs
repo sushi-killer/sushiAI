@@ -225,26 +225,20 @@ mod tests {
 
     #[test]
     fn report_shows_median_prefix_and_mean_cache_read_tokens_per_implement_attempt() {
-        let lean = Variant {
-            lean_context: true,
-            ..Variant::default()
-        };
-        let mut a = task(lean.clone(), TaskStatus::Done, 1.0, &[]);
+        let variant = Variant::default();
+        let mut a = task(variant.clone(), TaskStatus::Done, 1.0, &[]);
         a.attempts = vec![
             attempt("plan", Some(90_000), Some(90_000)),
             attempt("implement", Some(20_000), Some(1_000)),
             attempt("implement", None, Some(3_000)),
         ];
-        let mut b = task(lean, TaskStatus::Done, 1.0, &[]);
+        let mut b = task(variant, TaskStatus::Done, 1.0, &[]);
         b.attempts = vec![
             attempt("implement", Some(30_000), Some(5_000)),
             attempt("implement", Some(22_000), None),
         ];
         let out = report(&[a, b]);
-        let row = out
-            .lines()
-            .find(|l| l.contains("\"leanContext\":true"))
-            .unwrap();
+        let row = out.lines().nth(2).unwrap();
         // Median of 20k, 30k, 22k; mean cached of 1k, 3k, 5k.
         assert!(row.ends_with("| 22000 | 3000 |"), "{row}");
         assert!(out
@@ -255,18 +249,14 @@ mod tests {
     }
 
     #[test]
-    fn lean_output_gets_its_own_row_separate_from_lean_context() {
+    fn different_variants_each_get_their_own_row() {
         let lean_output = Variant {
             lean_output: true,
             ..Variant::default()
         };
         let mut a = task(lean_output, TaskStatus::Done, 1.0, &[]);
         a.attempts = vec![attempt("implement", Some(15_000), Some(2_000))];
-        let lean_context = Variant {
-            lean_context: true,
-            ..Variant::default()
-        };
-        let mut b = task(lean_context, TaskStatus::Done, 1.0, &[]);
+        let mut b = task(Variant::default(), TaskStatus::Done, 1.0, &[]);
         b.attempts = vec![attempt("implement", Some(30_000), Some(5_000))];
 
         let out = report(&[a, b]);
@@ -277,13 +267,9 @@ mod tests {
             .find(|r| r.contains("\"leanOutput\":true"))
             .unwrap();
         assert!(
-            !lean_output_row.contains("\"leanContext\":true"),
-            "{lean_output_row}"
-        );
-        assert!(
             lean_output_row.ends_with("| 15000 | 2000 |"),
             "{lean_output_row}"
         );
-        assert!(rows.iter().any(|r| r.contains("\"leanContext\":true")));
+        assert!(rows.iter().any(|r| !r.contains("\"leanOutput\":true")));
     }
 }

@@ -27,10 +27,6 @@ pub struct RunRequest<'a> {
     /// Codex only: images attached to the prompt (`--image`); Claude opens
     /// image files itself with its Read tool.
     pub images: &'a [std::path::PathBuf],
-    /// Claude implement only (`variant.lean_context`): disallow the
-    /// delegation tools, whose descriptions (the subagent list above all)
-    /// make up much of the fixed prompt prefix.
-    pub lean_context: bool,
 }
 
 /// The tools an orchd agent never needs: it implements one bounded task and
@@ -58,10 +54,10 @@ pub fn codex_mcp_flags(name: &str, server: &serde_json::Value) -> Vec<String> {
 /// `claude -p --output-format stream-json --verbose --setting-sources
 /// project,local --disable-slash-commands --strict-mcp-config --mcp-config
 /// <mcp.json> --settings <settings.json> --permission-mode acceptEdits
-/// --permission-prompts none [--model] [--effort] [--resume <id>]`; review
-/// swaps `--permission-mode acceptEdits` for
-/// `--tools Read,Grep,Glob --permission-mode plan`. `lean_context` adds
-/// `--disallowedTools <DELEGATION_TOOLS>` to an implement run.
+/// --disallowedTools <DELEGATION_TOOLS> --permission-prompts none [--model]
+/// [--effort] [--resume <id>]`; review swaps `--permission-mode acceptEdits`
+/// (and the delegation-tools trim, which review never gets) for
+/// `--tools Read,Grep,Glob --permission-mode plan`.
 pub fn claude_argv(req: &RunRequest) -> Vec<String> {
     let mut argv = vec![
         "-p".to_string(),
@@ -89,11 +85,9 @@ pub fn claude_argv(req: &RunRequest) -> Vec<String> {
     } else {
         argv.push("--permission-mode".to_string());
         argv.push("acceptEdits".to_string());
-        if req.lean_context {
-            // One comma-joined value: the flag is variadic.
-            argv.push("--disallowedTools".to_string());
-            argv.push(DELEGATION_TOOLS.to_string());
-        }
+        // One comma-joined value: the flag is variadic.
+        argv.push("--disallowedTools".to_string());
+        argv.push(DELEGATION_TOOLS.to_string());
     }
     argv.push("--permission-prompts".to_string());
     argv.push("none".to_string());
@@ -204,22 +198,15 @@ pub fn build_argv(req: &RunRequest) -> Vec<String> {
 
 /// The Stop hook wiring for a Claude run: `orchd`'s own path, the daemon's
 /// socket, and the token that maps this run's `hook.stop` calls back to its
-/// task/attempt. `skills` also wires `orchd hook skills` (same socket and
-/// token) to UserPromptSubmit and PostToolUse. `lean_output` wires `orchd
-/// hook rtk` to PreToolUse and sets `bashOutputMaxChars` -- neither
-/// needs the socket or token, since the hook never contacts the daemon.
+/// task/attempt. `lean_output` wires `orchd hook rtk` to PreToolUse and sets
+/// `bashOutputMaxChars` -- it needs no socket or token, since the hook never
+/// contacts the daemon.
 pub struct StopHook<'a> {
     pub orchd_path: &'a str,
     pub socket_path: &'a str,
     pub token: &'a str,
-    pub skills: bool,
     pub lean_output: bool,
 }
-
-/// The tools whose output can tell which skill the agent needs next.
-pub const SKILLS_HOOK_MATCHER: &str = "Read|Bash|Grep|Glob";
-/// One classifier call (5s) plus reading the skill catalog.
-const SKILLS_HOOK_TIMEOUT_SECS: u64 = 30;
 
 /// A few seconds' margin over the rtk subprocess's own 2s timeout
 /// (`hook::RTK_REWRITE_TIMEOUT`) so Claude Code's own hook-level timeout
@@ -321,14 +308,6 @@ pub fn build_claude_settings(
                 }
             ]
         });
-        if hook.skills {
-            let skills = serde_json::json!(
-                {"type": "command", "command": command("skills"), "timeout": SKILLS_HOOK_TIMEOUT_SECS}
-            );
-            hooks["UserPromptSubmit"] = serde_json::json!([{"hooks": [skills.clone()]}]);
-            hooks["PostToolUse"] =
-                serde_json::json!([{"matcher": SKILLS_HOOK_MATCHER, "hooks": [skills]}]);
-        }
         if hook.lean_output {
             let rtk_command = format!("{} hook rtk", shell_quote(hook.orchd_path));
             hooks["PreToolUse"] = serde_json::json!([{
@@ -553,7 +532,6 @@ mod tests {
             network_allowed: true,
             codex_mcp: None,
             images: &[],
-            lean_context: false,
         }
     }
 
@@ -593,9 +571,10 @@ mod tests {
         assert!(!argv.contains(&"--resume".to_string()));
     }
 
-    /// Pins today's argv: with `lean_context` off nothing may change.
+    /// Pins today's argv: an implement run always trims the delegation
+    /// tools now, unconditionally.
     #[test]
-    fn claude_implement_argv_without_lean_context_is_unchanged() {
+    fn claude_implement_argv_always_trims_delegation_tools() {
         let wt = PathBuf::from("/w");
         let mcp = PathBuf::from("/r/mcp.json");
         let settings = PathBuf::from("/r/settings.json");
@@ -620,6 +599,8 @@ mod tests {
             "/r/settings.json",
             "--permission-mode",
             "acceptEdits",
+            "--disallowedTools",
+            DELEGATION_TOOLS,
             "--permission-prompts",
             "none",
             "--model",
@@ -631,26 +612,17 @@ mod tests {
         ]
         .map(String::from)
         .to_vec();
-        assert_eq!(claude_argv(&req), expected);
-
-        req.lean_context = true;
-        let lean = claude_argv(&req);
-        let at = lean.iter().position(|a| a == "--disallowedTools").unwrap();
-        assert_eq!(lean[at + 1], DELEGATION_TOOLS);
-        assert!(lean[at + 1].split(',').any(|t| t == "Task"));
-        // Only that one flag pair is added; skills stay off.
-        let mut without = lean.clone();
-        without.drain(at..at + 2);
-        assert_eq!(without, expected);
-        assert!(lean.contains(&"--disable-slash-commands".to_string()));
+        let argv = claude_argv(&req);
+        assert_eq!(argv, expected);
+        let at = argv.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert!(argv[at + 1].split(',').any(|t| t == "Task"));
     }
 
     #[test]
-    fn claude_review_never_gets_the_lean_context_trim() {
+    fn claude_review_never_gets_the_delegation_tools_trim() {
         let wt = PathBuf::from("/w");
         let mut req = base_req(Harness::Claude, &wt);
         req.review = true;
-        req.lean_context = true;
         assert!(!claude_argv(&req).contains(&"--disallowedTools".to_string()));
     }
 
@@ -744,7 +716,6 @@ mod tests {
             orchd_path: "/usr/local/bin/orchd",
             socket_path: "/tmp/orchd.sock",
             token: "tok-1",
-            skills: false,
             lean_output: false,
         };
         let deny_read = vec!["/data".to_string()];
@@ -775,7 +746,6 @@ mod tests {
             orchd_path: "/usr/local/bin/orchd",
             socket_path: "/tmp/orchd.sock",
             token: "tok-1",
-            skills: false,
             lean_output: false,
         };
         let host =
@@ -785,38 +755,11 @@ mod tests {
     }
 
     #[test]
-    fn claude_settings_wire_the_skills_hook_only_when_asked() {
-        let hook = |skills| StopHook {
-            orchd_path: "/bin/orchd",
-            socket_path: "/tmp/o.sock",
-            token: "tok",
-            skills,
-            lean_output: false,
-        };
-        let off = build_claude_settings(None, SandboxMode::Host, &[], &[], Some(hook(false)));
-        let keys: Vec<&String> = off["hooks"].as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["Stop"], "the Stop hook only: {off}");
-
-        let on = build_claude_settings(None, SandboxMode::Host, &[], &[], Some(hook(true)));
-        assert_eq!(on["hooks"]["Stop"], off["hooks"]["Stop"]);
-        let prompt = &on["hooks"]["UserPromptSubmit"][0]["hooks"][0];
-        assert_eq!(
-            prompt["command"],
-            "'/bin/orchd' hook skills --socket '/tmp/o.sock' --token 'tok'"
-        );
-        assert!(prompt["timeout"].as_u64().unwrap() > 0);
-        let tool = &on["hooks"]["PostToolUse"][0];
-        assert_eq!(tool["matcher"], "Read|Bash|Grep|Glob");
-        assert_eq!(tool["hooks"][0], *prompt);
-    }
-
-    #[test]
     fn claude_settings_wire_the_rtk_hook_and_output_cap_only_when_asked() {
         let hook = |lean_output| StopHook {
             orchd_path: "/bin/orchd",
             socket_path: "/tmp/o.sock",
             token: "tok",
-            skills: false,
             lean_output,
         };
         let profile = serde_json::json!({"env": {"ANTHROPIC_API_KEY_HELPER": "x"}});

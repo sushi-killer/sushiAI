@@ -712,7 +712,6 @@ mod tests {
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
-            skills: vec![],
             prefix_tokens: None,
             review: None,
             failure: Some(Failure {
@@ -867,7 +866,6 @@ mod tests {
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
-            skills: vec![],
             prefix_tokens: None,
             review: None,
             failure: None,
@@ -1037,7 +1035,6 @@ mod tests {
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
-            skills: vec![],
             prefix_tokens: None,
             review: None,
             failure: Some(Failure {

@@ -3,7 +3,7 @@
 - A task's detail view now shows a `Variant: ...` line under the header meta:
   `default` when it ran with the current experiment settings, `not recorded`
   for a task from before variants existed, or only the flags that differ
-  (e.g. `retryMode fresh · leanContext on`).
+  (e.g. `retryMode fresh · leanOutput on`).
 - Below it, a compact cost breakdown shows where the task's money went, by
   stage - Plan, Implement #n per attempt, Review, and Other (auto-answer
   runs and, for a task recorded before this change, reviews with no cost

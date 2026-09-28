@@ -223,18 +223,11 @@ pub struct Variant {
     /// The planner splits slow whole-repo checks into `final_verify`, run
     /// once after review passes instead of on every attempt and stop.
     pub defer_heavy_checks: bool,
-    /// Implement agents get skills and MCP servers Jev picks for the task
-    /// instead of a fixed set: a Claude run's skills arrive through a
-    /// UserPromptSubmit/PostToolUse hook, a fresh Codex run's in its brief,
-    /// and a Claude run's `mcp.json` keeps only the servers Jev picked.
-    /// Claude runs also drop the delegation tools from their prompt prefix.
-    pub lean_context: bool,
     /// A Claude implement run's `settings.json` gets a PreToolUse hook
     /// (`orchd hook rtk`) that offers `rtk rewrite`'s shorter form of a
     /// `Bash` command, and `bashOutputMaxChars` caps how much of a
-    /// command's own output comes back. Independent of `lean_context`, and
-    /// combinable with it. Codex runs and review/plan sessions are
-    /// untouched either way.
+    /// command's own output comes back. Codex runs and review/plan
+    /// sessions are untouched either way.
     pub lean_output: bool,
 }
 
@@ -517,10 +510,6 @@ pub struct Attempt {
     pub verify: Vec<VerifyOutcome>,
     #[serde(default)]
     pub gate_blocks: u32,
-    /// `variant.lean_context`: the skills Jev picked and this attempt
-    /// received (skills hook for Claude, brief section for Codex).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skills: Vec<String>,
     /// Tokens of the first turn's prompt (input + cache creation + cache
     /// read) of a fresh Claude implement attempt: the fixed prefix plus the
     /// brief. `None` for resumed and Codex attempts.
@@ -662,24 +651,6 @@ mod tests {
     }
 
     #[test]
-    fn lean_context_is_camel_case_off_by_default_and_optional_on_disk() {
-        assert!(!Variant::default().lean_context);
-        let on = Variant {
-            lean_context: true,
-            ..Variant::default()
-        };
-        let v = serde_json::to_value(&on).unwrap();
-        assert_eq!(v["leanContext"], true);
-        let back: Variant = serde_json::from_value(v).unwrap();
-        assert_eq!(back, on);
-        // A task.json variant written before the flag existed.
-        let old: Variant =
-            serde_json::from_value(serde_json::json!({"retryMode": "fresh"})).unwrap();
-        assert!(!old.lean_context);
-        assert_eq!(old.retry_mode, RetryMode::Fresh);
-    }
-
-    #[test]
     fn lean_output_is_camel_case_off_by_default_and_optional_on_disk() {
         assert!(!Variant::default().lean_output);
         let on = Variant {
@@ -698,20 +669,18 @@ mod tests {
     }
 
     #[test]
-    fn attempt_skills_and_prefix_tokens_are_optional_on_disk() {
+    fn attempt_prefix_tokens_is_optional_on_disk_and_a_removed_skills_field_still_loads() {
         let old = serde_json::json!({
             "n": 1, "stage": "implement", "routeId": "r", "harness": "claude", "model": "m",
-            "reason": "x", "resumed": false, "startedAt": 0, "status": "passed"
+            "reason": "x", "resumed": false, "startedAt": 0, "status": "passed",
+            "skills": ["deslop"]
         });
         let mut a: Attempt = serde_json::from_value(old).unwrap();
-        assert!(a.skills.is_empty());
         assert_eq!(a.prefix_tokens, None);
         let v = serde_json::to_value(&a).unwrap();
-        assert!(v.get("skills").is_none() && v.get("prefixTokens").is_none());
-        a.skills = vec!["deslop".into()];
+        assert!(v.get("prefixTokens").is_none() && v.get("skills").is_none());
         a.prefix_tokens = Some(19_629);
         let v = serde_json::to_value(&a).unwrap();
-        assert_eq!(v["skills"], serde_json::json!(["deslop"]));
         assert_eq!(v["prefixTokens"], 19_629);
     }
 

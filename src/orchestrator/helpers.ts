@@ -57,7 +57,6 @@ const VARIANT_KEYS: (keyof Variant)[] = [
   "reviewOtherFamily",
   "reviewEvidence",
   "deferHeavyChecks",
-  "leanContext",
   "leanOutput",
 ];
 

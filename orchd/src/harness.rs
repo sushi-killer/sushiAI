@@ -3,7 +3,7 @@
 //! process); stream parsing folds one line at a time into a
 //! [`RunOutcome`] as the engine reads the child's stdout.
 
-use crate::model::{price_for, Harness, Price, SandboxMode};
+use crate::model::{price_for, Fingerprint, Harness, Price, SandboxMode};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -352,6 +352,93 @@ pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+// -- run fingerprint -------------------------------------------------------
+
+/// FNV-1a, 64 bit, hex: stable across Rust versions and platforms, which
+/// `DefaultHasher` is not, and short enough to print in a report row.
+fn short_hash(parts: &[&str]) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for part in parts {
+        for byte in part.bytes().chain(std::iter::once(0xff)) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("{:08x}", hash >> 32)
+}
+
+/// The argv without the values that differ per run or per machine: paths,
+/// session ids, the MCP server wiring.
+fn stable_argv(argv: &[String]) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut skip_next = false;
+    let mut after_resume = false;
+    for (i, arg) in argv.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let prev = i.checked_sub(1).map(|p| argv[p].as_str());
+        if after_resume {
+            after_resume = false;
+            continue;
+        }
+        match arg.as_str() {
+            "--mcp-config" | "--settings" | "--resume" | "-C" => skip_next = true,
+            "resume" if i == 1 => after_resume = true,
+            a if a.starts_with("--image=") => {}
+            a if a.starts_with("mcp_servers.") && prev == Some("-c") => {
+                out.pop();
+            }
+            a => out.push(a),
+        }
+    }
+    out
+}
+
+/// The run settings JSON without secrets (profile env, key helper) and
+/// without the per-machine paths (hook commands, denied-read dirs).
+fn stable_settings(settings: &serde_json::Value) -> String {
+    let mut settings = settings.clone();
+    if let Some(obj) = settings.as_object_mut() {
+        for key in ["env", "apiKeyHelper", "hooks"] {
+            obj.remove(key);
+        }
+        if let Some(sandbox) = obj.get_mut("sandbox").and_then(|s| s.as_object_mut()) {
+            sandbox.remove("filesystem");
+        }
+    }
+    settings.to_string()
+}
+
+/// The hash of the inputs orchd controls for one run. The task-specific
+/// brief text is deliberately not part of it.
+pub fn prompt_hash(argv: &[String], settings: Option<&serde_json::Value>) -> String {
+    let version = crate::brief::BRIEF_TEMPLATE_VERSION.to_string();
+    let settings = settings.map(stable_settings).unwrap_or_default();
+    let argv = stable_argv(argv).join("\u{1f}");
+    short_hash(&[&version, &argv, &settings])
+}
+
+impl RunOutcome {
+    /// Builds the run's fingerprint from what the harness reported. The
+    /// requested alias is never a stand-in for a model the harness did not
+    /// name: that would hide exactly the drift the fingerprint is for.
+    pub fn build_fingerprint(
+        &self,
+        harness: Harness,
+        harness_version: Option<String>,
+        prompt_hash: String,
+    ) -> Fingerprint {
+        Fingerprint {
+            models: self.real_models(),
+            harness,
+            harness_version: self.harness_version.clone().or(harness_version),
+            prompt_hash,
+        }
+    }
+}
+
 // -- stream event parsing --------------------------------------------------
 
 #[derive(Debug, Clone, Default)]
@@ -382,6 +469,14 @@ pub struct RunOutcome {
     pub messages: BTreeMap<String, MessageUsage>,
     /// `cost_usd` was priced from `messages`: the run printed no `result`.
     pub cost_estimated: bool,
+    /// What the harness reported it ran: Claude's init `model` and
+    /// `claude_code_version`, the `modelUsage` keys of its result (every
+    /// real model id, subagents included), Codex's reported `model`.
+    pub init_model: Option<String>,
+    pub harness_version: Option<String>,
+    pub usage_models: Vec<String>,
+    /// Set by the engine once the run ends.
+    pub fingerprint: Option<Fingerprint>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -394,6 +489,24 @@ pub struct MessageUsage {
 }
 
 impl RunOutcome {
+    /// The model ids that really ran: init model, then every `modelUsage`
+    /// key, then any top-level message's model, without repeats.
+    pub fn real_models(&self) -> Vec<String> {
+        let mut models: Vec<String> = Vec::new();
+        let all = self
+            .init_model
+            .iter()
+            .chain(self.usage_models.iter())
+            .chain(self.messages.values().map(|m| &m.model))
+            .filter(|m| !m.is_empty());
+        for m in all {
+            if !models.contains(m) {
+                models.push(m.clone());
+            }
+        }
+        models
+    }
+
     /// A Claude run that ended without its `result` event (killed, stalled,
     /// crashed): price the messages it did stream, fill in their token
     /// usage, and mark the cost estimated. No-op once a cost is known, or
@@ -462,9 +575,21 @@ fn feed_claude_line(v: &serde_json::Value, outcome: &mut RunOutcome) -> Option<S
                 .get("session_id")
                 .and_then(|x| x.as_str())
                 .map(|s| s.to_string());
+            outcome.init_model = v.get("model").and_then(|x| x.as_str()).map(str::to_string);
+            outcome.harness_version = v
+                .get("claude_code_version")
+                .and_then(|x| x.as_str())
+                .map(str::to_string);
             Some("session started".to_string())
         }
         "result" => {
+            if let Some(usage) = v.get("modelUsage").and_then(|x| x.as_object()) {
+                for key in usage.keys() {
+                    if !outcome.usage_models.contains(key) {
+                        outcome.usage_models.push(key.clone());
+                    }
+                }
+            }
             outcome.cost_usd = v.get("total_cost_usd").and_then(|x| x.as_f64());
             if let Some(usage) = v.get("usage") {
                 outcome.usage_input = usage
@@ -578,6 +703,9 @@ fn short_note(text: &str) -> String {
 }
 
 fn feed_codex_line(v: &serde_json::Value, outcome: &mut RunOutcome) -> Option<String> {
+    if let Some(model) = v.get("model").and_then(|x| x.as_str()) {
+        outcome.init_model = Some(model.to_string());
+    }
     let ty = v.get("type").and_then(|x| x.as_str())?;
     match ty {
         "thread.started" => {
@@ -1143,6 +1271,80 @@ mod tests {
             (9, 18198, 50)
         );
         assert!(claude.error.is_none());
+    }
+
+    #[test]
+    fn claude_events_give_the_real_models_and_version() {
+        let text = r#"{"type":"system","subtype":"init","session_id":"s","model":"claude-sonnet-5-5","claude_code_version":"2.1.284"}
+{"type":"result","total_cost_usd":0.1,"modelUsage":{"claude-sonnet-5-5":{},"claude-haiku-4-5-20251001":{}},"result":"x"}"#;
+        let outcome = replay_events(Harness::Claude, text);
+        let fp = outcome.build_fingerprint(Harness::Claude, None, "h".into());
+        assert_eq!(
+            fp.models,
+            ["claude-sonnet-5-5", "claude-haiku-4-5-20251001"]
+        );
+        assert_eq!(fp.harness_version.as_deref(), Some("2.1.284"));
+        assert_eq!(
+            fp.label(),
+            "claude-sonnet-5-5+claude-haiku-4-5-20251001 (2.1.284)"
+        );
+    }
+
+    #[test]
+    fn prompt_hash_ignores_codex_mcp_wiring() {
+        let argv = |cmd: &str, key: &str| -> Vec<String> {
+            [
+                "exec",
+                "-c",
+                &format!("mcp_servers.m.command=\"{cmd}\""),
+                "-c",
+                &format!("mcp_servers.m.env.TOKEN=\"{key}\""),
+                "--model",
+                "gpt",
+            ]
+            .map(String::from)
+            .to_vec()
+        };
+        assert_eq!(
+            prompt_hash(&argv("/a", "k1"), None),
+            prompt_hash(&argv("/b", "k2"), None)
+        );
+        assert!(!stable_argv(&argv("/a", "k1"))
+            .iter()
+            .any(|a| a.contains("mcp_servers")));
+    }
+
+    #[test]
+    fn prompt_hash_ignores_paths_ids_and_secrets_but_not_real_settings() {
+        let argv = |mcp: &str, resume: &str| -> Vec<String> {
+            [
+                "-p",
+                "--mcp-config",
+                mcp,
+                "--resume",
+                resume,
+                "--model",
+                "sonnet",
+            ]
+            .map(String::from)
+            .to_vec()
+        };
+        let settings = |key: &str, cap: bool| {
+            serde_json::json!({
+                "env": {"ANTHROPIC_API_KEY": key},
+                "hooks": {"Stop": key},
+                "permissions": {"allow": ["Bash"]},
+                "bashOutputMaxChars": if cap { 1 } else { 2 },
+            })
+        };
+        let a = prompt_hash(&argv("/a/mcp.json", "s1"), Some(&settings("k1", true)));
+        let b = prompt_hash(&argv("/b/mcp.json", "s2"), Some(&settings("k2", true)));
+        assert_eq!(a, b);
+        let c = prompt_hash(&argv("/a/mcp.json", "s1"), Some(&settings("k1", false)));
+        assert_ne!(a, c);
+        let mut other = argv("/a/mcp.json", "s1");
+        other.push("--effort".into());
+        assert_ne!(a, prompt_hash(&other, Some(&settings("k1", true))));
     }
 
     #[test]

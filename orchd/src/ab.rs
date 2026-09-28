@@ -210,7 +210,7 @@ pub fn report_with(
     eval: Option<&str>,
     breakdown: &dyn Fn(&Task, &Attempt) -> Option<Breakdown>,
 ) -> String {
-    let mut groups: BTreeMap<String, Vec<&Task>> = BTreeMap::new();
+    let mut groups: BTreeMap<(String, String), Vec<&Task>> = BTreeMap::new();
     let in_scope = |t: &&Task| eval.is_none_or(|e| t.eval_set.as_deref() == Some(e));
     // A subtask's cost is already in its parent's: the request counts once.
     for t in tasks
@@ -219,12 +219,22 @@ pub fn report_with(
         .filter(|t| t.variant.is_some() && t.parent.is_none())
     {
         let key = serde_json::to_string(&t.variant).unwrap_or_default();
-        groups.entry(key).or_default().push(t);
+        groups
+            .entry((key, fingerprint_label(t)))
+            .or_default()
+            .push(t);
+    }
+    let mut fingerprints: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (variant, fp) in groups.keys() {
+        fingerprints
+            .entry(variant.clone())
+            .or_default()
+            .push(fp.clone());
     }
     let mut out = String::from(
-        "| variant | tasks | done | attempts/task | $/task | median $ | median min to done | review FAIL | owner answers/task | process % | evidence % | verify % | task % | explore % | tool calls/attempt | stalls | median prefix tokens | cache-read tokens/attempt |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
+        "| variant | fingerprint | tasks | done | attempts/task | $/task | median $ | median min to done | review FAIL | owner answers/task | process % | evidence % | verify % | task % | explore % | tool calls/attempt | stalls | median prefix tokens | cache-read tokens/attempt |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
-    for (variant, ts) in groups {
+    for ((variant, fingerprint), ts) in groups {
         let n = ts.len() as f64;
         let done: Vec<&&Task> = ts.iter().filter(|t| t.status == TaskStatus::Done).collect();
         let implement = |t: &Task| {
@@ -311,7 +321,7 @@ pub fn report_with(
             .filter(|a| a.failure.as_ref().map(|f| f.kind) == Some(FailureKind::Stall))
             .count();
         out.push_str(&format!(
-            "| `{variant}` | {} | {} | {:.1} | {:.2} | {} | {} | {review_fails}/{} | {:.1} | {} | {} | {} | {} | {} | {} | {stalls} | {} | {} |\n",
+            "| `{variant}` | {fingerprint} | {} | {} | {:.1} | {:.2} | {} | {} | {review_fails}/{} | {:.1} | {} | {} | {} | {} | {} | {} | {stalls} | {} | {} |\n",
             ts.len(),
             done.len(),
             attempts as f64 / n,
@@ -330,6 +340,13 @@ pub fn report_with(
             fmt(mean_cached, 0),
         ));
     }
+    for (variant, fps) in fingerprints.iter().filter(|(_, f)| f.len() > 1) {
+        out.push_str(&format!(
+            "\nvariant `{variant}` mixes {} fingerprints: {}.\n",
+            fps.len(),
+            fps.join(", ")
+        ));
+    }
     if eval.is_some() {
         out.push_str(&per_task_table(tasks, eval));
     }
@@ -346,23 +363,44 @@ pub fn report_with(
     out
 }
 
+/// What the task's first implement attempt really ran (`model (version)`),
+/// `-` for a task from before fingerprints, or one that never implemented.
+fn fingerprint_label(t: &Task) -> String {
+    t.attempts
+        .iter()
+        .filter(|a| a.stage == Stage::Implement)
+        .find_map(|a| a.fingerprint.as_ref())
+        .map_or_else(
+            || "-".to_string(),
+            |f| {
+                format!(
+                    "{}: {}",
+                    format!("{:?}", f.harness).to_lowercase(),
+                    f.label()
+                )
+            },
+        )
+}
+
 /// One row per (evalName, variant): the same task under each arm, so arms
 /// compare on the same work and not on averages. Means when a task ran more
 /// than once per arm (`--repeat`).
 fn per_task_table(tasks: &[Task], eval: Option<&str>) -> String {
-    let mut rows: BTreeMap<(String, String), Vec<&Task>> = BTreeMap::new();
+    let mut rows: BTreeMap<(String, String, String), Vec<&Task>> = BTreeMap::new();
     for t in tasks {
         if t.variant.is_none() || t.eval_set.as_deref() != eval || eval.is_none() {
             continue;
         }
         let name = t.eval_name.clone().unwrap_or_else(|| "-".into());
         let variant = serde_json::to_string(&t.variant).unwrap_or_default();
-        rows.entry((name, variant)).or_default().push(t);
+        rows.entry((name, variant, fingerprint_label(t)))
+            .or_default()
+            .push(t);
     }
     let mut out = String::from(
-        "\n| task | variant | runs | done | $ | attempts |\n|---|---|---|---|---|---|\n",
+        "\n| task | variant | fingerprint | runs | done | $ | attempts |\n|---|---|---|---|---|---|---|\n",
     );
-    for ((name, variant), ts) in rows {
+    for ((name, variant, fingerprint), ts) in rows {
         let n = ts.len() as f64;
         let done = ts.iter().filter(|t| t.status == TaskStatus::Done).count();
         let attempts: usize = ts
@@ -376,7 +414,7 @@ fn per_task_table(tasks: &[Task], eval: Option<&str>) -> String {
             .sum();
         let cost: f64 = ts.iter().map(|t| t.cost_usd).sum();
         out.push_str(&format!(
-            "| {name} | `{variant}` | {} | {done} | {:.2} | {:.1} |\n",
+            "| {name} | `{variant}` | {fingerprint} | {} | {done} | {:.2} | {:.1} |\n",
             ts.len(),
             cost / n,
             attempts as f64 / n,
@@ -515,6 +553,63 @@ mod tests {
             "{lean_output_row}"
         );
         assert!(rows.iter().any(|r| !r.contains("\"leanOutput\":true")));
+    }
+
+    fn with_fingerprint(mut t: Task, model: &str, version: &str) -> Task {
+        let mut a = attempt("implement", None, None);
+        a.fingerprint = Some(crate::model::Fingerprint {
+            models: vec![model.to_string()],
+            harness: crate::model::Harness::Claude,
+            harness_version: Some(version.to_string()),
+            prompt_hash: "abcd1234".into(),
+        });
+        t.attempts = vec![a];
+        t
+    }
+
+    #[test]
+    fn one_variant_on_two_real_models_gets_two_rows_and_a_mixed_line() {
+        let v = Variant::default();
+        let a = with_fingerprint(
+            task(v.clone(), TaskStatus::Done, 1.0, &[]),
+            "claude-sonnet-4-6",
+            "2.1.200",
+        );
+        let b = with_fingerprint(
+            task(v.clone(), TaskStatus::Done, 1.0, &[]),
+            "claude-sonnet-5-5",
+            "2.1.284",
+        );
+        let c = with_fingerprint(
+            task(v, TaskStatus::Done, 1.0, &[]),
+            "claude-sonnet-5-5",
+            "2.1.284",
+        );
+        let out = report(&[a, b, c]);
+        let rows: Vec<&str> = out.lines().skip(2).filter(|l| l.starts_with('|')).collect();
+        assert_eq!(rows.len(), 2, "{out}");
+        let old = rows
+            .iter()
+            .find(|r| r.contains("claude-sonnet-4-6 (2.1.200)"))
+            .unwrap();
+        assert!(old.contains("| 1 | 1 |"), "{old}");
+        let new = rows
+            .iter()
+            .find(|r| r.contains("claude-sonnet-5-5 (2.1.284)"))
+            .unwrap();
+        assert!(new.contains("| 2 | 2 |"), "{new}");
+        assert!(out.contains("mixes 2 fingerprints"), "{out}");
+    }
+
+    #[test]
+    fn tasks_without_fingerprints_report_with_a_dash_and_no_mixed_line() {
+        let mut t = task(Variant::default(), TaskStatus::Done, 1.0, &[]);
+        t.attempts = vec![attempt("implement", None, None)];
+        assert!(t.attempts[0].fingerprint.is_none());
+        let out = report(&[t]);
+        let row = out.lines().nth(2).unwrap();
+        assert!(row.contains("| - | 1 | 1 |"), "{row}");
+        assert!(!out.contains("mixes"), "{out}");
     }
 
     fn ev(parent: Option<&str>, name: &str, input: Value) -> Value {

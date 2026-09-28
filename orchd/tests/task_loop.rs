@@ -675,3 +675,45 @@ fn a_looping_harness_is_stopped_and_a_second_loop_escalates_the_tier() {
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
 }
+
+#[test]
+fn an_attempt_stores_the_model_and_harness_version_the_run_reported() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        "#!/bin/sh\ncat > /dev/null\necho changed > CHANGED_MARKER.txt\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\",\"model\":\"claude-sonnet-5-5\",\"claude_code_version\":\"2.1.284\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"modelUsage\":{\"claude-sonnet-5-5\":{},\"claude-haiku-4-5-20251001\":{}},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n",
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Fingerprint",
+            "goal": "Make a trivial change",
+            "criteria": [],
+            "verify": ["true"],
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(15));
+    assert_eq!(settled["status"], "done", "task JSON: {settled}");
+    let fp = &settled["attempts"][0]["fingerprint"];
+    assert_eq!(
+        fp["models"],
+        serde_json::json!(["claude-sonnet-5-5", "claude-haiku-4-5-20251001"]),
+        "{fp}"
+    );
+    assert_eq!(fp["harness"], "claude", "{fp}");
+    assert_eq!(fp["harnessVersion"], "2.1.284", "{fp}");
+    assert_eq!(fp["promptHash"].as_str().map(str::len), Some(8), "{fp}");
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}

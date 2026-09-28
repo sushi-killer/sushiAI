@@ -2,6 +2,7 @@
 // window.bridge access here, so they're cheap to unit test directly.
 import type {
   Attempt,
+  Fingerprint,
   Message,
   OrchestratorEvent,
   Settings,
@@ -111,6 +112,12 @@ export type CostByStage = {
   review: number;
   other: number;
 };
+
+/** `model (harness version)` of what a run really used. */
+export function fingerprintLabel(fp: Fingerprint): string {
+  const models = fp.models.length > 0 ? fp.models.join("+") : "?";
+  return fp.harnessVersion ? `${models} (${fp.harnessVersion})` : models;
+}
 
 /** Splits a task's `costUsd` into where it went: the plan attempt(s), one
  * entry per implement attempt, the review runs, and `other` - the remainder

@@ -150,6 +150,7 @@ pub(super) async fn run_review(
     deny_read: &[String],
     cancel: &CancelToken,
     cost_usd: &mut f64,
+    fingerprint: &mut Option<Fingerprint>,
 ) -> Result<ReviewResult, RunError> {
     let wt = worktree.to_path_buf();
     let base = base_sha.to_string();
@@ -251,6 +252,7 @@ pub(super) async fn run_review(
     {
         Ok(outcome) => {
             *cost_usd += outcome.cost_usd.unwrap_or(0.0);
+            *fingerprint = outcome.fingerprint.clone();
             let text = outcome.final_text.unwrap_or_default();
             if let Some(result) = brief::parse_review(&text) {
                 return Ok(result);
@@ -265,6 +267,7 @@ pub(super) async fn run_review(
         }
         Err(RunError::Cancelled) => {
             // Stopped mid-review: what it streamed so far is still spent.
+            *fingerprint = read_cancelled_fingerprint(&events_path);
             *cost_usd += replay_run_cost(&events_path, &settings_snapshot.prices)
                 .and_then(|o| o.cost_usd)
                 .unwrap_or(0.0);

@@ -82,6 +82,7 @@ pub async fn handle_start(
         error: None,
         usage: None,
         cost_usd: 0.0,
+        fingerprint: None,
     };
     let dir = app.store.audit_dir(&audit.id);
     let brief_text = brief::build_audit_brief();
@@ -186,6 +187,7 @@ async fn run(
             let (mcp_path, settings_path, key_path) = prepare_run(app, &route, &dir, &settings);
             let repo = PathBuf::from(&audit.repo);
             let req = audit_request(&route, &repo, &mcp_path, &settings_path);
+            let events_path = dir.join("events.jsonl");
             let result = run_harness(
                 app,
                 &audit.id,
@@ -194,13 +196,16 @@ async fn run(
                 &repo,
                 &req,
                 &brief_text,
-                &dir.join("events.jsonl"),
+                &events_path,
                 &cancel,
                 None,
                 None,
             )
             .await;
             let _ = std::fs::remove_file(&key_path);
+            if matches!(result, Err(RunError::Cancelled)) {
+                audit.fingerprint = read_cancelled_fingerprint(&events_path);
+            }
             result
         }
         None => Err(RunError::Cancelled),
@@ -217,6 +222,7 @@ fn finish(app: &App, audit: &mut Audit, result: Result<harness::RunOutcome, RunE
     match result {
         Ok(outcome) => {
             audit.cost_usd = outcome.cost_usd.unwrap_or(0.0);
+            audit.fingerprint = outcome.fingerprint.clone();
             audit.usage = Some(Usage {
                 input: outcome.usage_input,
                 output: outcome.usage_output,
@@ -423,6 +429,7 @@ mod tests {
             error: None,
             usage: None,
             cost_usd: 0.0,
+            fingerprint: None,
         };
         let outcome = harness::RunOutcome {
             final_text: Some("Everything looks great.".into()),
@@ -453,6 +460,7 @@ mod tests {
             error: None,
             usage: None,
             cost_usd: 0.0,
+            fingerprint: None,
         };
         let reply = "```sushi-audit\n{\"summary\":\"ok\",\"items\":[{\"area\":\"x\",\"grade\":\"good\",\"effort\":\"small\"}],\"topFixes\":[]}\n```";
         let outcome = harness::RunOutcome {

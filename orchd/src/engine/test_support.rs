@@ -104,5 +104,8 @@ pub(super) fn attempt_with_failure(n: u32, signature: &str) -> Attempt {
         review_cost_usd: None,
         advice: None,
         advisor_cost_usd: None,
+        fingerprint: None,
+        review_fingerprint: None,
+        advisor_fingerprint: None,
     }
 }

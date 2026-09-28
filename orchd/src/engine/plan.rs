@@ -289,6 +289,9 @@ pub(super) async fn run_plan_stage(
             review_cost_usd: None,
             advice: None,
             advisor_cost_usd: None,
+            fingerprint: None,
+            review_fingerprint: None,
+            advisor_fingerprint: None,
         };
         task.attempts.push(attempt);
         let idx = task.attempts.len() - 1;
@@ -387,6 +390,7 @@ pub(super) async fn run_plan_stage(
                         a.cost_estimated |= o.cost_estimated;
                         task.cost_usd += cost;
                     }
+                    task.attempts[idx].fingerprint = o.fingerprint.clone();
                     let usage = task.attempts[idx].usage.get_or_insert(Usage {
                         input: 0,
                         output: 0,

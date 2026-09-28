@@ -350,6 +350,9 @@ pub(super) async fn run_task_loop(
             review_cost_usd: None,
             advice: None,
             advisor_cost_usd: None,
+            fingerprint: None,
+            review_fingerprint: None,
+            advisor_fingerprint: None,
         };
         task.attempts.push(attempt);
         let idx = task.attempts.len() - 1;
@@ -557,6 +560,7 @@ pub(super) async fn run_task_loop(
         };
 
         task.attempts[idx].session_id = outcome.session_id.clone();
+        task.attempts[idx].fingerprint = outcome.fingerprint.clone();
         task.attempts[idx].usage = Some(Usage {
             input: outcome.usage_input,
             output: outcome.usage_output,
@@ -1120,6 +1124,7 @@ pub(super) async fn run_task_loop(
                     return;
                 }
                 let mut review_cost = 0.0;
+                let mut review_fingerprint = None;
                 let reviewed = run_review(
                     &app,
                     &task_id,
@@ -1133,6 +1138,7 @@ pub(super) async fn run_task_loop(
                     &deny_read,
                     &cancel,
                     &mut review_cost,
+                    &mut review_fingerprint,
                 )
                 .await;
                 // The task's total, and separately the attempt's
@@ -1140,6 +1146,9 @@ pub(super) async fn run_task_loop(
                 // what later resumes of its session subtract
                 // (`attempt_cost`), so the review's cost must never join it.
                 task.cost_usd += review_cost;
+                if review_fingerprint.is_some() {
+                    task.attempts[idx].review_fingerprint = review_fingerprint;
+                }
                 task.attempts[idx].review_cost_usd =
                     Some(task.attempts[idx].review_cost_usd.unwrap_or(0.0) + review_cost);
                 match reviewed {

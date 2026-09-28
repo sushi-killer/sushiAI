@@ -128,6 +128,15 @@ export type Usage = { input: number; output: number; cached: number };
 export type AttemptStatus =
   "running" | "passed" | "failed" | "interrupted" | "blocked";
 
+/** What a run actually used, as the harness reported it; `model` on the
+ * attempt is only the alias orchd asked for. */
+export type Fingerprint = {
+  models: string[];
+  harness: Harness;
+  harnessVersion?: string;
+  promptHash: string;
+};
+
 export type Attempt = {
   n: number;
   stage: "plan" | "implement" | "review";
@@ -166,6 +175,10 @@ export type Attempt = {
   /** Cost of the advisor run about this attempt's failure (also in the
    * task's `costUsd`); once set, the attempt is not advised again. */
   advisorCostUsd?: number;
+  /** Absent on an attempt from before fingerprints. */
+  fingerprint?: Fingerprint;
+  reviewFingerprint?: Fingerprint;
+  advisorFingerprint?: Fingerprint;
 };
 
 export type Task = {
@@ -309,6 +322,8 @@ export type Audit = {
   error?: string;
   usage?: Usage;
   costUsd: number;
+  /** Absent on an audit from before fingerprints. */
+  fingerprint?: Fingerprint;
   report: AuditReport | null;
 };
 /** Pushed when an audit starts and when it ends; its progress lines are

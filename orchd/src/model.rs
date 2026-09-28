@@ -701,6 +701,37 @@ pub struct Usage {
     pub cached: u64,
 }
 
+/// What a run actually used, as the harness reported it: the alias in
+/// `Attempt.model` is only what orchd asked for. `prompt_hash` covers the
+/// inputs orchd controls (template version, argv and run settings minus
+/// paths, ids and secrets), never the task-specific brief text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Fingerprint {
+    #[serde(default)]
+    pub models: Vec<String>,
+    pub harness: Harness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_version: Option<String>,
+    #[serde(default)]
+    pub prompt_hash: String,
+}
+
+impl Fingerprint {
+    /// `model (harness version)`, the form shown in reports and the panel.
+    pub fn label(&self) -> String {
+        let models = if self.models.is_empty() {
+            "?".to_string()
+        } else {
+            self.models.join("+")
+        };
+        match &self.harness_version {
+            Some(v) => format!("{models} ({v})"),
+            None => models,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attempt {
@@ -769,6 +800,13 @@ pub struct Attempt {
     /// one. An attempt is never advised twice once this is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advisor_cost_usd: Option<f64>,
+    /// What the implement or plan run actually used (see [`Fingerprint`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<Fingerprint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_fingerprint: Option<Fingerprint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisor_fingerprint: Option<Fingerprint>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -841,6 +879,8 @@ pub struct Audit {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<Fingerprint>,
     #[serde(default)]
     pub cost_usd: f64,
 }
@@ -1068,6 +1108,20 @@ mod tests {
         v.planner_route = Some("gone".into());
         let err = v.check_routes(&settings.routes).unwrap_err();
         assert!(err.contains("plannerRoute \"gone\""), "{err}");
+    }
+
+    #[test]
+    fn an_attempt_without_a_fingerprint_loads_and_round_trips_without_one() {
+        let a: Attempt = serde_json::from_value(serde_json::json!({
+            "n": 1, "stage": "implement", "routeId": "r", "harness": "claude", "model": "sonnet",
+            "reason": "x", "resumed": false, "startedAt": 0, "status": "passed"
+        }))
+        .unwrap();
+        assert!(a.fingerprint.is_none());
+        assert!(serde_json::to_value(&a)
+            .unwrap()
+            .get("fingerprint")
+            .is_none());
     }
 
     #[test]

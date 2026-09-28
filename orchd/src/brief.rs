@@ -8,6 +8,10 @@ use crate::model::{
     Tier, Variant,
 };
 
+/// Bump when any brief template or fixed instruction block changes: it is
+/// part of every run's `promptHash`.
+pub const BRIEF_TEMPLATE_VERSION: u32 = 1;
+
 const MAX_FAILURE_DETAIL: usize = 1500;
 /// The resumed session sees only this one failure, so it gets the whole
 /// verify tail rather than the attempt list's short excerpt.
@@ -902,6 +906,9 @@ mod tests {
             review_cost_usd: None,
             advice: None,
             advisor_cost_usd: None,
+            fingerprint: None,
+            review_fingerprint: None,
+            advisor_fingerprint: None,
         });
         let mut second = task.attempts[0].clone();
         second.n = 2;
@@ -1061,6 +1068,9 @@ mod tests {
             review_cost_usd: None,
             advice: None,
             advisor_cost_usd: None,
+            fingerprint: None,
+            review_fingerprint: None,
+            advisor_fingerprint: None,
         });
         let brief = build_brief(&task, "", "");
         assert!(
@@ -1259,6 +1269,9 @@ mod tests {
             review_cost_usd: None,
             advice: None,
             advisor_cost_usd: None,
+            fingerprint: None,
+            review_fingerprint: None,
+            advisor_fingerprint: None,
         });
         let brief = build_triage_brief(
             &task,

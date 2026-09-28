@@ -26,6 +26,7 @@ import {
   criteriaMet,
   dependencyTitles,
   emptyLiveState,
+  fingerprintLabel,
   formatCost,
   formatDuration,
   formatTaskTier,
@@ -187,7 +188,10 @@ function AttemptRow({ attempt }: { attempt: Attempt }) {
           #{attempt.n} · {attempt.stage}
         </span>
         <span className="orch-attempt-route">
-          {attempt.harness} · {attempt.model || attempt.routeId}
+          {attempt.harness} ·{" "}
+          {attempt.fingerprint
+            ? fingerprintLabel(attempt.fingerprint)
+            : attempt.model || attempt.routeId}
           <span className={`orch-attempt-inline-status tone-${tone}`}>
             {" "}
             {attempt.status === "running" ? "running…" : attempt.status}

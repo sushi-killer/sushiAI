@@ -115,3 +115,10 @@
   its budget waits with the question "raise or stop" instead of running;
   `raise` adds the same amount again and continues, and the stop is
   recorded in the task's decisions. A run already going is never cut short.
+- Every orchd run (plan, implement, review, advisor, audit) records what it
+  really used: the model ids the harness reported (Claude's init model and
+  `modelUsage` keys, Codex's model), the harness version and a short hash of
+  the inputs orchd controls, as `fingerprint` on the attempt. `orchd ab` and
+  `orchd eval` split a variant's rows by real model and harness version and
+  say so when one variant mixes them; the panel shows `model (version)` on
+  the attempt line. Older attempts show `-`.

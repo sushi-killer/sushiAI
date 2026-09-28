@@ -111,12 +111,14 @@ pub(super) async fn run_advisor_before_retry(
                 .and_then(|o| o.cost_usd)
                 .unwrap_or(0.0);
             task.attempts[failed].advisor_cost_usd = Some(cost);
+            task.attempts[failed].advisor_fingerprint = read_cancelled_fingerprint(&events_path);
             return Some(cost);
         }
         Err(RunError::Io(_)) => return None,
     };
     let cost = outcome.cost_usd.unwrap_or(0.0);
     task.attempts[failed].advisor_cost_usd = Some(cost);
+    task.attempts[failed].advisor_fingerprint = outcome.fingerprint.clone();
     let text = outcome.final_text.unwrap_or_default();
     let advice = text.trim();
     if outcome.error.is_none() && !advice.is_empty() {

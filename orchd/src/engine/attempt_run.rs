@@ -38,6 +38,12 @@ pub(super) async fn run_harness(
 ) -> Result<harness::RunOutcome, RunError> {
     let argv = harness::build_argv(req);
     let bin = resolve_binary(req.harness);
+    // Asked before the run, not after, so a stand-in binary that logs its
+    // argv per invocation ends with the run's own.
+    let codex_version = match req.harness {
+        Harness::Codex => codex_version(&bin).await,
+        Harness::Claude => None,
+    };
     let mut cmd = tokio::process::Command::new(&bin);
     cmd.args(&argv)
         .current_dir(worktree)
@@ -97,6 +103,16 @@ pub(super) async fn run_harness(
         tokio::select! {
             _ = cancel.cancelled() => {
                 kill_group(pgid, &mut child).await;
+                // A stopped run still ran: keep what it reported so far.
+                let fp = fingerprint_of(&outcome, req, &argv, codex_version.clone());
+                if track_attempt {
+                    persist_attempt_field(app, task_id, attempt_n, move |a| a.fingerprint = Some(fp)).await;
+                } else if let Ok(json) = serde_json::to_string(&fp) {
+                    // Nested runs (review, advisor, audit) have no attempt to
+                    // write to and RunError::Cancelled carries no payload:
+                    // hand the fingerprint to the caller through a sidecar.
+                    let _ = std::fs::write(cancelled_fingerprint_path(events_path), json);
+                }
                 return Err(RunError::Cancelled);
             }
             _ = tokio::time::sleep_until(last_output + stall_limit), if stall.is_some() => {
@@ -196,6 +212,7 @@ pub(super) async fn run_harness(
     if req.harness == Harness::Claude {
         outcome.estimate_cost(&app.settings.read().unwrap().prices);
     }
+    outcome.fingerprint = Some(fingerprint_of(&outcome, req, &argv, codex_version));
     Ok(outcome)
 }
 
@@ -218,4 +235,57 @@ fn streamed_spend(
             )
         }),
     }
+}
+
+fn fingerprint_of(
+    outcome: &harness::RunOutcome,
+    req: &harness::RunRequest<'_>,
+    argv: &[String],
+    codex_version: Option<String>,
+) -> Fingerprint {
+    let settings_json = req
+        .settings_path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    outcome.build_fingerprint(
+        req.harness,
+        codex_version,
+        harness::prompt_hash(argv, settings_json.as_ref()),
+    )
+}
+
+/// `codex --version`, asked once per binary per daemon start.
+async fn codex_version(bin: &str) -> Option<String> {
+    static CACHE: OnceLock<StdMutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(known) = cache.lock().unwrap().get(bin) {
+        return known.clone();
+    }
+    let version = tokio::process::Command::new(bin)
+        .arg("--version")
+        .env("PATH", augmented_path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|v| !v.is_empty());
+    cache
+        .lock()
+        .unwrap()
+        .insert(bin.to_string(), version.clone());
+    version
+}
+
+fn cancelled_fingerprint_path(events_path: &Path) -> PathBuf {
+    events_path.with_extension("fingerprint.json")
+}
+
+/// The fingerprint a cancelled nested run left next to its events file.
+pub(super) fn read_cancelled_fingerprint(events_path: &Path) -> Option<Fingerprint> {
+    let path = cancelled_fingerprint_path(events_path);
+    let text = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    serde_json::from_str(&text).ok()
 }

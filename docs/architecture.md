@@ -58,6 +58,7 @@ flowchart TB
   herdr[("Herdr daemon")]
   ext[("OpenRouter - Jev")]
   repo[("Git repo<br/>base branch + worktrees")]
+  rtk[("rtk CLI")]
 
   owner --> shell
   orchSvc <-->|socket| proto
@@ -65,6 +66,7 @@ flowchart TB
   orchAgent -->|MCP| mcp
   taskAgent -->|Stop hook| proto
   taskAgent -->|skills hook<br/>leanContext| proto
+  taskAgent -->|rtk rewrite hook<br/>leanOutput, no socket| rtk
   side --> ext
   side --> repo
   herdrIpc <--> herdr

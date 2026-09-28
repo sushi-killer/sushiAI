@@ -253,4 +253,37 @@ mod tests {
             .unwrap()
             .ends_with("| median prefix tokens | cache-read tokens/attempt |"));
     }
+
+    #[test]
+    fn lean_output_gets_its_own_row_separate_from_lean_context() {
+        let lean_output = Variant {
+            lean_output: true,
+            ..Variant::default()
+        };
+        let mut a = task(lean_output, TaskStatus::Done, 1.0, &[]);
+        a.attempts = vec![attempt("implement", Some(15_000), Some(2_000))];
+        let lean_context = Variant {
+            lean_context: true,
+            ..Variant::default()
+        };
+        let mut b = task(lean_context, TaskStatus::Done, 1.0, &[]);
+        b.attempts = vec![attempt("implement", Some(30_000), Some(5_000))];
+
+        let out = report(&[a, b]);
+        let rows: Vec<&str> = out.lines().skip(2).filter(|l| l.starts_with('|')).collect();
+        assert_eq!(rows.len(), 2, "{out}");
+        let lean_output_row = rows
+            .iter()
+            .find(|r| r.contains("\"leanOutput\":true"))
+            .unwrap();
+        assert!(
+            !lean_output_row.contains("\"leanContext\":true"),
+            "{lean_output_row}"
+        );
+        assert!(
+            lean_output_row.ends_with("| 15000 | 2000 |"),
+            "{lean_output_row}"
+        );
+        assert!(rows.iter().any(|r| r.contains("\"leanContext\":true")));
+    }
 }

@@ -4106,6 +4106,7 @@ async fn run_task_loop(
                 socket_path: &socket_path_str,
                 token: &token,
                 skills: lean,
+                lean_output: task.variant().lean_output,
             };
             let mut claude_settings = harness::build_claude_settings(
                 profile_value.as_ref(),

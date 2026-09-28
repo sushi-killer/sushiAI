@@ -1,6 +1,7 @@
 //! `orchd serve --data <dir> [--socket <path>]` (also the default with no
-//! subcommand), `orchd hook stop|skills --socket <path> --token <t>`, `orchd
-//! mcp --data <dir> [--socket <path>]`, and `orchd ab --data <dir>`.
+//! subcommand), `orchd hook stop|skills --socket <path> --token <t>`,
+//! `orchd hook rtk` (no socket or token -- it never contacts the daemon),
+//! `orchd mcp --data <dir> [--socket <path>]`, and `orchd ab --data <dir>`.
 
 mod ab;
 mod brief;
@@ -43,8 +44,15 @@ async fn run(args: Vec<String>) -> i32 {
 
 async fn run_hook(args: &[String]) -> i32 {
     let kind = args.first().map(String::as_str);
-    if !matches!(kind, Some("stop" | "skills")) {
+    if !matches!(kind, Some("stop" | "skills" | "rtk")) {
         println!("{{}}");
+        return 0;
+    }
+    if kind == Some("rtk") {
+        match run_rtk_hook().await {
+            Some(v) => println!("{v}"),
+            None => println!("{{}}"),
+        }
         return 0;
     }
     let mut socket: Option<String> = None;
@@ -114,6 +122,56 @@ async fn run_skills_hook(socket: Option<String>, token: Option<String>) -> Optio
     .await
     .ok()?;
     result.is_object().then(|| result.to_string())
+}
+
+/// `rtk rewrite <command>`'s own timeout: long enough for a real rewrite, far
+/// short of Claude Code's hook-level timeout (`harness::RTK_HOOK_TIMEOUT_SECS`)
+/// so the hook always gets to answer for itself.
+const RTK_REWRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// `orchd hook rtk`: the PreToolUse payload on stdin (a Bash tool call)
+/// becomes an `rtk rewrite <command>` call, with no socket or token -- this
+/// hook never contacts the daemon. Fails open (`None` -> caller prints
+/// `{}`) on any error, same as the other hooks: bad stdin, rtk missing from
+/// PATH, a non-zero exit, a timeout, an unchanged command, or a rewrite
+/// that touches a denied git prefix.
+async fn run_rtk_hook() -> Option<String> {
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).ok()?;
+    let payload: serde_json::Value = serde_json::from_str(&input).ok()?;
+    let command = hook::rtk_hook_command(&payload)?;
+    if hook::touches_denied_bash_command(&command) {
+        return None;
+    }
+    let (success, stdout) = run_rtk_rewrite(&command).await;
+    let tool_input = payload.get("tool_input")?;
+    hook::rtk_rewrite_output(tool_input, &command, success, &stdout).map(|v| v.to_string())
+}
+
+/// Runs `rtk rewrite <command>`, killing it if it outlives
+/// [`RTK_REWRITE_TIMEOUT`] (`kill_on_drop` fires when the timed-out future
+/// drops the still-owned child). `(false, "")` covers everything that isn't
+/// a clean, on-time, zero exit: rtk missing from PATH, a non-zero exit (its
+/// common "nothing to rewrite" answer), or the timeout itself.
+async fn run_rtk_rewrite(command: &str) -> (bool, String) {
+    let child = tokio::process::Command::new("rtk")
+        .arg("rewrite")
+        .arg(command)
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let Ok(child) = child else {
+        return (false, String::new());
+    };
+    match tokio::time::timeout(RTK_REWRITE_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(out)) => (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+        ),
+        Ok(Err(_)) | Err(_) => (false, String::new()),
+    }
 }
 
 async fn run_serve(args: &[String]) -> i32 {

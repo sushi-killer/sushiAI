@@ -59,3 +59,11 @@
   fresh Claude implement attempts, and mean cache-read tokens per implement
   attempt. In the `leanContext` arm the first-turn figure also counts the
   skills injected on the first prompt, so it understates the trim.
+- `leanOutput: true` gives a Claude implement run a PreToolUse hook
+  (`orchd hook rtk`) that offers `rtk rewrite`'s shorter form of a `Bash`
+  command before it runs, and caps a command's own reported output at
+  `env.BASH_MAX_OUTPUT_LENGTH` characters. The hook needs no socket or
+  token -- it never contacts the daemon -- and never rewrites a command
+  containing `git commit` or `git push`, so a rewrite can never launder past
+  those same deny rules. Independent of `leanContext`, and combinable with
+  it; Codex runs and review/plan sessions are unaffected either way.

@@ -1,11 +1,13 @@
-//! The Stop hook's decision function (spec "Stop hook (`hook.stop`)"), and
-//! the skills hook's pure parts (`variant.lean_context`): what text a hook
-//! payload contributes, the `.agents/skills` catalog, which skills Jev's
-//! answers select, and the hook output. Kept as pure functions over facts
-//! so they can be unit tested without a socket, a git repo, or a classifier
-//! call; `main.rs`/`engine.rs` do the IO and feed them in.
+//! The Stop hook's decision function (spec "Stop hook (`hook.stop`)"), the
+//! skills hook's pure parts (`variant.lean_context`), and the rtk hook's
+//! pure parts (`variant.lean_output`): what text a hook payload contributes,
+//! the `.agents/skills` catalog, which skills Jev's answers select, and each
+//! hook's output. Kept as pure functions over facts so they can be unit
+//! tested without a socket, a git repo, a classifier call or a real `rtk`
+//! binary; `main.rs`/`engine.rs` do the IO and feed them in.
 
 use crate::classify::{Answers, QuestionSpec};
+use crate::harness::DENIED_BASH_COMMANDS;
 use crate::model::VerifyOutcome;
 use std::collections::HashSet;
 use std::path::Path;
@@ -376,6 +378,63 @@ pub fn skills_brief_section(picked: &[&Skill]) -> String {
         "## Skills for this task\n\n{}\n",
         skill_bodies(picked, "###")
     )
+}
+
+// -- rtk hook (`variant.lean_output`) ------------------------------------
+
+/// A PreToolUse payload's `tool_input.command`, the command `orchd hook rtk`
+/// asks `rtk rewrite` about. `None` for anything else the hook must fail
+/// open on: stdin that isn't JSON, a payload with no `tool_input.command`,
+/// or a `command` that isn't a string.
+pub fn rtk_hook_command(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .get("tool_input")?
+        .get("command")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Whether `command` touches a prefix `orchd hook rtk` must never let past
+/// as a rewrite -- checked against both the original and any candidate
+/// rewrite, since a rewrite that only introduces the denied prefix (e.g.
+/// `rtk git commit ...`) is exactly what would otherwise launder past
+/// `Bash(git commit:*)`/`Bash(git push:*)` through the hook's own
+/// `permissionDecision: allow`.
+pub fn touches_denied_bash_command(command: &str) -> bool {
+    DENIED_BASH_COMMANDS.iter().any(|p| command.contains(p))
+}
+
+/// `orchd hook rtk`'s reply once `rtk rewrite <original_command>` has run
+/// (or failed to). `Some(hookSpecificOutput)` only when it exited 0 with a
+/// different, non-empty command that touches no denied git prefix either
+/// way; `None` (caller prints `{}`) for everything else -- a non-zero exit
+/// (rtk's common "nothing to rewrite" answer), a timeout, rtk missing from
+/// PATH, the same command echoed back, or a denied rewrite.
+pub fn rtk_rewrite_output(
+    tool_input: &serde_json::Value,
+    original_command: &str,
+    rtk_exit_success: bool,
+    rtk_stdout: &str,
+) -> Option<serde_json::Value> {
+    if !rtk_exit_success {
+        return None;
+    }
+    let rewritten = rtk_stdout.trim();
+    if rewritten.is_empty() || rewritten == original_command.trim() {
+        return None;
+    }
+    if touches_denied_bash_command(original_command) || touches_denied_bash_command(rewritten) {
+        return None;
+    }
+    let mut updated_input = tool_input.clone();
+    updated_input["command"] = serde_json::Value::String(rewritten.to_string());
+    Some(serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": updated_input,
+        }
+    }))
 }
 
 #[cfg(test)]
@@ -796,5 +855,62 @@ mod tests {
         };
         let d = decide_stop(&facts(0, true, false, &[]), Some(&a));
         assert_eq!(d, StopDecision::Allow);
+    }
+
+    // -- rtk hook --
+
+    #[test]
+    fn rtk_hook_command_reads_tool_input_command_or_fails_open() {
+        assert_eq!(
+            rtk_hook_command(&serde_json::json!({"tool_input": {"command": "npm test"}})),
+            Some("npm test".to_string())
+        );
+        assert_eq!(rtk_hook_command(&serde_json::Value::Null), None);
+        assert_eq!(rtk_hook_command(&serde_json::json!({})), None);
+        assert_eq!(
+            rtk_hook_command(&serde_json::json!({"tool_input": {}})),
+            None
+        );
+        assert_eq!(
+            rtk_hook_command(&serde_json::json!({"tool_input": {"command": 1}})),
+            None
+        );
+    }
+
+    #[test]
+    fn rtk_rewrite_output_allows_only_a_clean_different_rewrite() {
+        let input =
+            serde_json::json!({"command": "npm test", "description": "run tests", "timeout": 1000});
+        let out = rtk_rewrite_output(&input, "npm test", true, "npm test --silent\n").unwrap();
+        assert_eq!(out["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            out["hookSpecificOutput"]["updatedInput"],
+            serde_json::json!({
+                "command": "npm test --silent",
+                "description": "run tests",
+                "timeout": 1000
+            })
+        );
+
+        // Same command back, non-zero exit, empty output: all decline.
+        assert!(rtk_rewrite_output(&input, "npm test", true, "npm test").is_none());
+        assert!(rtk_rewrite_output(&input, "npm test", false, "npm test --silent").is_none());
+        assert!(rtk_rewrite_output(&input, "npm test", true, "").is_none());
+        assert!(rtk_rewrite_output(&input, "npm test", true, "   ").is_none());
+    }
+
+    #[test]
+    fn rtk_rewrite_output_never_rewrites_past_git_commit_or_push() {
+        let input = serde_json::json!({"command": "git commit -m x"});
+        assert!(rtk_rewrite_output(&input, "git commit -m x", true, "git commit -am x").is_none());
+        let input = serde_json::json!({"command": "git push"});
+        assert!(rtk_rewrite_output(&input, "git push", true, "git push origin main").is_none());
+        // Even an unrelated original must not be rewritten into one.
+        let input = serde_json::json!({"command": "ls"});
+        assert!(rtk_rewrite_output(&input, "ls", true, "rtk git commit -am x").is_none());
+        assert!(touches_denied_bash_command("git commit -m x"));
+        assert!(touches_denied_bash_command("git push origin main"));
+        assert!(!touches_denied_bash_command("git status"));
     }
 }

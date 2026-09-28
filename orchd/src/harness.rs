@@ -205,18 +205,39 @@ pub fn build_argv(req: &RunRequest) -> Vec<String> {
 /// The Stop hook wiring for a Claude run: `orchd`'s own path, the daemon's
 /// socket, and the token that maps this run's `hook.stop` calls back to its
 /// task/attempt. `skills` also wires `orchd hook skills` (same socket and
-/// token) to UserPromptSubmit and PostToolUse.
+/// token) to UserPromptSubmit and PostToolUse. `lean_output` wires `orchd
+/// hook rtk` to PreToolUse and sets `env.BASH_MAX_OUTPUT_LENGTH` -- neither
+/// needs the socket or token, since the hook never contacts the daemon.
 pub struct StopHook<'a> {
     pub orchd_path: &'a str,
     pub socket_path: &'a str,
     pub token: &'a str,
     pub skills: bool,
+    pub lean_output: bool,
 }
 
 /// The tools whose output can tell which skill the agent needs next.
 pub const SKILLS_HOOK_MATCHER: &str = "Read|Bash|Grep|Glob";
 /// One classifier call (5s) plus reading the skill catalog.
 const SKILLS_HOOK_TIMEOUT_SECS: u64 = 30;
+
+/// A few seconds' margin over the rtk subprocess's own 2s timeout
+/// (`hook::RTK_REWRITE_TIMEOUT`) so Claude Code's own hook-level timeout
+/// never fires first and the hook always gets to answer `{}` itself.
+const RTK_HOOK_TIMEOUT_SECS: u64 = 5;
+
+/// `Bash` prefixes an agent may never run directly (`permissions.deny`
+/// below) and `orchd hook rtk` must never rewrite into an allow answer
+/// either: a rewrite like `rtk git commit ...` would otherwise escape these
+/// same deny rules through the hook's own `permissionDecision: allow`.
+pub const DENIED_BASH_COMMANDS: [&str; 2] = ["git commit", "git push"];
+
+/// `env.BASH_MAX_OUTPUT_LENGTH` under `variant.lean_output`: bigger than the
+/// 2000-char failure tail orchd itself feeds back in a Stop-hook block
+/// (`hook::TAIL_CHARS`), so a failing command's own reported output still
+/// fits, and well below Claude Code's 30000-char default, so it actually
+/// shrinks what a noisy command bills.
+pub const BASH_MAX_OUTPUT_LENGTH: u32 = 10_000;
 
 /// The `settings.json` written alongside a Claude run: profile
 /// env/apiKeyHelper (opaque, passed through) + sandbox block (omitted for
@@ -272,7 +293,10 @@ pub fn build_claude_settings(
         "permissions".to_string(),
         serde_json::json!({
             "allow": ["Bash"],
-            "deny": ["Bash(git commit:*)", "Bash(git push:*)"],
+            "deny": DENIED_BASH_COMMANDS
+                .iter()
+                .map(|c| format!("Bash({c}:*)"))
+                .collect::<Vec<_>>(),
         }),
     );
 
@@ -301,6 +325,31 @@ pub fn build_claude_settings(
             hooks["UserPromptSubmit"] = serde_json::json!([{"hooks": [skills.clone()]}]);
             hooks["PostToolUse"] =
                 serde_json::json!([{"matcher": SKILLS_HOOK_MATCHER, "hooks": [skills]}]);
+        }
+        if hook.lean_output {
+            let rtk_command = format!("{} hook rtk", shell_quote(hook.orchd_path));
+            hooks["PreToolUse"] = serde_json::json!([{
+                "matcher": "Bash",
+                "hooks": [
+                    {"type": "command", "command": rtk_command, "timeout": RTK_HOOK_TIMEOUT_SECS}
+                ]
+            }]);
+            match obj.get_mut("env") {
+                Some(serde_json::Value::Object(env)) => {
+                    env.insert(
+                        "BASH_MAX_OUTPUT_LENGTH".to_string(),
+                        serde_json::Value::String(BASH_MAX_OUTPUT_LENGTH.to_string()),
+                    );
+                }
+                _ => {
+                    obj.insert(
+                        "env".to_string(),
+                        serde_json::json!({
+                            "BASH_MAX_OUTPUT_LENGTH": BASH_MAX_OUTPUT_LENGTH.to_string()
+                        }),
+                    );
+                }
+            }
         }
         obj.insert("hooks".to_string(), hooks);
     }
@@ -705,6 +754,7 @@ mod tests {
             socket_path: "/tmp/orchd.sock",
             token: "tok-1",
             skills: false,
+            lean_output: false,
         };
         let deny_read = vec!["/data".to_string()];
         let native = build_claude_settings(
@@ -735,6 +785,7 @@ mod tests {
             socket_path: "/tmp/orchd.sock",
             token: "tok-1",
             skills: false,
+            lean_output: false,
         };
         let host =
             build_claude_settings(None, SandboxMode::Host, &domains, &deny_read, Some(hook2));
@@ -749,6 +800,7 @@ mod tests {
             socket_path: "/tmp/o.sock",
             token: "tok",
             skills,
+            lean_output: false,
         };
         let off = build_claude_settings(None, SandboxMode::Host, &[], &[], Some(hook(false)));
         let keys: Vec<&String> = off["hooks"].as_object().unwrap().keys().collect();
@@ -765,6 +817,60 @@ mod tests {
         let tool = &on["hooks"]["PostToolUse"][0];
         assert_eq!(tool["matcher"], "Read|Bash|Grep|Glob");
         assert_eq!(tool["hooks"][0], *prompt);
+    }
+
+    #[test]
+    fn claude_settings_wire_the_rtk_hook_and_output_cap_only_when_asked() {
+        let hook = |lean_output| StopHook {
+            orchd_path: "/bin/orchd",
+            socket_path: "/tmp/o.sock",
+            token: "tok",
+            skills: false,
+            lean_output,
+        };
+        let profile = serde_json::json!({"env": {"ANTHROPIC_API_KEY_HELPER": "x"}});
+        let off = build_claude_settings(
+            Some(&profile),
+            SandboxMode::Host,
+            &[],
+            &[],
+            Some(hook(false)),
+        );
+        let keys: Vec<&String> = off["hooks"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["Stop"], "the Stop hook only: {off}");
+        assert!(off
+            .get("env")
+            .unwrap()
+            .get("BASH_MAX_OUTPUT_LENGTH")
+            .is_none());
+        assert_eq!(off["env"]["ANTHROPIC_API_KEY_HELPER"], "x");
+
+        let on = build_claude_settings(
+            Some(&profile),
+            SandboxMode::Host,
+            &[],
+            &[],
+            Some(hook(true)),
+        );
+        assert_eq!(on["hooks"]["Stop"], off["hooks"]["Stop"]);
+        let pre = &on["hooks"]["PreToolUse"][0];
+        assert_eq!(pre["matcher"], "Bash");
+        let rtk = &pre["hooks"][0];
+        assert_eq!(rtk["command"], "'/bin/orchd' hook rtk");
+        assert!(rtk["timeout"].as_u64().unwrap() > 0);
+        // A profile's own env keys stay; the cap is only merged in.
+        assert_eq!(on["env"]["ANTHROPIC_API_KEY_HELPER"], "x");
+        assert_eq!(
+            on["env"]["BASH_MAX_OUTPUT_LENGTH"],
+            BASH_MAX_OUTPUT_LENGTH.to_string()
+        );
+
+        // No profile env at all: the cap still lands under a fresh `env`.
+        let no_profile = build_claude_settings(None, SandboxMode::Host, &[], &[], Some(hook(true)));
+        assert_eq!(
+            no_profile["env"]["BASH_MAX_OUTPUT_LENGTH"],
+            BASH_MAX_OUTPUT_LENGTH.to_string()
+        );
     }
 
     #[test]

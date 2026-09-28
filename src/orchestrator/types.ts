@@ -83,6 +83,7 @@ export type Variant = {
   reviewEvidence: boolean;
   deferHeavyChecks: boolean;
   leanContext: boolean;
+  leanOutput: boolean;
 };
 
 export type FailureKind =

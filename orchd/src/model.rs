@@ -217,7 +217,7 @@ pub enum RetryMode {
 /// keeps its own copy, so an A/B pair can run side by side and `orchd ab`
 /// groups results by it. A flag that wins becomes the plain behaviour and
 /// leaves this struct.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Variant {
     pub retry_mode: RetryMode,
@@ -261,6 +261,12 @@ pub struct Variant {
     /// variants together.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub tier_routes: BTreeMap<Tier, String>,
+    /// A dollar budget: once `task.cost_usd` reaches it, the task waits for
+    /// the owner before its next plan, implement, advisor or review run
+    /// (never mid-run); "raise" adds this amount again. 0 = no budget, and
+    /// left out of the JSON so a budget-less variant serializes as before.
+    #[serde(skip_serializing_if = "is_no_budget")]
+    pub max_cost_usd: f64,
 }
 
 #[cfg(test)]
@@ -275,25 +281,85 @@ mod price_tests {
         let expected = (34_564.0 * 0.20 + 324_864.0 * 0.02 + 3_869.0 * 1.20) / 1e6;
         assert!((cost - expected).abs() < 1e-9, "{cost}");
     }
+
+    #[test]
+    fn claude_prices_match_a_dated_model_id_and_the_longest_family() {
+        let prices = default_prices();
+        let haiku = price_for(&prices, "claude-haiku-4-5-20251001").unwrap();
+        assert_eq!(haiku.input, 1.0);
+        assert_eq!(price_for(&prices, "claude-sonnet-5-5").unwrap().input, 2.0);
+        assert_eq!(
+            price_for(&prices, "claude-opus-5-5-20260901")
+                .unwrap()
+                .output,
+            20.0
+        );
+        assert!(price_for(&prices, "claude-opus-5").is_none());
+        assert!(price_for(&prices, "claude-sonnet-50").is_none());
+        let opus = prices["claude-opus-5-5"];
+        let cost = opus.claude_cost(1_000_000, 1_000_000, 1_000_000, 1_000_000);
+        assert!((cost - (4.0 + 5.0 + 0.20 + 20.0)).abs() < 1e-9, "{cost}");
+        // Codex prices keep no cache-write price and stay off the wire.
+        let v = serde_json::to_value(prices["gpt-5.6-luna"]).unwrap();
+        assert!(v.get("cacheWrite").is_none());
+        assert_eq!(serde_json::to_value(opus).unwrap()["cacheWrite"], 5.0);
+    }
 }
 
 impl Task {
     pub fn variant(&self) -> Variant {
         self.variant.clone().unwrap_or_default()
     }
+
+    /// The dollar budget in force, with the owner's raises; `None` = none.
+    pub fn cost_budget(&self) -> Option<f64> {
+        let step = self.variant().max_cost_usd;
+        (step > 0.0).then(|| step * (1 + self.budget_raises) as f64)
+    }
 }
 
 /// Per-million-token list prices for a model whose harness reports tokens
-/// but no cost (Codex).
+/// but no cost (Codex), or a Claude run that ended before its `result`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Price {
     pub input: f64,
+    /// Cache reads.
     pub cached_input: f64,
     pub output: f64,
+    /// Cache writes (Claude's `cache_creation_input_tokens`); `None` bills
+    /// them at the input price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
+}
+
+/// The price of `model`: an exact key, else the longest key it extends by a
+/// `-suffix` (`claude-haiku-4-5` prices `claude-haiku-4-5-20251001`).
+pub fn price_for(prices: &std::collections::BTreeMap<String, Price>, model: &str) -> Option<Price> {
+    if let Some(p) = prices.get(model) {
+        return Some(*p);
+    }
+    prices
+        .iter()
+        .filter(|(key, _)| {
+            model
+                .strip_prefix(key.as_str())
+                .is_some_and(|rest| rest.starts_with('-'))
+        })
+        .max_by_key(|(key, _)| key.len())
+        .map(|(_, p)| *p)
 }
 
 impl Price {
+    /// Claude's `input_tokens` excludes cache writes and reads.
+    pub fn claude_cost(&self, input: u64, cache_write: u64, cache_read: u64, output: u64) -> f64 {
+        (input as f64 * self.input
+            + cache_write as f64 * self.cache_write.unwrap_or(self.input)
+            + cache_read as f64 * self.cached_input
+            + output as f64 * self.output)
+            / 1_000_000.0
+    }
+
     /// Codex's `input_tokens` already includes the cached ones.
     pub fn codex_cost(&self, input: u64, cached: u64, output: u64) -> f64 {
         let fresh = input.saturating_sub(cached) as f64;
@@ -304,22 +370,37 @@ impl Price {
 
 // ponytail: list prices as of 2026-09; `settings.prices` overrides them.
 fn default_prices() -> std::collections::BTreeMap<String, Price> {
-    [
+    let codex = [
         ("gpt-5.3-codex", 1.75, 0.175, 14.0),
         ("gpt-5.6-luna", 0.20, 0.02, 1.20),
     ]
-    .into_iter()
-    .map(|(m, input, cached_input, output)| {
-        (
-            m.to_string(),
-            Price {
-                input,
-                cached_input,
-                output,
-            },
-        )
-    })
-    .collect()
+    .map(|(m, input, cached_input, output)| (m, input, None, cached_input, output));
+    let claude = [
+        ("claude-opus-5-5", 4.0, 5.0, 0.20, 20.0),
+        ("claude-sonnet-5-5", 2.0, 2.50, 0.20, 10.0),
+        ("claude-sonnet-5", 2.0, 2.50, 0.20, 10.0),
+        ("claude-haiku-4-5", 1.0, 1.25, 0.10, 5.0),
+    ]
+    .map(|(m, input, write, read, output)| (m, input, Some(write), read, output));
+    codex
+        .into_iter()
+        .chain(claude)
+        .map(|(m, input, cache_write, cached_input, output)| {
+            (
+                m.to_string(),
+                Price {
+                    input,
+                    cached_input,
+                    output,
+                    cache_write,
+                },
+            )
+        })
+        .collect()
+}
+
+fn is_no_budget(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// Keeps `Instant + timeout` from overflowing.
@@ -327,6 +408,9 @@ const MAX_STALL_TIMEOUT_SECS: u64 = 24 * 3600;
 
 impl Variant {
     pub fn check(&self) -> Result<(), String> {
+        if !self.max_cost_usd.is_finite() || self.max_cost_usd < 0.0 {
+            return Err("maxCostUsd must be a non-negative number".to_string());
+        }
         let s = self.stall_timeout_secs;
         if s > MAX_STALL_TIMEOUT_SECS {
             return Err(format!(
@@ -338,7 +422,7 @@ impl Variant {
 
     /// Keys a serialized default `Variant` leaves out, but a partial
     /// override object may still name.
-    pub const OPTIONAL_KEYS: [&'static str; 2] = ["plannerRoute", "tierRoutes"];
+    pub const OPTIONAL_KEYS: [&'static str; 3] = ["plannerRoute", "tierRoutes", "maxCostUsd"];
 
     /// Every route override names a route in `routes`.
     pub fn check_routes(&self, routes: &[Route]) -> Result<(), String> {
@@ -470,6 +554,10 @@ pub struct Task {
     pub attempts: Vec<Attempt>,
     #[serde(default)]
     pub cost_usd: f64,
+    /// How many times the owner raised the `variant.max_cost_usd` budget;
+    /// the budget in force is that amount times `1 + budget_raises`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub budget_raises: u32,
     /// Hides the task from the default `task.list` without deleting it.
     /// `#[serde(default)]` so a `task.json` written before this field
     /// existed still loads, with `archived: false`.
@@ -615,6 +703,11 @@ pub struct Attempt {
     pub usage: Option<Usage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// `cost_usd` was priced from the per-message token usage in the run's
+    /// `events.jsonl` (`settings.prices`), because the run ended -- stopped,
+    /// stalled, or the daemon restarted -- before the CLI reported a cost.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cost_estimated: bool,
     /// Cost of the review run(s) that reviewed this implement attempt. Kept
     /// separate from `cost_usd` on purpose: `attempt_cost()` subtracts
     /// earlier attempts' `cost_usd` when a session resumes, and a review's
@@ -626,6 +719,16 @@ pub struct Attempt {
     /// next attempt. Its cost is added to the task, not to this attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advice: Option<String>,
+    /// Cost of the advisor run about this attempt's failure, already in
+    /// `task.cost_usd` -- set the moment the run ends, so recovery can tell
+    /// an advisor run the daemon died under (still `None`) from a counted
+    /// one. An attempt is never advised twice once this is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisor_cost_usd: Option<f64>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// The address the orchestrator agent sends from and receives at; every
@@ -802,6 +905,7 @@ mod tests {
             decisions: vec![],
             attempts: vec![],
             cost_usd: 0.0,
+            budget_raises: 0,
             archived: false,
             planned_tier: None,
             tier_fallback: None,
@@ -918,6 +1022,36 @@ mod tests {
     }
 
     #[test]
+    fn max_cost_usd_is_off_by_default_and_each_raise_adds_it_once_more() {
+        let v: Variant = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(v.max_cost_usd, 0.0);
+        let mut task: Task = serde_json::from_value(serde_json::json!({
+            "id": "t", "title": "", "goal": "", "criteria": [], "verify": [], "repo": "",
+            "worktree": "", "branch": "", "baseSha": "", "status": "queued", "tier": "standard",
+            "createdAt": 0, "updatedAt": 0, "variant": {}
+        }))
+        .unwrap();
+        assert_eq!(task.cost_budget(), None);
+        task.variant = Some(Variant {
+            max_cost_usd: 2.5,
+            ..Variant::default()
+        });
+        assert_eq!(task.cost_budget(), Some(2.5));
+        task.budget_raises = 2;
+        assert_eq!(task.cost_budget(), Some(7.5));
+        assert_eq!(serde_json::to_value(&task).unwrap()["budgetRaises"], 2);
+        assert_eq!(
+            serde_json::to_value(task.variant()).unwrap()["maxCostUsd"],
+            2.5
+        );
+        let negative = Variant {
+            max_cost_usd: -1.0,
+            ..Variant::default()
+        };
+        assert!(negative.check().is_err());
+    }
+
+    #[test]
     fn tier_up_caps_at_hard() {
         assert_eq!(Tier::Mechanical.up(), Tier::Standard);
         assert_eq!(Tier::Standard.up(), Tier::Hard);
@@ -947,6 +1081,7 @@ mod tests {
             decisions: vec![],
             attempts: vec![],
             cost_usd: 0.0,
+            budget_raises: 0,
             archived: false,
             planned_tier: None,
             tier_fallback: None,
@@ -985,6 +1120,7 @@ mod tests {
             decisions: vec![],
             attempts: vec![],
             cost_usd: 0.0,
+            budget_raises: 0,
             archived: true,
             planned_tier: None,
             tier_fallback: None,

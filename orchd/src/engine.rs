@@ -769,13 +769,18 @@ impl App {
     /// queued or drafting tasks simply resume. A `waiting` task needs no loop
     /// until its answer arrives (`task.answer` relaunches one).
     pub fn recover_on_start(&self) -> std::io::Result<()> {
-        for t in self.store.recover_interrupted()? {
+        let prices = self.settings.read().unwrap().prices.clone();
+        let recovered = self.store.recover_interrupted(|task, idx| {
+            let run_dir = self.store.run_dir(&task.id, task.attempts[idx].n);
+            settle_unfinished_cost(task, idx, &run_dir, &prices);
+        })?;
+        for t in recovered {
             self.broadcast_task(&t);
         }
         for a in self.store.recover_interrupted_audits()? {
             audit::broadcast(self, &a);
         }
-        for t in self.store.list_tasks()? {
+        for mut t in self.store.list_tasks()? {
             if t.archived {
                 continue;
             }
@@ -783,6 +788,12 @@ impl App {
                 t.status,
                 TaskStatus::Queued | TaskStatus::Running | TaskStatus::Drafting
             ) {
+                let id = t.id.clone();
+                if settle_interrupted_advisor(&mut t, |n| self.store.run_dir(&id, n), &prices) {
+                    t.updated_at = now_ms();
+                    self.store.save_task(&t)?;
+                    self.broadcast_task(&t);
+                }
                 self.start_task_loop(t.id);
             }
         }
@@ -1440,6 +1451,7 @@ impl App {
             decisions: vec![],
             attempts: vec![],
             cost_usd: 0.0,
+            budget_raises: 0,
             archived: false,
             planned_tier: None,
             tier_fallback: None,
@@ -1611,6 +1623,13 @@ impl App {
             // decision synchronously and relaunch (spec step 9: "status
             // queued, loop continues").
             task.decisions.push(format!("Owner: {}", p.answer));
+            if task
+                .question
+                .as_ref()
+                .is_some_and(|q| is_budget_raise(q, &p.answer))
+            {
+                task.budget_raises += 1;
+            }
             task.question = None;
             task.status = TaskStatus::Queued;
             task.updated_at = now_ms();
@@ -2438,16 +2457,140 @@ fn split_verify_commands(cwd: &Path, commands: &[String]) -> (Vec<String>, Vec<S
 /// Claude's `total_cost_usd` covers the whole session, so a resumed
 /// attempt's figure already includes every earlier attempt on that session;
 /// adding it as-is counted the first attempt's cost once per resume.
-fn attempt_cost(earlier: &[Attempt], attempt: &Attempt, session_total: f64) -> f64 {
-    if !attempt.resumed || attempt.session_id.is_none() {
-        return session_total;
+/// That includes an earlier attempt whose cost was estimated after the
+/// daemon killed it: its messages are part of the session the resume
+/// continues, so it is subtracted like any other. An estimated cost covers
+/// only its own run's messages, so it is taken as is.
+fn attempt_cost(earlier: &[Attempt], attempt: &Attempt, run_cost: f64, estimated: bool) -> f64 {
+    if estimated || !attempt.resumed || attempt.session_id.is_none() {
+        return run_cost;
     }
     let already: f64 = earlier
         .iter()
         .filter(|a| a.session_id == attempt.session_id)
         .filter_map(|a| a.cost_usd)
         .sum();
-    (session_total - already).max(0.0)
+    (run_cost - already).max(0.0)
+}
+
+type Prices = std::collections::BTreeMap<String, crate::model::Price>;
+
+/// What a Claude run spent, replayed from its saved `events.jsonl`: the
+/// CLI's own figure when its `result` made it to disk, else the priced
+/// per-message usage, marked estimated. `None` for a missing file or one
+/// with nothing priced -- which is every Codex run, whose events have no
+/// Claude-shaped message and report usage only at the end of a turn.
+fn replay_run_cost(events: &Path, prices: &Prices) -> Option<harness::RunOutcome> {
+    let text = std::fs::read_to_string(events).ok()?;
+    let mut outcome = harness::replay_events(Harness::Claude, &text);
+    outcome.estimate_cost(prices);
+    outcome.cost_usd.is_some().then_some(outcome)
+}
+
+/// The `events.jsonl` files of an attempt's own harness runs whose cost is
+/// not in `cost_usd` yet. A plan attempt saves its first run's cost before
+/// the retry run starts, so a recorded cost means only the retry is left.
+fn uncounted_event_files(run_dir: &Path, attempt: &Attempt) -> Vec<PathBuf> {
+    match attempt.stage {
+        Stage::Plan => {
+            let plan = run_dir.join("plan");
+            let retry = plan.join("events-retry.jsonl");
+            if attempt.cost_usd.is_some() {
+                vec![retry]
+            } else {
+                vec![plan.join("events.jsonl"), retry]
+            }
+        }
+        Stage::Implement | Stage::Review if attempt.cost_usd.is_none() => {
+            vec![run_dir.join("events.jsonl")]
+        }
+        Stage::Implement | Stage::Review => vec![],
+    }
+}
+
+/// For an attempt that ended before all its spend was recorded (stopped, or
+/// the daemon died under it): adds whatever its runs left in their events
+/// -- see [`replay_run_cost`] -- to the attempt and the task. That covers
+/// the attempt's review run too (`runs/<n>/review`), kept in
+/// `review_cost_usd`. Claude only, for the attempt's own runs; the review
+/// may run on either harness.
+fn settle_unfinished_cost(task: &mut Task, idx: usize, run_dir: &Path, prices: &Prices) {
+    let attempt = &task.attempts[idx];
+    if attempt.harness == Harness::Claude {
+        let mut total = None;
+        let mut estimated = false;
+        let mut usage = Usage {
+            input: 0,
+            output: 0,
+            cached: 0,
+        };
+        for path in uncounted_event_files(run_dir, attempt) {
+            let Some(outcome) = replay_run_cost(&path, prices) else {
+                continue;
+            };
+            let cost = outcome.cost_usd.unwrap_or(0.0);
+            let cost = attempt_cost(&task.attempts[..idx], attempt, cost, outcome.cost_estimated);
+            *total.get_or_insert(0.0) += cost;
+            estimated |= outcome.cost_estimated;
+            usage.input += outcome.usage_input;
+            usage.output += outcome.usage_output;
+            usage.cached += outcome.usage_cached;
+        }
+        if let Some(cost) = total {
+            let attempt = &mut task.attempts[idx];
+            attempt.cost_usd = Some(attempt.cost_usd.unwrap_or(0.0) + cost);
+            attempt.cost_estimated |= estimated;
+            let saved = attempt.usage.get_or_insert(Usage {
+                input: 0,
+                output: 0,
+                cached: 0,
+            });
+            saved.input += usage.input;
+            saved.output += usage.output;
+            saved.cached += usage.cached;
+            task.cost_usd += cost;
+        }
+    }
+    // An attempt reviews once, and its review_cost_usd is saved right after.
+    let attempt = &task.attempts[idx];
+    if attempt.stage == Stage::Implement && attempt.review_cost_usd.is_none() {
+        if let Some(o) = replay_run_cost(&run_dir.join("review").join("events.jsonl"), prices) {
+            let cost = o.cost_usd.unwrap_or(0.0);
+            task.attempts[idx].review_cost_usd = Some(cost);
+            task.cost_usd += cost;
+        }
+    }
+}
+
+/// On daemon start, for a task that was between attempts: an advisor run
+/// about its last failed attempt that the daemon died under. Its cost was
+/// never saved (`advisor_cost_usd` is saved the moment one ends), so it is
+/// replayed from `runs/<n>/advisor/events.jsonl`. Returns whether it added
+/// anything.
+fn settle_interrupted_advisor(
+    task: &mut Task,
+    run_dir_of: impl Fn(u32) -> PathBuf,
+    prices: &Prices,
+) -> bool {
+    let Some(idx) = task
+        .attempts
+        .iter()
+        .rposition(|a| a.stage == Stage::Implement)
+    else {
+        return false;
+    };
+    let attempt = &task.attempts[idx];
+    if attempt.status != AttemptStatus::Failed || attempt.advisor_cost_usd.is_some() {
+        return false;
+    }
+    let events = run_dir_of(attempt.n).join("advisor").join("events.jsonl");
+    let Some(o) = replay_run_cost(&events, prices) else {
+        return false;
+    };
+    let cost = o.cost_usd.unwrap_or(0.0);
+    task.attempts[idx].advisor_cost_usd = Some(cost);
+    task.cost_usd += cost;
+    true
 }
 
 fn short_sha(sha: &str) -> &str {
@@ -2816,6 +2959,9 @@ async fn run_harness(
             )
         });
     }
+    if req.harness == Harness::Claude {
+        outcome.estimate_cost(&app.settings.read().unwrap().prices);
+    }
     Ok(outcome)
 }
 
@@ -3019,6 +3165,81 @@ async fn wait_for_answer(
         }
     }
     result
+}
+
+/// Starts every question the budget gate asks; `task.answer` uses it to
+/// apply a "raise" that arrives with no live loop to deliver it to.
+const BUDGET_QUESTION_PREFIX: &str = "This task has spent";
+
+fn is_budget_raise(question: &Question, answer: &str) -> bool {
+    question.text.starts_with(BUDGET_QUESTION_PREFIX) && answer.trim().eq_ignore_ascii_case("raise")
+}
+
+/// The gate before every stage run (plan, advisor, implement attempt,
+/// review): while the task's spend meets its `variant.max_cost_usd` budget,
+/// it waits for the owner -- "raise" adds the budget once more, "stop"
+/// stops it -- instead of running. Never interrupts a run already going.
+/// On `true` the task is back in `resume_status` holding a slot; on `false`
+/// it is stopped (the wait already persisted that).
+#[allow(clippy::too_many_arguments)]
+async fn wait_while_over_budget(
+    app: &Arc<App>,
+    task_id: &str,
+    task: &mut Task,
+    run: &str,
+    resume_status: TaskStatus,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    cancel: &CancelToken,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> bool {
+    let mut waited = false;
+    while let Some(budget) = task.cost_budget().filter(|b| task.cost_usd >= *b) {
+        let step = task.variant().max_cost_usd;
+        task.decisions.push(format!(
+            "Orchestrator: budget ${budget:.2} reached (${:.2} spent); the {run} run waits for the owner",
+            task.cost_usd
+        ));
+        let question = Question {
+            text: format!(
+                "{BUDGET_QUESTION_PREFIX} ${:.2}, reaching its ${budget:.2} budget, before the {run} run. Raise the budget by ${step:.2}, or stop?",
+                task.cost_usd
+            ),
+            options: vec!["raise".into(), "stop".into()],
+        };
+        task.question = Some(question.clone());
+        task.status = TaskStatus::Waiting;
+        task.updated_at = now_ms();
+        waited = true;
+        match wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await {
+            None => return false,
+            Some(answer) => {
+                if is_budget_raise(&question, &answer) {
+                    task.budget_raises += 1;
+                }
+            }
+        }
+    }
+    if !waited {
+        return true;
+    }
+    task.status = resume_status;
+    task.updated_at = now_ms();
+    let _ = app.store.save_task(task);
+    app.broadcast_task(task);
+    if permit.is_none() {
+        let acquired = tokio::select! {
+            _ = cancel.cancelled() => None,
+            p = app.slots.clone().acquire_owned() => p.ok(),
+        };
+        match acquired {
+            Some(p) => *permit = Some(p),
+            None => {
+                mark_stopped_if_not_already(app, task_id).await;
+                return false;
+            }
+        }
+    }
+    true
 }
 
 // ===========================================================================
@@ -3646,6 +3867,13 @@ async fn run_review(
                 ),
             }))
         }
+        Err(RunError::Cancelled) => {
+            // Stopped mid-review: what it streamed so far is still spent.
+            *cost_usd += replay_run_cost(&events_path, &settings_snapshot.prices)
+                .and_then(|o| o.cost_usd)
+                .unwrap_or(0.0);
+            Err(RunError::Cancelled)
+        }
         Err(e) => Err(e),
     }
 }
@@ -3659,10 +3887,12 @@ const MAX_ADVICE_CHARS: usize = 1500;
 
 /// One read-only call on the task's planner route about the implement attempt
 /// that just failed, made before the next attempt starts. The answer is
-/// stored as the failed attempt's `advice`. Returns the run's cost (`None`
-/// when no run happened). Never fails the task: no route, an escalation to
-/// the advisor's own model, a failed run or an empty answer all just mean
-/// no advice.
+/// stored as the failed attempt's `advice`, and the run's cost as its
+/// `advisor_cost_usd`, which is also returned (`None` when no run happened).
+/// A failed attempt is advised at most once: a run that was stopped or gave
+/// no answer is not paid for again. Never fails the task: no route, an
+/// escalation to the advisor's own model, a failed or stopped run or an
+/// empty answer all just mean no advice.
 async fn run_advisor_before_retry(
     app: &Arc<App>,
     task: &mut Task,
@@ -3681,6 +3911,7 @@ async fn run_advisor_before_retry(
     if attempt.status != AttemptStatus::Failed
         || failure.kind == FailureKind::Blocked
         || attempt.advice.is_some()
+        || attempt.advisor_cost_usd.is_some()
     {
         return None;
     }
@@ -3753,8 +3984,19 @@ async fn run_advisor_before_retry(
     let _ = std::fs::remove_file(&key_path);
     // The run wrote the attempt's session/pgid to disk mid-run; keep the
     // caller's copy and only add the advice.
-    let outcome = result.ok()?;
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(RunError::Cancelled) => {
+            let cost = replay_run_cost(&events_path, &settings.prices)
+                .and_then(|o| o.cost_usd)
+                .unwrap_or(0.0);
+            task.attempts[failed].advisor_cost_usd = Some(cost);
+            return Some(cost);
+        }
+        Err(RunError::Io(_)) => return None,
+    };
     let cost = outcome.cost_usd.unwrap_or(0.0);
+    task.attempts[failed].advisor_cost_usd = Some(cost);
     let text = outcome.final_text.unwrap_or_default();
     let advice = text.trim();
     if outcome.error.is_none() && !advice.is_empty() {
@@ -3949,6 +4191,9 @@ async fn end_plan_stage(app: &Arc<App>, task_id: &str, idx: Option<usize>) -> Pl
                 if a.status == AttemptStatus::Running {
                     a.status = AttemptStatus::Interrupted;
                     a.ended_at = Some(now_ms());
+                    let run_dir = app.store.run_dir(task_id, a.n);
+                    let prices = app.settings.read().unwrap().prices.clone();
+                    settle_unfinished_cost(&mut t, idx, &run_dir, &prices);
                     t.updated_at = now_ms();
                     let _ = app.store.save_task(&t);
                     app.broadcast_task(&t);
@@ -4000,6 +4245,20 @@ async fn run_plan_stage(
             Ok(Some(t)) => t,
             _ => return end_plan_stage(app, task_id, None).await,
         };
+        if !wait_while_over_budget(
+            app,
+            task_id,
+            &mut task,
+            "plan",
+            TaskStatus::Drafting,
+            pending_answer,
+            cancel,
+            permit,
+        )
+        .await
+        {
+            return end_plan_stage(app, task_id, None).await;
+        }
 
         let settings = app.settings.read().unwrap().clone();
         let variant = task.variant();
@@ -4053,8 +4312,10 @@ async fn run_plan_stage(
             failure: None,
             usage: None,
             cost_usd: None,
+            cost_estimated: false,
             review_cost_usd: None,
             advice: None,
+            advisor_cost_usd: None,
         };
         task.attempts.push(attempt);
         let idx = task.attempts.len() - 1;
@@ -4098,10 +4359,23 @@ async fn run_plan_stage(
 
         let mut draft: Option<brief::PlanDraft> = None;
         let mut hard_failure = false;
+        let mut over_budget = false;
         for retry in 0..2 {
             if cancel.is_cancelled() {
                 let _ = std::fs::remove_file(&key_path);
                 return end_plan_stage(app, task_id, Some(idx)).await;
+            }
+            if retry > 0 {
+                // The retry is a run of its own: when the first one reached
+                // the budget, this attempt ends and the next round's gate
+                // asks the owner before any further planner run.
+                if task.cost_budget().is_some_and(|b| task.cost_usd >= b) {
+                    over_budget = true;
+                    break;
+                }
+                // The first run's cost, saved before the reload after the
+                // retry would drop it; recovery then counts only the retry.
+                let _ = app.store.save_task(&task);
             }
             let brief_text = match (retry == 0, task.parent.is_some()) {
                 (true, false) => brief::build_plan_brief(&request_text, &task.variant()),
@@ -4135,6 +4409,7 @@ async fn run_plan_stage(
                     if let Some(cost) = o.cost_usd {
                         let a = &mut task.attempts[idx];
                         a.cost_usd = Some(a.cost_usd.unwrap_or(0.0) + cost);
+                        a.cost_estimated |= o.cost_estimated;
                         task.cost_usd += cost;
                     }
                     let usage = task.attempts[idx].usage.get_or_insert(Usage {
@@ -4186,6 +4461,21 @@ async fn run_plan_stage(
         let _ = std::fs::remove_file(&key_path);
         if hard_failure {
             return end_plan_stage(app, task_id, Some(idx)).await;
+        }
+        if over_budget {
+            // Not a clarification round: the owner is asked about the
+            // budget, not for more detail, and "raise" drafts again.
+            record_failure(
+                &mut task,
+                idx,
+                FailureKind::NoDeliverable,
+                "planner did not return a parseable sushi-plan block; the budget stopped the retry"
+                    .to_string(),
+            );
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
+            continue;
         }
 
         let Some(draft) = draft else {
@@ -4975,6 +5265,24 @@ async fn run_task_loop(
         let resume_eligible = !just_answered;
         just_answered = false;
 
+        let status = task.status;
+        if !wait_while_over_budget(
+            &app,
+            &task_id,
+            &mut task,
+            "implement",
+            status,
+            &pending_answer,
+            &cancel,
+            &mut permit,
+        )
+        .await
+        {
+            drop(permit);
+            app.finish_task_loop(&task_id);
+            return;
+        }
+
         // A task in a graph starts from its base branch as it is now, so a
         // dependent begins on top of the work it waited for (a subtask on
         // its parent's head, with every earlier sibling landed).
@@ -5112,6 +5420,24 @@ async fn run_task_loop(
                 task.updated_at = now_ms();
                 let _ = app.store.save_task(&task);
                 app.broadcast_task(&task);
+                // The advisor's spend can be what reaches the budget.
+                let status = task.status;
+                if !wait_while_over_budget(
+                    &app,
+                    &task_id,
+                    &mut task,
+                    "implement",
+                    status,
+                    &pending_answer,
+                    &cancel,
+                    &mut permit,
+                )
+                .await
+                {
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
             }
         }
 
@@ -5165,8 +5491,10 @@ async fn run_task_loop(
             failure: None,
             usage: None,
             cost_usd: None,
+            cost_estimated: false,
             review_cost_usd: None,
             advice: None,
+            advisor_cost_usd: None,
         };
         task.attempts.push(attempt);
         let idx = task.attempts.len() - 1;
@@ -5332,6 +5660,7 @@ async fn run_task_loop(
             Err(RunError::Cancelled) => {
                 task.attempts[idx].status = AttemptStatus::Interrupted;
                 task.attempts[idx].ended_at = Some(now_ms());
+                settle_unfinished_cost(&mut task, idx, &run_dir, &settings.prices);
                 task.status = TaskStatus::Stopped;
                 task.updated_at = now_ms();
                 let _ = app.store.save_task(&task);
@@ -5379,10 +5708,16 @@ async fn run_task_loop(
         if route.harness == Harness::Claude && resume_session.is_none() {
             task.attempts[idx].prefix_tokens = outcome.first_turn_tokens;
         }
-        let cost = outcome
-            .cost_usd
-            .map(|total| attempt_cost(&task.attempts[..idx], &task.attempts[idx], total));
+        let cost = outcome.cost_usd.map(|total| {
+            attempt_cost(
+                &task.attempts[..idx],
+                &task.attempts[idx],
+                total,
+                outcome.cost_estimated,
+            )
+        });
         task.attempts[idx].cost_usd = cost;
+        task.attempts[idx].cost_estimated = outcome.cost_estimated;
         if let Some(cost) = cost {
             task.cost_usd += cost;
         }
@@ -5860,6 +6195,33 @@ async fn run_task_loop(
                         task.decisions.push(note);
                     }
                 }
+                if !wait_while_over_budget(
+                    &app,
+                    &task_id,
+                    &mut task,
+                    "review",
+                    TaskStatus::Running,
+                    &pending_answer,
+                    &cancel,
+                    &mut permit,
+                )
+                .await
+                {
+                    // Stopped at the gate: the attempt ends here too, or a
+                    // restart would find it `running` and requeue the task.
+                    if let Ok(Some(mut t)) = app.store.load_task(&task_id) {
+                        if let Some(a) = t.attempts.get_mut(idx) {
+                            a.status = AttemptStatus::Interrupted;
+                            a.ended_at = Some(now_ms());
+                        }
+                        t.updated_at = now_ms();
+                        let _ = app.store.save_task(&t);
+                        app.broadcast_task(&t);
+                    }
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
                 let mut review_cost = 0.0;
                 let reviewed = run_review(
                     &app,
@@ -6301,8 +6663,10 @@ mod tests {
             }),
             usage: None,
             cost_usd: None,
+            cost_estimated: false,
             review_cost_usd: None,
             advice: None,
+            advisor_cost_usd: None,
         }
     }
 
@@ -6768,13 +7132,54 @@ mod tests {
         };
         let first = with(1, false, Some(2.13));
         let second = with(2, true, None);
-        let second_cost = attempt_cost(std::slice::from_ref(&first), &second, 2.94);
+        let second_cost = attempt_cost(std::slice::from_ref(&first), &second, 2.94, false);
         assert!((second_cost - 0.81).abs() < 1e-9);
         let third = with(3, true, None);
         let paid = [first, with(2, true, Some(second_cost))];
-        assert!((attempt_cost(&paid, &third, 3.04) - 0.10).abs() < 1e-9);
+        assert!((attempt_cost(&paid, &third, 3.04, false) - 0.10).abs() < 1e-9);
         // A fresh session is never discounted.
-        assert_eq!(attempt_cost(&paid, &with(4, false, None), 1.5), 1.5);
+        assert_eq!(attempt_cost(&paid, &with(4, false, None), 1.5, false), 1.5);
+        // An estimate covers its own run only.
+        assert_eq!(attempt_cost(&paid, &third, 0.4, true), 0.4);
+        // An attempt killed mid-run and estimated on recovery is still part
+        // of the session total the resume reports, so it is subtracted too:
+        // the task pays 2.13 + 0.5 + 0.37 = 3.0, the session's own total.
+        let killed = Attempt {
+            cost_estimated: true,
+            ..with(2, true, Some(0.5))
+        };
+        let after_kill = [with(1, false, Some(2.13)), killed];
+        assert!((attempt_cost(&after_kill, &third, 3.0, false) - 0.37).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_plan_attempt_settles_only_the_runs_whose_cost_is_not_saved_yet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("plan");
+        std::fs::create_dir_all(&plan).unwrap();
+        let result = |cost: f64| {
+            format!(
+                r#"{{"type":"result","total_cost_usd":{cost},"usage":{{"input_tokens":1,"output_tokens":1}},"result":"x"}}"#
+            )
+        };
+        std::fs::write(plan.join("events.jsonl"), result(0.25)).unwrap();
+        std::fs::write(plan.join("events-retry.jsonl"), result(0.5)).unwrap();
+        let prices = Settings::default().prices;
+        let settle = |saved: Option<f64>| {
+            let mut task = task_with_status(TaskStatus::Drafting);
+            task.cost_usd = saved.unwrap_or(0.0);
+            task.attempts = vec![Attempt {
+                stage: Stage::Plan,
+                cost_usd: saved,
+                ..attempt_with_failure(1, "x")
+            }];
+            settle_unfinished_cost(&mut task, 0, tmp.path(), &prices);
+            (task.attempts[0].cost_usd, task.cost_usd)
+        };
+        // No cost saved yet: every plan run's file counts.
+        assert_eq!(settle(None), (Some(0.75), 0.75));
+        // Died in the retry: the first run's cost was saved before it.
+        assert_eq!(settle(Some(0.25)), (Some(0.75), 0.75));
     }
 
     #[test]
@@ -6875,6 +7280,7 @@ mod tests {
             decisions: vec![],
             attempts: vec![],
             cost_usd: 0.0,
+            budget_raises: 0,
             archived: false,
             planned_tier: None,
             tier_fallback: None,

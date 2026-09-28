@@ -685,6 +685,23 @@ test("variantLabel lists route overrides after the flags", async () => {
   );
 });
 
+test("variantLabel lists a dollar budget last and treats absent as none", async () => {
+  const { variantLabel } = await library;
+  const budget = variant({ maxCostUsd: 2.5 });
+  assert.equal(
+    variantLabel(task({ variant: budget }), variant()),
+    "maxCostUsd $2.50",
+  );
+  assert.equal(
+    variantLabel(task({ variant: variant() }), budget),
+    "maxCostUsd none",
+  );
+  assert.equal(
+    variantLabel(task({ variant: variant({ maxCostUsd: 0 }) }), variant()),
+    "default",
+  );
+});
+
 test("costByStage splits plan, each implement attempt, and review into their own totals", async () => {
   const { costByStage } = await library;
   const t = task({

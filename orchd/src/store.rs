@@ -123,12 +123,18 @@ impl Store {
     /// daemon's own death and would otherwise run forever unsupervised),
     /// delete its leftover per-run API key file if any, then mark the
     /// attempt `interrupted` and the task `stopped`, per spec step 10.
+    /// `settle(task, idx)` runs on each such attempt once its process is
+    /// gone (the engine counts the spend it left in `events.jsonl`).
     /// Returns the tasks that were mutated.
-    pub fn recover_interrupted(&self) -> io::Result<Vec<Task>> {
+    pub fn recover_interrupted(
+        &self,
+        mut settle: impl FnMut(&mut Task, usize),
+    ) -> io::Result<Vec<Task>> {
         let mut recovered = Vec::new();
         for mut task in self.list_tasks()? {
             let mut changed = false;
-            for attempt in task.attempts.iter_mut() {
+            for idx in 0..task.attempts.len() {
+                let attempt = &mut task.attempts[idx];
                 if attempt.status == AttemptStatus::Running {
                     if let Some(pgid) = attempt.pgid {
                         kill_stale_process_group(pgid);
@@ -137,6 +143,7 @@ impl Store {
                     let _ = fs::remove_file(key_file);
                     attempt.status = AttemptStatus::Interrupted;
                     attempt.ended_at = Some(crate::model::now_ms());
+                    settle(&mut task, idx);
                     changed = true;
                 }
             }
@@ -354,10 +361,13 @@ mod tests {
                 failure: None,
                 usage: None,
                 cost_usd: None,
+                cost_estimated: false,
                 review_cost_usd: None,
                 advice: None,
+                advisor_cost_usd: None,
             }],
             cost_usd: 0.0,
+            budget_raises: 0,
             archived: false,
             planned_tier: None,
             tier_fallback: None,
@@ -484,7 +494,7 @@ mod tests {
         store.save_task(&running_task).unwrap();
         store.save_task(&done_task).unwrap();
 
-        let recovered = store.recover_interrupted().unwrap();
+        let recovered = store.recover_interrupted(|_, _| {}).unwrap();
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].id, "running");
 
@@ -523,7 +533,7 @@ mod tests {
         task.attempts[0].pgid = Some(pgid);
         store.save_task(&task).unwrap();
 
-        store.recover_interrupted().unwrap();
+        store.recover_interrupted(|_, _| {}).unwrap();
 
         // `try_wait()` (not a raw `kill(pid, 0)`) is the correct liveness
         // check here: once SIGTERM/SIGKILL lands, the child becomes a

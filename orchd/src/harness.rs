@@ -3,7 +3,8 @@
 //! process); stream parsing folds one line at a time into a
 //! [`RunOutcome`] as the engine reads the child's stdout.
 
-use crate::model::{Harness, SandboxMode};
+use crate::model::{price_for, Harness, Price, SandboxMode};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 pub struct RunRequest<'a> {
@@ -364,6 +365,61 @@ pub struct RunOutcome {
     /// `assistant` event, i.e. the whole prompt the first turn was sent,
     /// whether or not an earlier run left it in the prompt cache.
     pub first_turn_tokens: Option<u64>,
+    /// Claude only: the usage of each top-level assistant message, by
+    /// message id -- the stream repeats a message once per content block.
+    pub messages: BTreeMap<String, MessageUsage>,
+    /// `cost_usd` was priced from `messages`: the run printed no `result`.
+    pub cost_estimated: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MessageUsage {
+    pub model: String,
+    pub input: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
+    pub output: u64,
+}
+
+impl RunOutcome {
+    /// A Claude run that ended without its `result` event (killed, stalled,
+    /// crashed): price the messages it did stream, fill in their token
+    /// usage, and mark the cost estimated. No-op once a cost is known, or
+    /// when no message has a price.
+    pub fn estimate_cost(&mut self, prices: &BTreeMap<String, Price>) {
+        if self.cost_usd.is_some() {
+            return;
+        }
+        let priced: Vec<(&MessageUsage, Price)> = self
+            .messages
+            .values()
+            .filter_map(|m| price_for(prices, &m.model).map(|p| (m, p)))
+            .collect();
+        if priced.is_empty() {
+            return;
+        }
+        self.cost_usd = Some(
+            priced
+                .iter()
+                .map(|(m, p)| p.claude_cost(m.input, m.cache_write, m.cache_read, m.output))
+                .sum(),
+        );
+        self.cost_estimated = true;
+        let sum = |f: fn(&MessageUsage) -> u64| self.messages.values().map(f).sum::<u64>();
+        self.usage_input = sum(|m| m.input);
+        self.usage_cached = sum(|m| m.cache_read);
+        self.usage_output = sum(|m| m.output);
+    }
+}
+
+/// Folds a whole saved `events.jsonl` (stderr lines included; they are
+/// skipped) into an outcome, as if streamed.
+pub fn replay_events(harness: Harness, text: &str) -> RunOutcome {
+    let mut outcome = RunOutcome::default();
+    for line in text.lines() {
+        feed_stream_line(harness, line, &mut outcome);
+    }
+    outcome
 }
 
 /// Folds one line of a harness's streamed JSON output into `outcome`,
@@ -421,6 +477,7 @@ fn feed_claude_line(v: &serde_json::Value, outcome: &mut RunOutcome) -> Option<S
             if outcome.first_turn_tokens.is_none() {
                 outcome.first_turn_tokens = first_turn_tokens(v);
             }
+            record_message_usage(v, outcome);
             claude_tool_note(v)
         }
         _ => None,
@@ -431,6 +488,42 @@ fn first_turn_tokens(v: &serde_json::Value) -> Option<u64> {
     let usage = v.get("message")?.get("usage")?;
     let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
     Some(n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens"))
+}
+
+/// A subagent's messages (`parent_tool_use_id` set) are left out: only the
+/// top-level conversation is counted. A repeated message id keeps its latest
+/// usage, which is the fullest.
+fn record_message_usage(v: &serde_json::Value, outcome: &mut RunOutcome) {
+    if v.get("parent_tool_use_id").is_some_and(|p| !p.is_null()) {
+        return;
+    }
+    let Some(message) = v.get("message") else {
+        return;
+    };
+    let Some(usage) = message.get("usage") else {
+        return;
+    };
+    let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    let id = message
+        .get("id")
+        .and_then(|x| x.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("#{}", outcome.messages.len()));
+    let model = message
+        .get("model")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    outcome.messages.insert(
+        id,
+        MessageUsage {
+            model,
+            input: n("input_tokens"),
+            cache_write: n("cache_creation_input_tokens"),
+            cache_read: n("cache_read_input_tokens"),
+            output: n("output_tokens"),
+        },
+    );
 }
 
 fn claude_tool_note(v: &serde_json::Value) -> Option<String> {
@@ -887,6 +980,58 @@ mod tests {
             &mut none,
         );
         assert_eq!(none.first_turn_tokens, None);
+    }
+
+    /// Shape of `claude -p --output-format stream-json --verbose` (2.1.283)
+    /// cut off before its `result`: one message streamed as two events (a
+    /// text block, then a tool_use block) under the same id, a second
+    /// message, a subagent's message, and a stderr line from events.jsonl.
+    #[test]
+    fn a_run_without_a_result_is_priced_from_its_unique_messages_and_marked_estimated() {
+        let events = [
+            r#"{"type":"system","subtype":"init","session_id":"s","model":"claude-opus-5-5"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","id":"msg_01A","type":"message","role":"assistant","content":[{"type":"text","text":"Reading."}],"usage":{"input_tokens":6,"cache_creation_input_tokens":12000,"cache_read_input_tokens":18000,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":12000},"output_tokens":30,"service_tier":"standard"}},"parent_tool_use_id":null,"session_id":"s"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","id":"msg_01A","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/w/a.rs"}}],"usage":{"input_tokens":6,"cache_creation_input_tokens":12000,"cache_read_input_tokens":18000,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":12000},"output_tokens":30,"service_tier":"standard"}},"parent_tool_use_id":null,"session_id":"s"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"fn a() {}"}]},"parent_tool_use_id":null,"session_id":"s"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","id":"msg_01B","type":"message","role":"assistant","content":[{"type":"text","text":"Editing."}],"usage":{"input_tokens":2,"cache_creation_input_tokens":500,"cache_read_input_tokens":30000,"output_tokens":400,"service_tier":"standard"}},"parent_tool_use_id":null,"session_id":"s"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","id":"msg_sub","type":"message","role":"assistant","content":[],"usage":{"input_tokens":9999,"output_tokens":9999}},"parent_tool_use_id":"toolu_9","session_id":"s"}"#,
+            "[stderr] warning: something",
+        ]
+        .join("\n");
+        let mut outcome = replay_events(Harness::Claude, &events);
+        assert_eq!(outcome.messages.len(), 2);
+        assert_eq!(outcome.cost_usd, None);
+        let prices = crate::model::Settings::default().prices;
+        outcome.estimate_cost(&prices);
+        let expected = (6.0 * 4.0 + 12_000.0 * 5.0 + 18_000.0 * 0.20 + 30.0 * 20.0) / 1e6
+            + (2.0 * 4.0 + 500.0 * 5.0 + 30_000.0 * 0.20 + 400.0 * 20.0) / 1e6;
+        let cost = outcome.cost_usd.unwrap();
+        assert!((cost - expected).abs() < 1e-12, "{cost} vs {expected}");
+        assert!(outcome.cost_estimated);
+        assert_eq!(
+            (
+                outcome.usage_input,
+                outcome.usage_cached,
+                outcome.usage_output
+            ),
+            (8, 48_000, 430)
+        );
+
+        // A run that did print its result keeps the CLI's own figure.
+        let finished = format!(
+            "{events}\n{}",
+            r#"{"type":"result","total_cost_usd":0.5,"usage":{"input_tokens":8},"result":"ok"}"#
+        );
+        let mut outcome = replay_events(Harness::Claude, &finished);
+        outcome.estimate_cost(&prices);
+        assert_eq!(outcome.cost_usd, Some(0.5));
+        assert!(!outcome.cost_estimated);
+
+        // No price for the model: no guess.
+        let mut unpriced = replay_events(Harness::Claude, &events.replace("claude-opus-5-5", "x"));
+        unpriced.estimate_cost(&prices);
+        assert_eq!(unpriced.cost_usd, None);
+        assert!(!unpriced.cost_estimated);
     }
 
     #[test]

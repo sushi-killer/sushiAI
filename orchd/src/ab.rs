@@ -222,7 +222,7 @@ pub fn report_with(
         groups.entry(key).or_default().push(t);
     }
     let mut out = String::from(
-        "| variant | tasks | done | attempts/task | $/task | median $ | median min to done | review FAIL | owner answers/task | process % | evidence % | verify % | task % | explore % | tool calls/attempt | stalls (cost not counted) | median prefix tokens | cache-read tokens/attempt |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
+        "| variant | tasks | done | attempts/task | $/task | median $ | median min to done | review FAIL | owner answers/task | process % | evidence % | verify % | task % | explore % | tool calls/attempt | stalls | median prefix tokens | cache-read tokens/attempt |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     for (variant, ts) in groups {
         let n = ts.len() as f64;

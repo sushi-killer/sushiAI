@@ -98,3 +98,20 @@
   the request form; pass `start: false` to leave it stopped. Before, such a
   task sat `queued` until something called `task.start` or the daemon
   restarted.
+- A Claude run that ends before the CLI reports its cost (stopped, stalled,
+  or cut off by a daemon or app restart) no longer loses its spend: the
+  attempt's cost is priced from the per-message token usage already in its
+  `events.jsonl` (each message counted once) and marked `costEstimated`.
+  The same holds for a review run (`reviewCostUsd`) and an advisor run
+  (new `advisorCostUsd` on the failed attempt; a failure whose advisor run
+  was already paid for is not advised again). A plan stage's first run no
+  longer drops out of the cost when the planner is asked a second time.
+  `settings.prices` now has list prices for `claude-opus-5-5`,
+  `claude-sonnet-5-5`, `claude-sonnet-5` and `claude-haiku-4-5` (a dated
+  model id matches its family), and a price can carry a `cacheWrite` rate.
+  Codex pricing is unchanged.
+- `maxCostUsd` (0 = off, the default) is a dollar budget per task. Before
+  each plan, advisor, implement or review run, a task that has already spent
+  its budget waits with the question "raise or stop" instead of running;
+  `raise` adds the same amount again and continues, and the stop is
+  recorded in the task's decisions. A run already going is never cut short.

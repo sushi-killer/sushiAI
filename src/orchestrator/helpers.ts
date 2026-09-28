@@ -49,7 +49,10 @@ export function formatCost(costUsd: number | undefined): string {
 
 /** `Variant`'s own field order - `variantLabel` walks it in this order so a
  * task with several differing flags always reads the same way. */
-const VARIANT_KEYS: Exclude<keyof Variant, "plannerRoute" | "tierRoutes">[] = [
+const VARIANT_KEYS: Exclude<
+  keyof Variant,
+  "plannerRoute" | "tierRoutes" | "maxCostUsd"
+>[] = [
   "retryMode",
   "stallTimeoutSecs",
   "plannerTier",
@@ -73,7 +76,8 @@ function tierRoutesText(routes: Variant["tierRoutes"]): string {
 /** How a task's experiment arm reads in the detail view: "not recorded" for
  * a task from before variants existed, "default" when every flag matches
  * `experiments` (the current settings), or else only the flags that differ,
- * in `Variant`'s own field order, then any differing route overrides. */
+ * in `Variant`'s own field order, then any differing route overrides and
+ * dollar budget. */
 export function variantLabel(task: Task, experiments: Variant): string {
   if (!task.variant) return "not recorded";
   const variant = task.variant;
@@ -86,6 +90,10 @@ export function variantLabel(task: Task, experiments: Variant): string {
   const tierRoutes = tierRoutesText(variant.tierRoutes);
   if (tierRoutes !== tierRoutesText(experiments.tierRoutes)) {
     diffs.push(`tierRoutes ${tierRoutes || "settings"}`);
+  }
+  const budget = variant.maxCostUsd ?? 0;
+  if (budget !== (experiments.maxCostUsd ?? 0)) {
+    diffs.push(`maxCostUsd ${budget ? formatCost(budget) : "none"}`);
   }
   if (diffs.length === 0) return "default";
   return diffs.join(" · ");

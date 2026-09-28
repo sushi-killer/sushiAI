@@ -838,6 +838,7 @@ mod tests {
             decisions: vec!["Owner: use the primary button style".into()],
             attempts: vec![],
             cost_usd: 0.0,
+            budget_raises: 0,
             archived: false,
             planned_tier: None,
             tier_fallback: None,
@@ -894,8 +895,10 @@ mod tests {
             }),
             usage: None,
             cost_usd: None,
+            cost_estimated: false,
             review_cost_usd: None,
             advice: None,
+            advisor_cost_usd: None,
         });
         let mut second = task.attempts[0].clone();
         second.n = 2;
@@ -1051,8 +1054,10 @@ mod tests {
             failure: None,
             usage: None,
             cost_usd: None,
+            cost_estimated: false,
             review_cost_usd: None,
             advice: None,
+            advisor_cost_usd: None,
         });
         let brief = build_brief(&task, "", "");
         assert!(
@@ -1247,8 +1252,10 @@ mod tests {
             }),
             usage: None,
             cost_usd: None,
+            cost_estimated: false,
             review_cost_usd: None,
             advice: None,
+            advisor_cost_usd: None,
         });
         let brief = build_triage_brief(
             &task,

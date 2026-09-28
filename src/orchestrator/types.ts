@@ -56,7 +56,13 @@ export type Settings = {
    * report tokens but no cost. */
   prices: Record<
     string,
-    { input: number; cachedInput: number; output: number }
+    {
+      input: number;
+      cachedInput: number;
+      output: number;
+      /** Cache writes; absent = billed at the input price. */
+      cacheWrite?: number;
+    }
   >; /** Repository-specific path fragments for `orchd ab`'s work breakdown. */
   workBuckets?: { process: string[]; evidence: string[] };
 };
@@ -90,6 +96,10 @@ export type Variant = {
   plannerRoute?: string;
   /** Route ids the implement stage uses instead of `settings.tiers`. */
   tierRoutes?: Partial<Record<Tier, string>>;
+  /** Dollar budget: once the task has spent it, the task waits for the
+   * owner ("raise" adds it again, "stop") before its next run. Absent or
+   * 0 = none. */
+  maxCostUsd?: number;
 };
 
 export type FailureKind =
@@ -137,13 +147,19 @@ export type Attempt = {
   failure?: Failure;
   usage?: Usage;
   costUsd?: number;
+  /** `costUsd` was priced from the run's per-message token usage because it
+   * ended (stopped, stalled, daemon restart) before the CLI reported one. */
+  costEstimated?: boolean;
   /** Cost of the review run(s) that reviewed this implement attempt - kept
    * separate from `costUsd` because that field is what a later resume of
    * the same session subtracts, and a review's cost must never join it. */
   reviewCostUsd?: number;
   /** The advisor's diagnosis of this attempt's failure, shown to the next
-   * attempt. Its cost is in the task's `costUsd` only. */
+   * attempt. */
   advice?: string;
+  /** Cost of the advisor run about this attempt's failure (also in the
+   * task's `costUsd`); once set, the attempt is not advised again. */
+  advisorCostUsd?: number;
 };
 
 export type Task = {
@@ -189,6 +205,9 @@ export type Task = {
   decisions: string[];
   attempts: Attempt[];
   costUsd: number;
+  /** Times the owner raised the `variant.maxCostUsd` budget; the budget in
+   * force is that amount times `1 + budgetRaises`. */
+  budgetRaises?: number;
   /** Hides the task from the default task list without deleting it. */
   archived: boolean;
   createdAt: number;

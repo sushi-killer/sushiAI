@@ -35,7 +35,7 @@ flowchart TB
   subgraph orchd["orchd daemon - Rust, outlives the app"]
     direction LR
     proto["protocol.rs<br/>NDJSON socket + token"]
-    engine["engine.rs<br/>task loop, gates, routing"]
+    engine["engine/<br/>task loop, gates, routing"]
     chat["chat.rs<br/>orchestrator chat"]
     audit["audit.rs<br/>repo.audit, read-only"]
     harness["harness.rs<br/>claude -p / codex exec"]

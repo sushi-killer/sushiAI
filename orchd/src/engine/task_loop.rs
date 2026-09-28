@@ -457,6 +457,8 @@ pub(super) async fn run_task_loop(
             worktree: &worktree,
             model: route.model.as_deref(),
             effort: route.effort.as_deref(),
+            max_budget_usd: (task.variant().max_attempt_cost_usd > 0.0)
+                .then(|| task.variant().max_attempt_cost_usd),
             resume: resume_session.as_deref(),
             review: false,
             mcp_config: Some(&mcp_path),
@@ -578,7 +580,12 @@ pub(super) async fn run_task_loop(
             task.cost_usd += cost;
         }
 
-        if outcome.stalled {
+        if outcome.stalled || outcome.over_budget {
+            let kind = if outcome.over_budget {
+                FailureKind::Budget
+            } else {
+                FailureKind::Stall
+            };
             let detail = outcome.error.clone().unwrap_or_default();
             let (wt, base) = (worktree.clone(), base_sha.clone());
             task.attempts[idx].changed_files = tokio::task::spawn_blocking(move || {
@@ -591,7 +598,7 @@ pub(super) async fn run_task_loop(
                 &task_id,
                 &mut task,
                 idx,
-                FailureKind::Stall,
+                kind,
                 detail,
                 &mut attempt_budget,
                 &pending_answer,

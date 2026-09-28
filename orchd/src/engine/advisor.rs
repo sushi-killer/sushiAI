@@ -77,6 +77,7 @@ pub(super) async fn run_advisor_before_retry(
         worktree,
         model: advisor.model.as_deref(),
         effort: advisor.effort.as_deref(),
+        max_budget_usd: None,
         resume: None,
         review: true,
         mcp_config: Some(&mcp_path),

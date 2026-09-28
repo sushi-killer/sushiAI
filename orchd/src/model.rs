@@ -292,6 +292,11 @@ pub struct Variant {
     /// left out of the JSON so a budget-less variant serializes as before.
     #[serde(skip_serializing_if = "is_no_budget")]
     pub max_cost_usd: f64,
+    /// A dollar cap on one implement attempt: past it the run is stopped and
+    /// fails with kind `budget`. Checked while the run streams, unlike
+    /// `max_cost_usd`. 0 = none, left out of the JSON.
+    #[serde(skip_serializing_if = "is_no_budget")]
+    pub max_attempt_cost_usd: f64,
 }
 
 #[cfg(test)]
@@ -436,6 +441,9 @@ impl Variant {
         if !self.max_cost_usd.is_finite() || self.max_cost_usd < 0.0 {
             return Err("maxCostUsd must be a non-negative number".to_string());
         }
+        if !self.max_attempt_cost_usd.is_finite() || self.max_attempt_cost_usd < 0.0 {
+            return Err("maxAttemptCostUsd must be a non-negative number".to_string());
+        }
         let s = self.stall_timeout_secs;
         if s > MAX_STALL_TIMEOUT_SECS {
             return Err(format!(
@@ -447,7 +455,12 @@ impl Variant {
 
     /// Keys a serialized default `Variant` leaves out, but a partial
     /// override object may still name.
-    pub const OPTIONAL_KEYS: [&'static str; 3] = ["plannerRoute", "tierRoutes", "maxCostUsd"];
+    pub const OPTIONAL_KEYS: [&'static str; 4] = [
+        "plannerRoute",
+        "tierRoutes",
+        "maxCostUsd",
+        "maxAttemptCostUsd",
+    ];
 
     /// Every route override names a route in `routes`.
     pub fn check_routes(&self, routes: &[Route]) -> Result<(), String> {
@@ -644,6 +657,8 @@ pub enum FailureKind {
     Stall,
     /// The loop detector stopped the run (`variant.loop_detect`).
     Loop,
+    /// The attempt's estimated cost passed `variant.max_attempt_cost_usd`.
+    Budget,
     Verify,
     Review,
     Protected,
@@ -657,6 +672,7 @@ impl FailureKind {
             FailureKind::NoDeliverable => "no_deliverable",
             FailureKind::Stall => "stall",
             FailureKind::Loop => "loop",
+            FailureKind::Budget => "budget",
             FailureKind::Verify => "verify",
             FailureKind::Review => "review",
             FailureKind::Protected => "protected",

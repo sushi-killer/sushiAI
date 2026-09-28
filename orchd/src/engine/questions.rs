@@ -155,6 +155,7 @@ async fn run_triage(
         worktree,
         model: route.model.as_deref(),
         effort: route.effort.as_deref(),
+        max_budget_usd: None,
         resume: None,
         review: true,
         mcp_config: Some(&mcp_path),

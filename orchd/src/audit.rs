@@ -301,6 +301,7 @@ mod tests {
                 worktree: &repo,
                 model: Some("m"),
                 effort: Some("high"),
+                max_budget_usd: None,
                 resume: None,
                 review: true,
                 mcp_config: Some(&mcp),

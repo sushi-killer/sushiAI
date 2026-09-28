@@ -128,6 +128,18 @@ pub(super) async fn run_harness(
                             ));
                             break;
                         }
+                        if let Some(cap) = req.max_budget_usd {
+                            let spent = streamed_spend(app, req, &outcome);
+                            if outcome.over_budget || spent.is_some_and(|c| c > cap) {
+                                kill_group(pgid, &mut child).await;
+                                outcome.over_budget = true;
+                                outcome.error = Some(format!(
+                                    "The attempt spent about ${:.4}, past its ${cap} cap; the run was stopped.",
+                                    spent.unwrap_or(cap)
+                                ));
+                                break;
+                            }
+                        }
                         if track_attempt && !session_persisted {
                             if let Some(sid) = outcome.session_id.clone() {
                                 session_persisted = true;
@@ -185,4 +197,25 @@ pub(super) async fn run_harness(
         outcome.estimate_cost(&app.settings.read().unwrap().prices);
     }
     Ok(outcome)
+}
+
+/// What this run has cost so far, priced from its streamed message usage.
+/// The CLI's own `total_cost_usd` is not used: on a resumed session it also
+/// covers earlier attempts, which the cap must not count.
+fn streamed_spend(
+    app: &App,
+    req: &harness::RunRequest<'_>,
+    outcome: &harness::RunOutcome,
+) -> Option<f64> {
+    let settings = app.settings.read().unwrap();
+    match req.harness {
+        Harness::Claude => outcome.streamed_cost(&settings.prices),
+        Harness::Codex => req.model.and_then(|m| settings.prices.get(m)).map(|p| {
+            p.codex_cost(
+                outcome.usage_input,
+                outcome.usage_cached,
+                outcome.usage_output,
+            )
+        }),
+    }
 }

@@ -101,12 +101,16 @@ export type Variant = {
    * owner ("raise" adds it again, "stop") before its next run. Absent or
    * 0 = none. */
   maxCostUsd?: number;
+  /** Dollar cap on one implement attempt: past it the run is stopped and
+   * fails with kind "budget". Absent or 0 = none. */
+  maxAttemptCostUsd?: number;
 };
 
 export type FailureKind =
   | "no_deliverable"
   | "stall"
   | "loop"
+  | "budget"
   | "verify"
   | "review"
   | "protected"

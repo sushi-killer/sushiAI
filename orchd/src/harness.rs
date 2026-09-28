@@ -12,6 +12,9 @@ pub struct RunRequest<'a> {
     pub worktree: &'a Path,
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
+    /// Claude only: `--max-budget-usd`. Every harness: orchd itself stops the
+    /// run once its streamed usage, priced with `settings.prices`, exceeds it.
+    pub max_budget_usd: Option<f64>,
     /// Resume the given session id instead of starting fresh.
     pub resume: Option<&'a str>,
     /// Read-only review session instead of an implement session.
@@ -61,7 +64,7 @@ pub fn codex_mcp_flags(name: &str, server: &serde_json::Value) -> Vec<String> {
 /// project,local --disable-slash-commands --strict-mcp-config --mcp-config
 /// <mcp.json> --settings <settings.json> --permission-mode acceptEdits
 /// --disallowedTools <DELEGATION_TOOLS> --permission-prompts none [--model]
-/// [--effort] [--resume <id>]`; review swaps `--permission-mode acceptEdits`
+/// [--effort] [--max-budget-usd] [--resume <id>]`; review swaps `--permission-mode acceptEdits`
 /// (and the delegation-tools trim, which review never gets) for
 /// `--tools Read,Grep,Glob --permission-mode plan`.
 pub fn claude_argv(req: &RunRequest) -> Vec<String> {
@@ -109,6 +112,10 @@ pub fn claude_argv(req: &RunRequest) -> Vec<String> {
     if let Some(effort) = req.effort {
         argv.push("--effort".to_string());
         argv.push(effort.to_string());
+    }
+    if let Some(cap) = req.max_budget_usd {
+        argv.push("--max-budget-usd".to_string());
+        argv.push(cap.to_string());
     }
     if !req.review {
         if let Some(session) = req.resume {
@@ -363,6 +370,9 @@ pub struct RunOutcome {
     pub stalled: bool,
     /// The loop detector killed the run; the failure detail.
     pub looped: Option<String>,
+    /// The run's estimated cost passed `RunRequest::max_budget_usd` and it
+    /// was stopped (or the CLI reported `error_max_budget_usd`).
+    pub over_budget: bool,
     /// Claude only: input + cache creation + cache read tokens of the first
     /// `assistant` event, i.e. the whole prompt the first turn was sent,
     /// whether or not an earlier run left it in the prompt cache.
@@ -392,25 +402,32 @@ impl RunOutcome {
         if self.cost_usd.is_some() {
             return;
         }
+        if let Some(cost) = self.streamed_cost(prices) {
+            self.cost_usd = Some(cost);
+            self.cost_estimated = true;
+            let sum = |f: fn(&MessageUsage) -> u64| self.messages.values().map(f).sum::<u64>();
+            self.usage_input = sum(|m| m.input);
+            self.usage_cached = sum(|m| m.cache_read);
+            self.usage_output = sum(|m| m.output);
+        }
+    }
+
+    /// The streamed messages priced so far; `None` when none has a price.
+    pub fn streamed_cost(&self, prices: &BTreeMap<String, Price>) -> Option<f64> {
         let priced: Vec<(&MessageUsage, Price)> = self
             .messages
             .values()
             .filter_map(|m| price_for(prices, &m.model).map(|p| (m, p)))
             .collect();
         if priced.is_empty() {
-            return;
+            return None;
         }
-        self.cost_usd = Some(
+        Some(
             priced
                 .iter()
                 .map(|(m, p)| p.claude_cost(m.input, m.cache_write, m.cache_read, m.output))
                 .sum(),
-        );
-        self.cost_estimated = true;
-        let sum = |f: fn(&MessageUsage) -> u64| self.messages.values().map(f).sum::<u64>();
-        self.usage_input = sum(|m| m.input);
-        self.usage_cached = sum(|m| m.cache_read);
-        self.usage_output = sum(|m| m.output);
+        )
     }
 }
 
@@ -467,6 +484,9 @@ fn feed_claude_line(v: &serde_json::Value, outcome: &mut RunOutcome) -> Option<S
                 .get("result")
                 .and_then(|x| x.as_str())
                 .map(|s| s.to_string());
+            if v.get("subtype").and_then(|x| x.as_str()) == Some("error_max_budget_usd") {
+                outcome.over_budget = true;
+            }
             if v.get("is_error").and_then(|x| x.as_bool()) == Some(true) {
                 outcome.error = outcome
                     .final_text
@@ -630,6 +650,7 @@ mod tests {
             worktree,
             model: None,
             effort: None,
+            max_budget_usd: None,
             resume: None,
             review: false,
             mcp_config: None,
@@ -656,6 +677,36 @@ mod tests {
         let resumed = codex_argv(&req);
         assert!(resumed.contains(&command));
         assert_eq!(resumed.last().unwrap(), "-");
+    }
+
+    #[test]
+    fn effort_and_the_attempt_cap_reach_every_argv_shape_or_none() {
+        let wt = PathBuf::from("/repo-task");
+        for harness in [Harness::Claude, Harness::Codex] {
+            for (review, resume) in [(false, None), (true, None), (false, Some("sess"))] {
+                let mut req = base_req(harness, &wt);
+                req.review = review;
+                req.resume = resume;
+                let none = build_argv(&req);
+                assert!(!none.iter().any(|a| a.contains("effort")), "{none:?}");
+                assert!(!none.contains(&"--max-budget-usd".to_string()));
+                req.effort = Some("medium");
+                req.max_budget_usd = Some(1.5);
+                let argv = build_argv(&req);
+                match harness {
+                    Harness::Claude => {
+                        let i = argv.iter().position(|a| a == "--effort").unwrap();
+                        assert_eq!(argv[i + 1], "medium");
+                        let i = argv.iter().position(|a| a == "--max-budget-usd").unwrap();
+                        assert_eq!(argv[i + 1], "1.5");
+                    }
+                    Harness::Codex => {
+                        assert!(argv.contains(&"model_reasoning_effort=\"medium\"".to_string()));
+                        assert!(!argv.contains(&"--max-budget-usd".to_string()));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -562,3 +562,48 @@ fn review_cost_lands_on_the_attempt_s_review_cost_usd_and_the_task_total() {
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
 }
+
+#[test]
+fn an_attempt_streaming_past_its_cap_is_stopped_as_budget_and_retried() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let marker = scripts_dir.path().join("first-run");
+    // The first run streams a message worth $0.20 (10k Opus output tokens)
+    // and hangs with no `result`; only the cap can end it. The retry passes.
+    let line = r#"{"type":"assistant","message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":10000}},"parent_tool_use_id":null,"session_id":"sess-fake"}"#;
+    let body = format!(
+        "#!/bin/sh\ncat > /dev/null\nif [ ! -f {m} ]; then touch {m}\necho '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}}'\necho '{line}'\nsleep 30; fi\necho pass > PASS.txt\necho changed > CHANGED_MARKER.txt\necho '{{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}},\"result\":\"done\"}}'\n",
+        m = marker.display()
+    );
+    let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", &body);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Attempt cap",
+            "goal": "Make a trivial change",
+            "criteria": [],
+            "verify": ["test -f PASS.txt"],
+            "variant": {"maxAttemptCostUsd": 0.05},
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+
+    let settled = poll_until(&daemon, &task_id, Duration::from_secs(20), |s| {
+        s == "done" || s == "failed" || s == "stopped" || s == "waiting"
+    });
+    assert_eq!(settled["status"], "done", "task JSON: {settled}");
+    let attempts = settled["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2, "{settled}");
+    assert_eq!(attempts[0]["failure"]["kind"], "budget", "{settled}");
+    assert_eq!(attempts[0]["costEstimated"], true, "{settled}");
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}

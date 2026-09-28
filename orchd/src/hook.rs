@@ -445,7 +445,9 @@ pub fn rtk_rewrite_output(
     if touches_denied_bash_command(original_command) || touches_denied_bash_command(rewritten) {
         return None;
     }
-    if original_command.contains('>') || !only_condensing_rtk(rewritten) {
+    // `2>&1` only merges streams; any other `>` writes rtk's text to a file.
+    let without_merges = original_command.replace("2>&1", "").replace(">&2", "");
+    if without_merges.contains('>') || !only_condensing_rtk(rewritten) {
         return None;
     }
     let mut updated_input = tool_input.clone();
@@ -963,6 +965,10 @@ mod tests {
                 "rtk cargo build && git status | head -5",
             ),
             ("tsc --noEmit", "rtk tsc --noEmit"),
+            (
+                "cargo test --manifest-path orchd/Cargo.toml 2>&1 | tail -40",
+                "rtk cargo test --manifest-path orchd/Cargo.toml 2>&1 | tail -40",
+            ),
         ] {
             let input = serde_json::json!({ "command": orig });
             assert!(

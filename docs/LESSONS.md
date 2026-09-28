@@ -26,23 +26,15 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 
 ## Open
 
-## 2026-09-24 — orchd task.create failed on an existing branch name
-
-Root cause: `create_worktree` (`orchd/src/git.rs`) always runs `worktree add -b`.
-Rule: give each task a new branch, or omit `branch`.
-
-## 2026-09-28 — A/B cause guessed from averages
-
-Root cause: blamed injected skills; transcripts showed ~20% of every arm's calls spent on LESSONS.md.
-Rule: read the run's `events.jsonl` before explaining an A/B result.
-
 ## 2026-09-29 — Three attempts lost to a self-contradicting brief
 
-Root cause: the refactor brief asked for an identical test-name set and for unit tests moved beside their code; each attempt satisfied one, and the reviewer failed it on the other (last time on a P2).
-Rule: before launching, check criteria against each other; orchd needs an "impossible" declaration and a way to amend criteria mid-task (stage 3).
+Root cause: criteria demanded identical test names and tests moved beside their code; review failed each attempt on the other.
+Rule: check criteria against each other before launch.
 
 ## Promoted
 
+- 2026-09-28 A/B cause guessed from averages → read `events.jsonl` before explaining a result.
+- 2026-09-24 `task.create` failed on an existing branch (`worktree add -b`) → new branch per task or omit `branch`.
 - 2026-09-28 Trusted `rtk rewrite` (`rtk read` drops code) → allowlist. `rtk_rewrite_output_*`.
 - 2026-09-25 A changed orchd default never reached earlier-saved settings (`settings.set` stores the whole struct) → mark settings differing from `settings.defaults`. `settings_defaults_reports_the_built_in_defaults_not_the_saved_settings`.
 - 2026-09-25 Disabled `select!` branch still built `Instant + Duration::MAX`, panicking the loop → bounded deadline. `run_harness`.

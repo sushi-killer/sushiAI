@@ -82,6 +82,7 @@ export type Variant = {
   reviewOtherFamily: boolean;
   reviewEvidence: boolean;
   deferHeavyChecks: boolean;
+  leanContext: boolean;
 };
 
 export type FailureKind =
@@ -123,6 +124,10 @@ export type Attempt = {
   changedFiles: string[];
   verify: VerifyResult[];
   gateBlocks: number;
+  /** leanContext: the skills Jev picked for this attempt. */
+  skills?: string[];
+  /** First-turn prompt tokens of a fresh Claude implement attempt. */
+  prefixTokens?: number;
   review?: ReviewResult;
   failure?: Failure;
   usage?: Usage;

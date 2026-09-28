@@ -44,3 +44,16 @@
   hook run only the fast `verify`; orchd runs `finalVerify` once, after
   review passes and before the commit, and a failure there is a normal
   retry. `task.create` also takes `finalVerify` directly.
+- `leanContext: true` gives implement agents the skills and MCP servers Jev
+  picks for the task instead of a fixed set. A Claude agent gets a skill's
+  `SKILL.md` body through a hook when its prompt or a tool's output calls
+  for it: at most 3 per call, each once per session, and never a skill
+  marked `disable-model-invocation`. A fresh Codex attempt gets the picked
+  skills in its brief. A Claude run's MCP servers are cut to the ones Jev
+  picks (orchd's messaging server always stays; if Jev can't be reached,
+  every server stays), and its prompt drops the subagent and other
+  delegation tools, which took the fixed prompt prefix from about 29.9k to
+  19.6k tokens in one measurement.
+- `orchd ab` has two more columns: the median first-turn prompt tokens of
+  fresh Claude implement attempts, and mean cache-read tokens per implement
+  attempt.

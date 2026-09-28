@@ -1,5 +1,5 @@
 //! `orchd serve --data <dir> [--socket <path>]` (also the default with no
-//! subcommand), `orchd hook stop --socket <path> --token <t>`, and `orchd
+//! subcommand), `orchd hook stop|skills --socket <path> --token <t>`, `orchd
 //! mcp --data <dir> [--socket <path>]`, and `orchd ab --data <dir>`.
 
 mod ab;
@@ -42,7 +42,8 @@ async fn run(args: Vec<String>) -> i32 {
 }
 
 async fn run_hook(args: &[String]) -> i32 {
-    if args.is_empty() || args[0] != "stop" {
+    let kind = args.first().map(String::as_str);
+    if !matches!(kind, Some("stop" | "skills")) {
         println!("{{}}");
         return 0;
     }
@@ -62,7 +63,12 @@ async fn run_hook(args: &[String]) -> i32 {
             _ => i += 1,
         }
     }
-    match run_hook_inner(socket, token).await {
+    let result = if kind == Some("skills") {
+        run_skills_hook(socket, token).await
+    } else {
+        run_hook_inner(socket, token).await
+    };
+    match result {
         Some(v) => println!("{v}"),
         None => println!("{{}}"),
     }
@@ -87,6 +93,27 @@ async fn run_hook_inner(socket: Option<String>, token: Option<String>) -> Option
     .await
     .ok()?;
     Some(result.to_string())
+}
+
+/// `orchd hook skills`: the UserPromptSubmit/PostToolUse payload on stdin
+/// becomes a `hook.skills` call with the agent's recent text. Fails open
+/// the same way as `hook.stop`, and a payload with nothing to ask about
+/// (a short tool output) never reaches the daemon.
+async fn run_skills_hook(socket: Option<String>, token: Option<String>) -> Option<String> {
+    let socket = socket?;
+    let token = token?;
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).ok()?;
+    let payload: serde_json::Value = serde_json::from_str(&input).ok()?;
+    let query = hook::skills_query(&payload)?;
+    let result = crate::protocol::client_request(
+        Path::new(&socket),
+        "hook.skills",
+        serde_json::json!({"token": token, "event": query.event, "text": query.text}),
+    )
+    .await
+    .ok()?;
+    result.is_object().then(|| result.to_string())
 }
 
 async fn run_serve(args: &[String]) -> i32 {

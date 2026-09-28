@@ -27,7 +27,15 @@ pub struct RunRequest<'a> {
     /// Codex only: images attached to the prompt (`--image`); Claude opens
     /// image files itself with its Read tool.
     pub images: &'a [std::path::PathBuf],
+    /// Claude implement only (`variant.lean_context`): disallow the
+    /// delegation tools, whose descriptions (the subagent list above all)
+    /// make up much of the fixed prompt prefix.
+    pub lean_context: bool,
 }
+
+/// The tools an orchd agent never needs: it implements one bounded task and
+/// does not delegate. `Task` and `Agent` are the subagent tool's two names.
+pub const DELEGATION_TOOLS: &str = "Task,Agent,Workflow,SendMessage,ListAgents";
 
 /// `-c mcp_servers.<name>.{command,args,env.*}` for one MCP server. JSON
 /// strings and string arrays are valid TOML values as they are.
@@ -52,7 +60,8 @@ pub fn codex_mcp_flags(name: &str, server: &serde_json::Value) -> Vec<String> {
 /// <mcp.json> --settings <settings.json> --permission-mode acceptEdits
 /// --permission-prompts none [--model] [--effort] [--resume <id>]`; review
 /// swaps `--permission-mode acceptEdits` for
-/// `--tools Read,Grep,Glob --permission-mode plan`.
+/// `--tools Read,Grep,Glob --permission-mode plan`. `lean_context` adds
+/// `--disallowedTools <DELEGATION_TOOLS>` to an implement run.
 pub fn claude_argv(req: &RunRequest) -> Vec<String> {
     let mut argv = vec![
         "-p".to_string(),
@@ -80,6 +89,11 @@ pub fn claude_argv(req: &RunRequest) -> Vec<String> {
     } else {
         argv.push("--permission-mode".to_string());
         argv.push("acceptEdits".to_string());
+        if req.lean_context {
+            // One comma-joined value: the flag is variadic.
+            argv.push("--disallowedTools".to_string());
+            argv.push(DELEGATION_TOOLS.to_string());
+        }
     }
     argv.push("--permission-prompts".to_string());
     argv.push("none".to_string());
@@ -190,12 +204,19 @@ pub fn build_argv(req: &RunRequest) -> Vec<String> {
 
 /// The Stop hook wiring for a Claude run: `orchd`'s own path, the daemon's
 /// socket, and the token that maps this run's `hook.stop` calls back to its
-/// task/attempt.
+/// task/attempt. `skills` also wires `orchd hook skills` (same socket and
+/// token) to UserPromptSubmit and PostToolUse.
 pub struct StopHook<'a> {
     pub orchd_path: &'a str,
     pub socket_path: &'a str,
     pub token: &'a str,
+    pub skills: bool,
 }
+
+/// The tools whose output can tell which skill the agent needs next.
+pub const SKILLS_HOOK_MATCHER: &str = "Read|Bash|Grep|Glob";
+/// One classifier call (5s) plus reading the skill catalog.
+const SKILLS_HOOK_TIMEOUT_SECS: u64 = 30;
 
 /// The `settings.json` written alongside a Claude run: profile
 /// env/apiKeyHelper (opaque, passed through) + sandbox block (omitted for
@@ -256,24 +277,32 @@ pub fn build_claude_settings(
     );
 
     if let Some(hook) = stop_hook {
-        let hook_command = format!(
-            "{} hook stop --socket {} --token {}",
-            shell_quote(hook.orchd_path),
-            shell_quote(hook.socket_path),
-            shell_quote(hook.token)
-        );
-        obj.insert(
-            "hooks".to_string(),
-            serde_json::json!({
-                "Stop": [
-                    {
-                        "hooks": [
-                            {"type": "command", "command": hook_command, "timeout": 600}
-                        ]
-                    }
-                ]
-            }),
-        );
+        let command = |kind: &str| {
+            format!(
+                "{} hook {kind} --socket {} --token {}",
+                shell_quote(hook.orchd_path),
+                shell_quote(hook.socket_path),
+                shell_quote(hook.token)
+            )
+        };
+        let mut hooks = serde_json::json!({
+            "Stop": [
+                {
+                    "hooks": [
+                        {"type": "command", "command": command("stop"), "timeout": 600}
+                    ]
+                }
+            ]
+        });
+        if hook.skills {
+            let skills = serde_json::json!(
+                {"type": "command", "command": command("skills"), "timeout": SKILLS_HOOK_TIMEOUT_SECS}
+            );
+            hooks["UserPromptSubmit"] = serde_json::json!([{"hooks": [skills.clone()]}]);
+            hooks["PostToolUse"] =
+                serde_json::json!([{"matcher": SKILLS_HOOK_MATCHER, "hooks": [skills]}]);
+        }
+        obj.insert("hooks".to_string(), hooks);
     }
 
     serde_json::Value::Object(obj)
@@ -302,6 +331,10 @@ pub struct RunOutcome {
     pub error: Option<String>,
     /// The run printed nothing for its stall timeout and was killed.
     pub stalled: bool,
+    /// Claude only: input + cache creation + cache read tokens of the first
+    /// `assistant` event, i.e. the whole prompt the first turn was sent,
+    /// whether or not an earlier run left it in the prompt cache.
+    pub first_turn_tokens: Option<u64>,
 }
 
 /// Folds one line of a harness's streamed JSON output into `outcome`,
@@ -355,9 +388,20 @@ fn feed_claude_line(v: &serde_json::Value, outcome: &mut RunOutcome) -> Option<S
             }
             Some("session finished".to_string())
         }
-        "assistant" => claude_tool_note(v),
+        "assistant" => {
+            if outcome.first_turn_tokens.is_none() {
+                outcome.first_turn_tokens = first_turn_tokens(v);
+            }
+            claude_tool_note(v)
+        }
         _ => None,
     }
+}
+
+fn first_turn_tokens(v: &serde_json::Value) -> Option<u64> {
+    let usage = v.get("message")?.get("usage")?;
+    let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    Some(n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens"))
 }
 
 fn claude_tool_note(v: &serde_json::Value) -> Option<String> {
@@ -469,6 +513,7 @@ mod tests {
             network_allowed: true,
             codex_mcp: None,
             images: &[],
+            lean_context: false,
         }
     }
 
@@ -506,6 +551,67 @@ mod tests {
         assert!(argv.contains(&"--mcp-config".to_string()));
         assert!(argv.contains(&"--model".to_string()));
         assert!(!argv.contains(&"--resume".to_string()));
+    }
+
+    /// Pins today's argv: with `lean_context` off nothing may change.
+    #[test]
+    fn claude_implement_argv_without_lean_context_is_unchanged() {
+        let wt = PathBuf::from("/w");
+        let mcp = PathBuf::from("/r/mcp.json");
+        let settings = PathBuf::from("/r/settings.json");
+        let mut req = base_req(Harness::Claude, &wt);
+        req.mcp_config = Some(&mcp);
+        req.settings_path = Some(&settings);
+        req.model = Some("opus");
+        req.effort = Some("high");
+        req.resume = Some("sess-1");
+        let expected: Vec<String> = [
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--setting-sources",
+            "project,local",
+            "--disable-slash-commands",
+            "--strict-mcp-config",
+            "--mcp-config",
+            "/r/mcp.json",
+            "--settings",
+            "/r/settings.json",
+            "--permission-mode",
+            "acceptEdits",
+            "--permission-prompts",
+            "none",
+            "--model",
+            "opus",
+            "--effort",
+            "high",
+            "--resume",
+            "sess-1",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(claude_argv(&req), expected);
+
+        req.lean_context = true;
+        let lean = claude_argv(&req);
+        let at = lean.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert_eq!(lean[at + 1], DELEGATION_TOOLS);
+        assert!(lean[at + 1].split(',').any(|t| t == "Task"));
+        // Only that one flag pair is added; skills stay off.
+        let mut without = lean.clone();
+        without.drain(at..at + 2);
+        assert_eq!(without, expected);
+        assert!(lean.contains(&"--disable-slash-commands".to_string()));
+    }
+
+    #[test]
+    fn claude_review_never_gets_the_lean_context_trim() {
+        let wt = PathBuf::from("/w");
+        let mut req = base_req(Harness::Claude, &wt);
+        req.review = true;
+        req.lean_context = true;
+        assert!(!claude_argv(&req).contains(&"--disallowedTools".to_string()));
     }
 
     #[test]
@@ -598,6 +704,7 @@ mod tests {
             orchd_path: "/usr/local/bin/orchd",
             socket_path: "/tmp/orchd.sock",
             token: "tok-1",
+            skills: false,
         };
         let deny_read = vec!["/data".to_string()];
         let native = build_claude_settings(
@@ -627,11 +734,37 @@ mod tests {
             orchd_path: "/usr/local/bin/orchd",
             socket_path: "/tmp/orchd.sock",
             token: "tok-1",
+            skills: false,
         };
         let host =
             build_claude_settings(None, SandboxMode::Host, &domains, &deny_read, Some(hook2));
         assert!(host.get("sandbox").is_none());
         assert!(host.get("hooks").is_some());
+    }
+
+    #[test]
+    fn claude_settings_wire_the_skills_hook_only_when_asked() {
+        let hook = |skills| StopHook {
+            orchd_path: "/bin/orchd",
+            socket_path: "/tmp/o.sock",
+            token: "tok",
+            skills,
+        };
+        let off = build_claude_settings(None, SandboxMode::Host, &[], &[], Some(hook(false)));
+        let keys: Vec<&String> = off["hooks"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["Stop"], "the Stop hook only: {off}");
+
+        let on = build_claude_settings(None, SandboxMode::Host, &[], &[], Some(hook(true)));
+        assert_eq!(on["hooks"]["Stop"], off["hooks"]["Stop"]);
+        let prompt = &on["hooks"]["UserPromptSubmit"][0]["hooks"][0];
+        assert_eq!(
+            prompt["command"],
+            "'/bin/orchd' hook skills --socket '/tmp/o.sock' --token 'tok'"
+        );
+        assert!(prompt["timeout"].as_u64().unwrap() > 0);
+        let tool = &on["hooks"]["PostToolUse"][0];
+        assert_eq!(tool["matcher"], "Read|Bash|Grep|Glob");
+        assert_eq!(tool["hooks"][0], *prompt);
     }
 
     #[test]
@@ -693,6 +826,30 @@ mod tests {
         );
         assert_eq!(outcome.error.as_deref(), Some("model not supported"));
         assert_eq!(outcome.final_text.as_deref(), Some("all set"));
+    }
+
+    /// Shape captured from `claude -p --output-format stream-json --verbose`
+    /// (2.1.283): the first turn read most of its prompt from the cache.
+    #[test]
+    fn first_turn_tokens_count_cached_prompt_tokens_from_the_first_assistant_event() {
+        let mut outcome = RunOutcome::default();
+        for line in [
+            r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":9,"cache_creation_input_tokens":11644,"cache_read_input_tokens":18198,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":11644},"output_tokens":4,"service_tier":"standard"}},"session_id":"s"}"#,
+            r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":5,"cache_read_input_tokens":40000}},"session_id":"s"}"#,
+            r#"{"type":"result","usage":{"input_tokens":14,"cache_read_input_tokens":58198,"output_tokens":9},"result":"ok"}"#,
+        ] {
+            feed_stream_line(Harness::Claude, line, &mut outcome);
+        }
+        assert_eq!(outcome.first_turn_tokens, Some(9 + 11644 + 18198));
+
+        let mut none = RunOutcome::default();
+        feed_stream_line(
+            Harness::Claude,
+            r#"{"type":"result","usage":{"input_tokens":1},"result":"ok"}"#,
+            &mut none,
+        );
+        assert_eq!(none.first_turn_tokens, None);
     }
 
     #[test]

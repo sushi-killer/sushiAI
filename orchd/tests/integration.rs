@@ -2619,3 +2619,464 @@ fn final_checks_run_once_after_review_passes_and_gate_the_commit() {
         let _ = std::fs::remove_dir_all(&worktree);
     }
 }
+
+// -- variant.leanContext ------------------------------------------------------
+
+/// Commits `files` (path relative to the repo, contents) on top of the repo's
+/// history, so a task's worktree starts with them.
+fn commit_files(repo: &Path, files: &[(&str, &str)]) {
+    for (path, text) in files {
+        let path = repo.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    for args in [&["add", "."][..], &["commit", "-q", "-m", "files"][..]] {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+}
+
+/// A relevant skill, an irrelevant one, and one only the owner may start
+/// (Jev rates it highest, so only the catalog can keep it out).
+const LEAN_SKILLS: &[(&str, &str)] = &[
+    (
+        ".agents/skills/relevant/SKILL.md",
+        "---\nname: relevant\ndescription: \"Helps with widgets.\"\n---\nRELEVANT_BODY\n",
+    ),
+    (
+        ".agents/skills/irrelevant/SKILL.md",
+        "---\nname: irrelevant\ndescription: Unrelated.\n---\nIRRELEVANT_BODY\n",
+    ),
+    (
+        ".agents/skills/pusher/SKILL.md",
+        "---\nname: pusher\ndescription: Opens PRs.\ndisable-model-invocation: true\n---\nPUSHER_BODY\n",
+    ),
+];
+
+/// Every question Jev is asked in these tests, answered: no `tier`, so a
+/// task stays on the standard (Claude) route unless `tier` is added.
+const LEAN_ANSWERS: &str =
+    r#"{"answers":{"relevant":{"noul":0.9},"irrelevant":{"noul":0.1},"pusher":{"noul":0.99}}}"#;
+
+fn set_classifier(
+    daemon: &Daemon,
+    base_url: Option<&str>,
+    tweak: impl FnOnce(&mut serde_json::Value),
+) {
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    if base_url.is_some() {
+        settings["classifier"] =
+            serde_json::json!({"backend": "openai", "model": "fake", "providerId": "fake"});
+    }
+    tweak(&mut settings);
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    if let Some(base_url) = base_url {
+        daemon.request(
+            "secrets.set",
+            serde_json::json!({"classifier": {"key": "test-key", "baseUrl": base_url}}),
+        );
+    }
+}
+
+fn journal_points(daemon: &Daemon) -> Vec<String> {
+    std::fs::read_to_string(daemon.data_dir().join("decisions.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v["point"].as_str().map(str::to_string))
+        .collect()
+}
+
+fn run_file(daemon: &Daemon, task_id: &str, name: &str) -> String {
+    std::fs::read_to_string(
+        daemon
+            .data_dir()
+            .join("tasks")
+            .join(task_id)
+            .join("runs/1")
+            .join(name),
+    )
+    .unwrap()
+}
+
+/// Runs the skills hooks orchd wired into `--settings` the way Claude would:
+/// two prompts, a long tool output and a short one. Records its argv and
+/// every hook's stdout, then reports a first turn and a finished task.
+const FAKE_CLAUDE_SKILLS_SCRIPT: &str = r#"#!/usr/bin/env node
+const fs = require('fs');
+const { execSync } = require('child_process');
+const args = process.argv.slice(2);
+const settings = JSON.parse(fs.readFileSync(args[args.indexOf('--settings') + 1], 'utf8'));
+try { fs.readFileSync(0); } catch (e) {}
+const prompt = settings.hooks.UserPromptSubmit[0].hooks[0].command;
+const tool = settings.hooks.PostToolUse[0];
+const run = (cmd, payload) => {
+  try { return execSync(cmd, { input: JSON.stringify(payload) }).toString(); }
+  catch (e) { return 'FAILED ' + (e.stdout || '').toString(); }
+};
+const outputs = [
+  run(prompt, { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'Change the widget' }),
+  run(tool.hooks[0].command, { hook_event_name: 'PostToolUse', tool_name: 'Bash',
+    tool_input: { command: 'cat src/widget.ts' }, tool_response: { stdout: 'w'.repeat(300), stderr: '' } }),
+  run(tool.hooks[0].command, { hook_event_name: 'PostToolUse', tool_name: 'Bash',
+    tool_input: { command: 'ls' }, tool_response: { stdout: 'a b', stderr: '' } }),
+  run(prompt, { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'Keep going with the widget' }),
+];
+fs.writeFileSync(process.env.LEAN_LOG, JSON.stringify({ args, matcher: tool.matcher, outputs }));
+fs.writeFileSync('CHANGED_MARKER.txt', 'changed\n');
+console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-lean' }));
+console.log(JSON.stringify({ type: 'assistant', session_id: 'sess-lean', message: { content: [{ type: 'text', text: 'ok' }],
+  usage: { input_tokens: 9, cache_creation_input_tokens: 100, cache_read_input_tokens: 1000, output_tokens: 1 } } }));
+console.log(JSON.stringify({ type: 'result', total_cost_usd: 0.01, usage: { input_tokens: 1, output_tokens: 1 },
+  result: '```sushi-report\n{"outcome":"complete","summary":"done","decisions":[],"question":""}\n```' }));
+"#;
+
+#[test]
+fn lean_context_injects_each_relevant_skill_once_through_the_claude_hook() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude-skills.js",
+        FAKE_CLAUDE_SKILLS_SCRIPT,
+    );
+    let log = scripts_dir.path().join("lean.json");
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("LEAN_LOG", log.to_str().unwrap()),
+    ]);
+    let base_url = spawn_fake_openai_classifier(LEAN_ANSWERS);
+    set_classifier(&daemon, Some(&base_url), |_| {});
+
+    let repo = init_git_repo();
+    commit_files(repo.path(), LEAN_SKILLS);
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Lean skills",
+            "goal": "Change the widget",
+            "verify": ["true"],
+            "variant": {"leanContext": true},
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    assert_eq!(settled["status"], "done", "{settled}");
+
+    let log: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
+    assert_eq!(log["matcher"], "Read|Bash|Grep|Glob");
+    let outputs: Vec<&str> = log["outputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o.as_str().unwrap())
+        .collect();
+    let all = outputs.join("\n");
+    assert_eq!(all.matches("RELEVANT_BODY").count(), 1, "{outputs:?}");
+    assert!(
+        !all.contains("IRRELEVANT_BODY") && !all.contains("PUSHER_BODY"),
+        "{outputs:?}"
+    );
+    let first: serde_json::Value = serde_json::from_str(outputs[0].trim()).unwrap();
+    assert_eq!(
+        first["hookSpecificOutput"]["hookEventName"],
+        "UserPromptSubmit"
+    );
+    for later in &outputs[1..] {
+        assert_eq!(later.trim(), "{}", "{outputs:?}");
+    }
+    let args: Vec<&str> = log["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    let at = args.iter().position(|a| *a == "--disallowedTools").unwrap();
+    assert!(args[at + 1].split(',').any(|t| t == "Task"), "{args:?}");
+
+    let attempt = &settled["attempts"][0];
+    assert_eq!(
+        attempt["skills"],
+        serde_json::json!(["relevant"]),
+        "{settled}"
+    );
+    assert_eq!(attempt["prefixTokens"], 9 + 100 + 1000, "{settled}");
+    let points = journal_points(&daemon);
+    // The short tool output never reached the daemon; the last prompt had
+    // only the irrelevant skill left to ask about.
+    assert_eq!(
+        points.iter().filter(|p| *p == "skills").count(),
+        3,
+        "{points:?}"
+    );
+    assert!(
+        !points.iter().any(|p| p == "mcp"),
+        "no MCP candidates, no MCP call: {points:?}"
+    );
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+const FAKE_CLAUDE_PASS: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CLAUDE_ARGS\"\ncat > /dev/null\necho changed > CHANGED_MARKER.txt\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n";
+
+#[test]
+fn lean_context_gives_a_claude_run_only_the_mcp_servers_jev_picks() {
+    // With Jev, and with no classifier key (the default settings).
+    for classified in [true, false] {
+        let scripts_dir = tempfile::tempdir().unwrap();
+        let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", FAKE_CLAUDE_PASS);
+        let args = scripts_dir.path().join("args");
+        let daemon = Daemon::spawn(&[
+            ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+            ("CLAUDE_ARGS", args.to_str().unwrap()),
+        ]);
+        let base_url = spawn_fake_openai_classifier(LEAN_ANSWERS);
+        set_classifier(&daemon, classified.then_some(base_url.as_str()), |_| {});
+        let repo = init_git_repo();
+        let task = daemon.request(
+            "task.create",
+            serde_json::json!({
+                "repo": repo.path().to_str().unwrap(),
+                "title": "Lean MCP",
+                "goal": "Change the widget",
+                "verify": ["true"],
+                "mcp": {"mcpServers": {
+                    "relevant": {"command": "relevant-server"},
+                    "irrelevant": {"command": "irrelevant-server", "env": {"TOKEN": "t"}},
+                }},
+                "variant": {"leanContext": true},
+                "start": true,
+            }),
+        );
+        let task_id = task["id"].as_str().unwrap().to_string();
+        let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+        assert_eq!(settled["status"], "done", "{settled}");
+
+        let mcp: serde_json::Value =
+            serde_json::from_str(&run_file(&daemon, &task_id, "mcp.json")).unwrap();
+        let mut servers: Vec<&String> = mcp["mcpServers"].as_object().unwrap().keys().collect();
+        servers.sort();
+        let decisions = settled["decisions"].to_string();
+        if classified {
+            assert_eq!(servers, ["relevant", "sushiai-messages"], "{mcp}");
+            assert!(
+                decisions.contains("Jev: MCP servers picked relevant; dropped irrelevant"),
+                "{decisions}"
+            );
+        } else {
+            assert_eq!(
+                servers,
+                ["irrelevant", "relevant", "sushiai-messages"],
+                "{mcp}"
+            );
+            assert!(
+                decisions.contains(
+                    "Jev: MCP pick unavailable -> kept every server (irrelevant, relevant)"
+                ),
+                "{decisions}"
+            );
+        }
+        let points = journal_points(&daemon);
+        assert_eq!(
+            points.iter().filter(|p| *p == "mcp").count(),
+            1,
+            "{points:?}"
+        );
+
+        let worktree = task["worktree"].as_str().unwrap().to_string();
+        daemon.shutdown_and_wait();
+        let _ = std::fs::remove_dir_all(worktree);
+    }
+}
+
+#[test]
+fn without_lean_context_a_run_s_argv_settings_mcp_and_brief_stay_as_they_were() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", FAKE_CLAUDE_PASS);
+    let args = scripts_dir.path().join("args");
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("CLAUDE_ARGS", args.to_str().unwrap()),
+    ]);
+    let base_url = spawn_fake_openai_classifier(LEAN_ANSWERS);
+    set_classifier(&daemon, Some(&base_url), |_| {});
+    let repo = init_git_repo();
+    commit_files(repo.path(), LEAN_SKILLS);
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Not lean",
+            "goal": "Change the widget",
+            "verify": ["true"],
+            "mcp": {"mcpServers": {"relevant": {"command": "r"}, "irrelevant": {"command": "i"}}},
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    assert_eq!(settled["status"], "done", "{settled}");
+    assert_eq!(settled["variant"]["leanContext"], false);
+
+    let argv = std::fs::read_to_string(&args).unwrap();
+    assert!(!argv.contains("--disallowedTools"), "{argv}");
+    let settings: serde_json::Value =
+        serde_json::from_str(&run_file(&daemon, &task_id, "settings.json")).unwrap();
+    let hooks: Vec<&String> = settings["hooks"].as_object().unwrap().keys().collect();
+    assert_eq!(hooks, ["Stop"], "{settings}");
+    let mcp: serde_json::Value =
+        serde_json::from_str(&run_file(&daemon, &task_id, "mcp.json")).unwrap();
+    assert_eq!(
+        mcp,
+        serde_json::json!({"mcpServers": {
+            "relevant": {"command": "r"},
+            "irrelevant": {"command": "i"},
+            "sushiai-messages": mcp["mcpServers"]["sushiai-messages"].clone(),
+        }})
+    );
+    assert!(mcp["mcpServers"]["sushiai-messages"].is_object());
+    let brief = run_file(&daemon, &task_id, "brief.md");
+    assert!(!brief.contains("## Skills for this task"), "{brief}");
+    assert!(settled["attempts"][0].get("skills").is_none(), "{settled}");
+    assert!(
+        !settled["decisions"].to_string().contains("MCP"),
+        "{settled}"
+    );
+    let points = journal_points(&daemon);
+    assert_eq!(points, ["tier"], "only the tier call: {points:?}");
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
+fn lean_context_puts_only_the_picked_skills_in_a_fresh_codex_brief() {
+    let low = r#"{"answers":{"tier":{"choice":"mechanical","probabilities":{"mechanical":0.9}},"relevant":{"noul":0.2},"irrelevant":{"noul":0.1}}}"#;
+    let picked = r#"{"answers":{"tier":{"choice":"mechanical","probabilities":{"mechanical":0.9}},"relevant":{"noul":0.9},"irrelevant":{"noul":0.1},"pusher":{"noul":0.99}}}"#;
+    // Jev picks one; Jev picks none; no classifier key at all (the standard
+    // tier is pointed at Codex so the task still runs there).
+    for answers in [Some(picked), Some(low), None] {
+        let scripts_dir = tempfile::tempdir().unwrap();
+        let brief_path = scripts_dir.path().join("brief.md");
+        let codex = fake_harness_script(
+            scripts_dir.path(),
+            "fake-codex.sh",
+            "#!/bin/sh\ncat > \"$CODEX_BRIEF\"\necho changed > CHANGED_MARKER.txt\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"th-1\"}'\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}}'\n",
+        );
+        let daemon = Daemon::spawn(&[
+            ("ORCHD_CODEX_BIN", codex.to_str().unwrap()),
+            ("CODEX_BRIEF", brief_path.to_str().unwrap()),
+        ]);
+        let base_url = answers.map(spawn_fake_openai_classifier);
+        set_classifier(&daemon, base_url.as_deref(), |s| {
+            s["tiers"]["standard"] = serde_json::json!("codex");
+        });
+        let repo = init_git_repo();
+        commit_files(repo.path(), LEAN_SKILLS);
+        let task = daemon.request(
+            "task.create",
+            serde_json::json!({
+                "repo": repo.path().to_str().unwrap(),
+                "title": "Lean Codex",
+                "goal": "Change the widget",
+                "verify": ["true"],
+                "variant": {"leanContext": true},
+                "start": true,
+            }),
+        );
+        let task_id = task["id"].as_str().unwrap().to_string();
+        let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+        assert_eq!(settled["status"], "done", "{settled}");
+        let attempt = &settled["attempts"][0];
+        assert_eq!(attempt["harness"], "codex", "{settled}");
+        assert!(attempt.get("prefixTokens").is_none(), "{settled}");
+
+        let brief = std::fs::read_to_string(&brief_path).unwrap();
+        assert_eq!(brief, run_file(&daemon, &task_id, "brief.md"));
+        assert!(!brief.contains("IRRELEVANT_BODY") && !brief.contains("PUSHER_BODY"));
+        if answers == Some(picked) {
+            let section = brief.find("## Skills for this task").expect(&brief);
+            assert!(section < brief.find("## Report format").unwrap(), "{brief}");
+            assert!(
+                brief.contains("### Skill: relevant\n\nRELEVANT_BODY"),
+                "{brief}"
+            );
+            assert_eq!(
+                attempt["skills"],
+                serde_json::json!(["relevant"]),
+                "{settled}"
+            );
+        } else {
+            assert!(!brief.contains("## Skills for this task"), "{brief}");
+            assert!(attempt.get("skills").is_none(), "{settled}");
+        }
+
+        let worktree = task["worktree"].as_str().unwrap().to_string();
+        daemon.shutdown_and_wait();
+        let _ = std::fs::remove_dir_all(worktree);
+    }
+}
+
+#[test]
+fn the_skills_hook_fails_open() {
+    let hook = |args: &[&str], stdin: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_orchd"))
+            .arg("hook")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{args:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let prompt = r#"{"hook_event_name":"UserPromptSubmit","prompt":"Change the widget"}"#;
+    let daemon = Daemon::spawn(&[]);
+    let socket = daemon.socket.to_str().unwrap();
+    let dead = daemon.data_dir().join("nobody.sock");
+    for (args, stdin) in [
+        (vec!["skills"], prompt),
+        (vec!["skills", "--socket", socket], prompt),
+        (
+            vec!["skills", "--socket", socket, "--token", "t"],
+            "not json",
+        ),
+        (
+            vec!["skills", "--socket", dead.to_str().unwrap(), "--token", "t"],
+            prompt,
+        ),
+        (
+            vec!["skills", "--socket", socket, "--token", "unknown"],
+            prompt,
+        ),
+    ] {
+        assert_eq!(hook(&args, stdin), "{}", "{args:?} {stdin}");
+    }
+
+    // The per-run token is the only credential `hook.skills` needs.
+    let reply = raw_request_with_params(
+        &daemon.socket,
+        "hook.skills",
+        serde_json::json!({"token": "unknown", "event": "UserPromptSubmit", "text": "x"}),
+        None,
+    );
+    assert_eq!(reply["result"], serde_json::json!({}), "{reply}");
+    daemon.shutdown_and_wait();
+}

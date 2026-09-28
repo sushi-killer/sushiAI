@@ -223,6 +223,12 @@ pub struct Variant {
     /// The planner splits slow whole-repo checks into `final_verify`, run
     /// once after review passes instead of on every attempt and stop.
     pub defer_heavy_checks: bool,
+    /// Implement agents get skills and MCP servers Jev picks for the task
+    /// instead of a fixed set: a Claude run's skills arrive through a
+    /// UserPromptSubmit/PostToolUse hook, a fresh Codex run's in its brief,
+    /// and a Claude run's `mcp.json` keeps only the servers Jev picked.
+    /// Claude runs also drop the delegation tools from their prompt prefix.
+    pub lean_context: bool,
 }
 
 #[cfg(test)]
@@ -498,6 +504,15 @@ pub struct Attempt {
     pub verify: Vec<VerifyOutcome>,
     #[serde(default)]
     pub gate_blocks: u32,
+    /// `variant.lean_context`: the skills Jev picked and this attempt
+    /// received (skills hook for Claude, brief section for Codex).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+    /// Tokens of the first turn's prompt (input + cache creation + cache
+    /// read) of a fresh Claude implement attempt: the fixed prefix plus the
+    /// brief. `None` for resumed and Codex attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -623,6 +638,42 @@ mod tests {
         without_request.request = None;
         let v2 = serde_json::to_value(&without_request).unwrap();
         assert!(v2.get("request").is_none());
+    }
+
+    #[test]
+    fn lean_context_is_camel_case_off_by_default_and_optional_on_disk() {
+        assert!(!Variant::default().lean_context);
+        let on = Variant {
+            lean_context: true,
+            ..Variant::default()
+        };
+        let v = serde_json::to_value(&on).unwrap();
+        assert_eq!(v["leanContext"], true);
+        let back: Variant = serde_json::from_value(v).unwrap();
+        assert_eq!(back, on);
+        // A task.json variant written before the flag existed.
+        let old: Variant =
+            serde_json::from_value(serde_json::json!({"retryMode": "fresh"})).unwrap();
+        assert!(!old.lean_context);
+        assert_eq!(old.retry_mode, RetryMode::Fresh);
+    }
+
+    #[test]
+    fn attempt_skills_and_prefix_tokens_are_optional_on_disk() {
+        let old = serde_json::json!({
+            "n": 1, "stage": "implement", "routeId": "r", "harness": "claude", "model": "m",
+            "reason": "x", "resumed": false, "startedAt": 0, "status": "passed"
+        });
+        let mut a: Attempt = serde_json::from_value(old).unwrap();
+        assert!(a.skills.is_empty());
+        assert_eq!(a.prefix_tokens, None);
+        let v = serde_json::to_value(&a).unwrap();
+        assert!(v.get("skills").is_none() && v.get("prefixTokens").is_none());
+        a.skills = vec!["deslop".into()];
+        a.prefix_tokens = Some(19_629);
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["skills"], serde_json::json!(["deslop"]));
+        assert_eq!(v["prefixTokens"], 19_629);
     }
 
     #[test]

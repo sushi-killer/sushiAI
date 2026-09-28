@@ -64,6 +64,7 @@ flowchart TB
   harness --> taskAgent & reviewer & orchAgent
   orchAgent -->|MCP| mcp
   taskAgent -->|Stop hook| proto
+  taskAgent -->|skills hook<br/>leanContext| proto
   side --> ext
   side --> repo
   herdrIpc <--> herdr

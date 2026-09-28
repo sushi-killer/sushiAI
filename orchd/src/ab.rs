@@ -1,7 +1,7 @@
 //! `orchd ab --data <dir>`: every task grouped by the experiment variant it
 //! ran with, one row per variant, read straight from the task store.
 
-use crate::model::{FailureKind, Stage, Task, TaskStatus, Verdict};
+use crate::model::{Attempt, FailureKind, Stage, Task, TaskStatus, Verdict};
 use crate::store::Store;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -56,7 +56,7 @@ pub fn report(tasks: &[Task]) -> String {
         groups.entry(key).or_default().push(t);
     }
     let mut out = String::from(
-        "| variant | tasks | done | attempts/task | $/task | median $ | median min to done | review FAIL | owner answers/task | stalls (cost not counted) |\n|---|---|---|---|---|---|---|---|---|---|\n",
+        "| variant | tasks | done | attempts/task | $/task | median $ | median min to done | review FAIL | owner answers/task | stalls (cost not counted) | median prefix tokens | cache-read tokens/attempt |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     for (variant, ts) in groups {
         let n = ts.len() as f64;
@@ -101,13 +101,29 @@ pub fn report(tasks: &[Task]) -> String {
                     .count()
             })
             .sum();
+        let implement_attempts: Vec<&Attempt> = ts
+            .iter()
+            .flat_map(|t| &t.attempts)
+            .filter(|a| a.stage == Stage::Implement)
+            .collect();
+        // Fresh Claude implement attempts only; the rest record none.
+        let prefixes: Vec<f64> = implement_attempts
+            .iter()
+            .filter_map(|a| a.prefix_tokens.map(|p| p as f64))
+            .collect();
+        let cached: Vec<f64> = implement_attempts
+            .iter()
+            .filter_map(|a| a.usage.as_ref().map(|u| u.cached as f64))
+            .collect();
+        let mean_cached =
+            (!cached.is_empty()).then(|| cached.iter().sum::<f64>() / cached.len() as f64);
         let stalls = ts
             .iter()
             .flat_map(|t| &t.attempts)
             .filter(|a| a.failure.as_ref().map(|f| f.kind) == Some(FailureKind::Stall))
             .count();
         out.push_str(&format!(
-            "| `{variant}` | {} | {} | {:.1} | {:.2} | {} | {} | {review_fails}/{} | {:.1} | {stalls} |\n",
+            "| `{variant}` | {} | {} | {:.1} | {:.2} | {} | {} | {review_fails}/{} | {:.1} | {stalls} | {} | {} |\n",
             ts.len(),
             done.len(),
             attempts as f64 / n,
@@ -116,6 +132,8 @@ pub fn report(tasks: &[Task]) -> String {
             fmt(median(minutes), 0),
             reviews.len(),
             owner as f64 / n,
+            fmt(median(prefixes), 0),
+            fmt(mean_cached, 0),
         ));
     }
     let before = tasks.iter().filter(|t| t.variant.is_none()).count();
@@ -184,5 +202,55 @@ mod tests {
         let fresh_row = rows.iter().find(|r| r.contains("\"fresh\"")).unwrap();
         assert!(fresh_row.contains("| 1 | 1 |"), "{fresh_row}");
         assert!(fresh_row.contains("| 0.50 |"), "{fresh_row}");
+        assert!(
+            fresh_row.ends_with("| 0 | - | - |"),
+            "nothing recorded: {fresh_row}"
+        );
+    }
+
+    fn attempt(stage: &str, prefix: Option<u64>, cached: Option<u64>) -> Attempt {
+        let mut a: Attempt = serde_json::from_value(serde_json::json!({
+            "n": 1, "stage": stage, "routeId": "r", "harness": "claude", "model": "m",
+            "reason": "x", "resumed": false, "startedAt": 0, "status": "passed"
+        }))
+        .unwrap();
+        a.prefix_tokens = prefix;
+        a.usage = cached.map(|c| crate::model::Usage {
+            input: 0,
+            output: 0,
+            cached: c,
+        });
+        a
+    }
+
+    #[test]
+    fn report_shows_median_prefix_and_mean_cache_read_tokens_per_implement_attempt() {
+        let lean = Variant {
+            lean_context: true,
+            ..Variant::default()
+        };
+        let mut a = task(lean.clone(), TaskStatus::Done, 1.0, &[]);
+        a.attempts = vec![
+            attempt("plan", Some(90_000), Some(90_000)),
+            attempt("implement", Some(20_000), Some(1_000)),
+            attempt("implement", None, Some(3_000)),
+        ];
+        let mut b = task(lean, TaskStatus::Done, 1.0, &[]);
+        b.attempts = vec![
+            attempt("implement", Some(30_000), Some(5_000)),
+            attempt("implement", Some(22_000), None),
+        ];
+        let out = report(&[a, b]);
+        let row = out
+            .lines()
+            .find(|l| l.contains("\"leanContext\":true"))
+            .unwrap();
+        // Median of 20k, 30k, 22k; mean cached of 1k, 3k, 5k.
+        assert!(row.ends_with("| 22000 | 3000 |"), "{row}");
+        assert!(out
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with("| median prefix tokens | cache-read tokens/attempt |"));
     }
 }

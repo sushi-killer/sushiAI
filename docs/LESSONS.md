@@ -31,6 +31,11 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 Root cause: `create_worktree` (`orchd/src/git.rs`) always runs `worktree add -b`.
 Rule: give each task a new branch, or omit `branch`.
 
+## 2026-09-28 — A/B cause guessed from averages
+
+Root cause: blamed injected skills; transcripts showed ~20% of every arm's calls spent on LESSONS.md.
+Rule: read the run's `events.jsonl` before explaining an A/B result.
+
 ## Promoted
 
 - 2026-09-28 Trusted `rtk rewrite` (`rtk read` drops code) → allowlist. `rtk_rewrite_output_*`.
@@ -50,11 +55,7 @@ Rule: give each task a new branch, or omit `branch`.
 - 2026-09-13 A wrapper printed success for a run that exited 1 → exit code is the verdict, never `npx`. `sushiai-testing` skill.
 - 2026-09-13 A user's ssh_config (`LocalForward`, `/dev/null` known-hosts) broke our tunnel → own `known_hosts`. `connections.cjs`.
 - 2026-09-13 One global `connected` flag colored every host's status dot → per-endpoint `statusByEndpoint`. `useHerdr.ts`.
-- 2026-09-12 Duplicate manifest labels broke a Playwright selector → `manifest.cjs`, `extension-contract-coverage.test.cjs`
-- 2026-09-12 Commands without a `surfaceId` silently did nothing at runtime → AGENTS.md, `manifest.cjs`
-- 2026-09-12 A copy-pasted duplicate in `ACTION_PLACEMENTS`/`ICONS` shipped silently → `extension-contract-coverage.test.cjs`
-- 2026-09-12 CI silently never ran 33 of 52 test files → `package.json` `ci` script
-- 2026-09-12 `scripts/smoke.mjs` discards an external `SUSHIAI_EXTENSIONS_DIR` → `author-and-verify-extension` skill
+- 2026-09-12 Manifest duplicates/missing `surfaceId`, CI skipping test files, smoke dropping `SUSHIAI_EXTENSIONS_DIR` → `manifest.cjs`, contract-coverage test, `ci` script, extension skill.
 - 2026-09-13 Pushed a 31-commit branch to `main` unsquashed → squash-only is a `main`-history invariant. AGENTS.md.
 - 2026-09-16 A lane's smoke failed on another lane's bridge contract → land the contract first, share its SHA, lead re-runs smoke.
 - 2026-09-18 A fixture invented a Herdr status (`running`) → check vocabularies against `herdr api snapshot`. `tests/herdr-snapshot.test.cjs`.

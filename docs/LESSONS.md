@@ -36,6 +36,11 @@ Rule: give each task a new branch, or omit `branch`.
 Root cause: blamed injected skills; transcripts showed ~20% of every arm's calls spent on LESSONS.md.
 Rule: read the run's `events.jsonl` before explaining an A/B result.
 
+## 2026-09-29 — Three attempts lost to a self-contradicting brief
+
+Root cause: the refactor brief asked for an identical test-name set and for unit tests moved beside their code; each attempt satisfied one, and the reviewer failed it on the other (last time on a P2).
+Rule: before launching, check criteria against each other; orchd needs an "impossible" declaration and a way to amend criteria mid-task (stage 3).
+
 ## Promoted
 
 - 2026-09-28 Trusted `rtk rewrite` (`rtk read` drops code) → allowlist. `rtk_rewrite_output_*`.

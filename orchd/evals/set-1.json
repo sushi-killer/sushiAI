@@ -1,5 +1,5 @@
 {
-  "about": "Replayable orchd tasks: each starts at the parent of a commit that already solved it; `reference` is that commit, for comparison only. Mixed sizes: mechanical, standard, UI and daemon.",
+  "about": "Replayable orchd tasks: each starts at the parent of a commit that already solved it; `reference` is that commit, for comparison only. Mixed sizes: mechanical, standard, UI and daemon. Kept small: run it before a flag becomes a default or after a big harness change; day-to-day A/B runs on real backlog requests.",
   "tasks": [
     {
       "name": "attempt-counter",
@@ -8,28 +8,10 @@
       "request": "The orchestrator task detail header shows 'attempt N/M' where N is the daemon's global attempt number across plan, implement and review stages, so a task on its first implementation attempt can read 'attempt 3/4'. Make it count implementation attempts only, in the header and wherever the panel counts attempts toward the limit; cover it in tests/orchestrator-helpers.test.cjs."
     },
     {
-      "name": "agent-prefix",
-      "base": "3fdcea3^",
-      "reference": "3fdcea3",
-      "request": "When an orchd task agent echoes a decision back in its report, the task's decisions end up with a doubled prefix such as 'Agent: Agent: chose X'. Keep a single 'Agent:' prefix, the way 'Owner:' decisions are already handled."
-    },
-    {
       "name": "unfenced-json",
       "base": "98481f2^",
       "reference": "98481f2",
       "request": "Codex sometimes drops the backticks around its final sushi-report or sushi-review block and sends the bare tag line followed by the JSON; orchd then finds no report or no verdict. Parse that form too, keep fenced blocks working, and add a unit test built from such a reply."
-    },
-    {
-      "name": "settings-hint",
-      "base": "dba7f97^",
-      "reference": "dba7f97",
-      "request": "In the orchestrator settings, the hint that marks settings differing from orchd's defaults is written in Title Case and is hard to understand: rewrite it in sentence case as a short plain sentence that says the value differs from the default and that the reset button restores it; keep the per-setting reset behaviour unchanged."
-    },
-    {
-      "name": "base-field-label",
-      "base": "975c65c^",
-      "reference": "975c65c",
-      "request": "In the orchestrator's New task form, the optional base-branch field has no visible label (only a placeholder), unlike the other fields: give it a visible label consistent with the form's other fields, and keep it optional and wired as it is now."
     },
     {
       "name": "base-branch-field",
@@ -42,12 +24,6 @@
       "base": "8c5fd73^",
       "reference": "8c5fd73",
       "request": "orchd task costs are too low: the plan run and the review run report a cost that is never added to the task, and Codex runs report tokens but no cost at all. Add plan and review costs to the task total, price Codex runs from per-model prices kept in settings (with built-in list prices for the Codex models in use), and make `orchd ab` leave out tasks created before variants existed so they don't skew the default arm."
-    },
-    {
-      "name": "task-archive",
-      "base": "9fecf75^",
-      "reference": "9fecf75",
-      "request": "Let orchd tasks be archived instead of deleted: orchd persists an archived flag per task and refuses to archive a task that is running, drafting or waiting; the orchestrator MCP server gets task_archive and task_unarchive tools and task_list hides archived tasks unless includeArchived is true; the Orchestrator panel gets an Archive section listing archived tasks with a restore action while the main task list hides them; cover persistence, the refusal and the MCP tools with regression tests and verify the Archive section with a screenshot."
     }
   ]
 }

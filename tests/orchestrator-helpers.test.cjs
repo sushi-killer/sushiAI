@@ -112,6 +112,21 @@ test("formatCost always shows two decimals, including for an unset cost", async 
   assert.equal(formatCost(12.3456), "$12.35");
 });
 
+test("formatTaskTier shows just the tier when it wasn't a fallback", async () => {
+  const { formatTaskTier } = await library;
+  assert.equal(formatTaskTier(task({ tier: "standard" })), "standard tier");
+});
+
+test("formatTaskTier names the fallback reason next to the tier", async () => {
+  const { formatTaskTier } = await library;
+  assert.equal(
+    formatTaskTier(
+      task({ tier: "standard", tierFallback: "no classifier key" }),
+    ),
+    "standard tier (fallback: no classifier key)",
+  );
+});
+
 test("attemptDurationMs uses `now` for a still-running attempt, endedAt once it has one", async () => {
   const { attemptDurationMs } = await library;
   const running = attempt({ startedAt: 1000 });

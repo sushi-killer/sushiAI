@@ -946,6 +946,7 @@ impl App {
             cost_usd: 0.0,
             archived: false,
             planned_tier: None,
+            tier_fallback: None,
             variant: Some(variant),
             created_at: now,
             updated_at: now,
@@ -2281,6 +2282,10 @@ fn advance_after_failure(task: &mut Task, max_attempts: u32) -> bool {
     };
     match decide_after_failure(&input) {
         FailureDecision::NextAttempt { tier } => {
+            // The fallback note stays until the tier actually changes.
+            if tier != task.tier {
+                task.tier_fallback = None;
+            }
             task.tier = tier;
             task.status = TaskStatus::Queued;
             true
@@ -2735,6 +2740,10 @@ fn jev_tier_line(choice: &str, p: f64, route_id: &str) -> String {
     format!("Jev: tier {choice} (p {p:.2}) -> route {route_id}")
 }
 
+fn jev_tier_fallback_line(reason: &str, route_id: &str) -> String {
+    format!("Jev: tier unavailable ({reason}) -> fallback standard, route {route_id}")
+}
+
 fn jev_answerable_line(p: f64, answer_self: bool) -> String {
     let outcome = if answer_self {
         "agent sent back"
@@ -2762,17 +2771,83 @@ fn jev_plan_preflight_line(
     )
 }
 
-/// The effective tier plus, only when the classifier call itself succeeded
-/// with a usable choice, the raw `(choice, probability)` for the caller to
-/// turn into a `task.decisions` line once it knows the resolved route --
-/// this function doesn't persist anything itself so the caller can push the
-/// line onto the same in-memory `Task` it's about to save (see
+/// Either a classified tier (with the raw `choice`/`p` for the caller to
+/// turn into a `task.decisions` line once it knows the resolved route), or
+/// a fallback to `Tier::Standard` with a reason from the fixed set `pick_tier`
+/// documents -- this type doesn't persist anything itself so the caller can
+/// push a line onto the same in-memory `Task` it's about to save (see
 /// `append_jev_decision` for why a call site with no live `Task` in scope
 /// has to do it differently).
-async fn classify_tier(app: &Arc<App>, task: &Task) -> (Tier, Option<(String, f64)>) {
+enum TierPick {
+    Classified { tier: Tier, choice: String, p: f64 },
+    Fallback { reason: String },
+}
+
+/// Turns a classifier call outcome into a tier decision. Pure and
+/// unit-testable: no network, no store, no app state. `reason` is always
+/// one of `classifier off`, `no classifier key`, `classifier call failed`,
+/// `no tier answer`, or `unsure: <choice> p <p:.2>` -- never the raw
+/// classifier error text, a key, a URL, or a response body.
+fn pick_tier(
+    result: &Result<classify::Answers, classify::ClassifyError>,
+    backend_off: bool,
+) -> TierPick {
+    if backend_off {
+        return TierPick::Fallback {
+            reason: "classifier off".to_string(),
+        };
+    }
+    let answers = match result {
+        Err(e) if e.0 == classify::NO_KEY_REASON => {
+            return TierPick::Fallback {
+                reason: "no classifier key".to_string(),
+            };
+        }
+        Err(_) => {
+            return TierPick::Fallback {
+                reason: "classifier call failed".to_string(),
+            };
+        }
+        Ok(answers) => answers,
+    };
+    let Some(a) = answers.get("tier") else {
+        return TierPick::Fallback {
+            reason: "no tier answer".to_string(),
+        };
+    };
+    let Some(choice) = &a.choice else {
+        return TierPick::Fallback {
+            reason: "no tier answer".to_string(),
+        };
+    };
+    let p = a
+        .probabilities
+        .as_ref()
+        .and_then(|p| p.get(choice))
+        .copied()
+        .unwrap_or(1.0);
+    if p < 0.5 {
+        return TierPick::Fallback {
+            reason: format!("unsure: {choice} p {p:.2}"),
+        };
+    }
+    let tier = match choice.as_str() {
+        "mechanical" => Tier::Mechanical,
+        "hard" => Tier::Hard,
+        _ => Tier::Standard,
+    };
+    TierPick::Classified {
+        tier,
+        choice: choice.clone(),
+        p,
+    }
+}
+
+async fn classify_tier(app: &Arc<App>, task: &Task) -> TierPick {
     let settings = app.settings.read().unwrap().classifier.clone();
     let key = app.secrets.read().unwrap().classifier_key.clone();
     let base_url = app.secrets.read().unwrap().classifier_base_url.clone();
+    let backend_off = settings.backend == ClassifierBackend::None;
     let state = json!({"goal": task.goal, "criteria": task.criteria});
     let questions = vec![classify::QuestionSpec::Choice {
         name: "tier".to_string(),
@@ -2791,30 +2866,7 @@ async fn classify_tier(app: &Arc<App>, task: &Task) -> (Tier, Option<(String, f6
     .await
     .unwrap_or_else(|e| Err(classify::ClassifyError(e.to_string())));
     app.journal(&task.id, "tier", &result, start.elapsed());
-    let Ok(answers) = result else {
-        return (Tier::Standard, None);
-    };
-    let Some(a) = answers.get("tier") else {
-        return (Tier::Standard, None);
-    };
-    let Some(choice) = &a.choice else {
-        return (Tier::Standard, None);
-    };
-    let p = a
-        .probabilities
-        .as_ref()
-        .and_then(|p| p.get(choice))
-        .copied()
-        .unwrap_or(1.0);
-    if p < 0.5 {
-        return (Tier::Standard, Some((choice.clone(), p)));
-    }
-    let tier = match choice.as_str() {
-        "mechanical" => Tier::Mechanical,
-        "hard" => Tier::Hard,
-        _ => Tier::Standard,
-    };
-    (tier, Some((choice.clone(), p)))
+    pick_tier(&result, backend_off)
 }
 
 async fn classify_answerable(app: &Arc<App>, task: &Task, question: &str) -> Option<f64> {
@@ -3893,17 +3945,26 @@ async fn run_task_loop(
 
         let mut jev_tier_choice = None;
         let mut planner_tier_used = false;
+        let mut tier_fallback_reason = None;
         if implement_attempt_count(&task) == 0 {
             match task.planned_tier.filter(|_| task.variant().planner_tier) {
                 Some(tier) => {
                     task.tier = tier;
+                    task.tier_fallback = None;
                     planner_tier_used = true;
                 }
-                None => {
-                    let (tier, jev) = classify_tier(&app, &task).await;
-                    task.tier = tier;
-                    jev_tier_choice = jev;
-                }
+                None => match classify_tier(&app, &task).await {
+                    TierPick::Classified { tier, choice, p } => {
+                        task.tier = tier;
+                        task.tier_fallback = None;
+                        jev_tier_choice = Some((choice, p));
+                    }
+                    TierPick::Fallback { reason } => {
+                        task.tier = Tier::Standard;
+                        task.tier_fallback = Some(reason.clone());
+                        tier_fallback_reason = Some(reason);
+                    }
+                },
             }
         }
 
@@ -3922,6 +3983,10 @@ async fn run_task_loop(
                 "Planner: tier {} -> route {route_id}",
                 task.tier.as_str()
             ));
+        }
+        if let Some(reason) = tier_fallback_reason {
+            task.decisions
+                .push(jev_tier_fallback_line(&reason, &route_id));
         }
         let route = settings
             .routes
@@ -5144,6 +5209,21 @@ mod tests {
     }
 
     #[test]
+    fn a_retry_on_the_same_tier_keeps_the_fallback_note() {
+        let mut task = task_with_status(TaskStatus::Running);
+        task.tier_fallback = Some("no classifier key".into());
+        task.attempts = vec![attempt_with_failure(1, "sig-a")];
+        assert!(advance_after_failure(&mut task, 4));
+        assert_eq!(task.tier, Tier::Standard);
+        assert_eq!(task.tier_fallback.as_deref(), Some("no classifier key"));
+        // The same failure again moves the task up a tier: the note goes.
+        task.attempts.push(attempt_with_failure(2, "sig-a"));
+        assert!(advance_after_failure(&mut task, 4));
+        assert_eq!(task.tier, Tier::Hard);
+        assert_eq!(task.tier_fallback, None);
+    }
+
+    #[test]
     fn consecutive_same_signature_counts_trailing_run_only() {
         let attempts = vec![
             attempt_with_failure(1, "sig-a"),
@@ -5271,6 +5351,107 @@ mod tests {
             jev_tier_line("mechanical", 0.82, "codex"),
             "Jev: tier mechanical (p 0.82) -> route codex"
         );
+    }
+
+    #[test]
+    fn jev_tier_fallback_line_formats_reason_and_route() {
+        assert_eq!(
+            jev_tier_fallback_line("no classifier key", "claude-sonnet"),
+            "Jev: tier unavailable (no classifier key) -> fallback standard, route claude-sonnet"
+        );
+    }
+
+    fn tier_answer(choice: &str, p: f64) -> classify::Answers {
+        let mut answers = classify::Answers::new();
+        answers.insert(
+            "tier".to_string(),
+            classify::Answer {
+                choice: Some(choice.to_string()),
+                probabilities: Some(HashMap::from([(choice.to_string(), p)])),
+                ..Default::default()
+            },
+        );
+        answers
+    }
+
+    #[test]
+    fn pick_tier_falls_back_to_classifier_off_regardless_of_the_result() {
+        let result: Result<classify::Answers, classify::ClassifyError> =
+            Err(classify::ClassifyError("network is down".to_string()));
+        match pick_tier(&result, true) {
+            TierPick::Fallback { reason } => assert_eq!(reason, "classifier off"),
+            TierPick::Classified { .. } => panic!("expected a fallback"),
+        }
+    }
+
+    #[test]
+    fn pick_tier_falls_back_to_no_classifier_key() {
+        let result: Result<classify::Answers, classify::ClassifyError> =
+            Err(classify::ClassifyError(classify::NO_KEY_REASON.to_string()));
+        match pick_tier(&result, false) {
+            TierPick::Fallback { reason } => assert_eq!(reason, "no classifier key"),
+            TierPick::Classified { .. } => panic!("expected a fallback"),
+        }
+    }
+
+    #[test]
+    fn pick_tier_falls_back_to_classifier_call_failed_and_drops_the_raw_error() {
+        let result: Result<classify::Answers, classify::ClassifyError> = Err(
+            classify::ClassifyError("https://openrouter.ai returned 500: secret leak".to_string()),
+        );
+        match pick_tier(&result, false) {
+            TierPick::Fallback { reason } => {
+                assert_eq!(reason, "classifier call failed");
+                assert!(!reason.contains("openrouter"));
+                assert!(!reason.contains("secret"));
+            }
+            TierPick::Classified { .. } => panic!("expected a fallback"),
+        }
+    }
+
+    #[test]
+    fn pick_tier_falls_back_to_no_tier_answer_when_choice_is_missing() {
+        let mut answers = classify::Answers::new();
+        answers.insert("tier".to_string(), classify::Answer::default());
+        let result: Result<classify::Answers, classify::ClassifyError> = Ok(answers);
+        match pick_tier(&result, false) {
+            TierPick::Fallback { reason } => assert_eq!(reason, "no tier answer"),
+            TierPick::Classified { .. } => panic!("expected a fallback"),
+        }
+    }
+
+    #[test]
+    fn pick_tier_falls_back_to_no_tier_answer_when_the_tier_question_is_absent() {
+        let result: Result<classify::Answers, classify::ClassifyError> =
+            Ok(classify::Answers::new());
+        match pick_tier(&result, false) {
+            TierPick::Fallback { reason } => assert_eq!(reason, "no tier answer"),
+            TierPick::Classified { .. } => panic!("expected a fallback"),
+        }
+    }
+
+    #[test]
+    fn pick_tier_falls_back_when_unsure() {
+        let result: Result<classify::Answers, classify::ClassifyError> =
+            Ok(tier_answer("hard", 0.45));
+        match pick_tier(&result, false) {
+            TierPick::Fallback { reason } => assert_eq!(reason, "unsure: hard p 0.45"),
+            TierPick::Classified { .. } => panic!("expected a fallback"),
+        }
+    }
+
+    #[test]
+    fn pick_tier_classifies_a_confident_answer_and_is_not_a_fallback() {
+        let result: Result<classify::Answers, classify::ClassifyError> =
+            Ok(tier_answer("hard", 0.82));
+        match pick_tier(&result, false) {
+            TierPick::Classified { tier, choice, p } => {
+                assert_eq!(tier, Tier::Hard);
+                assert_eq!(choice, "hard");
+                assert_eq!(p, 0.82);
+            }
+            TierPick::Fallback { reason } => panic!("expected a classified pick, got {reason}"),
+        }
     }
 
     #[test]
@@ -5652,6 +5833,7 @@ mod tests {
             cost_usd: 0.0,
             archived: false,
             planned_tier: None,
+            tier_fallback: None,
             variant: Default::default(),
             created_at: 1,
             updated_at: 1,

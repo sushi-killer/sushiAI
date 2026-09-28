@@ -1529,6 +1529,86 @@ fn jev_tier_decision_lands_in_task_decisions_on_classifier_success() {
             .starts_with("Jev: tier standard (p 0.82) -> route ")),
         "expected a Jev tier decision: {decisions:?}"
     );
+    assert!(
+        !decisions
+            .iter()
+            .any(|d| d.as_str().unwrap_or("").contains("tier unavailable")),
+        "a confident classifier answer must not fall back: {decisions:?}"
+    );
+    assert!(settled.get("tierFallback").is_none(), "{settled}");
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+/// A low-confidence classifier answer (p < 0.5) must not be routed on the
+/// classified tier -- it falls back to standard and records why, without
+/// ever writing the misleading `Jev: tier hard (p 0.45)` line (the
+/// pre-fallback behaviour this test guards against, docs/orchd-acceptance-audit.md G8).
+#[test]
+fn jev_tier_falls_back_to_standard_on_a_low_confidence_answer() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        "#!/bin/sh\ncat > /dev/null\necho \"changed\" > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n",
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+
+    // A p 0.45 "hard" answer falls back to standard, which routes to the
+    // Claude harness faked above (the default `tiers` map) -- "hard" would
+    // route to Claude Opus and still work, but standard is what the
+    // fallback path must land on regardless of the classifier's choice.
+    let base_url = spawn_fake_openai_classifier(
+        r#"{"answers":{"tier":{"choice":"hard","probabilities":{"mechanical":0.05,"standard":0.5,"hard":0.45}}}}"#,
+    );
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    settings["classifier"] =
+        serde_json::json!({"backend": "openai", "model": "fake", "providerId": "fake"});
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    daemon.request(
+        "secrets.set",
+        serde_json::json!({"classifier": {"key": "test-key", "baseUrl": base_url}}),
+    );
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Unsure case",
+            "goal": "Make a trivial change",
+            "criteria": [],
+            "verify": ["true"],
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": task_id}));
+
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(15));
+    assert_eq!(settled["status"], "done", "task JSON: {settled}");
+    assert_eq!(settled["tier"], "standard", "{settled}");
+    assert_eq!(
+        settled["attempts"][0]["routeId"], "claude-sonnet",
+        "{settled}"
+    );
+    let decisions = settled["decisions"].as_array().unwrap();
+    assert!(
+        decisions
+            .iter()
+            .any(|d| d
+                == "Jev: tier unavailable (unsure: hard p 0.45) -> fallback standard, route claude-sonnet"),
+        "expected a tier-unavailable fallback decision: {decisions:?}"
+    );
+    assert!(
+        !decisions
+            .iter()
+            .any(|d| d.as_str().unwrap_or("").starts_with("Jev: tier hard")),
+        "must not write the misleading pre-fallback line: {decisions:?}"
+    );
+    assert_eq!(settled["tierFallback"], "unsure: hard p 0.45", "{settled}");
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
@@ -2301,12 +2381,24 @@ fn the_planner_s_tier_routes_the_task_only_when_the_variant_asks_for_it() {
             "{settled}"
         );
         assert_eq!(settled["attempts"][1]["routeId"], route, "{settled}");
-        let noted = settled["decisions"]
-            .as_array()
-            .unwrap()
+        let decisions = settled["decisions"].as_array().unwrap();
+        let noted = decisions
             .iter()
             .any(|d| d == "Planner: tier hard -> route claude-opus");
         assert_eq!(noted, planner_tier, "{settled}");
+        // With `plannerTier: false` and no classifier key configured (the
+        // default), the tier falls back to standard instead of the
+        // planner's "hard" -- `plannedTier` above still records the
+        // planner's choice, just unused for routing.
+        let fell_back = decisions.iter().any(|d| {
+            d == "Jev: tier unavailable (no classifier key) -> fallback standard, route claude-sonnet"
+        });
+        assert_eq!(fell_back, !planner_tier, "{settled}");
+        if planner_tier {
+            assert!(settled.get("tierFallback").is_none(), "{settled}");
+        } else {
+            assert_eq!(settled["tierFallback"], "no classifier key", "{settled}");
+        }
 
         let worktree = task["worktree"].as_str().unwrap().to_string();
         daemon.shutdown_and_wait();

@@ -107,6 +107,14 @@ export function costByStage(task: Task): CostByStage {
   return { plan, implement, review, other };
 }
 
+/** The detail-view meta line's tier text, e.g. "standard tier" or, when the
+ * tier was picked by falling back instead of a classified/planner choice,
+ * "standard tier (fallback: no classifier key)". */
+export function formatTaskTier(task: Task): string {
+  const base = `${task.tier} tier`;
+  return task.tierFallback ? `${base} (fallback: ${task.tierFallback})` : base;
+}
+
 export function attemptDurationMs(attempt: Attempt, now = Date.now()): number {
   return (attempt.endedAt ?? now) - attempt.startedAt;
 }

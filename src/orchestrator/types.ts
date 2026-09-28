@@ -160,6 +160,10 @@ export type Task = {
   tier: Tier;
   /** The planner's tier; routes the task only with `variant.plannerTier`. */
   plannedTier?: Tier;
+  /** Set when `tier` was picked by falling back to `standard` instead of a
+   * classified or planner choice; the fixed-set reason (e.g. "no classifier
+   * key"). Absent when Jev or the planner picked the tier. */
+  tierFallback?: string;
   /** Experiment flags this task runs with (an A/B arm); absent on tasks
    * created before variants existed. */
   variant?: Variant;

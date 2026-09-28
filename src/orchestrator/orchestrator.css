@@ -532,6 +532,10 @@
   color: var(--text-muted);
 }
 
+.orch-tier-fallback {
+  color: var(--tone-warning);
+}
+
 .orch-branch {
   font-family: monospace;
   overflow: hidden;

@@ -265,6 +265,7 @@ mod tests {
             cost_usd: 0.0,
             archived: false,
             planned_tier: None,
+            tier_fallback: None,
             variant: Default::default(),
             created_at: 1,
             updated_at: 1,

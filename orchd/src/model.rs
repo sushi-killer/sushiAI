@@ -367,6 +367,12 @@ pub struct Task {
     /// off so its choice can be compared with Jev's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planned_tier: Option<Tier>,
+    /// Set to a fixed-set reason (see `classify_tier` in `engine.rs`) when
+    /// the implement tier was picked by falling back to `Standard` instead
+    /// of a classified or planner choice; cleared as soon as Jev or the
+    /// planner picks the tier, or a failure moves the task up a tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_fallback: Option<String>,
     /// `None` only on tasks created before variants existed; `orchd ab`
     /// keeps those out of every arm.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -640,6 +646,7 @@ mod tests {
             cost_usd: 0.0,
             archived: false,
             planned_tier: None,
+            tier_fallback: None,
             variant: Default::default(),
             created_at: 1,
             updated_at: 1,
@@ -738,6 +745,7 @@ mod tests {
             cost_usd: 0.0,
             archived: false,
             planned_tier: None,
+            tier_fallback: None,
             variant: Default::default(),
             created_at: 1,
             updated_at: 1,
@@ -771,6 +779,7 @@ mod tests {
             cost_usd: 0.0,
             archived: true,
             planned_tier: None,
+            tier_fallback: None,
             variant: Default::default(),
             created_at: 1,
             updated_at: 1,

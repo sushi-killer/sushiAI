@@ -15,6 +15,11 @@ pub const TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug)]
 pub struct ClassifyError(pub String);
 
+/// The fixed message `decide` uses for a missing key, so callers (e.g.
+/// `engine::pick_tier`) can distinguish it from any other `Err` without
+/// matching on arbitrary, possibly network-sourced error text.
+pub const NO_KEY_REASON: &str = "no classifier key configured";
+
 impl std::fmt::Display for ClassifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -334,7 +339,7 @@ pub fn decide(
     state: &serde_json::Value,
     questions: &[QuestionSpec],
 ) -> Result<Answers, ClassifyError> {
-    let key = key.ok_or_else(|| ClassifyError("no classifier key configured".to_string()))?;
+    let key = key.ok_or_else(|| ClassifyError(NO_KEY_REASON.to_string()))?;
     let redacted_state = redact_value(state);
     let qjson = questions_json(questions);
 

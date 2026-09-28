@@ -26,6 +26,7 @@ import {
   emptyLiveState,
   formatCost,
   formatDuration,
+  formatTaskTier,
   implementAttemptCount,
   messageThreads,
   participantLabel,
@@ -1058,6 +1059,14 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                   {formatDuration(totalDurationMs(selected))} ·{" "}
                   <span title="API list price the CLI reports, cache included; a subscription is not billed per token">
                     {formatCost(selected.costUsd)}
+                  </span>{" "}
+                  ·{" "}
+                  <span
+                    className={
+                      selected.tierFallback ? "orch-tier-fallback" : undefined
+                    }
+                  >
+                    {formatTaskTier(selected)}
                   </span>{" "}
                   ·{" "}
                   <span className="orch-branch" title={selected.branch}>

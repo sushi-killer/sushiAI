@@ -86,6 +86,10 @@ export type Variant = {
   leanOutput: boolean;
   reviewBlind: boolean;
   advisor: boolean;
+  /** Route id the plan stage runs on instead of `settings.planner`. */
+  plannerRoute?: string;
+  /** Route ids the implement stage uses instead of `settings.tiers`. */
+  tierRoutes?: Partial<Record<Tier, string>>;
 };
 
 export type FailureKind =

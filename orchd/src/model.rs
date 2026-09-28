@@ -4,7 +4,7 @@
 //! shapes independently.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -29,7 +29,7 @@ pub struct Route {
     pub profile_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
     Mechanical,
@@ -252,6 +252,15 @@ pub struct Variant {
     /// After an implement attempt fails, one read-only call on the planner's
     /// route diagnoses it; the answer goes into the next attempt's brief.
     pub advisor: bool,
+    /// Route id the plan stage runs on instead of `settings.planner`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planner_route: Option<String>,
+    /// Route ids the implement stage uses instead of `settings.tiers`, per
+    /// tier; a tier missing here keeps the settings' route. A `BTreeMap` so
+    /// the keys serialize in one order and `orchd ab` groups identical
+    /// variants together.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub tier_routes: BTreeMap<Tier, String>,
 }
 
 #[cfg(test)]
@@ -325,6 +334,51 @@ impl Variant {
             ));
         }
         Ok(())
+    }
+
+    /// Keys a serialized default `Variant` leaves out, but a partial
+    /// override object may still name.
+    pub const OPTIONAL_KEYS: [&'static str; 2] = ["plannerRoute", "tierRoutes"];
+
+    /// Every route override names a route in `routes`.
+    pub fn check_routes(&self, routes: &[Route]) -> Result<(), String> {
+        let known = |id: &str| routes.iter().any(|r| r.id == id);
+        if let Some(id) = self.planner_route.as_deref().filter(|id| !known(id)) {
+            return Err(format!(
+                "variant plannerRoute \"{id}\" is not a configured route"
+            ));
+        }
+        for (tier, id) in &self.tier_routes {
+            if !known(id) {
+                return Err(format!(
+                    "variant tierRoutes.{} \"{id}\" is not a configured route",
+                    tier.as_str()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The implement route for `tier`: this variant's override, else the
+    /// settings' tier route, else `codex`. `true` when the override applied.
+    pub fn implement_route_id(&self, settings: &Settings, tier: Tier) -> (String, bool) {
+        match self.tier_routes.get(&tier) {
+            Some(id) => (id.clone(), true),
+            None => (
+                settings
+                    .tiers
+                    .get(&tier)
+                    .cloned()
+                    .unwrap_or_else(|| "codex".to_string()),
+                false,
+            ),
+        }
+    }
+
+    /// The plan stage's route id: this variant's override, else
+    /// `settings.planner` (`""` = planning off).
+    pub fn plan_route_id<'a>(&'a self, settings: &'a Settings) -> &'a str {
+        self.planner_route.as_deref().unwrap_or(&settings.planner)
     }
 }
 
@@ -701,6 +755,68 @@ mod tests {
             serde_json::from_value(serde_json::json!({"retryMode": "fresh"})).unwrap();
         assert!(!old.lean_output);
         assert_eq!(old.retry_mode, RetryMode::Fresh);
+    }
+
+    #[test]
+    fn a_variant_without_route_overrides_serializes_as_before() {
+        assert_eq!(
+            serde_json::to_string(&Variant::default()).unwrap(),
+            r#"{"retryMode":"resume","stallTimeoutSecs":0,"plannerTier":false,"contract":false,"reviewOtherFamily":false,"reviewEvidence":false,"deferHeavyChecks":false,"leanOutput":false,"reviewBlind":false,"advisor":false}"#
+        );
+    }
+
+    #[test]
+    fn route_overrides_serialize_in_one_key_order_and_round_trip() {
+        let mut a = Variant::default();
+        a.tier_routes.insert(Tier::Hard, "claude-sonnet".into());
+        a.tier_routes.insert(Tier::Mechanical, "codex".into());
+        a.planner_route = Some("claude-sonnet".into());
+        let mut b = Variant {
+            planner_route: Some("claude-sonnet".into()),
+            ..Variant::default()
+        };
+        b.tier_routes.insert(Tier::Mechanical, "codex".into());
+        b.tier_routes.insert(Tier::Hard, "claude-sonnet".into());
+        let json = serde_json::to_string(&a).unwrap();
+        assert_eq!(json, serde_json::to_string(&b).unwrap());
+        assert!(
+            json.ends_with(r#""plannerRoute":"claude-sonnet","tierRoutes":{"mechanical":"codex","hard":"claude-sonnet"}}"#),
+            "{json}"
+        );
+        let back: Variant = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, a);
+    }
+
+    #[test]
+    fn route_overrides_replace_the_settings_routes_and_escalation_follows_them() {
+        let settings = Settings::default();
+        let mut v = Variant::default();
+        assert_eq!(
+            v.implement_route_id(&settings, Tier::Hard),
+            ("claude-opus".to_string(), false)
+        );
+        assert_eq!(v.plan_route_id(&settings), "claude-opus");
+        v.tier_routes.insert(Tier::Hard, "claude-sonnet".into());
+        v.planner_route = Some("claude-sonnet".into());
+        // A standard-tier task that keeps failing moves up to hard, and
+        // takes the overridden hard route.
+        assert_eq!(
+            v.implement_route_id(&settings, Tier::Standard.up()),
+            ("claude-sonnet".to_string(), true)
+        );
+        assert_eq!(
+            v.implement_route_id(&settings, Tier::Mechanical),
+            ("codex".to_string(), false)
+        );
+        assert_eq!(v.plan_route_id(&settings), "claude-sonnet");
+        assert!(v.check_routes(&settings.routes).is_ok());
+        v.tier_routes.insert(Tier::Standard, "nope".into());
+        let err = v.check_routes(&settings.routes).unwrap_err();
+        assert!(err.contains("tierRoutes.standard \"nope\""), "{err}");
+        v.tier_routes.clear();
+        v.planner_route = Some("gone".into());
+        let err = v.check_routes(&settings.routes).unwrap_err();
+        assert!(err.contains("plannerRoute \"gone\""), "{err}");
     }
 
     #[test]

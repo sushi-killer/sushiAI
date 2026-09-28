@@ -716,6 +716,7 @@ impl App {
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         p.settings.experiments.check()?;
+        p.settings.experiments.check_routes(&p.settings.routes)?;
         self.store
             .save_settings(&p.settings)
             .map_err(|e| e.to_string())?;
@@ -837,13 +838,12 @@ impl App {
             eval_name: Option<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
-        let variant = resolve_variant(
-            &self.settings.read().unwrap().experiments,
-            p.variant.as_ref(),
-        )?;
+        let settings = self.settings.read().unwrap().clone();
+        let variant = resolve_variant(&settings.experiments, p.variant.as_ref())?;
+        variant.check_routes(&settings.routes)?;
         let request_text = p.request.clone().filter(|s| !s.trim().is_empty());
         if request_text.is_some() {
-            let planner = self.settings.read().unwrap().planner.clone();
+            let planner = variant.plan_route_id(&settings);
             if planner.is_empty() {
                 return Err(
                     "planner is disabled; task.create needs title/goal instead of request"
@@ -853,13 +853,7 @@ impl App {
             // Same "off, not a silent fallback" rule `run_plan_stage` applies
             // at drafting time -- reject up front instead of creating a
             // worktree for a task that can only ever fail to plan.
-            let known = self
-                .settings
-                .read()
-                .unwrap()
-                .routes
-                .iter()
-                .any(|r| r.id == planner);
+            let known = settings.routes.iter().any(|r| r.id == planner);
             if !known {
                 return Err(format!("planner route \"{planner}\" is not configured"));
             }
@@ -1401,7 +1395,7 @@ fn resolve_variant(
     for (k, v) in fields {
         // Checked here, not with deny_unknown_fields: a task.json keeps
         // loading after a flag it names is retired.
-        if merged.get(k).is_none() {
+        if merged.get(k).is_none() && !Variant::OPTIONAL_KEYS.contains(&k.as_str()) {
             return Err(format!("unknown variant flag: {k}"));
         }
         merged[k] = v.clone();
@@ -2685,6 +2679,12 @@ async fn ask_plan_question_with_triage(
 // Classifier calls used by the engine loop
 // ===========================================================================
 
+/// Recorded once per task and stage/tier when a variant's route override
+/// replaces the settings' route.
+fn variant_route_line(what: &str, route_id: &str) -> String {
+    format!("Variant: {what} -> route {route_id} (override)")
+}
+
 /// Owner-visible `task.decisions` lines for a successful classifier call,
 /// kept as pure formatting helpers so they're unit-testable without a
 /// network call. Never fed anything but probabilities/choices/route ids --
@@ -3002,7 +3002,7 @@ async fn run_review(
 /// Longest advice kept, in characters.
 const MAX_ADVICE_CHARS: usize = 1500;
 
-/// One read-only call on the planner's route about the implement attempt
+/// One read-only call on the task's planner route about the implement attempt
 /// that just failed, made before the next attempt starts. The answer is
 /// stored as the failed attempt's `advice`. Returns the run's cost (`None`
 /// when no run happened). Never fails the task: no route, an escalation to
@@ -3029,7 +3029,9 @@ async fn run_advisor_before_retry(
     {
         return None;
     }
-    let advisor = settings.routes.iter().find(|r| r.id == settings.planner)?;
+    let variant = task.variant();
+    let planner = variant.plan_route_id(settings);
+    let advisor = settings.routes.iter().find(|r| r.id == planner)?;
     if advisor.id == next_route.id
         || (advisor.harness == next_route.harness
             && advisor.model.is_some()
@@ -3344,12 +3346,9 @@ async fn run_plan_stage(
         };
 
         let settings = app.settings.read().unwrap().clone();
-        let Some(route) = settings
-            .routes
-            .iter()
-            .find(|r| r.id == settings.planner)
-            .cloned()
-        else {
+        let variant = task.variant();
+        let planner = variant.plan_route_id(&settings);
+        let Some(route) = settings.routes.iter().find(|r| r.id == planner).cloned() else {
             // An unconfigured planner id is treated exactly like planner ==
             // "" -- never a silent fallback to some route the owner never
             // chose for this.
@@ -3361,6 +3360,13 @@ async fn run_plan_stage(
             }
             return end_plan_stage(app, task_id, None).await;
         };
+
+        if variant.planner_route.is_some() {
+            let line = variant_route_line("planner", &route.id);
+            if !task.decisions.contains(&line) {
+                task.decisions.push(line);
+            }
+        }
 
         let request_text = task.request.clone().unwrap_or_default();
         let attempt_n = task.attempts.len() as u32 + 1;
@@ -3831,11 +3837,13 @@ async fn run_task_loop(
 
         let settings = app.settings.read().unwrap().clone();
         let attempt_n = implement_attempt_count(&task) + 1;
-        let route_id = settings
-            .tiers
-            .get(&task.tier)
-            .cloned()
-            .unwrap_or_else(|| "codex".to_string());
+        let (route_id, overridden) = task.variant().implement_route_id(&settings, task.tier);
+        if overridden {
+            let line = variant_route_line(&format!("tier {}", task.tier.as_str()), &route_id);
+            if !task.decisions.contains(&line) {
+                task.decisions.push(line);
+            }
+        }
         if let Some((choice, p)) = jev_tier_choice {
             task.decisions.push(jev_tier_line(&choice, p, &route_id));
         }
@@ -5188,6 +5196,29 @@ mod tests {
         assert!(resolve_variant(&defaults, Some(&json!({"retryMode": "sideways"}))).is_err());
         assert!(resolve_variant(&defaults, Some(&json!("fresh"))).is_err());
         assert!(resolve_variant(&defaults, Some(&json!({"stallTimeoutSecs": u64::MAX}))).is_err());
+    }
+
+    #[test]
+    fn resolve_variant_takes_route_overrides_the_defaults_leave_out() {
+        let v = resolve_variant(
+            &Variant::default(),
+            Some(
+                &json!({"plannerRoute": "claude-sonnet", "tierRoutes": {"hard": "claude-sonnet"}}),
+            ),
+        )
+        .unwrap();
+        assert_eq!(v.planner_route.as_deref(), Some("claude-sonnet"));
+        assert_eq!(v.tier_routes.get(&Tier::Hard).unwrap(), "claude-sonnet");
+        let bad_tier = json!({"tierRoutes": {"extreme": "claude-sonnet"}});
+        assert!(resolve_variant(&Variant::default(), Some(&bad_tier)).is_err());
+    }
+
+    #[test]
+    fn variant_route_line_names_the_override() {
+        assert_eq!(
+            variant_route_line("tier hard", "claude-sonnet"),
+            "Variant: tier hard -> route claude-sonnet (override)"
+        );
     }
 
     #[test]

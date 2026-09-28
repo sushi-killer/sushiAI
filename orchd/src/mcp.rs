@@ -149,7 +149,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "finalVerify": {"type": "array", "items": {"type": "string"}, "description": "Slow checks (full CI, desktop smoke) run once, after review passes."},
                     "branch": {"type": "string"},
                     "base": {"type": "string", "description": "Branch or commit to start from; defaults to the repo's current HEAD."},
-                    "variant": {"type": "object", "description": "Experiment flags for this task only, over the settings defaults: retryMode (\"resume\"|\"fresh\"), stallTimeoutSecs (0 = off), plannerTier, contract, reviewOtherFamily, reviewEvidence, deferHeavyChecks, leanOutput, reviewBlind, advisor (bool). Create the same task twice with different variants to A/B them."},
+                    "variant": {"type": "object", "description": "Experiment flags for this task only, over the settings defaults: retryMode (\"resume\"|\"fresh\"), stallTimeoutSecs (0 = off), plannerTier, contract, reviewOtherFamily, reviewEvidence, deferHeavyChecks, leanOutput, reviewBlind, advisor (bool); plannerRoute (route id the plan stage runs on instead of the settings' planner) and tierRoutes (object tier -> route id, e.g. {\"hard\": \"claude-sonnet\"}, replacing the settings' tier route for implementing; must name configured routes). Create the same task twice with different variants to A/B them."},
                     "start": {"type": "boolean", "description": "Start right away (default true); false leaves the task stopped for review."},
                 },
                 "required": ["repo"],

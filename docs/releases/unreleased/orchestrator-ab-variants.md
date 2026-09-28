@@ -57,6 +57,11 @@
 - `orchd ab` has two more columns: the median first-turn prompt tokens of
   fresh Claude implement attempts, and mean cache-read tokens per implement
   attempt.
+- `plannerRoute` and `tierRoutes` (e.g. `{"hard": "claude-sonnet"}`) pick
+  the planner's route and a tier's implement route for one task instead of
+  the settings' `planner` and `tiers`, so model choice can be A/B'd; an
+  unknown route id fails `task.create`, and the task's decisions note the
+  override.
 - `leanOutput: true` gives a Claude implement run a PreToolUse hook
   (`orchd hook rtk`) that offers `rtk rewrite`'s shorter form of a `Bash`
   command before it runs (only for build, test and lint commands, whose

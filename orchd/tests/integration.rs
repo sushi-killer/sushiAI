@@ -3382,6 +3382,97 @@ fn eval_run_creates_one_task_at_the_resolved_base_with_its_eval_fields() {
 }
 
 #[test]
+fn variant_route_overrides_pick_the_planner_and_the_tier_s_implement_route() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-planner.sh", FAKE_PLANNER_SCRIPT);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    // Settings plan and implement `hard` on claude-opus; this task moves both
+    // to claude-sonnet. The planner's tier (hard) routes it.
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "add dark mode to the settings screen",
+            "variant": {
+                "plannerTier": true,
+                "plannerRoute": "claude-sonnet",
+                "tierRoutes": {"hard": "claude-sonnet"},
+            },
+            "start": true,
+        }),
+    );
+    assert_eq!(task["variant"]["plannerRoute"], "claude-sonnet", "{task}");
+    assert_eq!(
+        task["variant"]["tierRoutes"],
+        serde_json::json!({"hard": "claude-sonnet"}),
+        "{task}"
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+        s == "done" || s == "failed" || s == "stopped" || s == "waiting"
+    });
+    assert_eq!(settled["status"], "done", "{settled}");
+    assert_eq!(settled["tier"], "hard", "{settled}");
+    assert_eq!(settled["attempts"][0]["stage"], "plan", "{settled}");
+    assert_eq!(
+        settled["attempts"][0]["routeId"], "claude-sonnet",
+        "{settled}"
+    );
+    assert_eq!(settled["attempts"][1]["stage"], "implement", "{settled}");
+    assert_eq!(
+        settled["attempts"][1]["routeId"], "claude-sonnet",
+        "{settled}"
+    );
+    let decisions = settled["decisions"].as_array().unwrap();
+    for line in [
+        "Variant: planner -> route claude-sonnet (override)",
+        "Variant: tier hard -> route claude-sonnet (override)",
+        "Planner: tier hard -> route claude-sonnet",
+    ] {
+        assert!(decisions.iter().any(|d| d == line), "{line}: {settled}");
+    }
+
+    // The override was this task's only: the next one plans on the settings'
+    // planner and records no override.
+    let other = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "add dark mode to the settings screen",
+            "start": false,
+        }),
+    );
+    assert!(other["variant"].get("plannerRoute").is_none(), "{other}");
+    assert!(other["variant"].get("tierRoutes").is_none(), "{other}");
+    let other_id = other["id"].as_str().unwrap().to_string();
+    let other_settled = poll_until(&daemon, &other_id, Duration::from_secs(15), |s| {
+        s == "stopped" || s == "done" || s == "failed"
+    });
+    assert_eq!(
+        other_settled["attempts"][0]["routeId"], "claude-opus",
+        "{other_settled}"
+    );
+    assert!(
+        !other_settled["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d.as_str().unwrap().starts_with("Variant:")),
+        "{other_settled}"
+    );
+
+    daemon.shutdown_and_wait();
+    for t in [&task, &other] {
+        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+    }
+}
+
+#[test]
 fn eval_run_with_an_unknown_name_or_an_unresolvable_base_creates_nothing() {
     let daemon = Daemon::spawn(&[]);
     let repo = init_git_repo();
@@ -3417,5 +3508,44 @@ fn eval_run_with_an_unknown_name_or_an_unresolvable_base_creates_nothing() {
 
     let list = daemon.request("task.list", serde_json::json!({}));
     assert!(list.as_array().unwrap().is_empty(), "{list}");
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn task_create_rejects_a_route_override_naming_an_unknown_route_and_creates_nothing() {
+    let daemon = Daemon::spawn(&[]);
+    let repo = init_git_repo();
+    for (variant, expected) in [
+        (
+            serde_json::json!({"tierRoutes": {"hard": "claude-nope"}}),
+            "variant tierRoutes.hard \"claude-nope\" is not a configured route",
+        ),
+        (
+            serde_json::json!({"plannerRoute": "claude-nope"}),
+            "variant plannerRoute \"claude-nope\" is not a configured route",
+        ),
+    ] {
+        let result = raw_request_with_params(
+            &daemon.socket,
+            "task.create",
+            serde_json::json!({
+                "repo": repo.path().to_str().unwrap(),
+                "title": "t",
+                "goal": "g",
+                "variant": variant,
+            }),
+            Some(&daemon.token),
+        );
+        assert_eq!(result["error"]["message"], expected, "{result}");
+    }
+    let tasks = daemon.request("task.list", serde_json::json!({}));
+    assert_eq!(tasks, serde_json::json!([]), "{tasks}");
+    let worktrees = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&worktrees.stdout);
+    assert_eq!(listed.matches("worktree ").count(), 1, "{listed}");
     daemon.shutdown_and_wait();
 }

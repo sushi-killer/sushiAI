@@ -668,6 +668,23 @@ test("variantLabel leaves an unchanged flag out even when it sits between two di
   );
 });
 
+test("variantLabel lists route overrides after the flags", async () => {
+  const { variantLabel } = await library;
+  const taskVariant = variant({
+    leanOutput: true,
+    plannerRoute: "claude-sonnet",
+    tierRoutes: { hard: "claude-sonnet" },
+  });
+  assert.equal(
+    variantLabel(task({ variant: taskVariant }), variant()),
+    "leanOutput on · plannerRoute claude-sonnet · tierRoutes hard=claude-sonnet",
+  );
+  assert.equal(
+    variantLabel(task({ variant: variant() }), taskVariant),
+    "leanOutput off · plannerRoute settings · tierRoutes settings",
+  );
+});
+
 test("costByStage splits plan, each implement attempt, and review into their own totals", async () => {
   const { costByStage } = await library;
   const t = task({

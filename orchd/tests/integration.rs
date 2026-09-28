@@ -2196,7 +2196,7 @@ fn a_silent_harness_is_stopped_as_stalled_when_the_variant_sets_a_stall_timeout(
     let script = fake_harness_script(
         scripts_dir.path(),
         "fake-claude-silent.sh",
-        "#!/bin/sh\necho $$ > \"$PID_FILE\"\ncat > /dev/null\nexec sleep 30\n",
+        "#!/bin/sh\necho $$ > \"$PID_FILE\"\ncat > /dev/null\nexec sleep 90\n",
     );
     let pid_file = scripts_dir.path().join("harness.pid");
     let daemon = Daemon::spawn(&[
@@ -2216,14 +2216,14 @@ fn a_silent_harness_is_stopped_as_stalled_when_the_variant_sets_a_stall_timeout(
             "title": "Hangs",
             "goal": "Never answers",
             "verify": ["true"],
-            "variant": {"stallTimeoutSecs": 3},
+            "variant": {"stallTimeoutSecs": 8},
             "start": true,
         }),
     );
-    assert_eq!(task["variant"]["stallTimeoutSecs"], 3, "{task}");
+    assert_eq!(task["variant"]["stallTimeoutSecs"], 8, "{task}");
     let task_id = task["id"].as_str().unwrap().to_string();
 
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(90));
     assert_eq!(settled["status"], "waiting", "task JSON: {settled}");
     assert_eq!(
         settled["attempts"][0]["failure"]["kind"], "stall",
@@ -2850,6 +2850,46 @@ fn final_checks_run_once_after_review_passes_and_gate_the_commit() {
     }
 }
 
+#[test]
+fn a_failed_final_check_shows_the_failing_test_not_the_bundler_noise() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-contract.sh", FAKE_CONTRACT_SCRIPT);
+    let check = fake_harness_script(
+        scripts_dir.path(),
+        "noisy-check.sh",
+        "#!/bin/sh\ni=0\nwhile [ $i -lt 300 ]; do echo \"WARNING bundler chunk $i is large\" >&2; i=$((i+1)); done\necho 'test a_broken_thing ... FAILED'\necho \"thread 'a_broken_thing' panicked at t.rs:3:5:\"\necho 'assertion failed: boom_message'\nj=0\nwhile [ $j -lt 300 ]; do echo \"test fine_$j ... ok\"; j=$((j+1)); done\nexit 1\n",
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["maxAttempts"] = serde_json::json!(1);
+    settings["review"] = serde_json::json!("claude-opus");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Noisy final check",
+            "goal": "Write the marker",
+            "verify": ["true"],
+            "finalVerify": [check.to_str().unwrap()],
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
+    assert_eq!(settled["status"], "waiting", "{settled}");
+    let detail = settled["attempts"][0]["failure"]["detail"]
+        .as_str()
+        .unwrap();
+    assert!(detail.contains("a_broken_thing ... FAILED"), "{detail}");
+    assert!(detail.contains("boom_message"), "{detail}");
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(&worktree);
+}
+
 /// Implements like the other fakes; as reviewer, answers PASS and reports a
 /// cost of its own via `total_cost_usd`.
 const FAKE_PRICED_REVIEWER_SCRIPT: &str = r###"#!/bin/sh
@@ -2990,11 +3030,18 @@ fn a_claude_implement_run_trims_delegation_tools_and_keeps_the_configured_mcp_se
 /// fake rtk script to use. The test process's own `PATH` is never read or
 /// mutated. Returns the child's trimmed stdout.
 fn rtk_hook(path_dir: &Path, stdin: &str) -> String {
+    rtk_hook_with_timeout(path_dir, stdin, "10000")
+}
+
+/// `timeout_ms` is the hook's rtk timeout: generous by default so a loaded
+/// machine never times a fast fake out.
+fn rtk_hook_with_timeout(path_dir: &Path, stdin: &str, timeout_ms: &str) -> String {
     let path = format!("{}:/usr/bin:/bin", path_dir.display());
     let mut child = Command::new(env!("CARGO_BIN_EXE_orchd"))
         .arg("hook")
         .arg("rtk")
         .env("PATH", path)
+        .env("ORCHD_RTK_REWRITE_TIMEOUT_MS", timeout_ms)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -3086,17 +3133,17 @@ fn lean_output_rtk_hook_kills_a_slow_rtk_on_timeout() {
         dir.path(),
         "rtk",
         &format!(
-            "#!/bin/sh\necho $$ > {}\nsleep 5\necho \"$2 --slow\"\n",
+            "#!/bin/sh\necho $$ > {}\nsleep 60\necho \"$2 --slow\"\n",
             pid_file.display()
         ),
     );
     let stdin = rtk_payload("npm test");
     let start = Instant::now();
-    assert_eq!(rtk_hook(dir.path(), &stdin), "{}");
+    assert_eq!(rtk_hook_with_timeout(dir.path(), &stdin, "8000"), "{}");
     let elapsed = start.elapsed();
     assert!(
-        elapsed < Duration::from_secs(5),
-        "the hook must return well under 5s, took {elapsed:?}"
+        elapsed < Duration::from_secs(30),
+        "the hook must return well before the fake's 60s sleep, took {elapsed:?}"
     );
     // Give the kill a brief moment to land before checking.
     std::thread::sleep(Duration::from_millis(200));

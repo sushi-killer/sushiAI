@@ -1818,21 +1818,58 @@ fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(8)]
 }
 
-/// Each stream's own tail: concatenated, a noisy stderr (cargo's compile
-/// log) pushed stdout's end -- where test runners list what failed -- out of
-/// the kept window, so a retry never saw which test broke.
+/// Lines a test runner prints for a failure: cargo's `... FAILED` and
+/// `panicked at`, node's `not ok` / `AssertionError`, and the assertion
+/// detail lines that follow a panic.
+fn is_failure_line(line: &str) -> bool {
+    let t = line.trim();
+    t.ends_with("FAILED")
+        || t.starts_with("not ok")
+        || t.starts_with("---- ")
+        || t.contains("panicked at")
+        || t.contains("AssertionError")
+        || t.starts_with("assertion ")
+        || t.starts_with("left:")
+        || t.starts_with("right:")
+        || t.starts_with("error:")
+        || t.starts_with("Error:")
+}
+
+/// The failing tests' names and assertion lines from both streams, keeping
+/// the last lines when there are more than fit.
+fn failure_highlights(out: &str, err: &str, max: usize) -> String {
+    let lines: Vec<&str> = out
+        .lines()
+        .chain(err.lines())
+        .filter(|l| is_failure_line(l))
+        .collect();
+    tail_chars(&lines.join("\n"), max)
+}
+
+/// Each stream's own tail plus the failure lines found anywhere in either:
+/// concatenated, a noisy stderr (cargo's compile log) pushed stdout's end --
+/// where test runners list what failed -- out of the kept window, so a retry
+/// never saw which test broke. The failure lines come last because the
+/// consumers (brief, Stop hook) keep the end of the detail.
 fn verify_tail(stdout: &[u8], stderr: &[u8]) -> String {
     let out = String::from_utf8_lossy(stdout);
     let err = String::from_utf8_lossy(stderr);
-    match (out.trim().is_empty(), err.trim().is_empty()) {
-        (true, _) => tail_chars(&err, 4000),
-        (_, true) => tail_chars(&out, 4000),
+    let highlights = failure_highlights(&out, &err, 1000);
+    let mut body = match (out.trim().is_empty(), err.trim().is_empty()) {
+        (true, true) => String::new(),
+        (true, _) => tail_chars(&err, 3000),
+        (_, true) => tail_chars(&out, 3000),
         _ => format!(
             "--- stderr (tail) ---\n{}\n--- stdout (tail) ---\n{}",
-            tail_chars(&err, 1200),
-            tail_chars(&out, 2800)
+            tail_chars(&err, 900),
+            tail_chars(&out, 2100)
         ),
+    };
+    if !highlights.is_empty() {
+        body.push_str("\n--- failures ---\n");
+        body.push_str(&highlights);
     }
+    body
 }
 
 /// Run one verify command in its own process group (`setsid`, like the
@@ -5400,6 +5437,20 @@ mod tests {
         );
         assert!(tail.contains("test foo ... FAILED"));
         assert!(tail.len() < 4200);
+    }
+
+    #[test]
+    fn verify_tail_surfaces_failing_test_names_and_assertions() {
+        let stderr = "WARNING bundler chunk too large\n".repeat(300);
+        let stdout = format!(
+            "test a_broken_thing ... FAILED\n\nthread 'a_broken_thing' panicked at t.rs:3:5:\nassertion `left == right` failed: boom\n  left: 1\n right: 2\n{}",
+            "test ok_one ... ok\n".repeat(400)
+        );
+        let tail = verify_tail(stdout.as_bytes(), stderr.as_bytes());
+        assert!(tail.contains("a_broken_thing ... FAILED"));
+        assert!(tail.contains("assertion `left == right` failed: boom"));
+        assert!(tail.len() < 4500);
+        assert!(tail.trim_end().ends_with("right: 2"));
     }
 
     #[test]

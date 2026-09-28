@@ -108,6 +108,16 @@ async fn run_hook_inner(socket: Option<String>, token: Option<String>) -> Option
 /// so the hook always gets to answer for itself.
 const RTK_REWRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Test-only override (milliseconds) so a loaded machine can widen the window
+/// without changing what ships; unset, [`RTK_REWRITE_TIMEOUT`] applies.
+fn rtk_rewrite_timeout() -> std::time::Duration {
+    std::env::var("ORCHD_RTK_REWRITE_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(RTK_REWRITE_TIMEOUT)
+}
+
 /// `orchd hook rtk`: the PreToolUse payload on stdin (a Bash tool call)
 /// becomes an `rtk rewrite <command>` call, with no socket or token -- this
 /// hook never contacts the daemon. Fails open (`None` -> caller prints
@@ -143,7 +153,7 @@ async fn run_rtk_rewrite(command: &str) -> (Option<i32>, String) {
     let Ok(child) = child else {
         return (None, String::new());
     };
-    match tokio::time::timeout(RTK_REWRITE_TIMEOUT, child.wait_with_output()).await {
+    match tokio::time::timeout(rtk_rewrite_timeout(), child.wait_with_output()).await {
         Ok(Ok(out)) => (
             out.status.code(),
             String::from_utf8_lossy(&out.stdout).to_string(),

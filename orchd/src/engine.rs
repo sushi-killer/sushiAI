@@ -21,6 +21,8 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, oneshot, Notify, Semaphore};
 
+#[path = "audit.rs"]
+mod audit;
 #[path = "chat.rs"]
 mod chat;
 #[path = "messages.rs"]
@@ -375,6 +377,8 @@ pub struct App {
     controls: std::sync::Mutex<HashMap<String, TaskControl>>,
     /// Keyed by repo: the orchestrator chat turn running for it, if any.
     chat_turns: std::sync::Mutex<HashMap<String, CancelToken>>,
+    /// Keyed by audit id: the `repo.audit` runs still in flight.
+    audits: std::sync::Mutex<HashMap<String, CancelToken>>,
     /// Every agent-to-agent message, mirrored to `<data>/messages.json`.
     messages: StdMutex<Vec<Message>>,
     hook_tokens: RwLock<HashMap<String, Arc<HookContext>>>,
@@ -448,6 +452,7 @@ impl App {
             shutdown_tx,
             controls: std::sync::Mutex::new(HashMap::new()),
             chat_turns: std::sync::Mutex::new(HashMap::new()),
+            audits: std::sync::Mutex::new(HashMap::new()),
             messages: StdMutex::new(messages),
             hook_tokens: RwLock::new(HashMap::new()),
             verify_cache: std::sync::Mutex::new(HashMap::new()),
@@ -497,6 +502,9 @@ impl App {
         for cancel in self.chat_turns.lock().unwrap().values() {
             cancel.cancel();
         }
+        for cancel in self.audits.lock().unwrap().values() {
+            cancel.cancel();
+        }
         let _ = self.shutdown_tx.send(());
     }
 
@@ -520,6 +528,12 @@ impl App {
         !self.chat_turns.lock().unwrap().is_empty()
     }
 
+    /// Same again for `repo.audit` runs: an entry goes only once its run
+    /// has returned.
+    pub fn any_audit_running(&self) -> bool {
+        !self.audits.lock().unwrap().is_empty()
+    }
+
     /// `ping`/`hook.stop` are the only methods reachable without the
     /// control token: `ping` so Electron can probe/tell daemons apart
     /// before it has read the token file, `hook.stop` because it's only
@@ -541,6 +555,9 @@ impl App {
     pub fn recover_on_start(&self) -> std::io::Result<()> {
         for t in self.store.recover_interrupted()? {
             self.broadcast_task(&t);
+        }
+        for a in self.store.recover_interrupted_audits()? {
+            audit::broadcast(self, &a);
         }
         for t in self.store.list_tasks()? {
             if t.archived {
@@ -673,6 +690,9 @@ impl App {
             "message.send" => messages::handle_send(self, params).await,
             "message.inbox" => messages::handle_inbox(self, params).await,
             "message.list" => messages::handle_list(self, params).await,
+            "repo.audit" => audit::handle_start(self, params).await,
+            "repo.audit.get" => audit::handle_get(self, params).await,
+            "repo.audit.list" => audit::handle_list(self, params).await,
             "hook.stop" => self.handle_hook_stop(params).await,
             "shutdown" => self.handle_shutdown().await,
             other => Err(format!("unknown method: {other}")),
@@ -2480,6 +2500,7 @@ async fn run_triage(
         network_allowed: false,
         codex_mcp: None,
         images: &[],
+        repo_settings: true,
     };
     let brief_text = brief::build_triage_brief(task, question, options);
     let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
@@ -2853,6 +2874,32 @@ async fn classify_answerable(app: &Arc<App>, task: &Task, question: &str) -> Opt
 // Review
 // ===========================================================================
 
+/// The run request of a read-only session: review's, and anything that must
+/// be held to the same restrictions (no edits, no network, never resumed,
+/// no MCP servers but the empty config it is handed).
+fn review_request<'a>(
+    route: &'a Route,
+    worktree: &'a Path,
+    mcp_config: &'a Path,
+    settings_path: &'a Path,
+    images: &'a [PathBuf],
+) -> harness::RunRequest<'a> {
+    harness::RunRequest {
+        harness: route.harness,
+        worktree,
+        model: route.model.as_deref(),
+        effort: route.effort.as_deref(),
+        resume: None,
+        review: true,
+        mcp_config: Some(mcp_config),
+        settings_path: Some(settings_path),
+        network_allowed: false,
+        codex_mcp: None,
+        images,
+        repo_settings: true,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_review(
     app: &Arc<App>,
@@ -2950,19 +2997,7 @@ async fn run_review(
         let _ = store::write_json_atomic(&settings_path, &claude_settings);
     }
 
-    let req = harness::RunRequest {
-        harness: review_route.harness,
-        worktree,
-        model: review_route.model.as_deref(),
-        effort: review_route.effort.as_deref(),
-        resume: None,
-        review: true,
-        mcp_config: Some(&mcp_path),
-        settings_path: Some(&settings_path),
-        network_allowed: false,
-        codex_mcp: None,
-        images: &images,
-    };
+    let req = review_request(review_route, worktree, &mcp_path, &settings_path, &images);
     match run_harness(
         app,
         task_id,
@@ -3080,6 +3115,7 @@ async fn run_advisor_before_retry(
         network_allowed: false,
         codex_mcp: None,
         images: &[],
+        repo_settings: true,
     };
     let result = run_harness(
         app,
@@ -3437,6 +3473,7 @@ async fn run_plan_stage(
             network_allowed: false,
             codex_mcp: None,
             images: &[],
+            repo_settings: true,
         };
 
         let mut draft: Option<brief::PlanDraft> = None;
@@ -4089,6 +4126,7 @@ async fn run_task_loop(
             network_allowed,
             codex_mcp: Some((messages::SERVER, &messages_server)),
             images: &[],
+            repo_settings: true,
         };
 
         let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);

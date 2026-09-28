@@ -27,6 +27,11 @@ pub struct RunRequest<'a> {
     /// Codex only: images attached to the prompt (`--image`); Claude opens
     /// image files itself with its Read tool.
     pub images: &'a [std::path::PathBuf],
+    /// Claude only: load the checkout's own `.claude/settings{,.local}.json`
+    /// (`--setting-sources project,local`). Off for a run in a checkout
+    /// orchd does not own (an audited repo): those settings carry hooks,
+    /// shell commands that run outside the sandbox.
+    pub repo_settings: bool,
 }
 
 /// The tools an orchd agent never needs: it implements one bounded task and
@@ -65,7 +70,12 @@ pub fn claude_argv(req: &RunRequest) -> Vec<String> {
         "stream-json".to_string(),
         "--verbose".to_string(),
         "--setting-sources".to_string(),
-        "project,local".to_string(),
+        if req.repo_settings {
+            "project,local"
+        } else {
+            ""
+        }
+        .to_string(),
         "--disable-slash-commands".to_string(),
         "--strict-mcp-config".to_string(),
     ];
@@ -532,6 +542,7 @@ mod tests {
             network_allowed: true,
             codex_mcp: None,
             images: &[],
+            repo_settings: true,
         }
     }
 

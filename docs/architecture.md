@@ -37,14 +37,15 @@ flowchart TB
     proto["protocol.rs<br/>NDJSON socket + token"]
     engine["engine.rs<br/>task loop, gates, routing"]
     chat["chat.rs<br/>orchestrator chat"]
+    audit["audit.rs<br/>repo.audit, read-only"]
     harness["harness.rs<br/>claude -p / codex exec"]
     side["classify.rs (Jev)<br/>git.rs (worktrees, commit)<br/>messages.rs (merging)"]
-    store[("data dir<br/>tasks/, runs/, settings.json,<br/>decisions.jsonl, chats/")]
+    store[("data dir<br/>tasks/, runs/, settings.json,<br/>decisions.jsonl, chats/, audits/")]
     mcp["orchd mcp<br/>task_* tools, stdio"]
-    proto --> engine & chat
+    proto --> engine & chat & audit
     engine --> side
-    engine & chat --> harness
-    engine & chat <--> store
+    engine & chat & audit --> harness
+    engine & chat & audit <--> store
     mcp -->|socket| proto
   end
 
@@ -52,6 +53,7 @@ flowchart TB
     direction LR
     taskAgent["Task agent<br/>in its own worktree"]
     reviewer["Reviewer<br/>read-only"]
+    auditor["Auditor<br/>read-only, in the repo's checkout"]
     orchAgent["Orchestrator agent<br/>Opus, read-only + MCP"]
   end
 
@@ -62,7 +64,7 @@ flowchart TB
 
   owner --> shell
   orchSvc <-->|socket| proto
-  harness --> taskAgent & reviewer & orchAgent
+  harness --> taskAgent & reviewer & auditor & orchAgent
   orchAgent -->|MCP| mcp
   taskAgent -->|Stop hook| proto
   taskAgent -->|rtk rewrite hook<br/>leanOutput, no socket| rtk

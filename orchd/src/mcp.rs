@@ -56,6 +56,9 @@ orchestrator_reply {question, text}. inbox_read shows everything sent to you.
 - peer_send {to, text} messages a task and peer_list {repo} lists a \
 repository's tasks. A task reads a message on its next attempt; the attempt \
 it is running is never interrupted.
+- repo_audit {repo} starts a read-only audit of how ready a repository is \
+for autonomous agent work. It runs in the background: give the owner the \
+audit id it returns.
 ";
 
 /// The role handed to a task agent attached through `orchd mcp --task`.
@@ -78,7 +81,7 @@ pub const TASK_TOOLS: [&str; 4] = [
 ];
 
 /// What the orchestrator agent gets: every tool below.
-pub const ORCHESTRATOR_TOOLS: [&str; 15] = [
+pub const ORCHESTRATOR_TOOLS: [&str; 16] = [
     "task_list",
     "task_get",
     "task_create",
@@ -94,6 +97,7 @@ pub const ORCHESTRATOR_TOOLS: [&str; 15] = [
     "inbox_read",
     "ask_orchestrator",
     "orchestrator_reply",
+    "repo_audit",
 ];
 
 fn from_schema() -> Value {
@@ -278,6 +282,19 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "text": {"type": "string"},
                 },
                 "required": ["question", "text"],
+            }),
+        ),
+        (
+            "repo_audit",
+            "repo.audit",
+            "Start a read-only audit of a repository against a fixed agent-readiness rubric (instructions, build/test commands, test health, legibility, context hygiene, safety, verification surfaces). Returns the audit record with its id at once; the run continues in the background and stores a graded report with file-referenced recommendations.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Absolute path of the repository to audit."},
+                    "route": {"type": "string", "description": "Route id to run it on; defaults to the planner's route."},
+                },
+                "required": ["repo"],
             }),
         ),
     ]
@@ -652,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_has_exactly_the_fifteen_tools_and_no_delete_or_settings_set() {
+    fn tools_list_has_exactly_the_sixteen_tools_and_no_delete_or_settings_set() {
         let result = dispatch(&orchestrator(), "tools/list", &json!({})).unwrap();
         let tools = result["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -674,6 +691,7 @@ mod tests {
                 "inbox_read",
                 "ask_orchestrator",
                 "orchestrator_reply",
+                "repo_audit",
             ]
         );
         assert_eq!(names, ORCHESTRATOR_TOOLS);

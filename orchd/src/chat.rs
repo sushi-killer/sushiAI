@@ -325,7 +325,7 @@ fn push(session: &mut ChatSession, role: &str, text: &str) {
     session.messages.drain(..excess);
 }
 
-fn repo_param(params: &serde_json::Value) -> Result<String, String> {
+pub(super) fn repo_param(params: &serde_json::Value) -> Result<String, String> {
     let repo = params
         .get("repo")
         .and_then(|v| v.as_str())
@@ -828,7 +828,7 @@ mod tests {
         assert_eq!(at("--tools"), "Read,Grep,Glob");
         assert_eq!(at("--mcp-config"), "/d/mcp.json");
         assert_eq!(at("--resume"), "sess");
-        assert_eq!(at("--allowedTools").split(',').count(), 15);
+        assert_eq!(at("--allowedTools").split(',').count(), 16);
         assert!(at("--allowedTools").contains("mcp__sushiai-orchestrator__orchestrator_reply"));
         assert!(!at("--allowedTools").contains("task_delete"));
         assert!(!argv.iter().any(|a| a == "acceptEdits"));

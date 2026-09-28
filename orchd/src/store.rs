@@ -1,10 +1,11 @@
 //! JSON-file store: `<data>/settings.json`, `<data>/decisions.jsonl`,
-//! `<data>/tasks/<id>/task.json`, `<data>/tasks/<id>/runs/<n>/*`.
+//! `<data>/tasks/<id>/task.json`, `<data>/tasks/<id>/runs/<n>/*`,
+//! `<data>/audits/<id>/{audit.json,report.json,brief.md,events.jsonl}`.
 //! All writes to `task.json`/`settings.json` are atomic (write tmp file in
 //! the same directory, then rename) so a crash never leaves a half-written
 //! file for the next read.
 
-use crate::model::{AttemptStatus, Settings, Task, TaskStatus};
+use crate::model::{AttemptStatus, Audit, AuditReport, AuditStatus, Settings, Task, TaskStatus};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -152,6 +153,86 @@ impl Store {
         }
         Ok(recovered)
     }
+
+    // -- audits ------------------------------------------------------------
+
+    pub fn audit_dir(&self, id: &str) -> PathBuf {
+        self.data_dir.join("audits").join(id)
+    }
+
+    pub fn save_audit(&self, audit: &Audit) -> io::Result<()> {
+        write_json_atomic(&self.audit_dir(&audit.id).join("audit.json"), audit)
+    }
+
+    pub fn load_audit(&self, id: &str) -> io::Result<Option<Audit>> {
+        read_json(&self.audit_dir(id).join("audit.json"))
+    }
+
+    pub fn save_audit_report(&self, id: &str, report: &AuditReport) -> io::Result<()> {
+        write_json_atomic(&self.audit_dir(id).join("report.json"), report)
+    }
+
+    pub fn load_audit_report(&self, id: &str) -> io::Result<Option<AuditReport>> {
+        read_json(&self.audit_dir(id).join("report.json"))
+    }
+
+    /// Every audit of `repo`, newest first; corrupt entries are skipped.
+    pub fn list_audits(&self, repo: &str) -> io::Result<Vec<Audit>> {
+        let dir = self.data_dir.join("audits");
+        let mut out = Vec::new();
+        if !dir.exists() {
+            return Ok(out);
+        }
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            if let Ok(Some(audit)) = read_json::<Audit>(&entry.path().join("audit.json")) {
+                if audit.repo == repo {
+                    out.push(audit);
+                }
+            }
+        }
+        out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        Ok(out)
+    }
+
+    /// On daemon start: an audit left `running` lost its run with the
+    /// previous process, so it becomes `stopped`, and its per-run key file
+    /// goes. Returns the audits that changed.
+    pub fn recover_interrupted_audits(&self) -> io::Result<Vec<Audit>> {
+        let dir = self.data_dir.join("audits");
+        let mut recovered = Vec::new();
+        if !dir.exists() {
+            return Ok(recovered);
+        }
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let Ok(Some(mut audit)) = read_json::<Audit>(&entry.path().join("audit.json")) else {
+                continue;
+            };
+            if audit.status == AuditStatus::Running {
+                let _ = fs::remove_file(entry.path().join("key"));
+                audit.status = AuditStatus::Stopped;
+                audit.error = Some("Interrupted by a daemon restart.".to_string());
+                audit.ended_at = Some(crate::model::now_ms());
+                self.save_audit(&audit)?;
+                recovered.push(audit);
+            }
+        }
+        Ok(recovered)
+    }
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path)?;
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 /// Best-effort: SIGTERM then (briefly later) SIGKILL a process group left

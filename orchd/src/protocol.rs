@@ -36,6 +36,11 @@ pub enum Event {
     /// An agent-to-agent message, when it is sent and again when delivered.
     #[serde(rename = "message")]
     Message { message: Box<Message> },
+    /// A `repo.audit` run, as `repo.audit.get` returns it, when it starts
+    /// and when it ends; its progress lines are `log` events keyed by the
+    /// audit id.
+    #[serde(rename = "audit")]
+    Audit { audit: Box<serde_json::Value> },
 }
 
 #[derive(Debug, Deserialize)]

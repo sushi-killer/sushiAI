@@ -245,5 +245,45 @@ export type Message = {
 /** Pushed both when a message is created and again when it flips to
  * delivered - an upsert by id, same as `TaskEvent`. */
 export type MessageEvent = { event: "message"; message: Message };
+
+export type AuditStatus = "running" | "done" | "failed" | "stopped";
+export type AuditGrade = "good" | "weak" | "missing";
+export type AuditEffort = "small" | "medium" | "large";
+export type AuditItem = {
+  area: string;
+  grade: AuditGrade;
+  /** `path:line` references, commands run, or `unmeasured: ...`. */
+  evidence: string[];
+  recommendation: string;
+  effort: AuditEffort;
+};
+/** The agent's parsed ```sushi-audit reply, stored as `report.json`. */
+export type AuditReport = {
+  summary: string;
+  items: AuditItem[];
+  /** At most 5, most valuable for autonomous agents first. */
+  topFixes: string[];
+};
+/** One read-only `repo.audit` run, as `repo.audit.get`/`repo.audit.list`
+ * return it. `report` is null until the run is done, and stays null when
+ * the reply held no parsable report (`error` says why). */
+export type Audit = {
+  id: string;
+  repo: string;
+  routeId: string;
+  harness: Harness;
+  model: string;
+  status: AuditStatus;
+  startedAt: number;
+  endedAt?: number;
+  error?: string;
+  usage?: Usage;
+  costUsd: number;
+  report: AuditReport | null;
+};
+/** Pushed when an audit starts and when it ends; its progress lines are
+ * `LogEvent`s whose `taskId` is the audit id (`attempt` 0). */
+export type AuditEvent = { event: "audit"; audit: Audit };
 /** Pushed over `onOrchestrator` from the daemon's one `subscribe` connection. */
-export type OrchestratorEvent = TaskEvent | LogEvent | ChatEvent | MessageEvent;
+export type OrchestratorEvent =
+  TaskEvent | LogEvent | ChatEvent | MessageEvent | AuditEvent;

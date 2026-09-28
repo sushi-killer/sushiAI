@@ -268,7 +268,12 @@ export function applyOrchestratorEvent(
 ): OrchestratorLiveState {
   if (event.event === "task")
     return { ...state, tasks: upsertTask(state.tasks, event.task) };
-  if (event.event === "chat" || event.event === "message") return state;
+  if (
+    event.event === "chat" ||
+    event.event === "message" ||
+    event.event === "audit"
+  )
+    return state;
   const lines = [...(state.logLines[event.taskId] || []), event.line].slice(
     -MAX_LOG_LINES,
   );

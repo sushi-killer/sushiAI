@@ -33,6 +33,7 @@ Rule: give each task a new branch, or omit `branch`.
 
 ## Promoted
 
+- 2026-09-28 Trusted `rtk rewrite` (`rtk read` drops code) → allowlist. `rtk_rewrite_output_*`.
 - 2026-09-25 A changed orchd default never reached earlier-saved settings (`settings.set` stores the whole struct) → mark settings differing from `settings.defaults`. `settings_defaults_reports_the_built_in_defaults_not_the_saved_settings`.
 - 2026-09-25 Disabled `select!` branch still built `Instant + Duration::MAX`, panicking the loop → bounded deadline. `run_harness`.
 - 2026-09-24 An unparsed review verdict counted as PASS → no verdict asks the owner. `a_review_without_a_verdict_waits_for_the_owner_instead_of_passing`.
@@ -51,7 +52,6 @@ Rule: give each task a new branch, or omit `branch`.
 - 2026-09-13 One global `connected` flag colored every host's status dot → per-endpoint `statusByEndpoint`. `useHerdr.ts`.
 - 2026-09-12 Duplicate manifest labels broke a Playwright selector → `manifest.cjs`, `extension-contract-coverage.test.cjs`
 - 2026-09-12 Commands without a `surfaceId` silently did nothing at runtime → AGENTS.md, `manifest.cjs`
-- 2026-09-12 Empty `getPathForFile()` paths (Electron 30-33); drag highlight flicker → AGENTS.md
 - 2026-09-12 A copy-pasted duplicate in `ACTION_PLACEMENTS`/`ICONS` shipped silently → `extension-contract-coverage.test.cjs`
 - 2026-09-12 CI silently never ran 33 of 52 test files → `package.json` `ci` script
 - 2026-09-12 `scripts/smoke.mjs` discards an external `SUSHIAI_EXTENSIONS_DIR` → `author-and-verify-extension` skill

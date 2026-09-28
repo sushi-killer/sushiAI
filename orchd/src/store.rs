@@ -272,6 +272,7 @@ mod tests {
                 usage: None,
                 cost_usd: None,
                 review_cost_usd: None,
+                advice: None,
             }],
             cost_usd: 0.0,
             archived: false,

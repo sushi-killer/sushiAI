@@ -166,6 +166,41 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
     out
 }
 
+/// The advisor's answer for the next attempt, as data.
+pub fn advisor_block(advice: &str) -> String {
+    format!(
+        "## Advisor\n\n{}\n",
+        untrusted_block(
+            "A stronger model's diagnosis of the last attempt's failure",
+            advice
+        )
+    )
+}
+
+/// What the advisor is asked: diagnose the failed attempt and name one next
+/// step, in at most 1500 characters. Read-only.
+pub fn build_advisor_brief(task: &Task, diff: &str, failure_detail: &str) -> String {
+    let mut out = String::from("## Advisor\n\nAn implement attempt at this task failed. Read-only: do not edit files. Reply with a short diagnosis of why it failed and one concrete next step, at most 1500 characters, and nothing else.\n\n## Task\n\n");
+    out.push_str(&task.title);
+    out.push_str("\n\n");
+    out.push_str(&task.goal);
+    out.push_str("\n\n## Acceptance criteria\n\n");
+    for c in &task.criteria {
+        out.push_str("- ");
+        out.push_str(c);
+        out.push('\n');
+    }
+    out.push_str("\n## Failure detail\n\n");
+    out.push_str(&untrusted_block(
+        "How the attempt failed",
+        &clip_middle(failure_detail, MAX_RESUME_FAILURE_DETAIL),
+    ));
+    out.push_str("\n## Diff of the failed attempt\n\n```diff\n");
+    out.push_str(diff);
+    out.push_str("\n```\n");
+    out
+}
+
 /// A resumed session only needs the delta: the failure that ended the
 /// previous attempt, and a reminder of the report format (spec step 3,
 /// "A resumed session gets only the delta").
@@ -722,6 +757,7 @@ mod tests {
             usage: None,
             cost_usd: None,
             review_cost_usd: None,
+            advice: None,
         });
         let mut second = task.attempts[0].clone();
         second.n = 2;
@@ -878,6 +914,7 @@ mod tests {
             usage: None,
             cost_usd: None,
             review_cost_usd: None,
+            advice: None,
         });
         let brief = build_brief(&task, "", "");
         assert!(
@@ -1051,6 +1088,7 @@ mod tests {
             usage: None,
             cost_usd: None,
             review_cost_usd: None,
+            advice: None,
         });
         let brief = build_triage_brief(
             &task,

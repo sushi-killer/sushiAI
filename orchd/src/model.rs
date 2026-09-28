@@ -229,6 +229,12 @@ pub struct Variant {
     /// command's own output comes back. Codex runs and review/plan
     /// sessions are untouched either way.
     pub lean_output: bool,
+    /// The review brief leaves out the implementer's summary and decisions,
+    /// so the reviewer judges the diff without the author's account.
+    pub review_blind: bool,
+    /// After an implement attempt fails, one read-only call on the planner's
+    /// route diagnoses it; the answer goes into the next attempt's brief.
+    pub advisor: bool,
 }
 
 #[cfg(test)]
@@ -530,6 +536,10 @@ pub struct Attempt {
     /// `task.cost_usd` too, at the point the review runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_cost_usd: Option<f64>,
+    /// The advisor's short diagnosis of this attempt's failure, shown to the
+    /// next attempt. Its cost is added to the task, not to this attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advice: Option<String>,
 }
 
 /// The address the orchestrator agent sends from and receives at; every

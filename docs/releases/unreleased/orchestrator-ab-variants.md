@@ -68,3 +68,12 @@
   containing `git commit` or `git push`, so a rewrite can never launder past
   those same deny rules. Codex runs and review/plan sessions are unaffected
   either way.
+- `reviewBlind: true` leaves the implementer's summary and decisions out of
+  the review brief; the reviewer sees the diff, criteria, verify results and
+  screenshots only.
+- `advisor: true` makes one read-only call on the planner's route after an
+  implement attempt fails and before the retry (skipped when the retry runs on
+  that same route): a diagnosis and next step of at most 1500 characters,
+  shown to the next attempt under `## Advisor` and stored as the failed
+  attempt's `advice`. Its cost counts toward the task, and a failed advisor
+  run never blocks the retry.

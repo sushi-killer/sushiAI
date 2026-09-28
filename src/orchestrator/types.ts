@@ -83,6 +83,8 @@ export type Variant = {
   reviewEvidence: boolean;
   deferHeavyChecks: boolean;
   leanOutput: boolean;
+  reviewBlind: boolean;
+  advisor: boolean;
 };
 
 export type FailureKind =
@@ -134,6 +136,9 @@ export type Attempt = {
    * separate from `costUsd` because that field is what a later resume of
    * the same session subtracts, and a review's cost must never join it. */
   reviewCostUsd?: number;
+  /** The advisor's diagnosis of this attempt's failure, shown to the next
+   * attempt. Its cost is in the task's `costUsd` only. */
+  advice?: string;
 };
 
 export type Task = {

@@ -2347,6 +2347,144 @@ fn a_fresh_retry_starts_a_new_session_that_reads_the_earlier_handoff() {
     }
 }
 
+/// Like FAKE_RETRY_SCRIPT, but it also answers the advisor: a brief that
+/// says an attempt failed gets $ADVISOR_MODE ("ok" answers, "fail" exits 1
+/// with no output). Every run's brief is kept as $LOG_DIR/brief.<pid>.
+const FAKE_ADVISOR_SCRIPT: &str = r#"#!/bin/sh
+cat > "$LOG_DIR/brief.$$"
+if grep -q 'An implement attempt at this task failed' "$LOG_DIR/brief.$$"; then
+  echo advisor >> "$LOG_DIR/advisor.log"
+  if [ "$ADVISOR_MODE" = fail ]; then exit 1; fi
+  printf '%s\n' '{"type":"result","total_cost_usd":0.03,"usage":{"input_tokens":1,"output_tokens":1},"result":"Create SECOND, not FIRST."}'
+  exit 0
+fi
+if [ -f FIRST ]; then echo x > SECOND; else echo x > FIRST; fi
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"handoff\":\"quick fix\",\"decisions\":[],\"question\":\"\"}\n```"}'
+"#;
+
+#[test]
+fn the_advisor_runs_once_before_a_retry_and_its_advice_reaches_the_next_brief() {
+    for (advisor, mode) in [(true, "ok"), (true, "fail"), (false, "ok")] {
+        let scripts_dir = tempfile::tempdir().unwrap();
+        let script =
+            fake_harness_script(scripts_dir.path(), "fake-advisor.sh", FAKE_ADVISOR_SCRIPT);
+        let daemon = Daemon::spawn(&[
+            ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+            ("LOG_DIR", scripts_dir.path().to_str().unwrap()),
+            ("ADVISOR_MODE", mode),
+        ]);
+        let mut settings = daemon.request("settings.get", serde_json::json!({}));
+        settings["review"] = serde_json::json!("");
+        daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+        let repo = init_git_repo();
+        let task = daemon.request(
+            "task.create",
+            serde_json::json!({
+                "repo": repo.path().to_str().unwrap(),
+                "title": "Two tries",
+                "goal": "Needs a second attempt",
+                "verify": ["test -f SECOND"],
+                "variant": {"advisor": advisor, "retryMode": "fresh"},
+                "start": true,
+            }),
+        );
+        let task_id = task["id"].as_str().unwrap().to_string();
+        let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+        let label = format!("advisor={advisor} mode={mode}: {settled}");
+        assert_eq!(settled["status"], "done", "{label}");
+        let attempts = settled["attempts"].as_array().unwrap();
+        assert_eq!(attempts.len(), 2, "{label}");
+        let runs = std::fs::read_to_string(scripts_dir.path().join("advisor.log"))
+            .map(|t| t.lines().count())
+            .unwrap_or(0);
+        let brief = std::fs::read_to_string(
+            daemon
+                .data_dir()
+                .join("tasks")
+                .join(&task_id)
+                .join("runs/2/brief.md"),
+        )
+        .unwrap();
+        let cost = settled["costUsd"].as_f64().unwrap();
+        if advisor && mode == "ok" {
+            assert_eq!(runs, 1, "{label}");
+            assert_eq!(
+                attempts[0]["advice"], "Create SECOND, not FIRST.",
+                "{label}"
+            );
+            assert!(attempts[1].get("advice").is_none(), "{label}");
+            assert!(
+                brief.contains("## Advisor") && brief.contains("Create SECOND, not FIRST."),
+                "{brief}"
+            );
+            // Two implement runs plus the advisor; the advisor's cost is on
+            // no attempt.
+            assert!((cost - 0.05).abs() < 1e-9, "{label}");
+            assert_eq!(attempts[0]["costUsd"], 0.01, "{label}");
+        } else if advisor {
+            assert_eq!(runs, 1, "{label}");
+            assert!(attempts[0].get("advice").is_none(), "{label}");
+            assert!(!brief.contains("## Advisor"), "{brief}");
+        } else {
+            assert_eq!(runs, 0, "{label}");
+            assert!(!brief.contains("## Advisor"), "{brief}");
+            assert!((cost - 0.02).abs() < 1e-9, "{label}");
+        }
+
+        let worktree = task["worktree"].as_str().unwrap().to_string();
+        daemon.shutdown_and_wait();
+        let _ = std::fs::remove_dir_all(worktree);
+    }
+}
+
+#[test]
+fn a_blind_review_brief_leaves_out_the_implementer_s_account() {
+    for blind in [false, true] {
+        let scripts_dir = tempfile::tempdir().unwrap();
+        let claude = fake_harness_script(
+            scripts_dir.path(),
+            "fake-claude.sh",
+            "#!/bin/sh\ncat > /dev/null\necho changed > CHANGED_MARKER.txt\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n",
+        );
+        let args_log = scripts_dir.path().join("codex-args");
+        let codex = fake_harness_script(
+            scripts_dir.path(),
+            "fake-codex.sh",
+            "#!/bin/sh\ncat > \"$CODEX_ARGS.brief\"\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"```sushi-review\\n{\\\"verdict\\\":\\\"PASS\\\",\\\"findings\\\":[]}\\n```\"}}'\n",
+        );
+        let daemon = Daemon::spawn(&[
+            ("ORCHD_CLAUDE_BIN", claude.to_str().unwrap()),
+            ("ORCHD_CODEX_BIN", codex.to_str().unwrap()),
+            ("CODEX_ARGS", args_log.to_str().unwrap()),
+        ]);
+        let repo = init_git_repo();
+        let task = daemon.request(
+            "task.create",
+            serde_json::json!({
+                "repo": repo.path().to_str().unwrap(),
+                "title": "Blind",
+                "goal": "Write a marker",
+                "verify": ["true"],
+                "variant": {"reviewOtherFamily": true, "reviewBlind": blind},
+                "start": true,
+            }),
+        );
+        let task_id = task["id"].as_str().unwrap().to_string();
+        let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+        assert_eq!(settled["status"], "done", "{settled}");
+        let brief = std::fs::read_to_string(format!("{}.brief", args_log.display())).unwrap();
+        assert!(brief.contains("## Diff"), "{brief}");
+        assert_eq!(brief.contains("## Implementer"), !blind, "{brief}");
+        assert_eq!(brief.contains("<untrusted-data>\ndone"), !blind, "{brief}");
+
+        let worktree = task["worktree"].as_str().unwrap().to_string();
+        daemon.shutdown_and_wait();
+        let _ = std::fs::remove_dir_all(worktree);
+    }
+}
+
 #[test]
 fn the_planner_s_tier_routes_the_task_only_when_the_variant_asks_for_it() {
     for (planner_tier, route) in [(true, "claude-opus"), (false, "claude-sonnet")] {

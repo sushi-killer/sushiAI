@@ -77,3 +77,15 @@
   shown to the next attempt under `## Advisor` and stored as the failed
   attempt's `advice`. Its cost counts toward the task, and a failed advisor
   run never blocks the retry.
+- `orchd eval run --data <dir> --socket <sock> --set orchd/evals/set-1.json --variant '<json>'`
+  (also `--only a,b`, `--repeat N`, `--arms '[<json>, <json>]'`) creates one
+  task per set task and arm, each starting at the set's resolved `base` and
+  tagged `evalSet`/`evalName`; `--request '<text>' --arms '[...]' [--base <ref>]`
+  creates an ad-hoc A/B pair on one real request. It only creates tasks; the
+  daemon runs them. `orchd ab --eval <set>` limits the report to that set and
+  adds a per-task, per-variant table of cost and attempts. `orchd ab` also
+  gets columns for how an implement attempt's tool calls split into process,
+  evidence, verify, task and explore work (a keyword heuristic over
+  `events.jsonl`), and the tool calls per attempt. Common build/test tools and
+  the task's own verify commands count as verify; repository-specific process
+  and evidence paths come from `settings.workBuckets` (empty by default).

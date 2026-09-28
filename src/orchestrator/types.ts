@@ -57,7 +57,8 @@ export type Settings = {
   prices: Record<
     string,
     { input: number; cachedInput: number; output: number }
-  >;
+  >; /** Repository-specific path fragments for `orchd ab`'s work breakdown. */
+  workBuckets?: { process: string[]; evidence: string[] };
 };
 
 export type TaskStatus =
@@ -169,6 +170,10 @@ export type Task = {
   /** Experiment flags this task runs with (an A/B arm); absent on tasks
    * created before variants existed. */
   variant?: Variant;
+  /** Set on tasks created by `orchd eval run`: the eval set (file stem) and
+   * the task's name in it. */
+  evalSet?: string;
+  evalName?: string;
   question?: Question;
   /** Owner and classifier decisions, newest last - includes "Owner: ..."
    * answers to a question. */

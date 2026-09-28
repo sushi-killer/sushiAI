@@ -3216,3 +3216,159 @@ fn without_lean_output_a_claude_implement_run_gets_no_rtk_hook_or_output_cap() {
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
 }
+
+/// Runs `orchd eval run` against `daemon` from `repo`; `(exit ok, stdout, stderr)`.
+fn eval_run(daemon: &Daemon, repo: &Path, extra: &[&str]) -> (bool, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_orchd"))
+        .args(["eval", "run", "--data"])
+        .arg(daemon.data_dir())
+        .arg("--socket")
+        .arg(&daemon.socket)
+        .arg("--repo")
+        .arg(repo)
+        .args(extra)
+        .output()
+        .expect("run orchd eval");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+fn git_out(repo: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn eval_run_creates_one_task_at_the_resolved_base_with_its_eval_fields() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-planner.sh", FAKE_PLANNER_SCRIPT);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    std::fs::write(repo.path().join("second.txt"), "2\n").unwrap();
+    git_out(repo.path(), &["add", "."]);
+    git_out(repo.path(), &["commit", "-q", "-m", "second"]);
+    let parent = git_out(repo.path(), &["rev-parse", "HEAD^"]);
+
+    let sets = tempfile::tempdir().unwrap();
+    let set = sets.path().join("set-x.json");
+    std::fs::write(
+        &set,
+        serde_json::json!({"tasks": [
+            {"name": "one", "base": "HEAD^", "request": "add dark mode"},
+            {"name": "two", "base": "HEAD", "request": "something else"},
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+
+    let (ok, stdout, stderr) = eval_run(
+        &daemon,
+        repo.path(),
+        &[
+            "--set",
+            set.to_str().unwrap(),
+            "--only",
+            "one",
+            "--variant",
+            r#"{"retryMode":"fresh"}"#,
+        ],
+    );
+    assert!(ok, "stderr: {stderr}");
+    let created: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(created["tasks"].as_array().unwrap().len(), 1, "{stdout}");
+    let id = created["tasks"][0]["id"].as_str().unwrap();
+
+    let list = daemon.request("task.list", serde_json::json!({}));
+    assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
+    let task = daemon.request("task.get", serde_json::json!({"id": id}));
+    assert_eq!(task["baseSha"], parent.as_str(), "{task}");
+    assert_eq!(task["evalSet"], "set-x");
+    assert_eq!(task["evalName"], "one");
+    assert_eq!(task["variant"]["retryMode"], "fresh");
+
+    // Ad-hoc pair: one task per arm, same request and base, one shared name.
+    let (ok, stdout, stderr) = eval_run(
+        &daemon,
+        repo.path(),
+        &[
+            "--request",
+            "try the thing",
+            "--arms",
+            r#"[{"retryMode":"fresh"},{"contract":true}]"#,
+        ],
+    );
+    assert!(ok, "stderr: {stderr}");
+    let created: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let tasks = created["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 2, "{stdout}");
+    assert_eq!(tasks[0]["evalSet"], "adhoc");
+    assert_eq!(tasks[0]["evalName"], tasks[1]["evalName"]);
+    let head = git_out(repo.path(), &["rev-parse", "HEAD"]);
+    for t in tasks {
+        let full = daemon.request("task.get", serde_json::json!({"id": t["id"]}));
+        assert_eq!(full["baseSha"], head.as_str());
+    }
+
+    let worktrees: Vec<String> = daemon
+        .request("task.list", serde_json::json!({}))
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["worktree"].as_str().unwrap().to_string())
+        .collect();
+    daemon.shutdown_and_wait();
+    for w in worktrees {
+        let _ = std::fs::remove_dir_all(w);
+    }
+}
+
+#[test]
+fn eval_run_with_an_unknown_name_or_an_unresolvable_base_creates_nothing() {
+    let daemon = Daemon::spawn(&[]);
+    let repo = init_git_repo();
+    let sets = tempfile::tempdir().unwrap();
+    let set = sets.path().join("set-y.json");
+    std::fs::write(
+        &set,
+        serde_json::json!({"tasks": [
+            {"name": "good", "base": "HEAD", "request": "r"},
+            {"name": "bad-base", "base": "no-such-ref^", "request": "r"},
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+
+    let (ok, _, stderr) = eval_run(
+        &daemon,
+        repo.path(),
+        &["--set", set.to_str().unwrap(), "--only", "good,nope"],
+    );
+    assert!(!ok);
+    assert!(
+        stderr.contains("unknown task name in --only: nope"),
+        "{stderr}"
+    );
+
+    let (ok, _, stderr) = eval_run(&daemon, repo.path(), &["--set", set.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("bad-base") && stderr.contains("does not resolve"),
+        "{stderr}"
+    );
+
+    let list = daemon.request("task.list", serde_json::json!({}));
+    assert!(list.as_array().unwrap().is_empty(), "{list}");
+    daemon.shutdown_and_wait();
+}

@@ -830,6 +830,11 @@ impl App {
             /// task only (an A/B arm).
             #[serde(default)]
             variant: Option<serde_json::Value>,
+            /// Set by `orchd eval run`: the eval set and the task's name in it.
+            #[serde(default, rename = "evalSet")]
+            eval_set: Option<String>,
+            #[serde(default, rename = "evalName")]
+            eval_name: Option<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         let variant = resolve_variant(
@@ -927,6 +932,8 @@ impl App {
             planned_tier: None,
             tier_fallback: None,
             variant: Some(variant),
+            eval_set: p.eval_set.clone().filter(|s| !s.trim().is_empty()),
+            eval_name: p.eval_name.clone().filter(|s| !s.trim().is_empty()),
             created_at: now,
             updated_at: now,
         };
@@ -2843,7 +2850,7 @@ async fn run_review(
         brief_text.push_str("\n## Implementer\n\n");
         brief_text.push_str(implementer_note);
     }
-    brief_text.push_str("\n\nCriteria marked \"Checked by review\" have no command behind them: check them from the diff and the repository yourself.\n\nThe repository's process rules about commits, pull requests and LESSONS.md entries belong to the orchestrator, not this task: judge the change against the task and its criteria, and do not fail it for those.\n");
+    brief_text.push_str("\n\nCriteria marked \"Checked by review\" have no command behind them: check them from the diff and the repository yourself.\n\nThe repository's process rules about commits, pull requests, release notes and lesson or changelog files belong to the orchestrator, not this task: judge the change against the task and its criteria, and do not fail it for those.\n");
     let evidence = task.variant().review_evidence;
     brief_text.push_str("\n## Verify results\n\n");
     for v in verify_results {
@@ -5541,6 +5548,8 @@ mod tests {
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),
+            eval_set: None,
+            eval_name: None,
             created_at: 1,
             updated_at: 1,
         }

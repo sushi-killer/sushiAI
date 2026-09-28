@@ -115,6 +115,16 @@ pub fn repo_toplevel(path: &Path) -> Result<PathBuf, GitError> {
     Ok(PathBuf::from(out.trim()))
 }
 
+/// The commit `rev` names (`git rev-parse --verify <rev>^{commit}`), or the
+/// git error saying why it does not resolve.
+pub fn resolve_commit(repo_root: &Path, rev: &str) -> Result<String, GitError> {
+    run(
+        repo_root,
+        &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
+    )
+    .map(|s| s.trim().to_string())
+}
+
 pub struct CreatedWorktree {
     pub path: PathBuf,
     pub base_sha: String,

@@ -267,6 +267,8 @@ mod tests {
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),
+            eval_set: None,
+            eval_name: None,
             created_at: 1,
             updated_at: 1,
         };

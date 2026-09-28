@@ -120,6 +120,22 @@ pub struct Settings {
     /// Model id -> price, for harnesses that report no cost.
     #[serde(default = "default_prices")]
     pub prices: std::collections::BTreeMap<String, Price>,
+    /// Repository-specific path fragments for `orchd ab`'s work breakdown.
+    #[serde(default)]
+    pub work_buckets: WorkBuckets,
+}
+
+/// Tool-call inputs containing one of these count as process work (lesson
+/// files, changelogs, convention scripts) or as evidence work (screenshot
+/// helpers), on top of the generic rules in `ab.rs`. Empty by default: they
+/// describe one repository, not orchd.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkBuckets {
+    #[serde(default)]
+    pub process: Vec<String>,
+    #[serde(default)]
+    pub evidence: Vec<String>,
 }
 
 fn default_planner() -> String {
@@ -179,6 +195,7 @@ impl Default for Settings {
             auto_answer: false,
             experiments: Variant::default(),
             prices: default_prices(),
+            work_buckets: WorkBuckets::default(),
         }
     }
 }
@@ -376,6 +393,12 @@ pub struct Task {
     /// keeps those out of every arm.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<Variant>,
+    /// The eval set (`orchd eval run`) this task replays, and the task's name
+    /// in it; `orchd ab --eval` reports by these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eval_set: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eval_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<Question>,
     #[serde(default)]
@@ -647,6 +670,8 @@ mod tests {
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),
+            eval_set: None,
+            eval_name: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -726,6 +751,8 @@ mod tests {
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),
+            eval_set: None,
+            eval_name: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -760,6 +787,8 @@ mod tests {
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),
+            eval_set: None,
+            eval_name: None,
             created_at: 1,
             updated_at: 1,
         };

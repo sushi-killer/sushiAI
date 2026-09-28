@@ -462,7 +462,12 @@ fn dispatch(bridge: &Bridge, method: &str, params: &Value) -> Result<Value, (i64
 /// `orchdRequest` -- deliberately not `protocol::client_request`, which has
 /// no `auth` field at all (that module belongs to the daemon side, which
 /// never needs to authenticate itself).
-fn call_orchd(socket: &Path, token: &str, method: &str, params: Value) -> Result<Value, String> {
+pub(crate) fn call_orchd(
+    socket: &Path,
+    token: &str,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
     let mut stream = UnixStream::connect(socket)
         .map_err(|e| format!("cannot reach orchd at {}: {e}", socket.display()))?;
     let id = uuid::Uuid::new_v4().to_string();
@@ -492,7 +497,7 @@ fn call_orchd(socket: &Path, token: &str, method: &str, params: Value) -> Result
     }
 }
 
-fn read_control_token(data_dir: &Path) -> Result<String, String> {
+pub(crate) fn read_control_token(data_dir: &Path) -> Result<String, String> {
     let path = data_dir.join("control.token");
     let contents = std::fs::read_to_string(&path).map_err(|e| {
         format!(

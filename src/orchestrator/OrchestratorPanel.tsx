@@ -21,8 +21,10 @@ import {
   applyOrchestratorEvent,
   attemptDurationMs,
   attemptProgress,
+  childrenOf,
   costByStage,
   criteriaMet,
+  dependencyTitles,
   emptyLiveState,
   formatCost,
   formatDuration,
@@ -785,6 +787,11 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
     current.kind === "task"
       ? (picked ?? tasks.find((t) => t.id === current.id))
       : undefined;
+  const children = selected ? childrenOf(live.tasks, selected.id) : [];
+  const parentTask = selected?.parent
+    ? live.tasks.find((t) => t.id === selected.parent)
+    : undefined;
+  const waitsFor = selected ? dependencyTitles(selected, live.tasks) : [];
   const waitingCount = tasks.filter((t) => t.status === "waiting").length;
   const pendingMessages = messages.filter((m) => !m.delivered).length;
 
@@ -1081,6 +1088,22 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                     </>
                   )}
                 </p>
+                {(parentTask || waitsFor.length > 0) && (
+                  <p className="orch-detail-meta">
+                    {parentTask && (
+                      <button
+                        className="orch-parent-link"
+                        onClick={() =>
+                          open({ kind: "task", id: parentTask.id })
+                        }
+                      >
+                        Part of {parentTask.title}
+                      </button>
+                    )}
+                    {parentTask && waitsFor.length > 0 && " · "}
+                    {waitsFor.length > 0 && `after ${waitsFor.join(", ")}`}
+                  </p>
+                )}
                 {settings && (
                   <p className="orch-detail-meta orch-variant-line">
                     Variant: {variantLabel(selected, settings.experiments)}
@@ -1088,6 +1111,11 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                 )}
                 {(() => {
                   const breakdown = costByStage(selected);
+                  // A parent's total includes its subtasks' costs.
+                  const subtasks = children.reduce(
+                    (sum, child) => sum + child.costUsd,
+                    0,
+                  );
                   const rows: { label: string; cost: number }[] = [
                     { label: "Plan", cost: breakdown.plan },
                     ...breakdown.implement.map((a) => ({
@@ -1095,7 +1123,11 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                       cost: a.costUsd,
                     })),
                     { label: "Review", cost: breakdown.review },
-                    { label: "Other", cost: breakdown.other },
+                    { label: "Subtasks", cost: subtasks },
+                    {
+                      label: "Other",
+                      cost: Math.max(0, breakdown.other - subtasks),
+                    },
                   ].filter((row) => formatCost(row.cost) !== "$0.00");
                   if (rows.length === 0) return null;
                   return (
@@ -1224,6 +1256,33 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                 ))}
               </div>
             )}
+            {children.length > 0 && (
+              <div className="orch-subtasks">
+                <span className="dialog-eyebrow">SUBTASKS</span>
+                {children.map((child) => {
+                  const tone = statusTone(child);
+                  const after = dependencyTitles(child, live.tasks);
+                  return (
+                    <button
+                      key={child.id}
+                      className="orch-subtask-row"
+                      onClick={() => open({ kind: "task", id: child.id })}
+                    >
+                      <span className={`status-dot ${tone}`} />
+                      <span className="orch-task-title">{child.title}</span>
+                      {after.length > 0 && (
+                        <span className="orch-subtask-after">
+                          after {after.join(", ")}
+                        </span>
+                      )}
+                      <span className={`orch-status-badge tone-${tone}`}>
+                        {statusBadgeLabel(child)}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             {selected.decisions.length > 0 && (
               <div className="orch-decisions">
                 {selected.decisions.map((line, index) => {
@@ -1248,6 +1307,7 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                 <AttemptRow key={attempt.n} attempt={attempt} />
               ))}
               {settings?.review &&
+                children.length === 0 &&
                 !selected.attempts.some((a) => a.stage === "review") &&
                 (selected.status === "running" ||
                   selected.status === "queued") && (

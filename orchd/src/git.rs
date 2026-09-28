@@ -146,7 +146,8 @@ pub fn create_worktree(
     )?
     .trim()
     .to_string();
-    run(
+    let branch_existed = branch_exists(repo_root, branch);
+    let added = run(
         repo_root,
         &[
             "worktree",
@@ -157,7 +158,15 @@ pub fn create_worktree(
                 .ok_or_else(|| GitError("non-utf8 path".into()))?,
             &base_sha,
         ],
-    )?;
+    );
+    if let Err(e) = added {
+        // `worktree add -b` creates the branch before it checks the path,
+        // so a taken path would otherwise leave a stray branch behind.
+        if !branch_existed {
+            let _ = run(repo_root, &["branch", "-D", branch]);
+        }
+        return Err(e);
+    }
     Ok(CreatedWorktree {
         path: path.to_path_buf(),
         base_sha,
@@ -326,9 +335,47 @@ pub fn carry_onto_moved_base(
     })
 }
 
+pub fn head_sha(worktree: &Path) -> Result<String, GitError> {
+    Ok(run(worktree, &["rev-parse", "HEAD"])?.trim().to_string())
+}
+
+/// Turns every commit on the worktree's branch since `base_sha` back into
+/// uncommitted work on `base_sha` (`git reset <base_sha>`); the files stay
+/// as they are.
+pub fn uncommit_to(worktree: &Path, base_sha: &str) -> Result<(), GitError> {
+    run(worktree, &["reset", "-q", base_sha]).map(|_| ())
+}
+
+/// `git merge --ff-only <sha>` in `worktree`: moves its checked-out branch
+/// (and its files) to `sha`, or fails without touching anything when that
+/// is not a fast-forward.
+pub fn fast_forward(worktree: &Path, sha: &str) -> Result<(), GitError> {
+    run(
+        worktree,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "merge",
+            "-q",
+            "--ff-only",
+            sha,
+        ],
+    )
+    .map(|_| ())
+}
+
 /// Drops the saved work of a task that no longer needs it.
 pub fn delete_wip_ref(worktree: &Path, task_id: &str) {
     let _ = run(worktree, &["update-ref", "-d", &wip_ref(task_id)]);
+}
+
+/// Removes a worktree and its branch that nothing has used yet (best
+/// effort: an undone step leaves at most an unused branch or directory).
+pub fn discard_worktree(repo_root: &Path, path: &Path, branch: &str) {
+    if let Some(p) = path.to_str() {
+        let _ = run(repo_root, &["worktree", "remove", "--force", p]);
+    }
+    let _ = run(repo_root, &["branch", "-D", branch]);
 }
 
 /// `git check-ignore` reports true only when the main checkout actually

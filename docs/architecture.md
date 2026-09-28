@@ -81,11 +81,13 @@ stateDiagram-v2
   [*] --> queued: task.create {title, goal, criteria, verify}
   drafting --> waiting: planner question
   drafting --> queued: plan parsed
-  queued --> running: parallel slot free
+  drafting --> running: plan split into subtasks<br/>(the task becomes their parent)
+  queued --> running: parallel slot free,<br/>every dependsOn task done
+  queued --> waiting: a dependsOn task or child<br/>ended failed/stopped
   running --> waiting: blocked / protected path /<br/>review gave no verdict /<br/>attempts exhausted
   waiting --> queued: answer
   running --> queued: failed attempt, budget left
-  running --> done: gates passed, committed
+  running --> done: gates passed, committed<br/>(a subtask: landed on its parent's branch;<br/>a parent: every child landed, its checks passed)
   running --> stopped: task.stop
   waiting --> stopped: answer "stop"
   stopped --> queued: task.start
@@ -95,6 +97,22 @@ stateDiagram-v2
     task.archive hides done/stopped/failed/queued-idle tasks
   end note
 ```
+
+A task graph is state orchd keeps, never a split it decides: the planner
+may answer a top-level request with `subtasks` (keys, requests, `dependsOn`
+between keys), or the orchestrator agent builds one with `task.create
+{parent, dependsOn}`. A parent runs no implement attempt; each child
+branches from the parent's branch, is drafted and run as a normal task, and
+starts implementing only once its `dependsOn` tasks are done (it syncs to
+the parent's head first, so it sees their work). A finished child lands
+through a per-parent merge queue: its work is carried onto the parent's
+current head, verify runs again when that head moved, and the parent's
+branch fast-forwards to the child's commit; a conflict or failing verify is
+an ordinary failure the agent retries. When every child has landed, the
+parent runs its own verify and final checks on its branch and is done; its
+cost is its plan plus its children. When something a task waits for ends
+`failed`/`stopped`, the task waits with a question: retry the dependency,
+drop it, or stop.
 
 ## 3. One attempt: from plan to commit
 
@@ -121,7 +139,10 @@ flowchart TD
   impl -.- stall
   stall -->|stalled| fail
   verify -->|all exit 0| protect --> review
+  land["Subtask: land on the parent's branch<br/>one at a time per parent; carry onto its head,<br/>verify again if it moved, fast-forward"]
   review -->|PASS| commit --> done
+  review -->|PASS, subtask| land --> done
+  land -->|conflict / verify fails| fail
   review -->|no verdict| ownerQ
   verify -->|non-zero| fail
   review -->|FAIL| fail
@@ -191,8 +212,6 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  c["Parallel tasks on one feature base<br/>(task.create base + merge order)"]:::planned
   d["Base-branch field in the new-task form"]:::planned
-  c --> d
   classDef planned stroke-dasharray: 5 5
 ```

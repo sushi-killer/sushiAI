@@ -255,6 +255,193 @@ fn simple_hash(s: &str) -> String {
 }
 
 // ===========================================================================
+// Task graph: dependencies and parents (pure)
+// ===========================================================================
+
+/// Whether the wait-for graph has a cycle; `edges[a]` lists what `a` waits
+/// for.
+fn has_cycle(edges: &HashMap<String, Vec<String>>) -> bool {
+    fn visit<'a>(
+        node: &'a str,
+        edges: &'a HashMap<String, Vec<String>>,
+        state: &mut HashMap<&'a str, bool>,
+    ) -> bool {
+        match state.get(node) {
+            Some(true) => return true,
+            Some(false) => return false,
+            None => {}
+        }
+        state.insert(node, true);
+        for next in edges.get(node).into_iter().flatten() {
+            if visit(next, edges, state) {
+                return true;
+            }
+        }
+        state.insert(node, false);
+        false
+    }
+    // `true` = on the current path, `false` = finished without a cycle.
+    let mut state: HashMap<&str, bool> = HashMap::new();
+    edges.keys().any(|n| visit(n, edges, &mut state))
+}
+
+/// A task waits for its dependencies; a parent also waits for each child.
+fn wait_edges(tasks: &[Task]) -> HashMap<String, Vec<String>> {
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    for t in tasks {
+        edges
+            .entry(t.id.clone())
+            .or_default()
+            .extend(t.depends_on.iter().cloned());
+        if let Some(parent) = &t.parent {
+            edges.entry(parent.clone()).or_default().push(t.id.clone());
+        }
+    }
+    edges
+}
+
+/// What `task` waits for among `all` (its repo's tasks): the dependencies
+/// that still exist, and for a parent its children that are not archived.
+fn waits_for<'a>(task: &Task, all: &'a [Task]) -> Vec<&'a Task> {
+    all.iter()
+        .filter(|t| {
+            task.depends_on.contains(&t.id)
+                || (t.parent.as_deref() == Some(task.id.as_str()) && !t.archived)
+        })
+        .collect()
+}
+
+fn is_parent(task: &Task, all: &[Task]) -> bool {
+    all.iter()
+        .any(|t| t.parent.as_deref() == Some(task.id.as_str()))
+}
+
+#[derive(Debug, PartialEq)]
+enum Waits {
+    /// Waits for nothing.
+    Nothing,
+    Ready,
+    Pending,
+    /// These ended `failed` or `stopped` and will not finish on their own.
+    Ended(Vec<String>),
+}
+
+fn waits_state(task: &Task, all: &[Task]) -> Waits {
+    state_of(waits_for(task, all))
+}
+
+/// Like `waits_state` but only for the task's own `dependsOn`, not for its
+/// children: what a parent must wait for before its children may start.
+fn own_waits_state(task: &Task, all: &[Task]) -> Waits {
+    state_of(
+        all.iter()
+            .filter(|t| task.depends_on.contains(&t.id))
+            .collect(),
+    )
+}
+
+fn state_of(waits: Vec<&Task>) -> Waits {
+    if waits.is_empty() {
+        return Waits::Nothing;
+    }
+    let ended: Vec<String> = waits
+        .iter()
+        .filter(|t| matches!(t.status, TaskStatus::Failed | TaskStatus::Stopped))
+        .map(|t| t.id.clone())
+        .collect();
+    if !ended.is_empty() {
+        Waits::Ended(ended)
+    } else if waits.iter().all(|t| t.status == TaskStatus::Done) {
+        Waits::Ready
+    } else {
+        Waits::Pending
+    }
+}
+
+/// Asked when something a task waits for ended `failed`/`stopped`; its
+/// answer is handled by `answer_dependency_question`, not the attempt loop.
+const DEPENDENCY_QUESTION: &str = "A task this one waits for ended";
+
+fn status_word(status: TaskStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+const MAX_SUBTASKS: usize = 8;
+
+/// Whether the planner's split can become a graph: at least two parts,
+/// unique non-empty keys, a request each, dependencies on known keys only,
+/// and no cycle.
+fn check_subtasks(subtasks: &[brief::PlanSubtask]) -> Result<(), String> {
+    if subtasks.len() < 2 {
+        return Err("a single part is the task itself".to_string());
+    }
+    if subtasks.len() > MAX_SUBTASKS {
+        return Err(format!("more than {MAX_SUBTASKS} parts"));
+    }
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    for s in subtasks {
+        let key = s.key.trim();
+        if key.is_empty() || s.request.trim().is_empty() {
+            return Err("a part without a key or a request".to_string());
+        }
+        if edges.contains_key(key) {
+            return Err(format!("duplicate key {key}"));
+        }
+        edges.insert(key.to_string(), s.depends_on.clone());
+    }
+    for (key, deps) in &edges {
+        if let Some(unknown) = deps.iter().find(|d| !edges.contains_key(d.trim())) {
+            return Err(format!("{key} depends on unknown key {unknown}"));
+        }
+    }
+    if has_cycle(&edges) {
+        return Err("the parts depend on each other in a cycle".to_string());
+    }
+    Ok(())
+}
+
+/// A subtask's request: the planner's text first (what its own planner
+/// drafts from), then the whole it belongs to and what was already decided
+/// for it.
+fn subtask_request(parent: &Task, part: &str) -> String {
+    let mut out = format!(
+        "{}\n\nThis is one part of a larger task, \"{}\": {}",
+        part.trim(),
+        parent.title,
+        parent.goal
+    );
+    let decided: Vec<&String> = parent
+        .decisions
+        .iter()
+        .filter(|d| d.starts_with("Owner:") || d.starts_with("Orchestrator:"))
+        .collect();
+    if !decided.is_empty() {
+        out.push_str("\n\nAlready decided for the whole task:\n");
+        for d in decided {
+            out.push_str(&format!("- {d}\n"));
+        }
+    }
+    out
+}
+
+/// A parent's cost: its own runs plus every child's total.
+fn parent_cost(parent: &Task, all: &[Task]) -> f64 {
+    let own: f64 = parent
+        .attempts
+        .iter()
+        .map(|a| a.cost_usd.unwrap_or(0.0) + a.review_cost_usd.unwrap_or(0.0))
+        .sum();
+    own + all
+        .iter()
+        .filter(|t| t.parent.as_deref() == Some(parent.id.as_str()))
+        .map(|t| t.cost_usd)
+        .sum::<f64>()
+}
+
+// ===========================================================================
 // Cancellation
 // ===========================================================================
 
@@ -399,7 +586,33 @@ pub struct App {
     /// supports, and the spec explicitly allows skipping this).
     slots: Arc<Semaphore>,
     parallel_limit: u32,
+    /// Keyed by parent task id: held while one child lands on the parent's
+    /// branch, so landings onto one branch happen one at a time.
+    landing_locks: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Set by `shutdown()`: the loops it cancels end `stopped`, and that
+    /// must not read as a dependency ending.
+    shutting_down: AtomicBool,
     self_ref: OnceLock<std::sync::Weak<App>>,
+}
+
+/// Everything `create_task_record` needs for a new task.
+struct NewTask {
+    id: String,
+    repo_root: PathBuf,
+    title: String,
+    goal: String,
+    criteria: Vec<String>,
+    verify: Vec<String>,
+    final_verify: Vec<String>,
+    request: Option<String>,
+    branch: Option<String>,
+    base: String,
+    variant: Variant,
+    depends_on: Vec<String>,
+    parent: Option<String>,
+    eval_set: Option<String>,
+    eval_name: Option<String>,
+    created_at: i64,
 }
 
 fn generate_control_token() -> String {
@@ -461,6 +674,8 @@ impl App {
             control_token,
             slots,
             parallel_limit,
+            landing_locks: StdMutex::new(HashMap::new()),
+            shutting_down: AtomicBool::new(false),
             self_ref: OnceLock::new(),
         });
         let _ = app.self_ref.set(Arc::downgrade(&app));
@@ -496,6 +711,7 @@ impl App {
     /// child is just as capable of leaking past the daemon exiting as a task
     /// attempt's, so it needs the same cancel-on-shutdown treatment.
     pub fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
         for ctrl in self.controls.lock().unwrap().values() {
             ctrl.cancel.cancel();
         }
@@ -654,6 +870,145 @@ impl App {
 
     fn finish_task_loop(&self, task_id: &str) {
         self.controls.lock().unwrap().remove(task_id);
+        if let Ok(Some(task)) = self.store.load_task(task_id) {
+            self.advance_graph(&task.repo);
+        }
+    }
+
+    fn landing_lock(&self, parent_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.landing_locks
+            .lock()
+            .unwrap()
+            .entry(parent_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    fn repo_tasks(&self, repo: &str) -> Vec<Task> {
+        let mut tasks = self.store.list_tasks().unwrap_or_default();
+        tasks.retain(|t| t.repo == repo);
+        tasks
+    }
+
+    /// Moves a repo's task graph along after something in it changed: a
+    /// queued task (or a running parent) with no live loop starts once all
+    /// it waits for is done, and waits for the owner when one of those ended
+    /// `failed`/`stopped`. Tasks outside any graph are never touched.
+    fn advance_graph(&self, repo: &str) {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+        let all = self.repo_tasks(repo);
+        for task in all.iter().filter(|t| !t.archived) {
+            let parent = is_parent(task, &all);
+            let asking = task.status == TaskStatus::Waiting
+                && task
+                    .question
+                    .as_ref()
+                    .is_some_and(|q| q.text.starts_with(DEPENDENCY_QUESTION));
+            let idle = task.status == TaskStatus::Queued
+                || (parent && task.status == TaskStatus::Running)
+                || asking;
+            if !idle || self.controls.lock().unwrap().contains_key(&task.id) {
+                continue;
+            }
+            // A subtask never starts while its parent still waits for the
+            // parent's own dependencies.
+            if let Some(p) = task
+                .parent
+                .as_deref()
+                .and_then(|pid| all.iter().find(|t| t.id == pid))
+            {
+                if !matches!(own_waits_state(p, &all), Waits::Ready | Waits::Nothing) {
+                    continue;
+                }
+            }
+            let in_graph = parent || task.parent.is_some() || !task.depends_on.is_empty();
+            let state = waits_state(task, &all);
+            // A parent whose children were only just drafted has to start
+            // them itself once its own dependencies are done.
+            let unstarted_children = parent
+                && matches!(own_waits_state(task, &all), Waits::Ready | Waits::Nothing)
+                && all.iter().any(|t| {
+                    t.parent.as_deref() == Some(task.id.as_str())
+                        && !t.archived
+                        && t.status == TaskStatus::Drafting
+                });
+            match state {
+                // Also picks up a task restarted while its previous loop was
+                // still winding down (that spawn was a no-op), and a
+                // dependent whose question is moot because everything it
+                // waited for finished meanwhile.
+                Waits::Ready | Waits::Nothing if in_graph => {
+                    if asking {
+                        let mut task = task.clone();
+                        task.question = None;
+                        task.status = TaskStatus::Queued;
+                        task.updated_at = now_ms();
+                        let _ = self.store.save_task(&task);
+                        self.broadcast_task(&task);
+                    }
+                    self.spawn_task_loop(task.id.clone(), true)
+                }
+                Waits::Pending if unstarted_children => self.spawn_task_loop(task.id.clone(), true),
+                Waits::Ended(ended) => {
+                    if !asking {
+                        self.ask_dependency_question(task, &all, &ended);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Parks `task` `waiting` on the question of what to do about the
+    /// dependencies in `ended`.
+    fn ask_dependency_question(&self, task: &Task, all: &[Task], ended: &[String]) {
+        let names: Vec<String> = all
+            .iter()
+            .filter(|t| ended.contains(&t.id))
+            .map(|t| format!("\"{}\" ({})", t.title, status_word(t.status)))
+            .collect();
+        let mut task = task.clone();
+        task.question = Some(Question {
+            text: format!(
+                "{DEPENDENCY_QUESTION}: {}. Retry it, drop it from what this task waits for, or stop?",
+                names.join(", ")
+            ),
+            options: vec![
+                "retry the dependency".into(),
+                "drop the dependency".into(),
+                "stop".into(),
+            ],
+        });
+        task.status = TaskStatus::Waiting;
+        task.updated_at = now_ms();
+        let _ = self.store.save_task(&task);
+        self.broadcast_task(&task);
+    }
+
+    /// Stops every child of `parent_id` that has not finished: a live loop
+    /// is cancelled (it marks itself stopped), an idle one is marked here.
+    fn stop_children(&self, parent_id: &str, repo: &str) {
+        for mut child in self.repo_tasks(repo) {
+            if child.parent.as_deref() != Some(parent_id)
+                || matches!(
+                    child.status,
+                    TaskStatus::Done | TaskStatus::Failed | TaskStatus::Stopped
+                )
+            {
+                continue;
+            }
+            if let Some(ctrl) = self.controls.lock().unwrap().get(&child.id) {
+                ctrl.cancel.cancel();
+                continue;
+            }
+            child.question = None;
+            child.status = TaskStatus::Stopped;
+            child.updated_at = now_ms();
+            let _ = self.store.save_task(&child);
+            self.broadcast_task(&child);
+        }
     }
 
     // -- protocol methods --------------------------------------------------
@@ -856,6 +1211,13 @@ impl App {
             eval_set: Option<String>,
             #[serde(default, rename = "evalName")]
             eval_name: Option<String>,
+            /// Ids of tasks that must be done before this one implements.
+            #[serde(default, rename = "dependsOn")]
+            depends_on: Vec<String>,
+            /// The task this one is a part of; it branches from and lands
+            /// on that task's branch.
+            #[serde(default)]
+            parent: Option<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         let settings = self.settings.read().unwrap().clone();
@@ -894,64 +1256,48 @@ impl App {
         };
 
         let repo_input = PathBuf::from(&p.repo);
-        let title_for_branch = title.clone();
-        let branch_opt = p.branch.clone();
-        let base = p
-            .base
-            .clone()
-            .filter(|b| !b.trim().is_empty())
-            .unwrap_or_else(|| "HEAD".to_string());
-        let created = tokio::task::spawn_blocking(move || {
-            let repo_root = git::repo_toplevel(&repo_input)?;
-            let branch = branch_opt
-                .unwrap_or_else(|| git::unique_branch_name(&repo_root, &title_for_branch));
-            let wt_path = git::worktree_path(&repo_root, &branch);
-            let base_ref = git::branch_of(&repo_root, &base);
-            let created = git::create_worktree(&repo_root, &branch, &wt_path, &base)?;
-            git::bootstrap_worktree(&repo_root, &created.path)
-                .map_err(|e| git::GitError(e.to_string()))?;
-            Ok::<_, git::GitError>((repo_root, branch, created, base_ref))
-        })
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
-        let (repo_root, branch, created, base_ref) = created;
-
-        let id = uuid::Uuid::new_v4().to_string();
-        let now = now_ms();
-        let task = Task {
-            id: id.clone(),
-            title,
-            goal,
-            criteria: p.criteria,
-            verify: p.verify,
-            final_verify: p.final_verify,
-            request: request_text.clone(),
-            repo: repo_root.to_string_lossy().to_string(),
-            worktree: created.path.to_string_lossy().to_string(),
-            branch,
-            base_sha: created.base_sha,
-            base_ref,
-            status: if request_text.is_some() {
-                TaskStatus::Drafting
-            } else {
-                TaskStatus::Queued
-            },
-            tier: Tier::Standard,
-            question: None,
-            decisions: vec![],
-            attempts: vec![],
-            cost_usd: 0.0,
-            archived: false,
-            planned_tier: None,
-            tier_fallback: None,
-            variant: Some(variant),
-            eval_set: p.eval_set.clone().filter(|s| !s.trim().is_empty()),
-            eval_name: p.eval_name.clone().filter(|s| !s.trim().is_empty()),
-            created_at: now,
-            updated_at: now,
+        let repo_root = tokio::task::spawn_blocking(move || git::repo_toplevel(&repo_input))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let repo = repo_root.to_string_lossy().to_string();
+        // Checked before anything is created: a rejected graph leaves no
+        // worktree, branch or record behind.
+        let (depends_on, parent) =
+            self.check_graph_params(&repo, &p.depends_on, p.parent.as_deref())?;
+        let base = p.base.clone().filter(|b| !b.trim().is_empty());
+        let base = match (&parent, base) {
+            (Some(parent), Some(base)) if base != parent.branch => {
+                return Err(format!(
+                    "a subtask starts from its parent's branch {}, not {base}",
+                    parent.branch
+                ))
+            }
+            (Some(parent), _) => parent.branch.clone(),
+            (None, base) => base.unwrap_or_else(|| "HEAD".to_string()),
         };
-        self.store.save_task(&task).map_err(|e| e.to_string())?;
+        let in_graph = parent.is_some() || !depends_on.is_empty();
+        let task = self
+            .create_task_record(NewTask {
+                id: uuid::Uuid::new_v4().to_string(),
+                repo_root,
+                title,
+                goal,
+                criteria: p.criteria,
+                verify: p.verify,
+                final_verify: p.final_verify,
+                request: request_text.clone(),
+                branch: p.branch.clone(),
+                base,
+                variant,
+                depends_on,
+                parent: parent.map(|t| t.id),
+                eval_set: p.eval_set.clone().filter(|s| !s.trim().is_empty()),
+                eval_name: p.eval_name.clone().filter(|s| !s.trim().is_empty()),
+                created_at: now_ms(),
+            })
+            .await?;
+        let id = task.id.clone();
         if let Some(mcp) = &p.mcp {
             let path = self.store.task_dir(&id).join("mcp.json");
             store::write_json_atomic(&path, mcp).map_err(|e| e.to_string())?;
@@ -962,12 +1308,161 @@ impl App {
             // loop falls through into implementing once it's done depends
             // on it (spec step 6).
             self.spawn_task_loop(id.clone(), p.start.unwrap_or(true));
-        } else if p.start.unwrap_or(true) {
+        } else if p.start.unwrap_or(true) || in_graph {
             // Same default as the request form: a `queued` task that never
-            // starts until a daemon restart looks like work in progress.
+            // starts until a daemon restart looks like work in progress. A
+            // task in a graph starts on its own: its loop waits for what it
+            // depends on.
             self.start_task_loop(id.clone());
         }
         serde_json::to_value(&task).map_err(|e| e.to_string())
+    }
+
+    /// `task.create`'s `dependsOn`/`parent`: every id a task of this repo,
+    /// the parent a top-level task that has not implemented anything itself
+    /// and is not done, and no dependency cycle once the new task is added
+    /// (a parent waits for its children, so a child depending on its own
+    /// parent is one). Returns the deduplicated dependencies and the parent.
+    fn check_graph_params(
+        &self,
+        repo: &str,
+        depends_on: &[String],
+        parent: Option<&str>,
+    ) -> Result<(Vec<String>, Option<Task>), String> {
+        let load = |id: &str, what: &str| -> Result<Task, String> {
+            validate_task_id(&self.store, id).map_err(|_| format!("unknown {what} {id}"))?;
+            let task = self
+                .store
+                .load_task(id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("unknown {what} {id}"))?;
+            if task.repo != repo {
+                return Err(format!("{what} {id} belongs to another repository"));
+            }
+            Ok(task)
+        };
+        let mut deps: Vec<String> = Vec::new();
+        for id in depends_on {
+            load(id, "dependency")?;
+            if !deps.contains(id) {
+                deps.push(id.clone());
+            }
+        }
+        let parent = match parent.filter(|p| !p.trim().is_empty()) {
+            None => None,
+            Some(id) => {
+                let parent = load(id, "parent")?;
+                if parent.parent.is_some() {
+                    return Err("a subtask cannot have subtasks of its own".to_string());
+                }
+                if parent.status == TaskStatus::Done {
+                    return Err("the parent task is already done".to_string());
+                }
+                if implement_attempt_count(&parent) > 0 {
+                    return Err(
+                        "the parent task has already run an implement attempt of its own"
+                            .to_string(),
+                    );
+                }
+                // A live loop may already be queued for a slot to implement
+                // the whole request; only a drafting one re-checks after
+                // planning.
+                if parent.status != TaskStatus::Drafting
+                    && self.controls.lock().unwrap().contains_key(&parent.id)
+                {
+                    return Err(
+                        "the parent task is already running; create it with start: false, add its subtasks, then start it"
+                            .to_string(),
+                    );
+                }
+                Some(parent)
+            }
+        };
+        let new_id = "(new task)".to_string();
+        let mut edges = wait_edges(&self.repo_tasks(repo));
+        edges.insert(new_id.clone(), deps.clone());
+        if let Some(parent) = &parent {
+            edges.entry(parent.id.clone()).or_default().push(new_id);
+        }
+        if has_cycle(&edges) {
+            return Err("dependsOn would make a dependency cycle".to_string());
+        }
+        Ok((deps, parent))
+    }
+
+    /// Creates the task's branch and worktree and saves its record, status
+    /// `drafting` for a request, `queued` otherwise. Shared by `task.create`
+    /// and the planner's split into subtasks.
+    async fn create_task_record(&self, new: NewTask) -> Result<Task, String> {
+        let repo_root = new.repo_root.clone();
+        let title_for_branch = new.title.clone();
+        let branch_opt = new.branch.clone();
+        let base = new.base.clone();
+        let created = tokio::task::spawn_blocking(move || {
+            let branch = branch_opt
+                .unwrap_or_else(|| git::unique_branch_name(&repo_root, &title_for_branch));
+            let wt_path = git::worktree_path(&repo_root, &branch);
+            let base_ref = git::branch_of(&repo_root, &base);
+            let created = git::create_worktree(&repo_root, &branch, &wt_path, &base)?;
+            if let Err(e) = git::bootstrap_worktree(&repo_root, &created.path) {
+                git::discard_worktree(&repo_root, &created.path, &branch);
+                return Err(git::GitError(e.to_string()));
+            }
+            Ok::<_, git::GitError>((branch, created, base_ref))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        let (branch, created, base_ref) = created;
+
+        let task = Task {
+            id: new.id,
+            title: new.title,
+            goal: new.goal,
+            criteria: new.criteria,
+            verify: new.verify,
+            final_verify: new.final_verify,
+            status: if new.request.is_some() {
+                TaskStatus::Drafting
+            } else {
+                TaskStatus::Queued
+            },
+            request: new.request,
+            repo: new.repo_root.to_string_lossy().to_string(),
+            worktree: created.path.to_string_lossy().to_string(),
+            branch,
+            base_sha: created.base_sha,
+            base_ref,
+            depends_on: new.depends_on,
+            parent: new.parent,
+            tier: Tier::Standard,
+            question: None,
+            decisions: vec![],
+            attempts: vec![],
+            cost_usd: 0.0,
+            archived: false,
+            planned_tier: None,
+            tier_fallback: None,
+            variant: Some(new.variant),
+            eval_set: new.eval_set,
+            eval_name: new.eval_name,
+            created_at: new.created_at,
+            updated_at: new.created_at,
+        };
+        if let Err(e) = self.store.save_task(&task) {
+            let _ = std::fs::remove_dir_all(self.store.task_dir(&task.id));
+            let (repo, wt, branch) = (
+                task.repo.clone(),
+                task.worktree.clone(),
+                task.branch.clone(),
+            );
+            let _ = tokio::task::spawn_blocking(move || {
+                git::discard_worktree(Path::new(&repo), Path::new(&wt), &branch)
+            })
+            .await;
+            return Err(e.to_string());
+        }
+        Ok(task)
     }
 
     async fn handle_task_start(
@@ -1024,14 +1519,39 @@ impl App {
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         validate_task_id(&self.store, &p.id)?;
-        if let Some(ctrl) = self.controls.lock().unwrap().get(&p.id) {
-            ctrl.cancel.cancel();
-        }
-        let task = self
+        let live = match self.controls.lock().unwrap().get(&p.id) {
+            Some(ctrl) => {
+                ctrl.cancel.cancel();
+                true
+            }
+            None => false,
+        };
+        let mut task = self
             .store
             .load_task(&p.id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
+        // A task in a graph can sit idle with no loop to cancel: a parent
+        // while its children work, a task waiting for its dependencies.
+        let all = self.repo_tasks(&task.repo);
+        let parent = is_parent(&task, &all);
+        if parent {
+            self.stop_children(&task.id, &task.repo);
+        }
+        if !live
+            && (parent || !task.depends_on.is_empty())
+            && matches!(
+                task.status,
+                TaskStatus::Queued | TaskStatus::Running | TaskStatus::Waiting
+            )
+        {
+            task.question = None;
+            task.status = TaskStatus::Stopped;
+            task.updated_at = now_ms();
+            self.store.save_task(&task).map_err(|e| e.to_string())?;
+            self.broadcast_task(&task);
+            self.advance_graph(&task.repo);
+        }
         serde_json::to_value(&task).map_err(|e| e.to_string())
     }
 
@@ -1065,7 +1585,17 @@ impl App {
             task.updated_at = now_ms();
             self.store.save_task(&task).map_err(|e| e.to_string())?;
             self.broadcast_task(&task);
+            self.stop_children(&task.id, &task.repo);
+            self.advance_graph(&task.repo);
             return serde_json::to_value(&task).map_err(|e| e.to_string());
+        }
+
+        if task
+            .question
+            .as_ref()
+            .is_some_and(|q| q.text.starts_with(DEPENDENCY_QUESTION))
+        {
+            return self.answer_dependency_question(task, &p.answer);
         }
 
         let delivered = {
@@ -1096,6 +1626,89 @@ impl App {
         serde_json::to_value(&latest).map_err(|e| e.to_string())
     }
 
+    /// "retry" restarts every task this one waits for that ended
+    /// `failed`/`stopped`; "drop" stops waiting for them (a dependency leaves
+    /// `dependsOn`, a child is detached from this parent). Either way this
+    /// task goes back to waiting for the rest.
+    fn answer_dependency_question(
+        &self,
+        mut task: Task,
+        answer: &str,
+    ) -> Result<serde_json::Value, String> {
+        let all = self.repo_tasks(&task.repo);
+        let was_parent = is_parent(&task, &all);
+        let ended: Vec<Task> = waits_for(&task, &all)
+            .into_iter()
+            .filter(|t| matches!(t.status, TaskStatus::Failed | TaskStatus::Stopped))
+            .cloned()
+            .collect();
+        let choice = answer.trim().to_ascii_lowercase();
+        if choice.starts_with("retry") {
+            for dep in ended.iter().filter(|t| !t.archived) {
+                if self.controls.lock().unwrap().contains_key(&dep.id) {
+                    continue;
+                }
+                // Queued before its loop runs, so nothing reads it as
+                // ended again while it retries.
+                let mut dep = dep.clone();
+                dep.question = None;
+                dep.status = TaskStatus::Queued;
+                dep.updated_at = now_ms();
+                self.store.save_task(&dep).map_err(|e| e.to_string())?;
+                self.broadcast_task(&dep);
+                self.spawn_task_loop(dep.id.clone(), true);
+            }
+        } else if choice.starts_with("drop") {
+            task.depends_on
+                .retain(|id| !ended.iter().any(|t| &t.id == id));
+            for mut child in ended
+                .into_iter()
+                .filter(|t| t.parent.as_deref() == Some(task.id.as_str()))
+            {
+                child.parent = None;
+                child
+                    .decisions
+                    .push(format!("Owner: dropped from \"{}\"", task.title));
+                child.updated_at = now_ms();
+                self.store.save_task(&child).map_err(|e| e.to_string())?;
+                self.broadcast_task(&child);
+            }
+        } else {
+            return Err("answer retry the dependency, drop the dependency, or stop".to_string());
+        }
+        task.decisions.push(format!("Owner: {}", answer.trim()));
+        task.question = None;
+        let fresh = self.repo_tasks(&task.repo);
+        if was_parent && !is_parent(&task, &fresh) {
+            // Left without children it would implement the whole request.
+            task.decisions.push(
+                "Orchestrator: no subtasks are left, so this task was stopped instead of implementing the whole request itself"
+                    .to_string(),
+            );
+            task.status = TaskStatus::Stopped;
+            task.updated_at = now_ms();
+            self.store.save_task(&task).map_err(|e| e.to_string())?;
+            self.broadcast_task(&task);
+            return serde_json::to_value(&task).map_err(|e| e.to_string());
+        }
+        task.status = if is_parent(&task, &fresh) {
+            TaskStatus::Running
+        } else {
+            TaskStatus::Queued
+        };
+        task.updated_at = now_ms();
+        self.store.save_task(&task).map_err(|e| e.to_string())?;
+        self.broadcast_task(&task);
+        // Its loop waits for whatever is still pending, or goes ahead.
+        self.spawn_task_loop(task.id.clone(), true);
+        let latest = self
+            .store
+            .load_task(&task.id)
+            .map_err(|e| e.to_string())?
+            .unwrap_or(task);
+        serde_json::to_value(&latest).map_err(|e| e.to_string())
+    }
+
     /// Cancels the loop and waits for it to actually exit before touching
     /// the filesystem, so a still-running attempt can never write into a
     /// directory that's mid-deletion.
@@ -1114,9 +1727,14 @@ impl App {
             ctrl.cancel.cancel();
             let _ = ctrl.handle.await;
         }
+        let repo = self.store.load_task(&p.id).ok().flatten().map(|t| t.repo);
         let dir = self.store.task_dir(&p.id);
         if dir.exists() {
             std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+        }
+        // A deleted dependency no longer holds anything back.
+        if let Some(repo) = repo {
+            self.advance_graph(&repo);
         }
         Ok(json!({}))
     }
@@ -1158,6 +1776,8 @@ impl App {
         task.updated_at = now_ms();
         self.store.save_task(&task).map_err(|e| e.to_string())?;
         self.broadcast_task(&task);
+        // An archived child no longer holds its parent back.
+        self.advance_graph(&task.repo);
         serde_json::to_value(&task).map_err(|e| e.to_string())
     }
 
@@ -3483,10 +4103,13 @@ async fn run_plan_stage(
                 let _ = std::fs::remove_file(&key_path);
                 return end_plan_stage(app, task_id, Some(idx)).await;
             }
-            let brief_text = if retry == 0 {
-                brief::build_plan_brief(&request_text, &task.variant())
-            } else {
-                brief::build_plan_retry_brief(&request_text, &task.variant())
+            let brief_text = match (retry == 0, task.parent.is_some()) {
+                (true, false) => brief::build_plan_brief(&request_text, &task.variant()),
+                (false, false) => brief::build_plan_retry_brief(&request_text, &task.variant()),
+                (true, true) => brief::build_subtask_plan_brief(&request_text, &task.variant()),
+                (false, true) => {
+                    brief::build_subtask_plan_retry_brief(&request_text, &task.variant())
+                }
             };
             let file_stem = if retry == 0 { "" } else { "-retry" };
             let _ = std::fs::write(run_dir.join(format!("brief{file_stem}.md")), &brief_text);
@@ -3721,6 +4344,35 @@ async fn run_plan_stage(
             }
         }
 
+        // The planner split the request: the task becomes a parent of one
+        // child per part and never implements anything itself.
+        if !draft.subtasks.is_empty() && task.parent.is_none() {
+            let split = match check_subtasks(&draft.subtasks) {
+                Ok(()) => split_into_subtasks(app, task_id, &draft.subtasks, auto_start_after_plan)
+                    .await
+                    .map_err(|e| format!("could not create the subtasks: {e}")),
+                Err(reason) => Err(format!("subtasks ignored: {reason}")),
+            };
+            match split {
+                Ok(()) => {
+                    return if auto_start_after_plan {
+                        PlanOutcome::Proceed
+                    } else {
+                        PlanOutcome::StoppedForReview
+                    };
+                }
+                Err(why) => {
+                    app.append_jev_decision(
+                        task_id,
+                        format!("Planner: {why}; running as one task"),
+                    );
+                    if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
+                        task = reloaded;
+                    }
+                }
+            }
+        }
+
         // Unconditional on an empty `verify` now (review item P2e): a
         // classifier that's off, missing a key, or simply unsure is no
         // reason to skip asking outright.
@@ -3767,6 +4419,438 @@ async fn run_plan_stage(
     }
 }
 
+/// Turns a drafted task into a parent: one child per part, each drafted by
+/// its own planner, branching from the parent's branch, with `dependsOn`
+/// mapped from the parts' keys. The parent is left `running` (its loop then
+/// starts the children) or `stopped` for the owner to review first.
+async fn split_into_subtasks(
+    app: &Arc<App>,
+    parent_id: &str,
+    parts: &[brief::PlanSubtask],
+    start: bool,
+) -> Result<(), String> {
+    let mut parent = app
+        .store
+        .load_task(parent_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "task not found".to_string())?;
+    let ids: HashMap<&str, String> = parts
+        .iter()
+        .map(|p| (p.key.trim(), uuid::Uuid::new_v4().to_string()))
+        .collect();
+    let parent_mcp = std::fs::read_to_string(app.store.task_dir(parent_id).join("mcp.json")).ok();
+    let titles_by_key: HashMap<&str, String> = parts
+        .iter()
+        .map(|p| {
+            let title = if p.title.trim().is_empty() {
+                truncate_chars(p.request.trim(), 60)
+            } else {
+                p.title.trim().to_string()
+            };
+            (p.key.trim(), title)
+        })
+        .collect();
+    let now = now_ms();
+    let mut titles = Vec::new();
+    let mut children: Vec<Task> = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        let title = titles_by_key[part.key.trim()].clone();
+        let created = app
+            .create_task_record(NewTask {
+                id: ids[part.key.trim()].clone(),
+                repo_root: PathBuf::from(&parent.repo),
+                title: title.clone(),
+                goal: String::new(),
+                criteria: vec![],
+                verify: vec![],
+                final_verify: vec![],
+                request: Some(subtask_request(&parent, &part.request)),
+                branch: None,
+                base: parent.branch.clone(),
+                variant: parent.variant(),
+                depends_on: part
+                    .depends_on
+                    .iter()
+                    .map(|k| ids[k.trim()].clone())
+                    .collect(),
+                parent: Some(parent.id.clone()),
+                // Eval reports count the parent, which carries the children's
+                // cost.
+                eval_set: None,
+                eval_name: None,
+                // Keeps the planner's order when children are listed by age.
+                created_at: now + i as i64,
+            })
+            .await;
+        let child = match created {
+            Ok(child) => child,
+            Err(e) => {
+                // All parts or none: a partial split would leave the parent
+                // waiting on children that cover only part of the plan.
+                discard_children(app, children).await;
+                return Err(e);
+            }
+        };
+        if let Some(mcp) = &parent_mcp {
+            let _ = std::fs::write(app.store.task_dir(&child.id).join("mcp.json"), mcp);
+        }
+        titles.push(if part.depends_on.is_empty() {
+            title
+        } else {
+            let after: Vec<&str> = part
+                .depends_on
+                .iter()
+                .map(|k| titles_by_key[k.trim()].as_str())
+                .collect();
+            format!("{title} (after {})", after.join(", "))
+        });
+        children.push(child);
+    }
+    parent.decisions.push(format!(
+        "Planner: split into {} subtasks: {}",
+        parts.len(),
+        titles.join("; ")
+    ));
+    parent.status = if start {
+        TaskStatus::Running
+    } else {
+        TaskStatus::Stopped
+    };
+    parent.updated_at = now_ms();
+    if let Err(e) = app.store.save_task(&parent) {
+        discard_children(app, children).await;
+        return Err(e.to_string());
+    }
+    for child in &children {
+        app.broadcast_task(child);
+    }
+    app.broadcast_task(&parent);
+    Ok(())
+}
+
+/// Undoes a split that could not create every part: removes each child
+/// already created (its record, worktree and branch). None has a loop or
+/// has been broadcast yet, so nothing else has seen them.
+async fn discard_children(app: &Arc<App>, children: Vec<Task>) {
+    for child in children {
+        let _ = std::fs::remove_dir_all(app.store.task_dir(&child.id));
+        let _ = tokio::task::spawn_blocking(move || {
+            git::discard_worktree(
+                Path::new(&child.repo),
+                Path::new(&child.worktree),
+                &child.branch,
+            )
+        })
+        .await;
+    }
+}
+
+// ===========================================================================
+// Task graph: parents and landing
+// ===========================================================================
+
+/// A parent's loop: starts its children that have not started yet, and once
+/// every child has landed runs its own checks on its branch and ends `done`
+/// (`failed` when a check fails). Until then it leaves the task `running`
+/// with no loop; `advance_graph` comes back to it.
+async fn run_parent(app: &Arc<App>, task_id: &str, cancel: &CancelToken) {
+    let Ok(Some(mut task)) = app.store.load_task(task_id) else {
+        return;
+    };
+    let all = app.repo_tasks(&task.repo);
+    // No child starts before the parent's own dependencies are done.
+    match own_waits_state(&task, &all) {
+        Waits::Ready | Waits::Nothing => {}
+        Waits::Ended(ended) => {
+            app.ask_dependency_question(&task, &all, &ended);
+            return;
+        }
+        Waits::Pending => {
+            if task.status != TaskStatus::Queued {
+                task.status = TaskStatus::Queued;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+            }
+            return;
+        }
+    }
+    // `advance_graph` only relaunches a queued or running parent, so a
+    // stopped or failed one here is the owner's own restart: its unfinished
+    // children restart with it.
+    let restarted = matches!(task.status, TaskStatus::Stopped | TaskStatus::Failed);
+    for child in all
+        .iter()
+        .filter(|t| t.parent.as_deref() == Some(task_id) && !t.archived)
+    {
+        match child.status {
+            TaskStatus::Drafting | TaskStatus::Queued => {
+                app.spawn_task_loop(child.id.clone(), true);
+            }
+            TaskStatus::Stopped | TaskStatus::Failed if restarted => {
+                // Queued before its loop runs, so this parent never reads
+                // it as ended.
+                let mut child = child.clone();
+                child.question = None;
+                child.status = TaskStatus::Queued;
+                child.updated_at = now_ms();
+                let _ = app.store.save_task(&child);
+                app.broadcast_task(&child);
+                app.spawn_task_loop(child.id.clone(), true);
+            }
+            _ => {}
+        }
+    }
+    let all = if restarted {
+        app.repo_tasks(&task.repo)
+    } else {
+        all
+    };
+    if !matches!(waits_state(&task, &all), Waits::Ready | Waits::Nothing) {
+        if task.status != TaskStatus::Running {
+            task.status = TaskStatus::Running;
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
+        }
+        return;
+    }
+
+    let permit = tokio::select! {
+        _ = cancel.cancelled() => None,
+        p = app.slots.clone().acquire_owned() => p.ok(),
+    };
+    if permit.is_none() {
+        mark_stopped_if_not_already(app, task_id).await;
+        return;
+    }
+    task.status = TaskStatus::Running;
+    task.updated_at = now_ms();
+    let _ = app.store.save_task(&task);
+    app.broadcast_task(&task);
+
+    let checks: Vec<String> = task
+        .verify
+        .iter()
+        .chain(&task.final_verify)
+        .cloned()
+        .collect();
+    let sandbox = app.settings.read().unwrap().sandbox;
+    let results = run_verify_commands(
+        Path::new(&task.worktree),
+        &app.store.task_dir(task_id).join("runs").join("parent"),
+        &checks,
+        sandbox,
+        cancel,
+    )
+    .await;
+    if cancel.is_cancelled() {
+        mark_stopped_if_not_already(app, task_id).await;
+        return;
+    }
+    let Ok(Some(mut task)) = app.store.load_task(task_id) else {
+        return;
+    };
+    task.cost_usd = parent_cost(&task, &app.repo_tasks(&task.repo));
+    match results.iter().find(|v| v.code != Some(0)) {
+        Some(failed) => {
+            task.decisions.push(format!(
+                "Orchestrator: every subtask landed, but `{}` exited {} on {}: {}",
+                failed.command,
+                failed
+                    .code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "null".to_string()),
+                task.branch,
+                tail_chars(failed.tail.trim(), 600)
+            ));
+            task.status = TaskStatus::Failed;
+        }
+        None => {
+            task.decisions.push(format!(
+                "Orchestrator: every subtask landed on {}",
+                task.branch
+            ));
+            task.status = TaskStatus::Done;
+        }
+    }
+    task.updated_at = now_ms();
+    let _ = app.store.save_task(&task);
+    app.broadcast_task(&task);
+}
+
+/// The carry-onto-moved-base failure detail the agent gets: which files
+/// conflict and how to resolve them.
+fn conflict_detail(base_ref: &str, new_sha: &str, files: &[String], task_id: &str) -> String {
+    format!(
+        "{base_ref} moved ahead to {}, and your changes were carried onto it. \
+         These files conflict: {}. Text files carry <<<<<<< / >>>>>>> markers; \
+         for a binary or deleted file, your version is `git show {}:<path>`. \
+         Resolve each one so both the base's change and yours survive, then finish the task.",
+        short_sha(new_sha),
+        files.join(", "),
+        git::wip_ref(task_id)
+    )
+}
+
+enum Landing {
+    /// Committed and fast-forwarded onto the parent's branch (or the parent
+    /// already held the work).
+    Landed,
+    /// Back to the agent as an ordinary failure; it retries on the new base.
+    Failed {
+        kind: FailureKind,
+        detail: String,
+    },
+    Cancelled,
+    /// The parent is gone: commit like a task without one.
+    NoParent,
+}
+
+/// Lands a finished child on its parent's branch, one child per parent at a
+/// time: its work is carried onto the parent's current head (earlier
+/// siblings may have landed since it started), verify runs again when the
+/// head moved, then the child commits and the parent's branch
+/// fast-forwards to that commit.
+#[allow(clippy::too_many_arguments)]
+async fn land_on_parent(
+    app: &Arc<App>,
+    task: &mut Task,
+    idx: usize,
+    attempt_n: u32,
+    worktree: &Path,
+    run_dir: &Path,
+    parent_id: &str,
+    cancel: &CancelToken,
+) -> Landing {
+    let lock = app.landing_lock(parent_id);
+    let _landing = tokio::select! {
+        _ = cancel.cancelled() => return Landing::Cancelled,
+        guard = lock.lock_owned() => guard,
+    };
+    let Ok(Some(parent)) = app.store.load_task(parent_id) else {
+        return Landing::NoParent;
+    };
+    let branch = parent.branch.clone();
+    let failed = |kind, detail| Landing::Failed { kind, detail };
+
+    let (wt, base, tid, b) = (
+        worktree.to_path_buf(),
+        task.base_sha.clone(),
+        task.id.clone(),
+        branch.clone(),
+    );
+    let carried = tokio::task::spawn_blocking(move || {
+        // Commits the agent made itself go back to being uncommitted work,
+        // so they are carried (and later committed) like the rest.
+        if git::head_sha(&wt)? != base {
+            git::uncommit_to(&wt, &base)?;
+        }
+        git::carry_onto_moved_base(&wt, &b, &base, &tid)
+    })
+    .await
+    .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
+    match carried {
+        Ok(git::Rebase::Unchanged) => {}
+        Ok(git::Rebase::Moved { new_sha }) => {
+            task.decisions.push(format!(
+                "Land: carried the work onto {branch} at {}",
+                short_sha(&new_sha)
+            ));
+            task.base_sha = new_sha.clone();
+            let (wt, b) = (worktree.to_path_buf(), new_sha.clone());
+            let changed = tokio::task::spawn_blocking(move || {
+                git::changed_files(&wt, &b).unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+            task.attempts[idx].changed_files = changed.clone();
+            if changed.is_empty() {
+                task.decisions
+                    .push(format!("Land: {branch} already contains this work"));
+                return Landing::Landed;
+            }
+            let results = run_verify_cached(
+                app,
+                &task.id,
+                worktree,
+                run_dir,
+                &new_sha,
+                &task.verify,
+                cancel,
+            )
+            .await;
+            if cancel.is_cancelled() {
+                return Landing::Cancelled;
+            }
+            task.attempts[idx].verify = results.clone();
+            if let Some(v) = results.iter().find(|v| v.code != Some(0)) {
+                return failed(
+                    FailureKind::Verify,
+                    format!(
+                        "Another subtask landed on {branch} first; carried onto it, {} exited {}.\n{}",
+                        v.command,
+                        v.code
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| "null".to_string()),
+                        v.tail
+                    ),
+                );
+            }
+        }
+        Ok(git::Rebase::Conflicts { new_sha, files }) => {
+            task.base_sha = new_sha.clone();
+            return failed(
+                FailureKind::Verify,
+                conflict_detail(&branch, &new_sha, &files, &task.id),
+            );
+        }
+        Ok(git::Rebase::Skipped { reason }) => {
+            return failed(
+                FailureKind::Error,
+                format!("Could not carry the work onto {branch} ({reason})."),
+            );
+        }
+        Err(e) => {
+            return failed(
+                FailureKind::Error,
+                format!("Could not carry the work onto {branch} ({e})."),
+            );
+        }
+    }
+
+    let (wt, parent_wt, title, tid, base) = (
+        worktree.to_path_buf(),
+        PathBuf::from(&parent.worktree),
+        task.title.clone(),
+        task.id.clone(),
+        task.base_sha.clone(),
+    );
+    let landed = tokio::task::spawn_blocking(move || {
+        git::commit(&wt, &title, &tid, attempt_n)?;
+        let sha = git::head_sha(&wt)?;
+        if let Err(e) = git::fast_forward(&parent_wt, &sha) {
+            // Keep the work, uncommitted, for the next attempt to carry.
+            let _ = git::uncommit_to(&wt, &base);
+            return Err(e);
+        }
+        Ok(sha)
+    })
+    .await
+    .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
+    match landed {
+        Ok(sha) => {
+            task.decisions
+                .push(format!("Land: landed on {branch} at {}", short_sha(&sha)));
+            Landing::Landed
+        }
+        Err(e) => failed(
+            FailureKind::Error,
+            format!("Could not land on {branch}: {e}"),
+        ),
+    }
+}
+
 // ===========================================================================
 // The attempt loop
 // ===========================================================================
@@ -3804,6 +4888,38 @@ async fn run_task_loop(
                 return;
             }
         };
+
+        // The task graph: a parent never implements, and a task whose
+        // dependencies are not all done waits `queued` with no loop until
+        // `advance_graph` starts it again. Drafting runs meanwhile.
+        if !needs_planning(&task) {
+            let all = app.repo_tasks(&task.repo);
+            if is_parent(&task, &all) {
+                run_parent(&app, &task_id, &cancel).await;
+                app.finish_task_loop(&task_id);
+                return;
+            }
+            let parent_blocked = task
+                .parent
+                .as_deref()
+                .and_then(|pid| all.iter().find(|t| t.id == pid))
+                .is_some_and(|p| {
+                    !matches!(own_waits_state(p, &all), Waits::Ready | Waits::Nothing)
+                });
+            if parent_blocked
+                || (!task.depends_on.is_empty()
+                    && !matches!(waits_state(&task, &all), Waits::Ready | Waits::Nothing))
+            {
+                if task.status != TaskStatus::Queued {
+                    task.status = TaskStatus::Queued;
+                    task.updated_at = now_ms();
+                    let _ = app.store.save_task(&task);
+                    app.broadcast_task(&task);
+                }
+                app.finish_task_loop(&task_id);
+                return;
+            }
+        }
 
         // Concurrency limit: stays `queued` while waiting for a slot, and
         // `task.stop` (via `cancel`) works here too.
@@ -3844,8 +4960,47 @@ async fn run_task_loop(
             }
         }
 
+        // A child may have been attached while this task waited for a slot:
+        // it must never implement the whole request itself then.
+        if implement_attempt_count(&task) == 0 {
+            let all = app.repo_tasks(&task.repo);
+            if is_parent(&task, &all) {
+                drop(permit);
+                run_parent(&app, &task_id, &cancel).await;
+                app.finish_task_loop(&task_id);
+                return;
+            }
+        }
+
         let resume_eligible = !just_answered;
         just_answered = false;
+
+        // A task in a graph starts from its base branch as it is now, so a
+        // dependent begins on top of the work it waited for (a subtask on
+        // its parent's head, with every earlier sibling landed).
+        if implement_attempt_count(&task) == 0
+            && (task.parent.is_some() || !task.depends_on.is_empty())
+        {
+            if let Some(base_ref) = task.base_ref.clone() {
+                let (wt, from, tid, r) = (
+                    PathBuf::from(&task.worktree),
+                    task.base_sha.clone(),
+                    task_id.clone(),
+                    base_ref.clone(),
+                );
+                let synced = tokio::task::spawn_blocking(move || {
+                    git::carry_onto_moved_base(&wt, &r, &from, &tid)
+                })
+                .await;
+                if let Ok(Ok(git::Rebase::Moved { new_sha })) = synced {
+                    task.decisions.push(format!(
+                        "Rebase: started from {base_ref} at {}",
+                        short_sha(&new_sha)
+                    ));
+                    task.base_sha = new_sha;
+                }
+            }
+        }
 
         let mut jev_tier_choice = None;
         let mut planner_tier_used = false;
@@ -4539,15 +5694,7 @@ async fn run_task_loop(
                 }
                 Ok(git::Rebase::Conflicts { new_sha, files }) => {
                     task.base_sha = new_sha.clone();
-                    let detail = format!(
-                        "{base_ref} moved ahead to {}, and your changes were carried onto it. \
-                         These files conflict: {}. Text files carry <<<<<<< / >>>>>>> markers; \
-                         for a binary or deleted file, your version is `git show {}:<path>`. \
-                         Resolve each one so both the base's change and yours survive, then finish the task.",
-                        short_sha(&new_sha),
-                        files.join(", "),
-                        git::wip_ref(&task_id)
-                    );
+                    let detail = conflict_detail(&base_ref, &new_sha, &files, &task_id);
                     match fail_and_continue(
                         &app,
                         &task_id,
@@ -4885,6 +6032,66 @@ async fn run_task_loop(
                         return;
                     }
                 }
+            }
+        }
+
+        if let Some(parent_id) = task.parent.clone() {
+            let landing = land_on_parent(
+                &app, &mut task, idx, attempt_n, &worktree, &run_dir, &parent_id, &cancel,
+            )
+            .await;
+            match landing {
+                Landing::Landed => {
+                    git::delete_wip_ref(&worktree, &task_id);
+                    task.attempts[idx].status = AttemptStatus::Passed;
+                    task.attempts[idx].ended_at = Some(now_ms());
+                    task.status = TaskStatus::Done;
+                    task.updated_at = now_ms();
+                    let _ = app.store.save_task(&task);
+                    app.broadcast_task(&task);
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
+                Landing::Failed { kind, detail } => {
+                    match fail_and_continue(
+                        &app,
+                        &task_id,
+                        &mut task,
+                        idx,
+                        kind,
+                        detail,
+                        &mut attempt_budget,
+                        &pending_answer,
+                        &cancel,
+                        &mut permit,
+                    )
+                    .await
+                    {
+                        LoopSignal::Continue { answered } => {
+                            just_answered = answered;
+                            drop(permit);
+                            continue;
+                        }
+                        LoopSignal::Stop => {
+                            drop(permit);
+                            app.finish_task_loop(&task_id);
+                            return;
+                        }
+                    }
+                }
+                Landing::Cancelled => {
+                    task.attempts[idx].status = AttemptStatus::Interrupted;
+                    task.attempts[idx].ended_at = Some(now_ms());
+                    task.status = TaskStatus::Stopped;
+                    task.updated_at = now_ms();
+                    let _ = app.store.save_task(&task);
+                    app.broadcast_task(&task);
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
+                Landing::NoParent => {}
             }
         }
 
@@ -5660,6 +6867,8 @@ mod tests {
             branch: "task/do-thing".into(),
             base_sha: "deadbeef".into(),
             base_ref: None,
+            depends_on: vec![],
+            parent: None,
             status,
             tier: Tier::Standard,
             question: None,
@@ -5675,6 +6884,86 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    fn graph_task(id: &str, status: TaskStatus, depends_on: &[&str], parent: Option<&str>) -> Task {
+        let mut t = task_with_status(status);
+        t.id = id.to_string();
+        t.depends_on = depends_on.iter().map(|d| d.to_string()).collect();
+        t.parent = parent.map(str::to_string);
+        t
+    }
+
+    #[test]
+    fn a_parent_waiting_for_a_child_that_depends_on_it_is_a_cycle() {
+        let tasks = vec![
+            graph_task("p", TaskStatus::Queued, &[], None),
+            graph_task("c", TaskStatus::Queued, &["p"], Some("p")),
+        ];
+        assert!(has_cycle(&wait_edges(&tasks)));
+        let tasks = vec![
+            graph_task("p", TaskStatus::Queued, &[], None),
+            graph_task("a", TaskStatus::Queued, &[], Some("p")),
+            graph_task("b", TaskStatus::Queued, &["a"], Some("p")),
+        ];
+        assert!(!has_cycle(&wait_edges(&tasks)));
+    }
+
+    #[test]
+    fn waits_state_reads_dependencies_and_children() {
+        let mut tasks = vec![
+            graph_task("p", TaskStatus::Running, &[], None),
+            graph_task("a", TaskStatus::Done, &[], Some("p")),
+            graph_task("b", TaskStatus::Queued, &["a", "gone"], Some("p")),
+        ];
+        assert_eq!(waits_state(&tasks[2], &tasks), Waits::Ready);
+        assert_eq!(waits_state(&tasks[0], &tasks), Waits::Pending);
+        assert_eq!(waits_state(&tasks[1], &tasks), Waits::Nothing);
+        tasks[2].status = TaskStatus::Failed;
+        assert_eq!(
+            waits_state(&tasks[0], &tasks),
+            Waits::Ended(vec!["b".into()])
+        );
+        // An archived child no longer holds its parent back.
+        tasks[2].archived = true;
+        assert_eq!(waits_state(&tasks[0], &tasks), Waits::Ready);
+    }
+
+    #[test]
+    fn check_subtasks_accepts_a_serial_pair_and_rejects_bad_graphs() {
+        let part = |key: &str, deps: &[&str]| brief::PlanSubtask {
+            key: key.into(),
+            title: key.to_uppercase(),
+            request: format!("do {key}"),
+            depends_on: deps.iter().map(|d| d.to_string()).collect(),
+        };
+        assert!(check_subtasks(&[part("a", &[]), part("b", &["a"])]).is_ok());
+        assert!(check_subtasks(&[part("a", &[])]).is_err());
+        assert!(check_subtasks(&[part("a", &["b"]), part("b", &["a"])])
+            .unwrap_err()
+            .contains("cycle"));
+        assert!(check_subtasks(&[part("a", &[]), part("b", &["z"])])
+            .unwrap_err()
+            .contains("unknown key"));
+        assert!(check_subtasks(&[part("a", &[]), part("a", &[])])
+            .unwrap_err()
+            .contains("duplicate"));
+        let many: Vec<_> = (0..=MAX_SUBTASKS)
+            .map(|i| part(&i.to_string(), &[]))
+            .collect();
+        assert!(check_subtasks(&many).is_err());
+    }
+
+    #[test]
+    fn a_subtask_request_carries_the_whole_and_what_was_decided() {
+        let mut parent = task_with_status(TaskStatus::Running);
+        parent.decisions = vec!["Owner: Which default? -> dark".into(), "Jev: x".into()];
+        let text = subtask_request(&parent, "  write the toggle ");
+        assert!(
+            text.starts_with("write the toggle\n\nThis is one part of a larger task, \"Do thing\"")
+        );
+        assert!(text.contains("- Owner: Which default? -> dark"));
+        assert!(!text.contains("Jev: x"));
     }
 
     #[tokio::test]

@@ -325,6 +325,8 @@ mod tests {
             branch: "task/do-thing".into(),
             base_sha: "deadbeef".into(),
             base_ref: None,
+            depends_on: vec![],
+            parent: None,
             status,
             tier: Tier::Standard,
             question: None,

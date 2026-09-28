@@ -340,6 +340,8 @@ mod tests {
             branch: "b".into(),
             base_sha: "s".into(),
             base_ref: None,
+            depends_on: vec![],
+            parent: None,
             status: TaskStatus::Running,
             tier: Tier::Standard,
             question: None,

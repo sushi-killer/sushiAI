@@ -47,7 +47,8 @@ To screenshot one orchd task's detail view, skip the steps above and run
 (build prerequisites still apply). `<seed.json>` is a JSON array of task
 objects - only `title` is required, `status`/`tier`/`decisions`/`criteria`/
 `attempts` (with `costUsd`) all default; `status` must be done, failed,
-stopped or waiting. The tasks are written into the throwaway profile before
+stopped or waiting. Give a seed a `key` to let others name it in `parent`
+or `dependsOn` (a task graph). The tasks are written into the throwaway profile before
 the app starts its own orchd there - no harness run, no API key. It opens the
 panel, picks the task by title, saves
 `artifacts/orchestrator-{window,detail}.png`, prints a JSON report, and

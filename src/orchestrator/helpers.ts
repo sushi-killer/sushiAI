@@ -239,6 +239,21 @@ export function criteriaMet(task: Task): boolean {
   );
 }
 
+/** A parent's subtasks in the order they were planned (oldest first). */
+export function childrenOf(tasks: Task[], parentId: string): Task[] {
+  return tasks
+    .filter((t) => t.parent === parentId)
+    .sort((a, b) => a.createdAt - b.createdAt);
+}
+
+/** Titles of the tasks `task` waits for; an id no longer listed is skipped. */
+export function dependencyTitles(task: Task, tasks: Task[]): string[] {
+  return (task.dependsOn ?? []).flatMap((id) => {
+    const found = tasks.find((t) => t.id === id);
+    return found ? [found.title] : [];
+  });
+}
+
 /** Newest-updated first, matching `task.list`'s own order even after a live
  * `task` event patches one entry in place. */
 export function upsertTask(tasks: Task[], task: Task): Task[] {

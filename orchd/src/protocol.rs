@@ -262,6 +262,8 @@ mod tests {
             branch: "task/t".into(),
             base_sha: "abc".into(),
             base_ref: None,
+            depends_on: vec![],
+            parent: None,
             status: crate::model::TaskStatus::Running,
             tier: crate::model::Tier::Standard,
             question: None,

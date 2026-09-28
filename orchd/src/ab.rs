@@ -212,10 +212,11 @@ pub fn report_with(
 ) -> String {
     let mut groups: BTreeMap<String, Vec<&Task>> = BTreeMap::new();
     let in_scope = |t: &&Task| eval.is_none_or(|e| t.eval_set.as_deref() == Some(e));
+    // A subtask's cost is already in its parent's: the request counts once.
     for t in tasks
         .iter()
         .filter(in_scope)
-        .filter(|t| t.variant.is_some())
+        .filter(|t| t.variant.is_some() && t.parent.is_none())
     {
         let key = serde_json::to_string(&t.variant).unwrap_or_default();
         groups.entry(key).or_default().push(t);

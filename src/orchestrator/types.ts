@@ -163,6 +163,11 @@ export type Task = {
   baseSha: string;
   /** Branch the task started from; its work is carried onto it when it moves. */
   baseRef?: string;
+  /** Ids of tasks that must be done before this one starts implementing. */
+  dependsOn?: string[];
+  /** The task this one is a part of: it branches from and lands on that
+   * task's branch. A task with children runs no attempt of its own. */
+  parent?: string;
   status: TaskStatus;
   tier: Tier;
   /** The planner's tier; routes the task only with `variant.plannerTier`. */

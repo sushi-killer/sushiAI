@@ -24,14 +24,16 @@ function escapeRegExp(text) {
 
 const FIXTURE_STATUSES = new Set(["done", "failed", "stopped", "waiting"]);
 
-/** A seed object completed to the task.json shape orchd's store loads. */
-function taskJson(seed, repo, now) {
+/** A seed object completed to the task.json shape orchd's store loads.
+ * `ids` maps each seed's `key` to its generated id, so `parent` and
+ * `dependsOn` can name other seeds by key. */
+function taskJson(seed, repo, now, id, ids) {
   const status = seed.status ?? "done";
   if (!FIXTURE_STATUSES.has(status))
     throw new Error(
       `seed task "${seed.title}": status ${status} would run on daemon start; use one of ${[...FIXTURE_STATUSES].join(", ")}`,
     );
-  const id = randomUUID();
+  const byKey = (key) => ids.get(key) ?? key;
   const attempts = (seed.attempts ?? []).map((a, i) => ({
     n: i + 1,
     stage: "implement",
@@ -50,6 +52,7 @@ function taskJson(seed, repo, now) {
       (sum, a) => sum + (a.costUsd ?? 0) + (a.reviewCostUsd ?? 0),
       0,
     );
+  const { key: _key, parent, dependsOn, ...rest } = seed;
   return {
     goal: seed.title,
     criteria: [],
@@ -62,7 +65,9 @@ function taskJson(seed, repo, now) {
     archived: false,
     createdAt: now,
     updatedAt: now,
-    ...seed,
+    ...rest,
+    ...(parent ? { parent: byKey(parent) } : {}),
+    ...(dependsOn ? { dependsOn: dependsOn.map(byKey) } : {}),
     id,
     repo,
     status,
@@ -93,8 +98,13 @@ if (!seedPath || !title) {
   try {
     const tasks = await loadSeedTasks(seedPath);
     const now = Date.now();
-    for (const seed of tasks) {
-      const task = taskJson(seed, root, now);
+    const ids = new Map(
+      tasks.filter((seed) => seed.key).map((seed) => [seed.key, randomUUID()]),
+    );
+    for (const [index, seed] of tasks.entries()) {
+      const id = (seed.key && ids.get(seed.key)) || randomUUID();
+      // Seed order is creation order, which is how subtasks are listed.
+      const task = taskJson(seed, root, now + index, id, ids);
       const dir = `${dataDir}/tasks/${task.id}`;
       await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(`${dir}/task.json`, JSON.stringify(task, null, 2));

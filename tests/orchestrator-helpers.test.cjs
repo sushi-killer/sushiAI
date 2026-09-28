@@ -733,3 +733,28 @@ test("costByStage puts a review's cost into other when the attempt has no review
     other: 0.15,
   });
 });
+
+test("childrenOf lists a parent's subtasks oldest first and nothing else", async () => {
+  const { childrenOf } = await library;
+  const tasks = [
+    task({ id: "b", parent: "p", createdAt: 2002 }),
+    task({ id: "p", createdAt: 1000 }),
+    task({ id: "a", parent: "p", createdAt: 2001 }),
+    task({ id: "x", parent: "other", createdAt: 2000 }),
+  ];
+  assert.deepEqual(
+    childrenOf(tasks, "p").map((t) => t.id),
+    ["a", "b"],
+  );
+  assert.deepEqual(childrenOf(tasks, "a"), []);
+});
+
+test("dependencyTitles names what a task waits for and skips deleted ids", async () => {
+  const { dependencyTitles } = await library;
+  const tasks = [
+    task({ id: "a", title: "Part A" }),
+    task({ id: "b", title: "Part B", dependsOn: ["a", "gone"] }),
+  ];
+  assert.deepEqual(dependencyTitles(tasks[1], tasks), ["Part A"]);
+  assert.deepEqual(dependencyTitles(tasks[0], tasks), []);
+});

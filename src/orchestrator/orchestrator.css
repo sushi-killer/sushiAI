@@ -825,6 +825,45 @@
 
 /* The original ask a plan was drafted from - shown as a quoted excerpt, not
  * another form field, since it's read-only once the task exists. */
+.orch-subtasks {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.orch-subtask-row {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  padding: var(--gap-xs) var(--gap-sm);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  text-align: left;
+  min-width: 0;
+}
+
+.orch-subtask-row .orch-task-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.orch-subtask-after {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.orch-parent-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .orch-request {
   border-left: 2px solid var(--line);
   padding-left: var(--gap-sm);

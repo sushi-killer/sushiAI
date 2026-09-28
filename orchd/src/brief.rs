@@ -370,11 +370,23 @@ const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message wit
 
 const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app.";
 
-/// The drafting-stage brief: the owner's request verbatim, then the fixed
-/// planning instructions and report format (spec: "harness-agnostic", so
-/// this takes no harness parameter, same as [`build_brief`]). `contract`
-/// is the task's `variant.contract`.
+const PLAN_SUBTASKS: &str = "When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. Each part's `request` is what its own planner will draft from, so make it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. When the request fits one session, leave `subtasks` out.";
+
+/// The drafting-stage brief for a top-level task: the owner's request
+/// verbatim, then the fixed planning instructions and report format (spec:
+/// "harness-agnostic", so this takes no harness parameter, same as
+/// [`build_brief`]). The planner may split the request into subtasks.
 pub fn build_plan_brief(request: &str, variant: &Variant) -> String {
+    plan_brief(request, variant, true)
+}
+
+/// The drafting-stage brief for a subtask: the same, without the option to
+/// split again (a subtask never has subtasks of its own).
+pub fn build_subtask_plan_brief(request: &str, variant: &Variant) -> String {
+    plan_brief(request, variant, false)
+}
+
+fn plan_brief(request: &str, variant: &Variant, split: bool) -> String {
     let mut extra = String::new();
     if variant.contract {
         extra.push_str(&format!("\n\n{PLAN_CONTRACT}"));
@@ -383,6 +395,13 @@ pub fn build_plan_brief(request: &str, variant: &Variant) -> String {
     if variant.defer_heavy_checks {
         extra.push_str(&format!("\n\n{PLAN_FINAL_VERIFY}"));
         format = format.replace("\"verify\":[],", "\"verify\":[],\"finalVerify\":[],");
+    }
+    if split {
+        extra.push_str(&format!("\n\n{PLAN_SUBTASKS}"));
+        format = format.replace(
+            "]}]}\n```",
+            "]}],\"subtasks\":[{\"key\":\"a\",\"title\":\"...\",\"request\":\"...\",\"dependsOn\":[]}]}\n```",
+        );
     }
     format!(
         "## Request\n\n{}\n\n## Instructions\n\n{}{extra}\n\n{format}",
@@ -401,9 +420,16 @@ pub const REVIEW_CONTRACT: &str = "Rule on every acceptance criterion, using its
 /// same as review), so it still needs the full request, just with an
 /// explicit reminder in front of it.
 pub fn build_plan_retry_brief(request: &str, variant: &Variant) -> String {
+    plan_retry(&build_plan_brief(request, variant))
+}
+
+pub fn build_subtask_plan_retry_brief(request: &str, variant: &Variant) -> String {
+    plan_retry(&build_subtask_plan_brief(request, variant))
+}
+
+fn plan_retry(brief: &str) -> String {
     format!(
-        "Your previous reply did not include a valid ```sushi-plan block. Reply with nothing else.\n\n{}",
-        build_plan_brief(request, variant)
+        "Your previous reply did not include a valid ```sushi-plan block. Reply with nothing else.\n\n{brief}"
     )
 }
 
@@ -430,6 +456,23 @@ pub struct PlanDraft {
     /// Unknown or missing -> `None`: routing falls back to Jev.
     #[serde(default, deserialize_with = "lenient_tier")]
     pub tier: Option<Tier>,
+    /// The planner's split of a request too large for one session; empty
+    /// for an ordinary plan.
+    #[serde(default)]
+    pub subtasks: Vec<PlanSubtask>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PlanSubtask {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub request: String,
+    /// Keys of the parts this one builds on.
+    #[serde(default, rename = "dependsOn")]
+    pub depends_on: Vec<String>,
 }
 
 /// A handoff the agent wrote as null or as an object/array still reads:
@@ -787,6 +830,8 @@ mod tests {
             branch: "task/add-a-button".into(),
             base_sha: "abc123".into(),
             base_ref: None,
+            depends_on: vec![],
+            parent: None,
             status: TaskStatus::Running,
             tier: Tier::Standard,
             question: None,
@@ -1108,6 +1153,28 @@ mod tests {
         assert!(brief.contains("add dark mode to the settings screen"));
         assert!(brief.contains("sushi-plan"));
         assert!(brief.contains("AGENTS.md"));
+    }
+
+    #[test]
+    fn only_a_top_level_plan_brief_offers_subtasks() {
+        let top = build_plan_brief("r", &Variant::default());
+        assert!(top.contains("\"subtasks\":[{\"key\""));
+        assert!(top.contains("prefer 2-5 parts"));
+        let part = build_subtask_plan_brief("r", &Variant::default());
+        assert!(!part.contains("subtasks"));
+        assert!(build_subtask_plan_retry_brief("r", &Variant::default()).contains("previous reply"));
+    }
+
+    #[test]
+    fn parse_plan_reads_subtasks_with_their_dependencies() {
+        let text = "```sushi-plan\n{\"title\":\"T\",\"goal\":\"G\",\"subtasks\":[{\"key\":\"a\",\"title\":\"A\",\"request\":\"do a\"},{\"key\":\"b\",\"title\":\"B\",\"request\":\"do b\",\"dependsOn\":[\"a\"]}]}\n```";
+        let draft = parse_plan(text).unwrap();
+        assert_eq!(draft.subtasks.len(), 2);
+        assert_eq!(draft.subtasks[1].depends_on, vec!["a".to_string()]);
+        assert!(parse_plan("```sushi-plan\n{\"title\":\"T\"}\n```")
+            .unwrap()
+            .subtasks
+            .is_empty());
     }
 
     #[test]

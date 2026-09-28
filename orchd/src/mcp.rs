@@ -38,10 +38,13 @@ title/goal/criteria/verify for you. Use the full {repo, title, goal, \
 criteria, verify} form only when the owner already specified it.
 - A task branches from the repo's current HEAD; pass `base` to start it \
 from another branch (e.g. the feature branch the owner is working on).
-- To speed up one feature, split it into 2-3 tasks that touch different \
-files, give them the same `base`, and start them together; merge each \
-into the base once it is done. Keep parts that edit the same file in one \
-task.
+- The planner splits a request too large for one session into subtasks on \
+its own. To build such a graph by hand, create a parent task, then its \
+parts with `parent` set to its id: each part branches from the parent's \
+branch and lands there once done, and the parent is done when every part \
+has landed. Give a part `dependsOn` (task ids) when it builds on another \
+part; it starts only after those are done. Keep parts that edit the same \
+file in one task.
 - Use task_list / task_get to check on progress instead of guessing.
 - When a task is `waiting`, answer it yourself with task_answer if the repo \
 or the task's own context already answers the question. Otherwise bring \
@@ -154,6 +157,8 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "branch": {"type": "string"},
                     "base": {"type": "string", "description": "Branch or commit to start from; defaults to the repo's current HEAD."},
                     "variant": {"type": "object", "description": "Experiment flags for this task only, over the settings defaults: retryMode (\"resume\"|\"fresh\"), stallTimeoutSecs (0 = off), plannerTier, contract, reviewOtherFamily, reviewEvidence, deferHeavyChecks, leanOutput, reviewBlind, advisor (bool); plannerRoute (route id the plan stage runs on instead of the settings' planner) and tierRoutes (object tier -> route id, e.g. {\"hard\": \"claude-sonnet\"}, replacing the settings' tier route for implementing; must name configured routes). Create the same task twice with different variants to A/B them."},
+                    "dependsOn": {"type": "array", "items": {"type": "string"}, "description": "Ids of tasks in this repo that must be done before this one starts; it starts on its own once they are. A cycle is rejected."},
+                    "parent": {"type": "string", "description": "Id of the task this one is a part of: it branches from the parent's branch and lands there when done. The parent runs no implement attempt of its own; a task that already has a running loop is rejected as a parent."},
                     "start": {"type": "boolean", "description": "Start right away (default true); false leaves the task stopped for review."},
                 },
                 "required": ["repo"],

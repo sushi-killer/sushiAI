@@ -431,6 +431,15 @@ pub struct Task {
     /// never rebases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_ref: Option<String>,
+    /// Ids of tasks that must be `done` before this one starts implementing
+    /// (it may still draft its plan meanwhile).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    /// The task this one is a part of: it branches from that task's branch
+    /// and, once done, its commit lands there. A task with children runs no
+    /// implement attempt of its own; it is done when every child has landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     pub status: TaskStatus,
     pub tier: Tier,
     /// The tier the planner chose, kept even when `variant.planner_tier` is
@@ -785,6 +794,8 @@ mod tests {
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,
+            depends_on: vec![],
+            parent: None,
             status: TaskStatus::Drafting,
             tier: Tier::Standard,
             question: None,
@@ -928,6 +939,8 @@ mod tests {
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,
+            depends_on: vec![],
+            parent: None,
             status: TaskStatus::Queued,
             tier: Tier::Standard,
             question: None,
@@ -964,6 +977,8 @@ mod tests {
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,
+            depends_on: vec![],
+            parent: None,
             status: TaskStatus::Done,
             tier: Tier::Standard,
             question: None,

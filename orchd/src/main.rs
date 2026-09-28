@@ -143,17 +143,16 @@ async fn run_rtk_hook() -> Option<String> {
     if hook::touches_denied_bash_command(&command) {
         return None;
     }
-    let (success, stdout) = run_rtk_rewrite(&command).await;
+    let (code, stdout) = run_rtk_rewrite(&command).await;
     let tool_input = payload.get("tool_input")?;
-    hook::rtk_rewrite_output(tool_input, &command, success, &stdout).map(|v| v.to_string())
+    hook::rtk_rewrite_output(tool_input, &command, code, &stdout).map(|v| v.to_string())
 }
 
 /// Runs `rtk rewrite <command>`, killing it if it outlives
 /// [`RTK_REWRITE_TIMEOUT`] (`kill_on_drop` fires when the timed-out future
-/// drops the still-owned child). `(false, "")` covers everything that isn't
-/// a clean, on-time, zero exit: rtk missing from PATH, a non-zero exit (its
-/// common "nothing to rewrite" answer), or the timeout itself.
-async fn run_rtk_rewrite(command: &str) -> (bool, String) {
+/// drops the still-owned child). `(None, "")` when rtk is missing from PATH
+/// or times out; otherwise its exit code (see `hook::rtk_rewrite_output`).
+async fn run_rtk_rewrite(command: &str) -> (Option<i32>, String) {
     let child = tokio::process::Command::new("rtk")
         .arg("rewrite")
         .arg(command)
@@ -163,14 +162,14 @@ async fn run_rtk_rewrite(command: &str) -> (bool, String) {
         .stderr(std::process::Stdio::null())
         .spawn();
     let Ok(child) = child else {
-        return (false, String::new());
+        return (None, String::new());
     };
     match tokio::time::timeout(RTK_REWRITE_TIMEOUT, child.wait_with_output()).await {
         Ok(Ok(out)) => (
-            out.status.success(),
+            out.status.code(),
             String::from_utf8_lossy(&out.stdout).to_string(),
         ),
-        Ok(Err(_)) | Err(_) => (false, String::new()),
+        Ok(Err(_)) | Err(_) => (None, String::new()),
     }
 }
 

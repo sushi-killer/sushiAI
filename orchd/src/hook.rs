@@ -424,15 +424,20 @@ fn only_condensing_rtk(command: &str) -> bool {
         && words.last() != Some(&"rtk")
 }
 
+/// `rtk rewrite`'s exit code: 0 rewrites and allows, 3 rewrites but leaves
+/// the permission decision to Claude Code's own rules (rtk >= 0.50 checks
+/// them), 1 has no rewrite and 2 is a deny rule; anything else declines.
 pub fn rtk_rewrite_output(
     tool_input: &serde_json::Value,
     original_command: &str,
-    rtk_exit_success: bool,
+    rtk_exit: Option<i32>,
     rtk_stdout: &str,
 ) -> Option<serde_json::Value> {
-    if !rtk_exit_success {
-        return None;
-    }
+    let allow = match rtk_exit {
+        Some(0) => true,
+        Some(3) => false,
+        _ => return None,
+    };
     let rewritten = rtk_stdout.trim();
     if rewritten.is_empty() || rewritten == original_command.trim() {
         return None;
@@ -445,13 +450,14 @@ pub fn rtk_rewrite_output(
     }
     let mut updated_input = tool_input.clone();
     updated_input["command"] = serde_json::Value::String(rewritten.to_string());
-    Some(serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-            "updatedInput": updated_input,
-        }
-    }))
+    let mut out = serde_json::json!({
+        "hookEventName": "PreToolUse",
+        "updatedInput": updated_input,
+    });
+    if allow {
+        out["permissionDecision"] = "allow".into();
+    }
+    Some(serde_json::json!({ "hookSpecificOutput": out }))
 }
 
 #[cfg(test)]
@@ -898,7 +904,7 @@ mod tests {
     fn rtk_rewrite_output_allows_only_a_clean_different_rewrite() {
         let input =
             serde_json::json!({"command": "npm test", "description": "run tests", "timeout": 1000});
-        let out = rtk_rewrite_output(&input, "npm test", true, "rtk npm test\n").unwrap();
+        let out = rtk_rewrite_output(&input, "npm test", Some(0), "rtk npm test\n").unwrap();
         assert_eq!(out["hookSpecificOutput"]["hookEventName"], "PreToolUse");
         assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "allow");
         assert_eq!(
@@ -911,10 +917,25 @@ mod tests {
         );
 
         // Same command back, non-zero exit, empty output: all decline.
-        assert!(rtk_rewrite_output(&input, "npm test", true, "npm test").is_none());
-        assert!(rtk_rewrite_output(&input, "npm test", false, "npm test --silent").is_none());
-        assert!(rtk_rewrite_output(&input, "npm test", true, "").is_none());
-        assert!(rtk_rewrite_output(&input, "npm test", true, "   ").is_none());
+        assert!(rtk_rewrite_output(&input, "npm test", Some(0), "npm test").is_none());
+        assert!(rtk_rewrite_output(&input, "npm test", Some(1), "npm test --silent").is_none());
+        assert!(rtk_rewrite_output(&input, "npm test", Some(0), "").is_none());
+        assert!(rtk_rewrite_output(&input, "npm test", Some(0), "   ").is_none());
+    }
+
+    #[test]
+    fn rtk_rewrite_output_leaves_an_ask_answer_to_claude_code() {
+        let input = serde_json::json!({"command": "cargo test"});
+        let out = rtk_rewrite_output(&input, "cargo test", Some(3), "rtk cargo test").unwrap();
+        assert_eq!(
+            out["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk cargo test"
+        );
+        assert!(out["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none());
+        assert!(rtk_rewrite_output(&input, "cargo test", Some(2), "rtk cargo test").is_none());
+        assert!(rtk_rewrite_output(&input, "cargo test", None, "rtk cargo test").is_none());
     }
 
     #[test]
@@ -931,7 +952,7 @@ mod tests {
         ] {
             let input = serde_json::json!({ "command": orig });
             assert!(
-                rtk_rewrite_output(&input, orig, true, rewritten).is_none(),
+                rtk_rewrite_output(&input, orig, Some(0), rewritten).is_none(),
                 "{orig}"
             );
         }
@@ -945,7 +966,7 @@ mod tests {
         ] {
             let input = serde_json::json!({ "command": orig });
             assert!(
-                rtk_rewrite_output(&input, orig, true, rewritten).is_some(),
+                rtk_rewrite_output(&input, orig, Some(0), rewritten).is_some(),
                 "{orig}"
             );
         }
@@ -954,12 +975,14 @@ mod tests {
     #[test]
     fn rtk_rewrite_output_never_rewrites_past_git_commit_or_push() {
         let input = serde_json::json!({"command": "git commit -m x"});
-        assert!(rtk_rewrite_output(&input, "git commit -m x", true, "git commit -am x").is_none());
+        assert!(
+            rtk_rewrite_output(&input, "git commit -m x", Some(0), "git commit -am x").is_none()
+        );
         let input = serde_json::json!({"command": "git push"});
-        assert!(rtk_rewrite_output(&input, "git push", true, "git push origin main").is_none());
+        assert!(rtk_rewrite_output(&input, "git push", Some(0), "git push origin main").is_none());
         // Even an unrelated original must not be rewritten into one.
         let input = serde_json::json!({"command": "ls"});
-        assert!(rtk_rewrite_output(&input, "ls", true, "rtk git commit -am x").is_none());
+        assert!(rtk_rewrite_output(&input, "ls", Some(0), "rtk git commit -am x").is_none());
         assert!(touches_denied_bash_command("git commit -m x"));
         assert!(touches_denied_bash_command("git push origin main"));
         assert!(!touches_denied_bash_command("git status"));

@@ -30,7 +30,7 @@ open every image you produced before you describe it.
    - `scrollWidth - clientWidth` of scroll containers (horizontal overflow);
    - computed styles when two elements must match exactly;
    - accessible names through `getByRole`.
-   **Done when:** each claim in your reply is a number from this run.
+     **Done when:** each claim in your reply is a number from this run.
 5. **Capture and look.** Screenshot the full window and a crop of the area in
    question. Crops narrower than ~400px are unreadable; widen the clip rather
    than upscaling. Open every PNG with the Read tool and say what you see.
@@ -39,6 +39,19 @@ open every image you produced before you describe it.
    calling the element broken.
    **Done when:** every screenshot you cite was opened in this session.
 6. **Clean up.** Delete `artifacts/.driver.mjs`; keep only the PNGs you cite.
+
+## Orchestrator panel task detail
+
+To screenshot one orchd task's detail view, skip the steps above and run
+`node .agents/skills/ui-evidence/scripts/orchestrator-panel.mjs <seed.json> <task title>`
+(build prerequisites still apply). `<seed.json>` is a JSON array of task
+objects - only `title` is required, `status`/`tier`/`decisions`/`criteria`/
+`attempts` (with `costUsd`) all default; `status` must be done, failed,
+stopped or waiting. The tasks are written into the throwaway profile before
+the app starts its own orchd there - no harness run, no API key. It opens the
+panel, picks the task by title, saves
+`artifacts/orchestrator-{window,detail}.png`, prints a JSON report, and
+exits non-zero with `error` set on any failure, including an unmatched title.
 
 ## Boundaries
 

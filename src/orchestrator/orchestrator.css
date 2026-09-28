@@ -527,6 +527,11 @@
   color: var(--text-muted);
 }
 
+.orch-variant-line,
+.orch-cost-breakdown {
+  color: var(--text-muted);
+}
+
 .orch-branch {
   font-family: monospace;
   overflow: hidden;

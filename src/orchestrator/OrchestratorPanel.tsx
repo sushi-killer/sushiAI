@@ -21,6 +21,7 @@ import {
   applyOrchestratorEvent,
   attemptDurationMs,
   attemptProgress,
+  costByStage,
   criteriaMet,
   emptyLiveState,
   formatCost,
@@ -34,6 +35,7 @@ import {
   totalDurationMs,
   upsertMessage,
   upsertTask,
+  variantLabel,
   type MessageThread,
   type OrchestratorLiveState,
 } from "./helpers";
@@ -1070,6 +1072,34 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                     </>
                   )}
                 </p>
+                {settings && (
+                  <p className="orch-detail-meta orch-variant-line">
+                    Variant: {variantLabel(selected, settings.experiments)}
+                  </p>
+                )}
+                {(() => {
+                  const breakdown = costByStage(selected);
+                  const rows: { label: string; cost: number }[] = [
+                    { label: "Plan", cost: breakdown.plan },
+                    ...breakdown.implement.map((a) => ({
+                      label: `Implement #${a.n}`,
+                      cost: a.costUsd,
+                    })),
+                    { label: "Review", cost: breakdown.review },
+                    { label: "Other", cost: breakdown.other },
+                  ].filter((row) => formatCost(row.cost) !== "$0.00");
+                  if (rows.length === 0) return null;
+                  return (
+                    <p
+                      className="orch-detail-meta orch-cost-breakdown"
+                      title="Where this task's cost went, by stage"
+                    >
+                      {rows
+                        .map((row) => `${row.label} ${formatCost(row.cost)}`)
+                        .join(" · ")}
+                    </p>
+                  );
+                })()}
               </div>
               <div className="orch-detail-actions">
                 {(selected.status === "drafting" ||

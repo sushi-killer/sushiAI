@@ -7,6 +7,7 @@ import type {
   Settings,
   Task,
   Tier,
+  Variant,
 } from "./types";
 
 export type TaskCreateParams = {
@@ -44,6 +45,66 @@ export function formatDuration(ms: number): string {
 
 export function formatCost(costUsd: number | undefined): string {
   return `$${(costUsd || 0).toFixed(2)}`;
+}
+
+/** `Variant`'s own field order - `variantLabel` walks it in this order so a
+ * task with several differing flags always reads the same way. */
+const VARIANT_KEYS: (keyof Variant)[] = [
+  "retryMode",
+  "stallTimeoutSecs",
+  "plannerTier",
+  "contract",
+  "reviewOtherFamily",
+  "reviewEvidence",
+  "deferHeavyChecks",
+  "leanContext",
+  "leanOutput",
+];
+
+function variantFlagText(value: boolean | string | number): string {
+  return typeof value === "boolean" ? (value ? "on" : "off") : String(value);
+}
+
+/** How a task's experiment arm reads in the detail view: "not recorded" for
+ * a task from before variants existed, "default" when every flag matches
+ * `experiments` (the current settings), or else only the flags that differ,
+ * in `Variant`'s own field order. */
+export function variantLabel(task: Task, experiments: Variant): string {
+  if (!task.variant) return "not recorded";
+  const variant = task.variant;
+  const diffs = VARIANT_KEYS.filter((key) => variant[key] !== experiments[key]);
+  if (diffs.length === 0) return "default";
+  return diffs
+    .map((key) => `${key} ${variantFlagText(variant[key])}`)
+    .join(" · ");
+}
+
+export type CostByStage = {
+  plan: number;
+  implement: { n: number; costUsd: number }[];
+  review: number;
+  other: number;
+};
+
+/** Splits a task's `costUsd` into where it went: the plan attempt(s), one
+ * entry per implement attempt, the review runs, and `other` - the remainder
+ * left by auto-answer runs and (for a task recorded before `reviewCostUsd`
+ * existed) reviews with no cost attributed to any attempt. Clamped at 0
+ * rather than going negative on rounding. */
+export function costByStage(task: Task): CostByStage {
+  const plan = task.attempts
+    .filter((attempt) => attempt.stage === "plan")
+    .reduce((sum, attempt) => sum + (attempt.costUsd || 0), 0);
+  const implement = task.attempts
+    .filter((attempt) => attempt.stage === "implement")
+    .map((attempt) => ({ n: attempt.n, costUsd: attempt.costUsd || 0 }));
+  const implementTotal = implement.reduce((sum, a) => sum + a.costUsd, 0);
+  const review = task.attempts.reduce(
+    (sum, attempt) => sum + (attempt.reviewCostUsd || 0),
+    0,
+  );
+  const other = Math.max(0, task.costUsd - plan - implementTotal - review);
+  return { plan, implement, review, other };
 }
 
 export function attemptDurationMs(attempt: Attempt, now = Date.now()): number {

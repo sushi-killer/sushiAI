@@ -3478,6 +3478,7 @@ async fn run_plan_stage(
             failure: None,
             usage: None,
             cost_usd: None,
+            review_cost_usd: None,
         };
         task.attempts.push(attempt);
         let idx = task.attempts.len() - 1;
@@ -4046,6 +4047,7 @@ async fn run_task_loop(
             failure: None,
             usage: None,
             cost_usd: None,
+            review_cost_usd: None,
         };
         task.attempts.push(attempt);
         let idx = task.attempts.len() - 1;
@@ -4771,9 +4773,13 @@ async fn run_task_loop(
                     &mut review_cost,
                 )
                 .await;
-                // The task's total only: an attempt's own cost is what later
-                // resumes of its session subtract (`attempt_cost`).
+                // The task's total, and separately the attempt's
+                // review_cost_usd for display: an attempt's own cost_usd is
+                // what later resumes of its session subtract
+                // (`attempt_cost`), so the review's cost must never join it.
                 task.cost_usd += review_cost;
+                task.attempts[idx].review_cost_usd =
+                    Some(task.attempts[idx].review_cost_usd.unwrap_or(0.0) + review_cost);
                 match reviewed {
                     Ok(r) => review_result = Some(r),
                     Err(RunError::Cancelled) => {
@@ -5133,6 +5139,7 @@ mod tests {
             }),
             usage: None,
             cost_usd: None,
+            review_cost_usd: None,
         }
     }
 

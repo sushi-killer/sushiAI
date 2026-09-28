@@ -721,6 +721,7 @@ mod tests {
             }),
             usage: None,
             cost_usd: None,
+            review_cost_usd: None,
         });
         let mut second = task.attempts[0].clone();
         second.n = 2;
@@ -871,6 +872,7 @@ mod tests {
             failure: None,
             usage: None,
             cost_usd: None,
+            review_cost_usd: None,
         });
         let brief = build_brief(&task, "", "");
         assert!(
@@ -1044,6 +1046,7 @@ mod tests {
             }),
             usage: None,
             cost_usd: None,
+            review_cost_usd: None,
         });
         let brief = build_triage_brief(
             &task,

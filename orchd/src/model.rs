@@ -528,6 +528,13 @@ pub struct Attempt {
     pub usage: Option<Usage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// Cost of the review run(s) that reviewed this implement attempt. Kept
+    /// separate from `cost_usd` on purpose: `attempt_cost()` subtracts
+    /// earlier attempts' `cost_usd` when a session resumes, and a review's
+    /// cost must never be part of that subtraction. Always added to
+    /// `task.cost_usd` too, at the point the review runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_cost_usd: Option<f64>,
 }
 
 /// The address the orchestrator agent sends from and receives at; every

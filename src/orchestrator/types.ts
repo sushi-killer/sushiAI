@@ -133,6 +133,10 @@ export type Attempt = {
   failure?: Failure;
   usage?: Usage;
   costUsd?: number;
+  /** Cost of the review run(s) that reviewed this implement attempt - kept
+   * separate from `costUsd` because that field is what a later resume of
+   * the same session subtracts, and a review's cost must never join it. */
+  reviewCostUsd?: number;
 };
 
 export type Task = {

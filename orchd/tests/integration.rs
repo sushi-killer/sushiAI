@@ -2620,6 +2620,64 @@ fn final_checks_run_once_after_review_passes_and_gate_the_commit() {
     }
 }
 
+/// Implements like the other fakes; as reviewer, answers PASS and reports a
+/// cost of its own via `total_cost_usd`.
+const FAKE_PRICED_REVIEWER_SCRIPT: &str = r###"#!/bin/sh
+brief=$(cat)
+case "$brief" in
+"## Review"*)
+  printf '%s\n' '{"type":"result","total_cost_usd":0.05,"result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
+*)
+  echo changed > CHANGED_MARKER.txt
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}' ;;
+esac
+"###;
+
+#[test]
+fn review_cost_lands_on_the_attempt_s_review_cost_usd_and_the_task_total() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-priced-reviewer.sh",
+        FAKE_PRICED_REVIEWER_SCRIPT,
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("claude-opus");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Priced review",
+            "goal": "Write the marker",
+            "verify": ["true"],
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    assert_eq!(settled["status"], "done", "{settled}");
+    let attempt = &settled["attempts"][0];
+    assert_eq!(attempt["review"]["verdict"], "PASS", "{settled}");
+    // The review's cost sits on the implement attempt's own reviewCostUsd,
+    // never folded into that attempt's costUsd (attempt_cost() subtracts
+    // costUsd from earlier attempts on a resumed session).
+    assert_eq!(attempt["reviewCostUsd"], 0.05, "{settled}");
+    assert_eq!(attempt["costUsd"], 0.01, "{settled}");
+    assert!(
+        (settled["costUsd"].as_f64().unwrap() - 0.06).abs() < 1e-9,
+        "{settled}"
+    );
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
 // -- variant.leanContext ------------------------------------------------------
 
 /// Commits `files` (path relative to the repo, contents) on top of the repo's

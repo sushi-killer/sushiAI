@@ -598,3 +598,107 @@ test("resetSettingToDefault restores one setting and leaves the rest alone", asy
   // The input itself is never mutated.
   assert.equal(saved.planner, "claude-sonnet");
 });
+
+function variant(overrides = {}) {
+  return {
+    retryMode: "resume",
+    stallTimeoutSecs: 120,
+    plannerTier: false,
+    contract: false,
+    reviewOtherFamily: false,
+    reviewEvidence: false,
+    deferHeavyChecks: false,
+    leanContext: false,
+    leanOutput: false,
+    ...overrides,
+  };
+}
+
+test("variantLabel says 'not recorded' when the task predates variants", async () => {
+  const { variantLabel } = await library;
+  assert.equal(
+    variantLabel(task({ variant: undefined }), variant()),
+    "not recorded",
+  );
+});
+
+test("variantLabel says 'default' when the task's variant matches the current experiments", async () => {
+  const { variantLabel } = await library;
+  assert.equal(
+    variantLabel(task({ variant: variant() }), variant()),
+    "default",
+  );
+});
+
+test("variantLabel lists only the differing flags, in Variant's field order, booleans as on/off", async () => {
+  const { variantLabel } = await library;
+  const experiments = variant();
+  const taskVariant = variant({ retryMode: "fresh", leanContext: true });
+  assert.equal(
+    variantLabel(task({ variant: taskVariant }), experiments),
+    "retryMode fresh · leanContext on",
+  );
+});
+
+test("variantLabel leaves an unchanged flag out even when it sits between two differing ones", async () => {
+  const { variantLabel } = await library;
+  const experiments = variant();
+  const taskVariant = variant({
+    plannerTier: true,
+    contract: false,
+    reviewOtherFamily: true,
+  });
+  assert.equal(
+    variantLabel(task({ variant: taskVariant }), experiments),
+    "plannerTier on · reviewOtherFamily on",
+  );
+});
+
+test("costByStage splits plan, each implement attempt, and review into their own totals", async () => {
+  const { costByStage } = await library;
+  const t = task({
+    costUsd: 0.3,
+    attempts: [
+      attempt({ n: 1, stage: "plan", costUsd: 0.02 }),
+      attempt({ n: 2, stage: "implement", costUsd: 0.1, reviewCostUsd: 0.05 }),
+      attempt({ n: 3, stage: "implement", costUsd: 0.08, reviewCostUsd: 0.05 }),
+    ],
+  });
+  assert.deepEqual(costByStage(t), {
+    plan: 0.02,
+    implement: [
+      { n: 2, costUsd: 0.1 },
+      { n: 3, costUsd: 0.08 },
+    ],
+    review: 0.1,
+    other: 0,
+  });
+});
+
+test("costByStage puts a leftover auto-answer cost into other", async () => {
+  const { costByStage } = await library;
+  const t = task({
+    costUsd: 0.2,
+    attempts: [attempt({ n: 1, stage: "implement", costUsd: 0.1 })],
+  });
+  assert.deepEqual(costByStage(t), {
+    plan: 0,
+    implement: [{ n: 1, costUsd: 0.1 }],
+    review: 0,
+    other: 0.1,
+  });
+});
+
+test("costByStage puts a review's cost into other when the attempt has no reviewCostUsd", async () => {
+  const { costByStage } = await library;
+  const t = task({
+    costUsd: 0.25,
+    attempts: [attempt({ n: 1, stage: "implement", costUsd: 0.1 })],
+  });
+  assert.deepEqual(costByStage(t), {
+    plan: 0,
+    implement: [{ n: 1, costUsd: 0.1 }],
+    review: 0,
+    other: 0.15,
+  });
+});

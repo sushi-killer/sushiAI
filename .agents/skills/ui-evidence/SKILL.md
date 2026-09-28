@@ -51,7 +51,7 @@ stopped or waiting. Give a seed a `key` to let others name it in `parent`
 or `dependsOn` (a task graph). The tasks are written into the throwaway profile before
 the app starts its own orchd there - no harness run, no API key. It opens the
 panel, picks the task by title, saves
-`artifacts/orchestrator-{window,detail}.png`, prints a JSON report, and
+`artifacts/orchestrator-{window,detail,home}.png` (`home` is the orchestrator page before a task is picked), prints a JSON report, and
 exits non-zero with `error` set on any failure, including an unmatched title.
 
 ## Boundaries

@@ -5,9 +5,11 @@
 import type {
   ChatSessionList,
   ChatThread,
+  FailureRow,
   Message,
   Settings,
   Task,
+  TimelineSegment,
 } from "./types";
 
 function call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
@@ -28,6 +30,13 @@ export const orchestratorClient = {
       ...(includeArchived ? { includeArchived } : {}),
     }),
   taskGet: (id: string) => call<Task>("task.get", { id }),
+  taskTimeline: (id: string) =>
+    call<TimelineSegment[]>("task.timeline", { id }),
+  failuresCatalogue: (repo?: string, sinceDays?: number) =>
+    call<FailureRow[]>("failures.catalogue", {
+      ...(repo ? { repo } : {}),
+      ...(sinceDays ? { sinceDays } : {}),
+    }),
   taskCreate: (
     repo: string,
     params: {

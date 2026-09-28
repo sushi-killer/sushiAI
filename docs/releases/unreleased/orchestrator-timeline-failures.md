@@ -1,0 +1,4 @@
+## Orchestrator: where a task's time went, and which failures keep coming back
+
+- A task's detail now has a compact timeline bar: a segment per stage (plan, implement, verify, review, advisor, final checks), sized by duration, with time spent waiting for you as its own segment. Hover a segment for its cost and outcome. `task.timeline {id}` returns the segments; they are computed on demand from the task record and each run's events, so verify, review and final segments are sized from recorded command durations and run files, not exact timestamps.
+- The orchestrator page lists the top ten recurring failures in the repo, each with how often it happened and across how many tasks. Clicking one opens the task where it was seen last. `failures.catalogue {repo?, sinceDays?}` returns them grouped by failure signature, most frequent first, and `orchd failures --data <dir> [--repo <path>] [--since-days <n>]` prints the same as a table.

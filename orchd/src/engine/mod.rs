@@ -545,6 +545,12 @@ impl App {
             "task.archive" => self.handle_task_archive(params).await,
             "task.unarchive" => self.handle_task_unarchive(params).await,
             "task.preflight" => self.handle_task_preflight(params).await,
+            "task.timeline" => {
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                validate_task_id(&self.store, id)?;
+                crate::timeline::timeline_json(&self.store, id)
+            }
+            "failures.catalogue" => crate::timeline::catalogue_json(&self.store, &params),
             "chat.get" => chat::handle_get(self, params).await,
             "chat.send" => chat::handle_send(self, params).await,
             "chat.cancel" => chat::handle_cancel(self, params).await,

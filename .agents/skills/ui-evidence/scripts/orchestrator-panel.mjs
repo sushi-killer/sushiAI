@@ -168,6 +168,11 @@ if (!seedPath || !title) {
         `no seeded task titled "${title}" in the orchestrator panel`,
       );
     }
+    // The orchestrator page (chat, plus the recurring failures above it) is
+    // what the panel shows before a task is picked.
+    await page
+      .locator(".orch-main")
+      .screenshot({ path: shot("orchestrator-home") });
     await row.first().click();
     await page.locator(".orch-detail").waitFor();
 
@@ -178,6 +183,7 @@ if (!seedPath || !title) {
     report.screenshots = {
       window: shot("orchestrator-window"),
       detail: shot("orchestrator-detail"),
+      home: shot("orchestrator-home"),
     };
     report.selectedTitle = title;
   } catch (error) {

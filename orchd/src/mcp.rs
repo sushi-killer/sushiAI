@@ -840,7 +840,7 @@ mod tests {
             let _keep_serving = shutdown;
             let _ = crate::protocol::serve(&path, dispatcher, rx).await;
         });
-        while !socket.exists() {
+        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         let token = read_control_token(dir).unwrap();

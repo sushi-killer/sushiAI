@@ -317,3 +317,39 @@ export type AuditEvent = { event: "audit"; audit: Audit };
 /** Pushed over `onOrchestrator` from the daemon's one `subscribe` connection. */
 export type OrchestratorEvent =
   TaskEvent | LogEvent | ChatEvent | MessageEvent | AuditEvent;
+
+export type TimelineStage =
+  "plan" | "implement" | "verify" | "review" | "advisor" | "final" | "wait";
+
+/** One piece of a task's time, from `task.timeline`: computed on demand from
+ * the task record and each run's events, never stored. */
+export type TimelineSegment = {
+  stage: TimelineStage;
+  attempt: number;
+  startedAt: number;
+  endedAt: number;
+  costUsd: number;
+  outcome: string;
+  failureKind?: FailureKind;
+  /** Implement attempts only: tool calls by kind. */
+  buckets?: {
+    process: number;
+    evidence: number;
+    verify: number;
+    task: number;
+    explore: number;
+  };
+};
+
+/** One recurring failure from `failures.catalogue`: every attempt whose
+ * failure has this signature, across tasks. */
+export type FailureRow = {
+  signature: string;
+  kind: FailureKind;
+  count: number;
+  tasks: { id: string; title: string }[];
+  lastSeen: number;
+  exampleDetail: string;
+  /** The task whose attempt supplied `exampleDetail` and `lastSeen`. */
+  exampleTaskId: string;
+};

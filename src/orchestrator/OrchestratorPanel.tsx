@@ -53,6 +53,7 @@ import type {
 import { ChatTranscript } from "../ChatTranscript";
 import { ChipPicker } from "../ChipPicker";
 import { RichText } from "../agents/AgentsView";
+import { RecurringFailures, TaskTimelineBar } from "./TaskInsights";
 
 /** Electron wraps a rejected IPC call as "Error invoking remote method
  * 'orchestrator': Error: <daemon message>"; the owner only needs the last
@@ -1020,6 +1021,13 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
             </button>
           </div>
         )}
+        {current.kind === "chat" && (
+          <RecurringFailures
+            cwd={cwd}
+            refresh={live.tasks.map((t) => `${t.id}:${t.updatedAt}`).join()}
+            onOpenTask={(id) => open({ kind: "task", id })}
+          />
+        )}
         <OrchestratorChat
           cwd={cwd}
           hidden={current.kind !== "chat"}
@@ -1239,6 +1247,7 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                 }
               />
             )}
+            <TaskTimelineBar task={selected} />
             {selected.request && selected.request !== selected.title && (
               <p className="orch-request">{selected.request}</p>
             )}

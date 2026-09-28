@@ -1,7 +1,7 @@
 //! `orchd serve --data <dir> [--socket <path>]` (also the default with no
 //! subcommand), `orchd hook stop --socket <path> --token <t>`,
 //! `orchd hook rtk` (no socket or token -- it never contacts the daemon),
-//! `orchd mcp --data <dir> [--socket <path>]`, `orchd ab --data <dir> [--eval <set>]`, and
+//! `orchd mcp --data <dir> [--socket <path>]`, `orchd ab --data <dir> [--eval <set>]`, `orchd failures --data <dir>`, and
 //! `orchd eval run --data <dir> --socket <sock> ...` (see `eval.rs`).
 
 mod ab;
@@ -17,6 +17,7 @@ mod mcp;
 mod model;
 mod protocol;
 mod store;
+mod timeline;
 
 use std::path::{Path, PathBuf};
 
@@ -33,6 +34,9 @@ async fn run(args: Vec<String>) -> i32 {
     }
     if args.len() >= 2 && args[1] == "ab" {
         return ab::run(&args[2..]);
+    }
+    if args.len() >= 2 && args[1] == "failures" {
+        return timeline::run(&args[2..]);
     }
     if args.len() >= 2 && args[1] == "eval" {
         return eval::run(&args[2..]);

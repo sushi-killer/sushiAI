@@ -38,6 +38,8 @@ const ALLOWED_METHODS = new Set([
   "task.archive",
   "task.unarchive",
   "task.preflight",
+  "task.timeline",
+  "failures.catalogue",
   "chat.get",
   "chat.send",
   "chat.cancel",

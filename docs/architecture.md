@@ -38,14 +38,16 @@ flowchart TB
     engine["engine/<br/>task loop, gates, routing"]
     chat["chat.rs<br/>orchestrator chat"]
     audit["audit.rs<br/>repo.audit, read-only"]
+    insights["timeline.rs<br/>task.timeline, failures.catalogue"]
     harness["harness.rs<br/>claude -p / codex exec"]
     side["classify.rs (Jev)<br/>git.rs (worktrees, commit)<br/>messages.rs (merging)"]
     store[("data dir<br/>tasks/, runs/, settings.json,<br/>decisions.jsonl, chats/, audits/")]
     mcp["orchd mcp<br/>task_* tools, stdio"]
-    proto --> engine & chat & audit
+    proto --> engine & chat & audit & insights
     engine --> side
     engine & chat & audit --> harness
     engine & chat & audit <--> store
+    insights --> store
     mcp -->|socket| proto
   end
 

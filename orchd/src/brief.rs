@@ -377,7 +377,7 @@ const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message wit
 
 const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app.";
 
-const PLAN_SUBTASKS: &str = "When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. Each part's `request` is what its own planner will draft from, so make it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. When the request fits one session, leave `subtasks` out.";
+const PLAN_SUBTASKS: &str = "When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. List in each part's `paths` the repo-relative files or directories it edits; parts whose paths overlap (or that list none) are run one after another instead of side by side. Each part's `request` is what its own planner will draft from, so make it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. When the request fits one session, leave `subtasks` out.";
 
 /// The drafting-stage brief for a top-level task: the owner's request
 /// verbatim, then the fixed planning instructions and report format (spec:
@@ -407,7 +407,7 @@ fn plan_brief(request: &str, variant: &Variant, split: bool) -> String {
         extra.push_str(&format!("\n\n{PLAN_SUBTASKS}"));
         format = format.replace(
             "]}]}\n```",
-            "]}],\"subtasks\":[{\"key\":\"a\",\"title\":\"...\",\"request\":\"...\",\"dependsOn\":[]}]}\n```",
+            "]}],\"subtasks\":[{\"key\":\"a\",\"title\":\"...\",\"request\":\"...\",\"dependsOn\":[],\"paths\":[\"src/...\"]}]}\n```",
         );
     }
     format!(
@@ -480,6 +480,9 @@ pub struct PlanSubtask {
     /// Keys of the parts this one builds on.
     #[serde(default, rename = "dependsOn")]
     pub depends_on: Vec<String>,
+    /// Repo-relative files or directories this part edits.
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 /// A handoff the agent wrote as null or as an object/array still reads:
@@ -838,6 +841,7 @@ mod tests {
             base_sha: "abc123".into(),
             base_ref: None,
             depends_on: vec![],
+            paths: vec![],
             parent: None,
             status: TaskStatus::Running,
             tier: Tier::Standard,

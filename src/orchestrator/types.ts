@@ -200,6 +200,9 @@ export type Task = {
   baseRef?: string;
   /** Ids of tasks that must be done before this one starts implementing. */
   dependsOn?: string[];
+  /** Repo-relative files or directories the planner said this subtask edits;
+   * overlapping siblings run one after another. */
+  paths?: string[];
   /** The task this one is a part of: it branches from and lands on that
    * task's branch. A task with children runs no attempt of its own. */
   parent?: string;

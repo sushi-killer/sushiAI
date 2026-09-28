@@ -4,6 +4,9 @@
   it into 2-5 subtasks, serial where one builds on another. The task becomes
   their parent: it runs no attempt of its own, and each subtask is planned
   and run as a normal task on a branch taken from the parent's.
+- Subtasks declare the paths they touch; siblings whose paths overlap (or
+  that declare none) run one after another, with a decision line on the
+  parent for each added ordering.
 - Independent subtasks run side by side. A dependent one starts only after
   the subtask it builds on is done, from a branch that already contains it.
 - A finished subtask lands on the parent's branch through a queue, one at a

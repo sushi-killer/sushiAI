@@ -34,6 +34,84 @@ pub(super) fn check_subtasks(subtasks: &[brief::PlanSubtask]) -> Result<(), Stri
     Ok(())
 }
 
+fn path_components(path: &str) -> Vec<&str> {
+    path.split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect()
+}
+
+/// The first pair of paths where one equals or is a directory prefix of the
+/// other, compared per path component: returns the shorter (the shared area).
+fn overlapping_path<'a>(a: &'a [String], b: &'a [String]) -> Option<&'a str> {
+    for pa in a {
+        let ca = path_components(pa);
+        for pb in b {
+            let cb = path_components(pb);
+            let n = ca.len().min(cb.len());
+            if ca[..n] == cb[..n] {
+                return Some(if ca.len() <= cb.len() { pa } else { pb });
+            }
+        }
+    }
+    None
+}
+
+/// Whether `from` waits (directly or transitively) for `target`.
+fn waits_for(deps: &HashMap<String, Vec<String>>, from: &str, target: &str) -> bool {
+    let mut stack = vec![from.to_string()];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(node) = stack.pop() {
+        for d in deps.get(&node).into_iter().flatten() {
+            if d == target {
+                return true;
+            }
+            if seen.insert(d.clone()) {
+                stack.push(d.clone());
+            }
+        }
+    }
+    false
+}
+
+/// Siblings that touch the same paths would conflict at landing, so the later
+/// one in the list also waits for the earlier one unless they are already
+/// ordered. A part without paths overlaps every sibling. Edges only go from
+/// earlier to later positions, so no cycle can result. Returns the parts with
+/// the added `dependsOn` keys and one decision line per added edge.
+pub(super) fn serialise_overlapping(
+    parts: &[brief::PlanSubtask],
+) -> (Vec<brief::PlanSubtask>, Vec<String>) {
+    let mut out = parts.to_vec();
+    let mut deps: HashMap<String, Vec<String>> = out
+        .iter()
+        .map(|p| {
+            (
+                p.key.trim().to_string(),
+                p.depends_on.iter().map(|d| d.trim().to_string()).collect(),
+            )
+        })
+        .collect();
+    let mut decisions = Vec::new();
+    for j in 1..out.len() {
+        for i in 0..j {
+            let (a, b) = (out[i].key.trim().to_string(), out[j].key.trim().to_string());
+            if waits_for(&deps, &b, &a) || waits_for(&deps, &a, &b) {
+                continue;
+            }
+            let shared: Option<String> = if out[i].paths.is_empty() || out[j].paths.is_empty() {
+                Some("(no paths declared)".to_string())
+            } else {
+                overlapping_path(&out[i].paths, &out[j].paths).map(str::to_string)
+            };
+            let Some(shared) = shared else { continue };
+            deps.get_mut(&b).unwrap().push(a.clone());
+            out[j].depends_on.push(a.clone());
+            decisions.push(format!("Serialised {b} after {a}: both touch {shared}"));
+        }
+    }
+    (out, decisions)
+}
+
 /// A subtask's request: the planner's text first (what its own planner
 /// drafts from), then the whole it belongs to and what was already decided
 /// for it.
@@ -698,6 +776,8 @@ async fn split_into_subtasks(
     parts: &[brief::PlanSubtask],
     start: bool,
 ) -> Result<(), String> {
+    let (parts, serialised) = serialise_overlapping(parts);
+    let parts = parts.as_slice();
     let mut parent = app
         .store
         .load_task(parent_id)
@@ -743,6 +823,7 @@ async fn split_into_subtasks(
                     .map(|k| ids[k.trim()].clone())
                     .collect(),
                 parent: Some(parent.id.clone()),
+                paths: part.paths.clone(),
                 // Eval reports count the parent, which carries the children's
                 // cost.
                 eval_set: None,
@@ -775,6 +856,7 @@ async fn split_into_subtasks(
         });
         children.push(child);
     }
+    parent.decisions.extend(serialised);
     parent.decisions.push(format!(
         "Planner: split into {} subtasks: {}",
         parts.len(),

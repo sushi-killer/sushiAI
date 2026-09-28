@@ -37,6 +37,7 @@ pub(super) fn task_with_status(status: TaskStatus) -> Task {
         base_sha: "deadbeef".into(),
         base_ref: None,
         depends_on: vec![],
+        paths: vec![],
         parent: None,
         status,
         tier: Tier::Standard,

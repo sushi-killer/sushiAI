@@ -167,6 +167,54 @@ fn a_plan_with_two_dependent_subtasks_lands_both_on_the_parent_in_order() {
 }
 
 #[test]
+fn overlapping_subtask_paths_add_a_dependency_edge_to_the_created_children() {
+    let script_text = GRAPH_SCRIPT
+        .replace(
+            r#"\"request\":\"PART_A create a.txt\""#,
+            r#"\"request\":\"PART_A create a.txt\",\"paths\":[\"src/a\"]"#,
+        )
+        .replace(r#"\"dependsOn\":[\"a\"]"#, r#"\"paths\":[\"src/a/b.rs\"]"#);
+    assert_ne!(script_text, GRAPH_SCRIPT);
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", &script_text);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_off(&daemon);
+    let repo = init_git_repo();
+    let parent = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "build both parts",
+            "start": true,
+        }),
+    );
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let parent = settle(&daemon, &parent_id);
+    let tasks = daemon.request("task.list", serde_json::json!({"repo": parent["repo"]}));
+    let children: Vec<&serde_json::Value> = tasks
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["parent"] == parent_id.as_str())
+        .collect();
+    let a = children.iter().find(|t| t["title"] == "Part A").unwrap();
+    let b = children.iter().find(|t| t["title"] == "Part B").unwrap();
+    assert_eq!(b["dependsOn"], serde_json::json!([a["id"]]), "{b}");
+    assert_eq!(b["paths"], serde_json::json!(["src/a/b.rs"]));
+    assert!(
+        parent["decisions"]
+            .to_string()
+            .contains("Serialised b after a: both touch src/a"),
+        "{parent}"
+    );
+
+    daemon.shutdown_and_wait();
+    for t in [&parent, *a, *b] {
+        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+    }
+}
+
+#[test]
 fn a_split_that_cannot_create_every_part_creates_none_and_runs_as_one_task() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", GRAPH_SCRIPT);

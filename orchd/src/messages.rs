@@ -341,6 +341,7 @@ mod tests {
             base_sha: "s".into(),
             base_ref: None,
             depends_on: vec![],
+            paths: vec![],
             parent: None,
             status: TaskStatus::Running,
             tier: Tier::Standard,

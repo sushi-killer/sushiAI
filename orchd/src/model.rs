@@ -557,6 +557,10 @@ pub struct Task {
     /// (it may still draft its plan meanwhile).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+    /// Repo-relative files or directories the planner said this subtask
+    /// edits; siblings that overlap are serialised.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
     /// The task this one is a part of: it branches from that task's branch
     /// and, once done, its commit lands there. A task with children runs no
     /// implement attempt of its own; it is done when every child has landed.
@@ -982,6 +986,7 @@ mod tests {
             base_sha: "abc".into(),
             base_ref: None,
             depends_on: vec![],
+            paths: vec![],
             parent: None,
             status: TaskStatus::Drafting,
             tier: Tier::Standard,
@@ -1193,6 +1198,7 @@ mod tests {
             base_sha: "abc".into(),
             base_ref: None,
             depends_on: vec![],
+            paths: vec![],
             parent: None,
             status: TaskStatus::Queued,
             tier: Tier::Standard,
@@ -1232,6 +1238,7 @@ mod tests {
             base_sha: "abc".into(),
             base_ref: None,
             depends_on: vec![],
+            paths: vec![],
             parent: None,
             status: TaskStatus::Done,
             tier: Tier::Standard,

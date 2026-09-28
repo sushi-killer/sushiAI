@@ -2558,3 +2558,64 @@ fn review_evidence_attaches_the_attempt_s_screenshots_to_the_codex_reviewer() {
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
 }
+
+#[test]
+fn final_checks_run_once_after_review_passes_and_gate_the_commit() {
+    for (final_check, status) in [("false", "waiting"), ("true", "done")] {
+        let scripts_dir = tempfile::tempdir().unwrap();
+        // Implements, and as the (Claude) reviewer answers a plain PASS.
+        let script =
+            fake_harness_script(scripts_dir.path(), "fake-contract.sh", FAKE_CONTRACT_SCRIPT);
+        let ran_log = scripts_dir.path().join("final.log");
+        let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+        let mut settings = daemon.request("settings.get", serde_json::json!({}));
+        settings["maxAttempts"] = serde_json::json!(1);
+        settings["review"] = serde_json::json!("claude-opus");
+        daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+        let repo = init_git_repo();
+        let task = daemon.request(
+            "task.create",
+            serde_json::json!({
+                "repo": repo.path().to_str().unwrap(),
+                "title": "Final checks",
+                "goal": "Write the marker",
+                "verify": ["true"],
+                "finalVerify": [format!("echo ran >> {}; {final_check}", ran_log.display())],
+                "start": true,
+            }),
+        );
+        let task_id = task["id"].as_str().unwrap().to_string();
+        let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+        assert_eq!(settled["status"], status, "{final_check}: {settled}");
+        let attempt = &settled["attempts"][0];
+        assert_eq!(attempt["review"]["verdict"], "PASS", "{settled}");
+        if final_check == "false" {
+            assert!(
+                attempt["failure"]["detail"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Final check echo ran"),
+                "{settled}"
+            );
+        }
+        let worktree = task["worktree"].as_str().unwrap().to_string();
+        let ran = std::fs::read_to_string(&ran_log).unwrap();
+        assert_eq!(ran.lines().count(), 1, "the final check ran exactly once");
+        let brief = std::fs::read_to_string(
+            daemon
+                .data_dir()
+                .join("tasks")
+                .join(&task_id)
+                .join("runs/1/brief.md"),
+        )
+        .unwrap();
+        assert!(
+            brief.contains("## Final checks") && brief.contains("do not run them yourself"),
+            "{brief}"
+        );
+
+        daemon.shutdown_and_wait();
+        let _ = std::fs::remove_dir_all(&worktree);
+    }
+}

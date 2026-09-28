@@ -81,6 +81,7 @@ export type Variant = {
   contract: boolean;
   reviewOtherFamily: boolean;
   reviewEvidence: boolean;
+  deferHeavyChecks: boolean;
 };
 
 export type FailureKind =
@@ -134,6 +135,8 @@ export type Task = {
   goal: string;
   criteria: string[];
   verify: string[];
+  /** Slow checks run once, after review passes and before the commit. */
+  finalVerify?: string[];
   /** The one-sentence ask a plan was drafted from, when the task started
    * that way instead of from the full manual form. */
   request?: string;

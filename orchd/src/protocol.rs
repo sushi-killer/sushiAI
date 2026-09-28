@@ -250,6 +250,7 @@ mod tests {
             goal: "G".into(),
             criteria: vec![],
             verify: vec![],
+            final_verify: vec![],
             request: None,
             repo: "/r".into(),
             worktree: "/r-t".into(),

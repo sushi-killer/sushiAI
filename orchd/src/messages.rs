@@ -333,6 +333,7 @@ mod tests {
             goal: "g".into(),
             criteria: vec![],
             verify: vec![],
+            final_verify: vec![],
             request: None,
             repo: repo.into(),
             worktree: "/wt".into(),

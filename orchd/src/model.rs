@@ -220,6 +220,9 @@ pub struct Variant {
     /// The reviewer gets the screenshots the attempt saved (Codex as
     /// attachments, Claude as paths to open) and longer verify output.
     pub review_evidence: bool,
+    /// The planner splits slow whole-repo checks into `final_verify`, run
+    /// once after review passes instead of on every attempt and stop.
+    pub defer_heavy_checks: bool,
 }
 
 #[cfg(test)]
@@ -326,6 +329,10 @@ pub struct Task {
     pub goal: String,
     pub criteria: Vec<String>,
     pub verify: Vec<String>,
+    /// Slow checks (full CI, desktop smoke) run once, after review passes
+    /// and before the commit; `verify` runs after every attempt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub final_verify: Vec<String>,
     /// The owner's raw one-sentence ask, set only by the `{repo, request}`
     /// form of `task.create`; the drafting stage fills `title`/`goal`/
     /// `criteria`/`verify` from it and leaves this as the original text.
@@ -589,6 +596,7 @@ mod tests {
             goal: String::new(),
             criteria: vec![],
             verify: vec![],
+            final_verify: vec![],
             request: Some("fix the thing that's broken".into()),
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
@@ -632,6 +640,7 @@ mod tests {
             goal: "Goal".into(),
             criteria: vec![],
             verify: vec![],
+            final_verify: vec![],
             request: None,
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
@@ -664,6 +673,7 @@ mod tests {
             goal: "Goal".into(),
             criteria: vec![],
             verify: vec![],
+            final_verify: vec![],
             request: None,
             repo: "/repo".into(),
             worktree: "/repo-task".into(),

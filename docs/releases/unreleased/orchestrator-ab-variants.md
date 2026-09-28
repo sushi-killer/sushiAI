@@ -39,3 +39,8 @@
 - `reviewEvidence: true` shows the reviewer the screenshots the attempt
   saved under `artifacts/` (attached to a Codex reviewer's prompt, listed
   for a Claude reviewer to open) and longer verify output.
+- `deferHeavyChecks: true` has the planner split slow whole-repo checks (the
+  full CI script, a desktop smoke) into `finalVerify`. Agents and the Stop
+  hook run only the fast `verify`; orchd runs `finalVerify` once, after
+  review passes and before the commit, and a failure there is a normal
+  retry. `task.create` also takes `finalVerify` directly.

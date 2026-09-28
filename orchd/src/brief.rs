@@ -5,7 +5,7 @@
 
 use crate::model::{
     Attempt, AttemptStatus, Failure, Message, MessageKind, RetryMode, ReviewResult, Stage, Task,
-    Tier,
+    Tier, Variant,
 };
 
 const MAX_FAILURE_DETAIL: usize = 1500;
@@ -85,6 +85,16 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
         }
     }
     out.push('\n');
+
+    if !task.final_verify.is_empty() {
+        out.push_str("## Final checks\n\nThe orchestrator runs these once, after review passes. They are slow: do not run them yourself.\n\n");
+        for v in &task.final_verify {
+            out.push_str("- `");
+            out.push_str(v);
+            out.push_str("`\n");
+        }
+        out.push('\n');
+    }
 
     out.push_str(RULES_BLOCK);
     out.push('\n');
@@ -329,19 +339,24 @@ const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by
 /// planning instructions and report format (spec: "harness-agnostic", so
 /// this takes no harness parameter, same as [`build_brief`]). `contract`
 /// is the task's `variant.contract`.
-pub fn build_plan_brief(request: &str, contract: bool) -> String {
-    let contract = if contract {
-        format!("\n\n{PLAN_CONTRACT}")
-    } else {
-        String::new()
-    };
+pub fn build_plan_brief(request: &str, variant: &Variant) -> String {
+    let mut extra = String::new();
+    if variant.contract {
+        extra.push_str(&format!("\n\n{PLAN_CONTRACT}"));
+    }
+    let mut format = PLAN_REPORT_FORMAT.to_string();
+    if variant.defer_heavy_checks {
+        extra.push_str(&format!("\n\n{PLAN_FINAL_VERIFY}"));
+        format = format.replace("\"verify\":[],", "\"verify\":[],\"finalVerify\":[],");
+    }
     format!(
-        "## Request\n\n{}\n\n## Instructions\n\n{}{contract}\n\n{}",
+        "## Request\n\n{}\n\n## Instructions\n\n{}{extra}\n\n{format}",
         request.trim(),
         PLAN_INSTRUCTIONS,
-        PLAN_REPORT_FORMAT
     )
 }
+
+const PLAN_FINAL_VERIFY: &str = "Split the checks by cost. `verify` holds the fast, targeted commands that run after every attempt (a unit test file, the type checker, a linter on the touched paths). `finalVerify` holds the slow whole-repo checks (the full CI script, a desktop smoke) that the orchestrator runs once, after review passes and before the commit.";
 
 /// Asks the reviewer for a ruling on every criterion (`variant.contract`).
 pub const REVIEW_CONTRACT: &str = "Rule on every acceptance criterion, using its `check:` where it has one and the verify results as evidence. Add `\"criteria\":[{\"criterion\":\"...\",\"met\":true|false|null,\"evidence\":\"...\"}]` to your reply, with `null` for a criterion you cannot check read-only. The verdict is PASS only if no criterion is `false`; a claim in the task that the code contradicts is a finding.";
@@ -350,10 +365,10 @@ pub const REVIEW_CONTRACT: &str = "Rule on every acceptance criterion, using its
 /// unparseable draft -- a fresh read-only session (planning never resumes,
 /// same as review), so it still needs the full request, just with an
 /// explicit reminder in front of it.
-pub fn build_plan_retry_brief(request: &str, contract: bool) -> String {
+pub fn build_plan_retry_brief(request: &str, variant: &Variant) -> String {
     format!(
         "Your previous reply did not include a valid ```sushi-plan block. Reply with nothing else.\n\n{}",
-        build_plan_brief(request, contract)
+        build_plan_brief(request, variant)
     )
 }
 
@@ -375,6 +390,8 @@ pub struct PlanDraft {
     pub verify: Vec<String>,
     #[serde(default)]
     pub questions: Vec<PlanQuestion>,
+    #[serde(default, rename = "finalVerify")]
+    pub final_verify: Vec<String>,
     /// Unknown or missing -> `None`: routing falls back to Jev.
     #[serde(default, deserialize_with = "lenient_tier")]
     pub tier: Option<Tier>,
@@ -637,6 +654,7 @@ mod tests {
             goal: "Add a Save button to the settings dialog".into(),
             criteria: vec!["Button visible".into(), "Click saves settings".into()],
             verify: vec!["npm test".into()],
+            final_verify: vec![],
             request: None,
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
@@ -779,8 +797,20 @@ mod tests {
 
     #[test]
     fn the_plan_brief_asks_for_a_contract_only_with_the_flag() {
-        assert!(build_plan_brief("r", true).contains("-- check:"));
-        assert!(!build_plan_brief("r", false).contains("-- check:"));
+        let with = |contract, defer_heavy_checks| {
+            build_plan_brief(
+                "r",
+                &Variant {
+                    contract,
+                    defer_heavy_checks,
+                    ..Variant::default()
+                },
+            )
+        };
+        assert!(with(true, false).contains("-- check:"));
+        assert!(!with(false, false).contains("-- check:"));
+        assert!(with(false, true).contains("\"finalVerify\":[]"));
+        assert!(!with(false, false).contains("finalVerify"));
     }
 
     #[test]
@@ -933,7 +963,7 @@ mod tests {
 
     #[test]
     fn plan_brief_carries_the_request_verbatim_and_asks_for_the_sushi_plan_fence() {
-        let brief = build_plan_brief("add dark mode to the settings screen", false);
+        let brief = build_plan_brief("add dark mode to the settings screen", &Variant::default());
         assert!(brief.contains("add dark mode to the settings screen"));
         assert!(brief.contains("sushi-plan"));
         assert!(brief.contains("AGENTS.md"));
@@ -941,7 +971,7 @@ mod tests {
 
     #[test]
     fn plan_retry_brief_still_carries_the_original_request() {
-        let retry = build_plan_retry_brief("add dark mode", false);
+        let retry = build_plan_retry_brief("add dark mode", &Variant::default());
         assert!(retry.contains("add dark mode"));
         assert!(retry.contains("sushi-plan"));
         assert!(retry.to_lowercase().contains("previous reply"));

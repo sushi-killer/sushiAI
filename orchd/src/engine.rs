@@ -809,6 +809,9 @@ impl App {
             criteria: Vec<String>,
             #[serde(default)]
             verify: Vec<String>,
+            /// Slow checks run once, after review passes.
+            #[serde(default, rename = "finalVerify")]
+            final_verify: Vec<String>,
             #[serde(default)]
             branch: Option<String>,
             /// Commit-ish the task branches from; the repo's HEAD if unset.
@@ -903,6 +906,7 @@ impl App {
             goal,
             criteria: p.criteria,
             verify: p.verify,
+            final_verify: p.final_verify,
             request: request_text.clone(),
             repo: repo_root.to_string_lossy().to_string(),
             worktree: created.path.to_string_lossy().to_string(),
@@ -3223,9 +3227,9 @@ async fn run_plan_stage(
                 return end_plan_stage(app, task_id, Some(idx)).await;
             }
             let brief_text = if retry == 0 {
-                brief::build_plan_brief(&request_text, task.variant().contract)
+                brief::build_plan_brief(&request_text, &task.variant())
             } else {
-                brief::build_plan_retry_brief(&request_text, task.variant().contract)
+                brief::build_plan_retry_brief(&request_text, &task.variant())
             };
             let file_stem = if retry == 0 { "" } else { "-retry" };
             let _ = std::fs::write(run_dir.join(format!("brief{file_stem}.md")), &brief_text);
@@ -3370,6 +3374,12 @@ async fn run_plan_stage(
                 .map(|v| format!("Checked by review (not a shell command): {v}")),
         );
         task.verify = verify;
+        task.final_verify = draft
+            .final_verify
+            .iter()
+            .filter(|c| !c.trim().is_empty())
+            .cloned()
+            .collect();
         task.attempts[idx].status = AttemptStatus::Passed;
         task.attempts[idx].ended_at = Some(now_ms());
         task.attempts[idx].summary = Some(format!("Drafted: {}", draft.title));
@@ -4516,6 +4526,58 @@ async fn run_task_loop(
             }
         }
 
+        if !task.final_verify.is_empty() {
+            // Not through the verify cache: it keys on the diff alone and
+            // would hand back the fast checks' results.
+            let final_results = run_verify_commands(
+                &worktree,
+                &run_dir.join("final"),
+                &task.final_verify,
+                settings.sandbox,
+                &cancel,
+            )
+            .await;
+            task.attempts[idx]
+                .verify
+                .extend(final_results.iter().cloned());
+            if let Some(failed) = final_results.iter().find(|v| v.code != Some(0)) {
+                let detail = format!(
+                    "Final check {} exited {}.\n{}",
+                    failed.command,
+                    failed
+                        .code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "null".to_string()),
+                    failed.tail
+                );
+                match fail_and_continue(
+                    &app,
+                    &task_id,
+                    &mut task,
+                    idx,
+                    FailureKind::Verify,
+                    detail,
+                    &mut attempt_budget,
+                    &pending_answer,
+                    &cancel,
+                    &mut permit,
+                )
+                .await
+                {
+                    LoopSignal::Continue { answered } => {
+                        just_answered = answered;
+                        drop(permit);
+                        continue;
+                    }
+                    LoopSignal::Stop => {
+                        drop(permit);
+                        app.finish_task_loop(&task_id);
+                        return;
+                    }
+                }
+            }
+        }
+
         let wt4 = worktree.clone();
         let title = task.title.clone();
         let tid = task_id.clone();
@@ -5125,6 +5187,7 @@ mod tests {
             goal: "Do the thing".into(),
             criteria: vec![],
             verify: vec![],
+            final_verify: vec![],
             request: None,
             repo: "/repo".into(),
             worktree: "/repo-task".into(),

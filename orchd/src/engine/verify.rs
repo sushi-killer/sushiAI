@@ -297,16 +297,57 @@ fn is_failure_line(line: &str) -> bool {
         || t.starts_with("right:")
         || t.starts_with("error:")
         || t.starts_with("Error:")
+        || t.starts_with("FAIL")
+        || eslint_summary_has_errors(t)
+}
+
+/// eslint's `✖ N problems (M errors, ...)` with M > 0.
+fn eslint_summary_has_errors(t: &str) -> bool {
+    let Some(rest) = t.strip_prefix('\u{2716}') else {
+        return false;
+    };
+    let Some((_, after)) = rest.split_once("problem") else {
+        return false;
+    };
+    let Some((_, counts)) = after.split_once('(') else {
+        return false;
+    };
+    let digits: String = counts.chars().take_while(char::is_ascii_digit).collect();
+    counts[digits.len()..].starts_with(" error") && digits.parse::<u32>().is_ok_and(|n| n > 0)
+}
+
+/// The failure lines of one stream. A `Repository conventions failed` line
+/// starts a block whose `- ` bullets (after blank lines) are kept too.
+fn stream_highlights(text: &str) -> Vec<&str> {
+    let mut kept = Vec::new();
+    let mut in_block = false;
+    for line in text.lines() {
+        if in_block {
+            let t = line.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if t.starts_with("- ") {
+                kept.push(line);
+                continue;
+            }
+            in_block = false;
+        }
+        if line.contains("Repository conventions failed") {
+            in_block = true;
+            kept.push(line);
+        } else if is_failure_line(line) {
+            kept.push(line);
+        }
+    }
+    kept
 }
 
 /// The failing tests' names and assertion lines from both streams, keeping
 /// the last lines when there are more than fit.
 fn failure_highlights(out: &str, err: &str, max: usize) -> String {
-    let lines: Vec<&str> = out
-        .lines()
-        .chain(err.lines())
-        .filter(|l| is_failure_line(l))
-        .collect();
+    let mut lines = stream_highlights(out);
+    lines.extend(stream_highlights(err));
     tail_chars(&lines.join("\n"), max)
 }
 
@@ -336,6 +377,188 @@ pub(super) fn verify_tail(stdout: &[u8], stderr: &[u8]) -> String {
     body
 }
 
+const TIMED_OUT_TAIL: &str = "timed out after 20 minutes";
+const CANCELLED_TAIL: &str = "cancelled";
+const SPAWN_FAILED_PREFIX: &str = "failed to run: ";
+const INTERNAL_ERROR_PREFIX: &str = "internal error: ";
+
+/// How a check ran on the base checkout. `None` for a cancel, which aborts
+/// the baseline instead of classifying anything.
+pub(super) fn classify_baseline(outcome: &VerifyOutcome) -> Option<Baseline> {
+    match outcome.code {
+        Some(0) => Some(Baseline::Pass),
+        Some(126 | 127) => Some(Baseline::Env),
+        Some(_) => Some(Baseline::Fail),
+        None if outcome.tail == CANCELLED_TAIL => None,
+        None if outcome.tail.starts_with(SPAWN_FAILED_PREFIX)
+            || outcome.tail.starts_with(INTERNAL_ERROR_PREFIX) =>
+        {
+            Some(Baseline::Env)
+        }
+        // A timeout is a check that does not pass.
+        None => Some(Baseline::Fail),
+    }
+}
+
+/// Runs the checks that have no baseline yet in `worktree` and stores what
+/// each one did on the base: `pass` (proves nothing), `fail` (gates), `env`
+/// (could not run). Whatever the commands changed in the worktree is undone.
+/// `false` when cancelled, with nothing stored.
+pub(super) async fn baseline_checks(
+    app: &Arc<App>,
+    task_id: &str,
+    task: &mut Task,
+    worktree: &Path,
+    cancel: &CancelToken,
+) -> bool {
+    let todo = baseline_todo(task);
+    if todo.is_empty() {
+        return true;
+    }
+    let wt = worktree.to_path_buf();
+    let before = tokio::task::spawn_blocking(move || git::status_entries(&wt).unwrap_or_default())
+        .await
+        .unwrap_or_default();
+    let commands: Vec<String> = todo.iter().map(|(_, _, run)| run.clone()).collect();
+    let sandbox = app.settings.read().unwrap().sandbox;
+    let results = run_verify_commands(
+        worktree,
+        &app.store.task_dir(task_id),
+        &commands,
+        sandbox,
+        cancel,
+    )
+    .await;
+    let wt = worktree.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || git::restore_status(&wt, &before)).await;
+    if cancel.is_cancelled() {
+        return false;
+    }
+    record_baselines(task, &todo, &results)
+}
+
+/// (index into task.checks, or None for the held-out check, criterion,
+/// command) for every check that has no baseline yet.
+pub(super) fn baseline_todo(task: &Task) -> Vec<(Option<usize>, usize, String)> {
+    let mut todo = Vec::new();
+    for (i, c) in task.checks.iter().enumerate() {
+        if c.baseline.is_none() {
+            todo.push((Some(i), c.criterion, c.run.clone()));
+        }
+    }
+    if let Some(h) = task.held_out.as_ref().filter(|h| h.baseline.is_none()) {
+        todo.push((None, h.criterion, h.run.clone()));
+    }
+    todo
+}
+
+/// Stores what each `todo` check did on the base (`results` in the same
+/// order) and notes the ones that prove nothing. `false` when a result is a
+/// cancel: nothing is stored then.
+pub(super) fn record_baselines(
+    task: &mut Task,
+    todo: &[(Option<usize>, usize, String)],
+    results: &[VerifyOutcome],
+) -> bool {
+    let classified: Vec<Option<Baseline>> = results.iter().map(classify_baseline).collect();
+    if classified.iter().any(Option::is_none) {
+        return false;
+    }
+    for (((slot, criterion, run), result), baseline) in todo.iter().zip(results).zip(classified) {
+        let baseline = baseline.expect("checked above");
+        let shown = match slot {
+            Some(_) => run.clone(),
+            None => brief::held_out_label(*criterion),
+        };
+        match baseline {
+            Baseline::Pass => task.decisions.push(format!(
+                "Orchestrator: check for criterion {criterion} already passes on base, not grounded: {shown}"
+            )),
+            Baseline::Env => task.decisions.push(format!(
+                "Orchestrator: check for criterion {criterion} could not run on base (exit {}), left out: {shown}",
+                result
+                    .code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            )),
+            Baseline::Fail => {}
+        }
+        match slot {
+            Some(i) => task.checks[*i].baseline = Some(baseline),
+            None => {
+                if let Some(h) = task.held_out.as_mut() {
+                    h.baseline = Some(baseline);
+                }
+            }
+        }
+    }
+    task.updated_at = now_ms();
+    true
+}
+
+/// Some check (or the held-out one) has not run on the base yet.
+pub(super) fn needs_baseline(task: &Task) -> bool {
+    task.checks.iter().any(|c| c.baseline.is_none())
+        || task.held_out.as_ref().is_some_and(|h| h.baseline.is_none())
+}
+
+/// The gated checks of `task`: visible ones that fail on the base, then the
+/// held-out one.
+pub(super) fn gated_checks(task: &Task) -> Vec<Check> {
+    task.checks
+        .iter()
+        .filter(|c| c.baseline == Some(Baseline::Fail))
+        .cloned()
+        .collect()
+}
+
+pub(super) fn gated_held_out(task: &Task) -> Option<Check> {
+    task.held_out
+        .clone()
+        .filter(|h| h.baseline == Some(Baseline::Fail))
+}
+
+/// Runs the held-out check and returns its outcome with the command scrubbed
+/// out of the command field and the tail, plus the failure detail when it
+/// did not exit 0.
+pub(super) async fn run_held_out(
+    task: &Task,
+    check: &Check,
+    worktree: &Path,
+    run_dir: &Path,
+    sandbox: SandboxMode,
+    cancel: &CancelToken,
+) -> (VerifyOutcome, Option<String>) {
+    let mut result = run_verify_commands(
+        worktree,
+        run_dir,
+        std::slice::from_ref(&check.run),
+        sandbox,
+        cancel,
+    )
+    .await
+    .remove(0);
+    result.command = brief::held_out_label(check.criterion);
+    result.tail = result.tail.replace(&check.run, "<held-out check>");
+    let detail = (result.code != Some(0)).then(|| {
+        format!(
+            "Held-out check for criterion {} failed: {}. exited {}.\n{}",
+            check.criterion,
+            task.criteria
+                .get(check.criterion)
+                .map(String::as_str)
+                .unwrap_or(""),
+            result
+                .code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "null".to_string()),
+            result.tail
+        )
+        .replace(&check.run, "<held-out check>")
+    });
+    (result, detail)
+}
+
 /// Run one verify command in its own process group (`setsid`, like the
 /// harness). On timeout *or* cancellation, SIGTERM the whole group, SIGKILL
 /// 5s later -- a bare `tokio::time::timeout` around `Command::output()`
@@ -357,7 +580,7 @@ pub(super) async fn run_one_verify_command(
             return VerifyOutcome {
                 command: cmd.to_string(),
                 code: None,
-                tail: format!("failed to run: {e}"),
+                tail: format!("{SPAWN_FAILED_PREFIX}{e}"),
                 ms: start.elapsed().as_millis() as u64,
             };
         }
@@ -384,7 +607,7 @@ pub(super) async fn run_one_verify_command(
         Outcome::Done(Err(e)) => VerifyOutcome {
             command: cmd.to_string(),
             code: None,
-            tail: format!("internal error: {e}"),
+            tail: format!("{INTERNAL_ERROR_PREFIX}{e}"),
             ms: start.elapsed().as_millis() as u64,
         },
         Outcome::TimedOut => {
@@ -392,7 +615,7 @@ pub(super) async fn run_one_verify_command(
             VerifyOutcome {
                 command: cmd.to_string(),
                 code: None,
-                tail: "timed out after 20 minutes".to_string(),
+                tail: TIMED_OUT_TAIL.to_string(),
                 ms: start.elapsed().as_millis() as u64,
             }
         }
@@ -401,7 +624,7 @@ pub(super) async fn run_one_verify_command(
             VerifyOutcome {
                 command: cmd.to_string(),
                 code: None,
-                tail: "cancelled".to_string(),
+                tail: CANCELLED_TAIL.to_string(),
                 ms: start.elapsed().as_millis() as u64,
             }
         }
@@ -430,4 +653,155 @@ pub(super) fn verify_options_from_package_json(worktree: &Path) -> Vec<String> {
         .take(4)
         .map(|k| format!("npm run {k}"))
         .collect()
+}
+
+#[cfg(test)]
+mod grounded_checks_tests {
+    use super::*;
+
+    fn outcome(code: Option<i32>, tail: &str) -> VerifyOutcome {
+        VerifyOutcome {
+            command: "c".into(),
+            code,
+            tail: tail.into(),
+            ms: 0,
+        }
+    }
+
+    #[test]
+    fn a_baseline_is_classified_from_the_exit_code_and_the_tail() {
+        assert_eq!(
+            classify_baseline(&outcome(Some(0), "")),
+            Some(Baseline::Pass)
+        );
+        assert_eq!(
+            classify_baseline(&outcome(Some(1), "")),
+            Some(Baseline::Fail)
+        );
+        assert_eq!(
+            classify_baseline(&outcome(Some(126), "")),
+            Some(Baseline::Env)
+        );
+        assert_eq!(
+            classify_baseline(&outcome(Some(127), "")),
+            Some(Baseline::Env)
+        );
+        assert_eq!(
+            classify_baseline(&outcome(
+                None,
+                &format!("{SPAWN_FAILED_PREFIX}no such file")
+            )),
+            Some(Baseline::Env)
+        );
+        assert_eq!(
+            classify_baseline(&outcome(None, &format!("{INTERNAL_ERROR_PREFIX}pipe"))),
+            Some(Baseline::Env)
+        );
+        assert_eq!(
+            classify_baseline(&outcome(None, TIMED_OUT_TAIL)),
+            Some(Baseline::Fail)
+        );
+        assert_eq!(classify_baseline(&outcome(None, CANCELLED_TAIL)), None);
+    }
+
+    #[tokio::test]
+    async fn the_held_out_command_is_scrubbed_from_the_outcome_and_the_detail() {
+        let dir = tempfile::tempdir().unwrap();
+        // The command prints itself, so its output would leak it.
+        let command = "cat held.sh; false";
+        std::fs::write(dir.path().join("held.sh"), command).unwrap();
+        let task = Task {
+            criteria: vec!["the first".into(), "the second".into()],
+            ..task_with_status(TaskStatus::Running)
+        };
+        let check = Check {
+            criterion: 1,
+            run: command.into(),
+            baseline: Some(Baseline::Fail),
+        };
+        let (result, detail) = run_held_out(
+            &task,
+            &check,
+            dir.path(),
+            dir.path(),
+            SandboxMode::Host,
+            &CancelToken::new(),
+        )
+        .await;
+        assert_eq!(result.command, "held-out check (criterion 1)");
+        assert_eq!(result.code, Some(1));
+        let detail = detail.unwrap();
+        assert!(
+            detail.starts_with("Held-out check for criterion 1 failed: the second. exited 1.\n"),
+            "{detail}"
+        );
+        assert!(detail.contains("<held-out check>"), "{detail}");
+        assert!(!detail.contains(command) && !result.tail.contains(command));
+    }
+
+    #[tokio::test]
+    async fn a_baseline_undoes_what_the_checks_did_to_the_worktree() {
+        let repo = tempfile::tempdir().unwrap();
+        let sh = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success());
+        };
+        sh(&["init", "-q"]);
+        sh(&["config", "user.email", "t@example.com"]);
+        sh(&["config", "user.name", "t"]);
+        std::fs::write(repo.path().join("tracked.txt"), "one\n").unwrap();
+        sh(&["add", "."]);
+        sh(&["commit", "-q", "-m", "init"]);
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.criteria = vec!["a".into(), "b".into(), "c".into()];
+        let check = |criterion, run: &str| Check {
+            criterion,
+            run: run.into(),
+            baseline: None,
+        };
+        task.checks = vec![
+            check(0, "echo x > made.txt; mkdir -p d/e; echo y > d/e/f.txt; echo more >> tracked.txt; false"),
+            check(1, "true"),
+            check(2, "no-such-command-anywhere"),
+        ];
+        let before = git::status_entries(repo.path()).unwrap();
+        assert!(
+            baseline_checks(
+                &app,
+                &task.id.clone(),
+                &mut task,
+                repo.path(),
+                &CancelToken::new()
+            )
+            .await
+        );
+        assert_eq!(git::status_entries(repo.path()).unwrap(), before);
+        assert!(!repo.path().join("made.txt").exists() && !repo.path().join("d").exists());
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap(),
+            "one\n"
+        );
+        let baselines: Vec<_> = task.checks.iter().map(|c| c.baseline).collect();
+        assert_eq!(
+            baselines,
+            vec![
+                Some(Baseline::Fail),
+                Some(Baseline::Pass),
+                Some(Baseline::Env)
+            ]
+        );
+        assert!(task.decisions.contains(
+            &"Orchestrator: check for criterion 1 already passes on base, not grounded: true"
+                .to_string()
+        ));
+        assert!(task.decisions.iter().any(|d| d.starts_with(
+            "Orchestrator: check for criterion 2 could not run on base (exit 127), left out: no-such"
+        )));
+        assert!(!needs_baseline(&task));
+    }
 }

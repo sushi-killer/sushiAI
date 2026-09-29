@@ -168,6 +168,17 @@ pub(super) async fn run_parent(app: &Arc<App>, task_id: &str, cancel: &CancelTok
             return;
         }
     }
+    // Before the first child starts: the parent's checks judge the base, not
+    // the children's work. Idempotent across relaunches.
+    if task.variant().grounded_checks && needs_baseline(&task) {
+        let wt = PathBuf::from(&task.worktree);
+        if !baseline_checks(app, task_id, &mut task, &wt, cancel).await {
+            mark_stopped_if_not_already(app, task_id).await;
+            return;
+        }
+        let _ = app.store.save_task(&task);
+        app.broadcast_task(&task);
+    }
     // `advance_graph` only relaunches a queued or running parent, so a
     // stopped or failed one here is the owner's own restart: its unfinished
     // children restart with it.
@@ -237,6 +248,44 @@ pub(super) async fn run_parent(app: &Arc<App>, task_id: &str, cancel: &CancelTok
         cancel,
     )
     .await;
+    // Once, after verify and finalVerify: the gated checks, then the held-out
+    // one. The line for a failure names its kind and criterion, and never the
+    // held-out command.
+    let mut grounded_failure: Option<String> = None;
+    if task.variant().grounded_checks && results.iter().all(|v| v.code == Some(0)) {
+        let dir = app.store.task_dir(task_id).join("runs").join("parent");
+        let wt = Path::new(&task.worktree);
+        let gated = gated_checks(&task);
+        let commands: Vec<String> = gated.iter().map(|c| c.run.clone()).collect();
+        let gated_results = run_verify_commands(wt, &dir, &commands, sandbox, cancel).await;
+        if let Some((check, failed)) = gated
+            .iter()
+            .zip(&gated_results)
+            .find(|(_, v)| v.code != Some(0))
+        {
+            grounded_failure = Some(format!(
+                "Orchestrator: every subtask landed, but the check for criterion {} failed (verify) on {}: `{}` exited {}: {}",
+                check.criterion,
+                task.branch,
+                failed.command,
+                failed
+                    .code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "null".to_string()),
+                tail_chars(failed.tail.trim(), 600)
+            ));
+        } else if let Some(held) = gated_held_out(&task) {
+            let (result, detail) = run_held_out(&task, &held, wt, &dir, sandbox, cancel).await;
+            if detail.is_some() {
+                grounded_failure = Some(format!(
+                    "Orchestrator: every subtask landed, but the held-out check for criterion {} failed (heldout) on {}: {}",
+                    held.criterion,
+                    task.branch,
+                    tail_chars(result.tail.trim(), 600)
+                ));
+            }
+        }
+    }
     if cancel.is_cancelled() {
         mark_stopped_if_not_already(app, task_id).await;
         return;
@@ -259,13 +308,19 @@ pub(super) async fn run_parent(app: &Arc<App>, task_id: &str, cancel: &CancelTok
             ));
             task.status = TaskStatus::Failed;
         }
-        None => {
-            task.decisions.push(format!(
-                "Orchestrator: every subtask landed on {}",
-                task.branch
-            ));
-            task.status = TaskStatus::Done;
-        }
+        None => match grounded_failure {
+            Some(line) => {
+                task.decisions.push(line);
+                task.status = TaskStatus::Failed;
+            }
+            None => {
+                task.decisions.push(format!(
+                    "Orchestrator: every subtask landed on {}",
+                    task.branch
+                ));
+                task.status = TaskStatus::Done;
+            }
+        },
     }
     task.updated_at = now_ms();
     let _ = app.store.save_task(&task);

@@ -30,6 +30,8 @@ pub(super) fn task_with_status(status: TaskStatus) -> Task {
         criteria: vec![],
         verify: vec![],
         final_verify: vec![],
+        checks: vec![],
+        held_out: None,
         request: None,
         repo: "/repo".into(),
         worktree: "/repo-task".into(),

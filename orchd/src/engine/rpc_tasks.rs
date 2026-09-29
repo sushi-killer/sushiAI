@@ -9,6 +9,8 @@ pub(super) struct NewTask {
     pub(super) criteria: Vec<String>,
     pub(super) verify: Vec<String>,
     pub(super) final_verify: Vec<String>,
+    pub(super) checks: Vec<Check>,
+    pub(super) held_out: Option<Check>,
     pub(super) request: Option<String>,
     pub(super) branch: Option<String>,
     pub(super) base: String,
@@ -81,6 +83,11 @@ impl App {
             /// Slow checks run once, after review passes.
             #[serde(default, rename = "finalVerify")]
             final_verify: Vec<String>,
+            /// Executable checks per criterion (`variant.groundedChecks`).
+            #[serde(default)]
+            checks: Vec<Check>,
+            #[serde(default, rename = "heldOut")]
+            held_out: Option<Check>,
             #[serde(default)]
             branch: Option<String>,
             /// Commit-ish the task branches from; the repo's HEAD if unset.
@@ -179,6 +186,8 @@ impl App {
                 repo_root,
                 title,
                 goal,
+                checks: valid_checks(p.checks, p.criteria.len()),
+                held_out: valid_check(p.held_out, p.criteria.len()),
                 criteria: p.criteria,
                 verify: p.verify,
                 final_verify: p.final_verify,
@@ -320,6 +329,8 @@ impl App {
             criteria: new.criteria,
             verify: new.verify,
             final_verify: new.final_verify,
+            checks: new.checks,
+            held_out: new.held_out,
             status: if new.request.is_some() {
                 TaskStatus::Drafting
             } else {
@@ -557,6 +568,13 @@ impl App {
             // decision synchronously and relaunch (spec step 9: "status
             // queued, loop continues").
             task.decisions.push(format!("Owner: {}", p.answer));
+            if let Some(n) = task
+                .question
+                .as_ref()
+                .and_then(|q| impossible_drop_target(q, &p.answer))
+            {
+                drop_criterion(&mut task, n);
+            }
             if task
                 .question
                 .as_ref()
@@ -577,6 +595,127 @@ impl App {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
         serde_json::to_value(&latest).map_err(|e| e.to_string())
+    }
+
+    /// Owner amendment of criteria/verify/finalVerify/checks/heldOut. A task
+    /// with a live loop (running, or parked on a question) gets it through
+    /// `pending_amend`, because the loop saves its own copy of the task and
+    /// would overwrite a write made here; any other task is saved directly.
+    pub(super) async fn handle_task_amend(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        fn field<T: serde::de::DeserializeOwned>(
+            params: &serde_json::Value,
+            name: &str,
+            what: &str,
+        ) -> Result<Option<T>, String> {
+            match params.get(name) {
+                None => Ok(None),
+                Some(v) => serde_json::from_value(v.clone())
+                    .map(Some)
+                    .map_err(|_| format!("{name} must be {what}")),
+            }
+        }
+        let id = params
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "id must be a string".to_string())?
+            .to_string();
+        let held_out = match params.get("heldOut") {
+            None => None,
+            Some(serde_json::Value::Null) => Some(None),
+            Some(v) => Some(Some(
+                serde_json::from_value::<Check>(v.clone())
+                    .map_err(|_| "heldOut must be an object {criterion, run} or null")?,
+            )),
+        };
+        let amendment = Amendment {
+            criteria: field(&params, "criteria", "an array of strings")?,
+            verify: field(&params, "verify", "an array of strings")?,
+            final_verify: field(&params, "finalVerify", "an array of strings")?,
+            checks: field(&params, "checks", "an array of {criterion, run} objects")?,
+            held_out,
+        };
+        if amendment.is_empty() {
+            return Err(
+                "task.amend needs at least one of criteria, verify, finalVerify, checks, heldOut"
+                    .to_string(),
+            );
+        }
+        validate_task_id(&self.store, &id)?;
+        let mut task = self
+            .store
+            .load_task(&id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        if task.archived {
+            return Err("task is archived".to_string());
+        }
+        if !matches!(
+            task.status,
+            TaskStatus::Running | TaskStatus::Waiting | TaskStatus::Queued | TaskStatus::Stopped
+        ) {
+            return Err(format!(
+                "task is {:?}: only running, waiting, queued or stopped tasks can be amended",
+                task.status
+            )
+            .to_lowercase());
+        }
+        let criteria_len = amendment
+            .criteria
+            .as_ref()
+            .map_or(task.criteria.len(), Vec::len);
+        let stale = match &amendment.checks {
+            Some(_) => None,
+            None if amendment.criteria.is_some() => {
+                task.checks.iter().find(|c| c.criterion >= criteria_len)
+            }
+            None => None,
+        };
+        let held = match &amendment.held_out {
+            Some(h) => h.as_ref(),
+            None if amendment.criteria.is_some() => task.held_out.as_ref(),
+            None => None,
+        };
+        if let Some(c) = amendment
+            .checks
+            .iter()
+            .flatten()
+            .chain(stale)
+            .chain(held)
+            .find(|c| c.criterion >= criteria_len)
+        {
+            return Err(format!(
+                "check criterion {} is out of range: there are {criteria_len} criteria",
+                c.criterion
+            ));
+        }
+        let fields = amendment.fields();
+        if amendment.verify.is_some() {
+            self.verify_cache.lock().unwrap().remove(&id);
+        }
+
+        // Under the controls lock a loop cannot finish (and stop reading its
+        // slot) between the check and the hand-over.
+        {
+            let controls = self.controls.lock().unwrap();
+            if let Some(ctrl) = controls.get(&id).filter(|c| !c.cancel.is_cancelled()) {
+                let mut slot = ctrl.pending_amend.lock().unwrap();
+                match slot.as_mut() {
+                    Some(pending) => pending.merge(amendment),
+                    None => *slot = Some(amendment),
+                }
+                return Ok(json!({"id": id, "amended": fields, "pending": true}));
+            }
+        }
+        amendment.apply(&mut task);
+        if task.variant().grounded_checks {
+            baseline_on_base(&self.arc(), &mut task, &CancelToken::new()).await;
+        }
+        self.store.save_task(&task).map_err(|e| e.to_string())?;
+        self.broadcast_task(&task);
+        Ok(json!({"id": id, "amended": fields, "pending": false}))
     }
 
     /// Cancels the loop and waits for it to actually exit before touching

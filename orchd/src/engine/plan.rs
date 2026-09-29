@@ -623,6 +623,11 @@ pub(super) async fn run_plan_stage(
                 .map(|v| format!("Checked by review (not a shell command): {v}")),
         );
         task.verify = verify;
+        if task.variant().grounded_checks {
+            // Stored before any split, so a splitting parent keeps them.
+            task.checks = valid_checks(draft.checks.clone(), draft.criteria.len());
+            task.held_out = valid_check(draft.held_out.clone(), draft.criteria.len());
+        }
         task.final_verify = draft
             .final_verify
             .iter()
@@ -897,6 +902,8 @@ async fn split_into_subtasks(
                 criteria: vec![],
                 verify: vec![],
                 final_verify: vec![],
+                checks: vec![],
+                held_out: None,
                 request: Some(subtask_request(&parent, &part.request)),
                 branch: None,
                 base: parent.branch.clone(),

@@ -84,13 +84,14 @@ pub const TASK_TOOLS: [&str; 4] = [
 ];
 
 /// What the orchestrator agent gets: every tool below.
-pub const ORCHESTRATOR_TOOLS: [&str; 16] = [
+pub const ORCHESTRATOR_TOOLS: [&str; 17] = [
     "task_list",
     "task_get",
     "task_create",
     "task_start",
     "task_stop",
     "task_answer",
+    "task_amend",
     "task_preflight",
     "settings_get",
     "task_archive",
@@ -156,8 +157,9 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "finalVerify": {"type": "array", "items": {"type": "string"}, "description": "Slow checks (full CI, desktop smoke) run once, after review passes."},
                     "branch": {"type": "string"},
                     "base": {"type": "string", "description": "Branch or commit to start from; defaults to the repo's current HEAD."},
-                    "variant": {"type": "object", "description": "Experiment flags for this task only, over the settings defaults: retryMode (\"resume\"|\"fresh\"), stallTimeoutSecs (0 = off), plannerTier, contract, reviewOtherFamily, reviewEvidence, deferHeavyChecks, leanOutput, reviewBlind, advisor, loopDetect (bool; on by default: stops an attempt that repeats itself); plannerRoute (route id the plan stage runs on instead of the settings' planner) and tierRoutes (object tier -> route id, e.g. {\"hard\": \"claude-sonnet\"}, replacing the settings' tier route for implementing; must name configured routes); maxCostUsd (dollar budget; the task waits for the owner before its next run once spent, 0 = none). Create the same task twice with different variants to A/B them."},
-                    "variant": {"type": "object", "description": "Experiment flags for this task only, over the settings defaults: retryMode (\"resume\"|\"fresh\"), stallTimeoutSecs (0 = off), plannerTier, contract, reviewOtherFamily, reviewEvidence, deferHeavyChecks, leanOutput, reviewBlind, advisor (bool); plannerRoute (route id the plan stage runs on instead of the settings' planner) and tierRoutes (object tier -> route id, e.g. {\"hard\": \"claude-sonnet\"}, replacing the settings' tier route for implementing; must name configured routes); maxCostUsd (dollar budget; the task waits for the owner before its next run once spent, 0 = none); maxAttemptCostUsd (dollar cap on one implement attempt, stopped mid-run once its streamed usage passes it and retried, 0 = none). Create the same task twice with different variants to A/B them."},
+                    "variant": {"type": "object", "description": "Experiment flags for this task only, over the settings defaults: retryMode (\"resume\"|\"fresh\"), stallTimeoutSecs (0 = off), plannerTier, contract, reviewOtherFamily, reviewEvidence, deferHeavyChecks, leanOutput, reviewBlind, advisor (bool), loopDetect (bool; on by default: stops an attempt that repeats itself), groundedChecks (bool; the planner writes an executable check per criterion, the ones that fail on the base gate every attempt, and one hidden held-out check is run after verify); plannerRoute (route id the plan stage runs on instead of the settings' planner) and tierRoutes (object tier -> route id, e.g. {\"hard\": \"claude-sonnet\"}, replacing the settings' tier route for implementing; must name configured routes); maxCostUsd (dollar budget; the task waits for the owner before its next run once spent, 0 = none); maxAttemptCostUsd (dollar cap on one implement attempt, stopped mid-run once its streamed usage passes it and retried, 0 = none). Create the same task twice with different variants to A/B them."},
+                    "checks": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "integer", "description": "0-based index into criteria."}, "run": {"type": "string", "description": "Shell command run from the repo root; must fail before the work and pass after it."}}, "required": ["criterion", "run"]}, "description": "With variant.groundedChecks: executable checks per criterion. Entries with an out-of-range criterion or an empty run are dropped."},
+                    "heldOut": {"type": "object", "properties": {"criterion": {"type": "integer"}, "run": {"type": "string"}}, "required": ["criterion", "run"], "description": "With variant.groundedChecks: one extra check the implementer never sees."},
                     "dependsOn": {"type": "array", "items": {"type": "string"}, "description": "Ids of tasks in this repo that must be done before this one starts; it starts on its own once they are. A cycle is rejected."},
                     "parent": {"type": "string", "description": "Id of the task this one is a part of: it branches from the parent's branch and lands there when done. The parent runs no implement attempt of its own; a task that already has a running loop is rejected as a parent."},
                     "start": {"type": "boolean", "description": "Start right away (default true); false leaves the task stopped for review."},
@@ -193,6 +195,23 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                 "type": "object",
                 "properties": {"id": {"type": "string"}, "answer": {"type": "string"}},
                 "required": ["id", "answer"],
+            }),
+        ),
+        (
+            "task_amend",
+            "task.amend",
+            "Replace a running, waiting, queued or stopped task's criteria, verify, finalVerify, checks or heldOut (each field you pass replaces the task's; at least one is required). A live loop applies it at its next attempt boundary, never mid-run. The task gains an `Amended: <field names>` decision line. With variant.groundedChecks, amended checks and heldOut are re-run on the base commit and only those failing there gate.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "criteria": {"type": "array", "items": {"type": "string"}},
+                    "verify": {"type": "array", "items": {"type": "string"}},
+                    "finalVerify": {"type": "array", "items": {"type": "string"}, "description": "Slow checks run once, after review passes."},
+                    "checks": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "integer", "description": "0-based index into criteria."}, "run": {"type": "string"}}, "required": ["criterion", "run"]}, "description": "Replaces the task's checks; a criterion index out of range is rejected."},
+                    "heldOut": {"type": ["object", "null"], "properties": {"criterion": {"type": "integer"}, "run": {"type": "string"}}, "required": ["criterion", "run"], "description": "Replaces the held-out check; null removes it."},
+                },
+                "required": ["id"],
             }),
         ),
         (
@@ -675,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_has_exactly_the_sixteen_tools_and_no_delete_or_settings_set() {
+    fn tools_list_has_exactly_the_seventeen_tools_and_no_delete_or_settings_set() {
         let result = dispatch(&orchestrator(), "tools/list", &json!({})).unwrap();
         let tools = result["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -688,6 +707,7 @@ mod tests {
                 "task_start",
                 "task_stop",
                 "task_answer",
+                "task_amend",
                 "task_preflight",
                 "settings_get",
                 "task_archive",

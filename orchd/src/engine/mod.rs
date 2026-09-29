@@ -31,6 +31,7 @@ mod messages;
 
 mod advisor;
 mod attempt_run;
+mod base_check;
 mod cost;
 mod decision;
 mod graph;
@@ -50,6 +51,7 @@ mod verify;
 
 use advisor::*;
 use attempt_run::*;
+use base_check::*;
 use cost::*;
 use decision::*;
 use graph::*;
@@ -175,6 +177,10 @@ struct TaskControl {
     /// long-lived queue -- an answer that arrives when nobody is waiting is
     /// simply not delivered (`task.answer` rejects it before it gets here).
     pending_answer: Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    /// An owner's `task.amend` for a task whose loop holds its own copy of
+    /// the task: the loop applies it at its next attempt boundary, so no
+    /// save of the loop's copy can overwrite it.
+    pending_amend: Arc<StdMutex<Option<Amendment>>>,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -229,6 +235,9 @@ pub struct App {
     /// computed for, and its results -- shared by `hook.stop` and the
     /// post-session gate so an unchanged diff never re-runs verify twice.
     verify_cache: std::sync::Mutex<HashMap<String, (String, Vec<VerifyOutcome>)>>,
+    /// Keyed by (base sha, command): what a command did on that commit, so an
+    /// unchanged base is never checked twice for the same command.
+    base_runs: std::sync::Mutex<HashMap<(String, String), VerifyOutcome>>,
     pid: u32,
     /// The executable's mtime at startup, so the app can tell a rebuilt
     /// binary from the one this daemon is running.
@@ -392,6 +401,7 @@ impl App {
             messages: StdMutex::new(messages),
             hook_tokens: RwLock::new(HashMap::new()),
             verify_cache: std::sync::Mutex::new(HashMap::new()),
+            base_runs: std::sync::Mutex::new(HashMap::new()),
             pid: std::process::id(),
             binary_mtime_ms,
             control_token,
@@ -543,6 +553,7 @@ impl App {
             "task.stop" => self.handle_task_stop(params).await,
             "task.answer" => self.handle_task_answer(params).await,
             "task.overturn" => self.handle_task_overturn(params).await,
+            "task.amend" => self.handle_task_amend(params).await,
             "task.delete" => self.handle_task_delete(params).await,
             "task.archive" => self.handle_task_archive(params).await,
             "task.unarchive" => self.handle_task_unarchive(params).await,

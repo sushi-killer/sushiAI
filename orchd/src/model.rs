@@ -304,6 +304,11 @@ pub struct Variant {
     /// out of the JSON while off.
     #[serde(skip_serializing_if = "is_false")]
     pub batch_questions: bool,
+    /// The planner writes executable checks per criterion; the ones that
+    /// fail on the base gate every attempt, and one hidden held-out check
+    /// is run after verify without the implementer ever seeing it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub grounded_checks: bool,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -466,12 +471,13 @@ impl Variant {
 
     /// Keys a serialized default `Variant` leaves out, but a partial
     /// override object may still name.
-    pub const OPTIONAL_KEYS: [&'static str; 5] = [
+    pub const OPTIONAL_KEYS: [&'static str; 6] = [
         "plannerRoute",
         "tierRoutes",
         "maxCostUsd",
         "maxAttemptCostUsd",
         "batchQuestions",
+        "groundedChecks",
     ];
 
     /// Every route override names a route in `routes`.
@@ -555,6 +561,48 @@ pub struct Assumption {
     pub owner_answer: Option<String>,
 }
 
+/// How a check ran on the base checkout, before any work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Baseline {
+    /// Already passes: it proves nothing, so it does not gate.
+    Pass,
+    /// Fails as it should: it gates the attempt.
+    Fail,
+    /// Could not run (missing tool, spawn failure): left out.
+    Env,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Check {
+    /// Index into `Task::criteria`.
+    pub criterion: usize,
+    pub run: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<Baseline>,
+}
+
+/// Drops checks whose criterion is out of range or whose command is blank,
+/// and clears any supplied baseline: only the base run may set it.
+pub fn valid_checks(checks: Vec<Check>, criteria_len: usize) -> Vec<Check> {
+    checks
+        .into_iter()
+        .filter(|c| c.criterion < criteria_len && !c.run.trim().is_empty())
+        .map(|c| Check {
+            baseline: None,
+            ..c
+        })
+        .collect()
+}
+
+/// [`valid_checks`] for the one held-out check.
+pub fn valid_check(check: Option<Check>, criteria_len: usize) -> Option<Check> {
+    valid_checks(check.into_iter().collect(), criteria_len)
+        .into_iter()
+        .next()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
@@ -567,6 +615,13 @@ pub struct Task {
     /// and before the commit; `verify` runs after every attempt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub final_verify: Vec<String>,
+    /// Executable checks, each tied to one criterion by index
+    /// (`variant.grounded_checks`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<Check>,
+    /// One extra check the implementer never sees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_out: Option<Check>,
     /// The owner's raw one-sentence ask, set only by the `{repo, request}`
     /// form of `task.create`; the drafting stage fills `title`/`goal`/
     /// `criteria`/`verify` from it and leaves this as the original text.
@@ -711,6 +766,8 @@ pub enum FailureKind {
     /// The attempt's estimated cost passed `variant.max_attempt_cost_usd`.
     Budget,
     Verify,
+    /// The held-out check (`variant.grounded_checks`) failed after verify.
+    Heldout,
     Review,
     Protected,
     Blocked,
@@ -725,6 +782,7 @@ impl FailureKind {
             FailureKind::Loop => "loop",
             FailureKind::Budget => "budget",
             FailureKind::Verify => "verify",
+            FailureKind::Heldout => "heldout",
             FailureKind::Review => "review",
             FailureKind::Protected => "protected",
             FailureKind::Blocked => "blocked",
@@ -1026,6 +1084,8 @@ mod tests {
             criteria: vec![],
             verify: vec![],
             final_verify: vec![],
+            checks: vec![],
+            held_out: None,
             request: Some("fix the thing that's broken".into()),
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
@@ -1241,6 +1301,8 @@ mod tests {
             criteria: vec![],
             verify: vec![],
             final_verify: vec![],
+            checks: vec![],
+            held_out: None,
             request: None,
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
@@ -1284,6 +1346,8 @@ mod tests {
             criteria: vec![],
             verify: vec![],
             final_verify: vec![],
+            checks: vec![],
+            held_out: None,
             request: None,
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
@@ -1325,5 +1389,79 @@ mod tests {
         task.archived = false;
         let v2 = serde_json::to_value(&task).unwrap();
         assert_eq!(v2["archived"], false);
+    }
+}
+
+#[cfg(test)]
+mod grounded_checks_tests {
+    use super::*;
+
+    fn check(criterion: usize, run: &str) -> Check {
+        Check {
+            criterion,
+            run: run.into(),
+            baseline: None,
+        }
+    }
+
+    #[test]
+    fn grounded_checks_is_left_out_when_off_and_named_when_on() {
+        assert!(!serde_json::to_string(&Variant::default())
+            .unwrap()
+            .contains("groundedChecks"));
+        let on = Variant {
+            grounded_checks: true,
+            ..Variant::default()
+        };
+        assert!(serde_json::to_string(&on)
+            .unwrap()
+            .ends_with(r#""groundedChecks":true}"#));
+        assert!(Variant::OPTIONAL_KEYS.contains(&"groundedChecks"));
+    }
+
+    #[test]
+    fn valid_checks_drop_out_of_range_and_blank_entries() {
+        let kept = valid_checks(
+            vec![
+                check(0, "a"),
+                check(2, "out of range"),
+                check(1, "  \t"),
+                check(1, " b "),
+            ],
+            2,
+        );
+        assert_eq!(kept, vec![check(0, "a"), check(1, " b ")]);
+        assert_eq!(valid_check(Some(check(3, "x")), 3), None);
+        assert_eq!(valid_check(Some(check(2, "x")), 3), Some(check(2, "x")));
+        assert_eq!(valid_check(None, 3), None);
+    }
+
+    #[test]
+    fn valid_checks_reset_a_supplied_baseline() {
+        let mut c = check(0, "a");
+        c.baseline = Some(Baseline::Fail);
+        assert_eq!(valid_checks(vec![c.clone()], 1), vec![check(0, "a")]);
+        assert_eq!(valid_check(Some(c), 1), Some(check(0, "a")));
+    }
+
+    #[test]
+    fn a_check_serializes_its_baseline_only_once_known() {
+        assert_eq!(
+            serde_json::to_string(&check(0, "x")).unwrap(),
+            r#"{"criterion":0,"run":"x"}"#
+        );
+        let with = Check {
+            baseline: Some(Baseline::Env),
+            ..check(1, "y")
+        };
+        assert_eq!(
+            serde_json::to_string(&with).unwrap(),
+            r#"{"criterion":1,"run":"y","baseline":"env"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&FailureKind::Heldout).unwrap(),
+            r#""heldout""#
+        );
+        assert_eq!(FailureKind::Heldout.as_str(), "heldout");
     }
 }

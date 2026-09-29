@@ -158,3 +158,29 @@ fn diff_hash_changes_when_an_untracked_file_is_edited() {
     std::os::unix::fs::symlink("/dev/zero", tmp.path().join("zero")).unwrap();
     diff_hash(tmp.path(), "HEAD");
 }
+
+#[test]
+fn verify_tail_surfaces_a_conventions_block_over_bundler_noise() {
+    let stderr = format!(
+        "{}Repository conventions failed:\n\n  - problem one\n  - problem two\nnext line\n  - not part of it\n",
+        "WARNING bundler chunk too large\n".repeat(300)
+    );
+    let tail = verify_tail(b"", stderr.as_bytes());
+    let failures = tail.split("--- failures ---\n").nth(1).unwrap();
+    assert!(failures.contains("Repository conventions failed:"));
+    assert!(failures.contains("- problem one"));
+    assert!(failures.contains("- problem two"));
+    assert!(!failures.contains("not part of it"));
+}
+
+#[test]
+fn verify_tail_highlights_fail_lines_and_eslint_errors_only() {
+    let tail = verify_tail(
+        b"  FAIL tests/a.test.ts\n\xE2\x9C\x96 3 problems (2 errors, 1 warning)\n\xE2\x9C\x96 1 problem (0 errors, 1 warning)\n",
+        b"",
+    );
+    let failures = tail.split("--- failures ---\n").nth(1).unwrap();
+    assert!(failures.contains("FAIL tests/a.test.ts"));
+    assert!(failures.contains("3 problems (2 errors"));
+    assert!(!failures.contains("(0 errors"));
+}

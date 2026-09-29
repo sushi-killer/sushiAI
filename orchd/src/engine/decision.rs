@@ -233,3 +233,108 @@ pub(super) async fn fail_and_continue(
         None => LoopSignal::Stop,
     }
 }
+
+/// Owner answer `drop criterion`: removes criterion `n`, its checks and a
+/// held-out check on it, and shifts the later checks down by one. Shared by
+/// the live loop and the post-restart branch of `task.answer`.
+pub(super) fn drop_criterion(task: &mut Task, n: usize) {
+    if n >= task.criteria.len() {
+        return;
+    }
+    let text = task.criteria.remove(n);
+    task.checks.retain(|c| c.criterion != n);
+    if task.held_out.as_ref().is_some_and(|h| h.criterion == n) {
+        task.held_out = None;
+    }
+    for c in task.checks.iter_mut().chain(task.held_out.as_mut()) {
+        if c.criterion > n {
+            c.criterion -= 1;
+        }
+    }
+    task.decisions.push(format!(
+        "Orchestrator: dropped criterion {n} ({text}) as the owner answered"
+    ));
+}
+
+const IMPOSSIBLE_OPTIONS: [&str; 3] = ["drop criterion", "retry", "stop"];
+
+/// The owner question for a `sushi-impossible` claim.
+pub(super) fn impossible_question(task: &Task, claim: &brief::Impossible) -> Question {
+    Question {
+        text: format!(
+            "Criterion {} cannot be met as written: {}. Evidence: {}",
+            claim.criterion, task.criteria[claim.criterion], claim.evidence
+        ),
+        options: IMPOSSIBLE_OPTIONS.iter().map(|o| o.to_string()).collect(),
+    }
+}
+
+/// The criterion an [`impossible_question`] is about, and whether `answer`
+/// is its `drop criterion` option.
+pub(super) fn impossible_drop_target(question: &Question, answer: &str) -> Option<usize> {
+    if !answer.trim().eq_ignore_ascii_case("drop criterion") {
+        return None;
+    }
+    question
+        .text
+        .strip_prefix("Criterion ")?
+        .split_once(" cannot be met as written")?
+        .0
+        .parse()
+        .ok()
+}
+
+#[cfg(test)]
+mod grounded_checks_tests {
+    use super::*;
+
+    fn check(criterion: usize, run: &str) -> Check {
+        Check {
+            criterion,
+            run: run.into(),
+            baseline: Some(Baseline::Fail),
+        }
+    }
+
+    #[test]
+    fn dropping_a_criterion_removes_its_checks_and_shifts_the_later_ones() {
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.criteria = vec!["zero".into(), "one".into(), "two".into()];
+        task.checks = vec![check(0, "a"), check(1, "b"), check(2, "c"), check(1, "b2")];
+        task.held_out = Some(check(2, "h"));
+        drop_criterion(&mut task, 1);
+        assert_eq!(task.criteria, vec!["zero", "two"]);
+        assert_eq!(task.checks, vec![check(0, "a"), check(1, "c")]);
+        assert_eq!(task.held_out, Some(check(1, "h")));
+        assert_eq!(
+            task.decisions,
+            vec!["Orchestrator: dropped criterion 1 (one) as the owner answered"]
+        );
+        // The held-out check goes with its own criterion.
+        drop_criterion(&mut task, 1);
+        assert_eq!(task.held_out, None);
+        assert_eq!(task.checks, vec![check(0, "a")]);
+        // Out of range: nothing happens.
+        let before = task.decisions.len();
+        drop_criterion(&mut task, 9);
+        assert_eq!(task.decisions.len(), before);
+    }
+
+    #[test]
+    fn the_impossible_question_round_trips_to_its_criterion() {
+        let mut task = task_with_status(TaskStatus::Running);
+        task.criteria = vec!["zero".into(), "one".into()];
+        let claim = brief::Impossible {
+            criterion: 1,
+            evidence: "it contradicts zero".into(),
+        };
+        let q = impossible_question(&task, &claim);
+        assert_eq!(
+            q.text,
+            "Criterion 1 cannot be met as written: one. Evidence: it contradicts zero"
+        );
+        assert_eq!(q.options, vec!["drop criterion", "retry", "stop"]);
+        assert_eq!(impossible_drop_target(&q, "drop criterion"), Some(1));
+        assert_eq!(impossible_drop_target(&q, "retry"), None);
+    }
+}

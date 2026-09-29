@@ -107,6 +107,10 @@ export type Variant = {
   /** Non-blocking planner questions become assumptions instead of waiting
    * for the owner; blocking ones are asked together. Absent = off. */
   batchQuestions?: boolean;
+  /** The planner writes executable checks per criterion; the ones that fail
+   * on the base gate every attempt, and a held-out check is run after
+   * verify. */
+  groundedChecks?: boolean;
 };
 
 /** A choice the planner made itself (`variant.batchQuestions`). */
@@ -127,6 +131,7 @@ export type FailureKind =
   | "loop"
   | "budget"
   | "verify"
+  | "heldout"
   | "review"
   | "protected"
   | "blocked"
@@ -196,6 +201,14 @@ export type Attempt = {
   advisorFingerprint?: Fingerprint;
 };
 
+export type Check = {
+  /** Index into the task's criteria. */
+  criterion: number;
+  run: string;
+  /** How the check ran on the base checkout, before any work. */
+  baseline?: "pass" | "fail" | "env";
+};
+
 export type Task = {
   id: string;
   title: string;
@@ -204,6 +217,8 @@ export type Task = {
   verify: string[];
   /** Slow checks run once, after review passes and before the commit. */
   finalVerify?: string[];
+  checks?: Check[];
+  heldOut?: Check;
   /** The one-sentence ask a plan was drafted from, when the task started
    * that way instead of from the full manual form. */
   request?: string;

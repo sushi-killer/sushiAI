@@ -326,6 +326,8 @@ mod tests {
             criteria: vec!["works".into()],
             verify: vec!["true".into()],
             final_verify: vec![],
+            checks: vec![],
+            held_out: None,
             request: None,
             repo: "/repo".into(),
             worktree: "/repo-task".into(),

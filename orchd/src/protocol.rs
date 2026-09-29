@@ -256,6 +256,8 @@ mod tests {
             criteria: vec![],
             verify: vec![],
             final_verify: vec![],
+            checks: vec![],
+            held_out: None,
             request: None,
             repo: "/r".into(),
             worktree: "/r-t".into(),

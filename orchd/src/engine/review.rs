@@ -146,12 +146,13 @@ pub(super) async fn run_review(
     base_sha: &str,
     verify_results: &[VerifyOutcome],
     implementer_note: &str,
+    agent_decisions: &[String],
     review_route: &Route,
     deny_read: &[String],
     cancel: &CancelToken,
     cost_usd: &mut f64,
     fingerprint: &mut Option<Fingerprint>,
-) -> Result<ReviewResult, RunError> {
+) -> Result<(ReviewResult, bool), RunError> {
     let wt = worktree.to_path_buf();
     let base = base_sha.to_string();
     let diff =
@@ -159,31 +160,7 @@ pub(super) async fn run_review(
             .await
             .unwrap_or_default();
 
-    let mut brief_text = String::new();
-    brief_text.push_str("## Review\n\n");
-    brief_text.push_str(&task.goal);
-    brief_text.push_str("\n\n## Acceptance criteria\n\n");
-    for c in &task.criteria {
-        brief_text.push_str("- ");
-        brief_text.push_str(c);
-        brief_text.push('\n');
-    }
-    // Blind review: the implementer's account is left out entirely.
-    if !task.variant().review_blind {
-        brief_text.push_str("\n## Implementer\n\n");
-        brief_text.push_str(implementer_note);
-    }
-    brief_text.push_str("\n\nCriteria marked \"Checked by review\" have no command behind them: check them from the diff and the repository yourself.\n\nThe repository's process rules about commits, pull requests, release notes and lesson or changelog files belong to the orchestrator, not this task: judge the change against the task and its criteria, and do not fail it for those.\n");
     let evidence = task.variant().review_evidence;
-    brief_text.push_str("\n## Verify results\n\n");
-    for v in verify_results {
-        brief_text.push_str(&format!(
-            "- `{}` -> exit {:?}\n```\n{}\n```\n",
-            v.command,
-            v.code,
-            tail_chars(v.tail.trim(), if evidence { 3000 } else { 800 })
-        ));
-    }
     let images = if evidence {
         let since = task
             .attempts
@@ -194,21 +171,24 @@ pub(super) async fn run_review(
     } else {
         Vec::new()
     };
-    if !images.is_empty() {
-        brief_text.push_str("\n## Screenshots\n\nSaved by this attempt. Open each one and check it against the criteria it is meant to prove; a screenshot that does not show what a criterion claims is a finding.\n\n");
-        for image in &images {
-            let shown = image.strip_prefix(worktree).unwrap_or(image);
-            brief_text.push_str(&format!("- `{}`\n", shown.display()));
-        }
-    }
-    brief_text.push_str("\n## Diff\n\n```diff\n");
-    brief_text.push_str(&diff);
-    brief_text.push_str("\n```\n\n## Report format\n\nReply with:\n\n```sushi-review\n{\"verdict\":\"PASS|FAIL\",\"findings\":[]}\n```\n");
-    if task.variant().contract {
-        brief_text.push('\n');
-        brief_text.push_str(brief::REVIEW_CONTRACT);
-        brief_text.push('\n');
-    }
+    let shown: Vec<String> = images
+        .iter()
+        .map(|image| {
+            image
+                .strip_prefix(worktree)
+                .unwrap_or(image)
+                .display()
+                .to_string()
+        })
+        .collect();
+    let brief_text = brief::build_review_brief(
+        task,
+        implementer_note,
+        agent_decisions,
+        verify_results,
+        &shown,
+        &diff,
+    );
 
     // Its own subdirectory: a review's events/brief/settings must never
     // land in the implement attempt's `runs/<n>/` files.
@@ -254,7 +234,7 @@ pub(super) async fn run_review(
             *cost_usd += outcome.cost_usd.unwrap_or(0.0);
             *fingerprint = outcome.fingerprint.clone();
             let text = outcome.final_text.unwrap_or_default();
-            if let Some(result) = brief::parse_review(&text) {
+            if let Some(result) = brief::parse_review_with_rule(&text) {
                 return Ok(result);
             }
             Err(RunError::Io(match outcome.error {

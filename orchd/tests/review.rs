@@ -408,10 +408,14 @@ fn final_checks_run_once_after_review_passes_and_gate_the_commit() {
                     .starts_with("Final check echo ran"),
                 "{settled}"
             );
+            let question = settled["question"]["text"].as_str().unwrap();
+            assert!(question.contains(" already fails on base "), "{settled}");
         }
         let worktree = task["worktree"].as_str().unwrap().to_string();
         let ran = std::fs::read_to_string(&ran_log).unwrap();
-        assert_eq!(ran.lines().count(), 1, "the final check ran exactly once");
+        // A failing one is run once more, on the base.
+        let runs = if final_check == "false" { 2 } else { 1 };
+        assert_eq!(ran.lines().count(), runs, "{final_check}: {ran}");
         let brief = std::fs::read_to_string(
             daemon
                 .data_dir()

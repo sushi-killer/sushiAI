@@ -111,7 +111,9 @@ through a per-parent merge queue: its work is carried onto the parent's
 current head, verify runs again when that head moved, and the parent's
 branch fast-forwards to the child's commit; a conflict or failing verify is
 an ordinary failure the agent retries. When every child has landed, the
-parent runs its own verify and final checks on its branch and is done; its
+parent runs its own verify and final checks on its branch (with
+`groundedChecks`, its checks were baselined before the first child started and
+its gated and held-out checks run once here) and is done; its
 cost is its plan plus its children. When something a task waits for ends
 `failed`/`stopped`, the task waits with a question: retry the dependency,
 drop it, or stop.
@@ -122,13 +124,19 @@ drop it, or stop.
 flowchart TD
   plan["Plan<br/>planner route (Opus) drafts goal, criteria, verify"]
   split["Verify entries that are not shell commands<br/>become review criteria"]
+  baseline["Baseline (variant.groundedChecks), before attempt 1<br/>planner's checks and held-out check run on the base;<br/>pass = not grounded, exit 126/127 = env, fail = gated;<br/>worktree restored afterwards"]
   tier["Tier<br/>planner's tier (variant.plannerTier), else Jev"]
   impl["Implement<br/>route = tiers[tier]; retry resumes the session,<br/>or starts fresh with handoffs (variant.retryMode)"]
   stall["Stall watchdog<br/>no output for variant.stallTimeoutSecs -> kill"]
   rebase["Carry onto moved base<br/>conflicts go back to the agent"]
   verify["Verify<br/>task.verify in the worktree<br/>cached by diff + untracked contents"]
+  gated["Gated checks<br/>baseline-fail checks must now pass"]
+  heldout["Held-out check<br/>hidden from the implementer; failure kind heldout,<br/>command never in a brief or detail"]
+  impossible["sushi-impossible block in the reply<br/>criterion cannot be met as written"]
   protect["Protected paths<br/>owner approves"]
   review["Review<br/>hard-tier route, sees diff, verify tails,<br/>implementer report"]
+  final["Final checks<br/>task.finalVerify, once, after review passes"]
+  baserun{"Same command on the base?<br/>throwaway worktree on base sha,<br/>cached per base + command"}
   commit["Commit on the task branch"]
   done([done])
   fail["Failure<br/>signature dedup, maybe escalate tier"]
@@ -137,13 +145,22 @@ flowchart TD
   triage["Orchestrator triages, max 2 per task<br/>continue / reject finding / escalate"]
   ownerQ(["Owner question"])
 
-  plan --> split --> tier --> impl --> rebase --> verify
+  plan --> split --> baseline --> tier --> impl --> rebase --> verify
   impl -.- stall
   stall -->|stalled| fail
-  verify -->|all exit 0| protect --> review
+  verify -->|all exit 0| gated -->|pass| heldout -->|pass| protect --> review
+  gated -->|fails, kind verify| fail
+  heldout -->|fails, kind heldout| fail
+  impl -.- impossible
+  impossible -->|"drop criterion / retry / stop"| ownerQ
+  ownerQ -->|drop criterion or retry| impl
+  ownerQ -->|"drop this check"| commit
   land["Subtask: land on the parent's branch<br/>one at a time per parent; carry onto its head,<br/>verify again if it moved, fast-forward"]
-  review -->|PASS| commit --> done
-  review -->|PASS, subtask| land --> done
+  review -->|PASS| final -->|all exit 0| commit --> done
+  final -->|all exit 0, subtask| land --> done
+  final -->|non-zero| baserun
+  baserun -->|passes on base| fail
+  baserun -->|also fails: retry after base is fixed / drop this check / stop| ownerQ
   land -->|conflict / verify fails| fail
   review -->|no verdict| ownerQ
   verify -->|non-zero| fail

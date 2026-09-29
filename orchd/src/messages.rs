@@ -334,6 +334,8 @@ mod tests {
             criteria: vec![],
             verify: vec![],
             final_verify: vec![],
+            checks: vec![],
+            held_out: None,
             request: None,
             repo: repo.into(),
             worktree: "/wt".into(),
@@ -408,6 +410,7 @@ mod tests {
         let ctl = TaskControl {
             cancel: cancel.clone(),
             pending_answer: Arc::new(StdMutex::new(None)),
+            pending_amend: Arc::new(StdMutex::new(None)),
             handle: tokio::spawn(async {}),
         };
         app.controls.lock().unwrap().insert(B.to_string(), ctl);

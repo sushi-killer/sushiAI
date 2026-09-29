@@ -57,6 +57,7 @@ const VARIANT_KEYS: Exclude<
   | "maxCostUsd"
   | "maxAttemptCostUsd"
   | "batchQuestions"
+  | "groundedChecks"
 >[] = [
   "retryMode",
   "stallTimeoutSecs",
@@ -110,6 +111,9 @@ export function variantLabel(task: Task, experiments: Variant): string {
     (variant.batchQuestions ?? false) !== (experiments.batchQuestions ?? false)
   ) {
     diffs.push(`batchQuestions ${variant.batchQuestions ? "on" : "off"}`);
+  }
+  if (!!variant.groundedChecks !== !!experiments.groundedChecks) {
+    diffs.push(`groundedChecks ${variantFlagText(!!variant.groundedChecks)}`);
   }
   if (diffs.length === 0) return "default";
   return diffs.join(" · ");

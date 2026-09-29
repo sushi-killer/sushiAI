@@ -1,0 +1,233 @@
+use super::*;
+
+/// Options of the pre-existing final-check question, in the order shown.
+pub(super) const PRE_EXISTING_RETRY: &str = "retry after the base is fixed";
+pub(super) const PRE_EXISTING_DROP: &str = "drop this check";
+const PRE_EXISTING_OPTIONS: [&str; 3] = [PRE_EXISTING_RETRY, PRE_EXISTING_DROP, "stop"];
+
+/// The owner question for a final check that fails on the base as well.
+pub(super) fn pre_existing_question(command: &str, base_sha: &str, base_tail: &str) -> Question {
+    let sha: String = base_sha.chars().take(7).collect();
+    Question {
+        text: format!(
+            "{command} already fails on base {sha}: {}",
+            tail_chars(base_tail.trim(), 300)
+        ),
+        options: PRE_EXISTING_OPTIONS.iter().map(|o| o.to_string()).collect(),
+    }
+}
+
+/// Runs `commands` on the commit `base_sha` of `repo`, in a throwaway
+/// detached worktree that is removed again whatever happens (done, failed or
+/// cancelled). Results are cached on the app per (base sha, command), so the
+/// same command on an unchanged base runs once. `Err` only when the checkout
+/// itself could not be made; the caller then knows nothing about the base.
+pub(super) async fn run_on_base(
+    app: &Arc<App>,
+    repo: &str,
+    base_sha: &str,
+    commands: &[String],
+    run_dir: &Path,
+    cancel: &CancelToken,
+) -> Result<Vec<VerifyOutcome>, String> {
+    let mut known: HashMap<String, VerifyOutcome> = HashMap::new();
+    let mut missing: Vec<String> = Vec::new();
+    {
+        let cache = app.base_runs.lock().unwrap();
+        for c in commands {
+            match cache.get(&(base_sha.to_string(), c.clone())) {
+                Some(r) => {
+                    known.insert(c.clone(), r.clone());
+                }
+                None if !missing.contains(c) => missing.push(c.clone()),
+                None => {}
+            }
+        }
+    }
+    if !missing.is_empty() {
+        let sandbox = app.settings.read().unwrap().sandbox;
+        let scratch = app
+            .data_dir
+            .join("base-runs")
+            .join(uuid::Uuid::new_v4().to_string());
+        let wt = scratch.join("base");
+        let (repo_path, sha, scratch2, wt2) = (
+            PathBuf::from(repo),
+            base_sha.to_string(),
+            scratch.clone(),
+            wt.clone(),
+        );
+        let setup = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            std::fs::create_dir_all(&scratch2).map_err(|e| e.to_string())?;
+            git::add_detached_worktree(&repo_path, &wt2, &sha).map_err(|e| e.to_string())?;
+            git::bootstrap_worktree(&repo_path, &wt2).map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        let _ = std::fs::create_dir_all(run_dir);
+        let ran = match setup {
+            Ok(()) => Ok(run_verify_commands(&wt, run_dir, &missing, sandbox, cancel).await),
+            Err(e) => Err(format!("could not check out {base_sha}: {e}")),
+        };
+        let (repo_path, wt3) = (PathBuf::from(repo), wt.clone());
+        let _ = tokio::task::spawn_blocking(move || {
+            git::remove_worktree(&repo_path, &wt3);
+            let _ = std::fs::remove_dir_all(&scratch);
+        })
+        .await;
+        let results = ran?;
+        let cancelled = cancel.is_cancelled();
+        let mut cache = app.base_runs.lock().unwrap();
+        for (c, r) in missing.iter().zip(results) {
+            if !cancelled {
+                cache.insert((base_sha.to_string(), c.clone()), r.clone());
+            }
+            known.insert(c.clone(), r);
+        }
+    }
+    Ok(commands
+        .iter()
+        .filter_map(|c| known.get(c).cloned())
+        .collect())
+}
+
+/// The base's result for `failed`, when the same command also exits non-zero
+/// there: the failure is older than this task. `None` for a command that
+/// passes on base or a base that cannot be run.
+pub(super) async fn failing_on_base(
+    app: &Arc<App>,
+    task: &Task,
+    failed: &VerifyOutcome,
+    run_dir: &Path,
+    cancel: &CancelToken,
+) -> Option<VerifyOutcome> {
+    let base = run_on_base(
+        app,
+        &task.repo,
+        &task.base_sha,
+        std::slice::from_ref(&failed.command),
+        run_dir,
+        cancel,
+    )
+    .await
+    .ok()?
+    .into_iter()
+    .next()?;
+    base.code.is_some_and(|c| c != 0).then_some(base)
+}
+
+/// Baselines the checks that have none yet on the base commit (not in the
+/// task's worktree, which may hold the implementer's changes). `false` when
+/// cancelled or the base could not be checked out; nothing is stored then.
+pub(super) async fn baseline_on_base(
+    app: &Arc<App>,
+    task: &mut Task,
+    cancel: &CancelToken,
+) -> bool {
+    let todo = baseline_todo(task);
+    if todo.is_empty() {
+        return true;
+    }
+    let commands: Vec<String> = todo.iter().map(|(_, _, run)| run.clone()).collect();
+    let run_dir = app.store.task_dir(&task.id).join("baseline-base");
+    match run_on_base(app, &task.repo, &task.base_sha, &commands, &run_dir, cancel).await {
+        Ok(results) if results.len() == todo.len() && !cancel.is_cancelled() => {
+            record_baselines(task, &todo, &results)
+        }
+        _ => false,
+    }
+}
+
+/// What `task.amend` changes; a `None` field is left as it is.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Amendment {
+    pub criteria: Option<Vec<String>>,
+    pub verify: Option<Vec<String>>,
+    pub final_verify: Option<Vec<String>>,
+    pub checks: Option<Vec<Check>>,
+    pub held_out: Option<Option<Check>>,
+}
+
+impl Amendment {
+    pub fn is_empty(&self) -> bool {
+        self.fields().is_empty()
+    }
+
+    /// The camelCase names of the fields it changes, in a fixed order.
+    pub fn fields(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.criteria.is_some() {
+            names.push("criteria");
+        }
+        if self.verify.is_some() {
+            names.push("verify");
+        }
+        if self.final_verify.is_some() {
+            names.push("finalVerify");
+        }
+        if self.checks.is_some() {
+            names.push("checks");
+        }
+        if self.held_out.is_some() {
+            names.push("heldOut");
+        }
+        names
+    }
+
+    /// A later amendment wins field by field.
+    pub fn merge(&mut self, later: Amendment) {
+        self.criteria = later.criteria.or(self.criteria.take());
+        self.verify = later.verify.or(self.verify.take());
+        self.final_verify = later.final_verify.or(self.final_verify.take());
+        self.checks = later.checks.or(self.checks.take());
+        self.held_out = later.held_out.or(self.held_out.take());
+    }
+
+    /// Replaces the fields on `task` and adds the decision line: field
+    /// names only, so it can never carry a command or a held-out check.
+    pub fn apply(self, task: &mut Task) {
+        let line = format!("Amended: {}", self.fields().join(", "));
+        if let Some(v) = self.criteria {
+            task.criteria = v;
+        }
+        if let Some(v) = self.verify {
+            task.verify = v;
+        }
+        if let Some(v) = self.final_verify {
+            task.final_verify = v;
+        }
+        let len = task.criteria.len();
+        if let Some(v) = self.checks {
+            task.checks = valid_checks(v, len);
+        }
+        if let Some(h) = self.held_out {
+            task.held_out = valid_check(h, len);
+        }
+        task.decisions.push(line);
+        task.updated_at = now_ms();
+    }
+}
+
+/// Hands a pending amendment to the loop's own copy of the task: applied,
+/// baselined on the base commit with `variant.groundedChecks`, and saved.
+/// Called only at attempt boundaries, never while a harness runs.
+pub(super) async fn apply_pending_amendment(
+    app: &Arc<App>,
+    task: &mut Task,
+    pending: &Arc<StdMutex<Option<Amendment>>>,
+    cancel: &CancelToken,
+) {
+    let Some(amendment) = pending.lock().unwrap().take() else {
+        return;
+    };
+    if amendment.verify.is_some() {
+        // Cached results belong to the old commands.
+        app.verify_cache.lock().unwrap().remove(&task.id);
+    }
+    amendment.apply(task);
+    if task.variant().grounded_checks {
+        baseline_on_base(app, task, cancel).await;
+    }
+    let _ = app.store.save_task(task);
+    app.broadcast_task(task);
+}

@@ -130,6 +130,24 @@ pub struct CreatedWorktree {
     pub base_sha: String,
 }
 
+/// `git worktree add --detach <path> <sha>`: a throwaway checkout of one
+/// commit, on no branch.
+pub fn add_detached_worktree(repo_root: &Path, path: &Path, sha: &str) -> Result<(), GitError> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| GitError("non-utf8 path".into()))?;
+    run(repo_root, &["worktree", "add", "--detach", path, sha]).map(|_| ())
+}
+
+/// `git worktree remove --force <path>`, then `git worktree prune`. Both are
+/// best effort: the caller is cleaning up and has nothing left to do on error.
+pub fn remove_worktree(repo_root: &Path, path: &Path) {
+    if let Some(p) = path.to_str() {
+        let _ = run(repo_root, &["worktree", "remove", "--force", p]);
+    }
+    let _ = run(repo_root, &["worktree", "prune"]);
+}
+
 /// `git worktree add -b <branch> <path> HEAD`, then records `baseSha`.
 /// `base` is any commit-ish (`HEAD`, a branch, a sha): the new branch
 /// starts there, and `base_sha` is that exact commit, resolved once up
@@ -369,23 +387,6 @@ pub fn delete_wip_ref(worktree: &Path, task_id: &str) {
     let _ = run(worktree, &["update-ref", "-d", &wip_ref(task_id)]);
 }
 
-/// A detached, throwaway checkout of `sha` at `path` (for grading a
-/// finished task without touching its own worktree).
-pub fn add_detached_worktree(repo_root: &Path, path: &Path, sha: &str) -> Result<(), GitError> {
-    let p = path
-        .to_str()
-        .ok_or_else(|| GitError("non-utf8 path".into()))?;
-    run(repo_root, &["worktree", "add", "--detach", p, sha]).map(|_| ())
-}
-
-/// Removes a worktree made by `add_detached_worktree` (best effort).
-pub fn remove_worktree(repo_root: &Path, path: &Path) {
-    if let Some(p) = path.to_str() {
-        let _ = run(repo_root, &["worktree", "remove", "--force", p]);
-    }
-    let _ = run(repo_root, &["worktree", "prune"]);
-}
-
 /// Removes a worktree and its branch that nothing has used yet (best
 /// effort: an undone step leaves at most an unused branch or directory).
 pub fn discard_worktree(repo_root: &Path, path: &Path, branch: &str) {
@@ -478,25 +479,59 @@ pub fn bootstrap_worktree(main_root: &Path, worktree: &Path) -> std::io::Result<
 /// agent-created directory's contents are all individually visible to the
 /// protected-path check.
 pub fn status_porcelain(cwd: &Path) -> Result<Vec<String>, GitError> {
+    Ok(status_entries(cwd)?.into_iter().map(|(_, p)| p).collect())
+}
+
+/// `(XY status, path)` for every entry of `git status --porcelain -z
+/// --untracked-files=all`.
+pub fn status_entries(cwd: &Path) -> Result<Vec<(String, String)>, GitError> {
     let out = run(
         cwd,
         &["status", "--porcelain", "-z", "--untracked-files=all"],
     )?;
-    let mut paths = Vec::new();
+    let mut entries = Vec::new();
     let mut fields = out.split('\0').filter(|s| !s.is_empty());
     while let Some(entry) = fields.next() {
         if entry.len() < 3 {
             continue;
         }
         let status_code = &entry[0..2];
-        paths.push(entry[3..].to_string());
+        entries.push((status_code.to_string(), entry[3..].to_string()));
         if status_code.starts_with('R') || status_code.starts_with('C') {
             // Rename/copy entries are followed by the origin path as a
             // second NUL-terminated field; consume and discard it.
             fields.next();
         }
     }
-    Ok(paths)
+    Ok(entries)
+}
+
+/// Undoes what ran in `cwd` since `before` was taken with
+/// [`status_entries`]: a tracked path that changed is restored from HEAD, an
+/// untracked path that was not there is deleted. Never stashes: the stash
+/// is shared by every worktree of the repository.
+pub fn restore_status(cwd: &Path, before: &[(String, String)]) -> Result<(), GitError> {
+    for (code, path) in status_entries(cwd)? {
+        if before.iter().any(|(c, p)| *c == code && *p == path) {
+            continue;
+        }
+        if code == "??" {
+            let full = cwd.join(&path);
+            let _ = std::fs::remove_file(&full);
+            let mut dir = full.parent();
+            while let Some(d) = dir.filter(|d| *d != cwd && d.starts_with(cwd)) {
+                if std::fs::remove_dir(d).is_err() {
+                    break;
+                }
+                dir = d.parent();
+            }
+        } else if run(cwd, &["checkout", "HEAD", "--", &path]).is_err() {
+            // Added by the run: not in HEAD.
+            let _ = run(cwd, &["rm", "-f", "--cached", "--", &path]);
+            let _ = std::fs::remove_file(cwd.join(&path));
+        }
+    }
+    Ok(())
 }
 
 pub fn status_short(cwd: &Path) -> Result<String, GitError> {

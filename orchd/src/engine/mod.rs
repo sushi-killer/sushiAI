@@ -24,7 +24,7 @@ use tokio::sync::{broadcast, oneshot, Notify, Semaphore};
 #[path = "../audit.rs"]
 mod audit;
 #[path = "../chat.rs"]
-mod chat;
+pub(crate) mod chat;
 #[path = "../evolution/mod.rs"]
 mod evolution;
 #[path = "../messages.rs"]

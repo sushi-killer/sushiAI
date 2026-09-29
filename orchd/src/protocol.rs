@@ -29,6 +29,7 @@ pub enum Event {
     /// with the id of that session and a light summary of all of them.
     #[serde(rename = "chat")]
     Chat {
+        kind: crate::chat::ChatKind,
         thread: Box<serde_json::Value>,
         current: String,
         sessions: Box<serde_json::Value>,

@@ -95,6 +95,9 @@ pub const TASK_TOOLS: [&str; 4] = [
     "ask_orchestrator",
 ];
 
+/// What a brainstorm agent gets (`--read-only`): looking, never changing.
+pub const READ_ONLY_TOOLS: [&str; 4] = ["task_list", "task_get", "settings_get", "repo_notes_list"];
+
 /// What the orchestrator agent gets: every tool below.
 pub const ORCHESTRATOR_TOOLS: [&str; 22] = [
     "task_list",
@@ -396,17 +399,20 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
     ]
 }
 
-/// The bridge's scope: the whole orchestrator surface, or one task's
-/// messaging only (`--task <id>`), where every message is sent as that task.
+/// The bridge's scope: the whole orchestrator surface, one task's messaging
+/// only (`--task <id>`), where every message is sent as that task, or the
+/// read-only tools of a brainstorm (`--read-only`).
 struct Bridge {
     socket: PathBuf,
     token: String,
     task: Option<String>,
+    read_only: bool,
 }
 
 impl Bridge {
     fn offers(&self, tool_name: &str) -> bool {
-        self.task.is_none() || TASK_TOOLS.contains(&tool_name)
+        (self.task.is_none() || TASK_TOOLS.contains(&tool_name))
+            && (!self.read_only || READ_ONLY_TOOLS.contains(&tool_name))
     }
 }
 
@@ -670,6 +676,7 @@ pub fn run(args: &[String]) -> i32 {
     let mut data_dir_arg: Option<String> = None;
     let mut socket_arg: Option<String> = None;
     let mut task: Option<String> = None;
+    let mut read_only = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -684,6 +691,10 @@ pub fn run(args: &[String]) -> i32 {
             "--task" if i + 1 < args.len() => {
                 task = Some(args[i + 1].clone());
                 i += 2;
+            }
+            "--read-only" => {
+                read_only = true;
+                i += 1;
             }
             _ => i += 1,
         }
@@ -707,6 +718,7 @@ pub fn run(args: &[String]) -> i32 {
         socket,
         token,
         task,
+        read_only,
     };
 
     let stdin = std::io::stdin();
@@ -747,6 +759,7 @@ mod tests {
             socket: PathBuf::from("/nonexistent/orchd.sock"),
             token: "t".to_string(),
             task: task.map(str::to_string),
+            read_only: false,
         }
     }
 
@@ -837,6 +850,33 @@ mod tests {
         for name in ["task_create", "task_stop", "orchestrator_reply"] {
             let call = json!({"name": name, "arguments": {}});
             let out = dispatch(&task, "tools/call", &call).unwrap();
+            assert_eq!(out["isError"], true, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_read_only_bridge_offers_only_the_looking_tools_and_refuses_the_rest() {
+        let read_only = Bridge {
+            read_only: true,
+            ..bridge(None)
+        };
+        let result = dispatch(&read_only, "tools/list", &json!({})).unwrap();
+        let names: Vec<&str> = result["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, READ_ONLY_TOOLS);
+        for name in [
+            "task_create",
+            "task_start",
+            "task_amend",
+            "peer_send",
+            "repo_notes_add",
+        ] {
+            let call = json!({"name": name, "arguments": {}});
+            let out = dispatch(&read_only, "tools/call", &call).unwrap();
             assert_eq!(out["isError"], true, "{name}");
         }
     }
@@ -976,6 +1016,7 @@ mod tests {
             socket: socket.clone(),
             token: token.clone(),
             task: task.map(str::to_string),
+            read_only: false,
         };
         let orch = bridge(None);
         let a = bridge(Some(TASK_A));

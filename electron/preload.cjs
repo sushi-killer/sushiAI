@@ -74,6 +74,11 @@ contextBridge.exposeInMainWorld("bridge", {
     ipcRenderer.on("orchestrator-open", listener);
     return () => ipcRenderer.removeListener("orchestrator-open", listener);
   },
+  onOpenInbox: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on("open-inbox", listener);
+    return () => ipcRenderer.removeListener("open-inbox", listener);
+  },
   chat: invoke("chat"),
   chatModels: invoke("chat-models"),
   cancelChat: invoke("chat-cancel"),

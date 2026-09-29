@@ -5,6 +5,10 @@ const MASCOT_ANSWERED_MS = 2500;
 const MASCOT_MAX_NOTICES = 5;
 const MAX_ANSWER_CHARS = 2000;
 const FOCUSES = new Set(["question", "summary", "report"]);
+// orchd task ids are v4 UUIDs (orchd/src/engine/mod.rs validate_task_id).
+const TASK_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const RERUNNABLE = new Set(["failed", "stopped"]);
 
 const WIDTH = 400;
 const HEIGHT_INPUT = 340;
@@ -109,6 +113,51 @@ function validateAnswer(taskId, text, task, queue = []) {
   return answer;
 }
 
+/** The failed/stopped notice a Run again click may restart, or null. Only a
+ * UUID-shaped task id with such a notice still queued is accepted. */
+function rerunNotice(taskId, queue) {
+  if (typeof taskId !== "string" || !TASK_ID.test(taskId)) return null;
+  return (
+    queue.find((item) => RERUNNABLE.has(item.kind) && item.taskId === taskId) ??
+    null
+  );
+}
+
+/** True while the primary display's work area covers the whole screen: macOS
+ * hides the menu bar and Dock in a fullscreen space (a fullscreen app, a
+ * Keynote/PowerPoint slideshow). `baseline` is the same reading at launch; a
+ * menu bar that always auto-hides reads true then, and the signal is off. */
+function presentingFrom(display, baseline) {
+  if (baseline) return false;
+  const { bounds, workArea } = display;
+  return (
+    workArea.x === bounds.x &&
+    workArea.y === bounds.y &&
+    workArea.width === bounds.width &&
+    workArea.height === bounds.height
+  );
+}
+
+/** Polls `presentingFrom` and reports each change.
+ * ponytail: Electron exposes no cross-app "frontmost window is fullscreen" or
+ * "screen is being shared" signal, and switching Spaces does not reliably
+ * fire display-metrics-changed, so this polls the work area. Its ceiling: a
+ * fullscreen app on a secondary display, screen sharing without fullscreen,
+ * and an owner whose menu bar always auto-hides are not detected. */
+function watchPresenting({ screen, onChange, intervalMs = 1500 }) {
+  const read = () => screen.getPrimaryDisplay();
+  const baseline = presentingFrom(read(), false);
+  let presenting = false;
+  const timer = setInterval(() => {
+    const next = presentingFrom(read(), baseline);
+    if (next === presenting) return;
+    presenting = next;
+    onChange(next);
+  }, intervalMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 /** Window height: room for the answer field only when a needs-input notice
  * is queued. */
 function mascotHeight(queue) {
@@ -158,6 +207,7 @@ function registerMascot({
   let loaded = false;
   let timer = null;
   let contentHeight = 0;
+  let presenting = false;
 
   const own = (event) =>
     Boolean(win) &&
@@ -181,6 +231,7 @@ function registerMascot({
   function publish() {
     if (!win || win.isDestroyed()) return;
     win.webContents.send("mascot-notices", queue);
+    win.webContents.send("mascot-presenting", presenting);
   }
 
   function schedule() {
@@ -317,6 +368,28 @@ function registerMascot({
     if (notice.kind !== "input") dispatch({ type: "dismiss", id: notice.id });
   });
 
+  handle("mascot-rerun", async (taskId) => {
+    const notice = rerunNotice(taskId, queue);
+    if (!notice) throw new Error("That notice is gone.");
+    const service = getService();
+    if (!service) throw new Error("The orchestrator is not running.");
+    await service.call("task.start", { id: notice.taskId });
+    dispatch({ type: "dismiss", id: notice.id });
+    return "Running";
+  });
+
+  handle("mascot-inbox", () => {
+    if (!queue.length) throw new Error("No notices are queued.");
+    showMainWindow();
+    send("open-inbox");
+  });
+
+  // Asked for by the page after ⌥Space expands it, so the answer field can
+  // take typing; never on a plain notice, which must not steal focus.
+  handle("mascot-focus", () => {
+    if (policy === "visible" && win.isVisible()) win.focus();
+  });
+
   handle("mascot-dismiss", (id) => {
     if (typeof id !== "string") throw new Error("Invalid notice.");
     dispatch({ type: "dismiss", id });
@@ -337,6 +410,16 @@ function registerMascot({
     },
     onTask(task) {
       dispatch({ type: "task", taskId: task.id, status: task.status });
+    },
+    /** ⌥Space: the page flips between the bubble stack and the pill. */
+    toggle() {
+      if (!queue.length || !loaded || !win || win.isDestroyed()) return;
+      win.webContents.send("mascot-toggle");
+    },
+    /** A fullscreen app or a slideshow started (true) or ended (false). */
+    setPresenting(value) {
+      presenting = Boolean(value);
+      publish();
     },
     snapshot: () => queue,
     getWindow: () => (win && !win.isDestroyed() ? win : null),
@@ -359,6 +442,9 @@ module.exports = {
   noticeLifetimeMs,
   queueReducer,
   validateAnswer,
+  rerunNotice,
+  presentingFrom,
+  watchPresenting,
   MAX_HEIGHT_RATIO,
   mascotBounds,
   registerMascot,

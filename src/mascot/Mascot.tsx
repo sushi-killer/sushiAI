@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Check, X } from "lucide-react";
+import {
+  ArrowRight,
+  ChevronLeft,
+  ChevronRight,
+  Check,
+  RefreshCw,
+  X,
+} from "lucide-react";
 import { Character } from "./Character";
 import { isTyping, mascotMood, type Typing } from "./mood";
 import type { MascotNotice } from "./types";
@@ -186,6 +193,10 @@ function Bubble({
     void bridge
       ?.land(notice.taskId)
       .catch((failure) => setError(cleanError(failure)));
+  const rerun = () =>
+    void bridge
+      ?.rerun(notice.taskId)
+      .catch((failure) => setError(cleanError(failure)));
   return (
     <div
       className={`bubble ${notice.kind} ${fading ? "leaving" : ""}`}
@@ -275,15 +286,24 @@ function Bubble({
           <button onClick={openTask}>View diff</button>
         </div>
       )}
-      {notice.kind === "done" && error && (
-        <span className="bubble-error">{error}</span>
+      {(notice.kind === "failed" || notice.kind === "stopped") && (
+        <div className="bubble-actions">
+          <button onClick={rerun}>
+            <RefreshCw size={14} />
+            Run again
+          </button>
+          <button className="bubble-ghost" onClick={openTask}>
+            Open
+          </button>
+        </div>
       )}
-      {(notice.kind === "failed" ||
-        notice.kind === "stopped" ||
-        notice.kind === "landing") && (
+      {notice.kind === "landing" && (
         <div className="bubble-actions">
           <button onClick={openTask}>Open</button>
         </div>
+      )}
+      {notice.kind !== "input" && error && (
+        <span className="bubble-error">{error}</span>
       )}
     </div>
   );
@@ -297,8 +317,10 @@ export function Mascot() {
   const [hops, setHops] = useState(0);
   const [collapsed, setCollapsed] = useState(false);
   const [typing, setTyping] = useState<Typing>({ id: "", on: false });
+  const [focusAnswer, setFocusAnswer] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const lastHeight = useRef(0);
+  const presenting = useRef(false);
 
   useEffect(
     () =>
@@ -307,13 +329,49 @@ export function Mascot() {
           if (next[0]?.id !== previous[0]?.id) {
             setIndex(0);
             setHops((count) => count + 1);
-            setCollapsed(false);
+            // A fullscreen app or a slideshow keeps new notices in the pill.
+            if (!presenting.current) setCollapsed(false);
           }
           return next;
         });
       }),
     [],
   );
+
+  // Collapses when presenting starts and expands when it ends; in between,
+  // clicking the sushi or pressing Option-Space still toggles by hand.
+  useEffect(
+    () =>
+      window.mascot?.onPresenting((next) => {
+        if (next === presenting.current) return;
+        presenting.current = next;
+        setCollapsed(next);
+      }),
+    [],
+  );
+
+  useEffect(
+    () =>
+      window.mascot?.onToggle(() =>
+        setCollapsed((value) => {
+          if (value) setFocusAnswer((count) => count + 1);
+          return !value;
+        }),
+      ),
+    [],
+  );
+
+  // Option-Space expanded the stack: the answer field takes typing at once.
+  useEffect(() => {
+    if (!focusAnswer || collapsed) return;
+    void window.mascot
+      ?.focus()
+      .then(() =>
+        rootRef.current
+          ?.querySelector<HTMLInputElement>(".bubble-answer input")
+          ?.focus(),
+      );
+  }, [focusAnswer, collapsed]);
 
   const shown = notices[Math.min(index, notices.length - 1)];
   const hasShown = Boolean(shown);
@@ -393,6 +451,7 @@ export function Mascot() {
               {total > 1 ? ` · +${total - 1}` : ""}
             </span>
           </div>
+          <Kbd>{"\u2325 Space"}</Kbd>
         </div>
       </div>
     );
@@ -414,6 +473,13 @@ export function Mascot() {
             </span>
             <button aria-label="Next notice" onClick={() => step(1)}>
               <ChevronRight size={13} />
+            </button>
+            <button
+              className="queue-inbox"
+              onClick={() => void window.mascot?.openInbox()}
+            >
+              Answer all in Inbox
+              <ArrowRight size={12} />
             </button>
           </div>
         )}

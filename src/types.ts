@@ -363,6 +363,8 @@ export interface Bridge {
   onOrchestratorOpen(
     callback: (target: import("./orchestrator/notices.ts").TaskTarget) => void,
   ): () => void;
+  /** The desktop mascot's Answer all in Inbox. */
+  onOpenInbox(callback: () => void): () => void;
   chat(options: {
     panelId: string;
     cwd: string;

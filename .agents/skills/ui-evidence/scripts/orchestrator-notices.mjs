@@ -1,6 +1,7 @@
 // Screenshot recipe for orchd task notices on the desktop mascot: the
 // done/failed/needs-input bubbles, the quick answer and the two "Open"
-// landings. Builds nothing itself; run
+// landings, Run again, Answer all in Inbox and the pill (Option-Space).
+// Builds nothing itself; run
 //   npm run build && npm run build:orchd && node .agents/skills/ui-evidence/scripts/orchestrator-notices.mjs
 // It seeds one landed done task with a fresh report, one failed task (last
 // attempt failed with kind "verify") and one waiting task (options Delete it,
@@ -13,11 +14,18 @@
 // artifacts/orchestrator-open-{input,done}.png (reached by clicking Open on
 // the mascot) and artifacts/mascot-report.json (bounds vs the primary work
 // area, always-on-top, all-workspaces, the focused window before and after the
-// mascot shows, visibility once the queue is empty). Prints the JSON report
-// and exits non-zero on any failure.
+// mascot shows, visibility once the queue is empty). Also saves
+// artifacts/mascot-{pill,presenting}.png (the pill reached through the seam's
+// toggle, which is what Option-Space calls, and through a simulated fullscreen
+// app), artifacts/mascot-stack.png and artifacts/mascot-inbox-open.png (the
+// Inbox the pager's link opened). Run again restarts a separate failed task
+// seeded in a throwaway git repo under the profile, with ORCHD_CLAUDE_BIN and
+// ORCHD_CODEX_BIN pointed at /usr/bin/false so no agent really runs. Prints
+// the JSON report and exits non-zero on any failure.
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 
 // "hidden" keeps the run off the owner's screen; "visible" is the opt-out for
 // a run that must show the real mascot window (checks below adapt).
@@ -127,6 +135,27 @@ const SEEDS = [
     ],
   },
   {
+    title: "Rerun me",
+    status: "failed",
+    costUsd: 0.12,
+    rerun: true,
+    attempts: [
+      {
+        status: "failed",
+        summary: "The build broke.",
+        costUsd: 0.12,
+        changedFiles: [],
+        verify: [],
+        gateBlocks: 0,
+        failure: {
+          kind: "verify",
+          detail: "npm run build exited 1",
+          signature: "verify:npm run build",
+        },
+      },
+    ],
+  },
+  {
     title: "Cap question",
     status: "waiting",
     costUsd: 0.2,
@@ -156,6 +185,23 @@ let app = null;
 try {
   const now = Date.now();
   const tasks = {};
+  // Run again really starts a task: it gets its own repo, never this one.
+  const rerunRepo = `${profile}/rerun-repo`;
+  await fs.mkdir(rerunRepo, { recursive: true });
+  const git = (...args) =>
+    execFileSync("git", args, { cwd: rerunRepo, stdio: "ignore" });
+  git("init", "-q", "-b", "main");
+  await fs.writeFile(`${rerunRepo}/README.md`, "evidence\n");
+  git("add", ".");
+  git(
+    "-c",
+    "user.name=evidence",
+    "-c",
+    "user.email=evidence@example.invalid",
+    "commit",
+    "-qm",
+    "init",
+  );
   for (const [index, seed] of SEEDS.entries()) {
     const id = randomUUID();
     const attempts = seed.attempts.map((a, i) => ({
@@ -169,11 +215,13 @@ try {
       startedAt: now,
       ...a,
     }));
+    const { rerun, ...fields } = seed;
+    const repo = rerun ? rerunRepo : root;
     const task = {
       goal: seed.title,
       criteria: [],
       verify: [],
-      worktree: `${root}-${id}`,
+      worktree: `${repo}-${id}`,
       branch: `task/${id}`,
       baseSha: "0".repeat(40),
       tier: "standard",
@@ -181,9 +229,9 @@ try {
       archived: false,
       createdAt: now + index,
       updatedAt: now + index,
-      ...seed,
+      ...fields,
       id,
-      repo: root,
+      repo,
       attempts,
     };
     tasks[seed.title] = task;
@@ -203,6 +251,8 @@ try {
       HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
       BRIDGE_DEV_URL: "",
       SUSHIAI_TEST_MASCOT: "1",
+      ORCHD_CLAUDE_BIN: "/usr/bin/false",
+      ORCHD_CODEX_BIN: "/usr/bin/false",
     },
   });
   const page = await app.firstWindow();
@@ -306,6 +356,7 @@ try {
       .getByRole("button", { name: /(Previous|Next) notice/ })
       .count(),
     open: await mascot.getByRole("button", { name: "Open" }).count(),
+    runAgain: await mascot.getByRole("button", { name: "Run again" }).count(),
     dismiss: await mascot.getByRole("button", { name: "Dismiss" }).count(),
   };
   await dismiss();
@@ -488,11 +539,91 @@ try {
     .waitFor({ state: "detached", timeout: 10000 });
   await page.waitForTimeout(500);
   report.afterEmpty = await mainState();
+
+  // The pill: Option-Space calls the seam's toggle; so does a fullscreen app.
+  const seam = (name, ...args) =>
+    app.evaluate(
+      (_, [call, rest]) => globalThis.__sushiaiMascot[call](...rest),
+      [name, args],
+    );
+  // Two still-waiting questions: they never expire, so the pager stays.
+  await showNotice("Cap question", "Cap question");
+  await showNotice(LONG_TITLE, LONG_TITLE);
+  await seam("toggle");
+  await mascot.locator(".pill").waitFor({ timeout: 5000 });
+  await mascot.waitForTimeout(400);
+  await shotMascot("mascot-pill");
+  report.pill = {
+    text: (await mascot.locator(".pill").innerText()).replace(/\s+/g, " "),
+    kbd: await mascot.locator(".pill .kbd").innerText(),
+  };
+  await seam("toggle");
+  await mascot.locator(".queue").waitFor({ timeout: 5000 });
+  report.pill.expandedAgain = (await mascot.locator(".pill").count()) === 0;
+
+  await seam("setPresenting", true);
+  await mascot.locator(".pill").waitFor({ timeout: 5000 });
+  await push("Verify broke");
+  await mascot.waitForTimeout(700);
+  report.presenting = {
+    pillWhilePresenting: (await mascot.locator(".pill").count()) === 1,
+    queue: (await readState()).queue.length,
+  };
+  await shotMascot("mascot-presenting");
+  await seam("setPresenting", false);
+  await mascot.locator(".queue").waitFor({ timeout: 5000 });
+  report.presenting.expandedAfter =
+    (await mascot.locator(".pill").count()) === 0;
+  await dismiss(); // the failed notice on top; two stay for the pager
+  await mascot.locator(".queue").waitFor({ timeout: 5000 });
+  await mascot.waitForTimeout(400);
+  await shotMascot("mascot-stack");
+
+  // Answer all in Inbox hands the queue to the main window's Inbox.
+  await mascot.getByRole("button", { name: "Answer all in Inbox" }).click();
+  const inboxHeading = page.getByRole("heading", { name: "Inbox", level: 1 });
+  await inboxHeading.waitFor({ timeout: 10000 });
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: shot("mascot-inbox-open") });
+  report.inbox = { opened: (await inboxHeading.count()) === 1 };
+  // A second click keeps the Inbox open rather than toggling it shut.
+  await mascot.getByRole("button", { name: "Answer all in Inbox" }).click();
+  await page.waitForTimeout(500);
+  report.inbox.stillOpen = (await inboxHeading.count()) === 1;
+
+  // Run again restarts the task through orchd's task.start.
+  const rerunTask = tasks["Rerun me"];
+  const rerunFile = `${dataDir}/tasks/${rerunTask.id}/task.json`;
+  await showNotice("Rerun me", "Rerun me");
+  await mascot.getByRole("button", { name: "Run again" }).first().click();
+  await mascot
+    .locator(".bubble", { hasText: "Rerun me" })
+    .waitFor({ state: "detached", timeout: 10000 });
+  let restarted = null;
+  for (let i = 0; i < 50 && !restarted; i += 1) {
+    const saved = JSON.parse(await fs.readFile(rerunFile, "utf8"));
+    if (
+      saved.updatedAt !== rerunTask.updatedAt ||
+      saved.status !== "failed" ||
+      saved.attempts.length !== rerunTask.attempts.length
+    )
+      restarted = {
+        status: saved.status,
+        attempts: saved.attempts.length,
+        updatedAtChanged: saved.updatedAt !== rerunTask.updatedAt,
+      };
+    else await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  report.rerun = { noticeGone: true, restarted };
   report.screenshots = {
     mascotDone: shot("mascot-done"),
     mascotFailed: shot("mascot-failed"),
     mascotInput: shot("mascot-input"),
     mascotAnswered: shot("mascot-answered"),
+    mascotPill: shot("mascot-pill"),
+    mascotPresenting: shot("mascot-presenting"),
+    mascotStack: shot("mascot-stack"),
+    inboxOpen: shot("mascot-inbox-open"),
     openInput: shot("orchestrator-open-input"),
     openDone: shot("orchestrator-open-done"),
   };
@@ -562,6 +693,20 @@ try {
       );
     if (!ok) problems.push(`${name}: option text or accessible name differs`);
   }
+  if (!report.mascot.failed.runAgain)
+    problems.push("the failed bubble has no Run again");
+  if (report.pill.kbd !== "\u2325 Space")
+    problems.push("the pill does not show the Option-Space key");
+  if (!report.pill.expandedAgain) problems.push("toggle did not expand again");
+  if (!report.presenting.pillWhilePresenting)
+    problems.push("a notice expanded the mascot while presenting");
+  if (!report.presenting.expandedAfter)
+    problems.push("the mascot stayed a pill after presenting ended");
+  if (!report.inbox.opened) problems.push("Answer all did not open the Inbox");
+  if (!report.inbox.stillOpen)
+    problems.push("a second Answer all closed the Inbox");
+  if (!report.rerun.restarted)
+    problems.push("Run again did not restart the task");
   if (!/the task carries on\.$/.test(report.mascot.answered))
     problems.push("no Answered confirmation");
   if (report.openFlowError) problems.push(`open flow: ${report.openFlowError}`);

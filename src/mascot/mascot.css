@@ -173,6 +173,13 @@ body,
 .bubble .bubble-actions .bubble-primary:hover {
   background: var(--accent-sage);
 }
+.bubble .bubble-actions .bubble-ghost {
+  border-color: transparent;
+  background: transparent;
+}
+.bubble .bubble-actions .bubble-ghost:hover {
+  background: var(--bg-hover);
+}
 .bubble .bubble-dismiss {
   display: grid;
   place-items: center;
@@ -297,6 +304,18 @@ body,
 .queue button:hover {
   color: var(--text);
 }
+.queue .queue-inbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--accent-blue);
+  font-size: var(--text-sm);
+}
+.queue .queue-inbox:hover {
+  color: var(--accent-blue);
+  text-decoration: underline;
+}
 .sushi-hop {
   position: relative;
   margin-right: var(--gap-md);
@@ -355,6 +374,7 @@ body,
   font-size: 6px;
 }
 .pill-text {
+  flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -363,6 +383,10 @@ body,
 .pill-title {
   font-size: 12.5px;
   font-weight: 500;
+}
+.pill .kbd {
+  flex-shrink: 0;
+  font-family: Menlo, monospace;
 }
 .pill-sub {
   overflow: hidden;

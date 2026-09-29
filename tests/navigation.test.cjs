@@ -240,3 +240,24 @@ test("mode, a core section and an extension page survive the snapshot round trip
     );
   }
 });
+
+test("openSection opens a page from any mode and never closes an open one", async () => {
+  const { navigationReducer } = await library;
+  const inbox = core("Inbox");
+  const fromChat = navigationReducer(
+    { mode: "Chat", section: null },
+    { type: "openSection", section: inbox },
+  );
+  assert.deepEqual(fromChat, { mode: "Code", section: inbox });
+  assert.equal(
+    navigationReducer(fromChat, { type: "openSection", section: inbox }),
+    fromChat,
+  );
+  assert.deepEqual(
+    navigationReducer(
+      { mode: "Code", section: core("Skills") },
+      { type: "openSection", section: inbox },
+    ),
+    { mode: "Code", section: inbox },
+  );
+});

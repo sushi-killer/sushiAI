@@ -9,6 +9,7 @@ const {
   shell,
   safeStorage,
   powerMonitor,
+  globalShortcut,
 } = require("electron");
 const path = require("node:path");
 const os = require("node:os");
@@ -38,7 +39,7 @@ const {
   saveWindowState,
   clampBounds,
 } = require("./window-state.cjs");
-const { registerMascot } = require("./mascot.cjs");
+const { registerMascot, watchPresenting } = require("./mascot.cjs");
 const { DEV_RESTART_EXIT_CODE, watchCore } = require("./dev-restart.cjs");
 const { testWindow } = require("./test-window.cjs");
 
@@ -212,6 +213,7 @@ registerAppIpc({
 let orchestrator;
 let devRestart = false;
 let closeCoreWatch = null;
+let closePresentingWatch = null;
 const mascot = registerMascot({
   ipcMain,
   BrowserWindow,
@@ -341,7 +343,22 @@ app.whenReady().then(async () => {
       queue: () => mascot.snapshot(),
       window: () => mascot.getWindow(),
       workArea: () => screen.getPrimaryDisplay().workArea,
+      toggle: () => mascot.toggle(),
+      setPresenting: (value) => mascot.setPresenting(value),
     };
+  // A test run owns neither the owner's keyboard nor their screen state.
+  if (!testMode.test) {
+    try {
+      // Returns false when another app already holds the shortcut.
+      globalShortcut.register("Alt+Space", () => mascot.toggle());
+    } catch {
+      // The OS refused the accelerator: the sushi click still toggles.
+    }
+    closePresentingWatch = watchPresenting({
+      screen,
+      onChange: (presenting) => mascot.setPresenting(presenting),
+    });
+  }
   if (savedWindow && !testMode.hidden) {
     if (savedWindow.isFullScreen) mainWindow.setFullScreen(true);
     else if (savedWindow.isMaximized) mainWindow.maximize();
@@ -461,6 +478,8 @@ app.on("window-all-closed", () => app.quit());
 app.on("activate", () => attention.showWindow());
 let quitReady = false;
 app.on("will-quit", (event) => {
+  globalShortcut.unregisterAll();
+  closePresentingWatch?.();
   if (!devRestart) return;
   event.preventDefault();
   app.exit(DEV_RESTART_EXIT_CODE);

@@ -98,21 +98,24 @@ export function Composer({
 export function OrchestratorRouteChip({
   settings,
   onRouteChange,
+  standardLabel = "Standard route",
 }: {
   settings: Settings;
   onRouteChange: (routeId: string) => void;
+  /** What the unset route reads as; the Chat view calls it "Orchestrator". */
+  standardLabel?: string;
 }) {
   const routeId = settings.orchestrator || "";
   const route = settings.routes.find((r) => r.id === routeId);
   return (
     <ChipPicker
       icon={<Sparkles size={14} className="orch-composer-route-icon" />}
-      label={routeId ? (route?.label ?? routeId) : "Standard route"}
+      label={routeId ? (route?.label ?? routeId) : standardLabel}
       ariaLabel="Orchestrator route"
       value={routeId}
       onChange={onRouteChange}
       options={[
-        { value: "", label: "Standard route" },
+        { value: "", label: standardLabel },
         ...settings.routes.map((r) => ({ value: r.id, label: r.label })),
       ]}
     />

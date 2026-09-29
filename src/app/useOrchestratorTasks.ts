@@ -7,7 +7,8 @@ import type { Task } from "../orchestrator/types.ts";
 const REFRESH_MS = 60000;
 
 /** Every orchd task across repos, kept live from the daemon's task events.
- * Read-only: the Orchestrator panel owns changing them. */
+ * Mounted once, by `useAttention`; the Inbox gets the list through
+ * SectionPage's `attention` prop rather than subscribing again. */
 export function useOrchestratorTasks(): Task[] {
   const [tasks, setTasks] = useState<Task[]>([]);
   useEffect(() => {

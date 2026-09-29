@@ -1,0 +1,592 @@
+/* Chat (Figma "07 Chat": Chat · session / new / agent messages) and the
+ * Brainstorm layout (Brainstorm, Brainstorm · new). The conversation takes
+ * the width left over; the sessions column and the draft panel are 236px on
+ * the right. */
+
+.orch-chat-view.ochat {
+  flex-direction: row;
+  gap: 0;
+  padding: 0;
+}
+.ochat-convo {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.ochat-convo[hidden] {
+  display: none;
+}
+.ochat-spacer {
+  flex: 1;
+}
+
+/* Conversation head: title, route, the session menu. */
+.ochat-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 50px;
+  padding: 12px 16px 12px 20px;
+  border-bottom: 1px solid var(--line-divider);
+  flex-shrink: 0;
+}
+.ochat-head-messages {
+  min-height: 42px;
+}
+.ochat-head-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ochat-head-messages .ochat-head-title {
+  flex: 0 0 auto;
+}
+.ochat-head-sub {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ochat-route {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.ochat-menu-wrap,
+.ochat-bs-menu-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+.ochat-menu-btn {
+  width: 25px;
+  height: 25px;
+  color: var(--text-nav);
+}
+.ochat-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  max-width: 280px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-popover);
+}
+.ochat-menu button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+}
+.ochat-menu button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.ochat-menu button:disabled {
+  color: var(--text-faint);
+}
+.ochat-menu-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The turns. */
+.ochat-scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 14px;
+  min-height: 0;
+  padding: 18px 20px;
+  overflow-y: auto;
+}
+.ochat-scroll.empty {
+  align-items: center;
+  justify-content: center;
+}
+.ochat-you {
+  display: flex;
+  justify-content: flex-end;
+  padding-left: 40px;
+}
+.ochat-bubble {
+  padding: 9px 12px;
+  border: 1px solid var(--line-pane);
+  border-radius: 12px;
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: var(--text-md);
+  line-height: 16px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ochat-orch {
+  display: flex;
+  gap: 10px;
+}
+.ochat-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.ochat-orch-col {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 8px;
+  min-width: 0;
+}
+.ochat-orch-text {
+  color: var(--text);
+  font-size: var(--text-md);
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+.ochat-orch-text > :first-child {
+  margin-top: 0;
+}
+.ochat-orch-text > :last-child {
+  margin-bottom: 0;
+}
+.ochat-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 14px;
+}
+.ochat-ref {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-sunken);
+  text-align: left;
+}
+.ochat-ref:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.ochat-ref-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 1px;
+  min-width: 0;
+}
+.ochat-ref-title {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ochat-ref-sub {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  line-height: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ochat-ref-arrow {
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.ochat-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+.ochat-wait {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+.ochat-composer {
+  padding: 0 16px 16px;
+  flex-shrink: 0;
+}
+.orch-chat-view.ochat .orch-composer {
+  margin-bottom: 0;
+}
+
+/* Empty chat and empty brainstorm. */
+.ochat-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: 340px;
+  text-align: center;
+}
+.ochat-empty h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 19px;
+}
+.ochat-empty p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 15px;
+}
+.ochat-starters {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding-top: 6px;
+}
+
+/* Agent messages. */
+.ochat-cards {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 10px;
+  min-height: 0;
+  padding: 16px 20px;
+  overflow-y: auto;
+}
+.ochat-cards-empty {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+.ochat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-pane);
+  border-radius: 10px;
+  background: var(--bg-raised);
+  flex-shrink: 0;
+}
+.ochat-card.pending {
+  border-color: var(--tone-warning);
+}
+.ochat-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ochat-card-from {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ochat-card-to {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.ochat-card-time {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  flex-shrink: 0;
+}
+.ochat-card-text {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 15px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ochat-card-reply {
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  padding-left: 4px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 15px;
+}
+.ochat-card-reply svg {
+  margin-top: 2px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.ochat-card-reply .ochat-card-from {
+  font-size: var(--text-sm);
+}
+.ochat-card-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ochat-card-input {
+  flex: 1;
+  min-width: 0;
+  height: 31px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-app);
+  color: var(--text);
+  font-size: 12.5px;
+  outline: none;
+}
+.ochat-card-input::placeholder {
+  color: var(--text-faint);
+}
+.ochat-card-input:focus {
+  border-color: var(--line-strong);
+}
+
+/* The sessions column. */
+.ochat-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 236px;
+  padding: 12px 8px;
+  border-left: 1px solid var(--line-divider);
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+.ochat-sessions-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 6px;
+}
+.ochat-sessions-top h2 {
+  flex: 1;
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.ochat-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 29px;
+  margin-bottom: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.ochat-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-sm);
+  outline: none;
+}
+.ochat-search input::placeholder {
+  color: var(--text-faint);
+}
+.ochat-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+  flex-shrink: 0;
+}
+.ochat-agent-row svg {
+  color: var(--text-muted);
+}
+.ochat-agent-row span:first-of-type {
+  flex: 1;
+}
+.ochat-agent-row:hover,
+.ochat-agent-row.selected,
+.ochat-session:hover:not(:disabled),
+.ochat-session.selected {
+  background: var(--bg-hover);
+}
+.ochat-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ochat-group-label {
+  padding: 10px 8px 4px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 12px;
+}
+.ochat-session {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 6px;
+  text-align: left;
+}
+.ochat-session:disabled {
+  cursor: default;
+}
+.ochat-session-h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ochat-session-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ochat-session.selected .ochat-session-title {
+  font-weight: 500;
+}
+.ochat-session-time {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  line-height: 13px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.ochat-session-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 14px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* Brainstorm: [conversation + composer] | draft panel (236px, full height). */
+.ochat-bs-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.brainstorm-convo.ochat-bs-empty {
+  align-items: center;
+  justify-content: center;
+}
+.ochat-bs .brainstorm-head-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ochat-bs-note {
+  padding-left: 2px;
+}
+.ochat-bs-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 27px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+.ochat-bs-menu-btn svg {
+  color: var(--text-muted);
+}
+.ochat-bs-menu-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.ochat-bs-menu-wrap .ochat-menu {
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+}
+.brainstorm-head .ochat-bs-menu-wrap .ochat-menu {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+.ochat-draft .draft-title {
+  overflow-wrap: anywhere;
+}
+.ochat-draft-empty {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+  line-height: 15px;
+}
+.ochat-draft-acts {
+  display: flex;
+  gap: 6px;
+}
+.ochat-draft-acts .ui-button {
+  flex: 1;
+  min-width: 0;
+  padding: 0 8px;
+}

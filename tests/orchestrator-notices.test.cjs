@@ -1,6 +1,12 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { orchestratorTarget } = require("../src/orchestrator/notices.ts");
+const {
+  orchestratorTarget,
+  noticeAge,
+  noticeHeader,
+  doneMeta,
+} = require("../src/orchestrator/notices.ts");
+const { orchestratorNotice } = require("../electron/orchestrator.cjs");
 const {
   publishReveal,
   pendingReveal,
@@ -70,4 +76,63 @@ test("the reveal store keeps a request for its repo's panels until it goes stale
   publishReveal(target, 6000);
   assert.deepEqual(seen, ["published", "published"]);
   resetReveal();
+});
+
+test('noticeAge and noticeHeader read as "repo · 2m"', () => {
+  const now = 10_000_000;
+  assert.equal(noticeAge(now - 20_000, now), "now");
+  assert.equal(noticeAge(now - 2 * 60_000, now), "2m");
+  assert.equal(noticeAge(now - 3 * 3600_000, now), "3h");
+  assert.equal(noticeAge(now - 50 * 3600_000, now), "2d");
+  assert.deepEqual(
+    noticeHeader(
+      { kind: "done", repo: "/work/sushiai", at: now - 120_000 },
+      now,
+    ),
+    { label: "Done", source: "sushiai · 2m" },
+  );
+  assert.deepEqual(noticeHeader({ kind: "input", repo: "/work/x" }, now), {
+    label: "Needs you",
+    source: "x",
+  });
+});
+
+test("doneMeta composes cost, review verdict and landed state", () => {
+  assert.equal(
+    doneMeta({ costUsd: 0.31, verdict: "PASS", landed: false }),
+    "$0.31 · review PASS · not landed",
+  );
+  assert.equal(doneMeta({ costUsd: 1, landed: true }), "$1.00 · landed");
+  assert.equal(doneMeta({}), null);
+});
+
+test("orchestratorNotice carries time, repo name, cost and the last review verdict", () => {
+  const task = {
+    id: "t1",
+    title: "T",
+    repo: "/work/sushiai",
+    status: "done",
+    costUsd: 0.31,
+    updatedAt: 1234,
+    baseRef: "main",
+    attempts: [
+      { review: { verdict: "FAIL", findings: [] } },
+      { review: { verdict: "PASS", findings: [] } },
+      {},
+    ],
+  };
+  const done = orchestratorNotice(task);
+  assert.equal(done.at, 1234);
+  assert.equal(done.repoName, "sushiai");
+  assert.equal(done.costUsd, 0.31);
+  assert.equal(done.verdict, "PASS");
+  assert.equal(done.landed, false);
+  const asked = orchestratorNotice({
+    ...task,
+    status: "waiting",
+    question: { text: "q", askedAt: 99 },
+  });
+  assert.equal(asked.at, 99);
+  assert.equal(asked.costUsd, undefined);
+  assert.equal(orchestratorNotice({ ...task, updatedAt: 0 }).at, undefined);
 });

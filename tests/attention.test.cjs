@@ -206,19 +206,6 @@ test("waitingCount adds orchd tasks that need the owner, not archived or owner-s
   assert.equal(waitingCount([], createAttentionState(), []), 0);
 });
 
-test("cleanupSelection checks idle shells and seen idle/finished agents, never blocked or working", async () => {
-  const { cleanupSelection } = await library;
-  const w = workspace("w1", []);
-  const rows = [
-    { workspace: w, panel: panel("a"), group: "blocked", since: null },
-    { workspace: w, panel: panel("b"), group: "working", since: null },
-    { workspace: w, panel: panel("c"), group: "idle", since: null },
-    { workspace: w, panel: panel("d"), group: "shells", since: null },
-    { workspace: w, panel: panel("e"), group: "done", since: null },
-  ];
-  assert.deepEqual(cleanupSelection(rows), ["c", "d"]);
-});
-
 test("inboxGroups excludes a workspace whose host is hidden from the sidebar", async () => {
   const { createAttentionState, observe, inboxGroups } = await library;
   let state = createAttentionState();

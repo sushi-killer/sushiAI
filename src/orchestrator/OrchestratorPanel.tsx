@@ -31,9 +31,16 @@ import {
   type OrchestratorLiveState,
 } from "./helpers";
 import { needsOwner } from "./ownerAttention";
+import { upsertProposal } from "./improvementsModel";
 import type { ChatMessage, Message, Proposal, Settings, Task } from "./types";
 import { Banner, Tag } from "./ui";
 import { OrchRail } from "./OrchRail";
+import {
+  enterKind,
+  isOfKind,
+  listSessions,
+  type KindedList,
+} from "./chatKinds";
 import { Composer, OrchestratorRouteChip, TaskRouteLabel } from "./Composer";
 import { TaskDetail } from "./TaskDetail";
 import { HomeView } from "./HomeView";
@@ -48,7 +55,7 @@ type DaemonState = "loading" | "ready" | "not-built" | "unavailable";
 /** What the main pane beside the rail shows: see `OrchestratorView`. */
 type View = OrchestratorView;
 
-/** '+ New task' creates a task directly through `task.create`, not a
+/** The task composer creates a task directly through `task.create`, not a
  * chat round-trip with the orchestrator agent. It prefers the `request`
  * form (the planner drafts title/goal/criteria/verify), but a disabled
  * planner shouldn't dead-end the control - falling back to the plain
@@ -101,10 +108,6 @@ function writeChatSeen(cwd: string, ts: number) {
   } catch {
     // Storage blocked: the "new" count just never clears across restarts.
   }
-}
-
-function upsertProposal(rows: Proposal[], proposal: Proposal): Proposal[] {
-  return [proposal, ...rows.filter((row) => row.id !== proposal.id)];
 }
 
 const VIEW_NAMES: Record<Exclude<View["kind"], "task">, string> = {
@@ -173,6 +176,10 @@ export function OrchestratorPanel({
   // Messages segment can show a pending count before it is ever opened.
   const [messages, setMessages] = useState<Message[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  // The session the messages above belong to, and the repo's session list:
+  // only a plain chat's replies count as "new" on the rail, not a brainstorm's.
+  const [chatThreadId, setChatThreadId] = useState("");
+  const [chatSessions, setChatSessions] = useState<KindedList | null>(null);
   const [chatSeen, setChatSeen] = useState<number | null>(() =>
     readChatSeen(cwd),
   );
@@ -219,7 +226,10 @@ export function OrchestratorPanel({
           return;
         }
         if (event.event === "chat") {
-          if (event.thread.repo === cwd) setChatMessages(event.thread.messages);
+          if (event.thread.repo === cwd) {
+            setChatMessages(event.thread.messages);
+            setChatThreadId(event.thread.id);
+          }
           return;
         }
         if (event.event === "proposal") {
@@ -242,7 +252,14 @@ export function OrchestratorPanel({
       .catch(() => {});
     orchestratorClient
       .chatGet(cwd)
-      .then((thread) => !cancelled && setChatMessages(thread.messages))
+      .then((thread) => {
+        if (cancelled) return;
+        setChatMessages(thread.messages);
+        setChatThreadId(thread.id);
+      })
+      .catch(() => {});
+    listSessions(cwd, "chat")
+      .then((list) => !cancelled && setChatSessions(list))
       .catch(() => {});
     orchestratorClient
       .evolutionList(cwd)
@@ -274,8 +291,12 @@ export function OrchestratorPanel({
       writeChatSeen(cwd, latestChat);
     }
   }, [cwd, chatMessages.length, chatSeen, chatOpen, latestChat]);
+  const chatIsChat =
+    !chatThreadId || isOfKind(cwd, chatSessions, chatThreadId, "chat");
   const chatNew =
-    chatSeen === null || chatOpen ? 0 : unreadChatCount(chatMessages, chatSeen);
+    chatSeen === null || chatOpen || !chatIsChat
+      ? 0
+      : unreadChatCount(chatMessages, chatSeen);
 
   useEffect(() => {
     if (focusComposer) composerRef.current?.focus();
@@ -286,7 +307,7 @@ export function OrchestratorPanel({
     setSwitcherOpen(false);
   }
 
-  /** New task / ⌘N: Home, with the task composer focused. */
+  /** ⌘N: Home, with the task composer focused. */
   function newTask() {
     if (current.kind !== "home" && current.kind !== "plan")
       open({ kind: "home" });
@@ -314,10 +335,9 @@ export function OrchestratorPanel({
     if (!scrollTo || selected?.id !== scrollTo.taskId) return;
     const root = rootRef.current;
     const element =
-      (scrollTo.focus === "question" &&
-        root?.querySelector(".orch-question")) ||
-      (scrollTo.focus === "report" && root?.querySelector(".orch-report")) ||
-      root?.querySelector(".orch-attempts");
+      (scrollTo.focus === "question" && root?.querySelector(".td-question")) ||
+      (scrollTo.focus === "report" && root?.querySelector(".td-report")) ||
+      Array.from(root?.querySelectorAll(".td-attempt") ?? []).pop();
     if (!element) return;
     element.scrollIntoView({ block: "center" });
     setScrollTo(null);
@@ -345,13 +365,21 @@ export function OrchestratorPanel({
   }
 
   function setOrchestratorRoute(routeId: string) {
-    if (!settings) return;
-    const next = { ...settings, orchestrator: routeId };
-    setSettings(next);
-    orchestratorClient
-      .settingsSet(next)
-      .then(setSettings)
-      .catch((e) => fail(e));
+    updateSettings({ orchestrator: routeId });
+  }
+
+  /** The one settings write: optimistic, then the daemon's copy replaces it. */
+  function updateSettings(patch: Partial<Settings>): Promise<void> {
+    if (!settings) return Promise.resolve();
+    setSettings({ ...settings, ...patch });
+    return orchestratorClient
+      .settingsSet({ ...settings, ...patch })
+      .then((saved) => setSettings(saved))
+      .catch((e) => {
+        setSettings(settings);
+        fail(e);
+        throw e;
+      });
   }
 
   async function submitNewTask(start: boolean) {
@@ -380,8 +408,8 @@ export function OrchestratorPanel({
     if (!text || creatingBusy) return;
     setCreatingBusy(true);
     setError("");
-    orchestratorClient
-      .chatSend(cwd, text)
+    enterKind(cwd, "chat")
+      .then(() => orchestratorClient.chatSend(cwd, text))
       .then(() => {
         setTaskDraft("");
         open({ kind: "chat" });
@@ -445,7 +473,6 @@ export function OrchestratorPanel({
       archivedCount={archivedTasks.length}
       offline={offline}
       onOpen={open}
-      onNewTask={newTask}
     />
   );
 
@@ -466,12 +493,14 @@ export function OrchestratorPanel({
     if (daemonState === "not-built")
       return (
         <>
-          <Banner
-            tone="warning"
-            title="The orchestrator isn't built yet."
-            body="Build it once from the repository root, then Retry."
-            action={{ label: "Retry", onClick: retry }}
-          />
+          <div data-orchestrator-not-built>
+            <Banner
+              tone="warning"
+              title="The orchestrator isn't built yet."
+              body="Build it once from the repository root, then Retry."
+              action={{ label: "Retry", onClick: retry }}
+            />
+          </div>
           <div className="orch-command">
             <span className="orch-command-prompt">$</span>
             <code>npm run build:orchd</code>
@@ -539,11 +568,40 @@ export function OrchestratorPanel({
           />
         );
       case "analytics":
-        return <AnalyticsView cwd={cwd} refresh={refresh} />;
+        return (
+          <AnalyticsView
+            cwd={cwd}
+            refresh={refresh}
+            onOpenTask={(id) => open({ kind: "task", id })}
+          />
+        );
       case "plan":
-        return <PlanView onBrainstorm={() => open({ kind: "brainstorm" })} />;
+        return (
+          <PlanView
+            tasks={live.tasks}
+            settings={settings}
+            busy={busy}
+            act={act}
+            onSettings={updateSettings}
+            onOpen={(id) => open({ kind: "task", id })}
+            onBrainstorm={() => open({ kind: "brainstorm" })}
+          />
+        );
       case "brainstorm":
-        return <BrainstormView />;
+        return (
+          <BrainstormView
+            cwd={cwd}
+            tasks={live.tasks}
+            onCreated={(task) =>
+              setLive((old) => ({
+                ...old,
+                tasks: upsertTask(old.tasks, task),
+              }))
+            }
+            onOpenTask={(id) => open({ kind: "task", id })}
+            onPlan={() => open({ kind: "plan" })}
+          />
+        );
       case "archive":
         return (
           <div className="orch-view-scroll orch-archive">
@@ -581,6 +639,11 @@ export function OrchestratorPanel({
             busy={busy}
             act={act}
             onOpen={(id) => open({ kind: "task", id })}
+            onOpenAnalytics={() => open({ kind: "analytics" })}
+            onSendNote={async (text) => {
+              await enterKind(cwd, "chat");
+              await orchestratorClient.chatSend(cwd, text);
+            }}
             onTry={(text) => {
               setTaskDraft(text);
               setFocusComposer((n) => n + 1);
@@ -650,6 +713,7 @@ export function OrchestratorPanel({
         )}
         <ChatView
           cwd={cwd}
+          onOpenTask={(id) => open({ kind: "task", id })}
           kind={chatKind}
           settings={settings}
           tasks={tasks}

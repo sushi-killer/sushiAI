@@ -27,57 +27,83 @@ body,
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: var(--gap-xs);
+  gap: var(--gap-sm);
 }
 .bubble {
   position: relative;
   box-sizing: border-box;
   width: 100%;
+  max-width: 340px;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--gap-sm);
-  padding: var(--gap-md);
-  padding-right: var(--gap-xl);
+  gap: 10px;
+  padding: 12px 14px;
   border: 1px solid var(--line-strong);
-  border-radius: var(--radius-lg);
+  border-radius: 14px;
   background: var(--bg-elevated);
   box-shadow: var(--shadow-popover);
 }
-.bubble::after {
-  content: "";
-  position: absolute;
-  right: 34px;
-  bottom: -6px;
-  width: 10px;
-  height: 10px;
-  transform: rotate(45deg);
-  border-right: 1px solid var(--line-strong);
-  border-bottom: 1px solid var(--line-strong);
-  background: var(--bg-elevated);
-}
-.bubble.failed {
+.bubble.failed,
+.bubble.stopped {
   border-color: var(--danger-line);
   background: var(--danger-bg);
-}
-.bubble.failed::after {
-  border-color: var(--danger-line);
-  background: var(--danger-bg);
-}
-.bubble.answered {
-  border-color: var(--tone-ok);
-  background: var(--tone-ok-bg);
 }
 .bubble > * {
   flex-shrink: 0;
 }
 .bubble strong {
   font-size: var(--text-md);
+  font-weight: 500;
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+.bubble-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 16px;
+}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 12px;
+  color: var(--tone-info);
+  background: var(--tone-info-bg);
+}
+.tag i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.tag.ok {
+  color: var(--tone-ok);
+  background: var(--tone-ok-bg);
+}
+.tag.warn {
+  color: var(--tone-warning);
+  background: var(--tone-warning-bg);
+}
+.tag.bad {
+  color: var(--tone-danger);
+  background: var(--tone-danger-bg);
+}
+.bubble-source {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
 }
 .bubble-body {
   color: var(--text-muted);
@@ -96,83 +122,151 @@ body,
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: var(--gap-sm);
+  gap: 10px;
 }
 .bubble-scroll > * {
   flex-shrink: 0;
 }
 .bubble button,
 .bubble input,
-.queue button {
+.queue button,
+.pill {
   font: inherit;
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
   color: var(--text);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-md);
-  background: var(--bg-raised);
 }
 .bubble button,
 .queue button {
   cursor: pointer;
-  padding: var(--gap-xs) var(--gap-md);
-}
-.bubble button:hover:not(:disabled),
-.queue button:hover {
-  background: var(--bg-hover);
-}
-.bubble button:disabled {
-  opacity: 0.5;
-  cursor: default;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  background: transparent;
 }
 .bubble button:focus-visible,
 .bubble input:focus-visible,
-.queue button:focus-visible {
+.queue button:focus-visible,
+.sushi-hop:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 1px;
 }
-.bubble-open {
-  align-self: flex-start;
-  background: var(--accent);
-  color: var(--accent-ink);
+.bubble-actions {
+  display: flex;
+  gap: 8px;
 }
-.bubble .bubble-open {
-  background: var(--accent);
+.bubble .bubble-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  border-radius: 7px;
+  font-weight: 500;
+  background: var(--bg-control);
+}
+.bubble .bubble-actions button:hover {
+  background: var(--bg-hover);
+}
+.bubble .bubble-actions .bubble-primary {
   color: var(--accent-ink);
   border-color: var(--accent);
+  background: var(--accent);
 }
-.bubble .bubble-open:hover:not(:disabled) {
+.bubble .bubble-actions .bubble-primary:hover {
   background: var(--accent-sage);
 }
 .bubble .bubble-dismiss {
-  position: absolute;
-  top: var(--gap-sm);
-  right: var(--gap-sm);
   display: grid;
   place-items: center;
-  padding: var(--gap-xs);
+  margin-left: auto;
+  padding: 2px;
   border-color: transparent;
-  background: transparent;
   color: var(--text-muted);
+}
+.bubble-msg {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12.5px;
 }
 .bubble-options {
   display: flex;
-  flex-direction: column;
-  gap: var(--gap-xs);
+  flex-wrap: wrap;
+  gap: 6px;
 }
 .bubble .bubble-options button {
-  width: 100%;
+  max-width: 100%;
+  padding: 6px 12px;
+  border-radius: 7px;
+  font-size: var(--text-sm);
   text-align: left;
   white-space: normal;
   overflow-wrap: anywhere;
+  color: var(--text-muted);
+  border-color: transparent;
+  background: var(--bg-control);
+}
+.bubble .bubble-options button.picked {
+  color: var(--text);
+  border-color: var(--line-selected);
+  background: var(--bg-selected);
 }
 .bubble-answer {
   display: flex;
-  gap: var(--gap-xs);
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-sunken);
 }
-.bubble-answer input {
+.bubble .bubble-answer input {
   flex: 1;
   min-width: 0;
-  padding: var(--gap-xs) var(--gap-sm);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 12.5px;
+}
+.bubble .bubble-answer input::placeholder {
+  color: var(--text-faint);
+}
+.bubble .bubble-answer input:focus-visible {
+  outline: none;
+}
+.bubble-answer:focus-within {
+  border-color: var(--focus);
+}
+.bubble .kbd-button {
+  border: 0;
+  background: transparent;
+}
+.bubble .kbd-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-count);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 14px;
+}
+.bubble-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 16px;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+.bubble .bubble-link {
+  margin-left: auto;
+  border: 0;
+  color: var(--accent-blue);
+  font-size: 11.5px;
 }
 .bubble-error {
   color: var(--danger);
@@ -180,19 +274,102 @@ body,
 }
 .queue {
   flex-shrink: 0;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 340px;
   display: flex;
   align-items: center;
-  gap: var(--gap-xs);
-  color: var(--text-muted);
-  font-size: var(--text-xs);
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: var(--text-sm);
 }
 .queue button {
   display: grid;
   place-items: center;
   padding: 2px;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+.queue button:hover {
+  color: var(--text);
 }
 .sushi-hop {
+  position: relative;
   margin-right: var(--gap-md);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.sushi-badge {
+  position: absolute;
+  top: 2px;
+  right: -4px;
+  min-width: 18px;
+  height: 18px;
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: var(--accent-amber);
+  color: var(--accent-ink);
+  font-size: 10px;
+  font-weight: 600;
+}
+.sushi-badge.ok {
+  background: var(--tone-ok);
+}
+.pill {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 252px;
+  min-height: 46px;
+  padding: 2px 14px 2px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 22px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-popover);
+}
+.pill .sushi-hop {
+  flex-shrink: 0;
+  margin: 0;
+}
+.pill .sushi {
+  width: 34px;
+  height: 34px;
+}
+.pill .sushi-badge {
+  top: 4px;
+  right: -2px;
+  min-width: 10px;
+  height: 10px;
+  padding: 0 2px;
+  border-radius: 5px;
+  font-size: 6px;
+}
+.pill-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.pill-title {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.pill-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
 }
 .sushi {
   display: block;

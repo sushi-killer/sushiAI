@@ -1,10 +1,60 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Check, X } from "lucide-react";
 import { Character } from "./Character";
 import { isTyping, mascotMood, type Typing } from "./mood";
 import type { MascotNotice } from "./types";
+import { doneMeta, noticeHeader } from "../orchestrator/notices";
+import { composeAnswer } from "../orchestrator/ownerAttention";
 
 const FADE_MS = 700;
+
+const cleanError = (failure: unknown) =>
+  String(failure instanceof Error ? failure.message : failure).replace(
+    /^Error invoking remote method '[^']*': (Error: )?/,
+    "",
+  );
+
+function Kbd({ children }: { children: string }) {
+  return <kbd className="kbd">{children}</kbd>;
+}
+
+function Head({
+  label,
+  source,
+  tone,
+  onDismiss,
+}: {
+  label: string;
+  source: string;
+  tone: string;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="bubble-head">
+      <span className={`tag ${tone}`}>
+        <i />
+        {label}
+      </span>
+      {source && <span className="bubble-source">{source}</span>}
+      <button
+        className="bubble-dismiss"
+        aria-label="Dismiss"
+        onClick={onDismiss}
+      >
+        <X size={12} />
+      </button>
+    </div>
+  );
+}
+
+const TONES: Record<string, string> = {
+  input: "warn",
+  done: "ok",
+  landing: "info",
+  failed: "bad",
+  stopped: "bad",
+  "core-update": "info",
+};
 
 function Bubble({
   notice,
@@ -14,10 +64,17 @@ function Bubble({
   onTyping: (typing: Typing) => void;
 }) {
   const [text, setText] = useState("");
+  const [picked, setPicked] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [fading, setFading] = useState(false);
   const [focused, setFocused] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
   const bridge = window.mascot;
+  const options = notice.kind === "input" ? (notice.options ?? []) : [];
 
   useEffect(() => {
     onTyping({ id: notice.id, on: focused || text.length > 0 });
@@ -43,14 +100,39 @@ function Bubble({
       await bridge?.answer(taskId, value);
       setText("");
     } catch (failure) {
-      setError(
-        String(failure instanceof Error ? failure.message : failure).replace(
-          /^Error invoking remote method '[^']*': (Error: )?/,
-          "",
-        ),
-      );
+      setError(cleanError(failure));
     }
   };
+  const value = composeAnswer(picked === null ? "" : options[picked], text);
+  const send = () => {
+    if (notice.kind === "input" && value) void answer(notice.taskId, value);
+  };
+  const sendRef = useRef(send);
+  sendRef.current = send;
+
+  // 1-N picks an option and Enter sends, unless the reply field has focus
+  // (digits are text there, and its form sends on Enter itself).
+  const open = notice.kind === "input" && !notice.answered;
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
+      const digit = Number(event.key);
+      if (digit >= 1 && digit <= options.length) {
+        event.preventDefault();
+        setPicked(digit - 1);
+      } else if (event.key === "Enter" && target?.tagName !== "BUTTON") {
+        event.preventDefault();
+        sendRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, options.length]);
+
+  const dismiss = () => void bridge?.dismiss(notice.id);
 
   if (notice.kind === "core-update")
     return (
@@ -58,51 +140,75 @@ function Bubble({
         className={`bubble core-update ${fading ? "leaving" : ""}`}
         role="status"
       >
-        <button
-          className="bubble-dismiss"
-          aria-label="Dismiss"
-          onClick={() => void bridge?.dismiss(notice.id)}
-        >
-          <X size={13} />
-        </button>
+        <Head
+          label="Update"
+          source=""
+          tone={TONES["core-update"]}
+          onDismiss={dismiss}
+        />
         <strong title={notice.title}>{notice.title}</strong>
         <span className="bubble-body clamped" title={notice.body}>
           {notice.body}
         </span>
-        <button className="bubble-open" onClick={() => void bridge?.restart()}>
-          Restart
-        </button>
+        <div className="bubble-actions">
+          <button
+            className="bubble-primary"
+            onClick={() => void bridge?.restart()}
+          >
+            Restart
+          </button>
+        </div>
       </div>
     );
   if (notice.answered)
     return (
       <div className="bubble answered" role="status">
-        <strong>Answered</strong>
-        <span>Thanks, the task carries on.</span>
+        <div className="bubble-head">
+          <span className="tag ok">
+            <i />
+            Answered
+          </span>
+          <span className="bubble-source">
+            {noticeHeader(notice, now).source}
+          </span>
+        </div>
+        <div className="bubble-msg">
+          <Check size={14} />
+          <span>Answered — the task carries on.</span>
+        </div>
       </div>
     );
+
+  const header = noticeHeader(notice, now);
+  const openTask = () => void bridge?.open(notice.taskId, notice.focus);
+  const meta = notice.kind === "done" ? doneMeta(notice) : null;
+  const land = () =>
+    void bridge
+      ?.land(notice.taskId)
+      .catch((failure) => setError(cleanError(failure)));
   return (
     <div
       className={`bubble ${notice.kind} ${fading ? "leaving" : ""}`}
       role="status"
     >
-      <button
-        className="bubble-dismiss"
-        aria-label="Dismiss"
-        onClick={() => void bridge?.dismiss(notice.id)}
-      >
-        <X size={13} />
-      </button>
+      <Head
+        label={header.label}
+        source={header.source}
+        tone={TONES[notice.kind] ?? "info"}
+        onDismiss={dismiss}
+      />
       <strong title={notice.title}>{notice.title}</strong>
       {notice.kind === "input" ? (
         <div className="bubble-scroll">
           <span className="bubble-body">{notice.body}</span>
-          {!!notice.options?.length && (
+          {!!options.length && (
             <div className="bubble-options">
-              {notice.options.map((option) => (
+              {options.map((option, at) => (
                 <button
                   key={option}
-                  onClick={() => void answer(notice.taskId, option)}
+                  className={picked === at ? "picked" : ""}
+                  aria-pressed={picked === at}
+                  onClick={() => setPicked(at)}
                 >
                   {option}
                 </button>
@@ -111,8 +217,8 @@ function Bubble({
           )}
         </div>
       ) : (
-        <span className="bubble-body clamped" title={notice.body}>
-          {notice.body}
+        <span className="bubble-body clamped" title={meta ?? notice.body}>
+          {meta ?? notice.body}
         </span>
       )}
       {notice.kind === "input" && (
@@ -121,65 +227,75 @@ function Bubble({
             className="bubble-answer"
             onSubmit={(event) => {
               event.preventDefault();
-              void answer(notice.taskId, text);
+              send();
             }}
           >
             <input
               value={text}
               maxLength={2000}
-              placeholder="Type an answer"
+              placeholder="Type an answer..."
               aria-label="Answer"
               onChange={(event) => setText(event.target.value)}
               onFocus={() => setFocused(true)}
               onBlur={() => setFocused(false)}
             />
-            <button type="submit" disabled={!text.trim()}>
-              Answer
+            <button
+              type="submit"
+              className="kbd-button"
+              aria-label="Send answer"
+              disabled={!value}
+            >
+              <Kbd>⏎</Kbd>
             </button>
           </form>
+          <div className="bubble-hint">
+            {!!options.length && (
+              <>
+                <Kbd>{options.length > 1 ? `1-${options.length}` : "1"}</Kbd>
+                <span>pick</span>
+              </>
+            )}
+            <Kbd>⏎</Kbd>
+            <span>send</span>
+            <button className="bubble-link" onClick={openTask}>
+              Open task
+            </button>
+          </div>
           {error && <span className="bubble-error">{error}</span>}
         </>
       )}
-      {notice.kind === "done" && notice.canLand && (
-        <button
-          className="bubble-open"
-          onClick={() =>
-            void bridge
-              ?.land(notice.taskId)
-              .catch((failure) =>
-                setError(
-                  String(
-                    failure instanceof Error ? failure.message : failure,
-                  ).replace(
-                    /^Error invoking remote method '[^']*': (Error: )?/,
-                    "",
-                  ),
-                ),
-              )
-          }
-        >
-          Land
-        </button>
+      {notice.kind === "done" && (
+        <div className="bubble-actions">
+          {notice.canLand && (
+            <button className="bubble-primary" onClick={land}>
+              <Check size={14} />
+              Land
+            </button>
+          )}
+          <button onClick={openTask}>View diff</button>
+        </div>
       )}
       {notice.kind === "done" && error && (
         <span className="bubble-error">{error}</span>
       )}
-      <button
-        className="bubble-open"
-        onClick={() => void bridge?.open(notice.taskId, notice.focus)}
-      >
-        Open
-      </button>
+      {(notice.kind === "failed" ||
+        notice.kind === "stopped" ||
+        notice.kind === "landing") && (
+        <div className="bubble-actions">
+          <button onClick={openTask}>Open</button>
+        </div>
+      )}
     </div>
   );
 }
 
-/** The desktop mascot: the sushi with a speech bubble for the newest
- * queued orchd notice, and a +N count with arrows for the rest. */
+/** The desktop mascot: the sushi with a speech bubble for the newest queued
+ * orchd notice, a pager ("2 of 4") for the rest, and a pill it collapses to. */
 export function Mascot() {
   const [notices, setNotices] = useState<MascotNotice[]>([]);
   const [index, setIndex] = useState(0);
   const [hops, setHops] = useState(0);
+  const [collapsed, setCollapsed] = useState(false);
   const [typing, setTyping] = useState<Typing>({ id: "", on: false });
   const rootRef = useRef<HTMLDivElement>(null);
   const lastHeight = useRef(0);
@@ -191,6 +307,7 @@ export function Mascot() {
           if (next[0]?.id !== previous[0]?.id) {
             setIndex(0);
             setHops((count) => count + 1);
+            setCollapsed(false);
           }
           return next;
         });
@@ -236,13 +353,49 @@ export function Mascot() {
   });
 
   if (!shown) return null;
-  const extra = notices.length - 1;
+  const total = notices.length;
   const step = (delta: number) =>
     setIndex(
       (Math.min(index, notices.length - 1) + delta + notices.length) %
         notices.length,
     );
   const mood = mascotMood(shown, isTyping(typing, shown));
+  const badge = total > 1 ? String(total) : mood === "done" ? "\u2713" : null;
+  const needs = notices.filter((item) => item.kind === "input").length;
+  const character = (
+    <button
+      className={`sushi-hop hop-${hops % 2}`}
+      aria-label={collapsed ? "Expand notices" : "Collapse to a pill"}
+      aria-expanded={!collapsed}
+      onClick={() => setCollapsed((value) => !value)}
+    >
+      <Character mood={mood} />
+      {badge && (
+        <span className={`sushi-badge ${mood === "done" ? "ok" : ""}`}>
+          {badge}
+        </span>
+      )}
+    </button>
+  );
+  if (collapsed)
+    return (
+      <div className="mascot" ref={rootRef}>
+        <div className="pill" role="status">
+          {character}
+          <div className="pill-text">
+            <span className="pill-title">
+              {needs
+                ? `${needs} need${needs === 1 ? "s" : ""} you`
+                : `${total} notice${total === 1 ? "" : "s"}`}
+            </span>
+            <span className="pill-sub">
+              {shown.title}
+              {total > 1 ? ` · +${total - 1}` : ""}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
   return (
     <div className="mascot" ref={rootRef}>
       <div className="bubble-wrap">
@@ -251,21 +404,21 @@ export function Mascot() {
           notice={shown}
           onTyping={setTyping}
         />
-        {extra > 0 && (
+        {total > 1 && (
           <div className="queue">
             <button aria-label="Previous notice" onClick={() => step(-1)}>
               <ChevronLeft size={13} />
             </button>
-            <span>+{extra}</span>
+            <span>
+              {Math.min(index, total - 1) + 1} of {total}
+            </span>
             <button aria-label="Next notice" onClick={() => step(1)}>
               <ChevronRight size={13} />
             </button>
           </div>
         )}
       </div>
-      <div className={`sushi-hop hop-${hops % 2}`}>
-        <Character mood={mood} />
-      </div>
+      {character}
     </div>
   );
 }

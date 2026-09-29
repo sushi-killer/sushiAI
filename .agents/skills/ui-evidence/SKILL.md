@@ -54,7 +54,7 @@ stopped or waiting. `evidence: {"<attempt n>": [image paths]}` copies screenshot
 `dependsOn` (a task graph), `followUps` or `followUpOf`. The tasks are written into the throwaway profile before
 the app starts its own orchd there - no harness run, no API key. It opens the
 panel, picks the task by title, saves
-`artifacts/orchestrator-{window,detail,home}.png` (`home` is the orchestrator page before a task is picked), plus `artifacts/orchestrator-proposals.png` (a crop of the PROPOSALS list, only when proposals were seeded; `report.screenshots.proposals`), plus `artifacts/orchestrator-repo-notes.png` (a crop of the REPO NOTES section, only when notes were seeded; `report.screenshots.notes`), prints a JSON report, and
+`artifacts/orchestrator-{window,detail,home}.png` (`home` is the Home view before a task is picked; `detail` crops the task view `.td`), plus `artifacts/orchestrator-proposals.png` (a crop of the first proposal card on the Improvements view, only when proposals were seeded; `report.screenshots.proposals`), plus `artifacts/orchestrator-improvements.png` (the whole Improvements view, when proposals or notes were seeded) and `artifacts/orchestrator-repo-notes.png` (a crop of the notes list on that view, only when notes were seeded; `report.screenshots.notes`), prints a JSON report, and
 exits non-zero with `error` set on any failure, including an unmatched title.
 
 ## Orchestrator task notices
@@ -76,8 +76,8 @@ after clicking Open on the mascot's input and done bubbles
 `artifacts/orchestrator-open-{input,done}.png`. `artifacts/mascot-report.json`
 holds the mascot bounds vs the primary work area, `isAlwaysOnTop`,
 `isVisibleOnAllWorkspaces`, the focused window before and after the mascot
-shows, its visibility once the queue is empty, and whether `.orch-question` /
-`.orch-report` intersect the viewport with the `.selected` task row; the script
+shows, its visibility once the queue is empty, and whether `.td-question` /
+`.td-report` intersect the viewport with the `.selected` task row; the script
 exits non-zero with `error` set on any failure.
 
 The needs-input bubble grows with its question up to 70% of the work area

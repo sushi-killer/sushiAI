@@ -49,20 +49,6 @@ export function ownerTasks(tasks: Task[]): Task[] {
     .sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
 }
 
-/** One line in plain words for an Inbox row. */
-export function ownerReason(task: Task): string {
-  switch (task.status) {
-    case "waiting":
-      return questionsLabel(questionCount(task));
-    case "landing":
-      return "Waiting for a clean checkout to land";
-    case "failed":
-      return "Failed - needs your decision";
-    default:
-      return "Stopped on its own - needs a look";
-  }
-}
-
 /** Inbox search: the title or the project the task belongs to. */
 export function matchesOwnerTask(task: Task, query: string): boolean {
   const needle = query.trim().toLowerCase();
@@ -84,26 +70,109 @@ export function ownerTarget(task: Task): TaskTarget {
   };
 }
 
-export interface OwnerInboxRow {
-  key: string;
-  title: string;
-  reason: string;
-  open(): void;
+/** The Inbox's task groups: a waiting task is a question to answer, anything
+ * else that needs the owner is a decision. */
+export type OwnerKind = "answer" | "decide";
+
+export function ownerKind(task: Task): OwnerKind {
+  return task.status === "waiting" ? "answer" : "decide";
 }
 
-/** The Inbox rows for the tasks that need the owner and match the search;
- * each row opens its task through `open`. */
-export function ownerInboxRows(
-  tasks: Task[],
-  query: string,
-  open: (target: TaskTarget) => void,
-): OwnerInboxRow[] {
-  return ownerTasks(tasks)
-    .filter((task) => matchesOwnerTask(task, query))
-    .map((task) => ({
-      key: task.id,
-      title: task.title,
-      reason: ownerReason(task),
-      open: () => open(ownerTarget(task)),
-    }));
+/** The LAND group: finished top-level work whose branch is not on its base yet.
+ * Deliberately separate from `needsOwner` - the Dock badge and the tray count
+ * only what needs an answer or a decision, never a task that merely awaits
+ * a Land click. */
+export function landTasks(tasks: Task[]): Task[] {
+  return tasks
+    .filter(
+      (task) =>
+        task.status === "done" &&
+        !task.archived &&
+        !task.landedSha &&
+        !task.parent &&
+        !!task.baseRef,
+    )
+    .sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+}
+
+/** The last path segment of a repo: the project as the owner calls it. */
+export function projectName(repo: string): string {
+  return (
+    repo
+      .split(/[\\/]+/)
+      .filter(Boolean)
+      .pop() || repo
+  );
+}
+
+function pluralize(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+/** "2m", "14m", "1h", "3d": how long ago, for an attention item's corner. */
+export function elapsedLabel(ms: number): string {
+  const minutes = Math.max(0, Math.floor(ms / 60_000));
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+}
+
+/** "10 things need you across 4 projects on 2 hosts · oldest 1h". */
+export function inboxHeadline(
+  things: number,
+  projects: number,
+  hosts: number,
+  oldestMs: number | null,
+): string {
+  if (things === 0) return "Nothing needs you";
+  const verb = things === 1 ? "needs" : "need";
+  const noun = things === 1 ? "thing" : "things";
+  const base = `${things} ${noun} ${verb} you across ${pluralize(projects, "project", "projects")} on ${pluralize(hosts, "host", "hosts")}`;
+  return oldestMs == null ? base : `${base} · oldest ${elapsedLabel(oldestMs)}`;
+}
+
+/** The Inbox-zero line: what landed today and what is still running, each
+ * only when there is something to say. */
+export function inboxZeroSummary(tasks: Task[], now = Date.now()): string {
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  const live = tasks.filter((task) => !task.archived);
+  const landed = live.filter(
+    (task) =>
+      task.status === "done" &&
+      !!task.landedSha &&
+      task.updatedAt >= start.getTime(),
+  ).length;
+  const running = live.filter(
+    (task) => task.status === "running" || task.status === "drafting",
+  ).length;
+  const parts: string[] = [];
+  if (landed > 0)
+    parts.push(`${pluralize(landed, "task", "tasks")} landed today`);
+  if (running > 0)
+    parts.push(`${running} ${running === 1 ? "is" : "are"} still running`);
+  return ["Nothing needs you.", parts.join("; ") && `${parts.join("; ")}.`]
+    .filter(Boolean)
+    .join(" ");
+}
+
+/** The reply field and a picked option become one answer: the note wins, a
+ * pick alone is sent as is, both read "pick: note". */
+export function composeAnswer(pick: string, note: string): string {
+  const text = note.trim();
+  if (!pick) return text;
+  return text ? `${pick}: ${text}` : pick;
+}
+
+/** The key after `delta` steps from `current`, clamped to the list; the first
+ * key when `current` is not in it. */
+export function stepSelection(
+  keys: string[],
+  current: string | null,
+  delta: number,
+): string | null {
+  if (keys.length === 0) return null;
+  const at = current == null ? -1 : keys.indexOf(current);
+  if (at < 0) return keys[0];
+  return keys[Math.min(keys.length - 1, Math.max(0, at + delta))];
 }

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ArrowRight, Check, FileText, Terminal, X } from "lucide-react";
 import { orchestratorClient } from "./client";
 import {
   formatCost,
@@ -6,25 +7,47 @@ import {
   orderedStageRows,
   stageLabel,
 } from "./helpers";
+import {
+  barLabel,
+  defaultSegment,
+  segmentFacts,
+  segmentLabel,
+  segmentNarration,
+  stageRows,
+  type NarrationKind,
+} from "./taskDetailModel";
+import { Tag } from "./ui";
 import type { SpendSummary, Task, TimelineSegment } from "./types";
 
 function segmentTitle(segment: TimelineSegment): string {
-  const parts = [
-    segment.stage === "wait" ? "waiting for you" : segment.stage,
-    segment.attempt > 0 ? `attempt ${segment.attempt}` : "",
-    formatDuration(segment.endedAt - segment.startedAt),
-    formatCost(segment.costUsd),
-    segment.outcome,
-    segment.failureKind ?? "",
-  ];
-  return parts.filter(Boolean).join(" · ");
+  return [segmentLabel(segment), segmentFacts(segment), segment.outcome]
+    .filter(Boolean)
+    .join(" · ");
 }
 
-/** A task's time as one horizontal bar: a segment per stage, sized by
- * duration, the cost of each in its tooltip. Fetched from the daemon, which
- * derives it from the task record and the runs' events. */
-export function TaskTimelineBar({ task }: { task: Task }) {
+function NarrationIcon({ kind }: { kind: NarrationKind }) {
+  const props = { size: 13, "aria-hidden": true };
+  switch (kind) {
+    case "run":
+      return <Terminal {...props} />;
+    case "ok":
+      return <Check {...props} />;
+    case "fail":
+      return <X {...props} />;
+    case "next":
+      return <ArrowRight {...props} />;
+    case "note":
+      return <FileText {...props} />;
+  }
+}
+
+/** A task's time: one bar with a segment per stage sized by duration, the
+ * card of whichever segment is picked, and a row per stage with its runs,
+ * time and cost. Fetched from the daemon, which derives it from the task
+ * record and the runs' events. */
+export function TaskTimeline({ task }: { task: Task }) {
   const [segments, setSegments] = useState<TimelineSegment[]>([]);
+  const [picked, setPicked] = useState<{ id: string; index: number | null }>();
 
   useEffect(() => {
     let cancelled = false;
@@ -38,31 +61,69 @@ export function TaskTimelineBar({ task }: { task: Task }) {
   }, [task.id, task.updatedAt]);
 
   if (segments.length === 0) return null;
+  const index =
+    picked && picked.id === task.id ? picked.index : defaultSegment(segments);
+  const segment = index === null ? undefined : segments[index];
+  const totalMs = segments.reduce(
+    (sum, s) => sum + Math.max(0, s.endedAt - s.startedAt),
+    0,
+  );
+  const rows = stageRows(task, segments);
   return (
-    <div className="orch-timeline">
-      <div className="orch-timeline-bar" role="img" aria-label="Task timeline">
-        {segments.map((segment, index) => (
-          <span
-            key={index}
-            className={`orch-timeline-segment stage-${segment.stage}${
-              segment.failureKind ? " failed" : ""
-            }`}
-            style={{
-              flexGrow: Math.max(1, segment.endedAt - segment.startedAt),
-            }}
-            title={segmentTitle(segment)}
-          />
+    <section className="td-timeline" aria-label="Timeline">
+      <div className="td-section-head">
+        <span className="td-eyebrow">TIMELINE</span>
+        <span className="td-faint">
+          {formatDuration(totalMs)} · click a segment to see what the agent did
+        </span>
+      </div>
+      <div className="td-bar" role="group" aria-label="Task timeline">
+        {segments.map((s, i) => (
+          <button
+            key={i}
+            type="button"
+            className={`td-seg td-stage-${s.stage}${s.failureKind ? " failed" : ""}${i === index ? " picked" : ""}`}
+            style={{ flexGrow: Math.max(1, s.endedAt - s.startedAt) }}
+            title={segmentTitle(s)}
+            aria-label={segmentTitle(s)}
+            aria-pressed={i === index}
+            onClick={() =>
+              setPicked({ id: task.id, index: i === index ? null : i })
+            }
+          >
+            {barLabel(s, totalMs)}
+          </button>
         ))}
       </div>
-      <div className="orch-timeline-legend">
-        {[...new Set(segments.map((s) => s.stage))].map((stage) => (
-          <span key={stage} className="orch-timeline-key">
-            <span className={`orch-timeline-swatch stage-${stage}`} />
-            {stage === "wait" ? "waiting" : stage}
-          </span>
+      {segment && (
+        <div className="td-seg-card">
+          <div className="td-seg-card-head">
+            <span className="td-seg-card-title">{segmentLabel(segment)}</span>
+            {segment.failureKind && <Tag tone="danger">failed</Tag>}
+            <span className="td-faint">{segmentFacts(segment)}</span>
+          </div>
+          {segmentNarration(task, segment).map((step, i) => (
+            <p key={i} className={`td-step ${step.kind}`}>
+              <NarrationIcon kind={step.kind} />
+              <span>{step.text}</span>
+            </p>
+          ))}
+        </div>
+      )}
+      <div className="td-stages">
+        {rows.map((row) => (
+          <div key={row.stage} className="td-stage-row">
+            <span className={`td-swatch td-stage-${row.stage}`} />
+            <span className="td-stage-name">{row.label}</span>
+            <span className="td-stage-detail">{row.detail}</span>
+            <span className="td-stage-time">{formatDuration(row.ms)}</span>
+            <span className="td-stage-cost">
+              {row.stage === "wait" ? "—" : formatCost(row.costUsd)}
+            </span>
+          </div>
         ))}
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -107,7 +168,7 @@ export function TaskCostLine({
   if (parts.length === 0) return null;
   return (
     <p
-      className="orch-detail-meta orch-cost-breakdown"
+      className="td-facts td-cost-breakdown"
       title="Where this task's cost went, by stage"
     >
       {parts.map((row) => `${row.label} ${formatCost(row.cost)}`).join(" · ")}

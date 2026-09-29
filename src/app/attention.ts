@@ -260,11 +260,3 @@ export function workingCount(
   }
   return count;
 }
-
-/** The panel ids "Clean up" checks: idle shells and idle/seen-finished
- * agents - never something still blocked or working. */
-export function cleanupSelection(rows: InboxRow[]): string[] {
-  return rows
-    .filter((row) => row.group === "idle" || row.group === "shells")
-    .map((row) => row.panel.id);
-}

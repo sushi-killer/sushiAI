@@ -1,0 +1,100 @@
+/* Settings dialog shell (Figma "Settings dialog"): a left nav beside a
+ * scrolling main column. The shared `.modal` frame is widened and unpadded
+ * only when it holds this shell. */
+.modal:has(> .settings-shell) {
+  width: 940px;
+  max-width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 16px;
+  background: var(--bg-app);
+}
+.modal:has(> .settings-shell) > .modal-close {
+  top: 22px;
+  right: 32px;
+  z-index: 1;
+}
+
+.settings-shell {
+  display: flex;
+  height: min(720px, calc(100dvh - 66px));
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  gap: 2px;
+  width: 209px;
+  padding: 18px 10px;
+  border-right: 1px solid var(--line-pane);
+  background: var(--bg-sunken);
+}
+.settings-nav-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 10px 14px;
+}
+.settings-nav-eyebrow {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+}
+.settings-nav-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+}
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 7px;
+  color: var(--text-nav);
+  font-size: var(--text-md);
+  text-align: left;
+}
+.settings-nav-item:hover {
+  background: var(--bg-hover);
+}
+.settings-nav-item.current {
+  background: var(--bg-control);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.settings-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  padding: 22px 32px 24px;
+  overflow-y: auto;
+}
+.settings-title {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-right: 28px;
+  margin-bottom: 12px;
+}
+.modal .settings-title h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 24px;
+}
+.modal .settings-title p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 15px;
+}

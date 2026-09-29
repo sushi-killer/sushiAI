@@ -1,60 +1,165 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowUpRight,
   Check,
-  Globe,
-  Inbox as InboxIcon,
+  ChevronDown,
+  ChevronRight,
+  GitBranch,
   ListChecks,
-  Search,
-  Server,
-  Trash2,
+  RefreshCw,
 } from "lucide-react";
-import { Icon } from "../PanelIcon.tsx";
 import {
   ExtensionNavSlot,
   ExtensionSectionSlot,
 } from "../extensions/ExtensionSlots.tsx";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
-import { PageFrame } from "./PageFrame.tsx";
-import { Empty } from "./Empty.tsx";
-import {
-  cleanupSelection,
-  type InboxGroup,
-  type InboxRow,
-} from "./attention.ts";
+import type { InboxGroup, InboxRow } from "./attention.ts";
 import { LOCAL_GROUP, groupKey, groupLabel } from "./workspaceMerge.ts";
-import type { WorkspaceController } from "../workspace/useWorkspaces.ts";
-import { ownerInboxRows } from "../orchestrator/ownerAttention.ts";
+import {
+  KINDS,
+  agentName,
+  cleanupCandidates,
+  inScope,
+  inboxItems,
+  landTargets,
+  needsYou,
+  type Item,
+  type Kind,
+  type SessionItem,
+  type TaskItem,
+} from "./inboxModel.ts";
+import {
+  parseSessionPrompt,
+  replySteps,
+  type SessionPrompt,
+} from "./sessionPrompt.ts";
+import { Icon } from "../PanelIcon.tsx";
+import { Character } from "../mascot/Character.tsx";
+import { orchestratorClient } from "../orchestrator/client.ts";
+import {
+  criteriaMet,
+  errorText,
+  formatCost,
+  implementAttemptCount,
+  latestImplementAttempt,
+  reviewOf,
+  stageTrack,
+  taskReason,
+} from "../orchestrator/helpers.ts";
+import {
+  composeAnswer,
+  elapsedLabel,
+  inboxHeadline,
+  inboxZeroSummary,
+  ownerTarget,
+  stepSelection,
+} from "../orchestrator/ownerAttention.ts";
 import type { TaskTarget } from "../orchestrator/notices.ts";
 import type { Task } from "../orchestrator/types.ts";
+import {
+  AttentionItem,
+  Chip,
+  Criterion,
+  GroupLabel,
+  StageTrack,
+} from "../orchestrator/ui/index.ts";
 import type { ConnectionProfile, Workspace } from "../types";
+import type { WorkspaceController } from "../workspace/useWorkspaces.ts";
+import "./inbox.css";
 
-/** Rounded to whatever unit reads best - minutes under an hour, then hours,
- * then days. Approximate on purpose: this is "12m ago", not a stopwatch. */
-function formatElapsed(ms: number): string {
-  const minutes = Math.max(0, Math.round(ms / 60000));
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  return `${Math.round(hours / 24)}d`;
+type Filter = "all" | "answer" | "decide" | "land" | "panels";
+
+const LABELS: Record<Kind, string> = {
+  answer: "ANSWER",
+  decide: "DECIDE",
+  land: "LAND & REVIEW",
+  panels: "PANELS",
+  working: "WORKING",
+  idle: "IDLE",
+};
+const CHIPS: { filter: Filter; label: string }[] = [
+  { filter: "all", label: "All" },
+  { filter: "answer", label: "Answer" },
+  { filter: "decide", label: "Decide" },
+  { filter: "land", label: "Land" },
+  { filter: "panels", label: "Panels" },
+];
+const TONE = {
+  answer: "warning",
+  decide: "danger",
+  land: "ok",
+  panels: "info",
+} as const;
+/** How often a blocked session's screen is re-read while it waits. */
+const SCREEN_REFRESH_MS = 2500;
+
+/** The diff numbers orchd will add to a task; absent until it does. */
+type DiffStat = { added?: number; removed?: number };
+const diffOf = (task: Task): DiffStat | undefined =>
+  (task as Task & { diff?: DiffStat }).diff;
+
+const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+
+/** A Herdr pane the Inbox can read and type into. */
+const answerable = (row: InboxRow) =>
+  !!row.panel.herdrId && !!row.workspace.connection && !row.panel.ended;
+
+/** Whether a global key belongs to something else: an open dialog, a text
+ * field, or - for anything but J/K - a focused button or link, where Enter is
+ * that button's own click, not a second answer. */
+function ownsKey(target: EventTarget | null, key: string): boolean {
+  if (document.querySelector("[role=dialog], dialog[open]")) return true;
+  const el = target as HTMLElement | null;
+  if (!el?.closest) return false;
+  if (el.isContentEditable || el.closest("input, textarea, select"))
+    return true;
+  return key !== "j" && key !== "k" && !!el.closest("button, a");
 }
 
-function matchesQuery(row: InboxRow, query: string): boolean {
-  if (!query) return true;
-  const needle = query.toLowerCase();
-  return (
-    row.panel.title.toLowerCase().includes(needle) ||
-    row.workspace.name.toLowerCase().includes(needle)
-  );
+/** The visible text of every blocked session, re-read while it waits. */
+function usePaneScreens(rows: InboxRow[]) {
+  const [screens, setScreens] = useState<Record<string, string>>({});
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+  const read = useCallback(async (row: InboxRow) => {
+    const result = await window.bridge?.herdr(
+      row.workspace.connection!,
+      "pane.read",
+      {
+        pane_id: row.panel.herdrId,
+        source: "visible",
+        format: "text",
+        strip_ansi: true,
+      },
+    );
+    const text: unknown = result?.read?.text;
+    if (typeof text !== "string") return;
+    setScreens((old) =>
+      old[row.panel.id] === text ? old : { ...old, [row.panel.id]: text },
+    );
+  }, []);
+  const signature = rows.map((row) => row.panel.id).join("|");
+  useEffect(() => {
+    if (!signature) return;
+    const tick = () => {
+      for (const row of rowsRef.current) void read(row).catch(() => {});
+    };
+    tick();
+    const timer = setInterval(tick, SCREEN_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [signature, read]);
+  return { screens, read };
 }
 
-/** The attention queue: agents that need input or finished, plus everything
- * else still running or sitting idle, across every host. Sessions used to be
- * a manual list you opened to check on things; this is the same panels, but
- * it tells you which of them actually want you. */
+/** Everything that needs you, across every project and host: agent sessions
+ * waiting on an answer or finished unseen, orchestrator questions and
+ * decisions, finished work waiting to land - then what is still working or
+ * idle. One queue on the left, the selected item on the right. */
 export function InboxPage({
   groups,
   markSeen,
   ownerTasks,
+  allTasks,
   openOrchestratorTask,
   switchWorkspace,
   ws,
@@ -68,6 +173,7 @@ export function InboxPage({
   groups: InboxGroup[];
   markSeen(panelId: string): void;
   ownerTasks: Task[];
+  allTasks: Task[];
   openOrchestratorTask(target: TaskTarget): void;
   switchWorkspace(id: string): void;
   ws: WorkspaceController;
@@ -79,65 +185,915 @@ export function InboxPage({
   workspaces: Workspace[];
 }) {
   const [query, setQuery] = useState(""),
+    [project, setProject] = useState(""),
     [hostFilter, setHostFilter] = useState(""),
-    [checked, setChecked] = useState<string[]>([]),
-    [confirming, setConfirming] = useState(false),
-    [busy, setBusy] = useState(false);
-  const allRows = useMemo(
-    () => groups.flatMap((group) => group.rows),
-    [groups],
+    [filter, setFilter] = useState<Filter>("all"),
+    [selectedKey, setSelectedKey] = useState<string | null>(null),
+    [picks, setPicks] = useState<Record<string, string>>({}),
+    [notes, setNotes] = useState<Record<string, string>>({}),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState(""),
+    [landAll, setLandAll] = useState(false),
+    [cleanup, setCleanup] = useState<Set<string> | null>(null),
+    [fixing, setFixing] = useState<string | null>(null),
+    [fixNote, setFixNote] = useState(""),
+    [collapsed, setCollapsed] = useState<Partial<Record<Kind, boolean>>>({
+      idle: true,
+    });
+  const inFlight = useRef(false);
+
+  const items = useMemo(
+    () => inboxItems(ownerTasks, allTasks, groups),
+    [ownerTasks, allTasks, groups],
+  );
+  const blockedRows = useMemo(
+    () =>
+      items.flatMap((item) =>
+        item.source === "session" &&
+        item.kind === "answer" &&
+        answerable(item.row)
+          ? [item.row]
+          : [],
+      ),
+    [items],
+  );
+  const { screens, read } = usePaneScreens(blockedRows);
+  const prompts = useMemo(() => {
+    const out: Record<string, SessionPrompt> = {};
+    for (const row of blockedRows) {
+      const screen = screens[row.panel.id];
+      if (screen != null)
+        out[row.panel.id] = parseSessionPrompt(screen, row.panel.agent);
+    }
+    return out;
+  }, [blockedRows, screens]);
+
+  const projects = useMemo(
+    () => [...new Set(items.map((item) => item.project))].sort(),
+    [items],
   );
   const hosts = useMemo(() => {
     const seen = new Map<string, string>();
-    for (const row of allRows) {
-      const key = groupKey(row.workspace.connection);
+    const keys = [
+      ...items.map((item) => item.host),
+      ...(groups.find((group) => group.key === "shells")?.rows ?? []).map(
+        (row) => groupKey(row.workspace.connection),
+      ),
+    ];
+    for (const key of keys)
       if (!seen.has(key)) seen.set(key, groupLabel(key, connectionProfiles));
-    }
     return [...seen.entries()].sort(([a], [b]) =>
       a === LOCAL_GROUP ? -1 : b === LOCAL_GROUP ? 1 : a.localeCompare(b),
     );
-  }, [allRows, connectionProfiles]);
-  // One host in the list means a host mark on every row says nothing.
-  const manyHosts = hosts.length > 1;
-  const visibleGroups = groups.map((group) => ({
-    ...group,
-    rows: group.rows.filter(
-      (row) =>
-        matchesQuery(row, query) &&
-        (!hostFilter || groupKey(row.workspace.connection) === hostFilter),
-    ),
-  }));
-  const visibleRows = visibleGroups.flatMap((group) => group.rows);
-  const selected = visibleRows.filter((row) => checked.includes(row.panel.id));
-  const visibleTasks = ownerInboxRows(ownerTasks, query, openOrchestratorTask);
-  const empty = allRows.length === 0 && ownerTasks.length === 0;
+  }, [items, groups, connectionProfiles]);
 
-  function toggle(panelId: string, on: boolean) {
-    setChecked((ids) =>
-      on ? [...ids, panelId] : ids.filter((id) => id !== panelId),
-    );
-    setConfirming(false);
+  const scope = { project, host: hostFilter, query };
+  const scoped = items.filter((item) => inScope(item, scope));
+  const counts = (value: Filter) =>
+    scoped.filter((item) =>
+      value === "all" ? needsYou(item) : item.kind === value,
+    ).length;
+  const visible = scoped.filter(
+    (item) => filter === "all" || item.kind === filter,
+  );
+  const keys = visible
+    .filter((item) => !collapsed[item.kind])
+    .map((item) => item.key);
+  const keysSignature = keys.join("\n");
+  // The selection is pinned: a newly arrived item never takes it over; only
+  // when the selected item leaves does it move to the first one.
+  useEffect(() => {
+    if (selectedKey == null || !keys.includes(selectedKey))
+      setSelectedKey(keys[0] ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keysSignature is keys by value
+  }, [keysSignature, selectedKey]);
+  const selected =
+    visible.find((item) => item.key === selectedKey) ??
+    visible.find((item) => item.key === keys[0]) ??
+    null;
+
+  const needs = items.filter(needsYou);
+  const oldest = needs.reduce<number | null>(
+    (min, item) =>
+      item.at != null && (min == null || item.at < min) ? item.at : min,
+    null,
+  );
+  const headline = inboxHeadline(
+    needs.length,
+    new Set(needs.map((item) => item.project)).size,
+    new Set(needs.map((item) => item.host)).size,
+    oldest == null ? null : Date.now() - oldest,
+  );
+  const candidates = cleanupCandidates(groups, {
+    project,
+    host: hostFilter,
+  });
+
+  async function act(run: () => Promise<unknown>) {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      await run();
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
   }
-  function jump(row: InboxRow) {
+  const openTask = (task: Task) => openOrchestratorTask(ownerTarget(task));
+  const noteOf = (item: Item) => notes[item.key] ?? "";
+  const setNote = (item: Item, text: string) =>
+    setNotes((old) => ({ ...old, [item.key]: text }));
+  const answerTask = (item: TaskItem) => {
+    const text = composeAnswer(picks[item.key] ?? "", noteOf(item));
+    if (!text) return;
+    void act(async () => {
+      await orchestratorClient.taskAnswer(item.task.id, text);
+      setNote(item, "");
+      setPicks((old) => ({ ...old, [item.key]: "" }));
+    });
+  };
+  /** Types into the session, one step at a time, then re-reads its screen. */
+  const send = (item: SessionItem, steps: string[], clearNote = false) =>
+    void act(async () => {
+      const { row } = item;
+      for (const [index, raw] of steps.entries()) {
+        if (index > 0) await sleep(150);
+        await window.bridge!.herdr(
+          row.workspace.connection!,
+          "pane.send_input",
+          {
+            pane_id: row.panel.herdrId,
+            raw,
+          },
+        );
+      }
+      if (clearNote) setNote(item, "");
+      await sleep(300);
+      await read(row).catch(() => {});
+    });
+  const replySession = (item: SessionItem) => {
+    const prompt = prompts[item.row.panel.id];
+    const steps = prompt && replySteps(prompt, noteOf(item));
+    if (steps) send(item, steps, true);
+  };
+  const runAgain = (task: Task) =>
+    void act(() => orchestratorClient.taskStart(task.id));
+  const archive = (task: Task) =>
+    void act(() => orchestratorClient.taskArchive(task.id));
+  const land = (task: Task) =>
+    void act(() => orchestratorClient.taskLand(task.id));
+  const jump = (row: InboxRow) => {
     switchWorkspace(row.workspace.id);
     ws.setSelected(row.panel.id);
     ws.setZoomed(row.panel.id);
+  };
+  const landEverything = (targets: Task[]) => {
+    if (!landAll) return setLandAll(true);
+    setLandAll(false);
+    void act(async () => {
+      for (const task of targets) await orchestratorClient.taskLand(task.id);
+    });
+  };
+
+  const handlers = useRef<(event: KeyboardEvent) => void>(() => {});
+  handlers.current = (event) => {
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    const key = event.key.toLowerCase();
+    if (ownsKey(event.target, key)) return;
+    const item = selected;
+    const move = (delta: number) => {
+      event.preventDefault();
+      setSelectedKey(stepSelection(keys, item?.key ?? null, delta));
+    };
+    if (key === "j") return move(1);
+    if (key === "k") return move(-1);
+    if (!item || busy) return;
+    if (item.source === "session") {
+      const prompt = prompts[item.row.panel.id];
+      if (item.kind === "answer" && prompt && /^[1-9]$/.test(key)) {
+        const option = prompt.options[Number(key) - 1];
+        if (option) send(item, option.steps);
+      } else if (key === "e" && item.kind === "panels")
+        markSeen(item.row.panel.id);
+      return;
+    }
+    const { task } = item;
+    if (item.kind === "answer" && /^[1-9]$/.test(key)) {
+      const option = task.question?.options[Number(key) - 1];
+      if (option) setPicks((old) => ({ ...old, [item.key]: option }));
+    } else if (key === "enter" && item.kind === "answer") answerTask(item);
+    else if (key === "l" && item.kind === "land") land(task);
+    else if (key === "r" && item.kind === "decide" && task.status !== "landing")
+      runAgain(task);
+    else if (key === "e" && item.kind !== "answer") archive(task);
+  };
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => handlers.current(event);
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, []);
+
+  const recent = (predicate: (task: Task) => boolean) =>
+    allTasks
+      .filter((task) => !task.archived && predicate(task))
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+
+  const hostName = (item: Item) => groupLabel(item.host, connectionProfiles);
+  const sessionKind = (row: InboxRow) =>
+    row.panel.agent
+      ? agentName(row)
+      : row.panel.kind === "terminal"
+        ? "terminal"
+        : "agent panel";
+
+  /** Needed a fix / Clean, as in the task view: a fix takes a note (the
+   * follow-up task is made from it), pressing an active mark clears it. */
+  function landMarks(task: Task) {
+    const mark = task.leadTouch;
+    if (fixing === task.id)
+      return (
+        <form
+          className="inbox-fix"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void act(async () => {
+              await orchestratorClient.taskLeadTouch(
+                task.id,
+                true,
+                fixNote.trim(),
+              );
+              setFixing(null);
+              setFixNote("");
+            });
+          }}
+        >
+          <input
+            aria-label="What had to be fixed"
+            placeholder="What is missing or wrong? A follow-up task will be created."
+            value={fixNote}
+            autoFocus
+            onChange={(event) => setFixNote(event.target.value)}
+          />
+          <button type="submit" className="ui-button primary" disabled={busy}>
+            Save
+          </button>
+          <button
+            type="button"
+            className="ui-button ghost"
+            onClick={() => setFixing(null)}
+          >
+            Cancel
+          </button>
+        </form>
+      );
+    return (
+      <>
+        <button
+          className="ui-button ghost"
+          disabled={busy}
+          aria-pressed={mark?.touched === true}
+          onClick={() => {
+            if (mark?.touched === true)
+              void act(() => orchestratorClient.taskLeadTouch(task.id));
+            else {
+              setFixNote("");
+              setFixing(task.id);
+            }
+          }}
+        >
+          Needed a fix
+        </button>
+        <button
+          className="ui-button ghost"
+          disabled={busy}
+          aria-pressed={mark?.touched === false}
+          onClick={() =>
+            void act(() =>
+              orchestratorClient.taskLeadTouch(
+                task.id,
+                mark?.touched === false ? undefined : false,
+              ),
+            )
+          }
+        >
+          Clean
+        </button>
+      </>
+    );
+  }
+
+  function optionChips(item: SessionItem, prompt: SessionPrompt) {
+    return prompt.options.map((option, index) => (
+      <span
+        key={`${index}:${option.label}`}
+        className="inbox-option"
+        title={option.hint ? `${option.label} ${option.hint}` : option.label}
+      >
+        <Chip
+          selected={option.checked === true}
+          disabled={busy}
+          onClick={() => send(item, option.steps)}
+        >
+          {prompt.multi ? `${option.checked ? "☑" : "☐"} ` : ""}
+          {option.label}
+        </Chip>
+      </span>
+    ));
+  }
+
+  function sessionView(item: SessionItem) {
+    const { row } = item;
+    const prompt = prompts[row.panel.id];
+    const meta = `${item.project} · ${hostName(item)} · ${sessionKind(row)}`;
+    const context =
+      item.kind === "answer"
+        ? prompt?.question ||
+          `Waiting for your input in the ${row.panel.kind === "terminal" ? "terminal" : "panel"}`
+        : `Finished “${row.panel.title}”`;
+    const actions = (
+      <>
+        {item.kind === "answer" && prompt && optionChips(item, prompt)}
+        <button className="ui-button secondary" onClick={() => jump(row)}>
+          <ArrowUpRight size={14} />{" "}
+          {item.kind === "answer" ? "Jump to panel" : "Open panel"}
+        </button>
+        {item.kind === "panels" && (
+          <button
+            className="ui-button ghost"
+            onClick={() => markSeen(row.panel.id)}
+          >
+            Mark seen
+          </button>
+        )}
+      </>
+    );
+    return { meta, context, actions };
+  }
+
+  function taskView(item: TaskItem) {
+    const { task } = item;
+    const pick = picks[item.key] ?? "";
+    const attempts = implementAttemptCount(task);
+    const meta =
+      item.kind === "land"
+        ? `${item.project} · orchestrator → ${task.baseRef}`
+        : `${item.project} · orchestrator${item.kind === "answer" && attempts > 0 ? ` · attempt ${attempts}` : ""}`;
+    let context: string;
+    if (item.kind === "answer")
+      context = (task.question?.text ?? "").split("\n")[0];
+    else if (item.kind === "land") {
+      const files = latestImplementAttempt(task)?.changedFiles.length;
+      const review = reviewOf(task);
+      context = [
+        review ? `review ${review.verdict}` : "done",
+        files ? `${files} files` : "",
+        formatCost(task.costUsd),
+        "not landed",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+    } else
+      context = `${taskReason(task, allTasks)} · ${formatCost(task.costUsd)}`;
+
+    let actions;
+    if (item.kind === "answer")
+      actions = (task.question?.options ?? []).map((option) => (
+        <Chip
+          key={option}
+          selected={pick === option}
+          onClick={() =>
+            setPicks((old) => ({
+              ...old,
+              [item.key]: old[item.key] === option ? "" : option,
+            }))
+          }
+        >
+          {option}
+        </Chip>
+      ));
+    else if (item.kind === "decide")
+      actions = (
+        <>
+          {task.status !== "landing" && (
+            <button
+              className="ui-button secondary"
+              disabled={busy}
+              onClick={() => runAgain(task)}
+            >
+              <RefreshCw size={14} /> Run again
+            </button>
+          )}
+          <button className="ui-button ghost" onClick={() => openTask(task)}>
+            Run with a note
+          </button>
+          <button
+            className="ui-button ghost"
+            disabled={busy}
+            onClick={() => archive(task)}
+          >
+            Archive
+          </button>
+        </>
+      );
+    else
+      actions = (
+        <>
+          <button
+            className="ui-button primary"
+            disabled={busy}
+            onClick={() => land(task)}
+          >
+            Land
+          </button>
+          {landMarks(task)}
+        </>
+      );
+    return { meta, context, actions };
+  }
+
+  function itemView(item: Item) {
+    if (item.kind === "working" || item.kind === "idle")
+      return compactRow(item);
+    const { meta, context, actions } =
+      item.source === "session" ? sessionView(item) : taskView(item);
+    return (
+      <div
+        key={item.key}
+        className="inbox-item"
+        title={item.title}
+        onClick={() => setSelectedKey(item.key)}
+      >
+        <AttentionItem
+          tone={TONE[item.kind]}
+          title={item.title}
+          time={
+            item.at != null ? elapsedLabel(Date.now() - item.at) : undefined
+          }
+          context={context}
+          question={item.kind === "answer"}
+          actions={actions}
+          meta={meta}
+          selected={selected?.key === item.key}
+          onOpen={() => setSelectedKey(item.key)}
+        />
+      </div>
+    );
+  }
+
+  function compactRow(item: SessionItem) {
+    const { row } = item;
+    return (
+      <div
+        key={item.key}
+        className={`inbox-session-row${selected?.key === item.key ? " selected" : ""}`}
+        onClick={() => setSelectedKey(item.key)}
+      >
+        <Icon kind={row.panel.kind} agent={row.panel.agent} />
+        <span className="inbox-session-name" title={item.title}>
+          {item.title}
+        </span>
+        <span className="inbox-session-meta">{hostName(item)}</span>
+        {item.at != null && (
+          <span className="inbox-session-meta">
+            {elapsedLabel(Date.now() - item.at)}
+          </span>
+        )}
+        <button
+          className="inbox-link"
+          aria-label={`Jump to ${row.panel.title} in ${row.workspace.name}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            jump(row);
+          }}
+        >
+          Jump <ArrowUpRight size={12} />
+        </button>
+      </div>
+    );
+  }
+
+  function group(kind: Kind, rows: Item[]) {
+    if (rows.length === 0) return null;
+    const compact = kind === "working" || kind === "idle";
+    const closed = compact && collapsed[kind];
+    const targets = kind === "land" ? landTargets(rows) : [];
+    return (
+      <section key={kind} className="inbox-group">
+        <div className="inbox-group-head">
+          {compact ? (
+            <button
+              className="inbox-group-toggle"
+              aria-expanded={!closed}
+              onClick={() =>
+                setCollapsed((old) => ({ ...old, [kind]: !old[kind] }))
+              }
+            >
+              {closed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+              <GroupLabel label={LABELS[kind]} count={rows.length} />
+            </button>
+          ) : (
+            <GroupLabel label={LABELS[kind]} count={rows.length} />
+          )}
+          {targets.length > 1 && (
+            <button
+              className="inbox-link"
+              disabled={busy}
+              onClick={() => landEverything(targets)}
+              onBlur={() => setLandAll(false)}
+            >
+              {landAll
+                ? `Confirm: land ${targets.length}`
+                : `Land ${targets.length}`}
+            </button>
+          )}
+        </div>
+        {!closed && rows.map(itemView)}
+      </section>
+    );
+  }
+
+  function sessionPreview(item: SessionItem) {
+    const { row } = item;
+    const prompt = prompts[row.panel.id];
+    const head = (
+      <div className="inbox-preview-head">
+        <h2 title={item.title}>{item.title}</h2>
+        <button className="inbox-link" onClick={() => jump(row)}>
+          {item.kind === "answer" ? "Jump to panel" : "Open panel"}
+          <ArrowUpRight size={12} />
+        </button>
+      </div>
+    );
+    if (item.kind !== "answer")
+      return (
+        <>
+          {head}
+          <p className="inbox-session-line">
+            {`${item.project} · ${hostName(item)} · ${sessionKind(row)} · ${item.kind === "panels" ? "finished, not seen" : item.kind}`}
+          </p>
+        </>
+      );
+    if (!answerable(row) || !prompt)
+      return (
+        <>
+          {head}
+          <p className="inbox-session-line">
+            {answerable(row)
+              ? "Reading the session…"
+              : "Waiting for your input in the panel."}
+          </p>
+        </>
+      );
+    const note = noteOf(item);
+    const reply = replySteps(prompt, note);
+    return (
+      <>
+        {head}
+        <p className="inbox-prompt-question">
+          {prompt.question || "Waiting for your input"}
+        </p>
+        {prompt.detail.length > 0 && (
+          <pre className="inbox-prompt-detail">{prompt.detail.join("\n")}</pre>
+        )}
+        {prompt.options.length > 0 && (
+          <div className="inbox-prompt-options">
+            {optionChips(item, prompt)}
+            {prompt.multi && (
+              <button
+                className="ui-button secondary"
+                disabled={busy}
+                onClick={() => send(item, prompt.advance)}
+              >
+                Continue
+              </button>
+            )}
+          </div>
+        )}
+        <div className="inbox-preview-spacer" />
+        {prompt.typeSteps && (
+          <form
+            className="inbox-reply"
+            onSubmit={(event) => {
+              event.preventDefault();
+              replySession(item);
+            }}
+          >
+            <input
+              aria-label="Reply to the session"
+              placeholder="Reply in the session…"
+              value={note}
+              onChange={(event) => setNote(item, event.target.value)}
+            />
+            <button
+              type="submit"
+              className="ui-button primary"
+              disabled={busy || !reply}
+            >
+              Send
+            </button>
+          </form>
+        )}
+      </>
+    );
+  }
+
+  function preview(item: Item) {
+    if (item.source === "session") return sessionPreview(item);
+    const { task } = item;
+    const attempts = implementAttemptCount(task);
+    const files = latestImplementAttempt(task)?.changedFiles.length;
+    const diff = diffOf(task);
+    const met = criteriaMet(task);
+    return (
+      <>
+        <div className="inbox-preview-head">
+          <h2 title={task.title}>{task.title}</h2>
+          <button className="inbox-link" onClick={() => openTask(task)}>
+            Open task
+            <ArrowUpRight size={12} />
+          </button>
+        </div>
+        <StageTrack steps={stageTrack(task)} />
+        {task.criteria.length > 0 && (
+          <div className="inbox-criteria">
+            <span className="inbox-eyebrow">ACCEPTANCE</span>
+            {task.criteria.map((text) => (
+              <Criterion key={text} state={met ? "met" : "pending"}>
+                {text}
+              </Criterion>
+            ))}
+          </div>
+        )}
+        <div className="inbox-diff">
+          <GitBranch size={13} />
+          <span className="inbox-diff-branch">{task.branch}</span>
+          {diff?.added != null && (
+            <span className="inbox-diff-add">+{diff.added}</span>
+          )}
+          {diff?.removed != null && (
+            <span className="inbox-diff-del">{`−${diff.removed}`}</span>
+          )}
+          <span className="inbox-diff-rest">
+            {[
+              files ? `${files} files` : "",
+              attempts > 0 ? `attempt ${attempts}` : "",
+              formatCost(task.costUsd),
+            ]
+              .filter(Boolean)
+              .map((part) => `· ${part}`)
+              .join(" ")}
+          </span>
+        </div>
+        <div className="inbox-preview-spacer" />
+        {item.kind === "answer" && (
+          <form
+            className="inbox-reply"
+            onSubmit={(event) => {
+              event.preventDefault();
+              answerTask(item);
+            }}
+          >
+            <input
+              aria-label="Answer note"
+              placeholder="Answer with a note, or pick above…"
+              value={noteOf(item)}
+              onChange={(event) => setNote(item, event.target.value)}
+            />
+            <button
+              type="submit"
+              className="ui-button primary"
+              disabled={
+                busy || !composeAnswer(picks[item.key] ?? "", noteOf(item))
+              }
+            >
+              Answer
+            </button>
+          </form>
+        )}
+      </>
+    );
+  }
+
+  const errorLine = error && (
+    <p className="inbox-error" role="alert">
+      {error}
+    </p>
+  );
+
+  function zero() {
+    const latest = recent(() => true);
+    const landed = recent((task) => task.status === "done" && !!task.landedSha);
+    const running = visible.filter((item) => !needsYou(item));
+    return (
+      <div className="inbox-zero-page">
+        <div className="inbox-zero">
+          <div className="inbox-zero-mascot">
+            <Character mood="idle" />
+            <span className="inbox-zero-shadow" />
+          </div>
+          <h2>Inbox zero</h2>
+          <p>{inboxZeroSummary(allTasks)}</p>
+          <div className="inbox-zero-actions">
+            {latest && (
+              <button
+                className="ui-button secondary"
+                onClick={() =>
+                  openOrchestratorTask({
+                    taskId: latest.id,
+                    repo: latest.repo,
+                    focus: "summary",
+                  })
+                }
+              >
+                <ListChecks size={14} /> Open orchestrator
+              </button>
+            )}
+            {landed && (
+              <button
+                className="ui-button ghost"
+                onClick={() =>
+                  openOrchestratorTask({
+                    taskId: landed.id,
+                    repo: landed.repo,
+                    focus: "report",
+                  })
+                }
+              >
+                <Check size={14} /> See what landed
+              </button>
+            )}
+          </div>
+          {cleanupView()}
+          {errorLine}
+        </div>
+        {running.length > 0 && (
+          <div className="inbox-zero-sessions">
+            {(["working", "idle"] as const).map((kind) =>
+              group(
+                kind,
+                running.filter((item) => item.kind === kind),
+              ),
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function cleanupRow(row: InboxRow) {
+    const on = cleanup?.has(row.panel.id) ?? false;
+    const name = row.panel.agent ? agentName(row) : row.panel.title;
+    return (
+      <div key={row.panel.id} className="inbox-cleanup-row">
+        <input
+          type="checkbox"
+          aria-label={`End ${row.panel.title} in ${row.workspace.name}`}
+          checked={on}
+          onChange={(event) =>
+            setCleanup((old) => {
+              const next = new Set(old);
+              if (event.target.checked) next.add(row.panel.id);
+              else next.delete(row.panel.id);
+              return next;
+            })
+          }
+        />
+        <Icon kind={row.panel.kind} agent={row.panel.agent} />
+        <span className="inbox-session-name" title={row.panel.title}>
+          {`${row.workspace.name} · ${name}`}
+        </span>
+        <span className="inbox-session-meta">
+          {groupLabel(groupKey(row.workspace.connection), connectionProfiles)}
+        </span>
+        <button
+          className="inbox-link"
+          aria-label={`Jump to ${row.panel.title}`}
+          onClick={() => jump(row)}
+        >
+          Jump <ArrowUpRight size={12} />
+        </button>
+      </div>
+    );
+  }
+
+  function cleanupView() {
+    const { agents, shells } = candidates;
+    if (agents.length + shells.length === 0) return null;
+    if (!cleanup)
+      return (
+        <div className="inbox-idle">
+          <ListChecks size={12} />
+          <span>
+            {[
+              agents.length ? `${agents.length} idle sessions` : "",
+              shells.length ? `${shells.length} shells` : "",
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </span>
+          <button
+            className="inbox-link"
+            onClick={() =>
+              setCleanup(new Set(agents.map((row) => row.panel.id)))
+            }
+          >
+            Clean up
+          </button>
+        </div>
+      );
+    const chosen = [...agents, ...shells].filter((row) =>
+      cleanup.has(row.panel.id),
+    );
+    return (
+      <div className="inbox-cleanup" aria-label="Sessions to end">
+        {agents.length > 0 && (
+          <>
+            <span className="inbox-eyebrow">IDLE SESSIONS</span>
+            {agents.map(cleanupRow)}
+          </>
+        )}
+        {shells.length > 0 && (
+          <>
+            <span className="inbox-eyebrow">SHELLS · may be running</span>
+            {shells.map(cleanupRow)}
+          </>
+        )}
+        <div className="inbox-cleanup-foot">
+          <span>
+            Running commands in ended sessions stop. Project files stay on disk.
+          </span>
+          <button className="inbox-link" onClick={() => setCleanup(null)}>
+            Cancel
+          </button>
+          <button
+            className="inbox-link danger"
+            disabled={busy || chosen.length === 0}
+            onClick={() =>
+              void act(async () => {
+                await ws.endSessions(
+                  chosen.map(({ workspace, panel }) => ({ workspace, panel })),
+                );
+                setCleanup(null);
+              })
+            }
+          >
+            {busy ? "Closing…" : `End ${chosen.length}`}
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
-    <PageFrame
-      eyebrow="YOUR WORKSPACE"
-      title="Inbox"
-      description="Agents that need you, across every host."
-      actions={
+    <div className="section-page inbox-page">
+      <div className="inbox-head">
+        <div className="inbox-head-title">
+          <h1>Inbox</h1>
+          <p>{headline}</p>
+        </div>
+        <label className="inbox-search">
+          <input
+            aria-label="Search inbox"
+            placeholder="Search title or project…"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </label>
+        <select
+          aria-label="Inbox project"
+          value={project}
+          onChange={(event) => setProject(event.target.value)}
+        >
+          <option value="">All projects</option>
+          {projects.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Inbox host"
+          value={hostFilter}
+          onChange={(event) => setHostFilter(event.target.value)}
+        >
+          <option value="">All hosts</option>
+          {hosts.map(([key, label]) => (
+            <option key={key} value={key}>
+              {label}
+            </option>
+          ))}
+        </select>
         <ExtensionNavSlot
           registry={registry}
           placement="sessions.navigation"
           className="secondary extension-nav"
           onOpen={openExtensionTarget}
         />
-      }
-    >
+      </div>
       <ExtensionSectionSlot
         registry={registry}
         host="sessions.section"
@@ -145,202 +1101,56 @@ export function InboxPage({
         connection={connection}
         workspaces={workspaces}
       />
-      {empty ? (
-        <Empty
-          icon={<InboxIcon size={28} />}
-          title="All quiet."
-          text="Agents that need you will show up here."
-        />
+      {needs.length === 0 ? (
+        zero()
       ) : (
         <>
-          <div className="session-filters">
-            <label className="catalog-search">
-              <Search size={14} />
-              <input
-                aria-label="Search inbox"
-                placeholder="Search title or project…"
-                value={query}
-                onChange={(e) => {
-                  setQuery(e.target.value);
-                  setConfirming(false);
-                }}
-              />
-            </label>
-            <select
-              aria-label="Inbox host"
-              value={hostFilter}
-              onChange={(e) => {
-                setHostFilter(e.target.value);
-                setConfirming(false);
-              }}
-            >
-              <option value="">All hosts</option>
-              {hosts.map(([key, label]) => (
-                <option key={key} value={key}>
-                  {label}
-                </option>
-              ))}
-            </select>
-            <button
-              className="secondary"
-              onClick={() => {
-                setChecked(cleanupSelection(allRows));
-                setConfirming(false);
-              }}
-            >
-              <ListChecks size={13} /> Clean up
-            </button>
-          </div>
-          <div className="session-select-all">
-            <label>
-              <input
-                type="checkbox"
-                checked={
-                  visibleRows.length > 0 &&
-                  selected.length === visibleRows.length
-                }
-                onChange={(e) => {
-                  setChecked(
-                    e.target.checked
-                      ? visibleRows.map((row) => row.panel.id)
-                      : [],
-                  );
-                  setConfirming(false);
-                }}
-              />{" "}
-              Select visible ({visibleRows.length})
-            </label>
-            {selected.length > 0 && <span>{selected.length} selected</span>}
-          </div>
-          <div className="inbox-groups">
-            {visibleTasks.length > 0 && (
-              <div className="inbox-group">
-                <div className="inbox-group-head">
-                  <span>Orchestrator</span>
-                  <span className="count">{visibleTasks.length}</span>
-                </div>
-                {visibleTasks.map((row) => (
-                  <div className="session-row" key={row.key}>
-                    <button
-                      className="inbox-row-open"
-                      title={`Open ${row.title} in the Orchestrator`}
-                      aria-label={`Open task ${row.title}`}
-                      onClick={row.open}
-                    >
-                      <strong>{row.title}</strong>
-                      <small>{row.reason}</small>
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            {visibleGroups
-              .filter((group) => group.rows.length > 0)
-              .map((group) => (
-                <div className="inbox-group" key={group.key}>
-                  <div className="inbox-group-head">
-                    <span>{group.label}</span>
-                    <span className="count">{group.rows.length}</span>
-                  </div>
-                  {group.rows.map((row) => {
-                    const hostKey = groupKey(row.workspace.connection);
-                    const hostLabel = groupLabel(hostKey, connectionProfiles);
-                    const HostIcon = hostKey === LOCAL_GROUP ? Server : Globe;
-                    const elapsed =
-                      row.since != null
-                        ? formatElapsed(Date.now() - row.since)
-                        : null;
-                    return (
-                      <div className="session-row" key={row.panel.id}>
-                        <input
-                          aria-label={`Select ${row.panel.title} in ${row.workspace.name}`}
-                          type="checkbox"
-                          checked={checked.includes(row.panel.id)}
-                          onChange={(e) =>
-                            toggle(row.panel.id, e.target.checked)
-                          }
-                        />
-                        <Icon kind={row.panel.kind} agent={row.panel.agent} />
-                        {/* The row itself is the way back into the session:
-                            the project leads, because that is what tells two
-                            "Claude Code" rows apart, and the icon already
-                            names the agent. */}
-                        <button
-                          className="inbox-row-open"
-                          title={`Open ${row.panel.title} in ${row.workspace.name}`}
-                          aria-label={`Jump to ${row.panel.title} in ${row.workspace.name}`}
-                          onClick={() => jump(row)}
-                        >
-                          <strong>
-                            {row.workspace.name}
-                            {manyHosts && (
-                              <span
-                                className="inbox-row-host"
-                                title={hostLabel}
-                              >
-                                <HostIcon size={11} />
-                              </span>
-                            )}
-                          </strong>
-                          <small>{row.panel.title}</small>
-                        </button>
-                        {elapsed && (
-                          <span className="inbox-row-time">{elapsed}</span>
-                        )}
-                        {group.key === "done" && (
-                          <button
-                            title={`Mark ${row.panel.title} seen`}
-                            aria-label={`Mark ${row.panel.title} seen`}
-                            onClick={() => markSeen(row.panel.id)}
-                          >
-                            <Check size={14} />
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              ))}
-          </div>
-          {confirming ? (
-            <div className="delete-confirm">
-              <p>
-                End these {selected.length} selected sessions? Running commands
-                will stop. Project files will stay on disk.
-              </p>
-              <button onClick={() => setConfirming(false)}>Cancel</button>
-              <button
-                className="danger"
-                disabled={busy}
-                onClick={async () => {
-                  setBusy(true);
-                  try {
-                    await ws.endSessions(
-                      selected.map(({ workspace, panel }) => ({
-                        workspace,
-                        panel,
-                      })),
-                    );
-                    setChecked([]);
-                    setConfirming(false);
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
+          <div className="inbox-filters">
+            {CHIPS.map(({ filter: value, label }) => (
+              <Chip
+                key={value}
+                selected={filter === value}
+                onClick={() => setFilter(value)}
               >
-                {busy ? "Closing…" : `End ${selected.length} sessions`}
-              </button>
+                {`${label} ${counts(value)}`}
+              </Chip>
+            ))}
+          </div>
+          <div className="inbox-split">
+            <div className="inbox-queue">
+              {KINDS.map((kind) =>
+                group(
+                  kind,
+                  visible.filter((item) => item.kind === kind),
+                ),
+              )}
+              {visible.length === 0 && (
+                <p className="inbox-none">Nothing matches.</p>
+              )}
+              {cleanupView()}
+              {errorLine}
             </div>
-          ) : selected.length > 0 ? (
-            <button
-              className="danger session-close-button"
-              onClick={() => setConfirming(true)}
-            >
-              <Trash2 size={13} /> End selected
-            </button>
-          ) : null}
+            <div className="inbox-preview">
+              {selected ? preview(selected) : null}
+            </div>
+          </div>
+          <div className="inbox-keys">
+            {[
+              ["J K", "move"],
+              ["1–9", "pick"],
+              ["⏎", "answer"],
+              ["L", "land"],
+              ["R", "run again"],
+              ["E", "done"],
+            ].map(([key, text]) => (
+              <span key={text}>
+                <kbd>{key}</kbd>
+                {text}
+              </span>
+            ))}
+          </div>
         </>
       )}
-    </PageFrame>
+    </div>
   );
 }

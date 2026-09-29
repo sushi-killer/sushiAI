@@ -290,7 +290,7 @@ try {
   report.mascot.done = {
     text: await bubbleText(),
     sushi: await mascot.locator("svg.sushi").count(),
-    open: await mascot.getByRole("button", { name: "Open" }).count(),
+    open: await mascot.getByRole("button", { name: "View diff" }).count(),
     dismiss: await mascot.getByRole("button", { name: "Dismiss" }).count(),
   };
   await dismiss();
@@ -353,7 +353,7 @@ try {
       return {
         title: fits(title),
         answerField: fits(bubble.querySelector('input[aria-label="Answer"]')),
-        open: fits(byName("Open")),
+        open: fits(byName("Open task")),
         dismiss: fits(byName("Dismiss")),
         titleLines: Math.round(
           title.getBoundingClientRect().height / lineHeight,
@@ -413,7 +413,7 @@ try {
     }, selector);
   const selectedTitle = () =>
     page
-      .locator(".orch-task-row.selected .orch-task-title")
+      .locator(".ui-task-row.selected .ui-task-row-title")
       .first()
       .innerText()
       .catch(() => "");
@@ -423,12 +423,15 @@ try {
       title,
       title === "Landed feature" ? "Feature done" : title,
     );
-    await mascot.getByRole("button", { name: "Open" }).first().click();
-    await page.locator(".orch-detail").waitFor({ timeout: 15000 });
+    await mascot
+      .getByRole("button", { name: /^(Open|View diff)/ })
+      .first()
+      .click();
+    await page.locator(".td").waitFor({ timeout: 15000 });
     await page.waitForFunction(
       ({ sel, expected }) => {
         const picked = document.querySelector(
-          ".orch-task-row.selected .orch-task-title",
+          ".ui-task-row.selected .ui-task-row-title",
         );
         if (picked?.textContent !== expected) return false;
         const el = document.querySelector(sel);
@@ -456,20 +459,27 @@ try {
     };
   }
 
-  report.openInput = await openFrom("Needs a call", "input", ".orch-question");
-  // Back to an unzoomed canvas before the second landing.
-  await page.keyboard.press("Escape");
-  // Start the second landing from a section page: opening must leave it.
-  await page.getByRole("button", { name: /^Routines/ }).click();
-  const routines = page.getByRole("heading", { name: "Routines" });
-  await routines.first().waitFor({ timeout: 10000 });
-  report.openedFrom = "Routines section page";
-  report.openDone = await openFrom("Landed feature", "done", ".orch-report");
-  report.leftSection = (await routines.count()) === 0;
+  // The panel-side steps depend on the task view's DOM; a break there is
+  // recorded and the mascot checks below still run.
+  try {
+    report.openInput = await openFrom("Needs a call", "input", ".td-question");
+    // Back to an unzoomed canvas before the second landing.
+    await page.keyboard.press("Escape");
+    // Start the second landing from a section page: opening must leave it.
+    await page.getByRole("button", { name: /^Routines/ }).click();
+    const routines = page.getByRole("heading", { name: "Routines" });
+    await routines.first().waitFor({ timeout: 10000 });
+    report.openedFrom = "Routines section page";
+    report.openDone = await openFrom("Landed feature", "done", ".td-report");
+    report.leftSection = (await routines.count()) === 0;
+  } catch (error) {
+    report.openFlowError = String(error.message ?? error).split("\n")[0];
+  }
 
   // Quick answer: the Stop option, then the short confirmation.
   await mascot.locator(".bubble.input").waitFor();
   await mascot.getByRole("button", { name: "Stop", exact: true }).click();
+  await mascot.getByRole("button", { name: "Send answer" }).click();
   await mascot.locator(".bubble.answered").waitFor({ timeout: 10000 });
   await shotMascot("mascot-answered");
   report.mascot.answered = await bubbleText();
@@ -488,16 +498,18 @@ try {
   };
 
   const problems = [];
-  if (report.panelBefore !== 0)
-    problems.push("an Orchestrator panel existed before opening");
-  if (report.openInput.selectedTitle !== "Needs a call")
-    problems.push("input open selected the wrong task");
-  if (!report.openInput.inViewport)
-    problems.push(".orch-question is not in view");
-  if (report.openDone.selectedTitle !== "Landed feature")
-    problems.push("done open selected the wrong task");
-  if (!report.leftSection) problems.push("the section page was not left");
-  if (!report.openDone.inViewport) problems.push(".orch-report is not in view");
+  if (!report.openFlowError) {
+    if (report.panelBefore !== 0)
+      problems.push("an Orchestrator panel existed before opening");
+    if (report.openInput.selectedTitle !== "Needs a call")
+      problems.push("input open selected the wrong task");
+    if (!report.openInput.inViewport)
+      problems.push(".td-question is not in view");
+    if (report.openDone.selectedTitle !== "Landed feature")
+      problems.push("done open selected the wrong task");
+    if (!report.leftSection) problems.push("the section page was not left");
+    if (!report.openDone.inViewport) problems.push(".td-report is not in view");
+  }
   const box = report.focusAfter.mascot?.bounds;
   const area = report.focusAfter.workArea;
   if (
@@ -550,8 +562,9 @@ try {
       );
     if (!ok) problems.push(`${name}: option text or accessible name differs`);
   }
-  if (report.mascot.answered !== "Answered Thanks, the task carries on.")
+  if (!/the task carries on\.$/.test(report.mascot.answered))
     problems.push("no Answered confirmation");
+  if (report.openFlowError) problems.push(`open flow: ${report.openFlowError}`);
   if (problems.length) report.error = problems.join("; ");
 } catch (error) {
   report.error = String(error?.message ?? error);

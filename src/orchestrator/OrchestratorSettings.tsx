@@ -1,34 +1,25 @@
-import { useEffect, useState } from "react";
-import { Plus, RotateCcw, Trash2 } from "lucide-react";
-import "./orchestrator.css";
+import { useEffect, useState, type ReactNode } from "react";
+import { ChevronDown, ChevronRight, Plus, Trash2, X } from "lucide-react";
+import "./orchestrator-settings.css";
 import { orchestratorClient } from "./client";
 import {
+  errorText,
   type DefaultableSetting,
   resetSettingToDefault,
   settingValue,
   settingsDifferingFromDefaults,
 } from "./helpers";
-import type { ChatModels, ModelProfile, ModelProvider } from "../types";
-import type {
-  ClassifierBackend,
-  Harness,
-  Route,
-  Settings,
-  Tier,
-} from "./types";
+import { Stepper } from "./ui";
+import {
+  applyPreset,
+  countChanges,
+  presetOf,
+  type AutonomyPreset,
+} from "./autonomy";
+import type { ChatModels, ModelProfile } from "../types";
+import type { Harness, Route, Settings, Tier } from "./types";
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-const TIERS: Tier[] = ["mechanical", "standard", "hard"];
 const HARNESSES: Harness[] = ["claude", "codex"];
-const CLASSIFIER_BACKENDS: { value: ClassifierBackend; label: string }[] = [
-  { value: "none", label: "Off (rules only)" },
-  { value: "openrouter", label: "OpenRouter" },
-  { value: "typesafe", label: "TypeSafe" },
-  { value: "openai", label: "OpenAI-compatible (Ollama / LM Studio)" },
-];
 
 const SETTING_LABELS: Record<DefaultableSetting, string> = {
   "tiers.mechanical": "Mechanical tier",
@@ -75,11 +66,6 @@ function defaultText(
     return value === "auto" ? "Auto (never weaker)" : "Off";
   if (field === "planner") return "Off";
   if (field === "orchestrator") return "Standard route";
-  if (field === "classifier.backend")
-    return (
-      CLASSIFIER_BACKENDS.find((backend) => backend.value === value)?.label ||
-      String(value)
-    );
   if (typeof value === "boolean") return value ? "On" : "Off";
   if (Array.isArray(value)) return value.length ? value.join(", ") : "None";
   return String(value) || "None";
@@ -93,18 +79,148 @@ function newRoute(harness: Harness): Route {
   };
 }
 
-function linesToList(text: string): string[] {
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-}
-
 /** Mirrors the engine's built-in strength for a route's model. */
 function defaultStrength(model?: string): number {
   const m = (model || "").toLowerCase();
   if (/haiku|luna|mini/.test(m)) return 1;
   return m.includes("opus") ? 3 : 2;
+}
+
+function Toggle({
+  on,
+  label,
+  onChange,
+}: {
+  on: boolean;
+  label: string;
+  onChange(next: boolean): void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      className={`os-toggle${on ? " on" : ""}`}
+      onClick={() => onChange(!on)}
+    >
+      <span className="os-knob" />
+    </button>
+  );
+}
+
+function Select({
+  value,
+  label,
+  onChange,
+  children,
+  className = "",
+}: {
+  value: string;
+  label: string;
+  onChange(value: string): void;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <span className={`os-select ${className}`}>
+      <select
+        value={value}
+        aria-label={label}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {children}
+      </select>
+      <ChevronDown size={12} aria-hidden />
+    </span>
+  );
+}
+
+function ChipList({
+  values,
+  label,
+  placeholder,
+  onChange,
+}: {
+  values: string[];
+  label: string;
+  placeholder: string;
+  onChange(next: string[]): void;
+}) {
+  const [text, setText] = useState("");
+  function commit() {
+    const items = text
+      .split(/[,\n]/)
+      .map((item) => item.trim())
+      .filter((item) => item && !values.includes(item));
+    if (items.length) onChange([...values, ...items]);
+    setText("");
+  }
+  return (
+    <div className="os-tokens">
+      {values.map((value) => (
+        <span key={value} className="os-token">
+          {value}
+          <button
+            type="button"
+            aria-label={`Remove ${value}`}
+            onClick={() => onChange(values.filter((item) => item !== value))}
+          >
+            <X size={11} />
+          </button>
+        </span>
+      ))}
+      <input
+        value={text}
+        aria-label={label}
+        placeholder={placeholder}
+        onChange={(event) => setText(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === ",") {
+            event.preventDefault();
+            commit();
+          }
+        }}
+        onBlur={commit}
+      />
+    </div>
+  );
+}
+
+/** A dollar cap: empty means none. Keeps its own text so "0." survives typing. */
+function DollarInput({
+  value,
+  label,
+  onChange,
+}: {
+  value: number | undefined;
+  label: string;
+  onChange(next: number | undefined): void;
+}) {
+  const [text, setText] = useState(value ? String(value) : "");
+  useEffect(() => {
+    setText((old) =>
+      Number(old) === (value || 0) ? old : value ? String(value) : "",
+    );
+  }, [value]);
+  return (
+    <label className="os-input">
+      <span>$</span>
+      <input
+        inputMode="decimal"
+        value={text}
+        aria-label={label}
+        placeholder="No cap"
+        onChange={(event) => {
+          const raw = event.target.value;
+          if (!/^\d*\.?\d*$/.test(raw)) return;
+          setText(raw);
+          const parsed = Number(raw);
+          onChange(parsed > 0 ? parsed : undefined);
+        }}
+      />
+    </label>
+  );
 }
 
 function RouteRow({
@@ -123,40 +239,36 @@ function RouteRow({
   const models = chatModels[route.harness]?.models || [];
   const efforts = chatModels[route.harness]?.efforts || [];
   return (
-    <div className="orch-route-row">
+    <div className="os-route-row">
       <input
-        className="orch-route-label"
+        className="os-route-label"
         value={route.label}
         onChange={(event) => onChange({ ...route, label: event.target.value })}
         aria-label="Route label"
         placeholder="Label"
       />
-      <select
-        className="orch-route-harness"
+      <Select
+        label="Harness"
         value={route.harness}
-        onChange={(event) =>
+        onChange={(harness) =>
           onChange({
             ...route,
-            harness: event.target.value as Harness,
+            harness: harness as Harness,
             model: undefined,
             profileId: undefined,
           })
         }
-        aria-label="Harness"
       >
         {HARNESSES.map((harness) => (
           <option key={harness} value={harness}>
             {harness}
           </option>
         ))}
-      </select>
-      <select
-        className="orch-route-model"
+      </Select>
+      <Select
+        label="Model"
         value={route.model || ""}
-        onChange={(event) =>
-          onChange({ ...route, model: event.target.value || undefined })
-        }
-        aria-label="Model"
+        onChange={(model) => onChange({ ...route, model: model || undefined })}
       >
         <option value="">Default model</option>
         {models.map((model) => (
@@ -164,85 +276,98 @@ function RouteRow({
             {model.label}
           </option>
         ))}
-      </select>
-      <select
-        className="orch-route-effort"
+      </Select>
+      <Select
+        label="Effort"
         value={route.effort || ""}
-        onChange={(event) =>
-          onChange({ ...route, effort: event.target.value || undefined })
+        onChange={(effort) =>
+          onChange({ ...route, effort: effort || undefined })
         }
-        aria-label="Effort"
       >
-        <option value="">Default effort</option>
+        <option value="">Default</option>
         {efforts.map((effort) => (
           <option key={effort} value={effort}>
             {effort}
           </option>
         ))}
-      </select>
-      {route.harness === "claude" && (
-        <select
-          className="orch-route-profile"
+      </Select>
+      {route.harness === "claude" ? (
+        <Select
+          label="Model profile"
           value={route.profileId || ""}
-          onChange={(event) =>
-            onChange({ ...route, profileId: event.target.value || undefined })
+          onChange={(profileId) =>
+            onChange({ ...route, profileId: profileId || undefined })
           }
-          aria-label="Model profile"
         >
-          <option value="">Anthropic (no profile)</option>
+          <option value="">Anthropic</option>
           {profiles.map((profile) => (
             <option key={profile.id} value={profile.id}>
               {profile.label}
             </option>
           ))}
-        </select>
+        </Select>
+      ) : (
+        <span />
       )}
-      <div className="orch-route-tail">
-        <input
-          className="orch-route-strength"
-          type="number"
-          min={1}
-          max={3}
-          value={route.strength ?? ""}
-          placeholder={String(defaultStrength(route.model))}
-          onChange={(event) =>
-            onChange({
-              ...route,
-              strength: event.target.value
-                ? Number(event.target.value)
-                : undefined,
-            })
-          }
-          aria-label="Strength"
-        />
-        <button
-          className="icon-button orch-route-delete"
-          title={`Remove route ${route.label}`}
-          onClick={onDelete}
-          type="button"
-        >
-          <Trash2 size={13} />
-        </button>
-      </div>
+      <button
+        className="icon-button os-route-delete"
+        title={`Remove route ${route.label}`}
+        aria-label={`Remove route ${route.label}`}
+        onClick={onDelete}
+        type="button"
+      >
+        <Trash2 size={14} />
+      </button>
     </div>
   );
 }
 
+function SectionHead({ title, note }: { title: string; note: string }) {
+  return (
+    <div className="os-head">
+      <p className="os-eyebrow">{title}</p>
+      <p className="os-note">{note}</p>
+    </div>
+  );
+}
+
+const PRESET_CARDS: {
+  id: "ask" | "balanced" | "handsOff";
+  title: string;
+  text: string;
+}[] = [
+  {
+    id: "ask",
+    title: "Ask me",
+    text: "Every question comes to you. Nothing lands without your click.",
+  },
+  {
+    id: "balanced",
+    title: "Balanced",
+    text: "Confident answers are taken for you and shown. Finished work lands on its branch, never on main.",
+  },
+  {
+    id: "handsOff",
+    title: "Hands-off",
+    text: "Also retries failures with a note and lands follow-ups. You see a daily digest.",
+  },
+];
+
+const TIER_CARDS: { tier: Tier; title: string; hint: string }[] = [
+  { tier: "mechanical", title: "Mechanical", hint: "renames, config, copy" },
+  { tier: "standard", title: "Standard", hint: "most tasks" },
+  { tier: "hard", title: "Hard", hint: "architecture, tricky bugs" },
+];
+
 export function OrchestratorSettings() {
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [providers, setProviders] = useState<ModelProvider[]>([]);
+  const [saved, setSaved] = useState<Settings | null>(null);
   const [profiles, setProfiles] = useState<ModelProfile[]>([]);
   const [chatModels, setChatModels] = useState<ChatModels>({});
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [notBuilt, setNotBuilt] = useState(false);
-  // Raw textarea text, decoupled from `settings.allowedDomains`/
-  // `protectedPaths`: parsing into a list on every keystroke rebuilds the
-  // controlled value from the filtered array immediately after, which drops
-  // a trailing newline before Enter can ever start a new line. Parsed back
-  // into `settings` on blur and again at save time.
-  const [domainsText, setDomainsText] = useState("");
-  const [pathsText, setPathsText] = useState("");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   // orchd's built-in defaults; stays null on an older orchd without
   // `settings.defaults`, which just means no default markers.
   const [defaults, setDefaults] = useState<Settings | null>(null);
@@ -250,15 +375,12 @@ export function OrchestratorSettings() {
   useEffect(() => {
     Promise.all([
       orchestratorClient.settingsGet(),
-      window.bridge?.providersList() ?? Promise.resolve([]),
       window.bridge?.modelProfilesList() ?? Promise.resolve([]),
       window.bridge?.chatModels() ?? Promise.resolve({}),
     ])
-      .then(([s, p, m, c]) => {
+      .then(([s, m, c]) => {
         setSettings(s);
-        setDomainsText(s.allowedDomains.join("\n"));
-        setPathsText(s.protectedPaths.join("\n"));
-        setProviders(p);
+        setSaved(s);
         setProfiles(m);
         setChatModels(c);
       })
@@ -282,7 +404,7 @@ export function OrchestratorSettings() {
         and reopen Settings.
       </p>
     );
-  if (!settings)
+  if (!settings || !saved)
     return error ? (
       <p className="inline-error" role="alert">
         {error}
@@ -294,25 +416,28 @@ export function OrchestratorSettings() {
   function update(patch: Partial<Settings>) {
     setSettings((old) => (old ? { ...old, ...patch } : old));
   }
+  function updateExperiments(patch: Partial<Settings["experiments"]>) {
+    setSettings((old) =>
+      old ? { ...old, experiments: { ...old.experiments, ...patch } } : old,
+    );
+  }
 
   const differing = defaults
     ? settingsDifferingFromDefaults(settings, defaults)
     : [];
+  const changes = countChanges(saved, settings);
+  const preset: AutonomyPreset = presetOf(settings);
+  const dailyBudget = "maxDailyCostUsd" in settings;
 
   function resetToDefault(field: DefaultableSetting) {
     if (!defaults) return;
     setSettings((old) =>
       old ? resetSettingToDefault(old, defaults, field) : old,
     );
-    if (field === "allowedDomains")
-      setDomainsText(defaults.allowedDomains.join("\n"));
-    if (field === "protectedPaths")
-      setPathsText(defaults.protectedPaths.join("\n"));
   }
 
-  /** The marker and reset button beside a control whose saved value differs
-   * from orchd's default. Reset only stages the value; Save still writes it,
-   * like every other edit here. */
+  /** "changed · default Off ↺" beside a setting saved away from orchd's
+   * default. Reset only stages the value; Save still writes it. */
   function defaultMarker(field: DefaultableSetting) {
     if (!defaults || !settings || !differing.includes(field)) return null;
     const label = SETTING_LABELS[field];
@@ -330,25 +455,40 @@ export function OrchestratorSettings() {
       routeId !== null &&
       !settings.routes.some((route) => route.id === routeId);
     return (
-      <span className="orch-default-marker">
-        {missing
-          ? `Differs from the default (${text}).`
-          : `Differs from the default (${text}). Reset restores it.`}
-        <button
-          type="button"
-          className="icon-button"
-          aria-label={`Reset ${label} to default`}
-          title={
-            missing
-              ? `Route ${text} is not configured`
-              : `Reset ${label} to default`
-          }
-          disabled={missing}
-          onClick={() => resetToDefault(field)}
-        >
-          <RotateCcw size={12} />
-        </button>
-      </span>
+      <button
+        type="button"
+        className="os-diff"
+        aria-label={`Reset ${label} to default`}
+        title={
+          missing
+            ? `Route ${text} is not configured`
+            : `Reset ${label} to default`
+        }
+        disabled={missing}
+        onClick={() => resetToDefault(field)}
+      >
+        changed · default {text} ↺
+      </button>
+    );
+  }
+
+  function row(
+    title: string,
+    description: string,
+    control: ReactNode,
+    field?: DefaultableSetting,
+  ) {
+    return (
+      <div className="os-row">
+        <div className="os-row-text">
+          <div className="os-row-head">
+            <span className="os-row-title">{title}</span>
+            {field && defaultMarker(field)}
+          </div>
+          <span className="os-row-desc">{description}</span>
+        </div>
+        {control}
+      </div>
     );
   }
 
@@ -357,17 +497,9 @@ export function OrchestratorSettings() {
     setSaving(true);
     setError("");
     try {
-      // Parsed here too, not just on blur: a click straight from a focused
-      // textarea to Save must not lose whatever hasn't blurred yet.
-      const toSave: Settings = {
-        ...settings,
-        allowedDomains: linesToList(domainsText),
-        protectedPaths: linesToList(pathsText),
-      };
-      const saved = await orchestratorClient.settingsSet(toSave);
-      setSettings(saved);
-      setDomainsText(saved.allowedDomains.join("\n"));
-      setPathsText(saved.protectedPaths.join("\n"));
+      const result = await orchestratorClient.settingsSet(settings);
+      setSettings(result);
+      setSaved(result);
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -375,10 +507,129 @@ export function OrchestratorSettings() {
     }
   }
 
+  function routeOptions(extra: ReactNode) {
+    return (
+      <>
+        {extra}
+        {settings?.routes.map((route) => (
+          <option key={route.id} value={route.id}>
+            {route.label}
+          </option>
+        ))}
+      </>
+    );
+  }
+
+  function tierCard(
+    key: string,
+    title: string,
+    hint: string | undefined,
+    select: ReactNode,
+    marker: ReactNode,
+    warning?: ReactNode,
+  ) {
+    return (
+      <div key={key} className="os-tier">
+        <div className="os-tier-head">
+          <span className="os-tier-title">{title}</span>
+          {hint && <span className="os-tier-hint">{hint}</span>}
+        </div>
+        {select}
+        {warning}
+        {marker}
+      </div>
+    );
+  }
+
   return (
     <div className="orchestrator-settings">
-      <div className="setting-block">
-        <p className="dialog-eyebrow">ROUTES</p>
+      <SectionHead
+        title="AUTONOMY"
+        note="One choice sets how often the orchestrator stops to ask you. Fine-tune below."
+      />
+      <div className="os-presets" role="radiogroup" aria-label="Autonomy">
+        {PRESET_CARDS.map((card) => {
+          const disabled = card.id === "handsOff";
+          const selected = preset === card.id;
+          return (
+            <button
+              key={card.id}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              disabled={disabled}
+              className={`os-preset${selected ? " selected" : ""}`}
+              onClick={() => {
+                if (card.id !== "handsOff")
+                  setSettings((old) =>
+                    old ? applyPreset(old, card.id as "ask" | "balanced") : old,
+                  );
+              }}
+            >
+              <span className="os-preset-title">
+                <i className="os-radio" />
+                {card.title}
+              </span>
+              <span className="os-preset-text">{card.text}</span>
+              {disabled && (
+                <span className="os-preset-soon">
+                  Coming: needs orchestrator support that isn't built yet.
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+      {preset === "custom" && (
+        <p className="os-custom">
+          Custom: the rows below don't match a preset. Pick a card to reset
+          them.
+        </p>
+      )}
+      {row(
+        "Answer stuck questions for me",
+        "When the orchestrator is confident it answers itself and tells you what it chose. You can overturn it.",
+        <Toggle
+          on={settings.autoAnswer}
+          label="Answer stuck questions for me"
+          onChange={(autoAnswer) => update({ autoAnswer })}
+        />,
+        "autoAnswer",
+      )}
+      {row(
+        "Land finished work",
+        "Merge a passed task into its base branch. Never lands on the default branch.",
+        <Toggle
+          on={settings.experiments.land === true}
+          label="Land finished work"
+          onChange={(land) => updateExperiments({ land })}
+        />,
+      )}
+      {row(
+        "Max attempts",
+        "How many times a task is retried before it comes to you.",
+        <Stepper
+          label="Max attempts"
+          min={1}
+          value={settings.maxAttempts}
+          onChange={(maxAttempts) => update({ maxAttempts })}
+        />,
+        "maxAttempts",
+      )}
+
+      <SectionHead
+        title="MODELS & ROUTES"
+        note="A route is a harness plus a model. Tiers pick a route by how hard the task looks."
+      />
+      <div className="os-routes">
+        <div className="os-route-row os-route-header">
+          <span>Route</span>
+          <span>Harness</span>
+          <span>Model</span>
+          <span>Effort</span>
+          <span>Profile</span>
+          <span />
+        </div>
         {settings.routes.map((route) => (
           <RouteRow
             key={route.id}
@@ -409,6 +660,7 @@ export function OrchestratorSettings() {
         ))}
         <button
           type="button"
+          className="os-add"
           onClick={() =>
             update({ routes: [...settings.routes, newRoute("claude")] })
           }
@@ -416,296 +668,318 @@ export function OrchestratorSettings() {
           <Plus size={13} /> Add route
         </button>
       </div>
-
-      <div className="setting-block">
-        <p className="dialog-eyebrow">TIER → ROUTE</p>
-        <div className="orch-tier-row">
-          {TIERS.map((tier) => (
-            <div key={tier} className="orch-tier-label">
-              <label>
-                <span>{tier}</span>
-                <select
-                  value={settings.tiers[tier] || ""}
-                  onChange={(event) =>
-                    update({
-                      tiers: { ...settings.tiers, [tier]: event.target.value },
-                    })
-                  }
-                >
-                  {settings.routes.map((route) => (
-                    <option key={route.id} value={route.id}>
-                      {route.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {defaultMarker(`tiers.${tier}`)}
-            </div>
-          ))}
-        </div>
-        <div className="orch-review-planner-row">
-          <div className="orch-tier-label">
-            <label>
-              <span>Review</span>
-              <select
-                value={settings.review}
-                onChange={(event) => update({ review: event.target.value })}
-              >
+      <div className="os-tiers">
+        {TIER_CARDS.map(({ tier, title, hint }) =>
+          tierCard(
+            tier,
+            title,
+            hint,
+            <Select
+              label={`${title} tier route`}
+              value={settings.tiers[tier] || ""}
+              onChange={(route) =>
+                update({ tiers: { ...settings.tiers, [tier]: route } })
+              }
+            >
+              {routeOptions(null)}
+            </Select>,
+            defaultMarker(`tiers.${tier}`),
+          ),
+        )}
+        {tierCard(
+          "review",
+          "Review",
+          "a second opinion from another vendor",
+          <Select
+            label="Review route"
+            value={settings.review}
+            onChange={(review) => update({ review })}
+          >
+            {routeOptions(
+              <>
                 <option value="">Off</option>
                 <option value="auto">Auto (never weaker)</option>
-                {settings.routes.map((route) => (
-                  <option key={route.id} value={route.id}>
-                    {route.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {defaultMarker("review")}
-          </div>
-          <div className="orch-tier-label">
-            <label>
-              <span>Planner</span>
-              <select
-                value={settings.planner}
-                onChange={(event) => update({ planner: event.target.value })}
-              >
-                <option value="">Off</option>
-                {settings.routes.map((route) => (
-                  <option key={route.id} value={route.id}>
-                    {route.label}
-                  </option>
-                ))}
-              </select>
-              {settings.planner && settings.planner !== settings.tiers.hard && (
-                <span className="tone-yellow">
-                  Differs from the hard tier's route
-                </span>
-              )}
-            </label>
-            {defaultMarker("planner")}
-          </div>
-          <div className="orch-tier-label">
-            <label>
-              <span>Orchestrator</span>
-              <select
-                value={settings.orchestrator}
-                onChange={(event) =>
-                  update({ orchestrator: event.target.value })
-                }
-              >
-                <option value="">Standard route</option>
-                {settings.routes.map((route) => (
-                  <option key={route.id} value={route.id}>
-                    {route.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {defaultMarker("orchestrator")}
-          </div>
-        </div>
-        <label className="setting-check">
-          <input
-            type="checkbox"
-            checked={settings.autoAnswer}
-            onChange={(event) => update({ autoAnswer: event.target.checked })}
-          />
-          <span>
-            Answer stuck questions for me
-            <em>
-              The orchestrator answers an agent's question when the repository
-              or your earlier decisions settle it, and asks you otherwise. It
-              never approves protected paths, stops a task or adds attempts.
-            </em>
-          </span>
-        </label>
-        {defaultMarker("autoAnswer")}
-      </div>
-
-      <div className="setting-block">
-        <p className="dialog-eyebrow">CLASSIFIER</p>
-        <label className="form-row">
-          Backend
-          <select
-            value={settings.classifier.backend}
-            onChange={(event) =>
-              update({
-                classifier: {
-                  ...settings.classifier,
-                  backend: event.target.value as ClassifierBackend,
-                },
-              })
-            }
-          >
-            {CLASSIFIER_BACKENDS.map((backend) => (
-              <option key={backend.value} value={backend.value}>
-                {backend.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        {defaultMarker("classifier.backend")}
-        {settings.classifier.backend !== "none" && (
-          <>
-            <label className="form-row">
-              Model
-              <input
-                value={settings.classifier.model}
-                onChange={(event) =>
-                  update({
-                    classifier: {
-                      ...settings.classifier,
-                      model: event.target.value,
-                    },
-                  })
-                }
-                placeholder="typesafe/jev-1.13"
-              />
-            </label>
-            {defaultMarker("classifier.model")}
-            <label className="form-row">
-              Provider (API key)
-              <select
-                value={settings.classifier.providerId}
-                onChange={(event) =>
-                  update({
-                    classifier: {
-                      ...settings.classifier,
-                      providerId: event.target.value,
-                    },
-                  })
-                }
-              >
-                <option value="">Choose a provider…</option>
-                {providers.map((provider) => (
-                  <option key={provider.id} value={provider.id}>
-                    {provider.label} {provider.hasKey ? "✓" : "(no key)"}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {settings.classifier.backend === "openai" && (
-              <p className="text-muted">
-                Uses the selected provider's own base URL - there is no separate
-                endpoint field.
-              </p>
+              </>,
             )}
-          </>
+          </Select>,
+          defaultMarker("review"),
+        )}
+        {tierCard(
+          "planner",
+          "Planner",
+          undefined,
+          <Select
+            label="Planner route"
+            value={settings.planner}
+            onChange={(planner) => update({ planner })}
+          >
+            {routeOptions(<option value="">Off</option>)}
+          </Select>,
+          defaultMarker("planner"),
+          settings.planner && settings.planner !== settings.tiers.hard ? (
+            <span className="os-warn">Differs from the hard tier's route</span>
+          ) : null,
+        )}
+        {tierCard(
+          "orchestrator",
+          "Orchestrator chat",
+          undefined,
+          <Select
+            label="Orchestrator chat route"
+            value={settings.orchestrator}
+            onChange={(orchestrator) => update({ orchestrator })}
+          >
+            {routeOptions(<option value="">Standard route</option>)}
+          </Select>,
+          defaultMarker("orchestrator"),
         )}
       </div>
 
-      <div className="setting-block">
-        <p className="dialog-eyebrow">SANDBOX AND LIMITS</p>
-        <div
-          className="workspace-control-tabs"
-          role="radiogroup"
-          aria-label="Sandbox"
+      <SectionHead
+        title="SAFETY & LIMITS"
+        note="Where agents run, what they may reach, and how much runs at once."
+      />
+      {row(
+        "Sandbox",
+        "native isolates each agent in a macOS sandbox; host runs it with your user rights.",
+        <Select
+          label="Sandbox"
+          className="os-select-fixed"
+          value={settings.sandbox}
+          onChange={(sandbox) =>
+            update({ sandbox: sandbox as Settings["sandbox"] })
+          }
         >
-          {(["native", "host"] as const).map((value) => (
-            <button
-              key={value}
-              role="radio"
-              aria-checked={settings.sandbox === value}
-              className={settings.sandbox === value ? "selected" : ""}
-              onClick={() => update({ sandbox: value })}
-            >
-              {value}
-            </button>
-          ))}
+          <option value="native">native</option>
+          <option value="host">host</option>
+        </Select>,
+        "sandbox",
+      )}
+      {row(
+        "Codex network access",
+        "Let Codex tasks reach the network. Claude tasks follow the allowed domains below.",
+        <Toggle
+          on={settings.codexNetwork}
+          label="Codex network access"
+          onChange={(codexNetwork) => update({ codexNetwork })}
+        />,
+        "codexNetwork",
+      )}
+      <div className="os-block">
+        <div className="os-row-head">
+          <span className="os-row-title">Allowed network domains</span>
+          {defaultMarker("allowedDomains")}
         </div>
-        {defaultMarker("sandbox")}
-        <label className="setting-check">
-          <input
-            type="checkbox"
-            checked={settings.codexNetwork}
-            onChange={(event) => update({ codexNetwork: event.target.checked })}
+        <span className="os-row-desc">
+          Everything else is blocked inside the sandbox.
+        </span>
+        <ChipList
+          values={settings.allowedDomains}
+          label="Add a domain"
+          placeholder="Add a domain…"
+          onChange={(allowedDomains) => update({ allowedDomains })}
+        />
+      </div>
+      <div className="os-block">
+        <div className="os-row-head">
+          <span className="os-row-title">Protected paths</span>
+          {defaultMarker("protectedPaths")}
+        </div>
+        <span className="os-row-desc">
+          Agents may read these but never change them.
+        </span>
+        <ChipList
+          values={settings.protectedPaths}
+          label="Add a glob"
+          placeholder="Add a glob…"
+          onChange={(protectedPaths) => update({ protectedPaths })}
+        />
+      </div>
+      <div className="os-limits">
+        <div className="os-limit">
+          <span>Parallel tasks</span>
+          <Stepper
+            label="Parallel tasks"
+            min={1}
+            value={settings.parallel}
+            onChange={(parallel) => update({ parallel })}
           />
-          <span>
-            Codex network access
-            <em>
-              All or nothing - Codex has no per-domain filter, unlike Claude's
-              sandbox below.
-            </em>
-          </span>
-        </label>
-        {defaultMarker("codexNetwork")}
-        <label>
-          Allowed network domains (Claude's sandbox only, one per line)
-          <textarea
-            value={domainsText}
-            onChange={(event) => setDomainsText(event.target.value)}
-            onBlur={() => update({ allowedDomains: linesToList(domainsText) })}
-            rows={3}
+          {defaultMarker("parallel")}
+        </div>
+        <div className="os-limit">
+          <span>Subtasks per task</span>
+          <Stepper
+            label="Subtasks per task"
+            min={1}
+            value={settings.childParallel}
+            onChange={(childParallel) => update({ childParallel })}
           />
-        </label>
-        {defaultMarker("allowedDomains")}
-        <label>
-          Protected paths (globs, one per line)
-          <textarea
-            value={pathsText}
-            onChange={(event) => setPathsText(event.target.value)}
-            onBlur={() => update({ protectedPaths: linesToList(pathsText) })}
-            rows={2}
-            placeholder="src/app/**"
-          />
-        </label>
-        {defaultMarker("protectedPaths")}
-        <div className="form-row">
-          <div className="orch-default-field">
-            <label>
-              Max attempts
-              <input
-                type="number"
-                min={1}
-                value={settings.maxAttempts}
-                onChange={(event) =>
-                  update({ maxAttempts: Number(event.target.value) || 1 })
-                }
-              />
-            </label>
-            {defaultMarker("maxAttempts")}
-          </div>
-          <div className="orch-default-field">
-            <label>
-              Parallel tasks
-              <input
-                type="number"
-                min={1}
-                value={settings.parallel}
-                onChange={(event) =>
-                  update({ parallel: Number(event.target.value) || 1 })
-                }
-              />
-            </label>
-            {defaultMarker("parallel")}
-          </div>
-          <div className="orch-default-field">
-            <label>
-              Parallel subtasks per task
-              <input
-                type="number"
-                min={1}
-                value={settings.childParallel}
-                onChange={(event) =>
-                  update({ childParallel: Number(event.target.value) || 1 })
-                }
-              />
-            </label>
-            {defaultMarker("childParallel")}
-          </div>
+          {defaultMarker("childParallel")}
         </div>
       </div>
+
+      <SectionHead
+        title="BUDGET"
+        note="A task that would cross a cap stops and comes to you instead."
+      />
+      <div className="os-budget">
+        <div className="os-limit">
+          <span>Per task</span>
+          <DollarInput
+            label="Budget per task"
+            value={settings.experiments.maxCostUsd}
+            onChange={(maxCostUsd) => updateExperiments({ maxCostUsd })}
+          />
+        </div>
+        <div className="os-limit">
+          <span>Per attempt</span>
+          <DollarInput
+            label="Budget per attempt"
+            value={settings.experiments.maxAttemptCostUsd}
+            onChange={(maxAttemptCostUsd) =>
+              updateExperiments({ maxAttemptCostUsd })
+            }
+          />
+        </div>
+        {dailyBudget && (
+          <div className="os-limit">
+            <span>Per day</span>
+            <DollarInput
+              label="Budget per day"
+              value={(settings as { maxDailyCostUsd?: number }).maxDailyCostUsd}
+              onChange={(next) =>
+                setSettings((old) =>
+                  old ? { ...old, maxDailyCostUsd: next } : old,
+                )
+              }
+            />
+          </div>
+        )}
+      </div>
+
+      <button
+        type="button"
+        className="os-advanced"
+        aria-expanded={advancedOpen}
+        onClick={() => setAdvancedOpen(!advancedOpen)}
+      >
+        <ChevronRight size={13} className={advancedOpen ? "open" : ""} />
+        Advanced — experiments and route strength
+      </button>
+      {advancedOpen && (
+        <div className="os-advanced-body">
+          {row(
+            "Review with evidence",
+            "The reviewer gets the screenshots the attempt saved and longer verify output.",
+            <Toggle
+              on={settings.experiments.reviewEvidence}
+              label="Review with evidence"
+              onChange={(reviewEvidence) =>
+                updateExperiments({ reviewEvidence })
+              }
+            />,
+          )}
+          {row(
+            "Advisor after a failed attempt",
+            "One read-only call on the planner's route diagnoses the failure for the next attempt.",
+            <Toggle
+              on={settings.experiments.advisor}
+              label="Advisor after a failed attempt"
+              onChange={(advisor) => updateExperiments({ advisor })}
+            />,
+          )}
+          {row(
+            "Loop detection",
+            "Stop an attempt that repeats itself.",
+            <Toggle
+              on={settings.experiments.loopDetect}
+              label="Loop detection"
+              onChange={(loopDetect) => updateExperiments({ loopDetect })}
+            />,
+          )}
+          {row(
+            "Stall timeout (seconds)",
+            "Stop an attempt that prints nothing for this long. 0 turns it off.",
+            <label className="os-input os-input-narrow">
+              <input
+                type="number"
+                min={0}
+                aria-label="Stall timeout in seconds"
+                value={settings.experiments.stallTimeoutSecs}
+                onChange={(event) =>
+                  updateExperiments({
+                    stallTimeoutSecs: Math.max(
+                      0,
+                      Number(event.target.value) || 0,
+                    ),
+                  })
+                }
+              />
+            </label>,
+          )}
+          {settings.routes.map((route) =>
+            row(
+              `Strength of ${route.label}`,
+              "1 to 3. Review never picks a route weaker than the implementer's.",
+              <label className="os-input os-input-narrow">
+                <input
+                  type="number"
+                  min={1}
+                  max={3}
+                  aria-label={`Strength of ${route.label}`}
+                  value={route.strength ?? ""}
+                  placeholder={String(defaultStrength(route.model))}
+                  onChange={(event) =>
+                    update({
+                      routes: settings.routes.map((r) =>
+                        r.id === route.id
+                          ? {
+                              ...r,
+                              strength: event.target.value
+                                ? Number(event.target.value)
+                                : undefined,
+                            }
+                          : r,
+                      ),
+                    })
+                  }
+                />
+              </label>,
+            ),
+          )}
+        </div>
+      )}
 
       {error && (
         <p className="inline-error" role="alert">
           {error}
         </p>
       )}
-      <div className="form-row">
-        <button className="primary" disabled={saving} onClick={save}>
-          {saving ? "Saving…" : "Save"}
-        </button>
-      </div>
+      {changes > 0 && (
+        <div className="os-savebar" role="region" aria-label="Unsaved changes">
+          <i className="os-savebar-dot" />
+          <span className="os-savebar-count">
+            {changes} unsaved {changes === 1 ? "change" : "changes"}
+          </span>
+          <span className="os-spacer" />
+          <button
+            type="button"
+            className="os-ghost"
+            disabled={saving}
+            onClick={() => setSettings(saved)}
+          >
+            Discard
+          </button>
+          <button
+            type="button"
+            className="os-primary"
+            disabled={saving}
+            onClick={save}
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

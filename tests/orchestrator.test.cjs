@@ -218,6 +218,7 @@ test("call() rejects a method outside the protocol allowlist before touching the
     assert.equal(ALLOWED_METHODS.has(method), true, method);
   // Agent-to-agent message threads are reachable the same way as tasks/chat.
   assert.equal(ALLOWED_METHODS.has("message.list"), true);
+  assert.equal(ALLOWED_METHODS.has("message.send"), true);
   // Read-only built-in defaults, compared against the saved settings.
   assert.equal(ALLOWED_METHODS.has("settings.defaults"), true);
   for (const method of [
@@ -235,6 +236,19 @@ test("call() rejects a method outside the protocol allowlist before touching the
   ])
     assert.equal(ALLOWED_METHODS.has(method), true, method);
   assert.equal(ALLOWED_METHODS.has("hook.stop"), false);
+});
+
+test("every method the renderer client calls is allowlisted in main", () => {
+  const client = require("node:fs").readFileSync(
+    require("node:path").join(__dirname, "../src/orchestrator/client.ts"),
+    "utf8",
+  );
+  const called = [
+    ...client.matchAll(/call<[^>]*>\(\s*"([a-z]+\.[A-Za-z.]+)"/g),
+  ].map((match) => match[1]);
+  assert.ok(called.length > 20, "client.ts call pattern changed");
+  for (const method of called)
+    assert.equal(ALLOWED_METHODS.has(method), true, method);
 });
 
 test("call() reports the daemon as not built rather than hanging on a missing binary", async (t) => {
@@ -427,6 +441,7 @@ test("connect() relays subscribe events and raises one notice per (task, questio
     title: "Do the thing",
     body: "Delete old keys?",
     focus: "question",
+    repoName: "repo",
   });
 
   // The same task re-entering `waiting` with the same question never re-notifies.
@@ -685,6 +700,8 @@ test("orchestratorNotice shapes input, done and failed notices and trims to the 
     title: "T".repeat(120),
     body: "over budget · $0.50",
     focus: "summary",
+    repoName: "repo",
+    costUsd: 0.5,
   });
 });
 

@@ -178,115 +178,17 @@ test("implementAttemptCount counts only implementation attempts", async () => {
 });
 
 test("a waiting row shows the real question count", async () => {
-  const { statusDetail } = await library;
+  const { taskReason } = await library;
   const waiting = (text) =>
-    statusDetail(task({ status: "waiting", question: { text, options: [] } }));
+    taskReason(
+      task({ status: "waiting", question: { text, options: [] } }),
+      [],
+    );
   assert.equal(
     waiting("The planner has 3 blocking question(s); answer them all:\n\n1. a"),
     "3 questions for you",
   );
   assert.equal(waiting("Which one?"), "1 question for you");
-});
-
-test("statusDetail adds only what the pill and progress don't say, never the question text", async () => {
-  const { statusDetail } = await library;
-  assert.equal(statusDetail(task({ status: "drafting" })), "");
-  assert.equal(statusDetail(task({ status: "queued" })), "");
-  assert.equal(
-    statusDetail(
-      task({ status: "running", costUsd: 0.41, attempts: [attempt({ n: 2 })] }),
-    ),
-    "$0.41",
-  );
-  assert.equal(
-    statusDetail(
-      task({
-        status: "waiting",
-        question: {
-          text: "Delete old keys now or in 2 releases?",
-          options: [],
-        },
-      }),
-    ),
-    "1 question for you",
-  );
-  assert.equal(
-    statusDetail(task({ status: "done", costUsd: 0.18 })),
-    "$0.18 · not landed",
-  );
-  assert.equal(
-    statusDetail(task({ status: "done", costUsd: 0.18, landedSha: "abc" })),
-    "$0.18 · landed",
-  );
-  assert.equal(
-    statusDetail(
-      task({
-        status: "done",
-        costUsd: 0.18,
-        attempts: [
-          attempt({
-            n: 1,
-            stage: "review",
-            review: { verdict: "PASS", findings: [] },
-          }),
-        ],
-      }),
-    ),
-    "review PASS · $0.18 · not landed",
-  );
-  assert.equal(
-    statusDetail(
-      task({
-        status: "stopped",
-        attempts: [
-          attempt({
-            failure: {
-              kind: "verify",
-              detail: "npm test failed",
-              signature: "x",
-            },
-          }),
-        ],
-      }),
-    ),
-    "npm test failed",
-  );
-  assert.equal(statusDetail(task({ status: "stopped" })), "");
-});
-
-test("attemptProgress counts the implement attempt while running or queued, null otherwise", async () => {
-  const { attemptProgress } = await library;
-  assert.equal(
-    attemptProgress(
-      task({ status: "running", attempts: [attempt({ n: 2 })] }),
-      4,
-    ),
-    "1/4",
-  );
-  // The daemon's attempt numbers are global across stages, so the first
-  // implementation is n=2 after a plan at n=1.
-  assert.equal(
-    attemptProgress(
-      task({
-        status: "running",
-        attempts: [
-          attempt({ n: 1, stage: "plan", status: "passed" }),
-          attempt({ n: 2, stage: "implement" }),
-        ],
-      }),
-      4,
-    ),
-    "1/4",
-  );
-  // No maxAttempts passed - falls back to the attempt's own number.
-  assert.equal(
-    attemptProgress(task({ status: "running", attempts: [attempt({ n: 1 })] })),
-    "1/1",
-  );
-  // Queued but nothing has run yet: no implementation attempt has started.
-  assert.equal(attemptProgress(task({ status: "queued" }), 5), "0/5");
-  assert.equal(attemptProgress(task({ status: "done" }), 5), null);
-  assert.equal(attemptProgress(task({ status: "waiting" }), 5), null);
 });
 
 test("statusBadgeLabel names each status a short word for the list row's pill", async () => {
@@ -413,38 +315,6 @@ test("upsertMessage replaces an existing message by id (a delivery flip) and kee
     list.map((m) => m.id),
     ["c", "a", "b"],
   );
-});
-
-test("messageThreads groups by the unordered participant pair, newest thread first, messages oldest first", async () => {
-  const { messageThreads } = await library;
-  const threads = messageThreads([
-    message({ id: "1", from: "t1", to: "orchestrator", ts: 1000 }),
-    message({
-      id: "2",
-      from: "orchestrator",
-      to: "t1",
-      ts: 2000,
-      kind: "reply",
-      replyTo: "1",
-      delivered: true,
-    }),
-    message({ id: "3", from: "t2", to: "orchestrator", ts: 1500 }),
-  ]);
-  assert.equal(threads.length, 2);
-  // The t1<->orchestrator thread has the newest message (ts 2000), so it
-  // sorts first even though t2's own message came earlier chronologically.
-  assert.deepEqual(threads[0].participants.slice().sort(), [
-    "orchestrator",
-    "t1",
-  ]);
-  assert.deepEqual(
-    threads[0].messages.map((m) => m.id),
-    ["1", "2"],
-  );
-  assert.equal(threads[0].lastTs, 2000);
-  assert.equal(threads[0].pending, 1); // only message "1" is undelivered
-  assert.equal(threads[1].messages[0].id, "3");
-  assert.equal(threads[1].pending, 1);
 });
 
 test("participantLabel names the orchestrator, a known task's title, or a short id fallback", async () => {
@@ -806,42 +676,6 @@ test("owner Inbox rows search by title or project and open the task at its quest
   assert.equal(ownerTarget({ ...task, status: "failed" }).focus, "summary");
 });
 
-test("ownerInboxRows lists only tasks needing the owner and a row click opens its task", async () => {
-  const { ownerInboxRows } =
-    await import("../src/orchestrator/ownerAttention.ts");
-  const { orchestratorTarget } = await import("../src/orchestrator/notices.ts");
-  const base = { repo: "/work/Alpha", decisions: [], attempts: [] };
-  const tasks = [
-    { ...base, id: "w", title: "Ask", status: "waiting", updatedAt: 2 },
-    { ...base, id: "a", title: "Old", status: "failed", archived: true },
-    {
-      ...base,
-      id: "o",
-      title: "Mine",
-      status: "stopped",
-      decisions: ["Owner: stop"],
-    },
-    { ...base, id: "r", title: "Busy", status: "running" },
-  ];
-  const opened = [];
-  const rows = ownerInboxRows(tasks, "", (target) => opened.push(target));
-  assert.deepEqual(
-    rows.map((row) => row.key),
-    ["w"],
-  );
-  assert.equal(rows[0].reason, "1 question for you");
-  rows[0].open();
-  assert.deepEqual(opened, [
-    { taskId: "w", repo: "/work/Alpha", focus: "question" },
-  ]);
-  assert.equal(ownerInboxRows(tasks, "beta", () => {}).length, 0);
-  const workspace = { id: "ws", cwd: "/work/Alpha", panels: [], layout: null };
-  assert.deepEqual(orchestratorTarget([workspace], "/work/Alpha"), {
-    kind: "add-panel",
-    workspaceId: "ws",
-  });
-});
-
 const NOON = new Date(2026, 8, 29, 12, 0, 0).getTime();
 const YESTERDAY = NOON - 24 * 3600 * 1000;
 
@@ -1086,14 +920,6 @@ test("unreadChatCount counts only assistant replies after the last look", async 
   ];
   assert.equal(unreadChatCount(messages, 6), 1);
   assert.equal(unreadChatCount(messages, 0), 2);
-});
-
-test("ageLabel and repoName", async () => {
-  const { ageLabel, repoName } = await library;
-  assert.equal(ageLabel(NOON - 2 * 60_000, NOON), "2m");
-  assert.equal(ageLabel(NOON - 90 * 60_000, NOON), "1h");
-  assert.equal(ageLabel(NOON - 50 * 3600_000, NOON), "2d");
-  assert.equal(repoName("/Users/sushi/sushiai/"), "sushiai");
 });
 
 test("errorText strips Electron's IPC wrapper", async () => {

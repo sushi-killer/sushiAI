@@ -103,6 +103,7 @@ export function SectionPage({
   attention: {
     groups: InboxGroup[];
     ownerTasks: Task[];
+    tasks: Task[];
     markSeen(panelId: string): void;
   };
   /** Opens an orchd task in its Orchestrator panel (adding the panel if missing). */
@@ -144,6 +145,7 @@ export function SectionPage({
         groups={attention.groups}
         markSeen={attention.markSeen}
         ownerTasks={attention.ownerTasks}
+        allTasks={attention.tasks}
         openOrchestratorTask={openOrchestratorTask}
         switchWorkspace={switchWorkspace}
         ws={ws}

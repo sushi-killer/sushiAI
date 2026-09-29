@@ -1,0 +1,445 @@
+/* Settings -> Orchestration (Figma "Settings dialog · Orchestration").
+ * Everything is scoped under `.orchestrator-settings`, which also has to
+ * beat the generic `.modal label/input/select` rules. */
+.orchestrator-settings {
+  display: flex;
+  flex-direction: column;
+  container-type: inline-size;
+  container-name: orchestrator-settings;
+}
+
+.orchestrator-settings .os-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 26px 0 6px;
+}
+.orchestrator-settings .os-eyebrow {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+}
+.orchestrator-settings .os-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+/* Autonomy presets. */
+.orchestrator-settings .os-presets {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 0 4px;
+}
+.orchestrator-settings .os-preset {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  text-align: left;
+}
+.orchestrator-settings .os-preset.selected {
+  border-color: var(--line-selected);
+  background: var(--bg-selected);
+}
+.orchestrator-settings .os-preset:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.orchestrator-settings .os-preset-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.orchestrator-settings .os-radio {
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+}
+.orchestrator-settings .os-preset.selected .os-radio {
+  border: 4px solid var(--accent);
+}
+.orchestrator-settings .os-preset-text {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 14px;
+}
+.orchestrator-settings .os-preset-soon {
+  color: var(--tone-warning);
+  font-size: 11px;
+}
+.orchestrator-settings .os-custom {
+  margin: 4px 0 0;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+
+/* Settings/Row. */
+.orchestrator-settings .os-row {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line-divider);
+}
+.orchestrator-settings .os-row-text,
+.orchestrator-settings .os-block {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.orchestrator-settings .os-block {
+  gap: 8px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line-divider);
+}
+.orchestrator-settings .os-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.orchestrator-settings .os-row-title {
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+.orchestrator-settings .os-row-desc {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+/* "changed · default Off ↺". */
+.orchestrator-settings .os-diff {
+  align-self: flex-start;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--tone-info-bg);
+  color: var(--tone-info);
+  font-size: 10.5px;
+  text-transform: none;
+}
+.orchestrator-settings .os-diff:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Control/Toggle. */
+.orchestrator-settings .os-toggle {
+  display: flex;
+  flex: none;
+  align-items: center;
+  width: 32px;
+  height: 18px;
+  padding: 2px;
+  border-radius: 9px;
+  background: var(--bg-count);
+}
+.orchestrator-settings .os-toggle .os-knob {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+.orchestrator-settings .os-toggle.on {
+  justify-content: flex-end;
+  background: var(--accent);
+}
+.orchestrator-settings .os-toggle.on .os-knob {
+  background: var(--accent-ink);
+}
+
+/* Control/Select. */
+.orchestrator-settings .os-select {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.orchestrator-settings .os-select select {
+  width: 100%;
+  height: 29px;
+  padding: 0 26px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-app);
+  color: var(--text);
+  font-size: 12.5px;
+  appearance: none;
+  text-overflow: ellipsis;
+}
+.orchestrator-settings .os-select svg {
+  position: absolute;
+  right: 9px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.orchestrator-settings .os-select-fixed {
+  width: 120px;
+  flex: none;
+}
+
+/* Routes table. */
+.orchestrator-settings .os-routes {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.orchestrator-settings .os-route-row {
+  display: grid;
+  grid-template-columns:
+    minmax(80px, 1.2fr) 96px minmax(90px, 1.3fr) 90px minmax(90px, 1.2fr)
+    24px;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line-divider);
+}
+.orchestrator-settings .os-route-header {
+  background: var(--bg-sunken);
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+.orchestrator-settings .os-route-label {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.orchestrator-settings .os-route-label:hover,
+.orchestrator-settings .os-route-label:focus {
+  border-color: var(--line);
+  padding-inline: 6px;
+}
+.orchestrator-settings .os-route-delete {
+  color: var(--text-muted);
+}
+.orchestrator-settings .os-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+/* Tier grid. */
+.orchestrator-settings .os-tiers {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding-top: 14px;
+}
+.orchestrator-settings .os-tier {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+.orchestrator-settings .os-tier-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.orchestrator-settings .os-tier-title {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.orchestrator-settings .os-tier-hint {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+.orchestrator-settings .os-warn {
+  color: var(--tone-warning);
+  font-size: var(--text-xs);
+}
+
+/* Domain and path chips. */
+.orchestrator-settings .os-tokens {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-app);
+}
+.orchestrator-settings .os-token {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 29px;
+  padding: 0 8px 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-control);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.orchestrator-settings .os-token button {
+  display: flex;
+  color: var(--text-muted);
+}
+.orchestrator-settings .os-token button:hover {
+  color: var(--text);
+}
+.orchestrator-settings .os-tokens input {
+  flex: 1;
+  min-width: 100px;
+  width: auto;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+/* Steppers and dollar inputs, each under a small label. */
+.orchestrator-settings .os-limits,
+.orchestrator-settings .os-budget {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 0 4px;
+}
+.orchestrator-settings .os-budget {
+  padding-top: 8px;
+}
+.orchestrator-settings .os-limit {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+.orchestrator-settings .os-input {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  width: 140px;
+  height: 31px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-app);
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+.orchestrator-settings .os-input input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+}
+.orchestrator-settings .os-input-narrow {
+  width: 86px;
+}
+
+/* Collapsed Advanced. */
+.orchestrator-settings .os-advanced {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  padding: 22px 0 8px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+.orchestrator-settings .os-advanced svg.open {
+  transform: rotate(90deg);
+}
+
+/* Settings/SaveBar: sticks to the bottom of the scrolling dialog column. */
+.orchestrator-settings .os-savebar {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 10px 14px 10px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+}
+.orchestrator-settings .os-savebar-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tone-info);
+}
+.orchestrator-settings .os-savebar-count {
+  color: var(--text);
+  font-size: 12.5px;
+}
+.orchestrator-settings .os-spacer {
+  flex: 1;
+}
+.orchestrator-settings .os-ghost,
+.orchestrator-settings .os-primary {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+.orchestrator-settings .os-ghost {
+  color: var(--text);
+}
+.orchestrator-settings .os-ghost:hover {
+  background: var(--bg-hover);
+}
+.orchestrator-settings .os-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.orchestrator-settings .os-savebar button:disabled {
+  opacity: 0.6;
+}
+
+@container orchestrator-settings (max-width: 560px) {
+  .orchestrator-settings .os-presets {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .orchestrator-settings .os-tiers {
+    grid-template-columns: 1fr;
+  }
+  .orchestrator-settings .os-route-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .orchestrator-settings .os-route-header {
+    display: none;
+  }
+}

@@ -1,0 +1,188 @@
+/* Improvements view (Figma frame 02 "Improvements"). */
+.imp-view {
+  gap: 12px;
+}
+.imp-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.imp-head .orch-view-title {
+  line-height: 24px;
+}
+.imp-lede {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 15px;
+}
+.imp-faint {
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+
+.imp-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-pane);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+}
+.imp-card.revert {
+  border-color: var(--tone-warning);
+}
+.imp-card-head,
+.imp-line,
+.imp-actions {
+  display: flex;
+  align-items: center;
+  max-width: 100%;
+}
+.imp-card-head {
+  gap: 8px;
+  min-height: 16px;
+}
+.imp-card-title {
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 500;
+  line-height: 16px;
+}
+.imp-line {
+  gap: 6px;
+  font-size: var(--text-sm);
+  line-height: 15px;
+}
+.imp-metric {
+  color: var(--text);
+}
+.imp-reason {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 15px;
+}
+.imp-command {
+  display: inline-flex;
+  gap: 8px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 13px;
+  overflow-wrap: anywhere;
+}
+.imp-actions {
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.imp-actions .ui-button.ghost {
+  background: transparent;
+}
+.imp-actions .ui-button.secondary {
+  background: var(--bg-raised);
+}
+
+.imp-failure {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-lg);
+  background: var(--danger-bg);
+}
+.imp-failure-count {
+  color: var(--danger);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.imp-failure-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.imp-failure-title {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.imp-failure-tasks {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.imp-notes {
+  border: 1px solid var(--line-pane);
+  border-radius: var(--radius-lg);
+}
+.imp-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line-divider);
+}
+.imp-note-text {
+  min-width: 0;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 15px;
+  overflow-wrap: anywhere;
+}
+.imp-note-remove {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  color: var(--text-faint);
+}
+.imp-note-remove:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.imp-note-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+}
+.imp-note-input {
+  flex: 1;
+  min-width: 0;
+  height: 31px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-app);
+  color: var(--text);
+  font-size: 12.5px;
+}
+.imp-note-input::placeholder {
+  color: var(--text-faint);
+}
+.imp-note-input:focus-visible {
+  border-color: var(--focus);
+  outline: none;
+}
+.imp-error {
+  color: var(--danger);
+  font-size: var(--text-sm);
+}

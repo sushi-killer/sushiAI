@@ -27,7 +27,9 @@ export function TaskRow({
         <span className={`ui-dot ui-tone-${tone}`} />
       </span>
       <span className="ui-task-row-body">
-        <span className="ui-task-row-title">{title}</span>
+        <span className="ui-task-row-title" title={title}>
+          {title}
+        </span>
         {reason && (
           <span className={`ui-task-row-reason ui-tone-${tone}`}>{reason}</span>
         )}

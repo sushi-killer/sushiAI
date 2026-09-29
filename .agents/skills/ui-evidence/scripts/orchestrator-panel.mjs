@@ -10,12 +10,12 @@
 // profile's orchd data dir before the app starts; the app then spawns orchd
 // on that profile as usual, which loads them. Each proposal is completed
 // (id, repo, createdAt) and written to <dataDir>/evolution/proposals/<id>.json,
-// the path orchd's store reads; when any were seeded the run also saves
-// artifacts/orchestrator-proposals.png, a crop of the PROPOSALS list. Each note is completed (id, source
+// the path orchd's store reads; when any were seeded the run also opens Improvements from the rail and saves
+// artifacts/orchestrator-improvements.png plus artifacts/orchestrator-proposals.png, a crop of the first proposal card. Each note is completed (id, source
 // "owner", createdAt) and written under this repo's root in
 // <dataDir>/repo-notes.json ({repo: [note]}, what orchd's store reads); when
 // any were seeded the run also saves artifacts/orchestrator-repo-notes.png,
-// a crop of the REPO NOTES section. Only finished/waiting statuses are accepted, because orchd resumes
+// a crop of the REPO NOTES list. Only finished/waiting statuses are accepted, because orchd resumes
 // queued/running/drafting tasks on start - a fixture must never run a harness.
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
@@ -209,22 +209,26 @@ if (!seedPath || !title) {
     await page.getByRole("button", { name: "Maximize Orchestrator" }).click();
 
     await page
-      .locator(".orch-tasks, .empty-state")
+      .locator(
+        ".orch-rail, [data-orchestrator-not-built], .orch-view-scroll.offline",
+      )
       .first()
       .waitFor({ timeout: 15000 });
-    const notBuilt = page.locator(".empty-state");
+    const notBuilt = page.locator(
+      "[data-orchestrator-not-built], .orch-view-scroll.offline",
+    );
     if (await notBuilt.count()) {
       throw new Error(
-        `the orchestrator panel could not open: ${(await notBuilt.innerText()).trim()}`,
+        `the orchestrator panel could not open: ${(await notBuilt.first().innerText()).trim()}`,
       );
     }
 
-    const row = page.locator(".orch-task-row").filter({
-      has: page.locator(".orch-task-title", {
+    const row = page.locator(".ui-task-row").filter({
+      has: page.locator(".ui-task-row-title", {
         hasText: new RegExp(`^${escapeRegExp(title)}$`),
       }),
     });
-    // The list can still be one render behind the panel container just after
+    // The rail can still be one render behind the panel container just after
     // it mounts, so wait for the row itself rather than a one-shot count.
     try {
       await row.first().waitFor({ timeout: 10000 });
@@ -233,34 +237,47 @@ if (!seedPath || !title) {
         `no seeded task titled "${title}" in the orchestrator panel`,
       );
     }
-    // The orchestrator page (chat, plus the recurring failures above it) is
-    // what the panel shows before a task is picked.
+    // The first page (Home) is what the panel shows before a task is picked.
     await page
       .locator(".orch-main")
       .screenshot({ path: shot("orchestrator-home") });
-    if (proposals.length > 0) {
-      await page.locator(".orch-proposals").waitFor({ timeout: 10000 });
+    // Proposals, recurring failures and repo notes live on the Improvements
+    // view, opened from the rail.
+    if (proposals.length > 0 || notes.length > 0) {
       await page
-        .locator(".orch-proposals")
+        .locator(".orch-rail")
+        .getByRole("button", { name: /^Improvements/ })
+        .click();
+      await page.locator(".imp-view").waitFor({ timeout: 10000 });
+      await page
+        .locator(".imp-view")
+        .screenshot({ path: shot("orchestrator-improvements") });
+    }
+    if (proposals.length > 0) {
+      await page.locator(".imp-card").first().waitFor({ timeout: 10000 });
+      await page
+        .locator(".imp-card")
+        .first()
         .screenshot({ path: shot("orchestrator-proposals") });
     }
     if (notes.length > 0) {
-      await page.locator(".orch-notes").waitFor({ timeout: 10000 });
+      await page.locator(".imp-notes").waitFor({ timeout: 10000 });
       await page
-        .locator(".orch-notes")
+        .locator(".imp-notes")
         .screenshot({ path: shot("orchestrator-repo-notes") });
     }
     await row.first().click();
-    await page.locator(".orch-detail").waitFor();
+    await page.locator(".td").waitFor();
 
     await page.screenshot({ path: shot("orchestrator-window") });
-    await page
-      .locator(".orch-detail")
-      .screenshot({ path: shot("orchestrator-detail") });
+    await page.locator(".td").screenshot({ path: shot("orchestrator-detail") });
     report.screenshots = {
       window: shot("orchestrator-window"),
       detail: shot("orchestrator-detail"),
       home: shot("orchestrator-home"),
+      ...(proposals.length > 0 || notes.length > 0
+        ? { improvements: shot("orchestrator-improvements") }
+        : {}),
       ...(proposals.length > 0
         ? { proposals: shot("orchestrator-proposals") }
         : {}),

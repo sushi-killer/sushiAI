@@ -244,18 +244,6 @@ export function reviewOf(task: Task) {
   return undefined;
 }
 
-/** "2/5"-style attempt progress for a task's list row - `null` once the task
- * is no longer actively working (there is nothing to count toward). */
-export function attemptProgress(
-  task: Task,
-  maxAttempts?: number,
-): string | null {
-  if (task.status !== "running" && task.status !== "queued") return null;
-  const n = implementAttemptCount(task);
-  const max = maxAttempts ?? n;
-  return `${n}/${max}`;
-}
-
 const STATUS_BADGE_LABELS: Record<Task["status"], string> = {
   drafting: "Drafting",
   queued: "Queued",
@@ -267,8 +255,7 @@ const STATUS_BADGE_LABELS: Record<Task["status"], string> = {
   failed: "Failed",
 };
 
-/** The short word a task-list pill badge shows - `statusDetail` carries
- * whatever else the row has to say underneath it. */
+/** The short word a task-list pill badge shows. */
 export function statusBadgeLabel(task: Task): string {
   return STATUS_BADGE_LABELS[task.status];
 }
@@ -283,36 +270,6 @@ function shortReason(task: Task): string {
   return detail.length > REASON_MAX
     ? `${detail.slice(0, REASON_MAX - 1)}…`
     : detail;
-}
-
-/** The task-list row's line under its pill: only what the pill and the
- * attempt progress don't already say, `""` when that is nothing. Never the
- * question text itself, so a row can't leak a private-looking question into
- * a list glanced at across a room. */
-export function statusDetail(task: Task): string {
-  switch (task.status) {
-    case "running":
-      return formatCost(task.costUsd);
-    case "waiting":
-      return questionsLabel(questionCount(task));
-    case "landing":
-      return "waiting to land";
-    case "done": {
-      const review = reviewOf(task);
-      const cost = formatCost(task.costUsd);
-      const landed = task.parent
-        ? ""
-        : task.landedSha
-          ? " · landed"
-          : " · not landed";
-      return (review ? `review ${review.verdict} · ${cost}` : cost) + landed;
-    }
-    case "stopped":
-    case "failed":
-      return shortReason(task);
-    default:
-      return "";
-  }
 }
 
 /** Whether a task's acceptance criteria can be shown as met: the task is
@@ -391,47 +348,6 @@ export function upsertMessage(
   next.push(message);
   next.sort((a, b) => a.ts - b.ts);
   return next;
-}
-
-export type MessageThread = {
-  /** The unordered participant pair, joined so both orderings hash alike. */
-  key: string;
-  participants: [string, string];
-  /** Oldest first. */
-  messages: Message[];
-  lastTs: number;
-  /** Count of messages not yet delivered. */
-  pending: number;
-};
-
-function threadKey(a: string, b: string): string {
-  return [a, b].sort().join("::");
-}
-
-/** Groups a flat message list into per-conversation threads, keyed by the
- * unordered {from, to} pair - a question and its reply flow the same way
- * whichever side sent which message. Threads are sorted newest-first by
- * their last message, and each thread's own messages stay oldest-first. */
-export function messageThreads(messages: Message[]): MessageThread[] {
-  const byKey = new Map<string, MessageThread>();
-  for (const message of messages) {
-    const key = threadKey(message.from, message.to);
-    let thread = byKey.get(key);
-    if (!thread) {
-      thread = {
-        key,
-        participants: [message.from, message.to],
-        messages: [],
-        lastTs: message.ts,
-        pending: 0,
-      };
-      byKey.set(key, thread);
-    }
-    thread.messages.push(message);
-    thread.lastTs = Math.max(thread.lastTs, message.ts);
-    if (!message.delivered) thread.pending++;
-  }
-  return [...byKey.values()].sort((a, b) => b.lastTs - a.lastTs);
 }
 
 /** How a participant id reads in the Messages view: the orchestrator's own
@@ -908,20 +824,6 @@ export function unreadChatCount(
 ): number {
   return messages.filter((m) => m.role === "assistant" && m.ts > lastSeen)
     .length;
-}
-
-/** "2m", "14m", "1h", "3d": how long ago, for an attention item's corner. */
-export function ageLabel(since: number, now = Date.now()): string {
-  const minutes = Math.max(0, Math.floor((now - since) / 60_000));
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  return `${Math.floor(hours / 24)}d`;
-}
-
-/** The last path segment of a repo, as the owner calls the project. */
-export function repoName(repo: string): string {
-  return repo.replace(/\/+$/, "").split("/").pop() || repo;
 }
 
 /** Whether an RPC error means the daemon itself is gone (not built, failed

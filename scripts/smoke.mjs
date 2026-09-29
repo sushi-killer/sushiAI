@@ -335,12 +335,23 @@ try {
     .locator(".section-page")
     .getByRole("heading", { name: "Inbox", exact: true })
     .waitFor();
+  // A plain shell never sits in the queue: it is listed for review under
+  // Clean up, unticked (it may be running a dev server), with its own Jump.
+  await page
+    .locator(".section-page")
+    .getByRole("button", { name: "Clean up", exact: true })
+    .click();
   const shellRow = page
-    .locator(".session-row")
+    .locator(".inbox-cleanup-row")
     .filter({ hasText: "zsh" })
     .filter({ hasText: "sushiai" })
     .first();
   await shellRow.waitFor();
+  assert.equal(
+    await shellRow.getByRole("checkbox").isChecked(),
+    false,
+    "Clean up never ticks a shell by default",
+  );
   await shellRow.getByRole("button", { name: "Jump to zsh" }).click();
   await page.waitForFunction(
     () => document.querySelectorAll(".workspace-canvas .panel").length === 1,

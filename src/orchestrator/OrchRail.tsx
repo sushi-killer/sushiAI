@@ -5,7 +5,6 @@ import {
   LayoutList,
   ListTodo,
   MessageSquare,
-  Plus,
   Sparkles,
 } from "lucide-react";
 import type { OrchestratorView } from "../types";
@@ -66,7 +65,6 @@ export function OrchRail({
   archivedCount,
   offline = false,
   onOpen,
-  onNewTask,
 }: {
   view: OrchestratorView;
   /** Every task of the repo, archived included. */
@@ -79,7 +77,6 @@ export function OrchRail({
   /** The daemon is down: the last known list stays, dimmed and inert. */
   offline?: boolean;
   onOpen: (view: OrchestratorView) => void;
-  onNewTask: () => void;
 }) {
   const groups = railGroups(tasks);
   const selectedId = view.kind === "task" ? view.id : undefined;
@@ -181,13 +178,6 @@ export function OrchRail({
         label="Analytics"
         selected={is("analytics")}
         onClick={() => onOpen({ kind: "analytics" })}
-      />
-      <NavRow
-        icon={<Plus size={14} />}
-        label="New task"
-        selected={false}
-        trailing="⌘N"
-        onClick={onNewTask}
       />
       {empty ? (
         <div className="orch-rail-empty">

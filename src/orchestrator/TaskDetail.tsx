@@ -4,8 +4,10 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  GitBranch,
   Square,
   Trash2,
+  Wrench,
 } from "lucide-react";
 import { orchestratorClient } from "./client";
 import {
@@ -18,15 +20,23 @@ import {
   formatCost,
   formatDuration,
   formatTaskTier,
-  implementAttemptCount,
+  stageTrack,
   statusBadgeLabel,
   statusTone,
-  totalDurationMs,
+  type Tone,
   variantLabel,
 } from "./helpers";
 import type { Attempt, Settings, Task } from "./types";
 import { RichText } from "../agents/AgentsView";
-import { TaskCostLine, TaskTimelineBar } from "./TaskInsights";
+import { TaskCostLine, TaskTimeline } from "./TaskInsights";
+import {
+  acceptanceHeading,
+  headerFacts,
+  questionSource,
+  reportLine,
+} from "./taskDetailModel";
+import { Chip, Criterion, StageTrack, Tag } from "./ui";
+import "./task-detail.css";
 
 const DECISION_TAGS = ["Jev", "Orchestrator"] as const;
 
@@ -45,19 +55,19 @@ function decisionTag(
   return null;
 }
 
-/** Same idea as `statusTone`, one level down: a single attempt's own status. */
-function attemptTone(status: Attempt["status"]): string {
+/** A single attempt's own status as a tag tone. */
+function attemptTone(status: Attempt["status"]): Tone {
   switch (status) {
     case "passed":
-      return "green";
+      return "ok";
     case "failed":
-      return "red";
+      return "danger";
     case "blocked":
-      return "yellow";
+      return "warning";
     case "running":
-      return "blue";
+      return "info";
     default:
-      return "muted";
+      return "neutral";
   }
 }
 
@@ -66,68 +76,75 @@ function VerifyRow({ result }: { result: Attempt["verify"][number] }) {
   const [open, setOpen] = useState(false);
   const failed = result.code !== 0;
   return (
-    <div className="orch-verify-row">
+    <div className="td-verify-row">
       <button
-        className="orch-verify-toggle"
+        className="td-verify-toggle"
         onClick={() => setOpen(!open)}
         aria-expanded={open}
       >
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        <code className="orch-verify-command" title={result.command}>
+        <code className="td-verify-command" title={result.command}>
           {result.command}
         </code>
-        <span className={`orch-verify-exit ${failed ? "failed" : ""}`}>
+        <span className={`td-verify-exit ${failed ? "failed" : ""}`}>
           exit {result.code ?? "—"}
         </span>
       </button>
-      {open && result.tail && <pre className="orch-tail">{result.tail}</pre>}
+      {open && result.tail && <pre className="td-tail">{result.tail}</pre>}
     </div>
   );
 }
 
 function AttemptRow({ attempt }: { attempt: Attempt }) {
   const tone = attemptTone(attempt.status);
+  const files = attempt.changedFiles.length;
   return (
-    <div className={`orch-attempt orch-attempt-${tone}`}>
-      <div className="orch-attempt-head">
-        <span className="orch-attempt-n">
-          #{attempt.n} · {attempt.stage}
-        </span>
-        <span className="orch-attempt-route">
-          {attempt.harness} ·{" "}
-          {attempt.fingerprint
-            ? fingerprintLabel(attempt.fingerprint)
-            : attempt.model || attempt.routeId}
-          <span className={`orch-attempt-inline-status tone-${tone}`}>
-            {" "}
-            {attempt.status === "running" ? "running…" : attempt.status}
+    <div className="td-attempt">
+      <span className="td-attempt-rail">
+        <span className={`td-dot ui-tone-${tone}`} />
+      </span>
+      <div className="td-attempt-body">
+        <div className="td-attempt-head">
+          <span className="td-attempt-title">
+            #{attempt.n} · {attempt.stage}
           </span>
-        </span>
-      </div>
-      <p className="orch-attempt-reason">{attempt.reason}</p>
-      <p className="orch-attempt-meta">
-        {formatDuration(attemptDurationMs(attempt))} ·{" "}
-        {formatCost(attempt.costUsd)} · {attempt.changedFiles.length} file
-        {attempt.changedFiles.length === 1 ? "" : "s"} changed
-        {attempt.gateBlocks > 0 &&
-          ` · ${attempt.gateBlocks} Stop-hook block${attempt.gateBlocks === 1 ? "" : "s"}`}
-      </p>
-      {attempt.verify.map((result, index) => (
-        <VerifyRow key={index} result={result} />
-      ))}
-      {attempt.review && (
-        <p
-          className={`orch-review orch-review-${attempt.review.verdict.toLowerCase()}`}
-        >
-          Review: {attempt.review.verdict}
-          {attempt.review.findings.length > 0 &&
-            ` — ${attempt.review.findings.join("; ")}`}
+          <span className="td-attempt-route">
+            {attempt.harness} ·{" "}
+            {attempt.fingerprint
+              ? fingerprintLabel(attempt.fingerprint)
+              : attempt.model || attempt.routeId}
+          </span>
+          <Tag tone={tone}>
+            {attempt.status === "running" ? "running" : attempt.status}
+          </Tag>
+        </div>
+        <p className="td-attempt-meta">
+          {formatDuration(attemptDurationMs(attempt))} ·{" "}
+          {formatCost(attempt.costUsd)} · {files} file{files === 1 ? "" : "s"}{" "}
+          changed
+          {attempt.gateBlocks > 0 &&
+            ` · ${attempt.gateBlocks} Stop-hook block${attempt.gateBlocks === 1 ? "" : "s"}`}
         </p>
-      )}
-      {attempt.failure && (
-        <p className="orch-failure">{attempt.failure.detail}</p>
-      )}
-      {attempt.summary && <p className="orch-summary">{attempt.summary}</p>}
+        {attempt.reason && <p className="td-attempt-meta">{attempt.reason}</p>}
+        {attempt.verify.map((result, index) => (
+          <VerifyRow key={index} result={result} />
+        ))}
+        {attempt.review && (
+          <p
+            className={`td-attempt-note ${attempt.review.verdict === "FAIL" ? "danger" : ""}`}
+          >
+            Review: {attempt.review.verdict}
+            {attempt.review.findings.length > 0 &&
+              ` — ${attempt.review.findings.join("; ")}`}
+          </p>
+        )}
+        {attempt.failure && (
+          <p className="td-attempt-note danger">{attempt.failure.detail}</p>
+        )}
+        {attempt.summary && (
+          <p className="td-attempt-note">{attempt.summary}</p>
+        )}
+      </div>
     </div>
   );
 }
@@ -166,27 +183,29 @@ function EvidenceGallery({ task }: { task: Task }) {
   if (paths.length === 0) return null;
   const name = (path: string) => path.split("/").pop() ?? path;
   return (
-    <div className="orch-evidence">
-      <span className="dialog-eyebrow">EVIDENCE</span>
-      <div className="orch-evidence-grid">
+    <div className="td-evidence">
+      <span className="td-eyebrow">EVIDENCE</span>
+      <div className="td-evidence-row">
         {paths.map((path) =>
           urls[path] ? (
             <button
               key={path}
-              className="orch-evidence-thumb"
+              className="td-thumb"
               title={name(path)}
               aria-label={`Open ${name(path)}`}
               onClick={() => setOpen(path)}
             >
-              <img src={urls[path]} alt={name(path)} />
-              <span>{name(path)}</span>
+              <span className="td-thumb-image">
+                <img src={urls[path]} alt={name(path)} />
+              </span>
+              <span className="td-thumb-caption">{name(path)}</span>
             </button>
           ) : null,
         )}
       </div>
       {open && urls[open] && (
         <div
-          className="orch-evidence-full"
+          className="td-evidence-full"
           role="dialog"
           aria-label={name(open)}
           onClick={() => setOpen(null)}
@@ -199,19 +218,19 @@ function EvidenceGallery({ task }: { task: Task }) {
 }
 
 /** An upcoming stage that hasn't run yet - review, most often - shown dimmed
- * on the rail so the rail reads as "what will happen", not just history. */
+ * so the list reads as "what will happen", not just history. */
 function PendingStageRow({ label }: { label: string }) {
   return (
-    <div className="orch-attempt orch-attempt-pending orch-attempt-muted">
-      <div className="orch-attempt-head">
-        <span className="orch-attempt-n">review</span>
-        <span className="orch-attempt-route">
-          {label}
-          <span className="orch-attempt-inline-status tone-muted">
-            {" "}
-            pending
-          </span>
-        </span>
+    <div className="td-attempt pending">
+      <span className="td-attempt-rail">
+        <span className="td-dot ui-tone-neutral" />
+      </span>
+      <div className="td-attempt-body">
+        <div className="td-attempt-head">
+          <span className="td-attempt-title">review</span>
+          <span className="td-attempt-route">{label}</span>
+          <Tag tone="neutral">pending</Tag>
+        </div>
       </div>
     </div>
   );
@@ -229,22 +248,27 @@ function QuestionCard({
   const [freeText, setFreeText] = useState("");
   if (!task.question) return null;
   return (
-    <div className="orch-question">
-      <p className="orch-question-text">{task.question.text}</p>
-      <div className="orch-question-options">
-        {task.question.options.map((option) => (
-          <button
-            key={option}
-            className="secondary"
-            disabled={disabled}
-            onClick={() => onAnswer(option)}
-          >
-            {option}
-          </button>
-        ))}
+    <div className="td-question">
+      <div className="td-question-head">
+        <Tag tone="warning">Needs you</Tag>
+        <span className="td-question-source">{questionSource(task)}</span>
       </div>
+      <p className="td-question-text">{task.question.text}</p>
+      {task.question.options.length > 0 && (
+        <div className="td-question-options">
+          {task.question.options.map((option) => (
+            <Chip
+              key={option}
+              disabled={disabled}
+              onClick={() => onAnswer(option)}
+            >
+              {option}
+            </Chip>
+          ))}
+        </div>
+      )}
       <form
-        className="orch-question-free"
+        className="td-inline-form"
         onSubmit={(event) => {
           event.preventDefault();
           if (freeText.trim()) {
@@ -260,101 +284,50 @@ function QuestionCard({
           aria-label="Your own answer"
         />
         <button
-          className="primary"
+          className="ui-button primary"
           type="submit"
           disabled={disabled || !freeText.trim()}
         >
-          Answer
+          <Check size={14} /> Answer
         </button>
       </form>
     </div>
   );
 }
 
-/** The finished task's report at the top of its detail, with the lead-touch
- * toggle: whether the work needed a fix after orchd said done. */
+/** The finished task's report at the top of its detail: the facts line, who
+ * marked the lead touch, follow-ups and the written report. */
 function TaskReport({
   task,
   tasks,
-  disabled,
   onOpen,
-  onLeadTouch,
 }: {
   task: Task;
   tasks: Task[];
-  disabled: boolean;
   onOpen(id: string): void;
-  onLeadTouch(touched: boolean | undefined, note?: string): void;
 }) {
   const mark = task.leadTouch;
-  const [noting, setNoting] = useState(false);
-  const [note, setNote] = useState("");
+  const facts = reportLine(task);
+  const followUps = task.followUps ?? [];
+  if (!task.report && !facts && !mark && followUps.length === 0) return null;
   return (
-    <section className="orch-report" aria-label="Report">
-      <div className="orch-report-head">
-        <span className="dialog-eyebrow">REPORT</span>
-        <span className="orch-report-touch">
-          {mark
-            ? `${mark.touched ? "Needed a fix" : "Clean"} (${mark.by})${mark.note ? `: ${mark.note}` : ""}`
-            : "Lead touch unknown"}
-        </span>
-        <button
-          className={mark?.touched === true ? "primary" : "secondary"}
-          disabled={disabled}
-          aria-pressed={mark?.touched === true}
-          onClick={() => {
-            if (mark?.touched === true) onLeadTouch(undefined);
-            else setNoting(true);
-          }}
-        >
-          Needed a fix
-        </button>
-        <button
-          className={mark?.touched === false ? "primary" : "secondary"}
-          disabled={disabled}
-          aria-pressed={mark?.touched === false}
-          onClick={() =>
-            onLeadTouch(mark?.touched === false ? undefined : false)
-          }
-        >
-          Clean
-        </button>
+    <section className="td-report" aria-label="Report">
+      <div className="td-report-head">
+        <span className="td-eyebrow">REPORT</span>
+        {facts && <span className="td-faint">{facts}</span>}
+        {mark && (
+          <span className="td-faint">
+            {mark.touched ? "Needed a fix" : "Clean"} ({mark.by})
+            {mark.note ? `: ${mark.note}` : ""}
+          </span>
+        )}
       </div>
-      {noting && (
-        <form
-          className="orch-question-free"
-          onSubmit={(event) => {
-            event.preventDefault();
-            onLeadTouch(true, note.trim());
-            setNoting(false);
-            setNote("");
-          }}
-        >
-          <input
-            value={note}
-            onChange={(event) => setNote(event.target.value)}
-            placeholder="What is missing or wrong? A follow-up task will be created."
-            aria-label="What had to be fixed"
-            autoFocus
-          />
-          <button className="primary" type="submit" disabled={disabled}>
-            Save
-          </button>
-          <button
-            className="secondary"
-            type="button"
-            onClick={() => setNoting(false)}
-          >
-            Cancel
-          </button>
-        </form>
-      )}
-      {(task.followUps ?? []).length > 0 && (
-        <p className="orch-detail-meta">
-          {(task.followUps ?? []).map((id, i) => (
+      {followUps.length > 0 && (
+        <p className="td-facts">
+          {followUps.map((id, i) => (
             <Fragment key={id}>
               {i > 0 && " · "}
-              <button className="orch-parent-link" onClick={() => onOpen(id)}>
+              <button className="td-link" onClick={() => onOpen(id)}>
                 Follow-up:{" "}
                 {tasks.find((t) => t.id === id)?.title ?? id.slice(0, 8)}
               </button>
@@ -363,7 +336,7 @@ function TaskReport({
         </p>
       )}
       {task.report && (
-        <div className="orch-report-body">
+        <div className="td-report-body">
           <RichText text={task.report} />
         </div>
       )}
@@ -388,29 +361,27 @@ function AssumptionsList({
   const assumptions = task.assumptions ?? [];
   if (assumptions.length === 0) return null;
   return (
-    <div className="orch-assumptions">
-      <span className="dialog-eyebrow">ASSUMPTIONS</span>
+    <div className="td-assumptions">
+      <span className="td-eyebrow">ASSUMPTIONS</span>
       {assumptions.map((assumption, index) => (
-        <div key={index} className="orch-assumption">
-          <p className="orch-assumption-question">{assumption.question}</p>
-          <p className="orch-assumption-answer">
-            <span className="orch-decision-tag orch-decision-jev">
-              {assumption.by}
-            </span>
+        <div key={index} className="td-assumption">
+          <p className="td-assumption-question">{assumption.question}</p>
+          <p className="td-assumption-answer">
+            <span className="td-decision-tag">{assumption.by}</span>
             {assumption.answer}
             {assumption.overturned && (
-              <span className="orch-assumption-overturned">
+              <span className="td-assumption-overturned">
                 {" "}
                 - overturned: {assumption.ownerAnswer}
               </span>
             )}
           </p>
           {assumption.evidence && (
-            <p className="orch-assumption-evidence">{assumption.evidence}</p>
+            <p className="td-assumption-evidence">{assumption.evidence}</p>
           )}
           {editing === index ? (
             <form
-              className="orch-question-free"
+              className="td-inline-form"
               onSubmit={(event) => {
                 event.preventDefault();
                 if (!text.trim()) return;
@@ -427,14 +398,14 @@ function AssumptionsList({
                 autoFocus
               />
               <button
-                className="primary"
+                className="ui-button primary"
                 type="submit"
                 disabled={disabled || !text.trim()}
               >
                 Send
               </button>
               <button
-                className="secondary"
+                className="ui-button secondary"
                 type="button"
                 onClick={() => setEditing(null)}
               >
@@ -443,7 +414,7 @@ function AssumptionsList({
             </form>
           ) : (
             <button
-              className="secondary"
+              className="ui-button secondary"
               disabled={disabled}
               onClick={() => {
                 setEditing(index);
@@ -459,9 +430,9 @@ function AssumptionsList({
   );
 }
 
-/** One task's view: header and actions, the question blocking it, its report,
- * timeline, criteria, subtasks, assumptions, decisions, evidence, attempts
- * and live log. */
+/** One task's view: header and actions, the question blocking it, its report
+ * or stage track, timeline, criteria, attempts and evidence, and the rest
+ * (request, subtasks, assumptions, decisions, live log) under Details. */
 export function TaskDetail({
   selected,
   tasks,
@@ -483,307 +454,412 @@ export function TaskDetail({
   onOpen(id: string): void;
   onDelete(): void;
 }) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [noting, setNoting] = useState(false);
+  const [note, setNote] = useState("");
   const children = childrenOf(tasks, selected.id);
   const parentTask = selected.parent
     ? tasks.find((t) => t.id === selected.parent)
     : undefined;
   const waitsFor = dependencyTitles(selected, tasks);
+  const done = selected.status === "done";
+  const mark = selected.leadTouch;
+  const statusTag: { tone: Tone; label: string } | null = done
+    ? { tone: "ok", label: selected.landedSha ? "landed" : "done" }
+    : selected.status === "failed" || selected.status === "stopped"
+      ? { tone: "danger", label: statusBadgeLabel(selected) }
+      : selected.status === "landing"
+        ? { tone: "warning", label: "landing" }
+        : null;
+  const met = criteriaMet(selected);
+  const breakdown = costByStage(selected);
+  // A parent's total includes its subtasks' costs.
+  const subtasksCost = children.reduce((sum, child) => sum + child.costUsd, 0);
+  const legacy: { label: string; cost: number }[] = [
+    { label: "Plan", cost: breakdown.plan },
+    ...breakdown.implement.map((a) => ({
+      label: `Implement #${a.n}`,
+      cost: a.costUsd,
+    })),
+    { label: "Review", cost: breakdown.review },
+    { label: "Subtasks", cost: subtasksCost },
+    { label: "Other", cost: Math.max(0, breakdown.other - subtasksCost) },
+  ].filter((row) => formatCost(row.cost) !== "$0.00");
+  const hasDetails =
+    (selected.request && selected.request !== selected.title) ||
+    children.length > 0 ||
+    (selected.assumptions ?? []).length > 0 ||
+    selected.decisions.length > 0 ||
+    !!settings ||
+    (logLines?.length ?? 0) > 0;
   return (
-    <div className="orch-detail">
-      <div className="orch-detail-head">
-        <div className="orch-detail-title">
-          <h3>{selected.title}</h3>
-          <p className="orch-detail-meta">
-            attempt {implementAttemptCount(selected)}/
-            {settings?.maxAttempts ?? implementAttemptCount(selected)} ·{" "}
-            {formatDuration(totalDurationMs(selected))} ·{" "}
-            <span title="API list price the CLI reports, cache included; a subscription is not billed per token">
-              {formatCost(selected.costUsd)}
-            </span>{" "}
-            ·{" "}
-            <span
-              className={
-                selected.tierFallback ? "orch-tier-fallback" : undefined
-              }
-            >
-              {formatTaskTier(selected)}
-            </span>{" "}
-            ·{" "}
-            <span className="orch-branch" title={selected.branch}>
-              {selected.branch}
-            </span>
-            {selected.baseRef && (
-              <>
-                {" "}
-                <span className="orch-branch" title={selected.baseRef}>
-                  from {selected.baseRef}
-                </span>
-              </>
-            )}
-            {selected.variant?.land && (
-              <>
-                {" · "}
-                <span className="orch-branch" title={selected.landedSha}>
-                  {selected.landedSha
-                    ? `landed ${selected.landedSha.slice(0, 8)}`
-                    : selected.status === "landing"
-                      ? "landing: waiting for a clean checkout"
-                      : "lands on its base"}
-                </span>
-              </>
-            )}
-          </p>
-          {(parentTask || waitsFor.length > 0 || selected.queueReason) && (
-            <p className="orch-detail-meta">
-              {parentTask && (
-                <button
-                  className="orch-parent-link"
-                  onClick={() => onOpen(parentTask.id)}
-                >
-                  Part of {parentTask.title}
-                </button>
-              )}
-              {parentTask && waitsFor.length > 0 && " · "}
-              {waitsFor.length > 0 && `after ${waitsFor.join(", ")}`}
-              {selected.queueReason &&
-                `${parentTask || waitsFor.length > 0 ? " · " : ""}${selected.queueReason}`}
+    <div className="td">
+      <div className="td-scroll">
+        <div className="td-head">
+          <div className="td-title">
+            <div className="td-title-row">
+              <h3 title={selected.title}>{selected.title}</h3>
+              {statusTag && <Tag tone={statusTag.tone}>{statusTag.label}</Tag>}
+            </div>
+            <p className="td-meta">
+              <GitBranch size={12} aria-hidden />
+              <span className="td-branch" title={selected.branch}>
+                {selected.branch}
+              </span>
+              <span className="td-faint">
+                {headerFacts(selected, settings?.maxAttempts)}
+              </span>
             </p>
-          )}
-          {settings && (
-            <p className="orch-detail-meta orch-variant-line">
-              Variant: {variantLabel(selected, settings.experiments)}
-            </p>
-          )}
-          {(() => {
-            const breakdown = costByStage(selected);
-            // A parent's total includes its subtasks' costs.
-            const subtasks = children.reduce(
-              (sum, child) => sum + child.costUsd,
-              0,
-            );
-            const legacy: { label: string; cost: number }[] = [
-              { label: "Plan", cost: breakdown.plan },
-              ...breakdown.implement.map((a) => ({
-                label: `Implement #${a.n}`,
-                cost: a.costUsd,
-              })),
-              { label: "Review", cost: breakdown.review },
-              { label: "Subtasks", cost: subtasks },
-              {
-                label: "Other",
-                cost: Math.max(0, breakdown.other - subtasks),
-              },
-            ].filter((row) => formatCost(row.cost) !== "$0.00");
-            return (
-              <TaskCostLine
-                task={selected}
-                subtasks={subtasks}
-                legacy={legacy}
-              />
-            );
-          })()}
-        </div>
-        <div className="orch-detail-actions">
-          {(selected.status === "drafting" ||
-            selected.status === "queued" ||
-            selected.status === "stopped" ||
-            selected.status === "failed") && (
-            <button
-              // A stopped or failed task is idle, waiting on you -
-              // restarting it is the one action that matters, so it
-              // gets the filled/primary treatment.
-              className={
-                selected.status === "stopped" || selected.status === "failed"
-                  ? "primary"
-                  : "secondary"
-              }
-              disabled={busy}
-              onClick={() =>
-                act(() => orchestratorClient.taskStart(selected.id))
-              }
-            >
-              {selected.status === "drafting" || selected.status === "queued"
-                ? "Start"
-                : "Run again"}
-            </button>
-          )}
-          {selected.status === "done" &&
-            !selected.parent &&
-            !selected.landedSha &&
-            !!selected.baseRef && (
+          </div>
+          <div className="td-actions">
+            {(selected.status === "drafting" ||
+              selected.status === "queued" ||
+              selected.status === "stopped" ||
+              selected.status === "failed") && (
               <button
+                // A stopped or failed task is idle, waiting on you -
+                // restarting it is the one action that matters.
+                className={`ui-button ${
+                  selected.status === "stopped" || selected.status === "failed"
+                    ? "primary"
+                    : "secondary"
+                }`}
                 disabled={busy}
                 onClick={() =>
-                  act(() => orchestratorClient.taskLand(selected.id))
+                  act(() => orchestratorClient.taskStart(selected.id))
                 }
               >
-                Land
+                {selected.status === "drafting" || selected.status === "queued"
+                  ? "Start"
+                  : "Run again"}
               </button>
             )}
-          {(selected.status === "drafting" ||
-            selected.status === "running" ||
-            selected.status === "queued" ||
-            selected.status === "waiting") && (
+            {done &&
+              !selected.parent &&
+              !selected.landedSha &&
+              !!selected.baseRef && (
+                <button
+                  className="ui-button secondary"
+                  disabled={busy}
+                  onClick={() =>
+                    act(() => orchestratorClient.taskLand(selected.id))
+                  }
+                >
+                  Land
+                </button>
+              )}
+            {done && (
+              <>
+                <button
+                  className="ui-button ghost"
+                  disabled={busy}
+                  aria-pressed={mark?.touched === true}
+                  onClick={() => {
+                    if (mark?.touched === true)
+                      act(() =>
+                        orchestratorClient.taskLeadTouch(
+                          selected.id,
+                          undefined,
+                        ),
+                      );
+                    else setNoting(true);
+                  }}
+                >
+                  <Wrench size={14} />
+                  Needed a fix
+                </button>
+                <button
+                  className="ui-button secondary"
+                  disabled={busy}
+                  aria-pressed={mark?.touched === false}
+                  onClick={() =>
+                    act(() =>
+                      orchestratorClient.taskLeadTouch(
+                        selected.id,
+                        mark?.touched === false ? undefined : false,
+                      ),
+                    )
+                  }
+                >
+                  <Check size={14} />
+                  Clean
+                </button>
+              </>
+            )}
+            {(selected.status === "drafting" ||
+              selected.status === "running" ||
+              selected.status === "queued" ||
+              selected.status === "waiting") && (
+              <button
+                className="ui-button secondary"
+                disabled={busy}
+                onClick={() =>
+                  act(() => orchestratorClient.taskStop(selected.id))
+                }
+              >
+                <Square size={12} /> Stop
+              </button>
+            )}
             <button
-              className="secondary"
-              disabled={busy}
+              className="td-icon-button"
+              title="Archive task"
+              aria-label="Archive task"
+              disabled={
+                busy ||
+                selected.status === "running" ||
+                selected.status === "drafting" ||
+                selected.status === "waiting"
+              }
               onClick={() =>
-                act(() => orchestratorClient.taskStop(selected.id))
+                act(() => orchestratorClient.taskArchive(selected.id))
               }
             >
-              <Square size={12} /> Stop
+              <Archive size={16} />
             </button>
-          )}
-          <button
-            className="icon-button orch-archive-button"
-            title="Archive task"
-            disabled={
-              busy ||
-              selected.status === "running" ||
-              selected.status === "drafting" ||
-              selected.status === "waiting"
-            }
-            onClick={() =>
-              act(() => orchestratorClient.taskArchive(selected.id))
-            }
+            <button
+              className="td-icon-button"
+              title="Delete task"
+              aria-label="Delete task"
+              disabled={busy}
+              onClick={onDelete}
+            >
+              <Trash2 size={16} />
+            </button>
+          </div>
+        </div>
+        {noting && (
+          <form
+            className="td-inline-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              act(() =>
+                orchestratorClient.taskLeadTouch(
+                  selected.id,
+                  true,
+                  note.trim(),
+                ),
+              );
+              setNoting(false);
+              setNote("");
+            }}
           >
-            <Archive size={13} />
-          </button>
-          <button
-            className="icon-button orch-delete-button"
-            title="Delete task"
-            disabled={busy}
-            onClick={onDelete}
-          >
-            <Trash2 size={13} />
-          </button>
-        </div>
-      </div>
-      {/* The one thing blocking the task goes first, above everything
-       * that only describes it. */}
-      {selected.question && (
-        <QuestionCard
-          key={`question-${selected.id}`}
-          task={selected}
-          disabled={busy}
-          onAnswer={(answer) =>
-            act(() => orchestratorClient.taskAnswer(selected.id, answer))
-          }
-        />
-      )}
-      {selected.status === "done" && (
-        <TaskReport
-          key={`report-${selected.id}`}
-          task={selected}
-          tasks={tasks}
-          disabled={busy}
-          onOpen={onOpen}
-          onLeadTouch={(touched, note) =>
-            act(() =>
-              orchestratorClient.taskLeadTouch(selected.id, touched, note),
-            )
-          }
-        />
-      )}
-      <TaskTimelineBar task={selected} />
-      {selected.request && selected.request !== selected.title && (
-        <p className="orch-request">{selected.request}</p>
-      )}
-      {selected.criteria.length > 0 && (
-        <div className="orch-criteria">
-          {selected.criteria.map((criterion, index) => (
-            <p key={index}>
-              {criteriaMet(selected) ? (
-                <Check size={12} className="orch-check-met" />
-              ) : (
-                <Square size={12} className="orch-check-open" />
-              )}{" "}
-              {criterion}
-            </p>
-          ))}
-        </div>
-      )}
-      {children.length > 0 && (
-        <div className="orch-subtasks">
-          <span className="dialog-eyebrow">SUBTASKS</span>
-          {children.map((child) => {
-            const tone = statusTone(child);
-            const after = dependencyTitles(child, tasks);
-            return (
-              <button
-                key={child.id}
-                className="orch-subtask-row"
-                onClick={() => onOpen(child.id)}
-              >
-                <span className={`status-dot ${tone}`} />
-                <span className="orch-task-title">{child.title}</span>
-                {after.length > 0 && (
-                  <span className="orch-subtask-after">
-                    after {after.join(", ")}
-                  </span>
-                )}
-                {child.queueReason && (
-                  <span className="orch-subtask-after">
-                    {child.queueReason}
-                  </span>
-                )}
-                <span className={`orch-status-badge tone-${tone}`}>
-                  {statusBadgeLabel(child)}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-      <AssumptionsList
-        key={`assumptions-${selected.id}`}
-        task={selected}
-        disabled={busy}
-        onOverturn={(index, answer) =>
-          act(() => orchestratorClient.taskOverturn(selected.id, index, answer))
-        }
-      />
-      {selected.decisions.length > 0 && (
-        <div className="orch-decisions">
-          {selected.decisions.map((line, index) => {
-            const parsed = decisionTag(line);
-            return (
-              <p key={index} className="orch-decision-line">
-                {parsed && (
-                  <span
-                    className={`orch-decision-tag orch-decision-${parsed.tag.toLowerCase()}`}
-                  >
-                    {parsed.tag}
-                  </span>
-                )}
-                {parsed ? parsed.text : line}
-              </p>
-            );
-          })}
-        </div>
-      )}
-      <EvidenceGallery task={selected} />
-      <div className="orch-attempts">
-        {selected.attempts.map((attempt) => (
-          <AttemptRow key={attempt.n} attempt={attempt} />
-        ))}
-        {settings?.review &&
-          children.length === 0 &&
-          !selected.attempts.some((a) => a.stage === "review") &&
-          (selected.status === "running" || selected.status === "queued") && (
-            <PendingStageRow
-              label={
-                settings.review === "auto"
-                  ? "other vendor"
-                  : (settings.routes.find((r) => r.id === settings.review)
-                      ?.label ?? settings.review)
-              }
+            <input
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+              placeholder="What is missing or wrong? A follow-up task will be created."
+              aria-label="What had to be fixed"
+              autoFocus
             />
-          )}
+            <button className="ui-button primary" type="submit" disabled={busy}>
+              Save
+            </button>
+            <button
+              className="ui-button secondary"
+              type="button"
+              onClick={() => setNoting(false)}
+            >
+              Cancel
+            </button>
+          </form>
+        )}
+        {(parentTask || waitsFor.length > 0 || selected.queueReason) && (
+          <p className="td-facts">
+            {parentTask && (
+              <button className="td-link" onClick={() => onOpen(parentTask.id)}>
+                Part of {parentTask.title}
+              </button>
+            )}
+            {parentTask && waitsFor.length > 0 && " · "}
+            {waitsFor.length > 0 && `after ${waitsFor.join(", ")}`}
+            {selected.queueReason &&
+              `${parentTask || waitsFor.length > 0 ? " · " : ""}${selected.queueReason}`}
+          </p>
+        )}
+        {done ? (
+          <TaskReport
+            key={`report-${selected.id}`}
+            task={selected}
+            tasks={tasks}
+            onOpen={onOpen}
+          />
+        ) : (
+          <StageTrack steps={stageTrack(selected)} />
+        )}
+        {/* The one thing blocking the task goes first, above everything
+         * that only describes it. */}
+        {selected.question && (
+          <QuestionCard
+            key={`question-${selected.id}`}
+            task={selected}
+            disabled={busy}
+            onAnswer={(answer) =>
+              act(() => orchestratorClient.taskAnswer(selected.id, answer))
+            }
+          />
+        )}
+        <TaskTimeline task={selected} />
+        {selected.criteria.length > 0 && (
+          <div className="td-criteria">
+            <span className="td-eyebrow">
+              {acceptanceHeading(selected, met)}
+            </span>
+            {selected.criteria.map((criterion, index) => (
+              <Criterion key={index} state={met ? "met" : "pending"}>
+                {criterion}
+              </Criterion>
+            ))}
+          </div>
+        )}
+        {(selected.attempts.length > 0 || !!settings?.review) && (
+          <div className="td-attempts">
+            {selected.attempts.length > 0 && (
+              <span className="td-eyebrow">ATTEMPTS</span>
+            )}
+            {selected.attempts.map((attempt) => (
+              <AttemptRow key={attempt.n} attempt={attempt} />
+            ))}
+            {settings?.review &&
+              children.length === 0 &&
+              !selected.attempts.some((a) => a.stage === "review") &&
+              (selected.status === "running" ||
+                selected.status === "queued") && (
+                <PendingStageRow
+                  label={
+                    settings.review === "auto"
+                      ? "other vendor"
+                      : (settings.routes.find((r) => r.id === settings.review)
+                          ?.label ?? settings.review)
+                  }
+                />
+              )}
+          </div>
+        )}
+        <EvidenceGallery task={selected} />
+        {hasDetails && (
+          <section className="td-details">
+            <button
+              className="td-details-toggle"
+              aria-expanded={detailsOpen}
+              onClick={() => setDetailsOpen(!detailsOpen)}
+            >
+              {detailsOpen ? (
+                <ChevronDown size={12} />
+              ) : (
+                <ChevronRight size={12} />
+              )}
+              Details
+            </button>
+            {detailsOpen && (
+              <div className="td-details-body">
+                {selected.request && selected.request !== selected.title && (
+                  <p className="td-request">{selected.request}</p>
+                )}
+                <p className="td-facts">
+                  <span
+                    className={selected.tierFallback ? "td-warn" : undefined}
+                  >
+                    {formatTaskTier(selected)}
+                  </span>
+                  {selected.baseRef && (
+                    <span className="td-branch" title={selected.baseRef}>
+                      {" · "}from {selected.baseRef}
+                    </span>
+                  )}
+                  {selected.variant?.land && (
+                    <span className="td-branch" title={selected.landedSha}>
+                      {" · "}
+                      {selected.landedSha
+                        ? `landed ${selected.landedSha.slice(0, 8)}`
+                        : selected.status === "landing"
+                          ? "landing: waiting for a clean checkout"
+                          : "lands on its base"}
+                    </span>
+                  )}
+                </p>
+                {settings && (
+                  <p className="td-facts">
+                    Variant: {variantLabel(selected, settings.experiments)}
+                  </p>
+                )}
+                <TaskCostLine
+                  task={selected}
+                  subtasks={subtasksCost}
+                  legacy={legacy}
+                />
+                {children.length > 0 && (
+                  <div className="td-subtasks">
+                    <span className="td-eyebrow">SUBTASKS</span>
+                    {children.map((child) => {
+                      const tone = statusTone(child);
+                      const after = dependencyTitles(child, tasks);
+                      return (
+                        <button
+                          key={child.id}
+                          className="td-subtask-row"
+                          onClick={() => onOpen(child.id)}
+                        >
+                          <span className={`status-dot ${tone}`} />
+                          <span className="td-subtask-title">
+                            {child.title}
+                          </span>
+                          {after.length > 0 && (
+                            <span className="td-faint">
+                              after {after.join(", ")}
+                            </span>
+                          )}
+                          {child.queueReason && (
+                            <span className="td-faint">
+                              {child.queueReason}
+                            </span>
+                          )}
+                          <span className="td-faint">
+                            {statusBadgeLabel(child)}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                <AssumptionsList
+                  key={`assumptions-${selected.id}`}
+                  task={selected}
+                  disabled={busy}
+                  onOverturn={(index, answer) =>
+                    act(() =>
+                      orchestratorClient.taskOverturn(
+                        selected.id,
+                        index,
+                        answer,
+                      ),
+                    )
+                  }
+                />
+                {selected.decisions.length > 0 && (
+                  <div className="td-decisions">
+                    <span className="td-eyebrow">DECISIONS</span>
+                    {selected.decisions.map((line, index) => {
+                      const parsed = decisionTag(line);
+                      return (
+                        <p key={index} className="td-decision-line">
+                          {parsed && (
+                            <span className="td-decision-tag">
+                              {parsed.tag}
+                            </span>
+                          )}
+                          {parsed ? parsed.text : line}
+                        </p>
+                      );
+                    })}
+                  </div>
+                )}
+                {logLines && logLines.length > 0 && (
+                  <pre className="td-log">{logLines.join("\n")}</pre>
+                )}
+              </div>
+            )}
+          </section>
+        )}
       </div>
-      {logLines && logLines.length > 0 && (
-        <pre className="orch-log">{logLines.join("\n")}</pre>
-      )}
     </div>
   );
 }

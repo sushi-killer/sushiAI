@@ -1,289 +1,457 @@
-import { useEffect, useState } from "react";
-import { CornerDownRight, MessageSquare, Plus, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  ArrowRight,
+  CornerDownRight,
+  MessageSquare,
+  MoreHorizontal,
+  Plus,
+  Search,
+  Sparkles,
+  SquareTerminal,
+} from "lucide-react";
 import { orchestratorClient } from "./client";
 import {
+  enterKind,
+  isOfKind,
+  newSession,
+  noteThread,
+  sendInKind,
+  sessionMeta,
+  sessionsOfKind,
+  switchSession,
+  visibleText,
+  visibleTitle,
+  type KindedList,
+} from "./chatKinds";
+import {
+  groupSessions,
+  matchesQuery,
+  sessionTime,
+  taskRefs,
+} from "./chatModel";
+import {
   errorText,
-  messageThreads,
+  formatCost,
   participantLabel,
+  taskReason,
+  taskTone,
   upsertMessage,
-  type MessageThread,
+  type Tone,
 } from "./helpers";
-import type {
-  ChatSessionList,
-  ChatThread,
-  Message,
-  Settings,
-  Task,
-} from "./types";
-import { ChatTranscript } from "../ChatTranscript";
+import type { ChatMessage, ChatThread, Message, Settings, Task } from "./types";
 import { RichText } from "../agents/AgentsView";
 import { Composer, OrchestratorRouteChip } from "./Composer";
+import { Chip, Tag } from "./ui";
+import "./chat.css";
 
-/** The orchestrator agent's conversations for this repo. The daemon runs each
- * turn and keeps every session, so a reply keeps coming and stays readable
- * when the window closes or the app restarts. A live reply pins the current
- * session: New chat, switching and Clear are disabled meanwhile, and the
- * daemon's refusal still shows if a click races the reply's first event. */
-function OrchestratorChat({
-  cwd,
-  hidden,
+const STARTERS = [
+  "What is running and what needs me?",
+  "Why did the last task fail?",
+  "Land everything that passed review",
+];
+
+/** "Orchestrator · claude-sonnet": the route the chat runs on, by model. */
+function routeLabel(settings: Settings): string {
+  const id = settings.orchestrator || settings.tiers.standard;
+  const route = settings.routes.find((r) => r.id === id);
+  const name = route?.label || id;
+  return name ? `Orchestrator · ${name}` : "Orchestrator";
+}
+
+/** A known task the orchestrator named, as a card that opens it. */
+function TaskRefCard({
+  task,
+  tasks,
+  maxAttempts,
+  onOpenTask,
+}: {
+  task: Task;
+  tasks: Task[];
+  maxAttempts?: number;
+  onOpenTask?: (id: string) => void;
+}) {
+  const cost = task.costUsd ? formatCost(task.costUsd) : "";
+  const sub = [taskReason(task, tasks, maxAttempts), cost]
+    .filter(Boolean)
+    .join(" · ");
+  const body = (
+    <>
+      <span className={`ui-dot ui-tone-${taskTone(task)}`} />
+      <span className="ochat-ref-body">
+        <span className="ochat-ref-title" title={task.title}>
+          {task.title}
+        </span>
+        <span className="ochat-ref-sub">{sub}</span>
+      </span>
+    </>
+  );
+  // Without a way to open the task the card still names it, unclickable.
+  if (!onOpenTask) return <div className="ochat-ref">{body}</div>;
+  return (
+    <button
+      type="button"
+      className="ochat-ref"
+      onClick={() => onOpenTask(task.id)}
+    >
+      {body}
+      <ArrowRight size={12} className="ochat-ref-arrow" />
+    </button>
+  );
+}
+
+function Avatar() {
+  return (
+    <span className="ochat-avatar" aria-hidden>
+      <Sparkles size={12} />
+    </span>
+  );
+}
+
+function OrchestratorTurn({
+  message,
+  tasks,
+  maxAttempts,
+  onOpenTask,
+}: {
+  message: ChatMessage;
+  tasks: Task[];
+  maxAttempts?: number;
+  onOpenTask?: (id: string) => void;
+}) {
+  const refs = taskRefs(message.text, tasks);
+  return (
+    <div className="ochat-orch">
+      <Avatar />
+      <div className="ochat-orch-col">
+        <div className="ochat-orch-text">
+          <RichText text={message.text} />
+        </div>
+        {refs.map((task) => (
+          <TaskRefCard
+            key={task.id}
+            task={task}
+            tasks={tasks}
+            maxAttempts={maxAttempts}
+            onOpenTask={onOpenTask}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** The conversation column's head: title, route and the session menu. */
+function ChatHead({
+  title,
   settings,
+  busy,
+  canClear,
+  onClear,
+}: {
+  title: string;
+  settings: Settings | null;
+  busy: boolean;
+  canClear: boolean;
+  onClear: () => void;
+}) {
+  const [menu, setMenu] = useState(false);
+  return (
+    <div className="ochat-head">
+      <h2 className="ochat-head-title">{title}</h2>
+      {settings && (
+        <span className="ochat-route" title="Change it in the composer">
+          <Sparkles size={12} />
+          {routeLabel(settings)}
+        </span>
+      )}
+      <div className="ochat-menu-wrap">
+        <button
+          type="button"
+          className="icon-button ochat-menu-btn"
+          aria-label="Chat actions"
+          aria-haspopup="menu"
+          aria-expanded={menu}
+          onClick={() => setMenu((v) => !v)}
+        >
+          <MoreHorizontal size={16} />
+        </button>
+        {menu && (
+          <div className="ochat-menu" role="menu">
+            <button
+              type="button"
+              role="menuitem"
+              disabled={busy || !canClear}
+              title={busy ? "Wait for the reply to finish" : undefined}
+              onClick={() => {
+                setMenu(false);
+                onClear();
+              }}
+            >
+              Clear chat
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** The orchestrator conversation: the current chat session's turns and the
+ * composer under them. */
+function Conversation({
+  cwd,
+  thread,
+  waiting,
+  error,
+  settings,
+  tasks,
   onRouteChange,
+  onOpenTask,
+  onSend,
+  onClear,
 }: {
   cwd: string;
-  hidden: boolean;
-  /** `null` while Settings is still loading - the route chip waits for it
-   * rather than guessing at a harness icon. */
+  thread: ChatThread | null;
+  waiting: boolean;
+  error: string;
   settings: Settings | null;
+  tasks: Task[];
   onRouteChange: (routeId: string) => void;
+  onOpenTask?: (id: string) => void;
+  onSend: (text: string) => Promise<boolean>;
+  onClear: () => void;
 }) {
   const [draft, setDraft] = useState("");
-  const [thread, setThread] = useState<ChatThread | null>(null);
-  const [list, setList] = useState<ChatSessionList | null>(null);
-  const [sendError, setSendError] = useState("");
-
+  const endRef = useRef<HTMLDivElement>(null);
+  const messages = thread?.messages ?? [];
+  const busy = Boolean(thread?.busy);
+  const last = messages.length ? messages[messages.length - 1].id : "";
   useEffect(() => {
-    let cancelled = false;
-    Promise.all([
-      orchestratorClient.chatGet(cwd),
-      orchestratorClient.chatList(cwd),
-    ])
-      .then(([loaded, sessions]) => {
-        if (cancelled) return;
-        setThread(loaded);
-        setList(sessions);
-      })
-      .catch((e) => !cancelled && setSendError(errorText(e)));
-    const off = window.bridge?.onOrchestrator((event) => {
-      if (event.event === "chat" && event.thread.repo === cwd) {
-        // A refusal ("still answering") is stale once the reply is in.
-        if (!event.thread.busy) setSendError("");
-        setThread(event.thread);
-        setList({ current: event.current, sessions: event.sessions });
-      }
-    });
-    return () => {
-      cancelled = true;
-      off?.();
-    };
-  }, [cwd]);
+    endRef.current?.scrollIntoView?.({ block: "end" });
+  }, [last, busy]);
 
   function submit() {
     const text = draft.trim();
-    if (!text || thread?.busy) return;
-    setSendError("");
-    orchestratorClient
-      .chatSend(cwd, text)
-      .then(() => setDraft(""))
-      .catch((e) => setSendError(errorText(e)));
+    if (!text || busy) return;
+    void onSend(text).then((sent) => sent && setDraft(""));
   }
-  /** New chat, switch and Clear all answer with the now-current session;
-   * the chat event that follows refreshes the session list. */
-  function changeSession(request: Promise<ChatThread>) {
-    setSendError("");
-    request.then(setThread).catch((e) => setSendError(errorText(e)));
-  }
-  const error = sendError || thread?.error;
-  const busy = Boolean(thread?.busy);
+  const shownError = error || thread?.error;
+  const empty = messages.length === 0 && !busy;
   return (
-    // Kept mounted behind the other views so a half-typed message and the
-    // scroll position survive a look at a task.
-    <div className="orch-chat" hidden={hidden}>
-      <div className="orch-sessions" aria-label="Chat sessions">
-        <button
-          className="orch-nav-row"
-          disabled={busy}
-          title={busy ? "Wait for the reply to finish" : undefined}
-          onClick={() => changeSession(orchestratorClient.chatNew(cwd))}
-        >
-          <Plus size={14} /> New chat
-        </button>
-        {/* Newest first, so a new chat lands right under its button. */}
-        {[...(list?.sessions ?? [])].reverse().map((session) => {
-          const current = session.id === list?.current;
-          return (
-            <div
-              key={session.id}
-              className={`orch-session-row ${current ? "selected" : ""}`}
-            >
-              <button
-                className="orch-session-open"
-                aria-current={current || undefined}
-                disabled={busy && !current}
-                title={
-                  busy && !current ? "Wait for the reply to finish" : undefined
-                }
-                onClick={() =>
-                  !current &&
-                  changeSession(orchestratorClient.chatSwitch(cwd, session.id))
-                }
-              >
-                <MessageSquare size={13} />
-                <span
-                  className={`orch-session-title ${session.title ? "" : "untitled"}`}
-                >
-                  {session.title || "New chat"}
-                </span>
-                {session.busy && (
-                  <span
-                    className="status-dot blue pulse"
-                    aria-label="Answering"
-                  />
-                )}
-              </button>
-              {current && (
-                <button
-                  className="icon-button orch-session-clear"
-                  aria-label="Clear chat"
-                  disabled={busy}
-                  title={
-                    busy ? "Wait for the reply to finish" : "Clear this chat"
-                  }
-                  onClick={() =>
-                    changeSession(orchestratorClient.chatClear(cwd))
-                  }
-                >
-                  <Trash2 size={13} />
-                </button>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      <ChatTranscript
-        messages={thread?.messages}
-        busy={thread?.busy}
-        note={thread?.note}
-        error={error}
-        welcome={
-          <>
-            <h2>Talk to the orchestrator</h2>
+    <>
+      <ChatHead
+        title={visibleTitle(thread?.title) || "New chat"}
+        settings={settings}
+        busy={busy}
+        canClear={messages.length > 0}
+        onClear={onClear}
+      />
+      <div className={`ochat-scroll ${empty ? "empty" : ""}`}>
+        {waiting && (
+          <p className="ochat-wait">
+            The orchestrator is still answering in another session. This chat
+            opens when it finishes.
+          </p>
+        )}
+        {empty && !waiting ? (
+          <div className="ochat-empty">
+            <h3>Ask about your tasks</h3>
             <p>
-              Describe what should happen - it creates, checks and answers tasks
-              on your behalf.
+              The orchestrator reads every task, its attempts and costs. It can
+              start, stop, answer and land them for you.
             </p>
-          </>
-        }
-      />
-      <Composer
-        value={draft}
-        onChange={setDraft}
-        onSubmit={submit}
-        placeholder="Ask the orchestrator…"
-        ariaLabel="Message the orchestrator"
-        sendLabel="Send message"
-        sending={busy}
-        onStop={() => void orchestratorClient.chatCancel(cwd)}
-        route={
-          settings && (
-            <OrchestratorRouteChip
-              settings={settings}
-              onRouteChange={onRouteChange}
-            />
+            <div className="ochat-starters">
+              {STARTERS.map((text) => (
+                <Chip
+                  key={text}
+                  disabled={!thread}
+                  onClick={() => void onSend(text)}
+                >
+                  {text}
+                </Chip>
+              ))}
+            </div>
+          </div>
+        ) : (
+          messages.map((message) =>
+            message.role === "user" ? (
+              <div key={message.id} className="ochat-you">
+                <div className="ochat-bubble">{visibleText(message.text)}</div>
+              </div>
+            ) : (
+              <OrchestratorTurn
+                key={message.id}
+                message={message}
+                tasks={tasks}
+                maxAttempts={settings?.maxAttempts}
+                onOpenTask={onOpenTask}
+              />
+            ),
           )
-        }
-      />
-    </div>
+        )}
+        {busy && (
+          <div className="ochat-orch">
+            <Avatar />
+            <div className="ochat-orch-col">
+              <span className="ochat-tool">
+                <SquareTerminal size={12} />
+                {thread?.note || "Thinking…"}
+              </span>
+            </div>
+          </div>
+        )}
+        {shownError && (
+          <p className="ochat-error" role="alert">
+            {shownError}
+          </p>
+        )}
+        <div ref={endRef} />
+      </div>
+      <div className="ochat-composer">
+        <Composer
+          value={draft}
+          onChange={setDraft}
+          onSubmit={submit}
+          placeholder="Ask the orchestrator…"
+          ariaLabel="Message the orchestrator"
+          sendLabel="Send message"
+          disabled={!thread || waiting}
+          sending={busy}
+          onStop={() => void orchestratorClient.chatCancel(cwd)}
+          route={
+            settings && (
+              <OrchestratorRouteChip
+                settings={settings}
+                onRouteChange={onRouteChange}
+                standardLabel="Orchestrator"
+              />
+            )
+          }
+        />
+      </div>
+    </>
   );
 }
 
-/** A small badge on a question to the orchestrator - the same look as a
- * decision tag (`orch-decision-tag`). A reply already carries its own
- * "↳ reply" marker, so it gets no second badge. */
-function MessageKindTag({ kind }: { kind: Message["kind"] }) {
-  if (kind !== "question") return null;
-  return (
-    <span className="orch-decision-tag orch-message-kind-question">{kind}</span>
-  );
-}
+const KIND_TAG: Record<Message["kind"], { tone: Tone; label: string }> = {
+  question: { tone: "warning", label: "question" },
+  message: { tone: "info", label: "note" },
+  reply: { tone: "ok", label: "reply" },
+};
 
-/** One message inside a thread card. A reply reads as answering its question
- * with an indent and a small "↳ reply" marker, rather than just another line
- * in the same column as everything else. */
-function MessageRow({ message, tasks }: { message: Message; tasks: Task[] }) {
-  const when = new Date(message.ts);
+function clock(ts: number) {
+  const when = new Date(ts);
   return (
-    <div
-      className={`orch-message-row ${message.kind === "reply" ? "orch-message-reply" : ""}`}
+    <time
+      className="ochat-card-time"
+      dateTime={when.toISOString()}
+      title={when.toLocaleString("en-US")}
     >
-      {message.kind === "reply" && (
-        <span className="orch-message-reply-marker">
-          <CornerDownRight size={12} /> reply
-        </span>
-      )}
-      <div className="orch-message-meta">
-        <span className="orch-message-from">
-          {participantLabel(message.from, tasks)}
-        </span>
-        <MessageKindTag kind={message.kind} />
-        <time
-          className="orch-message-time"
-          dateTime={when.toISOString()}
-          title={when.toLocaleString("en-US")}
-        >
-          {when.toLocaleTimeString("en-US", {
-            hour: "2-digit",
-            minute: "2-digit",
-          })}
-        </time>
-      </div>
-      <div className="orch-message-text">
-        <RichText text={message.text} />
-      </div>
-      <span
-        className={`orch-message-delivery ${message.delivered ? "delivered" : "pending"}`}
-      >
-        {message.delivered ? "delivered" : "pending — arrives on its next turn"}
-      </span>
-    </div>
+      {sessionTime(ts)}
+    </time>
   );
 }
 
-/** One conversation between two participants (a task and the orchestrator,
- * or two tasks), newest thread first, its own messages oldest first. */
-function MessageThreadCard({
-  thread,
+function name(id: string, tasks: Task[]) {
+  return id === "orchestrator" ? "orchestrator" : participantLabel(id, tasks);
+}
+
+/** One message a task agent sent, with the replies it got under it. A
+ * question the orchestrator has not picked up yet takes a reply here. */
+function MessageCard({
+  message,
+  replies,
   tasks,
 }: {
-  thread: MessageThread;
+  message: Message;
+  replies: Message[];
   tasks: Task[];
 }) {
-  const [a, b] = thread.participants;
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState("");
+  const tag = KIND_TAG[message.kind];
+  const pending =
+    message.kind === "question" &&
+    message.to === "orchestrator" &&
+    !message.delivered &&
+    replies.length === 0;
+  function send() {
+    const text = draft.trim();
+    if (!text) return;
+    setSending(true);
+    setError("");
+    orchestratorClient
+      .messageSend({
+        from: "orchestrator",
+        to: message.from,
+        replyTo: message.id,
+        text,
+      })
+      .then(() => setDraft(""))
+      .catch((e) => setError(errorText(e)))
+      .finally(() => setSending(false));
+  }
   return (
-    <div className="orch-thread-card">
-      <div className="orch-thread-head">
-        <span className="orch-thread-title">
-          {participantLabel(a, tasks)} ↔ {participantLabel(b, tasks)}
+    <div className={`ochat-card ${pending ? "pending" : ""}`}>
+      <div className="ochat-card-head">
+        <Tag tone={tag.tone}>{tag.label}</Tag>
+        <span className="ochat-card-from" title={name(message.from, tasks)}>
+          {name(message.from, tasks)}
         </span>
-        <span className="orch-thread-count">
-          {thread.messages.length} message
-          {thread.messages.length === 1 ? "" : "s"}
-        </span>
+        <span className="ochat-card-to">→ {name(message.to, tasks)}</span>
+        <span className="ochat-spacer" />
+        {clock(message.ts)}
       </div>
-      {thread.messages.map((message) => (
-        <MessageRow key={message.id} message={message} tasks={tasks} />
+      <p className="ochat-card-text">{message.text}</p>
+      {replies.map((reply) => (
+        <p key={reply.id} className="ochat-card-reply">
+          <CornerDownRight size={12} />
+          <span>
+            <span className="ochat-card-from">{name(reply.from, tasks)}</span>{" "}
+            {reply.text}
+          </span>
+        </p>
       ))}
+      {pending && (
+        <form
+          className="ochat-card-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            send();
+          }}
+        >
+          <input
+            className="ochat-card-input"
+            aria-label="Reply as the owner"
+            placeholder="Reply as the owner…"
+            value={draft}
+            disabled={sending}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          <button
+            type="submit"
+            className="ui-button secondary"
+            disabled={sending || !draft.trim()}
+          >
+            Reply
+          </button>
+        </form>
+      )}
+      {error && (
+        <p className="ochat-error" role="alert">
+          {error}
+        </p>
+      )}
     </div>
   );
 }
 
-/** Agent-to-agent (and agent-to-orchestrator) message threads the daemon
- * keeps for this repo - read-only, the owner only watches. Self-contained
- * like `OrchestratorChat`: it loads and live-updates its own state instead of
- * riding the panel's shared `live` state (`applyOrchestratorEvent` leaves a
- * `message` event untouched, same as it does for `chat`). */
-function MessagesView({
-  cwd,
-  tasks,
-  hidden,
-}: {
-  cwd: string;
-  tasks: Task[];
-  hidden: boolean;
-}) {
+/** Agent-to-orchestrator (and agent-to-agent) messages the daemon keeps for
+ * this repo, newest first, each reply under the message it answers. */
+function AgentMessages({ cwd, tasks }: { cwd: string; tasks: Task[] }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loadError, setLoadError] = useState("");
-
   useEffect(() => {
     let cancelled = false;
     orchestratorClient
@@ -300,37 +468,163 @@ function MessagesView({
     };
   }, [cwd]);
 
-  const threads = messageThreads(messages);
-
+  const replies = new Map<string, Message[]>();
+  for (const m of messages)
+    if (m.kind === "reply" && m.replyTo)
+      replies.set(m.replyTo, [...(replies.get(m.replyTo) ?? []), m]);
+  const known = new Set(messages.map((m) => m.id));
+  const top = messages
+    .filter((m) => !(m.kind === "reply" && m.replyTo && known.has(m.replyTo)))
+    .sort((a, b) => b.ts - a.ts);
   return (
-    <div className="orch-messages" hidden={hidden}>
-      {loadError && (
-        <div className="orch-error" role="alert">
-          <span>{loadError}</span>
-        </div>
-      )}
-      {threads.length === 0 ? (
-        <div className="chat-welcome">
-          <h2>Agent messages</h2>
-          <p>
-            Tasks message each other and ask the orchestrator here - watch each
-            thread as it happens, no need to answer on their behalf.
+    <>
+      <div className="ochat-head ochat-head-messages">
+        <h2 className="ochat-head-title">Agent messages</h2>
+        <span className="ochat-head-sub">
+          what task agents asked or told the orchestrator
+        </span>
+      </div>
+      <div className="ochat-cards">
+        {loadError && (
+          <p className="ochat-error" role="alert">
+            {loadError}
           </p>
-        </div>
-      ) : (
-        <div className="orch-thread-list">
-          {threads.map((thread) => (
-            <MessageThreadCard key={thread.key} thread={thread} tasks={tasks} />
-          ))}
-        </div>
-      )}
-    </div>
+        )}
+        {top.length === 0 && !loadError ? (
+          <p className="ochat-cards-empty">
+            No messages yet. Task agents ask the orchestrator here while they
+            work.
+          </p>
+        ) : (
+          top.map((message) => (
+            <MessageCard
+              key={message.id}
+              message={message}
+              replies={replies.get(message.id) ?? []}
+              tasks={tasks}
+            />
+          ))
+        )}
+      </div>
+    </>
   );
 }
 
-/** The Chat view: the orchestrator chat and, one segment over, the agent
- * messages the daemon keeps. Both stay mounted while hidden so a half-typed
- * message and the scroll position survive a look at a task. */
+/** The right-hand sessions column: New, search, the agent messages entry
+ * and this repo's chat sessions, TODAY and EARLIER. */
+function Sessions({
+  cwd,
+  list,
+  current,
+  kind,
+  busy,
+  pendingMessages,
+  onNew,
+  onPick,
+  onMessages,
+}: {
+  cwd: string;
+  list: KindedList | null;
+  current: string | undefined;
+  kind: "chat" | "messages";
+  busy: boolean;
+  pendingMessages: number;
+  onNew: () => void;
+  onPick: (id: string) => void;
+  onMessages: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const rows = sessionsOfKind(cwd, list, "chat")
+    .map((session) => ({ session, ...sessionMeta(cwd, session) }))
+    .filter((row) =>
+      matchesQuery(query, visibleTitle(row.session.title), row.preview),
+    );
+  const wait = busy ? "Wait for the reply to finish" : undefined;
+  return (
+    <aside className="ochat-sessions" aria-label="Chat sessions">
+      <div className="ochat-sessions-top">
+        <h2>Chats</h2>
+        <button
+          type="button"
+          className="ui-button secondary"
+          disabled={busy}
+          title={wait}
+          onClick={onNew}
+        >
+          <Plus size={14} />
+          New
+        </button>
+      </div>
+      <label className="ochat-search">
+        <Search size={12} />
+        <input
+          aria-label="Search chats"
+          placeholder="Search chats"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </label>
+      <button
+        type="button"
+        className={`ochat-agent-row ${kind === "messages" ? "selected" : ""}`}
+        aria-current={kind === "messages" || undefined}
+        onClick={onMessages}
+      >
+        <MessageSquare size={14} />
+        <span>Agent messages</span>
+        {pendingMessages > 0 && (
+          <span className="ui-count">{pendingMessages}</span>
+        )}
+      </button>
+      {groupSessions(rows).map((group) => (
+        <div key={group.label} className="ochat-group">
+          <span className="ochat-group-label">{group.label}</span>
+          {group.rows.map(({ session, time, preview }) => {
+            const selected = kind === "chat" && session.id === current;
+            return (
+              <button
+                key={session.id}
+                type="button"
+                className={`ochat-session ${selected ? "selected" : ""}`}
+                aria-current={selected || undefined}
+                disabled={busy && !selected}
+                title={busy && !selected ? wait : undefined}
+                onClick={() => onPick(session.id)}
+              >
+                <span className="ochat-session-h">
+                  <span className="ochat-session-title">
+                    {visibleTitle(session.title) || "New chat"}
+                  </span>
+                  {session.busy && (
+                    <span
+                      className="ui-dot ui-tone-info"
+                      aria-label="Answering"
+                    />
+                  )}
+                  {time !== undefined && (
+                    <span className="ochat-session-time">
+                      {sessionTime(time)}
+                    </span>
+                  )}
+                </span>
+                {(preview || !session.title) && (
+                  <span className="ochat-session-preview">
+                    {preview || "No messages yet"}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      ))}
+    </aside>
+  );
+}
+
+/** The Chat view: the conversation (or the agent messages) in the centre and
+ * this repo's chat sessions on the right. Stays mounted while hidden so a
+ * half-typed message survives a look at a task; becoming visible makes the
+ * last chat session current again (Brainstorm keeps sessions of its own). */
 export function ChatView({
   cwd,
   kind,
@@ -339,46 +633,122 @@ export function ChatView({
   pendingMessages,
   onRouteChange,
   onShow,
+  onOpenTask,
 }: {
   cwd: string;
-  /** Which segment shows; `null` hides the whole view. */
+  /** Which pane shows; `null` hides the whole view. */
   kind: "chat" | "messages" | null;
   settings: Settings | null;
   tasks: Task[];
   pendingMessages: number;
   onRouteChange: (routeId: string) => void;
   onShow: (kind: "chat" | "messages") => void;
+  onOpenTask?: (id: string) => void;
 }) {
+  const [thread, setThread] = useState<ChatThread | null>(null);
+  const [list, setList] = useState<KindedList | null>(null);
+  const [error, setError] = useState("");
+  const [waiting, setWaiting] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const waitingRef = useRef(false);
+  waitingRef.current = waiting;
+  const visible = kind !== null;
+
+  useEffect(() => {
+    const off = window.bridge?.onOrchestrator((event) => {
+      if (event.event !== "chat" || event.thread.repo !== cwd) return;
+      const next = { current: event.current, sessions: event.sessions };
+      setList(next);
+      noteThread(cwd, event.thread);
+      if (isOfKind(cwd, next, event.thread.id, "chat")) {
+        if (!event.thread.busy) setError("");
+        setThread(event.thread);
+      }
+      if (!event.thread.busy && waitingRef.current) setRetry((n) => n + 1);
+    });
+    return () => off?.();
+  }, [cwd]);
+
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    enterKind(cwd, "chat")
+      .then((entered) => {
+        if (cancelled) return;
+        setThread(entered.thread);
+        setList(entered.list);
+        setWaiting(false);
+        setError("");
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        const text = errorText(e);
+        if (/still answering/i.test(text)) setWaiting(true);
+        else setError(text);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, visible, retry]);
+
+  function change(request: Promise<ChatThread>) {
+    setError("");
+    request
+      .then((next) => {
+        setThread(next);
+        onShow("chat");
+      })
+      .catch((e) => setError(errorText(e)));
+  }
+  function send(text: string): Promise<boolean> {
+    setError("");
+    return sendInKind(cwd, "chat", text, thread, list)
+      .then(() => true)
+      .catch((e) => {
+        setError(errorText(e));
+        return false;
+      });
+  }
+  const busy = Boolean(list?.sessions.some((s) => s.busy) || thread?.busy);
+  const shown = waiting ? null : thread;
   return (
-    <div className="orch-chat-view" hidden={kind === null}>
-      <div className="orch-chat-tabs" role="tablist" aria-label="Chat">
-        <button
-          role="tab"
-          aria-selected={kind === "chat"}
-          className={kind === "chat" ? "selected" : ""}
-          onClick={() => onShow("chat")}
-        >
-          Chat
-        </button>
-        <button
-          role="tab"
-          aria-selected={kind === "messages"}
-          className={kind === "messages" ? "selected" : ""}
-          onClick={() => onShow("messages")}
-        >
-          Messages
-          {pendingMessages > 0 && (
-            <span className="ui-count">{pendingMessages}</span>
-          )}
-        </button>
-      </div>
-      <OrchestratorChat
+    <div className="orch-chat-view ochat" hidden={!visible}>
+      <section className="ochat-convo" hidden={kind === "messages"}>
+        <Conversation
+          cwd={cwd}
+          thread={shown}
+          waiting={waiting}
+          error={error}
+          settings={settings}
+          tasks={tasks}
+          onRouteChange={onRouteChange}
+          onOpenTask={onOpenTask}
+          onSend={send}
+          onClear={() => change(orchestratorClient.chatClear(cwd))}
+        />
+      </section>
+      <section className="ochat-convo" hidden={kind !== "messages"}>
+        <AgentMessages cwd={cwd} tasks={tasks} />
+      </section>
+      <Sessions
         cwd={cwd}
-        hidden={kind !== "chat"}
-        settings={settings}
-        onRouteChange={onRouteChange}
+        list={list}
+        current={shown?.id}
+        kind={kind ?? "chat"}
+        busy={busy}
+        pendingMessages={pendingMessages}
+        onNew={() =>
+          shown && shown.messages.length === 0 && !shown.busy
+            ? onShow("chat")
+            : change(newSession(cwd, "chat"))
+        }
+        onPick={(id) =>
+          id === shown?.id
+            ? onShow("chat")
+            : change(switchSession(cwd, "chat", id))
+        }
+        onMessages={() => onShow("messages")}
       />
-      <MessagesView cwd={cwd} tasks={tasks} hidden={kind !== "messages"} />
     </div>
   );
 }

@@ -69,25 +69,6 @@ export const orchestratorClient = {
     call<Task>("task.answer", { id, answer }),
   taskOverturn: (id: string, index: number, answer: string) =>
     call<Task>("task.overturn", { id, index, answer }),
-  /** Replaces the fields passed (at least one); a live loop applies them at
-   * its next attempt boundary (`pending: true`). The task itself arrives as a
-   * `task` event. */
-  taskAmend: (
-    id: string,
-    amend: {
-      criteria?: (string | { text: string; visual?: boolean })[];
-      verify?: string[];
-      finalVerify?: string[];
-      checks?: { criterion: number; run: string }[];
-      heldOut?: { criterion: number; run: string } | null;
-    },
-  ) =>
-    call<{ id: string; amended: string[]; pending: boolean }>("task.amend", {
-      id,
-      ...amend,
-    }),
-  taskReport: (id: string) =>
-    call<{ id: string; report: string }>("task.report", { id }),
   /** `touched` omitted clears the mark. */
   taskLeadTouch: (id: string, touched?: boolean, note?: string) =>
     call<Task>("task.leadTouch", {
@@ -110,6 +91,13 @@ export const orchestratorClient = {
     call<ChatThread>("chat.switch", { repo, id }),
   chatClear: (repo: string) => call<ChatThread>("chat.clear", { repo }),
   messageList: (repo: string) => call<Message[]>("message.list", { repo }),
+  /** The owner answers a task agent's question as the orchestrator. */
+  messageSend: (params: {
+    from: string;
+    to: string;
+    replyTo: string;
+    text: string;
+  }) => call<Message>("message.send", params),
   evolutionRun: () => call<unknown>("evolution.run"),
   evolutionList: (repo?: string) =>
     call<Proposal[]>("evolution.list", repo ? { repo } : {}),

@@ -165,6 +165,9 @@ export function useAttention({
   return {
     groups: inboxGroups(workspaces, state, connectionProfiles),
     ownerTasks: ownerTasks(orchdTasks),
+    /** Every orchd task: the Inbox's LAND group and zero-state summary read
+     * this one subscription instead of opening a second. */
+    tasks: orchdTasks,
     waiting,
     markSeen: (panelId: string) =>
       setState((current) => markSeen(current, panelId)),

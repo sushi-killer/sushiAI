@@ -38,6 +38,8 @@ const ALLOWED_METHODS = new Set([
   "task.land",
   "task.stop",
   "task.answer",
+  "task.overturn",
+  "task.leadTouch",
   "task.delete",
   "task.archive",
   "task.unarchive",
@@ -53,6 +55,7 @@ const ALLOWED_METHODS = new Set([
   "chat.switch",
   "chat.clear",
   "message.list",
+  "message.send",
   "evolution.run",
   "evolution.list",
   "evolution.approve",
@@ -271,6 +274,22 @@ function orchestratorNotice(task) {
     focus,
   };
   if (canLand) notice.canLand = true;
+  const at = Number(task.question?.askedAt) || Number(task.updatedAt) || 0;
+  if (at > 0) notice.at = at;
+  const repoName = String(task.repo ?? "")
+    .split(/[\\/]+/)
+    .filter(Boolean)
+    .pop();
+  if (repoName) notice.repoName = cap(repoName, 200);
+  if (kind === "done" || kind === "failed") {
+    notice.costUsd = Number(task.costUsd) || 0;
+    const attempts = Array.isArray(task.attempts) ? task.attempts : [];
+    const verdict = [...attempts]
+      .reverse()
+      .find((attempt) => attempt?.review?.verdict)?.review.verdict;
+    if (verdict === "PASS" || verdict === "FAIL") notice.verdict = verdict;
+    if (kind === "done") notice.landed = !!task.landedSha;
+  }
   if (kind === "input") {
     const options = (
       Array.isArray(task.question?.options) ? task.question.options : []

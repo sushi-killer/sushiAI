@@ -469,6 +469,14 @@ pub(super) async fn run_parent(
         .cloned()
         .collect();
     let sandbox = app.settings.read().unwrap().sandbox;
+    let (checks, skipped) = scope_to_diff(
+        app,
+        &task.repo,
+        Path::new(&task.worktree),
+        &task.base_sha,
+        &checks,
+    )
+    .await;
     let results = run_verify_commands(
         Path::new(&task.worktree),
         &app.store.task_dir(task_id).join("runs").join("parent"),
@@ -525,6 +533,7 @@ pub(super) async fn run_parent(
         return ParentEnd::Finished;
     };
     task.cost_usd = parent_cost(&task, &app.repo_tasks(&task.repo));
+    record_skips(&mut task, skipped);
     let failure = match results.iter().find(|v| v.code != Some(0)) {
         Some(failed) => {
             let code = failed
@@ -847,13 +856,16 @@ pub(super) async fn carry_and_check(
                     .push(format!("Land: {branch} already contains this work"));
                 return Ok(true);
             }
+            let (verify_commands, skipped) =
+                scope_to_diff(app, &task.repo, worktree, &new_sha, &task.verify).await;
+            record_skips(task, skipped);
             let results = run_verify_cached(
                 app,
                 &task.id,
                 worktree,
                 run_dir,
                 &new_sha,
-                &task.verify,
+                &verify_commands,
                 cancel,
             )
             .await;
@@ -876,12 +888,15 @@ pub(super) async fn carry_and_check(
                     ),
                 );
             }
+            let (extra_final, skipped) =
+                scope_to_diff(app, &task.repo, worktree, &task.base_sha, extra_final).await;
+            record_skips(task, skipped);
             if !extra_final.is_empty() {
                 let sandbox = app.settings.read().unwrap().sandbox;
                 let finals = run_verify_commands(
                     worktree,
                     &run_dir.join("final-land"),
-                    extra_final,
+                    &extra_final,
                     sandbox,
                     &task.base_sha,
                     cancel,

@@ -28,7 +28,13 @@ impl App {
         let has_changed = !changed.is_empty();
         let verify_configured = !ctx.verify.is_empty();
 
-        let verify_results = if verify_configured && has_changed {
+        let (hook_verify, _) = filter_scoped(
+            &self.settings.read().unwrap().scoped_checks,
+            &ctx.repo,
+            &ctx.verify,
+            &changed,
+        );
+        let verify_results = if !hook_verify.is_empty() && has_changed {
             let app = self.arc();
             let run_dir = self.store.run_dir(&ctx.task_id, ctx.attempt_n);
 
@@ -42,7 +48,7 @@ impl App {
                     &worktree,
                     &run_dir,
                     &base_sha,
-                    &ctx.verify,
+                    &hook_verify,
                     &ctx.cancel,
                 ),
             )

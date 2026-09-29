@@ -538,7 +538,12 @@ pub(super) async fn capture_screenshots(
         ));
     }
     let since = task.attempts[idx].started_at;
-    let saved = save_evidence(worktree, since, &run_dir.join("evidence"));
+    let saved = save_evidence(
+        worktree,
+        since,
+        &run_dir.join("evidence"),
+        &evidence_scope(task),
+    );
     let a = &mut task.attempts[idx];
     for s in saved {
         if !a.evidence.contains(&s) {

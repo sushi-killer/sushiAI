@@ -1234,7 +1234,8 @@ pub(super) async fn run_task_loop(
         let mut stale_evidence: Option<(u32, Vec<String>)> = None;
         {
             let since = task.attempts[idx].started_at;
-            let saved = save_evidence(&worktree, since, &run_dir.join("evidence"));
+            let scope = evidence_scope(&task);
+            let saved = save_evidence(&worktree, since, &run_dir.join("evidence"), &scope);
             let n = task.attempts[idx].n;
             if !saved.is_empty() {
                 task.attempts[idx].evidence = saved;
@@ -1266,6 +1267,10 @@ pub(super) async fn run_task_loop(
                     })
                     .next_back();
                 if let Some((m, old_tree, old_base, old_evidence)) = source {
+                    let old_evidence: Vec<String> = old_evidence
+                        .into_iter()
+                        .filter(|e| scope.allows_saved(e))
+                        .collect();
                     let wt = worktree.clone();
                     let now_base = task.base_sha.clone();
                     let diff = tokio::task::spawn_blocking(move || {
@@ -1279,7 +1284,7 @@ pub(super) async fn run_task_loop(
                     .await
                     .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
                     if let Ok(other) = diff {
-                        if other.is_empty() {
+                        if other.is_empty() && !old_evidence.is_empty() {
                             task.attempts[idx].evidence = old_evidence;
                             task.attempts[idx].evidence_from = Some(m);
                             task.decisions.push(format!(
@@ -1295,13 +1300,16 @@ pub(super) async fn run_task_loop(
             }
         }
         apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
+        let (verify_commands, skipped) =
+            scope_to_diff(&app, &task.repo, &worktree, &base_sha, &task.verify).await;
+        record_skips(&mut task, skipped);
         let mut verify_results = run_verify_cached(
             &app,
             &task_id,
             &worktree,
             &run_dir,
             &base_sha,
-            &task.verify,
+            &verify_commands,
             &cancel,
         )
         .await;
@@ -1456,18 +1464,28 @@ pub(super) async fn run_task_loop(
             return;
         }
         let visual: Vec<&str> = task.visual_criteria_texts();
-        if !visual.is_empty()
-            && task.attempts[idx].evidence.is_empty()
-            && task.brief_check.screenshot.is_none()
-        {
-            let mut detail = format!(
-                "These criteria are visual and no image was saved under artifacts/ during this attempt:\n{}\nSave one screenshot per criterion under artifacts/ (for example artifacts/<name>.png) and look at it before finishing.",
-                visual
-                    .iter()
-                    .map(|c| format!("- {c}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            );
+        let scope = evidence_scope(&task);
+        let missing_named = scope.missing(&task.attempts[idx].evidence);
+        let evidence_missing = match scope {
+            EvidenceScope::Named(_) => !missing_named.is_empty(),
+            _ => task.attempts[idx].evidence.is_empty(),
+        };
+        if !visual.is_empty() && evidence_missing && task.brief_check.screenshot.is_none() {
+            let criteria = visual
+                .iter()
+                .map(|c| format!("- {c}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut detail = if missing_named.is_empty() {
+                format!(
+                    "These criteria are visual and no image was saved under artifacts/ during this attempt:\n{criteria}\nSave one screenshot per criterion under artifacts/ (for example artifacts/<name>.png) and look at it before finishing."
+                )
+            } else {
+                format!(
+                    "These criteria are visual and the images they name were not saved during this attempt: {}\n{criteria}\nSave each named file and look at it before finishing; other images under artifacts/ are not evidence.",
+                    missing_named.join(", ")
+                )
+            };
             if let Some((m, paths)) = &stale_evidence {
                 detail.push_str(&format!(
                     "\nAttempt {m}'s images were not reused because these files changed since: {}",
@@ -2093,10 +2111,19 @@ pub(super) async fn finish_after_review(
     if !task.final_verify.is_empty() {
         // Not through the verify cache: it keys on the diff alone and
         // would hand back the fast checks' results.
+        let (final_commands, skipped) = scope_to_diff(
+            app,
+            &task.repo,
+            worktree,
+            &task.base_sha,
+            &task.final_verify,
+        )
+        .await;
+        record_skips(task, skipped);
         let final_results = run_verify_commands(
             worktree,
             &run_dir.join("final"),
-            &task.final_verify,
+            &final_commands,
             settings.sandbox,
             &task.base_sha,
             cancel,

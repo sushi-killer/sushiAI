@@ -4,13 +4,13 @@
 //! harness (spec step 3).
 
 use crate::model::{
-    Attempt, AttemptStatus, Baseline, Check, Dispute, Message, MessageKind, ReviewResult, Stage,
-    Task, TaskStatus, Tier, Variant, VerifyOutcome,
+    Attempt, AttemptStatus, Baseline, Check, Dispute, Message, MessageKind, ReviewResult,
+    ScopedCheck, Stage, Task, TaskStatus, Tier, Variant, VerifyOutcome,
 };
 
 /// Bump when any brief template or fixed instruction block changes: it is
 /// part of every run's `promptHash`.
-pub const BRIEF_TEMPLATE_VERSION: u32 = 4;
+pub const BRIEF_TEMPLATE_VERSION: u32 = 5;
 
 const MAX_FAILURE_DETAIL: usize = 1500;
 /// The latest failure is the one the next attempt has to fix, so it gets the whole
@@ -887,7 +887,7 @@ const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message wit
 
 const PLAN_BATCH_QUESTIONS: &str = "Give every question a `recommended` option (one of its `options`), the `evidence` for it, and `blocking`: true only when a wrong guess is irreversible or consequential (data loss, a public API or contract, money, security). A non-blocking question is not asked: your recommendation is recorded as an assumption and the work goes on, so recommend what you would pick yourself. Blocking questions are asked together in one message.";
 
-const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app. A criterion whose proof is an image may instead be written as `{\"text\": \"...\", \"visual\": true}`; orchd then requires a saved image under artifacts/ before review. `visual` means the criterion is proven by looking at an image; a criterion checked by a command is never visual, so do not flag one.";
+const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app. A criterion whose proof is an image may instead be written as `{\"text\": \"...\", \"visual\": true}`; orchd then requires a saved image under artifacts/ before review. `visual` means the criterion is proven by looking at an image; a criterion checked by a command is never visual, so do not flag one. Mark a criterion visual only for a screen the task changes, name its screenshot file (`artifacts/<name>.png`) in its check, and use one screenshot per changed screen: orchd keeps only the images a visual criterion names as evidence, so the other images a test run leaves under `artifacts/` are dropped.";
 
 const PLAN_SUBTASKS: &str = "When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. List in each part's `paths` the repo-relative files or directories it edits; parts whose paths overlap (or that list none) are run one after another instead of side by side. Each part's `request` is what its own planner will draft from, so make it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. When the request fits one session, leave `subtasks` out.";
 
@@ -943,6 +943,29 @@ fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) ->
         "## Request\n\n{}\n\n{past_work}## Instructions\n\n{}{extra}\n\n{format}",
         request.trim(),
         PLAN_INSTRUCTIONS,
+    )
+}
+
+/// The `## Scoped checks` block of a plan brief: the settings' scoped checks
+/// that apply to `repo`; empty when none do.
+pub fn scoped_checks_block(scoped: &[ScopedCheck], repo: &str) -> String {
+    let lines: Vec<String> = scoped
+        .iter()
+        .filter(|e| !e.paths.is_empty() && e.repo.as_deref().is_none_or(|r| r == repo))
+        .map(|e| {
+            format!(
+                "- `{}`: only when a changed file matches {}",
+                e.command,
+                e.paths.join(", ")
+            )
+        })
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "## Scoped checks\n\nOrchd skips these commands when the diff touches none of their paths:\n{}\nWhen the task's `paths` fall outside a command's globs, do not put that command in `verify` or `finalVerify`.\n\n",
+        lines.join("\n")
     )
 }
 
@@ -2006,6 +2029,37 @@ mod tests {
         let brief = build_plan_brief("r", &Variant::default(), "");
         assert!(brief.contains("proven by looking at an image"));
         assert!(brief.contains("a criterion checked by a command is never visual"));
+    }
+
+    #[test]
+    fn the_plan_brief_limits_visual_criteria_to_changed_screens_and_named_files() {
+        let brief = build_plan_brief("r", &Variant::default(), "");
+        assert!(brief.contains("only for a screen the task changes"));
+        assert!(brief.contains("name its screenshot file (`artifacts/<name>.png`)"));
+        assert!(brief.contains("one screenshot per changed screen"));
+    }
+
+    #[test]
+    fn the_plan_brief_lists_the_scoped_checks_of_the_tasks_repo() {
+        let scoped = vec![
+            ScopedCheck {
+                repo: None,
+                command: "npm run test:desktop".into(),
+                paths: vec!["src/app/**".into(), "electron/**".into()],
+            },
+            ScopedCheck {
+                repo: Some("/other".into()),
+                command: "make slow".into(),
+                paths: vec!["lib/**".into()],
+            },
+        ];
+        let block = scoped_checks_block(&scoped, "/repo");
+        assert!(block.contains(
+            "`npm run test:desktop`: only when a changed file matches src/app/**, electron/**"
+        ));
+        assert!(!block.contains("make slow"));
+        assert!(block.contains("do not put that command in `verify` or `finalVerify`"));
+        assert_eq!(scoped_checks_block(&scoped[1..], "/repo"), "");
     }
 
     #[test]

@@ -212,6 +212,13 @@ pub(super) async fn failing_twice_on_base(
             commands.push(c.clone());
         }
     }
+    // No diff yet: the task's planned paths stand in for it.
+    let commands = filter_scoped_planned(
+        &app.settings.read().unwrap().scoped_checks,
+        &task.repo,
+        &commands,
+        &task.paths,
+    );
     if commands.is_empty() {
         return None;
     }

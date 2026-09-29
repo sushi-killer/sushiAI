@@ -304,6 +304,7 @@ fn review_evidence_attaches_the_attempt_s_screenshots_to_the_codex_reviewer() {
             "repo": repo.path().to_str().unwrap(),
             "title": "Evidence",
             "goal": "Save a screenshot",
+            "criteria": ["the panel shows the change -- check: screenshot artifacts/after.png"],
             "verify": ["true"],
             "variant": {"reviewEvidence": true},
             "start": true,

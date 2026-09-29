@@ -590,6 +590,13 @@ pub(super) async fn run_plan_stage(
                 &brief_text,
                 &brief::landed_dependencies_block(&task, &app.repo_tasks(&task.repo), None),
             );
+            let brief_text = brief::with_block_before_report(
+                &brief_text,
+                &brief::scoped_checks_block(
+                    &app.settings.read().unwrap().scoped_checks,
+                    &task.repo,
+                ),
+            );
             let file_stem = if retry == 0 { "" } else { "-retry" };
             let _ = std::fs::write(run_dir.join(format!("brief{file_stem}.md")), &brief_text);
             let events_path = run_dir.join(format!("events{file_stem}.jsonl"));

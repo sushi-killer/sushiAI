@@ -63,7 +63,7 @@ fn gather_facts(task: &Task) -> Facts {
     };
     let wt = Path::new(&task.worktree);
     if wt.join("artifacts").is_dir() {
-        for p in attempt_screenshots(wt, task.created_at) {
+        for p in attempt_screenshots(wt, task.created_at, &evidence_scope(task)) {
             facts.images.push(p.display().to_string());
         }
     }

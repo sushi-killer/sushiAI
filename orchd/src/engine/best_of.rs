@@ -99,6 +99,7 @@ pub(super) fn prepare_run(
         let ctx = Arc::new(HookContext {
             task_id: task_id.to_string(),
             attempt_n,
+            repo: task.repo.clone(),
             worktree: worktree.to_path_buf(),
             base_sha: base_sha.to_string(),
             verify: task.verify.clone(),
@@ -184,6 +185,7 @@ fn run_cost(app: &App, res: &Result<harness::RunOutcome, RunError>, events: &Pat
 /// A candidate's verify commands, then (with `groundedChecks`) the gated
 /// checks and the held-out one; all of them run so the candidates can be
 /// compared by how many fail.
+#[allow(clippy::too_many_arguments)]
 async fn evaluate(
     task: &Task,
     worktree: &Path,
@@ -191,6 +193,7 @@ async fn evaluate(
     dir: &Path,
     finished: bool,
     sandbox: SandboxMode,
+    scoped_checks: &[ScopedCheck],
     cancel: &CancelToken,
 ) -> Eval {
     let (wt, base) = (worktree.to_path_buf(), base_sha.to_string());
@@ -209,10 +212,13 @@ async fn evaluate(
             tally: CheckTally::default(),
         };
     }
+    // No decision line: this runs once per side, and the winner's own
+    // attempt records the skip.
+    let (verify_commands, _) = filter_scoped(scoped_checks, &task.repo, &task.verify, &changed);
     let mut verify = run_verify_commands(
         worktree,
         &dir.join("verify"),
-        &task.verify,
+        &verify_commands,
         sandbox,
         base_sha,
         cancel,
@@ -383,6 +389,7 @@ where
             run_dir,
             run_finished(&a_res),
             sandbox,
+            &settings.scoped_checks,
             cancel
         ),
         evaluate(
@@ -392,6 +399,7 @@ where
             &run_dir_b,
             run_finished(&b_res),
             sandbox,
+            &settings.scoped_checks,
             cancel
         ),
     );

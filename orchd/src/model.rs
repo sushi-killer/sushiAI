@@ -176,6 +176,40 @@ pub struct Settings {
     /// Commands run in the repo's main checkout after a task lands.
     #[serde(default)]
     pub after_land: Vec<AfterLand>,
+    /// Commands that only run when the task's diff touches their `paths`.
+    #[serde(default = "default_scoped_checks")]
+    pub scoped_checks: Vec<ScopedCheck>,
+}
+
+/// One `settings.scopedChecks` entry: a command that is skipped unless a
+/// changed file matches one of `paths`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopedCheck {
+    /// The repo it applies to; none = every repo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// A glob over the whole command string.
+    pub command: String,
+    /// Globs over repo-relative changed files.
+    pub paths: Vec<String>,
+}
+
+fn default_scoped_checks() -> Vec<ScopedCheck> {
+    vec![ScopedCheck {
+        repo: None,
+        command: "npm run test:desktop".to_string(),
+        paths: [
+            "src/app/**",
+            "src/extensions/**",
+            "electron/**",
+            "src/styles/**",
+            "*.html",
+        ]
+        .iter()
+        .map(|p| p.to_string())
+        .collect(),
+    }]
 }
 
 /// One `settings.afterLand` entry: `run` (a shell command) runs in the main
@@ -468,6 +502,7 @@ impl Default for Settings {
             worktree_root: default_worktree_root(),
             land_on_default: false,
             after_land: vec![],
+            scoped_checks: default_scoped_checks(),
         }
     }
 }
@@ -2135,6 +2170,29 @@ mod grounded_checks_tests {
         c.baseline = Some(Baseline::Fail);
         assert_eq!(valid_checks(vec![c.clone()], 1), vec![check(0, "a")]);
         assert_eq!(valid_check(Some(c), 1), Some(check(0, "a")));
+    }
+
+    #[test]
+    fn the_default_scoped_check_gates_the_desktop_smoke_on_ui_paths() {
+        let expected = ScopedCheck {
+            repo: None,
+            command: "npm run test:desktop".into(),
+            paths: [
+                "src/app/**",
+                "src/extensions/**",
+                "electron/**",
+                "src/styles/**",
+                "*.html",
+            ]
+            .map(String::from)
+            .to_vec(),
+        };
+        assert_eq!(Settings::default().scoped_checks, vec![expected.clone()]);
+        // A settings.json written before the key existed picks it up.
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json.as_object_mut().unwrap().remove("scopedChecks");
+        let loaded: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded.scoped_checks, vec![expected]);
     }
 
     #[test]

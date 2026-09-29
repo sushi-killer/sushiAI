@@ -7,6 +7,10 @@ fn has_worktree(path: &str) -> bool {
     Path::new(path).join(".git").exists()
 }
 
+/// An archived task's saved evidence images are removed once it has not
+/// changed for this long.
+const EVIDENCE_KEEP_MS: i64 = 14 * 24 * 60 * 60 * 1000;
+
 impl App {
     /// Removes the task's worktree if the task is done, or stopped/failed
     /// (its uncommitted work is first saved to the wip ref). Records
@@ -114,7 +118,14 @@ impl App {
             }
             known.insert(canon(&task.worktree));
         }
+        let mut evidence_entries = Vec::new();
         for mut task in tasks {
+            let live = self.controls.lock().unwrap().contains_key(&task.id);
+            if !live && task.archived && now_ms() - task.updated_at > EVIDENCE_KEEP_MS {
+                let (pruned, bytes) = self.prune_evidence(&mut task, dry_run).await;
+                freed += bytes;
+                evidence_entries.extend(pruned);
+            }
             if !has_worktree(&task.worktree) {
                 continue;
             }
@@ -175,6 +186,55 @@ impl App {
                 let _ = tokio::task::spawn_blocking(move || git::prune_worktrees(&repo_path)).await;
             }
         }
-        Ok(json!({"dryRun": dry_run, "worktrees": entries, "freedBytes": freed}))
+        Ok(json!({
+            "dryRun": dry_run,
+            "worktrees": entries,
+            "evidence": evidence_entries,
+            "freedBytes": freed
+        }))
+    }
+
+    /// Removes `tasks/<id>/runs/*/evidence` of an archived task and drops the
+    /// vanished copies from its attempts. Returns the report entries and the
+    /// bytes (a dry run changes nothing and reports `would-remove`).
+    async fn prune_evidence(
+        &self,
+        task: &mut Task,
+        dry_run: bool,
+    ) -> (Vec<serde_json::Value>, u64) {
+        let runs = self.store.task_dir(&task.id).join("runs");
+        let dirs: Vec<PathBuf> = std::fs::read_dir(&runs)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.path().join("evidence"))
+                    .filter(|p| p.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut entries = Vec::new();
+        let mut total = 0u64;
+        for dir in dirs {
+            let d = dir.clone();
+            let bytes = tokio::task::spawn_blocking(move || git::dir_size(&d))
+                .await
+                .unwrap_or(0);
+            if !dry_run && std::fs::remove_dir_all(&dir).is_err() {
+                continue;
+            }
+            total += bytes;
+            entries.push(json!({
+                "task": task.id,
+                "path": dir.to_string_lossy(),
+                "action": if dry_run { "would-remove" } else { "removed" },
+                "bytes": bytes
+            }));
+        }
+        if !dry_run && !entries.is_empty() {
+            for a in &mut task.attempts {
+                a.evidence.retain(|p| Path::new(p).exists());
+            }
+            let _ = self.store.save_task(task);
+        }
+        (entries, total)
     }
 }

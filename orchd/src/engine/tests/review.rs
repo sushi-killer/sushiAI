@@ -6,9 +6,9 @@ fn attempt_screenshots_lists_new_images_under_artifacts_only() {
     std::fs::write(shots.join("after.png"), b"x").unwrap();
     std::fs::write(shots.join("notes.txt"), b"x").unwrap();
     std::fs::write(tmp.path().join("root.png"), b"x").unwrap();
-    let found = attempt_screenshots(tmp.path(), 0);
+    let found = attempt_screenshots(tmp.path(), 0, &EvidenceScope::All);
     assert_eq!(found, vec![shots.join("after.png")]);
-    assert!(attempt_screenshots(tmp.path(), i64::MAX).is_empty());
+    assert!(attempt_screenshots(tmp.path(), i64::MAX, &EvidenceScope::All).is_empty());
 }
 
 #[test]
@@ -143,4 +143,100 @@ fn select_review_route_explicit_id() {
     let (route, reason) = select_review_route(&settings, implementer, Tier::Hard).unwrap();
     assert_eq!(route.id, "claude-haiku", "even weaker than the implementer");
     assert_eq!(reason, "explicit setting");
+}
+
+fn visual_task(criteria: &[&str]) -> Task {
+    let mut task = task_with_status(TaskStatus::Running);
+    task.criteria = criteria.iter().map(|c| c.to_string()).collect();
+    task
+}
+
+fn write_images(root: &Path, names: &[&str]) {
+    for name in names {
+        let path = root.join("artifacts").join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+    }
+}
+
+#[test]
+fn evidence_scope_names_the_files_and_directories_visual_criteria_mention() {
+    let task = visual_task(&[
+        "panel shows a title -- check: screenshot artifacts/panel.png",
+        "list is sorted -- check: screenshots under artifacts/list/ look right",
+        "npm test passes -- check: npm test",
+    ]);
+    assert_eq!(
+        evidence_scope(&task),
+        EvidenceScope::Named(vec![
+            "artifacts/panel.png".to_string(),
+            "artifacts/list/*".to_string()
+        ])
+    );
+}
+
+#[test]
+fn evidence_scope_is_all_when_a_visual_criterion_names_no_path_and_nothing_without_one() {
+    let bare = visual_task(&[
+        "panel -- check: screenshot artifacts/panel.png",
+        "other -- check: a screenshot under artifacts/",
+    ]);
+    assert_eq!(evidence_scope(&bare), EvidenceScope::All);
+    let unnamed = visual_task(&["looks right -- check: screenshot"]);
+    assert_eq!(evidence_scope(&unnamed), EvidenceScope::All);
+    let none = visual_task(&["it works -- check: cargo test"]);
+    assert_eq!(evidence_scope(&none), EvidenceScope::Nothing);
+}
+
+#[test]
+fn evidence_copies_only_the_named_images() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_images(
+        tmp.path(),
+        &["panel.png", "workspace.png", "smoke-hidden-window.png", "list/a.png"],
+    );
+    let task = visual_task(&["panel -- check: screenshot artifacts/panel.png"]);
+    let scope = evidence_scope(&task);
+    let saved = save_evidence(tmp.path(), 0, &tmp.path().join("ev"), &scope);
+    let names: Vec<_> = saved.iter().map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, vec!["panel.png"]);
+    let shown = attempt_screenshots(tmp.path(), 0, &scope);
+    assert_eq!(shown, vec![tmp.path().join("artifacts/panel.png")]);
+    assert!(scope.missing(&saved).is_empty());
+    assert!(scope.allows_saved("/x/runs/1/evidence/panel.png"));
+    assert!(!scope.allows_saved("/x/runs/1/evidence/workspace.png"));
+}
+
+#[test]
+fn a_named_image_the_attempt_did_not_write_is_missing_from_the_gate() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_images(tmp.path(), &["workspace.png", "smoke-hidden-window.png"]);
+    let task = visual_task(&["panel -- check: screenshot artifacts/panel.png"]);
+    let scope = evidence_scope(&task);
+    let saved = save_evidence(tmp.path(), 0, &tmp.path().join("ev"), &scope);
+    assert!(saved.is_empty());
+    assert_eq!(scope.missing(&saved), vec!["artifacts/panel.png"]);
+}
+
+#[test]
+fn a_directory_a_check_names_is_evidence_for_every_image_under_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_images(tmp.path(), &["list/a.png", "list/deep/b.png", "workspace.png"]);
+    let task = visual_task(&["sorted -- check: screenshots under artifacts/list/"]);
+    let scope = evidence_scope(&task);
+    let saved = save_evidence(tmp.path(), 0, &tmp.path().join("ev"), &scope);
+    assert_eq!(saved.len(), 2);
+    assert!(scope.missing(&saved).is_empty());
+    assert_eq!(scope.missing(&[]), vec!["artifacts/list/"]);
+}
+
+#[test]
+fn an_unscoped_visual_criterion_and_a_task_without_one_behave_as_named() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_images(tmp.path(), &["a.png", "b.png"]);
+    let all = evidence_scope(&visual_task(&["looks right -- check: screenshot"]));
+    assert_eq!(save_evidence(tmp.path(), 0, &tmp.path().join("ev"), &all).len(), 2);
+    let none = evidence_scope(&visual_task(&["x -- check: cargo test"]));
+    assert!(save_evidence(tmp.path(), 0, &tmp.path().join("ev2"), &none).is_empty());
+    assert!(attempt_screenshots(tmp.path(), 0, &none).is_empty());
 }

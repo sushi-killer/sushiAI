@@ -204,6 +204,7 @@ struct TaskControl {
 struct HookContext {
     task_id: String,
     attempt_n: u32,
+    repo: String,
     worktree: PathBuf,
     base_sha: String,
     verify: Vec<String>,
@@ -637,4 +638,5 @@ mod tests {
     include!("tests/routing.rs");
     include!("tests/rpc_tasks.rs");
     include!("tests/verify.rs");
+    include!("tests/worktrees.rs");
 }

@@ -792,6 +792,97 @@ pub fn commit(cwd: &Path, title: &str, task_id: &str, attempt_n: u32) -> Result<
     Ok(())
 }
 
+// -- report facts -------------------------------------------------------------
+
+/// One `git diff --numstat` line: path, lines added, lines removed (`None`
+/// for a binary file).
+pub type NumstatEntry = (String, Option<u64>, Option<u64>);
+
+/// `git diff --numstat <from> <to>`.
+pub fn numstat(repo: &Path, from: &str, to: &str) -> Result<Vec<NumstatEntry>, GitError> {
+    let out = run(repo, &["diff", "--numstat", from, to])?;
+    Ok(out
+        .lines()
+        .filter_map(|l| {
+            let mut parts = l.splitn(3, '\t');
+            let (a, r, path) = (parts.next()?, parts.next()?, parts.next()?);
+            Some((path.to_string(), a.parse().ok(), r.parse().ok()))
+        })
+        .collect())
+}
+
+/// `<short sha> <subject>` of each commit in `from..to`, newest first.
+pub fn log_subjects(repo: &Path, from: &str, to: &str) -> Result<Vec<String>, GitError> {
+    let range = format!("{from}..{to}");
+    let out = run(repo, &["log", "--format=%h %s", &range])?;
+    Ok(out.lines().map(str::to_string).collect())
+}
+
+/// Whether `sha` is reachable from `rev`; `None` when git cannot tell (the
+/// branch or the commit is gone).
+pub fn is_ancestor(repo: &Path, sha: &str, rev: &str) -> Option<bool> {
+    let out = Command::new("git")
+        .args(["merge-base", "--is-ancestor", sha, rev])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    match out.status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
+/// Committer time of `sha`, ms since the epoch.
+pub fn commit_time_ms(repo: &Path, sha: &str) -> Option<i64> {
+    let out = run(repo, &["show", "-s", "--format=%ct", sha]).ok()?;
+    out.trim().parse::<i64>().ok().map(|s| s * 1000)
+}
+
+/// A commit on a branch after a landing, with the files it changed.
+pub struct LaterCommit {
+    pub sha: String,
+    pub ts_ms: i64,
+    /// Carries orchd's `Task-Id:` trailer.
+    pub by_orchd: bool,
+    pub files: Vec<String>,
+}
+
+/// The commits in `sha..rev`, oldest first.
+pub fn commits_after(repo: &Path, sha: &str, rev: &str) -> Result<Vec<LaterCommit>, GitError> {
+    let range = format!("{sha}..{rev}");
+    let out = run(
+        repo,
+        &[
+            "log",
+            "--reverse",
+            "--name-only",
+            "--format=%x1e%H%x1f%ct%x1f%B%x1f",
+            &range,
+        ],
+    )?;
+    Ok(out
+        .split('\x1e')
+        .filter(|c| !c.trim().is_empty())
+        .filter_map(|chunk| {
+            let mut parts = chunk.splitn(4, '\x1f');
+            let (sha, ts, body, files) =
+                (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+            Some(LaterCommit {
+                sha: sha.trim().to_string(),
+                ts_ms: ts.trim().parse::<i64>().ok()? * 1000,
+                by_orchd: body.lines().any(|l| l.starts_with("Task-Id:")),
+                files: files
+                    .lines()
+                    .map(str::trim)
+                    .filter(|f| !f.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+            })
+        })
+        .collect())
+}
+
 // -- worktree cleanup and restore ------------------------------------------
 
 /// Bytes under `path`, counting symlinks as themselves (never followed).

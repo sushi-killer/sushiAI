@@ -864,6 +864,19 @@ pub fn valid_check(check: Option<Check>, criteria_len: usize) -> Option<Check> {
         .next()
 }
 
+/// The autonomy metric: a person or the lead session had to fix a task's
+/// work after orchd said done. `by` is `owner` (`task.leadTouch`) or `auto`
+/// (the landing was rewritten, or someone else edited its files soon after).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeadTouch {
+    pub touched: bool,
+    #[serde(default)]
+    pub note: String,
+    pub at: i64,
+    pub by: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
@@ -902,6 +915,17 @@ pub struct Task {
     /// The commit a `variant.land` task put on its base branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landed_sha: Option<String>,
+    /// The markdown report of a finished top-level task (`report.rs`), also
+    /// kept in `<data>/tasks/<id>/report.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
+    /// When the report was first written; the panel raises its notice only
+    /// for a fresh one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_at: Option<i64>,
+    /// Whether the work needed a fix after orchd said done; absent = unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_touch: Option<LeadTouch>,
     pub branch: String,
     pub base_sha: String,
     /// The branch the task was started from (`base`, or the repo's checked-out
@@ -1473,6 +1497,9 @@ mod tests {
             worktree_removed: false,
             visual_criteria: vec![],
             landed_sha: None,
+            report: None,
+            report_at: None,
+            lead_touch: None,
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,
@@ -1694,6 +1721,9 @@ mod tests {
             worktree_removed: false,
             visual_criteria: vec![],
             landed_sha: None,
+            report: None,
+            report_at: None,
+            lead_touch: None,
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,
@@ -1743,6 +1773,9 @@ mod tests {
             worktree_removed: false,
             visual_criteria: vec![],
             landed_sha: None,
+            report: None,
+            report_at: None,
+            lead_touch: None,
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,

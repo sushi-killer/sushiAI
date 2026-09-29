@@ -423,3 +423,44 @@ test("connect() relays subscribe events and raises one attention notice per (tas
   await waitUntil(() => notices.length === 2);
   assert.equal(notices[1].body, "Something else?");
 });
+
+test("a top-level task's fresh report raises one 'Feature done' notice; old or child ones raise none", async (t) => {
+  const { socketPath, directory, hasSubscriber, pushEvent } =
+    await fixtureServer(t, {
+      ping: () => ({}),
+      "settings.get": () => ({ routes: [], classifier: { providerId: "" } }),
+    });
+  const notices = [];
+  const service = await serviceAgainst(t, socketPath, directory, {
+    send: () => {},
+    notify: async (notice) => {
+      notices.push(notice);
+    },
+  });
+  service.connect();
+  await waitUntil(hasSubscriber);
+
+  const done = (extra) => ({
+    id: "t1",
+    title: "Ship it",
+    goal: "Ship the thing",
+    repo: "/repo",
+    status: "done",
+    report: "# Ship it",
+    reportAt: Date.now(),
+    ...extra,
+  });
+  pushEvent({ event: "task", task: done({ id: "old", reportAt: 1 }) });
+  pushEvent({ event: "task", task: done({ id: "child", parent: "t0" }) });
+  pushEvent({ event: "task", task: done() });
+  await waitUntil(() => notices.length > 0);
+  assert.deepEqual(notices[0], {
+    workspaceId: "/repo",
+    panelId: "t1",
+    title: "Feature done: Ship it",
+    body: "Ship the thing",
+  });
+  pushEvent({ event: "task", task: done() });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(notices.length, 1);
+});

@@ -167,6 +167,9 @@ async function waitForExit(
   }
 }
 
+/** How long after its `reportAt` a report still counts as fresh. */
+const REPORT_NOTICE_MS = 5 * 60 * 1000;
+
 class OrchestratorService {
   constructor({
     dataDir,
@@ -397,11 +400,31 @@ class OrchestratorService {
 
   /** A task that just entered `waiting` raises one attention notice - trimmed
    * to the caps `attention.cjs` enforces, so a long goal/question never turns
-   * a real notice into a thrown validation error. */
+   * a real notice into a thrown validation error. A top-level task whose
+   * report was just written raises one "Feature done" notice. */
   #notifyWaiting(message) {
     if (!this.notify || message.event !== "task") return;
     const task = message.task;
-    if (!task || task.status !== "waiting") return;
+    if (!task) return;
+    if (task.status === "done" && task.report && !task.parent) {
+      // `reportAt` is set once; an old report re-broadcast after a mark
+      // change or a restart is not news.
+      const fresh = Date.now() - Number(task.reportAt || 0) < REPORT_NOTICE_MS;
+      const key = `${task.id}:report`;
+      if (!fresh || this.notifiedWaiting.has(key)) return;
+      this.notifiedWaiting.add(key);
+      this.notify({
+        workspaceId: String(task.repo || task.id || "").slice(0, 200),
+        panelId: String(task.id || "").slice(0, 200),
+        title: `Feature done: ${String(task.title || "")}`.slice(0, 120),
+        body: String(task.goal || "Open the task for its report.").slice(
+          0,
+          300,
+        ),
+      }).catch(() => {});
+      return;
+    }
+    if (task.status !== "waiting") return;
     const key = `${task.id}:${task.question?.text || ""}`;
     if (this.notifiedWaiting.has(key)) return;
     this.notifiedWaiting.add(key);

@@ -117,6 +117,12 @@ impl Daemon {
         request_on(&self.socket, method, params, Some(&self.token))
     }
 
+    /// The `error` text of a request that is expected to fail.
+    pub fn request_error(&self, method: &str, params: serde_json::Value) -> String {
+        let v = raw_request_with_params(&self.socket, method, params, Some(&self.token));
+        v["error"].to_string()
+    }
+
     pub fn shutdown_and_wait(mut self) {
         // Drop still runs afterwards and finds the child already reaped.
         let _ = self.request("shutdown", serde_json::json!({}));

@@ -1400,3 +1400,62 @@
   max-height: 100%;
   object-fit: contain;
 }
+
+.orch-report {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  padding: var(--gap-sm);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-sunken);
+}
+
+.orch-report-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap-sm);
+}
+
+.orch-report-touch {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.orch-report-body {
+  max-height: 420px;
+  overflow: auto;
+  font-size: var(--text-sm);
+}
+
+.orch-report-body h1 {
+  font-size: 15px;
+  margin: 0 0 6px;
+}
+
+.orch-report-body h2 {
+  font-size: 12px;
+  margin: 12px 0 4px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.orch-report-body p,
+.orch-report-body ul {
+  margin: 4px 0;
+}
+
+.orch-report-body table {
+  border-collapse: collapse;
+  margin: 4px 0;
+}
+
+.orch-report-body th,
+.orch-report-body td {
+  padding: 2px 10px 2px 0;
+  text-align: left;
+}

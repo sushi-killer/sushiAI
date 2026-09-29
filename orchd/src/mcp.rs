@@ -59,6 +59,10 @@ orchestrator_reply {question, text}. inbox_read shows everything sent to you.
 - peer_send {to, text} messages a task and peer_list {repo} lists a \
 repository's tasks. A task reads a message on its next attempt; the attempt \
 it is running is never interrupted.
+- task_report {id} returns the markdown report of a finished top-level task \
+or graph; task_lead_touch {id, touched, note} records whether a done task's \
+work needed a fix after orchd said done. Mark it only when you or the owner \
+really had to fix the work.
 - repo_audit {repo} starts a read-only audit of how ready a repository is \
 for autonomous agent work. It runs in the background: give the owner the \
 audit id it returns.
@@ -88,11 +92,13 @@ pub const TASK_TOOLS: [&str; 4] = [
 ];
 
 /// What the orchestrator agent gets: every tool below.
-pub const ORCHESTRATOR_TOOLS: [&str; 18] = [
+pub const ORCHESTRATOR_TOOLS: [&str; 20] = [
     "task_list",
     "task_get",
     "task_create",
     "task_start",
+    "task_report",
+    "task_lead_touch",
     "task_stop",
     "task_answer",
     "task_amend",
@@ -180,6 +186,30 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
             json!({
                 "type": "object",
                 "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            }),
+        ),
+        (
+            "task_report",
+            "task.report",
+            "The report of a finished top-level task or graph, as markdown: outcome, what changed, each criterion's status, assumptions and automatic answers, cost by stage and model, attempts, follow-ups and its lead-touch mark. Returns {id, report}; errors while the task is not done.",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            }),
+        ),
+        (
+            "task_lead_touch",
+            "task.leadTouch",
+            "Mark whether a done task's work needed a fix from a person or the lead session after orchd said done (touched true) or was clean (touched false); omit touched to clear the mark. The autonomy metric behind costs.summary's leadTouch rate.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "touched": {"type": "boolean"},
+                    "note": {"type": "string", "description": "What had to be fixed."},
+                },
                 "required": ["id"],
             }),
         ),
@@ -706,7 +736,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_has_exactly_the_seventeen_tools_and_no_delete_or_settings_set() {
+    fn tools_list_has_exactly_the_orchestrator_tools_and_no_delete_or_settings_set() {
         let result = dispatch(&orchestrator(), "tools/list", &json!({})).unwrap();
         let tools = result["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -717,6 +747,8 @@ mod tests {
                 "task_get",
                 "task_create",
                 "task_start",
+                "task_report",
+                "task_lead_touch",
                 "task_stop",
                 "task_answer",
                 "task_amend",

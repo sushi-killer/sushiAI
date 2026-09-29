@@ -164,6 +164,13 @@ export type Variant = {
   land?: boolean;
 };
 
+export type LeadTouch = {
+  touched: boolean;
+  note: string;
+  at: number;
+  by: "owner" | "auto";
+};
+
 /** A choice the planner made itself (`variant.batchQuestions`). */
 export type Assumption = {
   question: string;
@@ -303,6 +310,12 @@ export type Task = {
   baseRef?: string;
   /** The commit a `variant.land` task put on its base branch. */
   landedSha?: string;
+  /** Markdown report of a finished top-level task or graph. */
+  report?: string;
+  /** When the report was first written, ms epoch. */
+  reportAt?: number;
+  /** Whether the work needed a fix after orchd said done; absent = unknown. */
+  leadTouch?: LeadTouch;
   /** Ids of tasks that must be done before this one starts implementing. */
   dependsOn?: string[];
   /** Repo-relative files or directories the planner said this subtask edits;
@@ -571,6 +584,16 @@ export type SpendRow = {
 export type SpendSummary = {
   rows: SpendRow[];
   totals: Omit<SpendRow, "key" | "keys">;
+  leadTouch?: LeadTouchSummary;
+};
+
+/** Done tasks whose work needed a fix after orchd said done, over done tasks
+ * carrying a mark. */
+export type LeadTouchRate = { touched: number; marked: number; rate: number };
+
+export type LeadTouchSummary = LeadTouchRate & {
+  byRepo: (LeadTouchRate & { repo: string })[];
+  byWeek: (LeadTouchRate & { week: string })[];
 };
 
 export type SpendGroup = "stage" | "model" | "route" | "repo" | "task" | "day";

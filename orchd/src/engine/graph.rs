@@ -325,6 +325,8 @@ pub(super) async fn run_parent(app: &Arc<App>, task_id: &str, cancel: &CancelTok
         },
     }
     if task.status == TaskStatus::Done {
+        task.updated_at = now_ms();
+        app.write_report(&mut task).await;
         app.release_worktree(&mut task, "every subtask landed")
             .await;
     }

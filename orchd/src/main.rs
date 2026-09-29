@@ -21,6 +21,7 @@ mod loop_detect;
 mod mcp;
 mod model;
 mod protocol;
+mod report;
 mod store;
 mod timeline;
 

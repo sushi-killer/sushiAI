@@ -46,6 +46,7 @@ mod lines;
 mod plan;
 mod questions;
 mod recovery;
+mod reports;
 mod review;
 mod routing;
 mod rpc_misc;
@@ -591,6 +592,8 @@ impl App {
             "task.start" => self.handle_task_start(params).await,
             "task.stop" => self.handle_task_stop(params).await,
             "task.answer" => self.handle_task_answer(params).await,
+            "task.report" => self.handle_task_report(params).await,
+            "task.leadTouch" => self.handle_task_lead_touch(params).await,
             "task.overturn" => self.handle_task_overturn(params).await,
             "task.amend" => self.handle_task_amend(params).await,
             "task.delete" => self.handle_task_delete(params).await,

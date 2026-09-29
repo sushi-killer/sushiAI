@@ -373,6 +373,89 @@ function QuestionCard({
   );
 }
 
+/** The finished task's report at the top of its detail, with the lead-touch
+ * toggle: whether the work needed a fix after orchd said done. */
+function TaskReport({
+  task,
+  disabled,
+  onLeadTouch,
+}: {
+  task: Task;
+  disabled: boolean;
+  onLeadTouch(touched: boolean | undefined, note?: string): void;
+}) {
+  const mark = task.leadTouch;
+  const [noting, setNoting] = useState(false);
+  const [note, setNote] = useState("");
+  return (
+    <section className="orch-report" aria-label="Report">
+      <div className="orch-report-head">
+        <span className="dialog-eyebrow">REPORT</span>
+        <span className="orch-report-touch">
+          {mark
+            ? `${mark.touched ? "Needed a fix" : "Clean"} (${mark.by})${mark.note ? `: ${mark.note}` : ""}`
+            : "Lead touch unknown"}
+        </span>
+        <button
+          className={mark?.touched === true ? "primary" : "secondary"}
+          disabled={disabled}
+          aria-pressed={mark?.touched === true}
+          onClick={() => {
+            if (mark?.touched === true) onLeadTouch(undefined);
+            else setNoting(true);
+          }}
+        >
+          Needed a fix
+        </button>
+        <button
+          className={mark?.touched === false ? "primary" : "secondary"}
+          disabled={disabled}
+          aria-pressed={mark?.touched === false}
+          onClick={() =>
+            onLeadTouch(mark?.touched === false ? undefined : false)
+          }
+        >
+          Clean
+        </button>
+      </div>
+      {noting && (
+        <form
+          className="orch-question-free"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onLeadTouch(true, note.trim());
+            setNoting(false);
+            setNote("");
+          }}
+        >
+          <input
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder="What had to be fixed? (optional)"
+            aria-label="What had to be fixed"
+            autoFocus
+          />
+          <button className="primary" type="submit" disabled={disabled}>
+            Save
+          </button>
+          <button
+            className="secondary"
+            type="button"
+            onClick={() => setNoting(false)}
+          >
+            Cancel
+          </button>
+        </form>
+      )}
+      {task.report && (
+        <div className="orch-report-body">
+          <RichText text={task.report} />
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** The planner's own answers to its non-blocking questions, each with an
  * Overturn action: the owner's text replaces the assumption and reaches the
  * task's next attempt. */
@@ -1430,6 +1513,22 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                 disabled={busy}
                 onAnswer={(answer) =>
                   act(() => orchestratorClient.taskAnswer(selected.id, answer))
+                }
+              />
+            )}
+            {selected.status === "done" && (
+              <TaskReport
+                key={`report-${selected.id}`}
+                task={selected}
+                disabled={busy}
+                onLeadTouch={(touched, note) =>
+                  act(() =>
+                    orchestratorClient.taskLeadTouch(
+                      selected.id,
+                      touched,
+                      note,
+                    ),
+                  )
                 }
               />
             )}

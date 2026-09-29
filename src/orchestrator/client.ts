@@ -66,6 +66,15 @@ export const orchestratorClient = {
     call<Task>("task.answer", { id, answer }),
   taskOverturn: (id: string, index: number, answer: string) =>
     call<Task>("task.overturn", { id, index, answer }),
+  taskReport: (id: string) =>
+    call<{ id: string; report: string }>("task.report", { id }),
+  /** `touched` omitted clears the mark. */
+  taskLeadTouch: (id: string, touched?: boolean, note?: string) =>
+    call<Task>("task.leadTouch", {
+      id,
+      ...(touched === undefined ? {} : { touched }),
+      ...(note ? { note } : {}),
+    }),
   taskDelete: (id: string) =>
     call<Record<string, never>>("task.delete", { id }),
   taskArchive: (id: string) => call<Task>("task.archive", { id }),

@@ -3,7 +3,7 @@
 //! them, the one-time `orchd costs backfill`, and the `orchd costs` CLI.
 //! Every place orchd runs a harness writes its record when the run ends.
 
-use crate::model::{now_ms, Attempt, Audit, Harness, Proposal, Stage, Task};
+use crate::model::{now_ms, Attempt, Audit, Harness, Proposal, Stage, Task, TaskStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
@@ -204,6 +204,83 @@ pub fn summarize(records: &[CostRecord], q: &Query, now: i64) -> Value {
     json!({"rows": rows, "totals": total.json(json!({}))})
 }
 
+/// Monday (UTC) of the week `ts` falls in, as `YYYY-MM-DD`.
+fn week_of(ts: i64) -> String {
+    // 1970-01-01 was a Thursday: three days after that week's Monday.
+    let days = ts.div_euclid(DAY_MS);
+    let monday = days - (days + 3).rem_euclid(7);
+    day_of(monday * DAY_MS)
+}
+
+#[derive(Default, Clone, Copy)]
+struct Touch {
+    touched: u64,
+    marked: u64,
+}
+
+impl Touch {
+    fn json(&self, extra: Value) -> Value {
+        let rate = if self.marked == 0 {
+            0.0
+        } else {
+            self.touched as f64 / self.marked as f64
+        };
+        let mut v = json!({"touched": self.touched, "marked": self.marked, "rate": rate});
+        if let (Some(obj), Some(more)) = (v.as_object_mut(), extra.as_object()) {
+            obj.extend(more.clone());
+        }
+        v
+    }
+}
+
+/// The lead-touch rate: done tasks whose work needed a fix after orchd said
+/// done, over done tasks carrying a mark, overall, per repo and per week
+/// (the week the task finished). Honors the query's repo, task and window.
+pub fn lead_touch_summary(tasks: &[Task], q: &Query, now: i64) -> Value {
+    let since = q.since_days.map(|d| now - i64::from(d) * DAY_MS);
+    let mut total = Touch::default();
+    let mut repos: BTreeMap<&str, Touch> = BTreeMap::new();
+    let mut weeks: BTreeMap<String, Touch> = BTreeMap::new();
+    for t in tasks {
+        let Some(mark) = t
+            .lead_touch
+            .as_ref()
+            .filter(|_| t.status == TaskStatus::Done)
+        else {
+            continue;
+        };
+        if q.repo.as_ref().is_some_and(|r| *r != t.repo)
+            || q.task_id.as_ref().is_some_and(|id| *id != t.id)
+            || since.is_some_and(|s| t.updated_at < s)
+        {
+            continue;
+        }
+        for acc in [
+            &mut total,
+            repos.entry(t.repo.as_str()).or_default(),
+            weeks.entry(week_of(t.updated_at)).or_default(),
+        ] {
+            acc.marked += 1;
+            acc.touched += u64::from(mark.touched);
+        }
+    }
+    let mut out = total.json(json!({}));
+    out["byRepo"] = repos
+        .iter()
+        .map(|(repo, t)| t.json(json!({"repo": repo})))
+        .collect();
+    out["byWeek"] = weeks
+        .iter()
+        .map(|(week, t)| t.json(json!({"week": week})))
+        .collect();
+    out
+}
+
+/// Every stored task, for the lead-touch rate.
+pub fn read_tasks(data: &Path) -> Vec<Task> {
+    read_dir_json(&data.join("tasks"), Some("task.json"))
+}
+
 /// The text `orchd costs` prints for a summary.
 pub fn render(summary: &Value) -> String {
     let money = |v: &Value| format!("${:.2}", v["costUsd"].as_f64().unwrap_or(0.0));
@@ -231,6 +308,32 @@ pub fn render(summary: &Value) -> String {
         out.push_str(&line(r["key"].as_str().unwrap_or(""), r));
     }
     out.push_str(&line("total", &summary["totals"]));
+    let touch = &summary["leadTouch"];
+    if touch["marked"].as_u64().unwrap_or(0) > 0 {
+        let rate = |v: &Value| {
+            format!(
+                "{}/{} touched ({:.0}%)",
+                v["touched"].as_u64().unwrap_or(0),
+                v["marked"].as_u64().unwrap_or(0),
+                v["rate"].as_f64().unwrap_or(0.0) * 100.0
+            )
+        };
+        out.push_str(&format!("\nlead touch  {}\n", rate(touch)));
+        for r in touch["byRepo"].as_array().into_iter().flatten() {
+            out.push_str(&format!(
+                "  {}  {}\n",
+                r["repo"].as_str().unwrap_or(""),
+                rate(r)
+            ));
+        }
+        for w in touch["byWeek"].as_array().into_iter().flatten() {
+            out.push_str(&format!(
+                "  week {}  {}\n",
+                w["week"].as_str().unwrap_or(""),
+                rate(w)
+            ));
+        }
+    }
     out
 }
 
@@ -445,7 +548,8 @@ pub fn run(args: &[String]) -> i32 {
         since_days: since,
         group_by: by,
     };
-    let summary = summarize(&read_all(&data), &q, now_ms());
+    let mut summary = summarize(&read_all(&data), &q, now_ms());
+    summary["leadTouch"] = lead_touch_summary(&read_tasks(&data), &q, now_ms());
     if as_json {
         println!("{summary}");
     } else {
@@ -540,5 +644,66 @@ mod tests {
         let all = read_all(&dir);
         assert_eq!(all.len(), 2);
         assert_eq!(all[1].stage, "review");
+    }
+
+    fn done_task(id: &str, repo: &str, at: i64, touched: Option<bool>) -> Task {
+        let mut t: Task = serde_json::from_value(json!({
+            "id": id, "title": id, "goal": "", "criteria": [], "verify": [],
+            "repo": repo, "worktree": "", "branch": "b", "baseSha": "s",
+            "status": "done", "tier": "standard", "createdAt": at, "updatedAt": at,
+        }))
+        .unwrap();
+        t.lead_touch = touched.map(|touched| crate::model::LeadTouch {
+            touched,
+            note: String::new(),
+            at,
+            by: "owner".into(),
+        });
+        t
+    }
+
+    #[test]
+    fn lead_touch_rate_counts_marked_done_tasks_per_repo_and_week() {
+        let now = 40 * DAY_MS;
+        let mut running = done_task("r", "/a", now, Some(true));
+        running.status = TaskStatus::Running;
+        let tasks = vec![
+            done_task("1", "/a", now - DAY_MS, Some(true)),
+            done_task("2", "/a", now - DAY_MS, Some(false)),
+            done_task("3", "/a", now - DAY_MS, None),
+            done_task("4", "/b", now - 30 * DAY_MS, Some(true)),
+            running,
+        ];
+        let q = Query::default();
+        let s = lead_touch_summary(&tasks, &q, now);
+        assert_eq!(
+            (s["touched"].as_u64(), s["marked"].as_u64()),
+            (Some(2), Some(3))
+        );
+        assert!((s["rate"].as_f64().unwrap() - 2.0 / 3.0).abs() < 1e-9);
+        assert_eq!(s["byRepo"][0]["repo"], "/a");
+        assert_eq!(s["byRepo"][0]["rate"], 0.5);
+        assert_eq!(s["byRepo"][1]["rate"], 1.0);
+        assert_eq!(s["byWeek"].as_array().unwrap().len(), 2);
+        let recent = Query {
+            repo: Some("/a".into()),
+            since_days: Some(7),
+            ..Query::default()
+        };
+        let s = lead_touch_summary(&tasks, &recent, now);
+        assert_eq!(s["marked"], 2);
+        assert_eq!(s["rate"], 0.5);
+        assert_eq!(lead_touch_summary(&[], &q, now)["rate"], 0.0);
+        let text = render(
+            &json!({"rows": [], "totals": {}, "leadTouch": lead_touch_summary(&tasks, &q, now)}),
+        );
+        assert!(text.contains("lead touch  2/3 touched (67%)"), "{text}");
+    }
+
+    #[test]
+    fn week_of_is_the_monday_of_the_week() {
+        // 2023-11-14 was a Tuesday.
+        assert_eq!(week_of(1_700_000_000_000), "2023-11-13");
+        assert_eq!(week_of(0), "1969-12-29");
     }
 }

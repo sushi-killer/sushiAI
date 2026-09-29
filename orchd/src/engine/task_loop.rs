@@ -1018,6 +1018,8 @@ pub(super) async fn run_task_loop(
                         task.attempts[idx].status = AttemptStatus::Passed;
                         task.attempts[idx].ended_at = Some(now_ms());
                         task.status = TaskStatus::Done;
+                        task.updated_at = now_ms();
+                        app.write_report(&mut task).await;
                         app.release_worktree(&mut task, "task done").await;
                         task.updated_at = now_ms();
                         let _ = app.store.save_task(&task);
@@ -1819,6 +1821,8 @@ pub(super) async fn finish_attempt(
                 task.attempts[idx].status = AttemptStatus::Passed;
                 task.attempts[idx].ended_at = Some(now_ms());
                 task.status = TaskStatus::Done;
+                task.updated_at = now_ms();
+                app.write_report(task).await;
                 app.release_worktree(task, "landed").await;
                 task.updated_at = now_ms();
                 let _ = app.store.save_task(task);
@@ -1909,6 +1913,8 @@ pub(super) async fn finish_attempt(
         }
     }
     if task.status == TaskStatus::Done {
+        task.updated_at = now_ms();
+        app.write_report(task).await;
         app.release_worktree(task, "committed on its branch").await;
     }
     task.updated_at = now_ms();

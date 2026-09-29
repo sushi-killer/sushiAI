@@ -74,7 +74,8 @@ impl App {
     }
 
     /// `costs.summary {repo?, taskId?, sinceDays?, groupBy: [stage|model|route|repo|task|day]}`
-    /// -> `{rows: [{key, keys, costUsd, runs, tokens, cacheHitRate}], totals}`.
+    /// -> `{rows: [{key, keys, costUsd, runs, tokens, cacheHitRate}], totals,
+    /// leadTouch: {touched, marked, rate, byRepo, byWeek}}`.
     pub(super) async fn handle_costs_summary(
         &self,
         params: serde_json::Value,
@@ -94,19 +95,23 @@ impl App {
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         crate::costs::check_group_by(&p.group_by)?;
         let data = self.data_dir.clone();
-        let records = tokio::task::spawn_blocking(move || crate::costs::read_all(&data))
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(crate::costs::summarize(
-            &records,
-            &crate::costs::Query {
-                repo: p.repo,
-                task_id: p.task_id,
-                since_days: p.since_days,
-                group_by: p.group_by,
-            },
-            now_ms(),
-        ))
+        let (records, tasks) = tokio::task::spawn_blocking(move || {
+            (
+                crate::costs::read_all(&data),
+                crate::costs::read_tasks(&data),
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let query = crate::costs::Query {
+            repo: p.repo,
+            task_id: p.task_id,
+            since_days: p.since_days,
+            group_by: p.group_by,
+        };
+        let mut summary = crate::costs::summarize(&records, &query, now_ms());
+        summary["leadTouch"] = crate::costs::lead_touch_summary(&tasks, &query, now_ms());
+        Ok(summary)
     }
 
     pub(super) async fn handle_settings_get(&self) -> Result<serde_json::Value, String> {

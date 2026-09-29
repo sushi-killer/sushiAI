@@ -376,6 +376,26 @@ pub fn coordination_block(task_id: &str, inbox: &[(String, Message)]) -> String 
     out
 }
 
+/// Tells the implementer that a check found two of its requirements in
+/// conflict: report it rather than trade one for the other.
+pub fn conflict_block(conflict: &str, impossible: bool) -> String {
+    let report = if impossible {
+        "If the conflict cannot be resolved, end your final message with a `sushi-impossible` block (`{\"criterion\": <index>, \"evidence\": \"...\"}`) naming one of the conflicting criteria by its `[N]` index instead of satisfying one at the other's expense, and also mention it in your handoff and decisions."
+    } else {
+        "Report the conflict in your handoff and decisions, say which requirement you left alone and why, and if you cannot go on without an answer report outcome blocked with a question."
+    };
+    format!(
+        "## Brief conflict\n\nA check of this brief found two requirements that contradict each other: {conflict}\n\nDo not satisfy one requirement at the other's expense. {report}\n\n"
+    )
+}
+
+/// Tells the reviewer about the same conflict.
+pub fn review_conflict_block(conflict: &str) -> String {
+    format!(
+        "## Brief conflict\n\nA check of this brief found two requirements that contradict each other: {conflict}\nDo not fail the change for leaving one of them unmet. Fail it if it silently sacrificed one to the other with no report of the conflict."
+    )
+}
+
 /// Puts `block` in front of the brief's report format, which both
 /// [`build_brief`] and [`build_resume_delta`] end with.
 pub fn with_block_before_report(brief: &str, block: &str) -> String {
@@ -1039,6 +1059,10 @@ pub fn build_review_brief(
     if variant.grounded_checks {
         out.push_str(&grounded_checks_block(task, verify_results));
     }
+    if let Some(conflict) = &task.brief_check.conflict {
+        out.push_str("\n\n");
+        out.push_str(&review_conflict_block(conflict));
+    }
     out.push_str("\n\nCriteria marked \"Checked by review\" have no command behind them: check them from the diff and the repository yourself.\n\nThe repository's process rules about commits, pull requests, release notes and lesson or changelog files belong to the orchestrator, not this task: judge the change against the task and its criteria, and do not fail it for those.\n\n");
     out.push_str(REVIEW_VERDICT_RULE);
     let evidence = variant.review_evidence;
@@ -1352,6 +1376,7 @@ mod tests {
             eval_name: None,
             eval_check_cmd: None,
             eval_check: None,
+            brief_check: Default::default(),
             created_at: 1,
             updated_at: 1,
         }

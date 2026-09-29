@@ -138,6 +138,23 @@ pub(super) async fn run_task_loop(
             }
         }
 
+        // Explicit criteria are checked once, before the first attempt; a
+        // planned brief was already checked in the plan stage.
+        if implement_attempt_count(&task) == 0 && !task.brief_check.done {
+            let attempt_n = task.attempts.len() as u32 + 1;
+            if let BriefAction::Cancelled =
+                check_brief(&app, &task_id, attempt_n, false, &cancel).await
+            {
+                drop(permit);
+                mark_stopped_if_not_already(&app, &task_id).await;
+                app.finish_task_loop(&task_id);
+                return;
+            }
+            if let Ok(Some(reloaded)) = app.store.load_task(&task_id) {
+                task = reloaded;
+            }
+        }
+
         let resume_eligible = !just_answered;
         just_answered = false;
 
@@ -341,6 +358,15 @@ pub(super) async fn run_task_loop(
         ) {
             (Some(_), Some(failure)) => brief::build_resume_delta(failure),
             _ => brief::build_brief(&task, &status_short, &diff_stat),
+        };
+        let brief_text = match &task.brief_check.conflict {
+            Some(conflict) if implement_attempt_count(&task) == 0 => {
+                brief::with_block_before_report(
+                    &brief_text,
+                    &brief::conflict_block(conflict, task.variant().grounded_checks),
+                )
+            }
+            _ => brief_text,
         };
         // The messages sent to this task since its last attempt are
         // delivered here, with the attempt about to start.

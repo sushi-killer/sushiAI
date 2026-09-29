@@ -81,10 +81,16 @@ impl Daemon {
         let child = spawn_orchd_raw(data_dir.path(), &socket, extra_env);
         wait_for_socket(&socket);
         let token = read_control_token(data_dir.path());
-        if native_sandbox_unavailable() {
+        // The brief check is one more harness run: off, so tests that count
+        // runs, cost or argv see only the runs they set up. Its own tests
+        // turn it back on.
+        {
             let mut settings =
                 request_on(&socket, "settings.get", serde_json::json!({}), Some(&token));
-            fit_sandbox(&mut settings);
+            settings["briefCheckRoute"] = serde_json::json!("");
+            if native_sandbox_unavailable() {
+                fit_sandbox(&mut settings);
+            }
             request_on(
                 &socket,
                 "settings.set",

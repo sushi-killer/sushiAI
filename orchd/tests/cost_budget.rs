@@ -48,6 +48,7 @@ fn a_daemon_restart_mid_attempt_keeps_the_interrupted_attempt_s_estimated_cost()
     );
     settings["review"] = serde_json::json!("");
     fit_sandbox(&mut settings);
+    settings["briefCheckRoute"] = serde_json::json!("");
     request_on(
         &socket1,
         "settings.set",
@@ -190,6 +191,7 @@ fn kill_during_side_run_and_restart(
     let mut settings = call1("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!(review);
     fit_sandbox(&mut settings);
+    settings["briefCheckRoute"] = serde_json::json!("");
     call1("settings.set", serde_json::json!({"settings": settings}));
     let repo = init_git_repo();
     let mut params = task;

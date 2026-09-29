@@ -123,6 +123,7 @@ fn a_task_waiting_for_its_owner_does_not_hold_a_parallel_slot() {
     settings["parallel"] = serde_json::json!(1);
     settings["review"] = serde_json::json!("");
     fit_sandbox(&mut settings);
+    settings["briefCheckRoute"] = serde_json::json!("");
     request_on(
         &socket1,
         "settings.set",
@@ -330,6 +331,7 @@ fn a_task_interrupted_by_a_daemon_crash_resumes_on_restart() {
     );
     settings["review"] = serde_json::json!("");
     fit_sandbox(&mut settings);
+    settings["briefCheckRoute"] = serde_json::json!("");
     request_on(
         &socket1,
         "settings.set",
@@ -407,6 +409,7 @@ fn hang_shutdown_and_restart(stop_first: bool) -> serde_json::Value {
     );
     settings["review"] = serde_json::json!("");
     fit_sandbox(&mut settings);
+    settings["briefCheckRoute"] = serde_json::json!("");
     request_on(
         &socket1,
         "settings.set",

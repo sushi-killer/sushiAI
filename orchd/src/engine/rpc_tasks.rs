@@ -367,6 +367,7 @@ impl App {
             eval_name: new.eval_name,
             eval_check_cmd: new.eval_check_cmd,
             eval_check: None,
+            brief_check: Default::default(),
             created_at: new.created_at,
             updated_at: new.created_at,
         };

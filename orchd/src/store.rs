@@ -56,7 +56,22 @@ impl Store {
             return Ok(Settings::default());
         }
         let text = fs::read_to_string(&path)?;
-        serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let mut settings: Settings = serde_json::from_str(&text)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        // Settings written before the brief check existed carry the default
+        // check route id but not the built-in route it names.
+        if settings.brief_check_route == "claude-haiku"
+            && !settings.routes.iter().any(|r| r.id == "claude-haiku")
+        {
+            if let Some(route) = Settings::default()
+                .routes
+                .into_iter()
+                .find(|r| r.id == "claude-haiku")
+            {
+                settings.routes.push(route);
+            }
+        }
+        Ok(settings)
     }
 
     pub fn save_settings(&self, settings: &Settings) -> io::Result<()> {
@@ -434,6 +449,7 @@ mod tests {
             eval_name: None,
             eval_check_cmd: None,
             eval_check: None,
+            brief_check: Default::default(),
             created_at: 1,
             updated_at: 1,
         }
@@ -521,6 +537,22 @@ mod tests {
         store.save_settings(&custom).unwrap();
         let loaded = store.load_settings().unwrap();
         assert_eq!(loaded.max_attempts, 7);
+    }
+
+    #[test]
+    fn old_settings_gain_the_brief_check_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        let mut old = Settings::default();
+        old.routes.retain(|r| r.id != "claude-haiku");
+        store.save_settings(&old).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(store.settings_path()).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("briefCheckRoute");
+        std::fs::write(store.settings_path(), value.to_string()).unwrap();
+        let loaded = store.load_settings().unwrap();
+        assert_eq!(loaded.brief_check_route, "claude-haiku");
+        assert!(loaded.routes.iter().any(|r| r.id == "claude-haiku"));
     }
 
     #[test]

@@ -643,6 +643,17 @@ pub(super) async fn run_plan_stage(
         let _ = app.store.save_task(&task);
         app.broadcast_task(&task);
 
+        // Do the draft's own requirements contradict each other? One
+        // redraft, once per task; the check runs again on the new draft.
+        match check_brief(app, task_id, attempt_n, true, cancel).await {
+            BriefAction::Redraft => continue,
+            BriefAction::Cancelled => return end_plan_stage(app, task_id, Some(idx)).await,
+            BriefAction::Proceed => {}
+        }
+        if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
+            task = reloaded;
+        }
+
         // Classifier preflight on the draft (spec step 4), same three
         // checks as `task.preflight`, journaled under its own point --
         // still run for its goal/criteria signal even though it no longer

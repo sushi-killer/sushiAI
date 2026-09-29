@@ -104,6 +104,11 @@ pub struct Settings {
     /// rejected -- there is nothing to run it with).
     #[serde(default = "default_planner")]
     pub planner: String,
+    /// Route id of the read-only run that checks a brief's goal and criteria
+    /// for contradictions after drafting and before the first implement
+    /// attempt; `""` turns the check off.
+    #[serde(default = "default_brief_check_route")]
+    pub brief_check_route: String,
     /// Route the orchestrator agent runs on: its chat with the owner and,
     /// with `auto_answer`, its triage of stuck questions. `""` (or an id that
     /// matches no route) means the standard tier's route.
@@ -272,6 +277,33 @@ pub struct WorkBuckets {
     pub evidence: Vec<String>,
 }
 
+/// Route the brief consistency check runs on unless settings name another.
+fn default_brief_check_route() -> String {
+    "claude-haiku".to_string()
+}
+
+/// State of a task's brief consistency check (a cheap read-only model run
+/// asking whether the goal and criteria contradict each other).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BriefCheck {
+    /// The check has run (or been skipped for good); it never runs twice.
+    #[serde(default)]
+    pub done: bool,
+    /// The planner already redrafted once because of a contradiction.
+    #[serde(default)]
+    pub redrafted: bool,
+    /// The conflict the implement and review briefs must name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<String>,
+}
+
+impl BriefCheck {
+    pub fn is_default(&self) -> bool {
+        *self == BriefCheck::default()
+    }
+}
+
 fn default_planner() -> String {
     "claude-opus".to_string()
 }
@@ -301,6 +333,14 @@ impl Default for Settings {
                     profile_id: None,
                 },
                 Route {
+                    id: "claude-haiku".to_string(),
+                    label: "Claude Haiku".to_string(),
+                    harness: Harness::Claude,
+                    model: Some("claude-haiku-4-5".to_string()),
+                    effort: None,
+                    profile_id: None,
+                },
+                Route {
                     id: "codex".to_string(),
                     label: "Codex".to_string(),
                     harness: Harness::Codex,
@@ -325,6 +365,7 @@ impl Default for Settings {
             max_attempts: 4,
             parallel: 2,
             planner: default_planner(),
+            brief_check_route: default_brief_check_route(),
             orchestrator: String::new(),
             auto_answer: false,
             experiments: default_experiments(),
@@ -842,6 +883,9 @@ pub struct Task {
     pub eval_check: Option<EvalCheck>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<Question>,
+    /// Where the brief consistency check stands for this task.
+    #[serde(default, skip_serializing_if = "BriefCheck::is_default")]
+    pub brief_check: BriefCheck,
     #[serde(default)]
     pub decisions: Vec<String>,
     /// Non-blocking planner questions answered by their recommendation.
@@ -1314,6 +1358,7 @@ mod tests {
             eval_name: None,
             eval_check_cmd: None,
             eval_check: None,
+            brief_check: Default::default(),
             created_at: 1,
             updated_at: 1,
         };
@@ -1532,6 +1577,7 @@ mod tests {
             eval_name: None,
             eval_check_cmd: None,
             eval_check: None,
+            brief_check: Default::default(),
             created_at: 1,
             updated_at: 1,
         };
@@ -1578,6 +1624,7 @@ mod tests {
             eval_name: None,
             eval_check_cmd: None,
             eval_check: None,
+            brief_check: Default::default(),
             created_at: 1,
             updated_at: 1,
         };

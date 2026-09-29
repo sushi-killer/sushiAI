@@ -12,17 +12,21 @@ const HEIGHT_TIMED = 230;
 const MARGIN = 12;
 
 function noticeId(notice) {
+  if (notice.kind === "core-update") return "core-update";
   return `${notice.kind}:${notice.taskId}:${notice.body}`;
 }
 
 /** How long a notice stays: a needs-input one until the owner acts (null),
  * a done/failed one for MASCOT_TIMED_MS. */
 function noticeLifetimeMs(notice) {
-  return notice.kind === "input" ? null : MASCOT_TIMED_MS;
+  return notice.kind === "input" || notice.kind === "core-update"
+    ? null
+    : MASCOT_TIMED_MS;
 }
 
 /** The queue the mascot shows, newest first. Actions:
- * add (deduped by kind:taskId:body, capped), dismiss (by id), clear,
+ * add (deduped by kind:taskId:body, capped; the dev-only core-update notice
+ * is a single entry that stays until dismissed and survives clear), dismiss (by id), clear,
  * task (a needs-input notice whose task left `waiting` is dropped),
  * answered (marks a task's input notices as answered and gives them a short
  * life), expire (drops every notice whose `expiresAt` has passed). */
@@ -44,7 +48,7 @@ function queueReducer(state, action) {
     case "dismiss":
       return state.filter((item) => item.id !== action.id);
     case "clear":
-      return [];
+      return state.filter((item) => item.kind === "core-update");
     case "task":
       return action.status === "waiting"
         ? state
@@ -131,6 +135,7 @@ function registerMascot({
   getService,
   showMainWindow,
   send,
+  restart,
 }) {
   let win = null;
   let queue = [];
@@ -274,6 +279,12 @@ function registerMascot({
   handle("mascot-dismiss", (id) => {
     if (typeof id !== "string") throw new Error("Invalid notice.");
     dispatch({ type: "dismiss", id });
+  });
+
+  handle("mascot-restart", () => {
+    if (!queue.some((item) => item.kind === "core-update"))
+      throw new Error("No core update is pending.");
+    restart();
   });
 
   return {

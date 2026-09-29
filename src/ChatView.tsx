@@ -1,3 +1,4 @@
+import type { SessionState } from "./app/useSessionState";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -50,30 +51,13 @@ const SUGGESTIONS = [
   "Review recent changes",
   "Plan the next feature",
 ];
-// Which thread was open survives a restart, the way the Agent tab remembers its
-// conversation. Unsent drafts stay in memory and are never written to storage.
-const focusStorage = "sushiai.chat-focus.v1";
-function savedFocus(): string {
-  try {
-    const id = localStorage.getItem(focusStorage);
-    return typeof id === "string" ? id : "";
-  } catch {
-    return "";
-  }
-}
+// Which thread was open survives a restart in the workspace snapshot, the way
+// the Agent tab remembers its conversation. Unsent drafts stay in memory and
+// are never written to storage.
 const memory = {
-  selected: savedFocus(),
   drafts: {} as Record<string, string>,
   attachments: {} as Record<string, string[]>,
 };
-function remember(id: string) {
-  memory.selected = id;
-  try {
-    localStorage.setItem(focusStorage, id);
-  } catch {
-    /* a full store still leaves the thread open for this session */
-  }
-}
 
 export function ChatView({
   workspaces,
@@ -86,6 +70,7 @@ export function ChatView({
   onPatch,
   onDelete,
   onToggleSidebar,
+  session: { chatFocus: focus, setChatFocus: onFocus },
 }: {
   workspaces: Workspace[];
   active: Workspace;
@@ -97,8 +82,10 @@ export function ChatView({
   onPatch(panelId: string, patch: Partial<Panel>): void;
   onDelete(workspaceId: string, panel: Panel): void;
   onToggleSidebar(): void;
+  /** Holds the thread that was open and takes a change of it. */
+  session: SessionState;
 }) {
-  const [selected, setSelected] = useState(memory.selected);
+  const [selected, setSelected] = useState(focus);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [branch, setBranch] = useState("");
   const [renaming, setRenaming] = useState("");
@@ -137,7 +124,7 @@ export function ChatView({
   function open(workspaceId: string, panelId: string) {
     memory.drafts[current?.id || ""] = draft;
     memory.attachments[current?.id || ""] = attachments;
-    remember(panelId);
+    onFocus(panelId);
     setSelected(panelId);
     setDraft(memory.drafts[panelId] || "");
     setAttachments(memory.attachments[panelId] || []);
@@ -282,7 +269,7 @@ export function ChatView({
           onClick={() => {
             if (!window.confirm(`Delete thread “${panel.title}”?`)) return;
             if (panel.id === selected) {
-              remember("");
+              onFocus("");
               setSelected("");
             }
             onDelete(workspace.id, panel);

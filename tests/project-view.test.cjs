@@ -70,13 +70,13 @@ test("restore keeps well-formed project views and drops the rest", async () => {
       "w-3": null,
     },
   };
-  const restored = restore({ getItem: () => JSON.stringify(saved) });
+  const restored = restore({ read: () => JSON.stringify(saved) });
   assert.deepEqual(restored.views, {
     "w-1": { tabMode: true, zoomed: "p-1" },
     "w-2": { tabMode: false, zoomed: null },
   });
   const empty = restore({
-    getItem: () => JSON.stringify({ ...saved, views: ["not", "a map"] }),
+    read: () => JSON.stringify({ ...saved, views: ["not", "a map"] }),
   });
   assert.deepEqual(empty.views, {});
 });

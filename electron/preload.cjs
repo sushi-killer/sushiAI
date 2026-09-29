@@ -3,7 +3,25 @@ const invoke =
   (channel) =>
   (...args) =>
     ipcRenderer.invoke(channel, ...args);
+// The workspace snapshot is read and flushed synchronously: restore() runs
+// before the first render, and a flush runs while the window is closing.
+const sendSync = (channel, ...args) => {
+  const reply = ipcRenderer.sendSync(channel, ...args);
+  if (reply?.error) throw new Error(reply.error);
+  return reply?.value ?? null;
+};
 contextBridge.exposeInMainWorld("bridge", {
+  workspaceStateRead: () => {
+    try {
+      return sendSync("workspace-state-read");
+    } catch {
+      return null;
+    }
+  },
+  workspaceStateWrite: invoke("workspace-state-write"),
+  workspaceStateFlush: (text) => {
+    sendSync("workspace-state-flush", text);
+  },
   agentProviders: invoke("agent-providers"),
   agentCall: invoke("agent-call"),
   agentOpenExternal: invoke("agent-open-external"),

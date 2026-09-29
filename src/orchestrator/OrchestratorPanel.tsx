@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import {
   Archive,
   ArchiveRestore,
@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 import "./orchestrator.css";
+import type { OrchestratorView } from "../types";
 import type { TaskTarget } from "./notices";
 import { pendingReveal, subscribeReveal } from "./reveal";
 import { orchestratorClient } from "./client";
@@ -81,11 +82,7 @@ type DaemonState = "loading" | "ready" | "not-built" | "unavailable";
  * where tasks come from, a task is opened to watch or answer it, the archive
  * lists what's been hidden from the main list, and "messages" watches the
  * agent-to-agent threads the daemon keeps. */
-type View =
-  | { kind: "chat" }
-  | { kind: "task"; id: string }
-  | { kind: "archive" }
-  | { kind: "messages" };
+type View = OrchestratorView;
 
 function classifyError(message: string): DaemonState {
   return message.includes("is not built") ? "not-built" : "unavailable";
@@ -966,12 +963,28 @@ function MessagesView({
   );
 }
 
-export function OrchestratorPanel({ cwd }: { cwd: string }) {
+export function OrchestratorPanel({
+  cwd,
+  view: savedView,
+  onViewChange,
+}: {
+  cwd: string;
+  /** The view the panel had when it was last open; seeds its own state. */
+  view?: OrchestratorView;
+  /** Reports the view after each change so it can be saved on the panel. */
+  onViewChange(view: OrchestratorView | undefined): void;
+}) {
   const [daemonState, setDaemonState] = useState<DaemonState>("loading");
   const [error, setError] = useState("");
   const [live, setLive] = useState<OrchestratorLiveState>(emptyLiveState);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [view, setView] = useState<View | null>(null);
+  const [view, setViewState] = useState<View | null>(savedView ?? null);
+  const report = useRef(onViewChange);
+  report.current = onViewChange;
+  const setView = useCallback((next: View | null) => {
+    setViewState(next);
+    report.current(next ?? undefined);
+  }, []);
   const [busy, setBusy] = useState(false);
   // Which pane a narrow panel shows - ignored by the CSS above ~640px, where
   // the list and the main pane sit side by side.
@@ -1085,7 +1098,7 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
     };
     take();
     return subscribeReveal(take);
-  }, [cwd]);
+  }, [cwd, setView]);
   useEffect(() => {
     if (!scrollTo || selected?.id !== scrollTo.taskId) return;
     const root = rootRef.current;

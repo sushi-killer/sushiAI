@@ -149,3 +149,33 @@ test("mascotBounds hugs the bottom-right of the work area and grows for input", 
   }
   assert.ok(input.height > timed.height);
 });
+
+test("core-update is one permanent entry that only dismiss removes", () => {
+  const core = { kind: "core-update", title: "t", body: "b" };
+  assert.equal(noticeLifetimeMs(core), null);
+  let state = add([], notice("done", "a"));
+  state = add(state, core);
+  state = add(state, { ...core, body: "again" });
+  assert.equal(state.filter((item) => item.kind === "core-update").length, 1);
+  assert.equal(state[0].kind, "core-update");
+  assert.equal(state[0].expiresAt, null);
+  state = add(state, notice("done", "b"));
+  state = add(state, core);
+  assert.equal(state[0].id, "core-update");
+  for (const action of [
+    { type: "task", taskId: "a", status: "running" },
+    { type: "answered", taskId: "a", now: 1 },
+    { type: "expire", now: 1e15 },
+    { type: "clear" },
+  ])
+    assert.ok(
+      queueReducer(state, action).some((item) => item.id === "core-update"),
+      action.type,
+    );
+  assert.deepEqual(queueReducer(state, { type: "clear" }).length, 1);
+  assert.ok(
+    !queueReducer(state, { type: "dismiss", id: "core-update" }).some(
+      (item) => item.id === "core-update",
+    ),
+  );
+});

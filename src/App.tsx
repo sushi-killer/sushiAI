@@ -8,6 +8,7 @@ import { ClaudeMcpSettings } from "./ClaudeMcpSettings";
 import { WorkspaceDialog } from "./WorkspaceDialog";
 import { errorText } from "./app/errors";
 import { useAppPersistence } from "./app/useAppPersistence";
+import { useSessionState } from "./app/useSessionState";
 import { useAttention } from "./app/useAttention";
 import { useCompact } from "./app/useCompact";
 import { useKeepAwake } from "./app/useKeepAwake";
@@ -177,21 +178,20 @@ export function App() {
   const [compact, canvasRef] = useCompact();
   const [routines, setRoutines] = useState<Routine[]>(saved?.routines || []);
   const [fontScale, setFontScale] = useState(saved?.fontScale || 1);
-  // Held here, not in SettingsDialog: the blocker must be active whenever the
-  // app is open, not only while the preferences dialog happens to be mounted.
+  // Held here, not in SettingsDialog: the blocker runs whenever the app is open.
   const [keepAwake, setKeepAwake] = useKeepAwake();
   const connected = connection === "connected";
   const activeEndpoint = active.connection || socket;
-  // Pane provenance (AC23-AC26, D5): only set when the active workspace is a
-  // member of a merged row, and only in flat mode - the sidebar draws that
-  // row, but the canvas is where a Herdr/agent pane actually names its host.
+  // Pane provenance (AC23-AC26, D5): set only for a merged row's member in flat mode.
   const projectGit = useProjectGit(workspaces, active.id);
+  const session = useSessionState(saved);
   const merged = useMergedCanvas(
     ws,
     projectGit,
     connectionProfiles,
     workspaceGrouping,
     socket,
+    session,
   );
   const { tabMode, setTabMode, views } = useProjectView(
     merged.group?.id ?? active.id,
@@ -238,6 +238,7 @@ export function App() {
       workspaceGrouping,
       closedProjects: ws.closedProjects,
       views,
+      ...session,
     },
     notify,
   );
@@ -453,7 +454,7 @@ export function App() {
               attention={attention}
             />
           ) : mode === "Agent" ? (
-            <AgentsView slot={slot} />
+            <AgentsView slot={slot} session={session} />
           ) : mode === "Chat" ? (
             <ChatView
               workspaces={workspaces}
@@ -470,6 +471,7 @@ export function App() {
               onPatch={updatePanel}
               onDelete={deleteThread}
               onToggleSidebar={() => setSidebar(!sidebar)}
+              session={session}
             />
           ) : (
             <WorkspaceCanvas

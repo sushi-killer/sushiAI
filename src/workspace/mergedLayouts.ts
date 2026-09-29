@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback } from "react";
 import { activeMergeGroup } from "../app/workspaceMerge.ts";
 import type { ConnectionProfile, Layout } from "../types";
 import type { ProjectGit } from "../app/useProjectGit.ts";
@@ -9,53 +9,7 @@ import {
 } from "./workspace-actions.ts";
 import type { MergedPane } from "./workspace-actions.ts";
 import type { WorkspaceController } from "./useWorkspaces.ts";
-
-const STORAGE = "sushiai.mergedLayouts.v1";
-
-type StoredGroupLayouts = Record<string, Layout>;
-
-/** localStorage is outside the app's control - a stale format, a hand-edited
- * value or a future version this build doesn't know could all leave
- * something that isn't a real layout tree behind. `LayoutView` (and anything
- * else here) assumes a `leaf`/`split` shape without checking, so a malformed
- * entry crashes the canvas instead of just being dropped. */
-export function isValidLayout(value: unknown): value is Layout {
-  if (!value || typeof value !== "object") return false;
-  const node = value as { type?: unknown };
-  if (node.type === "leaf")
-    return typeof (node as { id?: unknown }).id === "string";
-  if (node.type === "split") {
-    const split = node as {
-      id?: unknown;
-      axis?: unknown;
-      ratio?: unknown;
-      a?: unknown;
-      b?: unknown;
-    };
-    return (
-      typeof split.id === "string" &&
-      (split.axis === "row" || split.axis === "column") &&
-      typeof split.ratio === "number" &&
-      isValidLayout(split.a) &&
-      isValidLayout(split.b)
-    );
-  }
-  return false;
-}
-
-function load(): StoredGroupLayouts {
-  try {
-    const value: unknown = JSON.parse(localStorage.getItem(STORAGE) || "{}");
-    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).filter(([, layout]) =>
-        isValidLayout(layout),
-      ),
-    ) as StoredGroupLayouts;
-  } catch {
-    return {};
-  }
-}
+import type { SessionState } from "../app/useSessionState.ts";
 
 export type MergedCanvas = {
   group: ReturnType<typeof activeMergeGroup>;
@@ -67,8 +21,9 @@ export type MergedCanvas = {
  * only). A merge group has no workspace of its own to keep a combined
  * layout in - Herdr polls rewrite each member's own `layout` independently
  * every few seconds (see reconcileGroupLayout in workspace-actions.ts) - so
- * it is persisted here instead, keyed by the merge group's stable id, and
- * survives restart the same way a single workspace's layout does. Assigns
+ * it is kept in the workspace snapshot instead (`mergedLayouts`, owned by
+ * App and passed in), keyed by the merge group's stable id, and survives
+ * restart the same way a single workspace's layout does. Assigns
  * `ws.groupRef` synchronously each render so `drop`/`resizeSplit`/`tidy` and
  * the selection effect in useWorkspaces.ts can act on it. */
 export function useMergedCanvas(
@@ -77,17 +32,8 @@ export function useMergedCanvas(
   connectionProfiles: ConnectionProfile[],
   workspaceGrouping: "grouped" | "flat",
   socket: string,
+  { mergedLayouts: stored, setMergedLayouts: setStored }: SessionState,
 ): MergedCanvas {
-  const [stored, setStored] = useState<StoredGroupLayouts>(() =>
-    typeof localStorage === "undefined" ? {} : load(),
-  );
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE, JSON.stringify(stored));
-    } catch {
-      /* storage full or unavailable: the layout still works this session */
-    }
-  }, [stored]);
   const setGroupLayout = useCallback(
     (groupId: string, layout: Layout | null) =>
       setStored((current) =>
@@ -97,7 +43,7 @@ export function useMergedCanvas(
               Object.entries(current).filter(([id]) => id !== groupId),
             ),
       ),
-    [],
+    [setStored],
   );
   const group = activeMergeGroup(
     ws.workspaces,

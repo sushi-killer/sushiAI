@@ -20,6 +20,18 @@ export const leafIds = (node: Layout | null): string[] =>
     : node.type === "leaf"
       ? [node.id]
       : [...leafIds(node.a), ...leafIds(node.b)];
+/** The same tree with one leaf pointing at another panel id. */
+export function replaceLeaf(
+  node: Layout | null,
+  id: string,
+  next: string,
+): Layout | null {
+  if (!node) return node;
+  if (node.type === "leaf") return node.id === id ? leaf(next) : node;
+  const a = replaceLeaf(node.a, id, next) as Layout,
+    b = replaceLeaf(node.b, id, next) as Layout;
+  return a === node.a && b === node.b ? node : { ...node, a, b };
+}
 export function remove(node: Layout | null, id: string): Layout | null {
   if (!node || node.type === "leaf") return node?.id === id ? null : node;
   const a = remove(node.a, id),
@@ -72,4 +84,31 @@ export function tidy(ids: string[]): Layout | null {
           1 / items.length,
         );
   return split(leaf(first), stack(rest), "row", ids.length > 2 ? 0.53 : 0.5);
+}
+
+/** A stored layout is outside the app's control - a stale format, a
+ * hand-edited value or a future version could leave something that isn't a
+ * real leaf/split tree, and `LayoutView` assumes that shape without checking. */
+export function isValidLayout(value: unknown): value is Layout {
+  if (!value || typeof value !== "object") return false;
+  const node = value as { type?: unknown };
+  if (node.type === "leaf")
+    return typeof (node as { id?: unknown }).id === "string";
+  if (node.type === "split") {
+    const split = node as {
+      id?: unknown;
+      axis?: unknown;
+      ratio?: unknown;
+      a?: unknown;
+      b?: unknown;
+    };
+    return (
+      typeof split.id === "string" &&
+      (split.axis === "row" || split.axis === "column") &&
+      typeof split.ratio === "number" &&
+      isValidLayout(split.a) &&
+      isValidLayout(split.b)
+    );
+  }
+  return false;
 }

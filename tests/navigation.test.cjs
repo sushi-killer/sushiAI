@@ -197,3 +197,46 @@ test("core routes round-trip through the saved shape", async () => {
     assert.deepEqual(restored, state, `${mode}/${name || "workspace"}`);
   }
 });
+
+test("mode, a core section and an extension page survive the snapshot round trip", async () => {
+  const { restoreNavigation, routeOf, sectionName } = await library;
+  const { saveWorkspaceState, restore } =
+    await import("../src/workspaceState.ts");
+  const workspace = {
+    id: "w",
+    name: "w",
+    cwd: "/a",
+    panels: [],
+    layout: null,
+  };
+  for (const state of [
+    { mode: "Code", section: null },
+    { mode: "Agent", section: null },
+    { mode: "Chat", section: null },
+    { mode: "Code", section: core("Dashboard") },
+    { mode: "Code", section: core("Skills") },
+    { mode: "Code", section: tasksSection },
+  ]) {
+    let stored = null;
+    saveWorkspaceState(
+      {
+        workspaces: [workspace],
+        activeId: "w",
+        socket: "",
+        routines: [],
+        fontScale: 1,
+        mode: state.mode,
+        section: sectionName(state.section),
+        route: routeOf(state),
+      },
+      { write: (text) => (stored = text), flush: () => {} },
+    );
+    // Through the same bytes the snapshot file would hold.
+    const restored = restore({ read: () => stored });
+    assert.deepEqual(
+      restoreNavigation(restored),
+      state,
+      `${state.mode}/${state.section?.kind ?? "workspace"}`,
+    );
+  }
+});

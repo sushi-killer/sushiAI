@@ -20,10 +20,10 @@ function Bubble({ notice }: { notice: MascotNotice }) {
     return () => clearTimeout(timer);
   }, [notice.id, notice.expiresAt]);
 
-  const answer = async (value: string) => {
+  const answer = async (taskId: string, value: string) => {
     setError("");
     try {
-      await bridge?.answer(notice.taskId, value);
+      await bridge?.answer(taskId, value);
       setText("");
     } catch (failure) {
       setError(
@@ -35,6 +35,28 @@ function Bubble({ notice }: { notice: MascotNotice }) {
     }
   };
 
+  if (notice.kind === "core-update")
+    return (
+      <div
+        className={`bubble core-update ${fading ? "leaving" : ""}`}
+        role="status"
+      >
+        <button
+          className="bubble-dismiss"
+          aria-label="Dismiss"
+          onClick={() => void bridge?.dismiss(notice.id)}
+        >
+          <X size={13} />
+        </button>
+        <strong>{notice.title}</strong>
+        <span className="bubble-body" title={notice.body}>
+          {notice.body}
+        </span>
+        <button className="bubble-open" onClick={() => void bridge?.restart()}>
+          Restart
+        </button>
+      </div>
+    );
   if (notice.answered)
     return (
       <div className="bubble answered" role="status">
@@ -63,7 +85,10 @@ function Bubble({ notice }: { notice: MascotNotice }) {
           {!!notice.options?.length && (
             <div className="bubble-options">
               {notice.options.map((option) => (
-                <button key={option} onClick={() => void answer(option)}>
+                <button
+                  key={option}
+                  onClick={() => void answer(notice.taskId, option)}
+                >
                   {option}
                 </button>
               ))}
@@ -73,7 +98,7 @@ function Bubble({ notice }: { notice: MascotNotice }) {
             className="bubble-answer"
             onSubmit={(event) => {
               event.preventDefault();
-              void answer(text);
+              void answer(notice.taskId, text);
             }}
           >
             <input
@@ -129,7 +154,7 @@ export function Mascot() {
       (Math.min(index, notices.length - 1) + delta + notices.length) %
         notices.length,
     );
-  const mood = shown.answered ? "" : shown.kind;
+  const mood = shown.kind !== "core-update" && shown.answered ? "" : shown.kind;
   return (
     <div className="mascot">
       <div className="bubble-wrap">

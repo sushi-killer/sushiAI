@@ -4,6 +4,7 @@ import {
   leaf,
   leafIds,
   remove,
+  replaceLeaf,
   split,
   swap,
   tidy,
@@ -39,6 +40,40 @@ export function appendPanel(
       ? split(workspace.layout, leaf(panel.id), "row", ratio)
       : leaf(panel.id),
   };
+}
+
+/** Puts the panel that replaces an ended Herdr pane into that pane's layout
+ * slot and panel-list position. `herdrId` rebinds the workspace to the Herdr
+ * workspace that was created for it. A background poll may already have listed
+ * the new pane, so a panel with its id is folded in rather than duplicated. */
+export function reopenInSlot(
+  workspace: Workspace,
+  endedId: string,
+  next: Panel,
+  herdrId?: string,
+): Workspace {
+  const listed = next.id !== endedId && contains(workspace.layout, next.id);
+  const layout = listed ? remove(workspace.layout, next.id) : workspace.layout;
+  const inSlot = contains(layout, endedId);
+  return {
+    ...workspace,
+    ...(herdrId ? { herdrId } : {}),
+    panels: workspace.panels
+      .filter((panel) => panel.id !== next.id || panel.id === endedId)
+      .map((panel) => (panel.id === endedId ? next : panel)),
+    layout: inSlot
+      ? replaceLeaf(layout, endedId, next.id)
+      : layout
+        ? split(layout, leaf(next.id), "row", 0.65)
+        : leaf(next.id),
+  };
+}
+
+/** True for a Herdr workspace whose host no longer lists it: it has Herdr
+ * panes and every one of them is ended. */
+export function isVanished(workspace: Workspace): boolean {
+  const herdr = workspace.panels.filter((panel) => panel.herdrId);
+  return herdr.length > 0 && herdr.every((panel) => panel.ended);
 }
 
 /** The workspace that currently owns a panel id, wherever it lives - not

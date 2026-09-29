@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { ArrowUpRight, Command, Play } from "lucide-react";
+import { ArrowUpRight, Command, Play, RotateCcw } from "lucide-react";
+import { agentTitle } from "./app/agent-title";
 import type { Panel } from "./types";
 import { fitTerminal, queueTerminalFit } from "./terminal-sizing";
 import { installTerminalInteractions } from "./terminal-interactions";
@@ -50,6 +51,7 @@ export function TerminalPanel({
   endpoint,
   hostLabel,
   onStart,
+  onReopen,
 }: {
   panel: Panel;
   cwd: string;
@@ -61,6 +63,8 @@ export function TerminalPanel({
    * a merged workspace's local (non-Herdr) pane still gets the label alone. */
   hostLabel?: string;
   onStart(): void;
+  /** Starts a new pane in place of an ended Herdr one. */
+  onReopen(): void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const attachmentsAllowed = useRef(false);
@@ -69,7 +73,9 @@ export function TerminalPanel({
   const [attempt, setAttempt] = useState(0);
   const [transfer, setTransfer] = useState("");
   const [disconnected, setDisconnected] = useState(false);
-  const active = panel.kind === "terminal" || panel.started || !!panel.herdrId;
+  const active =
+    !panel.ended &&
+    (panel.kind === "terminal" || panel.started || !!panel.herdrId);
   useEffect(() => {
     if (!active || !host.current) return;
     if (!window.bridge) {
@@ -368,6 +374,19 @@ export function TerminalPanel({
     if (runtime) runtime.error = "";
     setError("");
   };
+  if (panel.ended)
+    return (
+      <div className="terminal-ended" role="status">
+        <p>Session ended</p>
+        <small>
+          {panel.agent ? agentTitle(panel.agent) : "This terminal"} is no longer
+          running on its host.
+        </small>
+        <button className="primary" onClick={onReopen}>
+          <RotateCcw size={13} /> Reopen
+        </button>
+      </div>
+    );
   if (!active)
     return (
       <div className="agent-intro">

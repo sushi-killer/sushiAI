@@ -351,3 +351,96 @@ test("fixSelection widens aliveness across an active merge group's members, but 
     "without a group, cross-workspace ids fall back exactly like today (C3)",
   );
 });
+
+test("reopenInSlot puts the new pane in the ended pane's layout slot and list position", async () => {
+  const { reopenInSlot } = await library;
+  const { contains, leafIds } = await layoutLibrary;
+  const ended = panel("herdr:local:old", "agent", {
+    herdrId: "old",
+    agent: "claude",
+    ended: true,
+  });
+  const before = await workspace([
+    panel("a"),
+    ended,
+    panel("herdr:local:live", "terminal", { herdrId: "live" }),
+  ]);
+  const next = panel("herdr:local:new", "agent", {
+    herdrId: "new",
+    agent: "claude",
+  });
+  const after = reopenInSlot(before, ended.id, next);
+  assert.deepEqual(
+    after.panels.map((item) => item.id),
+    ["a", "herdr:local:new", "herdr:local:live"],
+  );
+  assert.deepEqual(
+    leafIds(after.layout),
+    leafIds(before.layout).map((id) => (id === ended.id ? next.id : id)),
+    "the leaf keeps its place in the tree",
+  );
+  assert.equal(after.herdrId, undefined);
+  assert.equal(contains(before.layout, ended.id), true, "input untouched");
+  // Ratios and split ids survive the swap.
+  assert.equal(after.layout.id, before.layout.id);
+  assert.equal(after.layout.ratio, before.layout.ratio);
+});
+
+test("reopenInSlot rebinds a vanished workspace and folds in a pane a poll already listed", async () => {
+  const { reopenInSlot, isVanished } = await library;
+  const { leafIds } = await layoutLibrary;
+  const ended = panel("herdr:local:old", "terminal", {
+    herdrId: "old",
+    ended: true,
+  });
+  const before = {
+    ...(await workspace([ended])),
+    herdrId: "w-old",
+    connection: "local",
+  };
+  assert.equal(isVanished(before), true);
+  const next = panel("herdr:local:new", "terminal", { herdrId: "new" });
+  // The poll got there first: the new pane is already in the list and layout.
+  const polled = {
+    ...before,
+    panels: [...before.panels, next],
+    layout: {
+      type: "split",
+      id: "s",
+      axis: "row",
+      ratio: 0.5,
+      a: before.layout,
+      b: { type: "leaf", id: next.id },
+    },
+  };
+  const after = reopenInSlot(polled, ended.id, next, "w-new");
+  assert.equal(after.herdrId, "w-new");
+  assert.deepEqual(
+    after.panels.map((item) => item.id),
+    ["herdr:local:new"],
+  );
+  assert.deepEqual(leafIds(after.layout), ["herdr:local:new"]);
+  assert.equal(
+    isVanished({
+      ...before,
+      panels: [panel("t", "terminal", { herdrId: "x" }), ended],
+    }),
+    false,
+    "a workspace with a live Herdr pane is not vanished",
+  );
+  assert.equal(
+    isVanished({ ...before, panels: [panel("t"), ended] }),
+    true,
+    "local panes do not keep a Herdr workspace alive",
+  );
+  assert.equal(isVanished({ ...before, panels: [panel("t")] }), false);
+});
+
+test("reopenInSlot adds a pane whose ended predecessor had left the layout", async () => {
+  const { reopenInSlot } = await library;
+  const { leafIds } = await layoutLibrary;
+  const ended = panel("old", "terminal", { herdrId: "old", ended: true });
+  const before = await workspace([panel("a"), ended], ["a"]);
+  const after = reopenInSlot(before, "old", panel("new"));
+  assert.deepEqual(leafIds(after.layout), ["a", "new"]);
+});

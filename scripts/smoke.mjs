@@ -631,11 +631,17 @@ try {
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Close Smoke routine" }).click();
   // The reload must find the close already persisted, not race its write.
-  await page.waitForFunction(() => {
-    const saved = JSON.parse(localStorage.getItem("sushiai.v1") || "null");
+  await until(async () => {
+    const saved = JSON.parse(
+      await fs
+        .readFile(`${profile}/workspace-state.json`, "utf8")
+        .catch(() => "null"),
+    );
     const active = saved?.workspaces.find((w) => w.id === saved.activeId);
-    return active && !active.panels.some((p) => p.title === "Smoke routine");
-  });
+    return Boolean(
+      active && !active.panels.some((p) => p.title === "Smoke routine"),
+    );
+  }, Boolean);
   await page.reload();
   await page.waitForSelector(".panel-agent");
   assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);

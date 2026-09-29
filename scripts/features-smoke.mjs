@@ -47,6 +47,31 @@ print(r)`)
   });
   workspace = created.workspace.workspace_id;
   const pane = created.root_pane.pane_id;
+  // The app restores its workspace from this file on the first paint.
+  const workspaceId = "herdr:" + endpoint + ":" + workspace,
+    panelId = "herdr:" + endpoint + ":" + pane;
+  await fs.writeFile(
+    `${profile}/workspace-state.json`,
+    JSON.stringify({
+      socket: endpoint,
+      activeId: workspaceId,
+      routines: [],
+      fontScale: 1,
+      workspaces: [
+        {
+          id: workspaceId,
+          name: "sushiAI feature test",
+          herdrId: workspace,
+          connection: endpoint,
+          cwd: root,
+          panels: [
+            { id: panelId, herdrId: pane, kind: "terminal", title: "zsh" },
+          ],
+          layout: { type: "leaf", id: panelId },
+        },
+      ],
+    }),
+  );
   desktop = await electron.launch({
     ...(process.env.SUSHIAI_EXECUTABLE
       ? { executablePath: process.env.SUSHIAI_EXECUTABLE }
@@ -62,36 +87,6 @@ print(r)`)
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.waitForSelector(".panel");
-  await page.evaluate(
-    ({ endpoint, workspace, pane, root }) => {
-      const id = "herdr:" + endpoint + ":" + workspace,
-        panelId = "herdr:" + endpoint + ":" + pane;
-      localStorage.setItem(
-        "sushiai.v1",
-        JSON.stringify({
-          socket: endpoint,
-          activeId: id,
-          routines: [],
-          fontScale: 1,
-          workspaces: [
-            {
-              id,
-              name: "sushiAI feature test",
-              herdrId: workspace,
-              connection: endpoint,
-              cwd: root,
-              panels: [
-                { id: panelId, herdrId: pane, kind: "terminal", title: "zsh" },
-              ],
-              layout: { type: "leaf", id: panelId },
-            },
-          ],
-        }),
-      );
-    },
-    { endpoint, workspace, pane, root },
-  );
-  await page.reload();
   await page.waitForSelector(".herdr-terminal-note");
   await page.waitForTimeout(1200);
   assert.equal(await page.locator(".panel-error").count(), 0);

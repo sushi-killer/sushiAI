@@ -31,7 +31,15 @@ const { registerChatIpc } = require("./ipc/chat.cjs");
 const { registerAppIpc } = require("./ipc/app.cjs");
 const { registerExtensionIpc } = require("./ipc/extensions.cjs");
 const { registerAttentionIpc } = require("./attention.cjs");
+const { registerWorkspaceSnapshot } = require("./workspace-snapshot.cjs");
+const {
+  DEFAULT_BOUNDS,
+  loadWindowState,
+  saveWindowState,
+  clampBounds,
+} = require("./window-state.cjs");
 const { registerMascot } = require("./mascot.cjs");
+const { DEV_RESTART_EXIT_CODE, watchCore } = require("./dev-restart.cjs");
 const { SurfaceStateStore } = require("./extensions/surface-state.cjs");
 const { ExtensionManager } = require("./extensions/extension-manager.cjs");
 const {
@@ -152,6 +160,12 @@ registerExtensionIpc({
   announce: (change) => send("extensions-state-changed", change),
 });
 registerHerdrExtension({ handle, getConnections: () => connections, id });
+registerWorkspaceSnapshot({
+  ipcMain,
+  handle,
+  getMainWindow: () => mainWindow,
+  userDataDir: () => app.getPath("userData"),
+});
 const terminalIpc = registerTerminalIpc({
   handle,
   send,
@@ -193,6 +207,8 @@ registerAppIpc({
   stageModelSettings,
 });
 let orchestrator;
+let devRestart = false;
+let closeCoreWatch = null;
 const mascot = registerMascot({
   ipcMain,
   BrowserWindow,
@@ -202,7 +218,21 @@ const mascot = registerMascot({
   getService: () => orchestrator,
   showMainWindow: () => attention.showWindow(),
   send,
+  restart: () => {
+    devRestart = true;
+    app.quit();
+  },
 });
+function coreUpdated(file) {
+  console.log(`[dev] electron/${file} changed - restart from the mascot`);
+  mascot.add({
+    kind: "core-update",
+    title: "sushiAI core",
+    body: "Core updated - restart?",
+  });
+}
+if (process.env.BRIDGE_DEV_URL)
+  closeCoreWatch = watchCore({ dir: __dirname, onChange: coreUpdated });
 const attention = registerAttentionIpc({
   handle,
   send,
@@ -266,9 +296,20 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionRequestHandler((_, __, callback) =>
     callback(false),
   );
+  const windowStateFile = path.join(
+    app.getPath("userData"),
+    "window-state.json",
+  );
+  const savedWindow = loadWindowState(windowStateFile);
+  const startBounds = savedWindow
+    ? clampBounds(
+        savedWindow,
+        screen.getAllDisplays(),
+        screen.getPrimaryDisplay(),
+      )
+    : DEFAULT_BOUNDS;
   mainWindow = new BrowserWindow({
-    width: 1380,
-    height: 880,
+    ...startBounds,
     minWidth: 600,
     minHeight: 440,
     title: "sushiAI",
@@ -289,12 +330,47 @@ app.whenReady().then(async () => {
   if (process.env.SUSHIAI_TEST_MASCOT === "1")
     globalThis.__sushiaiMascot = {
       notify: (task) => attention.notifyTask(orchestratorNotice(task)),
+      coreUpdated: () => coreUpdated("<seam>"),
       queue: () => mascot.snapshot(),
       window: () => mascot.getWindow(),
       workArea: () => screen.getPrimaryDisplay().workArea,
     };
+  if (savedWindow && process.env.SUSHIAI_TEST_HEADLESS !== "1") {
+    if (savedWindow.isFullScreen) mainWindow.setFullScreen(true);
+    else if (savedWindow.isMaximized) mainWindow.maximize();
+  }
+  const saveWindow = () => {
+    if (mainWindow.isDestroyed()) return;
+    const normalBounds = mainWindow.getNormalBounds();
+    try {
+      saveWindowState(windowStateFile, {
+        bounds: normalBounds,
+        displayId: screen.getDisplayMatching(normalBounds).id,
+        isMaximized: mainWindow.isMaximized(),
+        isFullScreen: mainWindow.isFullScreen(),
+      });
+    } catch {
+      // A failed save must never block closing.
+    }
+  };
+  let saveTimer = null;
+  const saveWindowSoon = () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveWindow, 500);
+  };
+  for (const name of [
+    "resize",
+    "move",
+    "maximize",
+    "unmaximize",
+    "enter-full-screen",
+    "leave-full-screen",
+  ])
+    mainWindow.on(name, saveWindowSoon);
   mainWindow.on("closed", () => mascot.destroy());
   mainWindow.on("close", (event) => {
+    clearTimeout(saveTimer);
+    saveWindow();
     if (attention.handleWindowClose(mainWindow)) event.preventDefault();
   });
   mainWindow.webContents.on("will-navigate", (event) => event.preventDefault());
@@ -377,10 +453,16 @@ app.whenReady().then(async () => {
 app.on("window-all-closed", () => app.quit());
 app.on("activate", () => attention.showWindow());
 let quitReady = false;
+app.on("will-quit", (event) => {
+  if (!devRestart) return;
+  event.preventDefault();
+  app.exit(DEV_RESTART_EXIT_CODE);
+});
 app.on("before-quit", (event) => {
   attention.setQuitting(true);
   if (quitReady) return;
   event.preventDefault();
+  closeCoreWatch?.();
   updates?.close();
   attention.close();
   mascot.destroy();

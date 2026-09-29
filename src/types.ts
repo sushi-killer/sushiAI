@@ -21,6 +21,16 @@ export type Message = {
   /** The model that actually answered, as the CLI resolved it. */
   model?: string;
 };
+/** What the Orchestrator panel shows: its chat, one task, the archive or the
+ * agent messages. Kept on the panel so a restart reopens the same view. */
+export type OrchestratorView =
+  | { kind: "chat" }
+  | { kind: "task"; id: string }
+  | { kind: "archive" }
+  | { kind: "messages" };
+/** Where a Files pane was browsing: its root folder, the folder listed and the
+ * open file ("" for none). Not part of the panel's remount key. */
+export type FilesView = { root: string; directory: string; file: string };
 type PanelState = {
   id: string;
   title: string;
@@ -40,6 +50,11 @@ type PanelState = {
     edit?: boolean;
     openToken?: number;
   };
+  orchestratorView?: OrchestratorView;
+  filesView?: FilesView;
+  /** A Herdr pane that is gone from its host: the slot stays in the layout
+   * with a Reopen button until the user reopens or closes it. */
+  ended?: boolean;
   pinned?: boolean;
   updatedAt?: number;
   note?: string;
@@ -256,6 +271,13 @@ export type AppPreferences = {
   desktopMascot: boolean;
 };
 export interface Bridge {
+  /** The workspace snapshot text from <userData>/workspace-state.json, or
+   * null when none is stored. Synchronous: restore() runs before first paint. */
+  workspaceStateRead(): string | null;
+  /** Debounced snapshot write; the main process writes it atomically. */
+  workspaceStateWrite(text: string): Promise<void>;
+  /** Synchronous write for when the window is going away. */
+  workspaceStateFlush(text: string): void;
   /** Shows a macOS notification unless notifications are off or the window
    * is focused. Clicking it shows the window and fires `onAttentionOpen`. */
   attentionNotify(notice: AttentionNotice): Promise<void>;

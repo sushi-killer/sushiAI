@@ -41,6 +41,8 @@ export function WorkspaceCanvas({
     endPanelDrag,
     zoomPanel,
     startPanel,
+    reopenPanel,
+    updatePanel,
     navigatePanel,
     setPanelAgent,
     cancelPanelChat,
@@ -87,6 +89,8 @@ export function WorkspaceCanvas({
         onAdd={openPanelPicker}
         onRename={renamePanel}
         onStart={startPanel}
+        onReopen={reopenPanel}
+        onPatch={updatePanel}
         onNavigate={navigatePanel}
         onHTML={openHTML}
         onSend={sendChat}

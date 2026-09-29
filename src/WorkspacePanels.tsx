@@ -31,6 +31,9 @@ type PanelHostProps = {
   onAdd(): void;
   onRename(panelId: string, title: string): void;
   onStart(panelId: string): void;
+  onReopen(panelId: string): void;
+  /** Saves per-pane state (Files folder, Orchestrator view) on the panel. */
+  onPatch(panelId: string, patch: Partial<Panel>): void;
   onNavigate(panelId: string, url: string): void;
   onHTML(root: string, file: string, endpoint?: string): void;
   onSend(panel: Panel, text: string): void;
@@ -57,6 +60,8 @@ export const PanelHost = memo(function PanelHost({
   onAdd,
   onRename,
   onStart,
+  onReopen,
+  onPatch,
   onNavigate,
   onHTML,
   onSend,
@@ -89,6 +94,7 @@ export const PanelHost = memo(function PanelHost({
               endpoint={endpoint}
               hostLabel={hostLabel}
               onStart={() => onStart(panel.id)}
+              onReopen={() => onReopen(panel.id)}
             />
           ) : (
             <div className="loading">Opening workspace…</div>
@@ -106,8 +112,18 @@ export const PanelHost = memo(function PanelHost({
             cwd={panel.filesTarget?.root || cwd}
             initialFile={panel.filesTarget?.path}
             initialEdit={panel.filesTarget?.edit}
+            initialView={panel.filesView}
             endpoint={panel.filesTarget ? panel.filesTarget.endpoint : endpoint}
             onHTML={onHTML}
+            onViewChange={(filesView) => {
+              const old = panel.filesView;
+              if (
+                old?.root !== filesView.root ||
+                old.directory !== filesView.directory ||
+                old.file !== filesView.file
+              )
+                onPatch(panel.id, { filesView });
+            }}
           />
         ) : panel.kind === "extension" ? (
           <ExtensionSurface
@@ -125,7 +141,13 @@ export const PanelHost = memo(function PanelHost({
               The orchestrator runs local projects only.
             </div>
           ) : (
-            <OrchestratorPanel cwd={cwd} />
+            <OrchestratorPanel
+              cwd={cwd}
+              view={panel.orchestratorView}
+              onViewChange={(orchestratorView) =>
+                onPatch(panel.id, { orchestratorView })
+              }
+            />
           )
         ) : (
           <ChatPanel

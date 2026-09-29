@@ -1378,98 +1378,129 @@ pub(super) async fn run_task_loop(
                 }
                 let mut review_cost = 0.0;
                 let mut review_fingerprint = None;
-                let reviewed = run_review(
-                    &app,
-                    &task_id,
-                    attempt_n,
-                    &task,
-                    &worktree,
-                    &base_sha,
-                    &verify_results,
-                    &implementer_note,
-                    &agent_decisions,
-                    review_route,
-                    &deny_read,
-                    &cancel,
-                    &mut review_cost,
-                    &mut review_fingerprint,
-                )
-                .await;
-                // The task's total, and separately the attempt's
-                // review_cost_usd for display: an attempt's own cost_usd is
-                // what later resumes of its session subtract
-                // (session cost accounting), so the review's cost must never join it.
-                task.cost_usd += review_cost;
-                if review_fingerprint.is_some() {
-                    task.attempts[idx].review_fingerprint = review_fingerprint;
-                }
-                task.attempts[idx].review_cost_usd =
-                    Some(task.attempts[idx].review_cost_usd.unwrap_or(0.0) + review_cost);
-                match reviewed {
-                    Ok((r, recorded_as_pass)) => {
-                        if recorded_as_pass {
-                            task.decisions.push(
-                                "Orchestrator: review FAIL recorded as PASS (only P2/P3 findings)"
-                                    .to_string(),
-                            );
+                // Every review run of this attempt: the first, the one
+                // automatic re-run after a reply with no verdict, and any the
+                // owner or the policy asks for with `retry`. Same diff, no new
+                // implement attempt.
+                let mut round = 1u32;
+                let mut after_no_verdict = false;
+                let mut auto_rerun = true;
+                loop {
+                    let reviewed = run_review(
+                        &app,
+                        &task_id,
+                        attempt_n,
+                        &task,
+                        &worktree,
+                        &base_sha,
+                        &verify_results,
+                        &implementer_note,
+                        &agent_decisions,
+                        review_route,
+                        &deny_read,
+                        &cancel,
+                        &mut review_cost,
+                        &mut review_fingerprint,
+                        round,
+                        after_no_verdict,
+                    )
+                    .await;
+                    // The task's total, and separately the attempt's
+                    // review_cost_usd for display: an attempt's own cost_usd is
+                    // what later resumes of its session subtract
+                    // (session cost accounting), so the review's cost must never join it.
+                    task.cost_usd += review_cost;
+                    if review_fingerprint.is_some() {
+                        task.attempts[idx].review_fingerprint = review_fingerprint.take();
+                    }
+                    task.attempts[idx].review_cost_usd =
+                        Some(task.attempts[idx].review_cost_usd.unwrap_or(0.0) + review_cost);
+                    review_cost = 0.0;
+                    let (why, no_verdict) = match reviewed {
+                        Ok((r, recorded_as_pass)) => {
+                            if recorded_as_pass {
+                                task.decisions.push(
+                                    "Orchestrator: review FAIL recorded as PASS (only P2/P3 findings)"
+                                        .to_string(),
+                                );
+                            }
+                            review_result = Some(r);
+                            break;
                         }
-                        review_result = Some(r);
+                        Err(ReviewFailure::Cancelled) => {
+                            // A cancelled review is never a PASS: the attempt
+                            // (and the task) is simply stopped.
+                            task.attempts[idx].status = AttemptStatus::Interrupted;
+                            task.attempts[idx].ended_at = Some(now_ms());
+                            task.status = app.cancelled_status(&task.status);
+                            task.updated_at = now_ms();
+                            let _ = app.store.save_task(&task);
+                            app.broadcast_task(&task);
+                            drop(permit);
+                            app.finish_task_loop(&task_id);
+                            return;
+                        }
+                        Err(ReviewFailure::NoVerdict(why)) => (why, true),
+                        Err(ReviewFailure::Harness(why)) => (why, false),
+                    };
+                    if no_verdict && auto_rerun {
+                        auto_rerun = false;
+                        round += 1;
+                        after_no_verdict = true;
+                        task.decisions.push(format!(
+                            "Orchestrator: attempt {attempt_n} review reply had no verdict; reviewing the same attempt again"
+                        ));
+                        continue;
                     }
-                    Err(RunError::Cancelled) => {
-                        // A cancelled review is never a PASS: the attempt
-                        // (and the task) is simply stopped.
-                        task.attempts[idx].status = AttemptStatus::Interrupted;
-                        task.attempts[idx].ended_at = Some(now_ms());
-                        task.status = app.cancelled_status(&task.status);
-                        task.updated_at = now_ms();
-                        let _ = app.store.save_task(&task);
-                        app.broadcast_task(&task);
-                        drop(permit);
-                        app.finish_task_loop(&task_id);
-                        return;
-                    }
-                    Err(RunError::Io(why)) => {
-                        // No verdict is never a PASS: the owner decides
-                        // whether to commit this attempt unreviewed.
-                        task.attempts[idx].status = AttemptStatus::Blocked;
-                        task.attempts[idx].ended_at = Some(now_ms());
-                        task.question = Some(Question {
-                            text: format!("The review gave no verdict ({why}). Commit this attempt unreviewed?"),
-                            options: vec!["approve".into(), "retry".into()],
-                            kind: QuestionKind::ReviewNoVerdict,
-                        });
-                        task.status = TaskStatus::Waiting;
-                        task.updated_at = now_ms();
-                        match wait_for_answer(
-                            &app,
-                            &task_id,
-                            &mut task,
-                            &pending_answer,
-                            &cancel,
-                            &mut permit,
-                        )
-                        .await
-                        {
-                            None => {
-                                drop(permit);
-                                app.finish_task_loop(&task_id);
-                                return;
-                            }
-                            Some(answer) => {
-                                if answer == "approve" {
-                                    task.decisions.push(format!(
-                                        "Orchestrator: attempt {attempt_n} committed without a review verdict"
-                                    ));
-                                } else {
-                                    review_result = Some(ReviewResult {
-                                        verdict: Verdict::Fail,
-                                        findings: vec![format!(
-                                            "Another attempt was asked for: {answer}"
-                                        )],
-                                        repeated: Vec::new(),
-                                    });
-                                }
-                            }
+                    // No verdict is never a PASS: the owner decides whether
+                    // to commit this attempt unreviewed.
+                    task.attempts[idx].status = AttemptStatus::Blocked;
+                    task.attempts[idx].ended_at = Some(now_ms());
+                    task.question = Some(Question {
+                        text: format!(
+                            "The review gave no verdict ({why}). Commit this attempt unreviewed?"
+                        ),
+                        options: vec!["approve".into(), "retry".into()],
+                        kind: QuestionKind::ReviewNoVerdict,
+                    });
+                    task.status = TaskStatus::Waiting;
+                    task.updated_at = now_ms();
+                    match wait_for_answer(
+                        &app,
+                        &task_id,
+                        &mut task,
+                        &pending_answer,
+                        &cancel,
+                        &mut permit,
+                    )
+                    .await
+                    {
+                        None => {
+                            drop(permit);
+                            app.finish_task_loop(&task_id);
+                            return;
+                        }
+                        Some(answer) if answer == "approve" => {
+                            task.decisions.push(format!(
+                                "Orchestrator: attempt {attempt_n} committed without a review verdict"
+                            ));
+                            break;
+                        }
+                        Some(answer) if answer == "retry" => {
+                            // Review the same attempt again, not a new one.
+                            task.attempts[idx].status = AttemptStatus::Running;
+                            task.attempts[idx].ended_at = None;
+                            round += 1;
+                            after_no_verdict = no_verdict;
+                            continue;
+                        }
+                        Some(answer) => {
+                            review_result = Some(ReviewResult {
+                                verdict: Verdict::Fail,
+                                findings: vec![format!("Another attempt was asked for: {answer}")],
+                                repeated: Vec::new(),
+                            });
+                            break;
                         }
                     }
                 }

@@ -2,8 +2,8 @@
 
 - Routine task questions are answered by fixed rules and a cheap judge, behind
   `answerPolicy` (on by default; `off` sends every question to the owner as
-  before). Every question now has a `kind`. A review with no verdict is retried
-  (once per attempt), failing attempts continue once, an ended dependency is
+  before). Every question now has a `kind`. A review with no verdict twice is reviewed
+  again (once per attempt, the same attempt, never a new implement attempt), failing attempts continue once, an ended dependency is
   retried once, a check that already fails on the base waits for the base to
   move once, and a plan or agent question with an option phrased as the
   cautious or reversible one takes it when triage agrees. An "impossible

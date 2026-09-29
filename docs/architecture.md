@@ -186,7 +186,9 @@ flowchart TD
   baserun -->|passes on base| fail
   baserun -->|also fails: retry after base is fixed / drop this check / stop| ownerQ
   land -->|conflict / verify fails| fail
-  review -->|no verdict| ownerQ
+  review -->|"no verdict: review again once, same attempt"| review
+  review -->|"no verdict twice"| ownerQ
+  ownerQ -->|"review retry: same attempt"| review
   verify -->|non-zero| fail
   review -->|FAIL| fail
   fail -->|"review finding marked repeat: first one runs the advisor and tiers up, second waits"| triage

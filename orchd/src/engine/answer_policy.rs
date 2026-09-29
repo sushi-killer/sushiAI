@@ -41,7 +41,7 @@ fn rule_answer(task: &Task, question: &Question, attempt_n: u32) -> Option<(Stri
     let (answer, evidence, once_per) = match kind {
         QuestionKind::ReviewNoVerdict => (
             "retry",
-            "a review that gave no verdict is retried once per attempt",
+            "a review that gave no verdict twice is reviewed again once per attempt",
             Some(attempt_n),
         ),
         QuestionKind::AttemptsFailing => (

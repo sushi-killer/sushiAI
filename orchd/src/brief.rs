@@ -464,13 +464,157 @@ fn truthy(v: &serde_json::Value) -> bool {
     }
 }
 
+/// A criterion's `met` as a boolean: `true`/`false`, or the strings
+/// yes/no/true/false; anything else (`null`, absent) is unchecked.
+fn met_of(criterion: &serde_json::Value) -> Option<bool> {
+    match criterion.get("met") {
+        Some(serde_json::Value::Bool(b)) => Some(*b),
+        Some(serde_json::Value::String(s)) => match s.to_ascii_lowercase().as_str() {
+            "true" | "yes" => Some(true),
+            "false" | "no" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether a parsed reply is a review verdict: a `verdict` of PASS/FAIL, or
+/// a `criteria` array with at least one boolean-ish `met`.
+fn has_verdict_shape(v: &serde_json::Value) -> bool {
+    let verdict = v
+        .get("verdict")
+        .and_then(|x| serde_json::from_value::<crate::model::Verdict>(x.clone()).ok());
+    verdict.is_some()
+        || v.get("criteria")
+            .and_then(|c| c.as_array())
+            .is_some_and(|c| c.iter().any(|c| met_of(c).is_some()))
+}
+
+/// The JSON object in `body`. A body that is not valid JSON is repaired for
+/// the shape reviewers have been seen to write: a first complete object
+/// closed too early, then `,` plus more keys and a closing `}`; those keys
+/// are spliced into the first object.
+fn parse_json_object(body: &str) -> Option<serde_json::Value> {
+    let body = body.trim();
+    if let Ok(v @ serde_json::Value::Object(_)) = serde_json::from_str(body) {
+        return Some(v);
+    }
+    let mut stream = serde_json::Deserializer::from_str(body).into_iter::<serde_json::Value>();
+    let serde_json::Value::Object(mut first) = stream.next()?.ok()? else {
+        return None;
+    };
+    let rest = body[stream.byte_offset()..].trim();
+    let rest = rest.strip_prefix(',')?.trim();
+    let rest = rest.strip_suffix('}')?;
+    let more: serde_json::Value = serde_json::from_str(&format!("{{{rest}}}")).ok()?;
+    first.extend(more.as_object()?.clone());
+    Some(serde_json::Value::Object(first))
+}
+
+/// The fenced blocks of `text` as (label, body), in order. A fence closes on
+/// a line that is just ` ``` `, or on a line ending in ` ``` ` (`}```).
+fn fenced_blocks(text: &str) -> Vec<(String, String)> {
+    let mut blocks = Vec::new();
+    let mut open: Option<(String, Vec<&str>)> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        match &mut open {
+            None => {
+                if let Some(label) = trimmed.strip_prefix("```") {
+                    open = Some((label.trim().to_ascii_lowercase(), Vec::new()));
+                }
+            }
+            Some((label, body)) => {
+                if trimmed == "```" {
+                    blocks.push((std::mem::take(label), body.join("\n")));
+                    open = None;
+                } else if let Some(before) = trimmed.strip_suffix("```") {
+                    body.push(before);
+                    blocks.push((std::mem::take(label), body.join("\n")));
+                    open = None;
+                } else {
+                    body.push(line);
+                }
+            }
+        }
+    }
+    blocks
+}
+
+/// The balanced top-level `{...}` spans of `text`, in order, skipping braces
+/// inside JSON strings.
+fn balanced_objects(text: &str) -> Vec<&str> {
+    let mut spans = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    let (mut in_string, mut escaped) = (false, false);
+    for (i, c) in text.char_indices() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' if depth > 0 => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    start = i;
+                }
+                depth += 1;
+            }
+            '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    spans.push(&text[start..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    spans
+}
+
+/// Where a review reply may keep its verdict, best first: the last
+/// sushi-review block, the last ```json block, the last unlabelled block,
+/// the balanced `{...}` objects (last first), then the first `{` to the last
+/// `}` (a premature `}` breaks the balance).
+fn review_candidates(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    out.extend(last_fenced_block(text, "sushi-review"));
+    let blocks = fenced_blocks(text);
+    for label in ["json", ""] {
+        out.extend(
+            blocks
+                .iter()
+                .rev()
+                .find(|(l, _)| l == label)
+                .map(|(_, b)| b.clone()),
+        );
+    }
+    out.extend(balanced_objects(text).iter().rev().map(|s| s.to_string()));
+    if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) {
+        if start < end {
+            out.push(text[start..=end].to_string());
+        }
+    }
+    out
+}
+
 /// [`parse_review`] plus whether the reviewer's FAIL was recorded as PASS:
 /// it gave findings of its own, every one labelled P2/P3, and no criterion
 /// is unmet. All findings are kept.
 pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
-    let body = tagged_json(text, "sushi-review")?;
-    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let verdict = serde_json::from_value(v.get("verdict")?.clone()).ok()?;
+    let v = review_candidates(text)
+        .iter()
+        .filter_map(|body| parse_json_object(body))
+        .find(has_verdict_shape)?;
+    let verdict = v
+        .get("verdict")
+        .and_then(|x| serde_json::from_value(x.clone()).ok())
+        .unwrap_or(crate::model::Verdict::Pass);
     let mut severities: Vec<Option<u8>> = Vec::new();
     let mut repeated: Vec<String> = Vec::new();
     let findings: Vec<String> = v
@@ -530,15 +674,7 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
         .into_iter()
         .flatten()
     {
-        let met = match c.get("met") {
-            Some(serde_json::Value::Bool(b)) => Some(*b),
-            Some(serde_json::Value::String(s)) => match s.to_ascii_lowercase().as_str() {
-                "true" | "yes" => Some(true),
-                "false" | "no" => Some(false),
-                _ => None,
-            },
-            _ => None,
-        };
+        let met = met_of(c);
         if met == Some(true) {
             continue;
         }
@@ -637,7 +773,7 @@ const PLAN_CHECKS: &str = "For each criterion that a command can prove, add an e
 const PLAN_FINAL_VERIFY: &str = "Split the checks by cost. `verify` holds the fast, targeted commands that run after every attempt (a unit test file, the type checker, a linter on the touched paths). `finalVerify` holds the slow whole-repo checks (the full CI script, a desktop smoke) that the orchestrator runs once, after review passes and before the commit.";
 
 /// Asks the reviewer for a ruling on every criterion.
-pub const REVIEW_CONTRACT: &str = "Rule on every acceptance criterion, using its `check:` where it has one and the verify results as evidence. Add `\"criteria\":[{\"criterion\":\"...\",\"met\":true|false|null,\"evidence\":\"...\"}]` to your reply, with `null` for a criterion you cannot check read-only. The verdict is PASS only if no criterion is `false`; a claim in the task that the code contradicts is a finding.";
+pub const REVIEW_CONTRACT: &str = "Rule on every acceptance criterion, using its `check:` where it has one and the verify results as evidence. Fill in the `criteria` array of the one JSON object in your reply, `{\"criterion\":\"...\",\"met\":true|false|null,\"evidence\":\"...\"}` per criterion, with `null` for a criterion you cannot check read-only. The verdict is PASS only if no criterion is `false`; a claim in the task that the code contradicts is a finding.";
 
 /// Sent instead of [`build_plan_brief`] on the one retry after an
 /// unparseable draft -- a fresh read-only session (planning never resumes,
@@ -1053,6 +1189,8 @@ pub fn agent_decision_lines(decisions: &[String]) -> Vec<String> {
         .collect()
 }
 
+const REVIEW_REPORT_EXAMPLE: &str = "{\"verdict\":\"PASS|FAIL\",\"findings\":[\"P2: path:line - issue\"],\"criteria\":[{\"criterion\":\"...\",\"met\":true,\"evidence\":\"...\"}]}";
+
 const REVIEW_VERDICT_RULE: &str = "Verdict rule: FAIL only for an unmet acceptance criterion or a P0/P1 finding. P2/P3 findings are reported with a PASS verdict. Start each finding with its severity (P0-P3).\n";
 
 /// The review session's brief. Pure: `screenshots` are paths relative to the
@@ -1126,15 +1264,23 @@ pub fn build_review_brief(
     out.push_str(diff);
     out.push_str("\n```\n\n## Report format\n\nReply with:\n\n```sushi-review\n");
     out.push_str(if previous.is_empty() {
-        "{\"verdict\":\"PASS|FAIL\",\"findings\":[\"P2: path:line - issue\"]}"
+        REVIEW_REPORT_EXAMPLE
     } else {
-        "{\"verdict\":\"PASS|FAIL\",\"findings\":[{\"finding\":\"P2: path:line - issue\",\"repeat\":true}]}"
+        "{\"verdict\":\"PASS|FAIL\",\"findings\":[{\"finding\":\"P2: path:line - issue\",\"repeat\":true}],\"criteria\":[{\"criterion\":\"...\",\"met\":true,\"evidence\":\"...\"}]}"
     });
     out.push_str("\n```\n");
     out.push('\n');
     out.push_str(REVIEW_CONTRACT);
     out.push('\n');
     out
+}
+
+/// Appended to the brief of a review re-run after a reply with no parseable
+/// verdict: what went wrong and the exact format to answer in.
+pub fn review_retry_note() -> String {
+    format!(
+        "## Previous reply\n\nYour previous reply had no parseable verdict. Reply again with exactly one fenced block holding one complete JSON object, `criteria` inside it:\n\n```sushi-review\n{REVIEW_REPORT_EXAMPLE}\n```\n"
+    )
 }
 
 /// The findings the review of the implement attempt before the current one
@@ -2205,6 +2351,79 @@ mod tests {
         )
     }
 
+    // The exact reply of task 50a52492, run 6: the object is closed right after
+    // `findings`, and `criteria` follows a premature `}`.
+    const PREMATURE_CLOSE: &str = include_str!("../tests/fixtures/review-run6-premature-close.txt");
+
+    #[test]
+    fn a_criteria_block_after_a_premature_close_is_spliced_into_the_verdict() {
+        let (r, flag) = parse_review_with_rule(PREMATURE_CLOSE).unwrap();
+        assert_eq!(r.verdict, Verdict::Fail);
+        assert!(!flag);
+        assert!(r.findings.iter().any(|f| f.starts_with(
+            "Unmet criterion: Before and after screenshots show the same busy Code layout"
+        )));
+        assert!(r.findings[0].starts_with("P1: artifacts/restore-after.png"));
+    }
+
+    #[test]
+    fn a_verdict_is_read_from_a_json_fence() {
+        let r = parse_review(
+            "All good.\n```json\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: a - b\"]}\n```\nBye",
+        )
+        .unwrap();
+        assert_eq!(r.verdict, Verdict::Fail);
+        assert_eq!(r.findings, vec!["P1: a - b".to_string()]);
+    }
+
+    #[test]
+    fn a_verdict_is_read_from_an_unlabelled_fence() {
+        let r =
+            parse_review("Verdict:\n```\n{\"verdict\":\"PASS\",\"findings\":[]}\n```\n").unwrap();
+        assert_eq!(r.verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn a_verdict_is_read_from_the_last_bare_object_in_prose() {
+        let text = "I checked {\"unrelated\": \"thing\"} first, then decided: {\"verdict\":\"FAIL\",\"findings\":[\"P0: x\"]} and that is it.";
+        let r = parse_review(text).unwrap();
+        assert_eq!(r.verdict, Verdict::Fail);
+        assert_eq!(r.findings, vec!["P0: x".to_string()]);
+    }
+
+    #[test]
+    fn a_missing_verdict_is_derived_from_the_criteria() {
+        let pass = parse_review(
+            r#"{"criteria":[{"criterion":"a","met":true},{"criterion":"b","met":null}]}"#,
+        )
+        .unwrap();
+        assert_eq!(pass.verdict, Verdict::Pass);
+        let fail = parse_review(
+            r#"```json
+{"findings":[],"criteria":[{"criterion":"a","met":true},{"criterion":"b","met":"no","evidence":"why"}]}
+```"#,
+        )
+        .unwrap();
+        assert_eq!(fail.verdict, Verdict::Fail);
+        assert!(fail
+            .findings
+            .contains(&"Unmet criterion: b (why)".to_string()));
+    }
+
+    #[test]
+    fn a_reply_with_no_verdict_shape_is_rejected() {
+        for text in [
+            "Looks fine to me.",
+            r#"{"summary":"fine","findings":[]}"#,
+            r#"{"criteria":[{"criterion":"a","met":null}]}"#,
+            r#"{"criteria":[]}"#,
+            r#"{"verdict":"MAYBE","findings":[]}"#,
+            "```sushi-review\nnot json\n```",
+        ] {
+            assert!(parse_review(text).is_none(), "{text}");
+        }
+    }
+
     #[test]
     fn a_fail_with_only_p2_p3_findings_is_recorded_as_pass() {
         let text = review_reply(
@@ -2257,6 +2476,11 @@ mod tests {
         assert!(text.starts_with("## Review"));
         assert!(text.contains("FAIL only for an unmet acceptance criterion or a P0/P1 finding"));
         assert!(text.contains("\"P2: path:line - issue\""));
+        let example = REVIEW_REPORT_EXAMPLE;
+        let value: serde_json::Value = serde_json::from_str(example).unwrap();
+        assert!(value["criteria"].is_array() && value["findings"].is_array());
+        assert!(text.contains(example));
+        assert!(review_retry_note().contains(example));
         assert!(text.contains("<untrusted-data>\nAgent: kept the old name\n</untrusted-data>"));
         assert!(text.contains("judged on its merits"));
         assert!(text.contains("- `artifacts/a.png`"));

@@ -145,6 +145,30 @@ pub(super) fn review_request<'a>(
     }
 }
 
+/// Why a review run produced no verdict.
+pub(super) enum ReviewFailure {
+    Cancelled,
+    /// The harness did not run or errored.
+    Harness(String),
+    /// The run finished, but its reply had no parseable verdict.
+    NoVerdict(String),
+}
+
+/// The start of a reply, at most `max` characters, with an ellipsis when cut.
+pub(super) fn head_chars(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{head}\u{2026}")
+    } else {
+        head
+    }
+}
+
+/// Review run `round` of an attempt (1 = the first). A re-run after a reply
+/// without a verdict (`after_no_verdict`) carries a note, and every run after
+/// the first writes to its own `review-<round>` subdirectory so the earlier
+/// reply stays on disk.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_review(
     app: &Arc<App>,
@@ -161,7 +185,9 @@ pub(super) async fn run_review(
     cancel: &CancelToken,
     cost_usd: &mut f64,
     fingerprint: &mut Option<Fingerprint>,
-) -> Result<(ReviewResult, bool), RunError> {
+    round: u32,
+    after_no_verdict: bool,
+) -> Result<(ReviewResult, bool), ReviewFailure> {
     let wt = worktree.to_path_buf();
     let base = base_sha.to_string();
     let diff =
@@ -202,7 +228,7 @@ pub(super) async fn run_review(
     } else {
         saved
     };
-    let brief_text = brief::build_review_brief(
+    let mut brief_text = brief::build_review_brief(
         task,
         implementer_note,
         agent_decisions,
@@ -210,10 +236,18 @@ pub(super) async fn run_review(
         &shown,
         &diff,
     );
+    if after_no_verdict {
+        brief_text.push('\n');
+        brief_text.push_str(&brief::review_retry_note());
+    }
 
     // Its own subdirectory: a review's events/brief/settings must never
     // land in the implement attempt's `runs/<n>/` files.
-    let run_dir = app.store.run_dir(task_id, attempt_n).join("review");
+    let run_dir = app.store.run_dir(task_id, attempt_n).join(if round <= 1 {
+        "review".to_string()
+    } else {
+        format!("review-{round}")
+    });
     let _ = std::fs::create_dir_all(&run_dir);
     let mcp_path = run_dir.join("mcp.json");
     let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
@@ -259,13 +293,13 @@ pub(super) async fn run_review(
             if let Some(result) = brief::parse_review_with_rule(&text) {
                 return Ok(result);
             }
-            Err(RunError::Io(match outcome.error {
-                Some(error) => format!("review did not run ({error})"),
-                None => format!(
+            Err(match outcome.error {
+                Some(error) => ReviewFailure::Harness(format!("review did not run ({error})")),
+                None => ReviewFailure::NoVerdict(format!(
                     "review reply had no sushi-review verdict: {}",
-                    tail_chars(text.trim(), 600)
-                ),
-            }))
+                    head_chars(text.trim(), 300)
+                )),
+            })
         }
         Err(RunError::Cancelled) => {
             // Stopped mid-review: what it streamed so far is still spent.
@@ -273,9 +307,9 @@ pub(super) async fn run_review(
             *cost_usd += replay_run_cost(&events_path, &settings_snapshot.prices)
                 .and_then(|o| o.cost_usd)
                 .unwrap_or(0.0);
-            Err(RunError::Cancelled)
+            Err(ReviewFailure::Cancelled)
         }
-        Err(e) => Err(e),
+        Err(RunError::Io(why)) => Err(ReviewFailure::Harness(why)),
     }
 }
 
@@ -329,4 +363,20 @@ pub(super) fn write_readonly_claude_settings_with_profile(
         None,
     );
     let _ = store::write_json_atomic(settings_path, &claude_settings);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::head_chars;
+
+    #[test]
+    fn a_long_reply_is_quoted_from_its_start() {
+        let reply = format!("START{}END", "x".repeat(600));
+        let quote = head_chars(&reply, 300);
+        assert!(quote.starts_with("STARTxxx"));
+        assert!(!quote.contains("END"));
+        assert!(quote.ends_with('\u{2026}'));
+        assert_eq!(quote.chars().count(), 301);
+        assert_eq!(head_chars("short", 300), "short");
+    }
 }

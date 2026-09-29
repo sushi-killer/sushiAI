@@ -119,6 +119,14 @@ fn policy_assumptions(task: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+fn runs(s: &Setup, prefix: &str) -> usize {
+    std::fs::read_dir(s.log.path())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
+        .count()
+}
+
 fn cleanup(s: Setup, task: &Value) {
     let worktree = task["worktree"].as_str().unwrap().to_string();
     s.daemon.shutdown_and_wait();
@@ -127,12 +135,23 @@ fn cleanup(s: Setup, task: &Value) {
 
 #[test]
 fn a_review_without_a_verdict_is_retried_once_and_recorded_as_a_policy_assumption() {
-    let s = setup(&[("PASS_REVIEW_FROM", "1")], |settings| {
+    // Runs 0 and 1 (the automatic re-review) have no verdict; the policy's
+    // retry reviews the same attempt again and run 2 passes.
+    let s = setup(&[("PASS_REVIEW_FROM", "2")], |settings| {
         settings["review"] = json!("claude-sonnet");
     });
     let id = create(&s, json!({}));
     let task = finished(&s, &id);
     assert_eq!(task["status"], "done", "task JSON: {task}");
+    assert_eq!(runs(&s, "implement."), 1, "{task}");
+    assert_eq!(runs(&s, "review."), 3, "{task}");
+    let implements = task["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["stage"] == "implement")
+        .count();
+    assert_eq!(implements, 1, "{task}");
     let assumed = policy_assumptions(&task);
     assert_eq!(assumed.len(), 1, "{task}");
     assert_eq!(assumed[0]["by"], "policy");
@@ -156,18 +175,53 @@ fn a_review_without_a_verdict_is_retried_once_and_recorded_as_a_policy_assumptio
 }
 
 #[test]
-fn the_fourth_question_on_a_task_reaches_the_owner() {
-    // No review ever gives a verdict: three answers by the policy, then the
-    // owner is asked.
+fn a_second_no_verdict_on_the_same_attempt_reaches_the_owner() {
+    // No review ever gives a verdict: an automatic re-review, one policy
+    // retry (a third review), then the owner is asked. The policy answers a
+    // review question once per attempt, and nothing re-implements.
     let s = setup(&[("PASS_REVIEW_FROM", "99")], |settings| {
         settings["review"] = json!("claude-sonnet");
     });
     let id = create(&s, json!({}));
     let task = finished(&s, &id);
     assert_eq!(task["status"], "waiting", "task JSON: {task}");
-    assert_eq!(policy_assumptions(&task).len(), 3, "{task}");
-    assert!(task["question"]["text"].is_string(), "{task}");
+    assert_eq!(policy_assumptions(&task).len(), 1, "{task}");
+    assert_eq!(runs(&s, "implement."), 1, "{task}");
+    assert_eq!(runs(&s, "review."), 3, "{task}");
+    assert_eq!(task["question"]["kind"], "review_no_verdict", "{task}");
     cleanup(s, &task);
+}
+
+#[test]
+fn a_review_without_a_verdict_is_reviewed_again_before_anyone_is_asked() {
+    for policy in [true, false] {
+        let s = setup(&[("PASS_REVIEW_FROM", "1")], |settings| {
+            settings["review"] = json!("claude-sonnet");
+            settings["answerPolicy"] = json!(policy);
+        });
+        let id = create(&s, json!({}));
+        let task = finished(&s, &id);
+        assert_eq!(task["status"], "done", "policy {policy}: {task}");
+        assert_eq!(runs(&s, "implement."), 1, "{task}");
+        assert_eq!(runs(&s, "review."), 2, "{task}");
+        let implements = task["attempts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["stage"] == "implement")
+            .count();
+        assert_eq!(implements, 1, "{task}");
+        assert!(policy_assumptions(&task).is_empty(), "{task}");
+        assert!(task["question"].is_null(), "{task}");
+        let noted = std::fs::read_dir(s.log.path())
+            .unwrap()
+            .flatten()
+            .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+            .filter(|b| b.starts_with("## Review") && b.contains("no parseable verdict"))
+            .count();
+        assert_eq!(noted, 1, "only the second review carries the note");
+        cleanup(s, &task);
+    }
 }
 
 #[test]

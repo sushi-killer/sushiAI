@@ -374,3 +374,110 @@ test("mergedMarkerAccessibleName: two and three hosts, no Oxford comma", async (
   });
   assert.equal(name, "Runs on Local (Connected) and Lab (Offline).");
 });
+
+/** Two local checkouts of one repository (main + a worktree), one merge group. */
+const worktreePair = () => {
+  const main = workspace("w-main", undefined, "/repo/app");
+  const tree = workspace("w-tree", undefined, "/repo/app-wt");
+  const gitMap = {
+    "w-main": git(REMOTE, "/repo/app", "main"),
+    "w-tree": git(REMOTE, "/repo/app-wt", "task/x", "/repo/app"),
+  };
+  const group = [main, tree];
+  return { group, gitMap };
+};
+const pairGroup = async () => {
+  const { computeMergeGroups } = await library;
+  const { group, gitMap } = worktreePair();
+  const groups = computeMergeGroups(group, gitMap, []);
+  const merged = groups.get("w-main");
+  return {
+    merged,
+    tree: merged.members.find((m) => m.workspace.id === "w-tree"),
+  };
+};
+const task = (extra = {}) => ({
+  title: "app: Add thing",
+  branch: "task/other",
+  worktree: "/elsewhere",
+  repo: "/repo/app",
+  updatedAt: 1,
+  ...extra,
+});
+
+test("task title labels a member matched by worktree path", async () => {
+  const { memberLabel } = await library;
+  const { merged, tree } = await pairGroup();
+  assert.equal(merged.worktrees, true);
+  assert.equal(
+    memberLabel(merged, tree, [], [task({ worktree: "/repo/app-wt/" })]),
+    "app: Add thing",
+  );
+});
+
+test("task title labels a member matched by branch and repository", async () => {
+  const { memberLabel } = await library;
+  const { merged, tree } = await pairGroup();
+  assert.equal(
+    memberLabel(merged, tree, [], [task({ branch: "task/x" })]),
+    "app: Add thing",
+  );
+});
+
+test("a same-named branch in another repository keeps the branch", async () => {
+  const { memberLabel } = await library;
+  const { merged, tree } = await pairGroup();
+  assert.equal(
+    memberLabel(merged, tree, [], [task({ branch: "task/x", repo: "/other" })]),
+    "task/x",
+  );
+});
+
+test("a remote-host member never takes a task title", async () => {
+  const { memberTask } = await library;
+  const { tree } = await pairGroup();
+  const remote = { ...tree, hostKey: "ssh:lab" };
+  assert.equal(memberTask(remote, [task({ branch: "task/x" })]), undefined);
+});
+
+test("branch kept with no tasks or no matching task", async () => {
+  const { memberLabel } = await library;
+  const { merged, tree } = await pairGroup();
+  assert.equal(memberLabel(merged, tree, []), "task/x");
+  assert.equal(memberLabel(merged, tree, [], []), "task/x");
+  assert.equal(memberLabel(merged, tree, [], [task()]), "task/x");
+});
+
+test("host label kept when the group is not a worktree group", async () => {
+  const { memberLabel } = await library;
+  const { merged, tree } = await pairGroup();
+  const hosts = { ...merged, worktrees: false };
+  assert.equal(
+    memberLabel(hosts, tree, [], [task({ branch: "task/x" })]),
+    "Local",
+  );
+});
+
+test("the newest of several matching tasks wins", async () => {
+  const { memberLabel } = await library;
+  const { merged, tree } = await pairGroup();
+  const tasks = [
+    task({ branch: "task/x", title: "old", updatedAt: 1 }),
+    task({ branch: "task/x", title: "new", updatedAt: 5 }),
+    task({ branch: "task/x", title: "mid", updatedAt: 3 }),
+  ];
+  assert.equal(memberLabel(merged, tree, [], tasks), "new");
+});
+
+test("memberTooltip adds the branch to a task title only", async () => {
+  const { memberTooltip } = await library;
+  const { merged, tree } = await pairGroup();
+  const main = merged.members.find((m) => m.workspace.id === "w-main");
+  const tasks = [task({ branch: "task/x" })];
+  assert.equal(
+    memberTooltip(merged, tree, [], tasks),
+    "app: Add thing (task/x)",
+  );
+  assert.equal(memberTooltip(merged, tree, [], []), "task/x");
+  assert.equal(memberTooltip(merged, main, [], tasks), "main");
+});

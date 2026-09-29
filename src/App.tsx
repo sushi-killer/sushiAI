@@ -182,7 +182,6 @@ export function App() {
   const [keepAwake, setKeepAwake] = useKeepAwake();
   const connected = connection === "connected";
   const activeEndpoint = active.connection || socket;
-  // Pane provenance (AC23-AC26, D5): set only for a merged row's member in flat mode.
   const projectGit = useProjectGit(workspaces, active.id);
   const session = useSessionState(saved);
   const merged = useMergedCanvas(
@@ -198,7 +197,7 @@ export function App() {
     ws,
     saved,
   );
-  const { openTask: openOrchestratorTask } = useOrchestratorNotices({
+  const orchestrator = useOrchestratorNotices({
     workspaces,
     showWorkspace,
     switchWorkspace,
@@ -369,6 +368,7 @@ export function App() {
       <div className="app-body">
         {sidebar && (
           <Sidebar
+            worktreeTasks={orchestrator.worktreeTasks}
             registry={extensionRegistry}
             openExtensionTarget={openExtensionTarget}
             runExtensionCommand={runExtensionCommand}
@@ -440,7 +440,7 @@ export function App() {
               activeEndpoint={activeEndpoint}
               home={system?.home}
               switchWorkspace={switchWorkspace}
-              openOrchestratorTask={openOrchestratorTask}
+              openOrchestratorTask={orchestrator.openTask}
               addExtensionPanel={addExtensionPanel}
               setExtensionEnabled={(extensionId, enabled) =>
                 void setExtensionEnabled(extensionId, enabled)

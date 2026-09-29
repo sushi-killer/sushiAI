@@ -458,6 +458,14 @@ textarea::placeholder {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The label inside a chip is what ellipsizes; the chip itself is inline-flex,
+   where text-overflow would only clip. */
+.remote-tag > .tag-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .workspace-panels {
   padding: 2px 0 6px 24px;
 }

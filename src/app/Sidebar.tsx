@@ -38,10 +38,12 @@ import {
   isHidden,
   mergedMarkerAccessibleName,
   memberLabel,
+  memberTooltip,
   mergedRowStatusKey,
   mixedRemotes,
   shouldCollapseHostMarkers,
   type MergeGroup,
+  type WorktreeTask,
 } from "./workspaceMerge.ts";
 import type { ConnectionProfile, Panel, Workspace } from "../types";
 import type { ProjectGit } from "./useProjectGit.ts";
@@ -166,6 +168,7 @@ export function Sidebar({
   connection,
   localSocket,
   connectionProfiles,
+  worktreeTasks,
   statusByEndpoint,
   projectGit,
   workspaceGrouping,
@@ -204,6 +207,8 @@ export function Sidebar({
    * real poll status the same way an SSH group looks up its own. */
   localSocket: string;
   connectionProfiles: ConnectionProfile[];
+  /** orchd tasks, so a task's worktree is named by the task's title. */
+  worktreeTasks: WorktreeTask[];
   /** Real, current poll status per endpoint - every connected host is polled
    * independently, so this is never just the default connection's status. */
   statusByEndpoint: Record<string, string>;
@@ -331,7 +336,11 @@ export function Sidebar({
     const statusKey = mergedRowStatusKey(group, active.id);
     const live =
       groupStatus(statusKey, localSocket, statusByEndpoint) === "connected";
-    const collapse = shouldCollapseHostMarkers(group, connectionProfiles);
+    const collapse = shouldCollapseHostMarkers(
+      group,
+      connectionProfiles,
+      worktreeTasks,
+    );
     // On one machine every pane's icon would be identical noise.
     const manyHosts = new Set(group.members.map((m) => m.hostKey)).size > 1;
     const markerName = mergedMarkerAccessibleName(
@@ -339,11 +348,12 @@ export function Sidebar({
       connectionProfiles,
       localSocket,
       statusByEndpoint,
+      worktreeTasks,
     );
     const rowTitle = group.members
       .map(
         (m) =>
-          `${memberLabel(group, m, connectionProfiles)} - ${m.workspace.cwd}`,
+          `${memberTooltip(group, m, connectionProfiles, worktreeTasks)} - ${m.workspace.cwd}`,
       )
       .join("\n");
     return (
@@ -391,7 +401,14 @@ export function Sidebar({
                       {(!group.worktrees || m.hostKey !== LOCAL_GROUP) && (
                         <MarkerIcon size={10} />
                       )}
-                      {memberLabel(group, m, connectionProfiles)}
+                      <span className="tag-text">
+                        {memberLabel(
+                          group,
+                          m,
+                          connectionProfiles,
+                          worktreeTasks,
+                        )}
+                      </span>
                     </span>
                   );
                 })
@@ -406,7 +423,18 @@ export function Sidebar({
         {expanded && (
           <div className="workspace-panels">
             {group.members.flatMap((m) => {
-              const label = memberLabel(group, m, connectionProfiles);
+              const label = memberLabel(
+                group,
+                m,
+                connectionProfiles,
+                worktreeTasks,
+              );
+              const tooltip = memberTooltip(
+                group,
+                m,
+                connectionProfiles,
+                worktreeTasks,
+              );
               const offline =
                 groupStatus(m.hostKey, localSocket, statusByEndpoint) ===
                 "offline";
@@ -416,7 +444,7 @@ export function Sidebar({
                   key={`${m.workspace.id}:${p.id}`}
                   className={`${selected === p.id && m.workspace.id === active.id ? "selected" : ""} ${offline ? "offline" : ""}`}
                   onClick={() => selectHostPane(m.workspace, p)}
-                  title={`${p.title} - ${label}${offline ? " (offline)" : ""}`}
+                  title={`${p.title} - ${tooltip}${offline ? " (offline)" : ""}`}
                 >
                   <Icon kind={p.kind} agent={p.agent} />
                   <span>
@@ -425,9 +453,9 @@ export function Sidebar({
                       : p.title}
                   </span>
                   {(group.worktrees || manyHosts) && (
-                    <span className="remote-tag pane-branch">
+                    <span className="remote-tag pane-branch" title={tooltip}>
                       {manyHosts && <HostIcon size={10} />}
-                      {label}
+                      <span className="tag-text">{label}</span>
                     </span>
                   )}
                   {p.status === "working" && (

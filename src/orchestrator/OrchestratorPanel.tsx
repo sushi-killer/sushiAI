@@ -57,6 +57,8 @@ import { RichText } from "../agents/AgentsView";
 import {
   EvolutionProposals,
   RecurringFailures,
+  SpendBlock,
+  TaskCostLine,
   TaskTimelineBar,
 } from "./TaskInsights";
 
@@ -1118,6 +1120,12 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
           </div>
         )}
         {current.kind === "chat" && (
+          <SpendBlock
+            cwd={cwd}
+            refresh={live.tasks.map((t) => `${t.id}:${t.updatedAt}`).join()}
+          />
+        )}
+        {current.kind === "chat" && (
           <RecurringFailures
             cwd={cwd}
             refresh={live.tasks.map((t) => `${t.id}:${t.updatedAt}`).join()}
@@ -1226,7 +1234,7 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                     (sum, child) => sum + child.costUsd,
                     0,
                   );
-                  const rows: { label: string; cost: number }[] = [
+                  const legacy: { label: string; cost: number }[] = [
                     { label: "Plan", cost: breakdown.plan },
                     ...breakdown.implement.map((a) => ({
                       label: `Implement #${a.n}`,
@@ -1239,16 +1247,12 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                       cost: Math.max(0, breakdown.other - subtasks),
                     },
                   ].filter((row) => formatCost(row.cost) !== "$0.00");
-                  if (rows.length === 0) return null;
                   return (
-                    <p
-                      className="orch-detail-meta orch-cost-breakdown"
-                      title="Where this task's cost went, by stage"
-                    >
-                      {rows
-                        .map((row) => `${row.label} ${formatCost(row.cost)}`)
-                        .join(" · ")}
-                    </p>
+                    <TaskCostLine
+                      task={selected}
+                      subtasks={subtasks}
+                      legacy={legacy}
+                    />
                   );
                 })()}
               </div>

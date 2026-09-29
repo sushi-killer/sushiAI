@@ -668,16 +668,7 @@ async fn run_turn(
         Harness::Codex => codex_argv(&route, &repo, &server, session.as_deref()),
     };
 
-    let result = run(
-        app,
-        &repo,
-        &mut thread,
-        route.harness,
-        &argv,
-        &text,
-        &cancel,
-    )
-    .await;
+    let result = run(app, &repo, &mut thread, &route, &argv, &text, &cancel).await;
     let _ = std::fs::remove_file(&key_path);
 
     // Messages sent meanwhile are impossible (the turn slot stays held until
@@ -725,11 +716,27 @@ async fn run(
     app: &Arc<App>,
     repo: &str,
     thread: &mut ChatSession,
-    harness_kind: Harness,
+    route: &Route,
     argv: &[String],
     text: &str,
     cancel: &CancelToken,
 ) -> Result<harness::RunOutcome, RunError> {
+    let harness_kind = route.harness;
+    let started_at = now_ms();
+    let thread_resumed = thread.session_id.is_some();
+    let record = |outcome: &mut harness::RunOutcome| {
+        finalize_cost(app, harness_kind, route.model.as_deref(), outcome);
+        outcome.fingerprint = Some(outcome.build_fingerprint(harness_kind, None, String::new()));
+        record_run(
+            app,
+            "",
+            0,
+            &CostTag::repo("chat", &route.id, repo),
+            (harness_kind, route.model.as_deref(), thread_resumed),
+            outcome,
+            started_at,
+        );
+    };
     let bin = resolve_binary(harness_kind);
     let mut cmd = tokio::process::Command::new(&bin);
     cmd.args(argv)
@@ -765,6 +772,7 @@ async fn run(
         tokio::select! {
             _ = cancel.cancelled() => {
                 kill_group(pgid, &mut child).await;
+                record(&mut outcome.clone());
                 return Err(RunError::Cancelled);
             }
             line = out.next_line(), if !out_done => match line {
@@ -798,6 +806,7 @@ async fn run(
             }
         }
     }
+    record(&mut outcome);
     Ok(outcome)
 }
 

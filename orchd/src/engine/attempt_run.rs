@@ -1,5 +1,32 @@
 use super::*;
 
+/// What a run is for, so its cost record names the stage. `repo` is set for
+/// a run that is no task's (audit, evolution proposal, chat): its `task_id`
+/// argument is then the audit or proposal id, kept as the record's `runId`.
+pub(super) struct CostTag {
+    pub stage: &'static str,
+    pub route_id: String,
+    pub repo: Option<String>,
+}
+
+impl CostTag {
+    pub fn task(stage: &'static str, route_id: &str) -> Self {
+        CostTag {
+            stage,
+            route_id: route_id.to_string(),
+            repo: None,
+        }
+    }
+
+    pub fn repo(stage: &'static str, route_id: &str, repo: &str) -> Self {
+        CostTag {
+            stage,
+            route_id: route_id.to_string(),
+            repo: Some(repo.to_string()),
+        }
+    }
+}
+
 pub(super) enum RunError {
     Cancelled,
     Io(String),
@@ -30,12 +57,14 @@ pub(super) async fn run_harness(
     track_attempt: bool,
     worktree: &Path,
     req: &harness::RunRequest<'_>,
+    tag: CostTag,
     brief_text: &str,
     events_path: &Path,
     cancel: &CancelToken,
     stall: Option<Stall>,
     mut detector: Option<LoopDetector>,
 ) -> Result<harness::RunOutcome, RunError> {
+    let started_at = now_ms();
     let argv = harness::build_argv(req);
     let bin = resolve_binary(req.harness);
     // Asked before the run, not after, so a stand-in binary that logs its
@@ -105,6 +134,18 @@ pub(super) async fn run_harness(
                 kill_group(pgid, &mut child).await;
                 // A stopped run still ran: keep what it reported so far.
                 let fp = fingerprint_of(&outcome, req, &argv, codex_version.clone());
+                let mut partial = outcome.clone();
+                finalize_cost(app, req.harness, req.model, &mut partial);
+                partial.fingerprint = Some(fp.clone());
+                record_run(
+                    app,
+                    task_id,
+                    attempt_n,
+                    &tag,
+                    (req.harness, req.model, req.resume.is_some()),
+                    &partial,
+                    started_at,
+                );
                 if track_attempt {
                     persist_attempt_field(app, task_id, attempt_n, move |a| a.fingerprint = Some(fp)).await;
                 } else if let Ok(json) = serde_json::to_string(&fp) {
@@ -197,10 +238,30 @@ pub(super) async fn run_harness(
             }
         }
     }
-    if outcome.cost_usd.is_none() && req.harness == Harness::Codex {
-        let price = req
-            .model
-            .and_then(|m| app.settings.read().unwrap().prices.get(m).copied());
+    finalize_cost(app, req.harness, req.model, &mut outcome);
+    outcome.fingerprint = Some(fingerprint_of(&outcome, req, &argv, codex_version));
+    record_run(
+        app,
+        task_id,
+        attempt_n,
+        &tag,
+        (req.harness, req.model, req.resume.is_some()),
+        &outcome,
+        started_at,
+    );
+    Ok(outcome)
+}
+
+/// Prices a run the harness reported no cost for: Codex from its token
+/// usage, Claude from its streamed messages (marked estimated).
+pub(super) fn finalize_cost(
+    app: &App,
+    harness: Harness,
+    model: Option<&str>,
+    outcome: &mut harness::RunOutcome,
+) {
+    if outcome.cost_usd.is_none() && harness == Harness::Codex {
+        let price = model.and_then(|m| app.settings.read().unwrap().prices.get(m).copied());
         outcome.cost_usd = price.map(|p| {
             p.codex_cost(
                 outcome.usage_input,
@@ -209,11 +270,68 @@ pub(super) async fn run_harness(
             )
         });
     }
-    if req.harness == Harness::Claude {
+    if harness == Harness::Claude {
         outcome.estimate_cost(&app.settings.read().unwrap().prices);
     }
-    outcome.fingerprint = Some(fingerprint_of(&outcome, req, &argv, codex_version));
-    Ok(outcome)
+}
+
+/// Appends the run's cost record. A resumed Claude session's own total
+/// covers its earlier runs too, so its record is priced from this run's
+/// streamed messages when it has any.
+pub(super) fn record_run(
+    app: &App,
+    task_id: &str,
+    attempt_n: u32,
+    tag: &CostTag,
+    run: (Harness, Option<&str>, bool),
+    outcome: &harness::RunOutcome,
+    started_at: i64,
+) {
+    let (harness, req_model, resumed) = run;
+    let (mut cost, mut estimated) = (outcome.cost_usd.unwrap_or(0.0), outcome.cost_estimated);
+    if harness == Harness::Claude && resumed {
+        if let Some(own) = outcome.streamed_cost(&app.settings.read().unwrap().prices) {
+            cost = own;
+            estimated = true;
+        }
+    }
+    let is_task = tag.repo.is_none();
+    let repo = tag.repo.clone().unwrap_or_else(|| {
+        app.store
+            .load_task(task_id)
+            .ok()
+            .flatten()
+            .map(|t| t.repo)
+            .unwrap_or_default()
+    });
+    let model = outcome
+        .fingerprint
+        .as_ref()
+        .and_then(|f| f.models.first().cloned())
+        .or_else(|| req_model.map(str::to_string))
+        .unwrap_or_else(|| "unknown".into());
+    let ended = now_ms();
+    crate::costs::append(
+        &app.data_dir,
+        &crate::costs::CostRecord {
+            ts: ended,
+            repo,
+            task_id: is_task.then(|| task_id.to_string()),
+            run_id: (!is_task && !task_id.is_empty()).then(|| task_id.to_string()),
+            stage: tag.stage.to_string(),
+            attempt: is_task.then_some(attempt_n),
+            route_id: tag.route_id.clone(),
+            harness,
+            model,
+            cost_usd: cost,
+            estimated,
+            input_tokens: outcome.usage_input,
+            cached_tokens: outcome.usage_cached,
+            output_tokens: outcome.usage_output,
+            ms: (ended - started_at).max(0) as u64,
+            backfilled: false,
+        },
+    );
 }
 
 /// What this run has cost so far, priced from its streamed message usage.

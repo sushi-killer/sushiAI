@@ -680,6 +680,7 @@ async fn run_proposer(
             false,
             &job.toplevel,
             &req,
+            CostTag::repo("evolution", &route.id, &job.repo),
             &brief_text,
             &dir.join("events.jsonl"),
             &cancel,

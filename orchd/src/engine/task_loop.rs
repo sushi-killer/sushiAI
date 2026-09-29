@@ -468,6 +468,7 @@ pub(super) async fn run_task_loop(
             true,
             &worktree,
             &req,
+            CostTag::task("implement", &route.id),
             &brief_text,
             &events_path,
             &cancel,

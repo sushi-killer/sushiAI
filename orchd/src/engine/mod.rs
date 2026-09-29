@@ -590,6 +590,7 @@ impl App {
             "task.overturn" => self.handle_task_overturn(params).await,
             "task.amend" => self.handle_task_amend(params).await,
             "task.delete" => self.handle_task_delete(params).await,
+            "costs.summary" => self.handle_costs_summary(params).await,
             "worktrees.gc" => self.handle_worktrees_gc(params).await,
             "task.archive" => self.handle_task_archive(params).await,
             "task.unarchive" => self.handle_task_unarchive(params).await,

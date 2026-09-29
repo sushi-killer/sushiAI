@@ -73,6 +73,42 @@ impl App {
         Ok(json!({"answers": answers, "ms": start.elapsed().as_millis() as u64}))
     }
 
+    /// `costs.summary {repo?, taskId?, sinceDays?, groupBy: [stage|model|route|repo|task|day]}`
+    /// -> `{rows: [{key, keys, costUsd, runs, tokens, cacheHitRate}], totals}`.
+    pub(super) async fn handle_costs_summary(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize, Default)]
+        #[serde(rename_all = "camelCase")]
+        struct P {
+            #[serde(default)]
+            repo: Option<String>,
+            #[serde(default)]
+            task_id: Option<String>,
+            #[serde(default)]
+            since_days: Option<u32>,
+            #[serde(default)]
+            group_by: Vec<String>,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        crate::costs::check_group_by(&p.group_by)?;
+        let data = self.data_dir.clone();
+        let records = tokio::task::spawn_blocking(move || crate::costs::read_all(&data))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(crate::costs::summarize(
+            &records,
+            &crate::costs::Query {
+                repo: p.repo,
+                task_id: p.task_id,
+                since_days: p.since_days,
+                group_by: p.group_by,
+            },
+            now_ms(),
+        ))
+    }
+
     pub(super) async fn handle_settings_get(&self) -> Result<serde_json::Value, String> {
         let s = self.settings.read().unwrap().clone();
         serde_json::to_value(&s).map_err(|e| e.to_string())

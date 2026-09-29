@@ -93,6 +93,7 @@ async fn run_check(
         false,
         &worktree,
         &req,
+        CostTag::task("brief_check", &route.id),
         &brief_text,
         &events_path,
         cancel,

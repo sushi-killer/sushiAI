@@ -94,6 +94,7 @@ pub(super) async fn run_advisor_before_retry(
         false,
         worktree,
         &req,
+        CostTag::task("advisor", &advisor.id),
         &brief_text,
         &events_path,
         cancel,

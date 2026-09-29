@@ -222,6 +222,7 @@ pub(super) async fn run_review(
         false,
         worktree,
         &req,
+        CostTag::task("review", &review_route.id),
         &brief_text,
         &events_path,
         cancel,

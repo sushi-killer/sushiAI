@@ -1107,6 +1107,98 @@
   border-radius: 2px;
 }
 
+/* Spend above the orchestrator chat. */
+.orch-spend {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  padding: var(--gap-sm);
+  margin-bottom: var(--gap-sm);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  font-size: var(--text-sm);
+}
+
+.orch-spend-head {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+}
+
+.orch-spend-total {
+  flex: 1;
+  color: var(--text-muted);
+}
+
+.orch-spend-toggle {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.orch-spend-toggle button {
+  padding: 0 var(--gap-sm);
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.orch-spend-toggle button.active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.orch-spend-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--gap-md);
+}
+
+.orch-spend-caption {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+
+.orch-spend-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.orch-spend-row {
+  display: grid;
+  grid-template-columns: minmax(0, 9em) 1fr 5em;
+  align-items: center;
+  gap: var(--gap-sm);
+}
+
+.orch-spend-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.orch-spend-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-sunken);
+}
+
+.orch-spend-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.orch-spend-cost {
+  text-align: right;
+  color: var(--text-muted);
+}
+
 /* Recurring failures above the orchestrator chat. */
 .orch-failures {
   display: flex;

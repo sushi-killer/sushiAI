@@ -128,6 +128,41 @@ export function variantLabel(task: Task, experiments: Variant): string {
   return diffs.join(" · ");
 }
 
+const STAGE_ORDER = [
+  "plan",
+  "implement",
+  "review",
+  "advisor",
+  "brief_check",
+  "pick",
+  "final",
+  "eval_check",
+  "triage",
+  "audit",
+  "evolution",
+  "chat",
+];
+
+/** `brief_check` -> `Brief check`. */
+export function stageLabel(stage: string): string {
+  const text = stage.replace(/_/g, " ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** Cost records' stage rows in pipeline order, unknown stages last, rows
+ * that round to $0.00 dropped. */
+export function orderedStageRows<T extends { key: string; costUsd: number }>(
+  rows: T[],
+): T[] {
+  const rank = (key: string) => {
+    const index = STAGE_ORDER.indexOf(key);
+    return index < 0 ? STAGE_ORDER.length : index;
+  };
+  return rows
+    .filter((row) => formatCost(row.costUsd) !== "$0.00")
+    .sort((a, b) => rank(a.key) - rank(b.key));
+}
+
 export type CostByStage = {
   plan: number;
   implement: { n: number; costUsd: number }[];

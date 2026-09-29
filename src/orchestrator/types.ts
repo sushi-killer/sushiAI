@@ -514,3 +514,21 @@ export type FailureRow = {
   /** The task whose attempt supplied `exampleDetail` and `lastSeen`. */
   exampleTaskId: string;
 };
+
+/** One row of `costs.summary`: what a group of model runs cost. */
+export type SpendRow = {
+  key: string;
+  keys?: string[];
+  costUsd: number;
+  runs: number;
+  tokens: { input: number; cached: number; output: number };
+  cacheHitRate: number;
+};
+
+/** `costs.summary {repo?, taskId?, sinceDays?, groupBy}`. */
+export type SpendSummary = {
+  rows: SpendRow[];
+  totals: Omit<SpendRow, "key" | "keys">;
+};
+
+export type SpendGroup = "stage" | "model" | "route" | "repo" | "task" | "day";

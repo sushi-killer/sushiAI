@@ -62,7 +62,19 @@ impl App {
             .load_task(&p.id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
-        serde_json::to_value(&task).map_err(|e| e.to_string())
+        let mut value = serde_json::to_value(&task).map_err(|e| e.to_string())?;
+        // What each stage of this task cost, from the per-run cost records.
+        let by_stage = crate::costs::summarize(
+            &crate::costs::read_all(&self.data_dir),
+            &crate::costs::Query {
+                task_id: Some(task.id.clone()),
+                group_by: vec!["stage".into()],
+                ..Default::default()
+            },
+            now_ms(),
+        );
+        value["costByStage"] = by_stage["rows"].clone();
+        Ok(value)
     }
 
     pub(super) async fn handle_task_create(

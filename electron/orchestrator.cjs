@@ -40,6 +40,7 @@ const ALLOWED_METHODS = new Set([
   "task.preflight",
   "task.timeline",
   "failures.catalogue",
+  "costs.summary",
   "chat.get",
   "chat.send",
   "chat.cancel",

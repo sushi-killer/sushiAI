@@ -16,6 +16,8 @@ impl App {
         for t in recovered {
             self.broadcast_task(&t);
         }
+        // Spend recorded before per-run cost records existed; a no-op once done.
+        crate::costs::backfill(&self.data_dir);
         for a in self.store.recover_interrupted_audits()? {
             audit::broadcast(self, &a);
         }

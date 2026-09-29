@@ -176,6 +176,7 @@ async fn run_triage(
         false,
         worktree,
         &req,
+        CostTag::task("triage", &route.id),
         &brief_text,
         &events_path,
         cancel,

@@ -9,6 +9,8 @@ import type {
   Message,
   Proposal,
   Settings,
+  SpendGroup,
+  SpendSummary,
   Task,
   TimelineSegment,
 } from "./types";
@@ -31,6 +33,12 @@ export const orchestratorClient = {
       ...(includeArchived ? { includeArchived } : {}),
     }),
   taskGet: (id: string) => call<Task>("task.get", { id }),
+  costsSummary: (params: {
+    repo?: string;
+    taskId?: string;
+    sinceDays?: number;
+    groupBy: SpendGroup[];
+  }) => call<SpendSummary>("costs.summary", params),
   taskTimeline: (id: string) =>
     call<TimelineSegment[]>("task.timeline", { id }),
   failuresCatalogue: (repo?: string, sinceDays?: number) =>

@@ -195,6 +195,7 @@ async fn run(
                 false,
                 &repo,
                 &req,
+                CostTag::repo("audit", &route.id, &audit.repo),
                 &brief_text,
                 &events_path,
                 &cancel,

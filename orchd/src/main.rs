@@ -4,11 +4,13 @@
 //! `orchd mcp --data <dir> [--socket <path>]`, `orchd ab --data <dir> [--eval <set>]`, `orchd failures --data <dir>`, and
 //! `orchd gc --data <dir> --socket <sock> [--dry-run]`,
 //! `orchd eval run --data <dir> --socket <sock> ...` (see `eval.rs`), and
+//! `orchd costs [backfill] --data <dir> [--since <days>] [--by stage,model] [--json]` (see `costs.rs`), and
 //! `orchd evolve --data <dir> [--socket <sock>] [--adopt <id>]` (see `evolve.rs`).
 
 mod ab;
 mod brief;
 mod classify;
+mod costs;
 mod engine;
 mod eval;
 mod evolve;
@@ -43,6 +45,9 @@ async fn run(args: Vec<String>) -> i32 {
     }
     if args.len() >= 2 && args[1] == "eval" {
         return eval::run(&args[2..]);
+    }
+    if args.len() >= 2 && args[1] == "costs" {
+        return costs::run(&args[2..]);
     }
     if args.len() >= 2 && args[1] == "evolve" {
         return evolve::run(&args[2..]);

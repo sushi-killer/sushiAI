@@ -41,11 +41,12 @@ flowchart TB
     insights["timeline.rs<br/>task.timeline, failures.catalogue"]
     evolution["evolution/<br/>signals when a task ends,<br/>clusters, proposals, measurement"]
     evolveCli["orchd evolve<br/>evolution.run / evolution.adopt"]
+    costs["costs.rs<br/>costs.summary, orchd costs"]
     harness["harness.rs<br/>claude -p / codex exec"]
     side["classify.rs (Jev)<br/>git.rs (worktrees, commit)<br/>messages.rs (merging)"]
-    store[("data dir<br/>tasks/, runs/, settings.json,<br/>decisions.jsonl, chats/, audits/,<br/>evolution/ (signals.jsonl, detected.jsonl,<br/>proposals/)")]
+    store[("data dir<br/>tasks/, runs/, settings.json,<br/>decisions.jsonl, costs.jsonl, chats/, audits/,<br/>evolution/ (signals.jsonl, detected.jsonl,<br/>proposals/)")]
     mcp["orchd mcp<br/>task_* tools, stdio"]
-    proto --> engine & chat & audit & insights & evolution
+    proto --> engine & chat & audit & insights & evolution & costs
     engine --> side
     engine -->|task done or failed| evolution
     evolution -->|append signals| store
@@ -53,7 +54,8 @@ flowchart TB
     evolveCli -->|socket| proto
     engine & chat & audit --> harness
     engine & chat & audit & evolution <--> store
-    insights --> store
+    insights & costs --> store
+    engine & chat & audit & evolution -->|one record per run| costs
     mcp -->|socket| proto
   end
 

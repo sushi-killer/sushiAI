@@ -474,6 +474,7 @@ pub(super) async fn run_plan_stage(
                 true,
                 &worktree,
                 &req,
+                CostTag::task("plan", &route.id),
                 &brief_text,
                 &events_path,
                 cancel,

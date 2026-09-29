@@ -245,6 +245,7 @@ pub(super) async fn run_parent(app: &Arc<App>, task_id: &str, cancel: &CancelTok
         &app.store.task_dir(task_id).join("runs").join("parent"),
         &checks,
         sandbox,
+        &task.base_sha,
         cancel,
     )
     .await;
@@ -257,7 +258,8 @@ pub(super) async fn run_parent(app: &Arc<App>, task_id: &str, cancel: &CancelTok
         let wt = Path::new(&task.worktree);
         let gated = gated_checks(&task);
         let commands: Vec<String> = gated.iter().map(|c| c.run.clone()).collect();
-        let gated_results = run_verify_commands(wt, &dir, &commands, sandbox, cancel).await;
+        let gated_results =
+            run_verify_commands(wt, &dir, &commands, sandbox, &task.base_sha, cancel).await;
         if let Some((check, failed)) = gated
             .iter()
             .zip(&gated_results)
@@ -533,6 +535,7 @@ pub(super) async fn carry_and_check(
                     &run_dir.join("final-land"),
                     extra_final,
                     sandbox,
+                    &task.base_sha,
                     cancel,
                 )
                 .await;

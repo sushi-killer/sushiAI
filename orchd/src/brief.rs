@@ -629,7 +629,7 @@ fn plan_brief(request: &str, variant: &Variant, split: bool) -> String {
 }
 
 /// `variant.grounded_checks`: what the planner's `checks` and `heldOut` are.
-const PLAN_CHECKS: &str = "For each criterion that a command can prove, add an entry to `checks`: `criterion` is the criterion's 0-based index in `criteria` and `run` a shell command (run with `sh -c` from the repository root, in the task's verify environment). A check must fail on the current code and pass once its criterion is met. A test-name filter that matches zero tests passes, so use exact test names or assert a count. Leave out a criterion that has no such command. `heldOut` is one optional extra check of the same shape, run after verify; the implementer never sees it, so it may probe what the visible checks do not.";
+const PLAN_CHECKS: &str = "For each criterion that a command can prove, add an entry to `checks`: `criterion` is the criterion's 0-based index in `criteria` and `run` a shell command (run with `sh -c` from the repository root, in the task's verify environment). A check must exercise the new behaviour: it must fail on the current code and pass once its criterion is met, and a test that already passes today proves nothing. A check that compares against a branch name (`git diff main`) breaks once the branch moves; compare against the task's base commit with the `ORCHD_BASE_SHA` environment variable instead (`git diff $ORCHD_BASE_SHA`), which orchd sets for every check and verify command. A test-name filter that matches zero tests passes, so use exact test names or assert a count. Leave out a criterion that has no such command. `heldOut` is one optional extra check of the same shape, run after verify; the implementer never sees it, so it may probe what the visible checks do not.";
 
 const PLAN_FINAL_VERIFY: &str = "Split the checks by cost. `verify` holds the fast, targeted commands that run after every attempt (a unit test file, the type checker, a linter on the touched paths). `finalVerify` holds the slow whole-repo checks (the full CI script, a desktop smoke) that the orchestrator runs once, after review passes and before the commit.";
 
@@ -2244,6 +2244,8 @@ mod tests {
                 brief.contains("must fail on the current code and pass once its criterion is met")
             );
             assert!(brief.contains("matches zero tests passes"));
+            assert!(brief.contains("ORCHD_BASE_SHA"));
+            assert!(brief.contains("already passes today proves nothing"));
             assert!(brief.contains("from the repository root"));
             assert!(brief.contains("the implementer never sees it"));
             // The format stays valid JSON-ish: checks sit before questions.

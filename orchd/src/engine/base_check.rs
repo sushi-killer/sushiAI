@@ -66,7 +66,9 @@ pub(super) async fn run_on_base(
         .unwrap_or_else(|e| Err(e.to_string()));
         let _ = std::fs::create_dir_all(run_dir);
         let ran = match setup {
-            Ok(()) => Ok(run_verify_commands(&wt, run_dir, &missing, sandbox, cancel).await),
+            Ok(()) => {
+                Ok(run_verify_commands(&wt, run_dir, &missing, sandbox, base_sha, cancel).await)
+            }
             Err(e) => Err(format!("could not check out {base_sha}: {e}")),
         };
         let (repo_path, wt3) = (PathBuf::from(repo), wt.clone());

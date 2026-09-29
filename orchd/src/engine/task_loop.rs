@@ -1084,6 +1084,13 @@ pub(super) async fn run_task_loop(
             &cancel,
         )
         .await;
+        if cancel.is_cancelled() {
+            // Killed by the shutdown, not failed: the next daemon re-runs it.
+            interrupt_attempt(&app, &mut task, idx);
+            drop(permit);
+            app.finish_task_loop(&task_id);
+            return;
+        }
         task.attempts[idx].verify = verify_results.clone();
         if let Some(failed) = verify_results.iter().find(|v| v.code != Some(0)) {
             let detail = format!(
@@ -1134,9 +1141,16 @@ pub(super) async fn run_task_loop(
                     &run_dir.join("checks"),
                     &commands,
                     settings.sandbox,
+                    &task.base_sha,
                     &cancel,
                 )
                 .await;
+                if cancel.is_cancelled() {
+                    interrupt_attempt(&app, &mut task, idx);
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
                 task.attempts[idx].verify.extend(results.iter().cloned());
                 verify_results.extend(results.iter().cloned());
                 if let Some(failed) = results.iter().find(|v| v.code != Some(0)) {
@@ -1165,6 +1179,12 @@ pub(super) async fn run_task_loop(
                         &cancel,
                     )
                     .await;
+                    if cancel.is_cancelled() {
+                        interrupt_attempt(&app, &mut task, idx);
+                        drop(permit);
+                        app.finish_task_loop(&task_id);
+                        return;
+                    }
                     task.attempts[idx].verify.push(result.clone());
                     verify_results.push(result);
                     failure = detail.map(|d| (FailureKind::Heldout, d));
@@ -1450,9 +1470,16 @@ pub(super) async fn run_task_loop(
                 &run_dir.join("final"),
                 &task.final_verify,
                 settings.sandbox,
+                &task.base_sha,
                 &cancel,
             )
             .await;
+            if cancel.is_cancelled() {
+                interrupt_attempt(&app, &mut task, idx);
+                drop(permit);
+                app.finish_task_loop(&task_id);
+                return;
+            }
             task.attempts[idx]
                 .verify
                 .extend(final_results.iter().cloned());
@@ -1606,6 +1633,17 @@ pub(super) async fn run_task_loop(
             Tail::Return => return,
         }
     }
+}
+
+/// A daemon shutdown killed the attempt's run: it is interrupted, never a
+/// failure, and the next daemon resumes the task.
+fn interrupt_attempt(app: &Arc<App>, task: &mut Task, idx: usize) {
+    task.attempts[idx].status = AttemptStatus::Interrupted;
+    task.attempts[idx].ended_at = Some(now_ms());
+    task.status = app.cancelled_status(&task.status);
+    task.updated_at = now_ms();
+    let _ = app.store.save_task(task);
+    app.broadcast_task(task);
 }
 
 pub(super) async fn mark_stopped_if_not_already(app: &Arc<App>, task_id: &str) {

@@ -16,6 +16,7 @@ async fn run_one_verify_command_kills_the_whole_process_group_on_timeout() {
         Duration::from_millis(300),
         SandboxMode::Host,
         &[],
+        "",
         &cancel,
     )
     .await;
@@ -54,6 +55,7 @@ async fn run_one_verify_command_kills_the_group_on_cancellation_too() {
         Duration::from_secs(60),
         SandboxMode::Host,
         &[],
+        "",
         &cancel,
     )
     .await;

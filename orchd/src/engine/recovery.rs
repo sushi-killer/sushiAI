@@ -42,6 +42,20 @@ impl App {
             }
         }
         self.spawn_landing_retries();
+        // A dependency question can have become moot while the daemon was
+        // down; the graph clears it now, not at the next graph event.
+        let mut repos: Vec<String> = self
+            .store
+            .list_tasks()?
+            .into_iter()
+            .filter(|t| !t.archived)
+            .map(|t| t.repo)
+            .collect();
+        repos.sort();
+        repos.dedup();
+        for repo in repos {
+            self.advance_graph(&repo);
+        }
         Ok(())
     }
 }

@@ -319,6 +319,10 @@ pub fn poll_task_status(daemon: &Daemon, task_id: &str, timeout: Duration) -> se
 /// with a synthetic payload on stdin -- the same way the real Claude CLI
 /// would, just without a real model in the loop.
 pub const FAKE_CLAUDE_HOOK_SCRIPT: &str = r#"#!/usr/bin/env node
+// First output before anything else runs: the stall clock must not depend on
+// how long node takes to load modules on a busy machine.
+console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-fake' }));
+
 const fs = require('fs');
 const { execSync } = require('child_process');
 
@@ -330,8 +334,6 @@ const hookCmd = settings.hooks.Stop[0].hooks[0].command;
 try { fs.readFileSync(0); } catch (e) {}
 
 fs.writeFileSync('CHANGED_MARKER.txt', 'changed\n');
-
-console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-fake' }));
 
 const payload = JSON.stringify({
   session_id: 's',

@@ -210,15 +210,29 @@ async fn evaluate(
             tally: CheckTally::default(),
         };
     }
-    let mut verify =
-        run_verify_commands(worktree, &dir.join("verify"), &task.verify, sandbox, cancel).await;
+    let mut verify = run_verify_commands(
+        worktree,
+        &dir.join("verify"),
+        &task.verify,
+        sandbox,
+        base_sha,
+        cancel,
+    )
+    .await;
     let plain = verify.len();
     if task.variant().grounded_checks {
         let commands: Vec<String> = gated_checks(task).into_iter().map(|c| c.run).collect();
         if !commands.is_empty() {
             verify.extend(
-                run_verify_commands(worktree, &dir.join("checks"), &commands, sandbox, cancel)
-                    .await,
+                run_verify_commands(
+                    worktree,
+                    &dir.join("checks"),
+                    &commands,
+                    sandbox,
+                    base_sha,
+                    cancel,
+                )
+                .await,
             );
         }
         if let Some(held) = gated_held_out(task) {

@@ -48,6 +48,7 @@ fn build_verify_command(
     cmd: &str,
     sandbox: SandboxMode,
     allow_write: &[PathBuf],
+    base_sha: &str,
 ) -> tokio::process::Command {
     let mut command;
     #[cfg(target_os = "macos")]
@@ -74,6 +75,7 @@ fn build_verify_command(
     }
     command
         .current_dir(cwd)
+        .env("ORCHD_BASE_SHA", base_sha)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -92,13 +94,23 @@ pub(super) async fn run_verify_commands(
     run_dir: &Path,
     commands: &[String],
     sandbox: SandboxMode,
+    base_sha: &str,
     cancel: &CancelToken,
 ) -> Vec<VerifyOutcome> {
     let allow_write = verify_allow_write_paths(cwd, run_dir);
     let mut results = Vec::new();
     for cmd in commands {
         results.push(
-            run_one_verify_command(cwd, cmd, VERIFY_TIMEOUT, sandbox, &allow_write, cancel).await,
+            run_one_verify_command(
+                cwd,
+                cmd,
+                VERIFY_TIMEOUT,
+                sandbox,
+                &allow_write,
+                base_sha,
+                cancel,
+            )
+            .await,
         );
     }
     results
@@ -130,8 +142,16 @@ pub(super) async fn run_eval_check(
         Err(e) => return failed(format!("check checkout panicked: {e}")),
     }
     let allow_write = verify_allow_write_paths(&path, run_dir);
-    let out =
-        run_one_verify_command(&path, cmd, VERIFY_TIMEOUT, sandbox, &allow_write, cancel).await;
+    let out = run_one_verify_command(
+        &path,
+        cmd,
+        VERIFY_TIMEOUT,
+        sandbox,
+        &allow_write,
+        sha,
+        cancel,
+    )
+    .await;
     let (r, p) = (repo.to_path_buf(), path);
     let _ = tokio::task::spawn_blocking(move || git::remove_worktree(&r, &p)).await;
     EvalCheck {
@@ -166,7 +186,7 @@ pub(super) async fn run_verify_cached(
         }
     }
     let sandbox = app.settings.read().unwrap().sandbox;
-    let results = run_verify_commands(worktree, run_dir, commands, sandbox, cancel).await;
+    let results = run_verify_commands(worktree, run_dir, commands, sandbox, base, cancel).await;
     app.verify_cache
         .lock()
         .unwrap()
@@ -426,6 +446,7 @@ pub(super) async fn baseline_checks(
         &app.store.task_dir(task_id),
         &commands,
         sandbox,
+        &task.base_sha,
         cancel,
     )
     .await;
@@ -534,6 +555,7 @@ pub(super) async fn run_held_out(
         run_dir,
         std::slice::from_ref(&check.run),
         sandbox,
+        &task.base_sha,
         cancel,
     )
     .await
@@ -570,10 +592,11 @@ pub(super) async fn run_one_verify_command(
     timeout: Duration,
     sandbox: SandboxMode,
     allow_write: &[PathBuf],
+    base_sha: &str,
     cancel: &CancelToken,
 ) -> VerifyOutcome {
     let start = std::time::Instant::now();
-    let mut command = build_verify_command(cwd, cmd, sandbox, allow_write);
+    let mut command = build_verify_command(cwd, cmd, sandbox, allow_write, base_sha);
     let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {

@@ -393,6 +393,7 @@ pub(super) async fn run_plan_stage(
             fingerprint: None,
             review_fingerprint: None,
             advisor_fingerprint: None,
+            candidates: vec![],
         };
         task.attempts.push(attempt);
         let idx = task.attempts.len() - 1;

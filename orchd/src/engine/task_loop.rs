@@ -372,6 +372,7 @@ pub(super) async fn run_task_loop(
             fingerprint: None,
             review_fingerprint: None,
             advisor_fingerprint: None,
+            candidates: vec![],
         };
         task.attempts.push(attempt);
         let idx = task.attempts.len() - 1;
@@ -382,96 +383,17 @@ pub(super) async fn run_task_loop(
 
         let run_dir = app.store.run_dir(&task_id, attempt_n);
         let _ = std::fs::create_dir_all(&run_dir);
-        let mcp_path = run_dir.join("mcp.json");
-        let task_mcp_path = app.store.task_dir(&task_id).join("mcp.json");
-        // The project's own servers, plus orchd's messaging bridge scoped to
-        // this task.
-        let messages_server = messages::task_server(&app, &task_id);
-        let mut mcp_config = std::fs::read_to_string(&task_mcp_path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .filter(|v| v.get("mcpServers").is_some_and(|s| s.is_object()))
-            .unwrap_or_else(|| json!({"mcpServers": {}}));
-        mcp_config["mcpServers"][messages::SERVER] = messages_server.clone();
-        let _ = store::write_json_atomic(&mcp_path, &mcp_config);
-
         let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
-        let token = uuid::Uuid::new_v4().to_string();
-        let settings_path = run_dir.join("settings.json");
-        let key_path = run_dir.join("key");
-        // Keep our own clone of the hook context alongside the one handed
-        // to `hook.stop` lookups, so we can read back how many times it
-        // blocked into `attempt.gateBlocks` once the run ends.
-        let mut registered: Option<(String, Arc<HookContext>)> = None;
-        if matches!(route.harness, Harness::Claude) {
-            let profile = route
-                .profile_id
-                .as_ref()
-                .and_then(|pid| app.secrets.read().unwrap().profiles.get(pid).cloned());
-            let mut profile_obj = serde_json::Map::new();
-            if let Some(p) = &profile {
-                if !p.env.is_empty() {
-                    profile_obj.insert(
-                        "env".to_string(),
-                        serde_json::to_value(&p.env).unwrap_or(serde_json::Value::Null),
-                    );
-                }
-                if let Some(key) = &p.key {
-                    if store::write_secret_file(&key_path, key).is_ok() {
-                        profile_obj.insert(
-                            "apiKeyHelper".to_string(),
-                            serde_json::Value::String(format!(
-                                "cat {}",
-                                harness::shell_quote(&key_path.to_string_lossy())
-                            )),
-                        );
-                    }
-                }
-            }
-            let profile_value = if profile_obj.is_empty() {
-                None
-            } else {
-                Some(serde_json::Value::Object(profile_obj))
-            };
-
-            let socket_path_str = app.socket_path.to_string_lossy().to_string();
-            let stop_hook = harness::StopHook {
-                orchd_path: &app.orchd_path,
-                socket_path: &socket_path_str,
-                token: &token,
-                lean_output: task.variant().lean_output,
-            };
-            let mut claude_settings = harness::build_claude_settings(
-                profile_value.as_ref(),
-                settings.sandbox,
-                &settings.allowed_domains,
-                &deny_read,
-                Some(stop_hook),
-            );
-            // A headless run answers no prompts, so the messaging tools must
-            // be allowed up front to be usable at all.
-            if let Some(allow) = claude_settings["permissions"]["allow"].as_array_mut() {
-                for tool in crate::mcp::TASK_TOOLS {
-                    allow.push(json!(format!("mcp__{}__{tool}", messages::SERVER)));
-                }
-            }
-            let _ = store::write_json_atomic(&settings_path, &claude_settings);
-            let ctx = Arc::new(HookContext {
-                task_id: task_id.clone(),
-                attempt_n,
-                worktree: worktree.clone(),
-                base_sha: base_sha.clone(),
-                verify: task.verify.clone(),
-                blocks: AtomicU32::new(0),
-                cancel: CancelToken::new(),
-                hook_running: Arc::new(AtomicBool::new(false)),
-            });
-            app.hook_tokens
-                .write()
-                .unwrap()
-                .insert(token.clone(), ctx.clone());
-            registered = Some((token.clone(), ctx));
-        }
+        let PreparedRun {
+            mcp_path,
+            settings_path,
+            key_path,
+            messages_server,
+            mut registered,
+        } = prepare_run(
+            &app, &task, &task_id, &route, &settings, &worktree, &base_sha, attempt_n, &run_dir,
+            &deny_read,
+        );
 
         let network_allowed = settings.codex_network;
         let req = harness::RunRequest {
@@ -493,7 +415,7 @@ pub(super) async fn run_task_loop(
 
         let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
         let events_path = run_dir.join("events.jsonl");
-        let run_result = run_harness(
+        let a_run = run_harness(
             &app,
             &task_id,
             attempt_n,
@@ -511,8 +433,38 @@ pub(super) async fn run_task_loop(
                     .unwrap_or_default(),
             }),
             task.variant().loop_detect.then(LoopDetector::new),
-        )
-        .await;
+        );
+        // Recorded after the reload below, which would drop a line pushed now.
+        let mut no_second = BestOfExtra::default();
+        let second = match second_route(&task, &settings, &route, attempt_n) {
+            Ok(second) => second,
+            Err(line) => {
+                no_second.decisions.push(line);
+                None
+            }
+        };
+        let (run_result, best_of) = match second {
+            Some(b_route) => {
+                run_best_of(
+                    &app,
+                    &task,
+                    &task_id,
+                    attempt_n,
+                    a_run,
+                    &route,
+                    &b_route,
+                    &settings,
+                    &worktree,
+                    &base_sha,
+                    &run_dir,
+                    &brief_text,
+                    &deny_read,
+                    &cancel,
+                )
+                .await
+            }
+            None => (a_run.await, no_second),
+        };
 
         let gate_blocks = if let Some((tok, ctx)) = registered.take() {
             app.hook_tokens.write().unwrap().remove(&tok);
@@ -534,6 +486,23 @@ pub(super) async fn run_task_loop(
             task = reloaded;
         }
         task.attempts[idx].gate_blocks = gate_blocks;
+        // Both candidates' spend counts, the loser's and the pick run's on
+        // top of the winner's (added below with the attempt's own).
+        task.cost_usd += best_of.cost;
+        task.attempts[idx].candidates = best_of.candidates;
+        task.decisions.extend(best_of.decisions);
+        let b_won = best_of.winner.is_some();
+        let route = match best_of.winner {
+            Some(winner) => {
+                let a = &mut task.attempts[idx];
+                a.route_id = winner.id.clone();
+                a.harness = winner.harness;
+                a.model = winner.model.clone().unwrap_or_default();
+                a.reason = format!("{}; best-of winner", a.reason);
+                winner
+            }
+            None => route,
+        };
 
         let outcome = match run_result {
             Ok(o) => o,
@@ -578,7 +547,9 @@ pub(super) async fn run_task_loop(
             }
         };
 
-        task.attempts[idx].session_id = outcome.session_id.clone();
+        // The winner's session lives under the sibling worktree's path, so
+        // a later resume in the task's worktree could never find it.
+        task.attempts[idx].session_id = outcome.session_id.clone().filter(|_| !b_won);
         task.attempts[idx].fingerprint = outcome.fingerprint.clone();
         task.attempts[idx].usage = Some(Usage {
             input: outcome.usage_input,

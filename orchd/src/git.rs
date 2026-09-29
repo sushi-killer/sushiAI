@@ -538,6 +538,63 @@ pub fn status_short(cwd: &Path) -> Result<String, GitError> {
     run(cwd, &["status", "--short"])
 }
 
+/// Stages everything (new files too, ignored ones stay out), so a plain
+/// `git diff <base>` shows the whole change.
+pub fn stage_all(cwd: &Path) -> Result<(), GitError> {
+    run(cwd, &["-c", "core.hooksPath=/dev/null", "add", "-A"]).map(|_| ())
+}
+
+/// The whole change since `base` as a binary-safe patch.
+pub fn patch_since(cwd: &Path, base: &str) -> Result<Vec<u8>, GitError> {
+    stage_all(cwd)?;
+    let out = Command::new("git")
+        .args(["diff", "--binary", base])
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| GitError(format!("git diff: {e}")))?;
+    if !out.status.success() {
+        return Err(GitError(format!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(out.stdout)
+}
+
+/// Makes the worktree hold exactly `patch` on top of `base_sha`: its own
+/// commits and edits are dropped first. Ignored files are left alone.
+pub fn replace_work_with_patch(
+    worktree: &Path,
+    base_sha: &str,
+    patch: &[u8],
+) -> Result<(), GitError> {
+    run(worktree, &["reset", "-q", "--hard", base_sha])?;
+    run(worktree, &["clean", "-q", "-fd"])?;
+    if patch.is_empty() {
+        return Ok(());
+    }
+    let file = worktree.join(".git-best-of.patch");
+    // A worktree's `.git` is a file: keep the patch out of the tree.
+    let dir = run(worktree, &["rev-parse", "--git-dir"])?;
+    let file = if dir.trim().is_empty() {
+        file
+    } else {
+        worktree.join(dir.trim()).join("best-of.patch")
+    };
+    std::fs::write(&file, patch).map_err(|e| GitError(format!("write patch: {e}")))?;
+    let applied = run(
+        worktree,
+        &[
+            "apply",
+            "--binary",
+            file.to_str()
+                .ok_or_else(|| GitError("non-utf8 path".into()))?,
+        ],
+    );
+    let _ = std::fs::remove_file(&file);
+    applied.map(|_| ())
+}
+
 /// `git diff --name-only <base>`.
 pub fn diff_name_only(cwd: &Path, base: &str) -> Result<Vec<String>, GitError> {
     let out = run(cwd, &["diff", "--name-only", base])?;

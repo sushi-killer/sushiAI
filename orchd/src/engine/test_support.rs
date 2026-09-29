@@ -113,5 +113,6 @@ pub(super) fn attempt_with_failure(n: u32, signature: &str) -> Attempt {
         fingerprint: None,
         review_fingerprint: None,
         advisor_fingerprint: None,
+        candidates: vec![],
     }
 }

@@ -420,6 +420,7 @@ mod tests {
                 fingerprint: None,
                 review_fingerprint: None,
                 advisor_fingerprint: None,
+                candidates: vec![],
             }],
             cost_usd: 0.0,
             budget_raises: 0,

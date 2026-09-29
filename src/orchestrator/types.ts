@@ -126,6 +126,13 @@ export type Variant = {
    * on the base gate every attempt, and a held-out check is run after
    * verify. */
   groundedChecks?: boolean;
+  /** 2 = the first implement attempt of a hard task runs twice at once, on
+   * the tier route and on `bestOfRoute`, and the checks (then a reviewer)
+   * pick. 0/1 or absent = off. */
+  bestOf?: number;
+  /** Second candidate's route; default the first route on the other
+   * harness. */
+  bestOfRoute?: string;
 };
 
 /** A choice the planner made itself (`variant.batchQuestions`). */
@@ -138,6 +145,15 @@ export type Assumption = {
   overturned: boolean;
   /** What the owner answered instead, once overturned. */
   ownerAnswer?: string;
+};
+
+export type Candidate = {
+  route: string;
+  cost: number;
+  /** Finished, changed files and every verify command exited 0. */
+  verify: boolean;
+  checks: { passed: number; failed: number };
+  picked: boolean;
 };
 
 export type FailureKind =
@@ -214,6 +230,8 @@ export type Attempt = {
   fingerprint?: Fingerprint;
   reviewFingerprint?: Fingerprint;
   advisorFingerprint?: Fingerprint;
+  /** `variant.bestOf`: the concurrent runs of this attempt. */
+  candidates?: Candidate[];
 };
 
 export type Check = {

@@ -95,6 +95,59 @@ pub fn parse_impossible(text: &str, criteria_len: usize) -> Option<Impossible> {
         .filter(|i| i.criterion < criteria_len)
 }
 
+/// A candidate of a best-of attempt, as the pick run sees it.
+pub struct PickCandidate<'a> {
+    pub verify: &'a [VerifyOutcome],
+    pub diff: &'a str,
+}
+
+/// The read-only run that chooses between two candidates that both passed
+/// verify and the checks. It starts with `## Pick`, never `## Review`.
+pub fn build_pick_brief(task: &Task, a: &PickCandidate, b: &PickCandidate) -> String {
+    let mut out = String::from(
+        "## Pick\n\nTwo implementers did the same task independently. Both passed verify and the checks. Choose the change that better meets the goal and criteria: correct, minimal, in the repository's own style. You cannot edit anything.\n\n",
+    );
+    out.push_str(&task.goal);
+    out.push_str("\n\n## Acceptance criteria\n\n");
+    for c in &task.criteria {
+        out.push_str("- ");
+        out.push_str(c);
+        out.push('\n');
+    }
+    for (name, cand) in [("a", a), ("b", b)] {
+        out.push_str(&format!("\n## Candidate {name}\n\n"));
+        for v in cand.verify.iter().filter(|v| !is_held_out(v)) {
+            out.push_str(&format!("- `{}` -> exit {:?}\n", v.command, v.code));
+        }
+        out.push_str("\n```diff\n");
+        out.push_str(cand.diff);
+        out.push_str("\n```\n");
+    }
+    out.push_str(
+        "\n## Report format\n\nReply with:\n\n```sushi-pick\n{\"pick\":\"a|b\",\"why\":\"one sentence\"}\n```\n",
+    );
+    out
+}
+
+/// The `sushi-pick` block: `(true, why)` for candidate `b`, `(false, why)`
+/// for `a`.
+pub fn parse_pick(text: &str) -> Option<(bool, String)> {
+    let body = tagged_json(text, "sushi-pick")?;
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let pick = v.get("pick")?.as_str()?.trim().to_ascii_lowercase();
+    let why = v
+        .get("why")
+        .and_then(|w| w.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    match pick.as_str() {
+        "a" => Some((false, why)),
+        "b" => Some((true, why)),
+        _ => None,
+    }
+}
+
 /// Full brief for a fresh (non-resumed) attempt.
 pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> String {
     let mut out = String::new();
@@ -1355,6 +1408,7 @@ mod tests {
             fingerprint: None,
             review_fingerprint: None,
             advisor_fingerprint: None,
+            candidates: vec![],
         });
         let mut second = task.attempts[0].clone();
         second.n = 2;
@@ -1517,6 +1571,7 @@ mod tests {
             fingerprint: None,
             review_fingerprint: None,
             advisor_fingerprint: None,
+            candidates: vec![],
         });
         let brief = build_brief(&task, "", "");
         assert!(
@@ -1718,6 +1773,7 @@ mod tests {
             fingerprint: None,
             review_fingerprint: None,
             advisor_fingerprint: None,
+            candidates: vec![],
         });
         let brief = build_triage_brief(
             &task,
@@ -2380,5 +2436,22 @@ mod tests {
         assert_eq!(brief.matches("{\"raw\":0,").count(), 5);
         assert_eq!(brief.matches("{\"raw\":39,").count(), 5);
         assert_eq!(brief.matches("{\"raw\":40,").count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::*;
+
+    #[test]
+    fn parse_pick_reads_the_fenced_block_and_rejects_other_answers() {
+        let text = "x\n```sushi-pick\n{\"pick\":\"B\",\"why\":\" tidier \"}\n```";
+        assert_eq!(parse_pick(text), Some((true, "tidier".to_string())));
+        assert_eq!(
+            parse_pick("```sushi-pick\n{\"pick\":\"a\"}\n```"),
+            Some((false, String::new()))
+        );
+        assert_eq!(parse_pick("```sushi-pick\n{\"pick\":\"c\"}\n```"), None);
+        assert_eq!(parse_pick("no block"), None);
     }
 }

@@ -58,6 +58,8 @@ const VARIANT_KEYS: Exclude<
   | "maxAttemptCostUsd"
   | "batchQuestions"
   | "groundedChecks"
+  | "bestOf"
+  | "bestOfRoute"
 >[] = [
   "retryMode",
   "stallTimeoutSecs",
@@ -114,6 +116,13 @@ export function variantLabel(task: Task, experiments: Variant): string {
   }
   if (!!variant.groundedChecks !== !!experiments.groundedChecks) {
     diffs.push(`groundedChecks ${variantFlagText(!!variant.groundedChecks)}`);
+  }
+  const bestOf = variant.bestOf ?? 0;
+  if (bestOf >= 2 !== (experiments.bestOf ?? 0) >= 2) {
+    diffs.push(`bestOf ${bestOf >= 2 ? "on" : "off"}`);
+  }
+  if (variant.bestOfRoute !== experiments.bestOfRoute) {
+    diffs.push(`bestOfRoute ${variant.bestOfRoute ?? "settings"}`);
   }
   if (diffs.length === 0) return "default";
   return diffs.join(" · ");

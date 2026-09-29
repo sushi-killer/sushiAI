@@ -433,6 +433,21 @@ pub struct Variant {
     /// is run after verify without the implementer ever seeing it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub grounded_checks: bool,
+    /// 2 = on, 0/1 = off. On the hard tier the first implement attempt runs
+    /// twice at once (the task's worktree and a sibling `-b` one, on the
+    /// tier route and on `best_of_route`); each candidate runs verify and
+    /// the grounded checks, and the passing one wins, the other-family
+    /// reviewer picking when both pass. Later attempts are single.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub best_of: u32,
+    /// Route id of the second candidate; default the first route on the
+    /// other harness than the tier route's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_of_route: Option<String>,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 fn is_false(v: &bool) -> bool {
@@ -595,13 +610,15 @@ impl Variant {
 
     /// Keys a serialized default `Variant` leaves out, but a partial
     /// override object may still name.
-    pub const OPTIONAL_KEYS: [&'static str; 6] = [
+    pub const OPTIONAL_KEYS: [&'static str; 8] = [
         "plannerRoute",
         "tierRoutes",
         "maxCostUsd",
         "maxAttemptCostUsd",
         "batchQuestions",
         "groundedChecks",
+        "bestOf",
+        "bestOfRoute",
     ];
 
     /// Every route override names a route in `routes`.
@@ -610,6 +627,11 @@ impl Variant {
         if let Some(id) = self.planner_route.as_deref().filter(|id| !known(id)) {
             return Err(format!(
                 "variant plannerRoute \"{id}\" is not a configured route"
+            ));
+        }
+        if let Some(id) = self.best_of_route.as_deref().filter(|id| !known(id)) {
+            return Err(format!(
+                "variant bestOfRoute \"{id}\" is not a configured route"
             ));
         }
         for (tier, id) in &self.tier_routes {
@@ -1040,6 +1062,31 @@ pub struct Attempt {
     pub review_fingerprint: Option<Fingerprint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advisor_fingerprint: Option<Fingerprint>,
+    /// `variant.best_of`: the candidates this attempt ran, empty for a
+    /// single run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<Candidate>,
+}
+
+/// One of the concurrent runs of a best-of attempt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Candidate {
+    pub route: String,
+    /// What the candidate's own run cost.
+    pub cost: f64,
+    /// It finished, changed files and every verify command exited 0.
+    pub verify: bool,
+    /// Grounded checks (and the held-out one) that passed and failed.
+    pub checks: CheckTally,
+    pub picked: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckTally {
+    pub passed: u32,
+    pub failed: u32,
 }
 
 fn is_zero(n: &u32) -> bool {

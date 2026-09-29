@@ -289,6 +289,7 @@ mod tests {
             budget_raises: 0,
             daily_budget_ok_day: None,
             assumptions: vec![],
+            question_history: vec![],
             judged_findings: vec![],
             archived: false,
             planned_tier: None,
@@ -310,6 +311,37 @@ mod tests {
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["event"], "task");
         assert_eq!(v["task"]["id"], "t1");
+        assert!(v["task"].get("questionHistory").is_none(), "{v}");
+    }
+
+    #[test]
+    fn event_task_carries_the_question_history_and_who_asked() {
+        use crate::model::*;
+        let mut task: Task = serde_json::from_value(serde_json::json!({
+            "id": "t1", "title": "", "goal": "", "criteria": [], "verify": [], "repo": "",
+            "worktree": "", "branch": "", "baseSha": "", "status": "waiting", "tier": "standard",
+            "createdAt": 0, "updatedAt": 0, "variant": {}
+        }))
+        .unwrap();
+        let q = Question::new("Ok?", vec![], QuestionKind::Budget, AskedBy::Plan);
+        task.question_history.push(AnsweredQuestion {
+            question: q.text.clone(),
+            options: vec![],
+            kind: q.kind,
+            asked_by: q.asked_by,
+            asked_at: q.asked_at,
+            answer: "yes".into(),
+            answered_at: 9,
+            answered_by: AnsweredBy::Owner,
+        });
+        task.question = Some(q);
+        let v = serde_json::to_value(Event::Task {
+            task: Box::new(task),
+        })
+        .unwrap();
+        assert_eq!(v["task"]["question"]["askedBy"], "plan");
+        assert_eq!(v["task"]["questionHistory"][0]["answeredBy"], "owner");
+        assert_eq!(v["task"]["questionHistory"][0]["askedBy"], "plan");
     }
 
     #[test]

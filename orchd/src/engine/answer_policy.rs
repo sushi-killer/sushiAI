@@ -108,6 +108,32 @@ pub(super) fn record_policy_answer(
     });
     task.decisions
         .push(policy_answer_line(&question.text, answer, by, evidence));
+    let answered_by = if by == "judge" {
+        AnsweredBy::Judge
+    } else {
+        AnsweredBy::Policy
+    };
+    record_answered_question(task, question, answer, answered_by);
+}
+
+/// Keeps an answered question in the task's history: the one place every
+/// answer is recorded, once per answered question.
+pub(super) fn record_answered_question(
+    task: &mut Task,
+    question: &Question,
+    answer: &str,
+    answered_by: AnsweredBy,
+) {
+    task.question_history.push(AnsweredQuestion {
+        question: question.text.clone(),
+        options: question.options.clone(),
+        kind: question.kind,
+        asked_by: question.asked_by,
+        asked_at: question.asked_at,
+        answer: answer.to_string(),
+        answered_at: now_ms(),
+        answered_by,
+    });
 }
 
 /// Answers `task`'s waiting question by rule or judge, when the policy is on
@@ -324,11 +350,12 @@ mod tests {
 
     #[test]
     fn the_impossible_question_yields_its_criterion_and_evidence() {
-        let q = Question {
-            text: "Criterion 1 cannot be met as written: x. Evidence: the file is gone".into(),
-            options: vec![],
-            kind: QuestionKind::Impossible,
-        };
+        let q = Question::new(
+            "Criterion 1 cannot be met as written: x. Evidence: the file is gone",
+            vec![],
+            QuestionKind::Impossible,
+            AskedBy::Implement,
+        );
         assert_eq!(
             impossible_parts(&q),
             Some((1, "the file is gone".to_string()))
@@ -352,11 +379,12 @@ mod tests {
     fn the_rule_never_answers_the_accept_option() {
         let mut task = task_with_status(TaskStatus::Waiting);
         task.attempts = vec![attempt_with_failure(1, "review:x")];
-        let q = Question {
-            text: "Attempts keep failing".into(),
-            options: opts(&["continue", brief::ACCEPT_LAST_ATTEMPT, "stop"]),
-            kind: QuestionKind::AttemptsFailing,
-        };
+        let q = Question::new(
+            "Attempts keep failing",
+            opts(&["continue", brief::ACCEPT_LAST_ATTEMPT, "stop"]),
+            QuestionKind::AttemptsFailing,
+            AskedBy::Implement,
+        );
         let (answer, _) = rule_answer(&task, &q, 1).unwrap();
         assert_eq!(answer, "continue");
     }

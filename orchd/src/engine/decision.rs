@@ -244,11 +244,12 @@ pub(super) fn advance_after_failure(
                 options.push(brief::ACCEPT_LAST_ATTEMPT.into());
             }
             options.push("stop".into());
-            task.question = Some(Question {
-                text: question,
+            task.question = Some(Question::new(
+                question,
                 options,
-                kind: QuestionKind::AttemptsFailing,
-            });
+                QuestionKind::AttemptsFailing,
+                AskedBy::Implement,
+            ));
             task.status = TaskStatus::Waiting;
             false
         }
@@ -466,14 +467,15 @@ const IMPOSSIBLE_OPTIONS: [&str; 3] = ["drop criterion", "retry", "stop"];
 
 /// The owner question for a `sushi-impossible` claim.
 pub(super) fn impossible_question(task: &Task, claim: &brief::Impossible) -> Question {
-    Question {
-        text: format!(
+    Question::new(
+        format!(
             "Criterion {} cannot be met as written: {}. Evidence: {}",
             claim.criterion, task.criteria[claim.criterion], claim.evidence
         ),
-        options: IMPOSSIBLE_OPTIONS.iter().map(|o| o.to_string()).collect(),
-        kind: QuestionKind::Impossible,
-    }
+        IMPOSSIBLE_OPTIONS.iter().map(|o| o.to_string()).collect(),
+        QuestionKind::Impossible,
+        AskedBy::Implement,
+    )
 }
 
 /// The criterion an [`impossible_question`] is about, and whether `answer`

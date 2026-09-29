@@ -760,11 +760,12 @@ mod tests {
             "s",
         ));
         b.attempts = vec![conflict];
-        b.question = Some(Question {
-            text: "Should I reuse what Add login built?".into(),
-            options: vec![],
-            kind: QuestionKind::AgentQuestion,
-        });
+        b.question = Some(Question::new(
+            "Should I reuse what Add login built?",
+            vec![],
+            QuestionKind::AgentQuestion,
+            AskedBy::Implement,
+        ));
         let repo = vec![parent.clone(), a.clone(), b.clone()];
         let run_for = |t: &Task, msgs: &[Message]| {
             detect(

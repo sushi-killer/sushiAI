@@ -362,6 +362,7 @@ mod tests {
             budget_raises: 0,
             daily_budget_ok_day: None,
             assumptions: vec![],
+            question_history: vec![],
             judged_findings: vec![],
             archived: false,
             planned_tier: None,

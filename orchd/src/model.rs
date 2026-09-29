@@ -879,6 +879,70 @@ pub struct Question {
     /// What the question is about; the answer policy picks its rule by it.
     #[serde(default)]
     pub kind: QuestionKind,
+    /// The stage that asked it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_by: Option<AskedBy>,
+    /// When it was asked (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_at: Option<i64>,
+}
+
+impl Question {
+    /// A question asked now by `asked_by`; every asking site goes through it.
+    pub fn new(
+        text: impl Into<String>,
+        options: Vec<String>,
+        kind: QuestionKind,
+        asked_by: AskedBy,
+    ) -> Self {
+        Question {
+            text: text.into(),
+            options,
+            kind,
+            asked_by: Some(asked_by),
+            asked_at: Some(now_ms()),
+        }
+    }
+}
+
+/// The stage that asked a question. `brief`, `advisor` and `land` are
+/// reserved for the UI: nothing asks from them yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AskedBy {
+    Brief,
+    Plan,
+    Implement,
+    Verify,
+    Review,
+    Advisor,
+    Land,
+}
+
+/// Who answered a question kept in the history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnsweredBy {
+    Owner,
+    Policy,
+    Judge,
+    Orchestrator,
+}
+
+/// An answered question, kept in `Task.questionHistory`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnsweredQuestion {
+    pub question: String,
+    pub options: Vec<String>,
+    pub kind: QuestionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_by: Option<AskedBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_at: Option<i64>,
+    pub answer: String,
+    pub answered_at: i64,
+    pub answered_by: AnsweredBy,
 }
 
 /// Why orchd asks a question, set where it is asked.
@@ -1112,6 +1176,9 @@ pub struct Task {
     /// Non-blocking planner questions answered by their recommendation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assumptions: Vec<Assumption>,
+    /// Every answered question, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub question_history: Vec<AnsweredQuestion>,
     /// Keys of the disputed review findings a judge already ruled on: each
     /// is judged at most once per task.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1667,6 +1734,61 @@ pub fn now_ms() -> i64 {
 mod tests {
     use super::*;
 
+    fn minimal_task_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": "t", "title": "", "goal": "", "criteria": [], "verify": [], "repo": "",
+            "worktree": "", "branch": "", "baseSha": "", "status": "waiting", "tier": "standard",
+            "createdAt": 0, "updatedAt": 0, "variant": {}
+        })
+    }
+
+    #[test]
+    fn a_task_json_from_before_question_history_still_loads_and_serializes_without_the_keys() {
+        let mut v = minimal_task_json();
+        v["question"] = serde_json::json!({"text": "Ok?", "options": ["a"], "kind": "budget"});
+        let task: Task = serde_json::from_value(v).unwrap();
+        let q = task.question.as_ref().unwrap();
+        assert_eq!((q.asked_by, q.asked_at), (None, None));
+        assert!(task.question_history.is_empty());
+        let out = serde_json::to_value(&task).unwrap();
+        assert!(out.get("questionHistory").is_none(), "{out}");
+        assert!(out["question"].get("askedBy").is_none(), "{out}");
+        assert!(out["question"].get("askedAt").is_none(), "{out}");
+    }
+
+    #[test]
+    fn a_stamped_question_and_its_history_entry_serialize_lowercase() {
+        let q = Question::new(
+            "Ok?",
+            vec!["a".into()],
+            QuestionKind::Budget,
+            AskedBy::Review,
+        );
+        assert!(q.asked_at.is_some());
+        let mut task: Task = serde_json::from_value(minimal_task_json()).unwrap();
+        task.question_history.push(AnsweredQuestion {
+            question: q.text.clone(),
+            options: q.options.clone(),
+            kind: q.kind,
+            asked_by: q.asked_by,
+            asked_at: q.asked_at,
+            answer: "a".into(),
+            answered_at: 5,
+            answered_by: AnsweredBy::Orchestrator,
+        });
+        task.question = Some(q);
+        let v = serde_json::to_value(&task).unwrap();
+        assert_eq!(v["question"]["askedBy"], "review");
+        assert!(v["question"]["askedAt"].is_i64());
+        let e = &v["questionHistory"][0];
+        assert_eq!(e["askedBy"], "review");
+        assert_eq!(e["answeredBy"], "orchestrator");
+        assert_eq!(e["answeredAt"], 5);
+        assert_eq!(e["kind"], "budget");
+        let back: Task = serde_json::from_value(v).unwrap();
+        assert_eq!(back.question_history, task.question_history);
+    }
+
     #[test]
     fn settings_without_evolution_load_with_evolution_defaults() {
         let mut v = serde_json::to_value(Settings::default()).unwrap();
@@ -1753,6 +1875,7 @@ mod tests {
             budget_raises: 0,
             daily_budget_ok_day: None,
             assumptions: vec![],
+            question_history: vec![],
             judged_findings: vec![],
             archived: false,
             planned_tier: None,
@@ -1991,6 +2114,7 @@ mod tests {
             budget_raises: 0,
             daily_budget_ok_day: None,
             assumptions: vec![],
+            question_history: vec![],
             judged_findings: vec![],
             archived: false,
             planned_tier: None,
@@ -2048,6 +2172,7 @@ mod tests {
             budget_raises: 0,
             daily_budget_ok_day: None,
             assumptions: vec![],
+            question_history: vec![],
             archived: false,
             planned_tier: None,
             tier_fallback: None,
@@ -2131,6 +2256,7 @@ mod tests {
             budget_raises: 0,
             daily_budget_ok_day: None,
             assumptions: vec![],
+            question_history: vec![],
             judged_findings: vec![],
             archived: true,
             planned_tier: None,

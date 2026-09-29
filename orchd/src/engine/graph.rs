@@ -1102,18 +1102,19 @@ impl App {
             .map(|t| format!("\"{}\" ({})", t.title, status_word(t.status)))
             .collect();
         let mut task = task.clone();
-        task.question = Some(Question {
-            text: format!(
+        task.question = Some(Question::new(
+            format!(
                 "{DEPENDENCY_QUESTION}: {}. Retry it, drop it from what this task waits for, or stop?",
                 names.join(", ")
             ),
-            options: vec![
+            vec![
                 "retry the dependency".into(),
                 "drop the dependency".into(),
                 "stop".into(),
             ],
-            kind: QuestionKind::DependencyEnded,
-        });
+            QuestionKind::DependencyEnded,
+            AskedBy::Implement,
+        ));
         task.status = TaskStatus::Waiting;
         task.updated_at = now_ms();
         // The answer policy retries an ended dependency once before the owner
@@ -1142,6 +1143,7 @@ impl App {
                 }
                 task.assumptions.pop();
                 task.decisions.pop();
+                task.question_history.pop();
             }
         }
         let _ = self.store.save_task(&task);
@@ -1225,6 +1227,9 @@ impl App {
         }
         if by_owner {
             task.decisions.push(format!("Owner: {}", answer.trim()));
+            if let Some(question) = task.question.clone() {
+                record_answered_question(&mut task, &question, answer.trim(), AnsweredBy::Owner);
+            }
         }
         task.question = None;
         let fresh = self.repo_tasks(&task.repo);

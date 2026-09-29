@@ -466,6 +466,7 @@ impl App {
             budget_raises: 0,
             daily_budget_ok_day: None,
             assumptions: vec![],
+            question_history: vec![],
             judged_findings: vec![],
             archived: false,
             planned_tier: None,
@@ -747,7 +748,9 @@ impl App {
                 ctrl.cancel.cancel();
             }
             task.decisions.push("Owner: stop".to_string());
-            task.question = None;
+            if let Some(question) = task.question.take() {
+                record_answered_question(&mut task, &question, "stop", AnsweredBy::Owner);
+            }
             task.status = TaskStatus::Stopped;
             task.updated_at = now_ms();
             self.store.save_task(&task).map_err(|e| e.to_string())?;
@@ -778,6 +781,9 @@ impl App {
             // decision synchronously and relaunch (spec step 9: "status
             // queued, loop continues").
             task.decisions.push(format!("Owner: {}", p.answer));
+            if let Some(question) = task.question.clone() {
+                record_answered_question(&mut task, &question, &p.answer, AnsweredBy::Owner);
+            }
             if let Some(n) = task
                 .question
                 .as_ref()

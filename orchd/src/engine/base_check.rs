@@ -14,14 +14,15 @@ const ALREADY_FAILS: &str = " already fails on base ";
 /// The owner question for a final check that fails on the base as well.
 pub(super) fn pre_existing_question(command: &str, base_sha: &str, base_tail: &str) -> Question {
     let sha: String = base_sha.chars().take(7).collect();
-    Question {
-        text: format!(
+    Question::new(
+        format!(
             "{command} already fails on base {sha}: {}",
             tail_chars(base_tail.trim(), 300)
         ),
-        options: PRE_EXISTING_OPTIONS.iter().map(|o| o.to_string()).collect(),
-        kind: QuestionKind::PreexistingFailure,
-    }
+        PRE_EXISTING_OPTIONS.iter().map(|o| o.to_string()).collect(),
+        QuestionKind::PreexistingFailure,
+        AskedBy::Verify,
+    )
 }
 
 /// The owner question for a parent's `verify` command that fails on the base:

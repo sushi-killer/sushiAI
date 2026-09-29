@@ -158,13 +158,23 @@ async fn daily_budget_question(app: &Arc<App>, task: &mut Task, run: &str) -> Op
     task.decisions.push(format!(
         "Orchestrator: daily budget ${budget:.2} reached (${spent:.2} spent on {day} UTC); the {run} run waits for the owner"
     ));
-    Some(Question {
-        text: format!(
+    Some(Question::new(
+        format!(
             "Today's spend is ${spent:.2}, reaching the ${budget:.2} daily budget (UTC {day}); the {run} run was not started. Run anyway for the rest of {day}, or stop?"
         ),
-        options: vec![DAILY_RUN_ANYWAY.into(), "stop".into()],
-        kind: QuestionKind::DailyBudget,
-    })
+        vec![DAILY_RUN_ANYWAY.into(), "stop".into()],
+        QuestionKind::DailyBudget,
+        asked_by_run(run),
+    ))
+}
+
+/// The stage a budget gate's `run` argument names.
+fn asked_by_run(run: &str) -> AskedBy {
+    match run {
+        "plan" => AskedBy::Plan,
+        "review" => AskedBy::Review,
+        _ => AskedBy::Implement,
+    }
 }
 
 /// The gate before every stage run (plan, advisor, implement attempt,
@@ -192,14 +202,15 @@ pub(super) async fn wait_while_over_budget(
                 "Orchestrator: budget ${budget:.2} reached (${:.2} spent); the {run} run waits for the owner",
                 task.cost_usd
             ));
-            Question {
-                text: format!(
+            Question::new(
+                format!(
                     "{BUDGET_QUESTION_PREFIX} ${:.2}, reaching its ${budget:.2} budget, before the {run} run. Raise the budget by ${step:.2}, or stop?",
                     task.cost_usd
                 ),
-                options: vec!["raise".into(), "stop".into()],
-                kind: QuestionKind::Budget,
-            }
+                vec!["raise".into(), "stop".into()],
+                QuestionKind::Budget,
+                asked_by_run(run),
+            )
         } else if let Some(q) = daily_budget_question(app, task, run).await {
             q
         } else {

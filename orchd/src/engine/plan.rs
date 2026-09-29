@@ -281,11 +281,12 @@ pub(super) async fn ask_plan_question(
     let (tx, rx) = oneshot::channel();
     *pending_answer.lock().unwrap() = Some(tx);
     if let Ok(Some(mut task)) = app.store.load_task(task_id) {
-        task.question = Some(Question {
-            text: question_text.to_string(),
+        task.question = Some(Question::new(
+            question_text,
             options,
-            kind: QuestionKind::PlanQuestion,
-        });
+            QuestionKind::PlanQuestion,
+            AskedBy::Plan,
+        ));
         task.status = TaskStatus::Waiting;
         task.updated_at = now_ms();
         let _ = app.store.save_task(&task);
@@ -303,7 +304,9 @@ pub(super) async fn ask_plan_question(
             if let Ok(Some(mut task)) = app.store.load_task(task_id) {
                 task.decisions
                     .push(format!("Owner: {question_text} -> {answer}"));
-                task.question = None;
+                if let Some(question) = task.question.take() {
+                    record_answered_question(&mut task, &question, answer, AnsweredBy::Owner);
+                }
                 task.status = TaskStatus::Drafting;
                 task.updated_at = now_ms();
                 let _ = app.store.save_task(&task);

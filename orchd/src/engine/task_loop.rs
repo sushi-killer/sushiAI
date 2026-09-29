@@ -1043,11 +1043,12 @@ pub(super) async fn run_task_loop(
                 }
             }
 
-            task.question = Some(Question {
-                text: question_text,
-                options: vec![],
-                kind: QuestionKind::AgentQuestion,
-            });
+            task.question = Some(Question::new(
+                question_text,
+                vec![],
+                QuestionKind::AgentQuestion,
+                AskedBy::Implement,
+            ));
             task.status = TaskStatus::Waiting;
             task.updated_at = now_ms();
             match wait_for_answer_with_triage(
@@ -1547,11 +1548,12 @@ pub(super) async fn run_task_loop(
         {
             task.attempts[idx].status = AttemptStatus::Blocked;
             task.attempts[idx].ended_at = Some(now_ms());
-            task.question = Some(Question {
-                text: format!("Change touches protected path {path}: approve or reject?"),
-                options: vec!["approve".into(), "reject".into()],
-                kind: QuestionKind::ProtectedPath,
-            });
+            task.question = Some(Question::new(
+                format!("Change touches protected path {path}: approve or reject?"),
+                vec!["approve".into(), "reject".into()],
+                QuestionKind::ProtectedPath,
+                AskedBy::Implement,
+            ));
             task.status = TaskStatus::Waiting;
             task.updated_at = now_ms();
             match wait_for_answer(
@@ -1778,13 +1780,14 @@ pub(super) async fn run_task_loop(
                     // to commit this attempt unreviewed.
                     task.attempts[idx].status = AttemptStatus::Blocked;
                     task.attempts[idx].ended_at = Some(now_ms());
-                    task.question = Some(Question {
-                        text: format!(
+                    task.question = Some(Question::new(
+                        format!(
                             "The review gave no verdict ({why}). Commit this attempt unreviewed?"
                         ),
-                        options: vec!["approve".into(), "retry".into()],
-                        kind: QuestionKind::ReviewNoVerdict,
-                    });
+                        vec!["approve".into(), "retry".into()],
+                        QuestionKind::ReviewNoVerdict,
+                        AskedBy::Review,
+                    ));
                     task.status = TaskStatus::Waiting;
                     task.updated_at = now_ms();
                     match wait_for_answer(

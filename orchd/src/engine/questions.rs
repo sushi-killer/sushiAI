@@ -190,7 +190,9 @@ async fn park_for_answer(
         // stale copy used to overwrite it with the question still set.
         Some(answer) => {
             task.decisions.push(format!("Owner: {answer}"));
-            task.question = None;
+            if let Some(question) = task.question.take() {
+                record_answered_question(task, &question, answer, AnsweredBy::Owner);
+            }
             task.status = TaskStatus::Queued;
             task.updated_at = now_ms();
             let _ = app.store.save_task(task);
@@ -383,10 +385,8 @@ async fn wait_for_triaged_answer(
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Option<Answered> {
-    let question = task.question.clone().unwrap_or(Question {
-        text: String::new(),
-        options: vec![],
-        kind: QuestionKind::AgentQuestion,
+    let question = task.question.clone().unwrap_or_else(|| {
+        Question::new("", vec![], QuestionKind::AgentQuestion, AskedBy::Implement)
     });
     let attempt_n = task.attempts[idx].n;
     let worktree = PathBuf::from(&task.worktree);
@@ -438,6 +438,12 @@ async fn wait_for_triaged_answer(
                     );
                     app.broadcast_log(task_id, attempt_n, line.clone());
                     task.decisions.push(line);
+                    record_answered_question(
+                        task,
+                        &question,
+                        &decision.answer,
+                        AnsweredBy::Orchestrator,
+                    );
                 }
                 task.question = None;
                 task.status = TaskStatus::Queued;
@@ -456,6 +462,8 @@ async fn wait_for_triaged_answer(
                     text: decision.question,
                     options: decision.options,
                     kind: question.kind,
+                    asked_by: question.asked_by,
+                    asked_at: question.asked_at,
                 });
                 task.decisions
                     .push(orchestrator_escalate_line(&decision.reason));
@@ -495,11 +503,12 @@ pub(super) async fn ask_plan_question_with_triage(
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Option<String> {
-    let asked = Question {
-        text: question_text.to_string(),
-        options: options.clone(),
-        kind: QuestionKind::PlanQuestion,
-    };
+    let asked = Question::new(
+        question_text,
+        options.clone(),
+        QuestionKind::PlanQuestion,
+        AskedBy::Plan,
+    );
     let cautious = cautious_choice(app, task, &asked);
     let auto_answer = app.settings.read().unwrap().auto_answer;
     if let Some(TriageRun { decision, cost_usd }) = run_triage(
@@ -546,6 +555,12 @@ pub(super) async fn ask_plan_question_with_triage(
                         orchestrator_answer_line(question_text, &decision.answer, &decision.reason);
                     app.broadcast_log(task_id, attempt_n, line.clone());
                     task.decisions.push(line);
+                    record_answered_question(
+                        task,
+                        &asked,
+                        &decision.answer,
+                        AnsweredBy::Orchestrator,
+                    );
                 }
                 task.question = None;
                 task.status = TaskStatus::Drafting;

@@ -327,6 +327,15 @@ export interface Bridge {
       event: import("./orchestrator/types.ts").OrchestratorEvent,
     ) => void,
   ): () => void;
+  /** An orchd task needs input, finished or failed while the window is
+   * focused: the renderer draws its own toast. */
+  onOrchestratorNotice(
+    callback: (notice: import("./orchestrator/notices.ts").TaskNotice) => void,
+  ): () => void;
+  /** The owner clicked a native orchd notification. */
+  onOrchestratorOpen(
+    callback: (target: import("./orchestrator/notices.ts").TaskTarget) => void,
+  ): () => void;
   chat(options: {
     panelId: string;
     cwd: string;

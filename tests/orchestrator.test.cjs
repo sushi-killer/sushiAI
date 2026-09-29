@@ -6,6 +6,7 @@ const path = require("node:path");
 const fs = require("node:fs/promises");
 const {
   OrchestratorService,
+  orchestratorNotice,
   socketPathFor,
   orchdBinaryPath,
   isStalePing,
@@ -375,7 +376,7 @@ test("secrets.set is always pushed, even to clear it: no provider or key means c
   assert.deepEqual(secretsCall.params, { classifier: null, profiles: {} });
 });
 
-test("connect() relays subscribe events and raises one attention notice per (task, question)", async (t) => {
+test("connect() relays subscribe events and raises one notice per (task, question)", async (t) => {
   const { socketPath, directory, hasSubscriber, pushEvent } =
     await fixtureServer(t, {
       ping: () => ({}),
@@ -385,7 +386,7 @@ test("connect() relays subscribe events and raises one attention notice per (tas
   const notices = [];
   const service = await serviceAgainst(t, socketPath, directory, {
     send: (channel, value) => relayed.push([channel, value]),
-    notify: async (notice) => {
+    notify: (notice) => {
       notices.push(notice);
     },
   });
@@ -407,10 +408,12 @@ test("connect() relays subscribe events and raises one attention notice per (tas
     { event: "task", task: task("Delete old keys?") },
   ]);
   assert.deepEqual(notices[0], {
-    workspaceId: "/repo",
-    panelId: "t1",
+    taskId: "t1",
+    repo: "/repo",
+    kind: "input",
     title: "Do the thing",
     body: "Delete old keys?",
+    focus: "question",
   });
 
   // The same task re-entering `waiting` with the same question never re-notifies.
@@ -424,7 +427,7 @@ test("connect() relays subscribe events and raises one attention notice per (tas
   assert.equal(notices[1].body, "Something else?");
 });
 
-test("a top-level task's fresh report raises one 'Feature done' notice; old or child ones raise none", async (t) => {
+test("the transition detector notifies done and failed once, only for live top-level tasks; a fresh report titles the done notice", async (t) => {
   const { socketPath, directory, hasSubscriber, pushEvent } =
     await fixtureServer(t, {
       ping: () => ({}),
@@ -433,34 +436,154 @@ test("a top-level task's fresh report raises one 'Feature done' notice; old or c
   const notices = [];
   const service = await serviceAgainst(t, socketPath, directory, {
     send: () => {},
-    notify: async (notice) => {
+    notify: (notice) => {
       notices.push(notice);
     },
   });
   service.connect();
   await waitUntil(hasSubscriber);
 
-  const done = (extra) => ({
-    id: "t1",
+  const base = {
     title: "Ship it",
-    goal: "Ship the thing",
     repo: "/repo",
+    branch: "task/ship",
+    baseRef: "main",
+    costUsd: 1.234,
+    archived: false,
+    attempts: [],
+  };
+  const done = {
+    ...base,
+    id: "d1",
     status: "done",
+    landedSha: "0123456789abcdef",
     report: "# Ship it",
     reportAt: Date.now(),
-    ...extra,
+  };
+  pushEvent({ event: "task", task: done });
+  pushEvent({ event: "task", task: { ...done, costUsd: 2 } });
+  pushEvent({ event: "task", task: { ...base, id: "d2", status: "done" } });
+  pushEvent({
+    event: "task",
+    task: { ...base, id: "d3", status: "done", report: "# Old", reportAt: 1 },
   });
-  pushEvent({ event: "task", task: done({ id: "old", reportAt: 1 }) });
-  pushEvent({ event: "task", task: done({ id: "child", parent: "t0" }) });
-  pushEvent({ event: "task", task: done() });
-  await waitUntil(() => notices.length > 0);
-  assert.deepEqual(notices[0], {
-    workspaceId: "/repo",
-    panelId: "t1",
-    title: "Feature done: Ship it",
-    body: "Ship the thing",
+  pushEvent({
+    event: "task",
+    task: {
+      ...base,
+      id: "f1",
+      status: "failed",
+      attempts: [{ n: 1, failure: { kind: "verify" } }],
+    },
   });
-  pushEvent({ event: "task", task: done() });
+  // Subtask and archived tasks raise nothing.
+  pushEvent({
+    event: "task",
+    task: { ...base, id: "s1", status: "done", parent: "d1" },
+  });
+  pushEvent({
+    event: "task",
+    task: { ...base, id: "s2", status: "failed", parent: "d1" },
+  });
+  pushEvent({
+    event: "task",
+    task: { ...base, id: "a1", status: "done", archived: true },
+  });
+  // A waiting subtask still asks.
+  pushEvent({
+    event: "task",
+    task: {
+      ...base,
+      id: "s3",
+      status: "waiting",
+      parent: "d1",
+      question: { text: "Which?" },
+    },
+  });
+  pushEvent({
+    event: "task",
+    task: {
+      ...base,
+      id: "a2",
+      status: "waiting",
+      archived: true,
+      question: { text: "Archived?" },
+    },
+  });
+  await waitUntil(() => notices.length >= 5);
   await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.equal(notices.length, 1);
+  assert.deepEqual(
+    notices.map((n) => [n.taskId, n.kind, n.title, n.body, n.focus]),
+    [
+      [
+        "d1",
+        "done",
+        "Feature done: Ship it",
+        "$1.23 · landed 01234567 on main",
+        "report",
+      ],
+      ["d2", "done", "Ship it", "$1.23 · on task/ship, not landed", "report"],
+      ["d3", "done", "Ship it", "$1.23 · on task/ship, not landed", "report"],
+      ["f1", "failed", "Ship it", "verify failed · $1.23", "summary"],
+      ["s3", "input", "Ship it", "Which?", "question"],
+    ],
+  );
+});
+
+test("orchestratorNotice shapes input, done and failed notices and trims to the caps", () => {
+  const task = {
+    id: "t1",
+    title: "T".repeat(500),
+    repo: "/repo",
+    branch: "task/x",
+    costUsd: 0,
+  };
+  const input = orchestratorNotice({
+    ...task,
+    status: "waiting",
+    question: { text: "q".repeat(900) },
+  });
+  assert.equal(input.kind, "input");
+  assert.equal(input.focus, "question");
+  assert.equal(input.title.length, 120);
+  assert.equal(input.body.length, 300);
+  assert.equal(
+    orchestratorNotice({ ...task, status: "waiting" }).body,
+    "Needs your input.",
+  );
+  const done = orchestratorNotice({ ...task, status: "done" });
+  assert.equal(done.body, "$0.00 · on task/x, not landed");
+  assert.equal(done.focus, "report");
+  assert.equal(done.title, "T".repeat(120));
+  const fresh = orchestratorNotice({
+    ...task,
+    status: "done",
+    report: "# r",
+    reportAt: Date.now(),
+  });
+  assert.equal(fresh.title, `Feature done: ${"T".repeat(500)}`.slice(0, 120));
+  const stale = orchestratorNotice({
+    ...task,
+    status: "done",
+    report: "# r",
+    reportAt: 1,
+  });
+  assert.equal(stale.title, "T".repeat(120));
+  const failed = orchestratorNotice({
+    ...task,
+    status: "failed",
+    costUsd: 0.5,
+    attempts: [
+      { n: 1, failure: { kind: "stall" } },
+      { n: 2, failure: { kind: "budget" } },
+    ],
+  });
+  assert.deepEqual(failed, {
+    taskId: "t1",
+    repo: "/repo",
+    kind: "failed",
+    title: "T".repeat(120),
+    body: "over budget · $0.50",
+    focus: "summary",
+  });
 });

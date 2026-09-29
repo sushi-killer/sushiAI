@@ -4,7 +4,8 @@
   to `<data>/tasks/<id>/report.md` and `task.report`: outcome, what changed,
   each criterion's status, assumptions and automatic answers, cost by stage
   and model, attempts and failure kinds, follow-ups from the handoffs. It
-  raises one "Feature done: <title>" notice and shows as a Report section at
+  is announced by the one mascot notice, titled "Feature done: <title>"
+  (opening it scrolls to the Report section), and shows as a Report section at
   the top of the task's detail. `task.report {id}` and the `task_report`
   orchestrator tool return it.
 - `leadTouch` marks whether a person had to fix a done task's work

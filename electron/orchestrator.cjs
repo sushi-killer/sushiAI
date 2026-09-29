@@ -167,8 +167,65 @@ async function waitForExit(
   }
 }
 
+const FAILURE_LABELS = {
+  no_deliverable: "no deliverable",
+  stall: "stalled",
+  loop: "looping",
+  budget: "over budget",
+  verify: "verify failed",
+  heldout: "held-out check failed",
+  review: "review failed",
+  protected: "protected path touched",
+  blocked: "blocked",
+  error: "error",
+};
+
+function formatCost(costUsd) {
+  return `$${(costUsd || 0).toFixed(2)}`;
+}
+
 /** How long after its `reportAt` a report still counts as fresh. */
 const REPORT_NOTICE_MS = 5 * 60 * 1000;
+
+/** The notice for a task that needs input, finished or failed - trimmed to
+ * the caps a native notification can carry. Pure: the caller decides whether
+ * the task is worth one. */
+function orchestratorNotice(task) {
+  const cap = (value, max) => String(value ?? "").slice(0, max);
+  let title = cap(task.title || "Orchestrator", 120);
+  let kind = "input";
+  let body = cap(task.question?.text || "Needs your input.", 300);
+  let focus = "question";
+  if (task.status === "done") {
+    kind = "done";
+    focus = "report";
+    // `reportAt` is set once; an old report re-broadcast after a restart is
+    // not news, so only a fresh one is announced as a finished feature.
+    const fresh = Date.now() - Number(task.reportAt || 0) < REPORT_NOTICE_MS;
+    if (task.report && fresh)
+      title = cap(`Feature done: ${task.title || "Orchestrator"}`, 120);
+    const where = task.landedSha
+      ? `landed ${String(task.landedSha).slice(0, 8)} on ${task.baseRef || "its base"}`
+      : `on ${task.branch || "its branch"}, not landed`;
+    body = cap(`${formatCost(task.costUsd)} · ${where}`, 300);
+  } else if (task.status === "failed") {
+    kind = "failed";
+    focus = "summary";
+    const attempts = Array.isArray(task.attempts) ? task.attempts : [];
+    const last = attempts[attempts.length - 1];
+    const failure = last?.failure?.kind;
+    const label = FAILURE_LABELS[failure] || failure || "failed";
+    body = cap(`${label} · ${formatCost(task.costUsd)}`, 300);
+  }
+  return {
+    taskId: cap(task.id, 200),
+    repo: cap(task.repo, 1000),
+    kind,
+    title,
+    body,
+    focus,
+  };
+}
 
 class OrchestratorService {
   constructor({
@@ -197,9 +254,9 @@ class OrchestratorService {
     this.backoff = 500;
     this.closed = false;
     this.starting = null;
-    // One notice per (taskId, question text): a task re-entering `waiting`
-    // with the same question never re-notifies.
-    this.notifiedWaiting = new Set();
+    // Keys of notices already raised (see #notifyTransition): a task
+    // re-entering a state with the same question never re-notifies.
+    this.notified = new Set();
   }
 
   async #refreshToken() {
@@ -398,42 +455,25 @@ class OrchestratorService {
     setTimeout(() => this.#subscribeLoop(), this.backoff).unref?.();
   }
 
-  /** A task that just entered `waiting` raises one attention notice - trimmed
-   * to the caps `attention.cjs` enforces, so a long goal/question never turns
-   * a real notice into a thrown validation error. A top-level task whose
-   * report was just written raises one "Feature done" notice. */
-  #notifyWaiting(message) {
+  /** The transition detector: raises one notice per (task, question) for a
+   * task needing input, and one per (task, status) for a top-level task that
+   * finished or failed. Subtasks never raise done/failed, archived tasks
+   * raise nothing. */
+  #notifyTransition(message) {
     if (!this.notify || message.event !== "task") return;
     const task = message.task;
-    if (!task) return;
-    if (task.status === "done" && task.report && !task.parent) {
-      // `reportAt` is set once; an old report re-broadcast after a mark
-      // change or a restart is not news.
-      const fresh = Date.now() - Number(task.reportAt || 0) < REPORT_NOTICE_MS;
-      const key = `${task.id}:report`;
-      if (!fresh || this.notifiedWaiting.has(key)) return;
-      this.notifiedWaiting.add(key);
-      this.notify({
-        workspaceId: String(task.repo || task.id || "").slice(0, 200),
-        panelId: String(task.id || "").slice(0, 200),
-        title: `Feature done: ${String(task.title || "")}`.slice(0, 120),
-        body: String(task.goal || "Open the task for its report.").slice(
-          0,
-          300,
-        ),
-      }).catch(() => {});
-      return;
-    }
-    if (task.status !== "waiting") return;
-    const key = `${task.id}:${task.question?.text || ""}`;
-    if (this.notifiedWaiting.has(key)) return;
-    this.notifiedWaiting.add(key);
-    this.notify({
-      workspaceId: String(task.repo || task.id || "").slice(0, 200),
-      panelId: String(task.id || "").slice(0, 200),
-      title: String(task.title || "Orchestrator").slice(0, 120),
-      body: String(task.question?.text || "Needs your input.").slice(0, 300),
-    }).catch(() => {});
+    if (!task || typeof task !== "object" || task.archived) return;
+    let key;
+    if (task.status === "waiting")
+      key = `input:${task.id}:${task.question?.text || ""}`;
+    else if (
+      (task.status === "done" || task.status === "failed") &&
+      !task.parent
+    )
+      key = `${task.status}:${task.id}`;
+    if (!key || this.notified.has(key)) return;
+    this.notified.add(key);
+    this.notify(orchestratorNotice(task));
   }
 
   #subscribeOnce() {
@@ -463,7 +503,7 @@ class OrchestratorService {
           }
           if (!message.event) continue;
           this.send("orchestrator-event", message);
-          this.#notifyWaiting(message);
+          this.#notifyTransition(message);
         }
       });
       const done = () => {
@@ -513,6 +553,7 @@ module.exports = {
   ORCHESTRATOR_MANIFEST,
   OrchestratorService,
   registerOrchestratorExtension,
+  orchestratorNotice,
   orchdBinaryPath,
   socketPathFor,
   isStalePing,

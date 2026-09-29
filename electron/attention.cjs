@@ -45,6 +45,18 @@ function trayTitle(count) {
   return Number.isFinite(count) && count > 0 ? String(Math.trunc(count)) : "";
 }
 
+/** The mascot shipped next to the tray mark: `dist/sushi-dock.png`. */
+function mascotIconPath(trayIconPath) {
+  return path.join(path.dirname(trayIconPath), "sushi-dock.png");
+}
+
+/** Where an orchd task notice goes: nowhere when notifications are off, the
+ * renderer's own toast while the window is focused, else a native one. */
+function taskNoticeRoute({ enabled, focused }) {
+  if (!enabled) return "none";
+  return focused ? "in-app" : "native";
+}
+
 function boundedString(value, max) {
   return typeof value === "string" && value.length > 0 && value.length <= max;
 }
@@ -204,6 +216,46 @@ function registerAttentionIpc({
     notification.show();
   }
 
+  let mascot;
+  function mascotImage() {
+    if (mascot === undefined) {
+      const file = mascotIconPath(trayIconPath);
+      mascot = existsSync(file) ? nativeImage.createFromPath(file) : null;
+    }
+    return mascot;
+  }
+
+  /** An orchd task notice (needs input, done, failed). Clicking the native
+   * one shows the window and asks the renderer to open that exact task. */
+  function notifyTask(notice) {
+    const win = getMainWindow();
+    const route = taskNoticeRoute({
+      enabled: preferences.notifications,
+      focused: Boolean(
+        win && !win.isDestroyed() && win.isVisible() && win.isFocused(),
+      ),
+    });
+    if (route === "none") return;
+    if (route === "in-app") return send("orchestrator-notice", notice);
+    const options = { title: notice.title, body: notice.body };
+    const icon = mascotImage();
+    if (icon) options.icon = icon;
+    const notification = new Notification(options);
+    notifications.add(notification);
+    const cleanup = () => notifications.delete(notification);
+    notification.on("click", () => {
+      cleanup();
+      showWindow();
+      send("orchestrator-open", {
+        taskId: notice.taskId,
+        repo: notice.repo,
+        focus: notice.focus,
+      });
+    });
+    notification.on("close", cleanup);
+    notification.show();
+  }
+
   handle("attention-notify", (notice) => notify(notice));
   handle("attention-badge", (count, working) => setBadge(count, working));
   handle("app-preferences", () => ({ ...preferences }));
@@ -212,10 +264,7 @@ function registerAttentionIpc({
   return {
     init,
     showWindow,
-    /** The same notifier `attention-notify` wires to IPC, for a main-process
-     * caller (the orchestrator's waiting-task notice) that has no renderer
-     * round trip to make. */
-    notify,
+    notifyTask,
     /** Called from the window's `close` listener; returns true when the
      * event was intercepted (hidden) so main.cjs can `preventDefault()`. */
     handleWindowClose(win) {
@@ -254,5 +303,7 @@ module.exports = {
   trayState,
   trayIconFile,
   validateNotice,
+  mascotIconPath,
+  taskNoticeRoute,
   registerAttentionIpc,
 };

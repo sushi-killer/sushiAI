@@ -57,6 +57,21 @@ panel, picks the task by title, saves
 `artifacts/orchestrator-{window,detail,home}.png` (`home` is the orchestrator page before a task is picked), plus `artifacts/orchestrator-proposals.png` (a crop of the PROPOSALS list, only when proposals were seeded; `report.screenshots.proposals`), prints a JSON report, and
 exits non-zero with `error` set on any failure, including an unmatched title.
 
+## Orchestrator task notices
+
+To photograph the orchd notices (needs input, done, failed) and what "Open"
+does, run
+`npm run build && npm run build:orchd && node .agents/skills/ui-evidence/scripts/orchestrator-notices.mjs`
+(no arguments). It seeds one landed done task with cost, one failed task whose
+last attempt failed with kind `verify`, and one waiting task with a question,
+opens a Local Evidence workspace with no Orchestrator panel, and emits each
+notice as the `orchestrator-notice` IPC, built by the exported
+`orchestratorNotice`. It saves `artifacts/orchestrator-toast-{done,failed,input}.png`
+(the bottom-right corner), then clicks Open on the input and done toasts and
+saves `artifacts/orchestrator-open-{input,done}.png`. The JSON report says
+whether `.orch-question` / `.orch-report` intersect the viewport and which
+task row is `.selected`; it exits non-zero with `error` set on any failure.
+
 ## Boundaries
 
 - The driver launches its own Electron with a temporary `BRIDGE_DATA_DIR`.

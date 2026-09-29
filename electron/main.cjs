@@ -200,7 +200,7 @@ const attention = registerAttentionIpc({
 registerOrchestratorExtension({
   handle,
   send,
-  notify: (notice) => attention.notify(notice),
+  notify: (notice) => attention.notifyTask(notice),
   dataDir: path.join(app.getPath("userData"), "orchestrator"),
   root,
   resourcesPath: process.resourcesPath,

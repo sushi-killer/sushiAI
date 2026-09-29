@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Archive,
   ArchiveRestore,
@@ -16,6 +16,8 @@ import {
   X,
 } from "lucide-react";
 import "./orchestrator.css";
+import type { TaskTarget } from "./notices";
+import { pendingReveal, subscribeReveal } from "./reveal";
 import { orchestratorClient } from "./client";
 import {
   applyOrchestratorEvent,
@@ -997,9 +999,9 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
 
   useEffect(
     () =>
-      // The waiting-task attention notice is raised by the main process's
-      // subscribe relay (electron/orchestrator.cjs), not here: this panel
-      // only needs to exist for a task's live state to update.
+      // Task notices are raised by the main process's subscribe relay
+      // (electron/orchestrator.cjs), not here: this panel only needs to
+      // exist for a task's live state to update.
       window.bridge?.onOrchestrator((event) => {
         if (event.event === "task" && event.task.repo !== cwd) return;
         if (event.event === "message") {
@@ -1049,6 +1051,36 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
     setView(next);
     setNarrowMain(true);
   }
+
+  // A notice's "open this task" lands here: select it, then bring its
+  // question card (needs input), its report (done) or its attempts (failed) into view.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [scrollTo, setScrollTo] = useState<TaskTarget | null>(null);
+  const applied = useRef<TaskTarget | null>(null);
+  useEffect(() => {
+    const take = () => {
+      const target = pendingReveal(cwd);
+      if (!target || applied.current === target) return;
+      applied.current = target;
+      setView({ kind: "task", id: target.taskId });
+      setNarrowMain(true);
+      setScrollTo(target);
+    };
+    take();
+    return subscribeReveal(take);
+  }, [cwd]);
+  useEffect(() => {
+    if (!scrollTo || selected?.id !== scrollTo.taskId) return;
+    const root = rootRef.current;
+    const element =
+      (scrollTo.focus === "question" &&
+        root?.querySelector(".orch-question")) ||
+      (scrollTo.focus === "report" && root?.querySelector(".orch-report")) ||
+      root?.querySelector(".orch-attempts");
+    if (!element) return;
+    element.scrollIntoView({ block: "center" });
+    setScrollTo(null);
+  }, [scrollTo, selected?.id, live.tasks]);
 
   async function act(action: () => Promise<Task>) {
     setBusy(true);
@@ -1121,6 +1153,7 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
 
   return (
     <div
+      ref={rootRef}
       className={`orchestrator-panel ${narrowMain ? "view-main" : "view-list"}`}
     >
       <div className="orch-tasks">

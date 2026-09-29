@@ -474,7 +474,13 @@ pub fn settle(daemon: &Daemon, task_id: &str) -> serde_json::Value {
 /// attempt runs on the fake Claude harness the test set up.
 pub fn cheap_route_on_claude(daemon: &Daemon) {
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
-    settings["tiers"]["mechanical"] = serde_json::json!("claude-haiku");
+    settings["routes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "claude-cheap", "label": "Claude cheap", "harness": "claude", "model": "sonnet",
+        }));
+    settings["tiers"]["mechanical"] = serde_json::json!("claude-cheap");
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 }
 

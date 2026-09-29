@@ -168,9 +168,11 @@ pub(super) fn add_task_cost(app: &Arc<App>, task_id: &str, cost: f64) {
     }
 }
 
-/// The `briefCheckRoute` id and the route it names (`None` when it names no
-/// route); `None` overall when the setting is empty, i.e. cheap checks are off.
-pub(super) fn check_route(app: &App) -> Option<(String, Option<Route>)> {
+/// The `briefCheckRoute` id, the route it resolves to (`None` when nothing
+/// usable is configured) and, when the id names no route and the mechanical
+/// tier's route stands in, the reason to record; `None` overall when the
+/// setting is empty, i.e. cheap checks are off.
+pub(super) fn check_route(app: &App) -> Option<(String, Option<Route>, Option<String>)> {
     let settings = app.settings.read().unwrap();
     let route_id = settings.brief_check_route.clone();
     if route_id.is_empty() {
@@ -181,14 +183,27 @@ pub(super) fn check_route(app: &App) -> Option<(String, Option<Route>)> {
         .iter()
         .find(|r| r.id == route_id)
         .cloned()
-        // Settings saved before this route existed still reach the built-in one.
         .or_else(|| {
             Settings::default()
                 .routes
                 .into_iter()
                 .find(|r| r.id == route_id)
         });
-    Some((route_id, route))
+    if route.is_some() {
+        return Some((route_id, route, None));
+    }
+    let mechanical = settings
+        .tiers
+        .get(&Tier::Mechanical)
+        .and_then(|id| settings.routes.iter().find(|r| &r.id == id))
+        .cloned();
+    let note = mechanical.as_ref().map(|m| {
+        format!(
+            "route {route_id} is not configured; using the mechanical tier's route {}",
+            m.id
+        )
+    });
+    Some((route_id, mechanical, note))
 }
 
 /// Checks the stored task's goal and criteria once. `can_redraft` is true
@@ -208,7 +223,7 @@ pub(super) async fn check_brief(
     if task.brief_check.done {
         return BriefAction::Proceed;
     }
-    let Some((route_id, route)) = check_route(app) else {
+    let Some((route_id, route, fallback)) = check_route(app) else {
         return BriefAction::Proceed;
     };
     let verdict = match &route {
@@ -223,6 +238,9 @@ pub(super) async fn check_brief(
         return BriefAction::Proceed;
     };
     let mut action = BriefAction::Proceed;
+    if let Some(note) = fallback {
+        task.decisions.push(format!("Brief check: {note}"));
+    }
     match verdict {
         Verdict::Clear => task
             .decisions

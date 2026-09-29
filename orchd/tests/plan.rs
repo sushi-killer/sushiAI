@@ -217,6 +217,7 @@ fn a_task_waiting_on_its_plan_question_does_not_hold_a_parallel_slot() {
         Some(&token1),
     );
     settings["parallel"] = serde_json::json!(1);
+    settings["briefCheckRoute"] = serde_json::json!("");
     settings["review"] = serde_json::json!("");
     settings["answerPolicy"] = serde_json::json!(false);
     fit_sandbox(&mut settings);

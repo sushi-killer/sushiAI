@@ -383,9 +383,10 @@ fn default_answer_policy() -> bool {
     true
 }
 
-/// Route the brief consistency check runs on unless settings name another.
+/// Route the brief consistency check runs on unless settings name another:
+/// the route `Settings::default` gives the mechanical tier.
 fn default_brief_check_route() -> String {
-    "claude-haiku".to_string()
+    "codex".to_string()
 }
 
 /// State of a task's brief consistency check (a cheap read-only model run
@@ -466,15 +467,6 @@ impl Default for Settings {
                     harness: Harness::Claude,
                     model: Some("opus".to_string()),
                     effort: Some("high".to_string()),
-                    profile_id: None,
-                    strength: None,
-                },
-                Route {
-                    id: "claude-haiku".to_string(),
-                    label: "Claude Haiku".to_string(),
-                    harness: Harness::Claude,
-                    model: Some("claude-haiku-4-5".to_string()),
-                    effort: None,
                     profile_id: None,
                     strength: None,
                 },
@@ -1733,6 +1725,20 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_settings_have_no_haiku_route_and_check_on_the_mechanical_route() {
+        let settings = Settings::default();
+        assert!(!settings
+            .routes
+            .iter()
+            .any(|r| r.id.contains("haiku")
+                || r.model.as_deref().is_some_and(|m| m.contains("haiku"))));
+        assert_eq!(
+            Some(&settings.brief_check_route),
+            settings.tiers.get(&Tier::Mechanical)
+        );
+    }
 
     fn minimal_task_json() -> serde_json::Value {
         serde_json::json!({

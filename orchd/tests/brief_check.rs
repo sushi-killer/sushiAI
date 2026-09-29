@@ -34,6 +34,8 @@ esac
 const CONTRADICTION: &str =
     r#"{\"contradiction\": true, \"conflict\": \"keep the API and remove the API\"}"#;
 
+const CLEAR_RESULT: &str = r#"{\"contradiction\": false, \"conflict\": \"\"}"#;
+
 struct Run {
     task: serde_json::Value,
     calls: Vec<String>,
@@ -54,7 +56,8 @@ fn run(check_result: &str, route: Option<&str>, create: serde_json::Value) -> Ru
     ]);
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
-    settings["briefCheckRoute"] = serde_json::json!(route.unwrap_or("claude-haiku"));
+    settings["tiers"]["mechanical"] = serde_json::json!("claude-sonnet");
+    settings["briefCheckRoute"] = serde_json::json!(route.unwrap_or("claude-sonnet"));
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
     let repo = init_git_repo();
     let mut params = create;
@@ -171,5 +174,19 @@ fn an_empty_route_turns_the_check_off() {
     assert!(!decisions(&r.task)
         .iter()
         .any(|l| l.starts_with("Brief check")));
+    r.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_route_that_names_nothing_falls_back_to_the_mechanical_tier() {
+    let r = run(CLEAR_RESULT, Some("claude-haiku"), explicit());
+    assert_eq!(r.task["status"], "done", "task JSON: {}", r.task);
+    assert_eq!(count(&r.calls, "check"), 1, "calls: {:?}", r.calls);
+    let lines = decisions(&r.task);
+    assert!(
+        lines.iter().any(|l| l
+            == "Brief check: route claude-haiku is not configured; using the mechanical tier's route claude-sonnet"),
+        "{lines:?}"
+    );
     r.daemon.shutdown_and_wait();
 }

@@ -136,12 +136,12 @@ fn settings_without_route_strength_still_load() {
 #[test]
 fn select_review_route_explicit_id() {
     let settings = Settings {
-        review: "claude-haiku".to_string(),
+        review: "claude-sonnet".to_string(),
         ..Settings::default()
     };
     let implementer = find(&settings, "claude-opus");
     let (route, reason) = select_review_route(&settings, implementer, Tier::Hard).unwrap();
-    assert_eq!(route.id, "claude-haiku", "even weaker than the implementer");
+    assert_eq!(route.id, "claude-sonnet", "even weaker than the implementer");
     assert_eq!(reason, "explicit setting");
 }
 

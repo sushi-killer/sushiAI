@@ -222,8 +222,11 @@ async fn judge_impossible(
 ) -> Option<(String, String)> {
     let (n, evidence) = impossible_parts(question)?;
     let criterion = task.criteria.get(n)?.clone();
-    let (_, route) = check_route(app)?;
+    let (_, route, fallback) = check_route(app)?;
     let route = route?;
+    if let Some(note) = fallback {
+        task.decisions.push(format!("Answer judge: {note}"));
+    }
     let settings = app.settings.read().unwrap().clone();
     let worktree = PathBuf::from(&task.worktree);
     let run_dir = app.store.run_dir(&task.id, attempt_n).join("answer-judge");

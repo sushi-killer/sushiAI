@@ -241,7 +241,7 @@ fn an_impossible_claim_with_true_evidence_is_dropped_by_the_judge() {
         ],
         |settings| {
             settings["review"] = json!("");
-            settings["briefCheckRoute"] = json!("claude-haiku");
+            settings["briefCheckRoute"] = json!("claude-sonnet");
         },
     );
     let id = create(
@@ -279,7 +279,7 @@ fn an_impossible_claim_with_false_evidence_is_retried() {
         ],
         |settings| {
             settings["review"] = json!("");
-            settings["briefCheckRoute"] = json!("claude-haiku");
+            settings["briefCheckRoute"] = json!("claude-sonnet");
         },
     );
     let id = create(

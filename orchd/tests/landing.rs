@@ -317,7 +317,7 @@ fn an_amended_base_that_conflicts_fails_an_attempt_and_lands_after_the_next() {
         "{task}"
     );
     assert_eq!(attempts[0]["failure"]["kind"], "conflict", "{task}");
-    assert_eq!(attempts[1]["routeId"], "claude-haiku", "{task}");
+    assert_eq!(attempts[1]["routeId"], "claude-cheap", "{task}");
     assert!(
         attempts[1]["reason"]
             .as_str()

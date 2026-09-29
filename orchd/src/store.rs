@@ -53,21 +53,8 @@ impl Store {
             return Ok(Settings::default());
         }
         let text = fs::read_to_string(&path)?;
-        let mut settings: Settings = serde_json::from_str(&text)
+        let settings: Settings = serde_json::from_str(&text)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        // Settings written before the brief check existed carry the default
-        // check route id but not the built-in route it names.
-        if settings.brief_check_route == "claude-haiku"
-            && !settings.routes.iter().any(|r| r.id == "claude-haiku")
-        {
-            if let Some(route) = Settings::default()
-                .routes
-                .into_iter()
-                .find(|r| r.id == "claude-haiku")
-            {
-                settings.routes.push(route);
-            }
-        }
         Ok(settings)
     }
 
@@ -564,19 +551,15 @@ mod tests {
     }
 
     #[test]
-    fn old_settings_gain_the_brief_check_route() {
+    fn old_settings_naming_the_retired_haiku_route_load_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path()).unwrap();
-        let mut old = Settings::default();
-        old.routes.retain(|r| r.id != "claude-haiku");
-        store.save_settings(&old).unwrap();
-        let mut value: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(store.settings_path()).unwrap()).unwrap();
-        value.as_object_mut().unwrap().remove("briefCheckRoute");
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        value["briefCheckRoute"] = serde_json::json!("claude-haiku");
         std::fs::write(store.settings_path(), value.to_string()).unwrap();
         let loaded = store.load_settings().unwrap();
         assert_eq!(loaded.brief_check_route, "claude-haiku");
-        assert!(loaded.routes.iter().any(|r| r.id == "claude-haiku"));
+        assert!(!loaded.routes.iter().any(|r| r.id == "claude-haiku"));
     }
 
     #[test]

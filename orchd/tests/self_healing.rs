@@ -87,7 +87,7 @@ fn setup(env: &[(&str, &str)], review: &str) -> Setup {
     vars.extend_from_slice(env);
     let daemon = Daemon::spawn(&vars);
     let mut settings = daemon.request("settings.get", json!({}));
-    settings["briefCheckRoute"] = json!("claude-haiku");
+    settings["briefCheckRoute"] = json!("claude-sonnet");
     settings["review"] = json!(review);
     daemon.request("settings.set", json!({"settings": settings}));
     Setup {

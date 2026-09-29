@@ -261,7 +261,7 @@ fn a_judged_impossible_claim_is_recorded_as_judge() {
         ],
         |settings| {
             settings["review"] = json!("");
-            settings["briefCheckRoute"] = json!("claude-haiku");
+            settings["briefCheckRoute"] = json!("claude-sonnet");
         },
     );
     let id = create(

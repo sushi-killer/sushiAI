@@ -364,6 +364,79 @@ const LANDED_DECISIONS_MAX: usize = 5;
 const LANDED_FILES_MAX: usize = 20;
 const LANDED_LABEL: &str = "Result of this dependency";
 
+fn landed_entry(dep: &Task) -> String {
+    let passed = dep
+        .attempts
+        .iter()
+        .rev()
+        .find(|a| a.stage == Stage::Implement && a.status == AttemptStatus::Passed);
+    let mut text = format!("Title: {}", dep.title);
+    if let Some(summary) = passed.and_then(|a| a.summary.as_deref()) {
+        text.push_str(&format!("\nSummary: {summary}"));
+    }
+    let decisions: Vec<&String> = dep
+        .decisions
+        .iter()
+        .filter(|d| d.starts_with("Agent:") || d.starts_with("Owner:"))
+        .collect();
+    let skip = decisions.len().saturating_sub(LANDED_DECISIONS_MAX);
+    if !decisions[skip..].is_empty() {
+        text.push_str("\nDecisions:");
+        for d in &decisions[skip..] {
+            text.push_str(&format!("\n{d}"));
+        }
+    }
+    if let Some(handoff) = passed.and_then(|a| a.handoff.as_deref()) {
+        if !handoff.trim().is_empty() {
+            text.push_str(&format!("\nHandoff: {handoff}"));
+        }
+    }
+    if let Some(a) = passed.filter(|a| !a.changed_files.is_empty()) {
+        text.push_str("\nChanged files:");
+        for f in a.changed_files.iter().take(LANDED_FILES_MAX) {
+            text.push_str(&format!("\n{f}"));
+        }
+        if a.changed_files.len() > LANDED_FILES_MAX {
+            text.push_str(&format!(
+                "\n+{} more",
+                a.changed_files.len() - LANDED_FILES_MAX
+            ));
+        }
+    }
+    let heading = format!("### {}\n", dep.id);
+    let overhead = heading.len() + untrusted_block(LANDED_LABEL, "").len();
+    // The cap is measured in bytes; `truncate_chars` cuts at a char boundary and
+    // appends a 3-byte ellipsis, so a byte budget also bounds the character count.
+    let room = LANDED_ENTRY_MAX.saturating_sub(overhead);
+    let text = if text.len() > room {
+        truncate_chars(&text, room.saturating_sub(3))
+    } else {
+        text
+    };
+    let mut out = heading;
+    out.push_str(&untrusted_block(LANDED_LABEL, &text));
+    out.push('\n');
+    out
+}
+
+/// The previous link of a relay: its branch is what this task continues, so
+/// its handoff comes first, whether or not it is marked done.
+pub fn relay_block(task: &Task, all: &[Task]) -> String {
+    let Some(prev) = task
+        .queue
+        .relay_of
+        .as_deref()
+        .and_then(|id| all.iter().find(|t| t.id == id))
+    else {
+        return String::new();
+    };
+    format!(
+        "## Relay: continue from {}\n\nThis task continues on the branch of the previous subtask; its commit is already in your worktree. You start with a fresh context, so this is what it reported:\n\n{}",
+        prev.title,
+        landed_entry(prev)
+    )
+}
+
 /// What the dependencies of `task` that are done delivered: title, summary,
 /// decisions, handoff and changed files of each, so a dependent starts from
 /// its results instead of rediscovering them. With `landed_after`, only
@@ -377,64 +450,14 @@ pub fn landed_dependencies_block(task: &Task, all: &[Task], landed_after: Option
         let Some(dep) = all.iter().find(|t| &t.id == id) else {
             continue;
         };
-        if dep.status != TaskStatus::Done {
+        if dep.status != TaskStatus::Done || task.queue.relay_of.as_deref() == Some(id.as_str()) {
             continue;
         }
         let ended = dep.attempts.last().and_then(|a| a.ended_at);
         if landed_after.is_some_and(|after| ended.is_none_or(|e| e <= after)) {
             continue;
         }
-        let passed = dep
-            .attempts
-            .iter()
-            .rev()
-            .find(|a| a.stage == Stage::Implement && a.status == AttemptStatus::Passed);
-        let mut text = format!("Title: {}", dep.title);
-        if let Some(summary) = passed.and_then(|a| a.summary.as_deref()) {
-            text.push_str(&format!("\nSummary: {summary}"));
-        }
-        let decisions: Vec<&String> = dep
-            .decisions
-            .iter()
-            .filter(|d| d.starts_with("Agent:") || d.starts_with("Owner:"))
-            .collect();
-        let skip = decisions.len().saturating_sub(LANDED_DECISIONS_MAX);
-        if !decisions[skip..].is_empty() {
-            text.push_str("\nDecisions:");
-            for d in &decisions[skip..] {
-                text.push_str(&format!("\n{d}"));
-            }
-        }
-        if let Some(handoff) = passed.and_then(|a| a.handoff.as_deref()) {
-            if !handoff.trim().is_empty() {
-                text.push_str(&format!("\nHandoff: {handoff}"));
-            }
-        }
-        if let Some(a) = passed.filter(|a| !a.changed_files.is_empty()) {
-            text.push_str("\nChanged files:");
-            for f in a.changed_files.iter().take(LANDED_FILES_MAX) {
-                text.push_str(&format!("\n{f}"));
-            }
-            if a.changed_files.len() > LANDED_FILES_MAX {
-                text.push_str(&format!(
-                    "\n+{} more",
-                    a.changed_files.len() - LANDED_FILES_MAX
-                ));
-            }
-        }
-        let heading = format!("### {}\n", dep.id);
-        let overhead = heading.len() + untrusted_block(LANDED_LABEL, "").len();
-        // The cap is measured in bytes; `truncate_chars` cuts at a char boundary and
-        // appends a 3-byte ellipsis, so a byte budget also bounds the character count.
-        let room = LANDED_ENTRY_MAX.saturating_sub(overhead);
-        let text = if text.len() > room {
-            truncate_chars(&text, room.saturating_sub(3))
-        } else {
-            text
-        };
-        entries.push_str(&heading);
-        entries.push_str(&untrusted_block(LANDED_LABEL, &text));
-        entries.push('\n');
+        entries.push_str(&landed_entry(dep));
     }
     if entries.is_empty() {
         return String::new();
@@ -455,6 +478,12 @@ pub fn conflict_block(conflict: &str, impossible: bool) -> String {
     format!(
         "## Brief conflict\n\nA check of this brief found two requirements that contradict each other: {conflict}\n\nDo not satisfy one requirement at the other's expense. {report}\n\n"
     )
+}
+
+/// Tells the implementer that the work was finished and checked, and only a
+/// landing conflict is left: resolve the markers, nothing else.
+pub fn conflict_only_block() -> String {
+    "## Conflict-only attempt\n\nThe work is finished and its checks passed. Landing it carried it onto a base branch that moved on, and the files named under Previous attempts (latest failure) now conflict. Do not redo or extend the work and do not touch other files. Resolve each conflict so both the base's change and this task's change survive, remove every `<<<<<<<`, `=======` and `>>>>>>>` marker, run the verification commands, then finish.\n\n".to_string()
 }
 
 /// Tells the implementer of a parent task why finishing the parent failed
@@ -838,6 +867,8 @@ fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) ->
             "\"options\":[\"...\",\"...\"],\"recommended\":\"...\",\"evidence\":\"...\",\"blocking\":false}",
         );
     }
+    extra.push_str(&format!("\n\n{PLAN_PATHS}"));
+    format = format.replace("\"verify\":[],", "\"verify\":[],\"paths\":[\"src/...\"],");
     extra.push_str(&format!("\n\n{PLAN_FINAL_VERIFY}"));
     format = format.replace("\"verify\":[],", "\"verify\":[],\"finalVerify\":[],");
     if variant.grounded_checks {
@@ -868,6 +899,8 @@ fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) ->
 
 /// `variant.grounded_checks`: what the planner's `checks` and `heldOut` are.
 const PLAN_CHECKS: &str = "For each criterion that a command can prove, add an entry to `checks`: `criterion` is the criterion's 0-based index in `criteria` and `run` a shell command (run with `sh -c` from the repository root, in the task's verify environment). A check must exercise the new behaviour: it must fail on the current code and pass once its criterion is met, and a test that already passes today proves nothing. A check that compares against a branch name (`git diff main`) breaks once the branch moves; compare against the task's base commit with the `ORCHD_BASE_SHA` environment variable instead (`git diff $ORCHD_BASE_SHA`), which orchd sets for every check and verify command. A test-name filter that matches zero tests passes, so use exact test names or assert a count. Leave out a criterion that has no such command. `heldOut` is one optional extra check of the same shape, run after verify; the implementer never sees it, so it may probe what the visible checks do not.";
+
+const PLAN_PATHS: &str = "List in `paths` the repo-relative files or directories the task will edit, as narrowly as you can. Tasks on the same branch never edit one file at once: a task whose paths overlap another running task's waits for it, then continues on top of its landed work. Leave `paths` empty only when you cannot tell.";
 
 const PLAN_FINAL_VERIFY: &str = "Split the checks by cost. `verify` holds the fast, targeted commands that run after every attempt (a unit test file, the type checker, a linter on the touched paths). `finalVerify` holds the slow whole-repo checks (the full CI script, a desktop smoke) that the orchestrator runs once, after review passes and before the commit.";
 
@@ -952,6 +985,10 @@ pub struct PlanDraft {
     pub checks: Vec<Check>,
     #[serde(default, rename = "heldOut", deserialize_with = "lenient_check")]
     pub held_out: Option<Check>,
+    /// Repo-relative files or directories the whole task edits; a task whose
+    /// paths overlap another live task's waits for it.
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1686,6 +1723,7 @@ mod tests {
             eval_check_cmd: None,
             eval_check: None,
             brief_check: Default::default(),
+            queue: Default::default(),
             created_at: 1,
             updated_at: 1,
         }

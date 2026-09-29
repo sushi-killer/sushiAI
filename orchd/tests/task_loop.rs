@@ -696,7 +696,7 @@ fn a_claude_implement_run_trims_delegation_tools_and_keeps_the_configured_mcp_se
     let settings: serde_json::Value =
         serde_json::from_str(&run_file(&daemon, &task_id, "settings.json")).unwrap();
     let hooks: Vec<&String> = settings["hooks"].as_object().unwrap().keys().collect();
-    assert_eq!(hooks, ["Stop"], "{settings}");
+    assert_eq!(hooks, ["PreToolUse", "Stop"], "{settings}");
     let mcp: serde_json::Value =
         serde_json::from_str(&run_file(&daemon, &task_id, "mcp.json")).unwrap();
     assert_eq!(

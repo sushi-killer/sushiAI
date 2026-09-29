@@ -42,6 +42,7 @@ mod decision;
 mod graph;
 mod hooks;
 mod land;
+mod leases;
 mod lines;
 mod past_work;
 mod plan;
@@ -69,6 +70,7 @@ use cost::*;
 use decision::*;
 use graph::*;
 use land::*;
+use leases::*;
 use lines::*;
 use plan::*;
 use questions::*;
@@ -245,6 +247,11 @@ pub struct App {
     /// Every agent-to-agent message, mirrored to `<data>/messages.json`.
     messages: StdMutex<Vec<Message>>,
     hook_tokens: RwLock<HashMap<String, Arc<HookContext>>>,
+    /// Keyed by task id: the files each live task holds (`leases.rs`).
+    leases: StdMutex<HashMap<String, Lease>>,
+    /// Held while a graph start counts a parent's running children and
+    /// spawns one more, so `childParallel` is never exceeded by a race.
+    child_admission: StdMutex<()>,
     /// Keyed by task id: the diff+untracked-list hash a verify run was last
     /// computed for, and its results -- shared by `hook.stop` and the
     /// post-session gate so an unchanged diff never re-runs verify twice.
@@ -415,6 +422,8 @@ impl App {
             audits: std::sync::Mutex::new(HashMap::new()),
             messages: StdMutex::new(messages),
             hook_tokens: RwLock::new(HashMap::new()),
+            leases: StdMutex::new(HashMap::new()),
+            child_admission: StdMutex::new(()),
             verify_cache: std::sync::Mutex::new(HashMap::new()),
             base_runs: std::sync::Mutex::new(HashMap::new()),
             pid: std::process::id(),
@@ -519,13 +528,13 @@ impl App {
         !self.audits.lock().unwrap().is_empty() || !self.proposals.lock().unwrap().is_empty()
     }
 
-    /// `ping`/`hook.stop` are the only methods reachable without the
-    /// control token: `ping` so Electron can probe/tell daemons apart
-    /// before it has read the token file, `hook.stop` because it's only
-    /// ever invoked by `orchd hook stop` over the same trusted local
-    /// machine, matched by its own per-run token instead.
+    /// `ping`/`hook.stop`/`hook.edit` are the only methods reachable without
+    /// the control token: `ping` so Electron can probe/tell daemons apart
+    /// before it has read the token file, the hooks because they are only
+    /// ever invoked by `orchd hook ...` over the same trusted local
+    /// machine, matched by their own per-run token instead.
     fn check_auth(&self, method: &str, auth: Option<&str>) -> bool {
-        if method == "ping" || method == "hook.stop" {
+        if matches!(method, "ping" | "hook.stop" | "hook.edit") {
             return true;
         }
         auth.map(|a| a == self.control_token).unwrap_or(false)
@@ -627,6 +636,7 @@ impl App {
             "repo.notes.add" => self.handle_repo_notes_add(params).await,
             "repo.notes.remove" => self.handle_repo_notes_remove(params).await,
             "hook.stop" => self.handle_hook_stop(params).await,
+            "hook.edit" => self.handle_hook_edit(params).await,
             "shutdown" => self.handle_shutdown().await,
             other => Err(format!("unknown method: {other}")),
         }

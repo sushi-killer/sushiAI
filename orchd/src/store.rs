@@ -355,7 +355,15 @@ pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> io::Res
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("data.json");
-    let tmp_path = dir.join(format!(".{}.tmp-{}", file_name, std::process::id()));
+    // Unique per call: two saves of one task can overlap, and a shared
+    // temp name made the slower rename fail.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp_path = dir.join(format!(
+        ".{}.tmp-{}-{}",
+        file_name,
+        std::process::id(),
+        WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let json = serde_json::to_vec_pretty(value)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     {
@@ -473,6 +481,7 @@ mod tests {
             eval_check_cmd: None,
             eval_check: None,
             brief_check: Default::default(),
+            queue: Default::default(),
             created_at: 1,
             updated_at: 1,
         }

@@ -370,6 +370,7 @@ mod tests {
             eval_check_cmd: None,
             eval_check: None,
             brief_check: Default::default(),
+            queue: Default::default(),
             created_at: 1,
             updated_at: 1,
         }

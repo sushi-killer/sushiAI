@@ -80,3 +80,43 @@ fn an_existing_order_is_kept_and_no_duplicate_edge_is_added() {
     assert_eq!(out[2].depends_on, vec!["b".to_string()]);
     assert!(decisions.is_empty());
 }
+
+#[test]
+fn overlapping_parts_with_paths_form_one_relay_and_a_disjoint_part_stays_apart() {
+    let (mut parts, _) = serialise_overlapping(&[
+        pathed("a", &[], &["src"]),
+        pathed("b", &[], &["src/b.rs"]),
+        pathed("c", &[], &["src"]),
+        pathed("d", &[], &["docs"]),
+    ]);
+    let (links, decisions) = relay_links(&mut parts);
+    assert_eq!(links, vec![None, Some(0), Some(1), None]);
+    assert_eq!(decisions.len(), 2);
+    assert!(parts[2].depends_on.contains(&"b".to_string()));
+}
+
+#[test]
+fn a_part_without_paths_or_with_a_foreign_dependency_is_not_relayed() {
+    let (mut parts, _) = serialise_overlapping(&[pathed("a", &[], &[]), pathed("b", &[], &[])]);
+    assert_eq!(relay_links(&mut parts).0, vec![None, None]);
+
+    // c overlaps b but also builds on d, which is outside b's chain.
+    let (mut parts, _) = serialise_overlapping(&[
+        pathed("b", &[], &["src"]),
+        pathed("d", &[], &["docs"]),
+        pathed("c", &["d"], &["src"]),
+    ]);
+    assert_eq!(relay_links(&mut parts).0, vec![None, None, None]);
+}
+
+#[test]
+fn a_part_that_builds_on_a_middle_link_waits_for_the_chains_last_link() {
+    let (mut parts, _) = serialise_overlapping(&[
+        pathed("a", &[], &["src"]),
+        pathed("b", &[], &["src"]),
+        pathed("x", &["a"], &["docs"]),
+    ]);
+    let (links, _) = relay_links(&mut parts);
+    assert_eq!(links, vec![None, Some(0), None]);
+    assert!(parts[2].depends_on.contains(&"b".to_string()));
+}

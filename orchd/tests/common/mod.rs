@@ -469,3 +469,11 @@ pub fn settle(daemon: &Daemon, task_id: &str) -> serde_json::Value {
         matches!(s, "done" | "failed" | "stopped" | "waiting")
     })
 }
+
+/// Points the cheap (`mechanical`) tier at a Claude route, so a conflict-only
+/// attempt runs on the fake Claude harness the test set up.
+pub fn cheap_route_on_claude(daemon: &Daemon) {
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["tiers"]["mechanical"] = serde_json::json!("claude-haiku");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+}

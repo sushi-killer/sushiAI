@@ -404,6 +404,7 @@ fn a_child_whose_rebase_conflicts_is_retried_by_the_agent_not_dropped() {
         ("SHARED", "1"),
     ]);
     review_off(&daemon);
+    cheap_route_on_claude(&daemon);
     let repo = init_git_repo();
     let clean = "! grep -q '<<<<' shared.txt";
     let (parent_id, ids) = hand_built_graph(

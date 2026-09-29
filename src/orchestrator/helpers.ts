@@ -453,7 +453,8 @@ export type DefaultableSetting =
   | "allowedDomains"
   | "protectedPaths"
   | "maxAttempts"
-  | "parallel";
+  | "parallel"
+  | "childParallel";
 
 /** One setting's value, read by its dotted `DefaultableSetting` path. */
 export function settingValue(
@@ -492,6 +493,7 @@ const DEFAULTABLE_SETTINGS: DefaultableSetting[] = [
   "protectedPaths",
   "maxAttempts",
   "parallel",
+  "childParallel",
 ];
 
 /** The settings whose saved value differs from orchd's built-in default -

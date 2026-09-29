@@ -1439,7 +1439,9 @@ export function OrchestratorPanel({
                     </>
                   )}
                 </p>
-                {(parentTask || waitsFor.length > 0) && (
+                {(parentTask ||
+                  waitsFor.length > 0 ||
+                  selected.queueReason) && (
                   <p className="orch-detail-meta">
                     {parentTask && (
                       <button
@@ -1453,6 +1455,8 @@ export function OrchestratorPanel({
                     )}
                     {parentTask && waitsFor.length > 0 && " · "}
                     {waitsFor.length > 0 && `after ${waitsFor.join(", ")}`}
+                    {selected.queueReason &&
+                      `${parentTask || waitsFor.length > 0 ? " · " : ""}${selected.queueReason}`}
                   </p>
                 )}
                 {settings && (
@@ -1639,6 +1643,11 @@ export function OrchestratorPanel({
                       {after.length > 0 && (
                         <span className="orch-subtask-after">
                           after {after.join(", ")}
+                        </span>
+                      )}
+                      {child.queueReason && (
+                        <span className="orch-subtask-after">
+                          {child.queueReason}
                         </span>
                       )}
                       <span className={`orch-status-badge tone-${tone}`}>

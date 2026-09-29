@@ -40,6 +40,9 @@ export type Settings = {
   protectedPaths: string[];
   maxAttempts: number;
   parallel: number;
+  /** At most this many subtasks of one parent run at once (`parallel` stays
+   * the global cap). */
+  childParallel: number;
   /** Route id that drafts a plan (title/goal/criteria/verify) from a bare
    * request; "" turns drafting off, so `task.create` always needs the full
    * form instead. */
@@ -201,6 +204,7 @@ export type FailureKind =
   | "loop"
   | "budget"
   | "verify"
+  | "conflict"
   | "heldout"
   | "review"
   | "evidence"
@@ -322,6 +326,18 @@ export type Task = {
   /** Repo-relative files or directories the planner said this subtask edits;
    * overlapping siblings run one after another. */
   paths?: string[];
+  /** Why the task sits queued: it waits for another task's lease, e.g.
+   * `waits for "Add a" on src/x`. Gone once it starts. */
+  queueReason?: string;
+  /** The task waited for a lease; its worktree is carried onto the base head
+   * before its first attempt. */
+  waitedOnLease?: boolean;
+  /** The sibling subtask whose branch this one continues (a relay): it starts
+   * from that subtask's commit and only the chain's last link lands on the
+   * parent. */
+  relayOf?: string;
+  /** Where the relay's chain began (a commit); set once the link started. */
+  relayBase?: string;
   /** The task this one is a part of: it branches from and lands on that
    * task's branch. A task with children runs no attempt of its own. */
   parent?: string;

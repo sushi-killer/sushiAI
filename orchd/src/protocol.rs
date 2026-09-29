@@ -55,7 +55,7 @@ struct Request {
     #[serde(default)]
     params: serde_json::Value,
     /// The control token (spec item A): required on every method except
-    /// `ping`/`hook.stop`, which `Dispatcher::check_auth` exempts.
+    /// `ping`/`hook.stop`/`hook.edit`, which `Dispatcher::check_auth` exempts.
     #[serde(default)]
     auth: Option<String>,
 }
@@ -296,6 +296,7 @@ mod tests {
             eval_check_cmd: None,
             eval_check: None,
             brief_check: Default::default(),
+            queue: Default::default(),
             created_at: 1,
             updated_at: 1,
         };
@@ -321,7 +322,7 @@ mod tests {
     }
 
     /// A fake dispatcher whose `check_auth` matches a single fixed token,
-    /// exempting only `ping`/`hook.stop` -- exactly the real `App`'s rule,
+    /// exempting only `ping`/`hook.stop`/`hook.edit` -- exactly the real `App`'s rule,
     /// exercised here without any of its engine/store dependencies.
     struct FakeDispatcher {
         token: &'static str,
@@ -335,7 +336,7 @@ mod tests {
             broadcast::channel(1).1
         }
         fn check_auth(&self, method: &str, auth: Option<&str>) -> bool {
-            if method == "ping" || method == "hook.stop" {
+            if matches!(method, "ping" | "hook.stop" | "hook.edit") {
                 return true;
             }
             auth == Some(self.token)

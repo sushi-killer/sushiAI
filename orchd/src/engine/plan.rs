@@ -112,6 +112,105 @@ pub(super) fn serialise_overlapping(
     (out, decisions)
 }
 
+/// Which earlier sibling each part continues as a relay, and one decision
+/// line per link. Parts whose declared paths overlap and were serialised
+/// run as one branch: a part continues the previous overlapping
+/// part's commit instead of branching from the parent, so it edits on top of
+/// that work and only the last part lands on the parent. A part only joins a
+/// chain when every earlier part it overlaps and every part it depends on is
+/// already in that chain and nothing continues the same predecessor;
+/// otherwise it stays an ordinary serialised sibling. `parts` gain the
+/// `dependsOn` a link needs, and a part that depends on a chain's middle
+/// link also waits for the chain's last one, which is what lands.
+pub(super) fn relay_links(parts: &mut [brief::PlanSubtask]) -> (Vec<Option<usize>>, Vec<String>) {
+    let keys: Vec<String> = parts.iter().map(|p| p.key.trim().to_string()).collect();
+    // Only parts that both declare paths can be linked: a part without paths
+    // is serialised, and its work lands on the parent like any sibling's.
+    let overlaps = |i: usize, j: usize| {
+        !parts[i].paths.is_empty()
+            && !parts[j].paths.is_empty()
+            && overlapping_path(&parts[i].paths, &parts[j].paths).is_some()
+    };
+    let mut link: Vec<Option<usize>> = vec![None; parts.len()];
+    let mut has_next = vec![false; parts.len()];
+    let chain_of = |link: &[Option<usize>], mut at: usize| {
+        let mut chain = vec![at];
+        while let Some(prev) = link[at] {
+            chain.push(prev);
+            at = prev;
+        }
+        chain
+    };
+    for j in 1..parts.len() {
+        let earlier: Vec<usize> = (0..j).filter(|&i| overlaps(i, j)).collect();
+        let Some(&p) = earlier.last() else { continue };
+        if has_next[p] {
+            continue;
+        }
+        let chain = chain_of(&link, p);
+        let deps_in_chain = parts[j].depends_on.iter().all(|d| {
+            keys.iter()
+                .position(|k| k == d.trim())
+                .is_some_and(|at| chain.contains(&at))
+        });
+        if earlier.iter().all(|i| chain.contains(i)) && deps_in_chain {
+            link[j] = Some(p);
+            has_next[p] = true;
+        }
+    }
+    let mut decisions = Vec::new();
+    for j in 0..parts.len() {
+        let Some(p) = link[j] else { continue };
+        if !parts[j].depends_on.iter().any(|d| d.trim() == keys[p]) {
+            parts[j].depends_on.push(keys[p].clone());
+        }
+        decisions.push(format!(
+            "Relay: {} continues on {}'s branch, one chain landed on the parent once",
+            keys[j], keys[p]
+        ));
+    }
+    // A part outside a chain that builds on one of its middle links needs
+    // the chain's last link: that is the one that lands the work.
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    for i in 0..parts.len() {
+        if link[i].is_some() {
+            continue;
+        }
+        let mut extra = Vec::new();
+        for d in parts[i].depends_on.clone() {
+            let Some(mut at) = keys.iter().position(|k| k == d.trim()) else {
+                continue;
+            };
+            let mut moved = false;
+            while let Some(next) = (0..parts.len()).find(|&n| link[n] == Some(at)) {
+                at = next;
+                moved = true;
+            }
+            if moved {
+                extra.push(keys[at].clone());
+            }
+        }
+        for key in extra {
+            if !parts[i].depends_on.iter().any(|d| d.trim() == key) {
+                parts[i].depends_on.push(key);
+            }
+        }
+    }
+    for part in parts.iter() {
+        edges.insert(
+            part.key.trim().to_string(),
+            part.depends_on
+                .iter()
+                .map(|d| d.trim().to_string())
+                .collect(),
+        );
+    }
+    if has_cycle(&edges) {
+        return (vec![None; parts.len()], Vec::new());
+    }
+    (link, decisions)
+}
+
 /// A subtask's request: the planner's text first (what its own planner
 /// drafts from), then the whole it belongs to and what was already decided
 /// for it.
@@ -642,6 +741,16 @@ pub(super) async fn run_plan_stage(
         } else {
             split_verify_commands(&worktree, &draft.verify)
         };
+        // What the planner says the task edits: the queue holds it back while
+        // another live task on the same base holds any of these paths.
+        if task.paths.is_empty() {
+            task.paths = draft
+                .paths
+                .iter()
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect();
+        }
         task.criteria = draft.criteria.clone();
         task.visual_criteria = draft.visual_criteria.clone();
         task.criteria.extend(
@@ -855,7 +964,9 @@ async fn split_into_subtasks(
     parts: &[brief::PlanSubtask],
     start: bool,
 ) -> Result<(), String> {
-    let (parts, serialised) = serialise_overlapping(parts);
+    let (mut parts, mut serialised) = serialise_overlapping(parts);
+    let (links, relayed) = relay_links(&mut parts);
+    serialised.extend(relayed);
     let parts = parts.as_slice();
     let mut parent = app
         .store
@@ -905,6 +1016,7 @@ async fn split_into_subtasks(
                     .collect(),
                 parent: Some(parent.id.clone()),
                 paths: part.paths.clone(),
+                relay_of: links[i].map(|p| ids[parts[p].key.trim()].clone()),
                 // Eval reports count the parent, which carries the children's
                 // cost.
                 eval_set: None,

@@ -147,6 +147,16 @@ pub(super) fn implement_attempt_count(task: &Task) -> u32 {
         .count() as u32
 }
 
+/// Whether the latest implement attempt failed on a landing conflict: the
+/// next one only resolves it.
+pub(super) fn last_failure_is_conflict(task: &Task) -> bool {
+    task.attempts
+        .iter()
+        .rfind(|a| a.stage == Stage::Implement)
+        .and_then(|a| a.failure.as_ref())
+        .is_some_and(|f| f.kind == FailureKind::Conflict)
+}
+
 /// Implement attempts whose review failed with a repeated finding.
 pub(super) fn repeated_review_count(task: &Task) -> u32 {
     task.attempts

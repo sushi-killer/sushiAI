@@ -46,6 +46,7 @@ const SETTING_LABELS: Record<DefaultableSetting, string> = {
   protectedPaths: "Protected paths",
   maxAttempts: "Max attempts",
   parallel: "Parallel tasks",
+  childParallel: "Parallel subtasks per task",
 };
 
 /** The route id a route-valued setting points at, or `null` when its value
@@ -651,6 +652,20 @@ export function OrchestratorSettings() {
               />
             </label>
             {defaultMarker("parallel")}
+          </div>
+          <div className="orch-default-field">
+            <label>
+              Parallel subtasks per task
+              <input
+                type="number"
+                min={1}
+                value={settings.childParallel}
+                onChange={(event) =>
+                  update({ childParallel: Number(event.target.value) || 1 })
+                }
+              />
+            </label>
+            {defaultMarker("childParallel")}
           </div>
         </div>
       </div>

@@ -71,7 +71,7 @@ fn stop_hook_blocks_on_failing_verify_then_task_passes_once_fixed() {
 // -- Claude implement run hooks -------------------------------------------
 
 #[test]
-fn a_claude_implement_run_gets_only_the_stop_hook_and_no_env() {
+fn a_claude_implement_run_gets_only_the_orchd_hooks_and_no_env() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", FAKE_CLAUDE_PASS);
     let args = scripts_dir.path().join("args");
@@ -101,7 +101,7 @@ fn a_claude_implement_run_gets_only_the_stop_hook_and_no_env() {
     let settings: serde_json::Value =
         serde_json::from_str(&run_file(&daemon, &task_id, "settings.json")).unwrap();
     let hooks: Vec<&String> = settings["hooks"].as_object().unwrap().keys().collect();
-    assert_eq!(hooks, ["Stop"], "{settings}");
+    assert_eq!(hooks, ["PreToolUse", "Stop"], "{settings}");
     assert!(settings.get("env").is_none(), "{settings}");
 
     let worktree = task["worktree"].as_str().unwrap().to_string();

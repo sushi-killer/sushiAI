@@ -57,7 +57,9 @@ pub(super) async fn run_task_loop(
         // The task graph: a parent never implements, and a task whose
         // dependencies are not all done waits `queued` with no loop until
         // `advance_graph` starts it again. Drafting runs meanwhile.
-        if !needs_planning(&task) {
+        // A subtask is planned only once everything it depends on has landed,
+        // so no planning is spent on a part that cannot start yet.
+        if !needs_planning(&task) || task.parent.is_some() {
             let all = app.repo_tasks(&task.repo);
             if is_parent(&task, &all)
                 && parent_failure.is_none()
@@ -82,19 +84,35 @@ pub(super) async fn run_task_loop(
                 .and_then(|pid| all.iter().find(|t| t.id == pid))
                 .is_some_and(|p| {
                     !matches!(own_waits_state(p, &all), Waits::Ready | Waits::Nothing)
+                        // A parent parked on a question (its base check) starts
+                        // no subtask until it is answered.
+                        || (p.status == TaskStatus::Waiting
+                            && implement_attempt_count(&task) == 0)
                 });
             if parent_blocked
                 || (!task.depends_on.is_empty()
                     && !matches!(waits_state(&task, &all), Waits::Ready | Waits::Nothing))
             {
-                if task.status != TaskStatus::Queued {
+                if task.status != TaskStatus::Queued || task.queue.queue_reason.is_some() {
                     task.status = TaskStatus::Queued;
+                    task.queue.queue_reason = None;
                     task.updated_at = now_ms();
                     let _ = app.store.save_task(&task);
                     app.broadcast_task(&task);
                 }
                 app.finish_task_loop(&task_id);
                 return;
+            }
+            // Paths another live task on this base holds: wait `queued`, no
+            // slot taken, until that task lands, stops or fails.
+            if !needs_planning(&task) {
+                let force = task.status == TaskStatus::Landing
+                    || implement_attempt_count(&task) > 0
+                    || parent_failure.is_some();
+                if !pass_lease_gate(&app, &mut task, force) {
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
             }
         }
 
@@ -228,9 +246,15 @@ pub(super) async fn run_task_loop(
         // A task in a graph starts from its base branch as it is now, so a
         // dependent begins on top of the work it waited for (a subtask on
         // its parent's head, with every earlier sibling landed).
+        if let Some(prev_id) = task.queue.relay_of.clone() {
+            if implement_attempt_count(&task) == 0 && task.queue.relay_base.is_none() {
+                start_relay_link(&app, &mut task, &prev_id).await;
+            }
+        }
         if implement_attempt_count(&task) == 0
             && parent_failure.is_none()
-            && (task.parent.is_some() || !task.depends_on.is_empty())
+            && (task.parent.is_some() || !task.depends_on.is_empty() || task.queue.waited_on_lease)
+            && task.queue.relay_of.is_none()
         {
             if let Some(base_ref) = task.base_ref.clone() {
                 let (wt, from, tid, r) = (
@@ -252,6 +276,7 @@ pub(super) async fn run_task_loop(
                 }
             }
         }
+        task.queue.waited_on_lease = false;
 
         if task.variant().grounded_checks
             && implement_attempt_count(&task) == 0
@@ -341,8 +366,22 @@ pub(super) async fn run_task_loop(
 
         let settings = app.settings.read().unwrap().clone();
         let attempt_n = implement_attempt_count(&task) + 1;
-        let (route_id, overridden) = task.variant().implement_route_id(&settings, task.tier);
-        if overridden {
+        // A landing that conflicted only needs its markers resolved: that
+        // runs on the cheap route, not as a full re-implementation.
+        let conflict_only = last_failure_is_conflict(&task);
+        let (route_id, overridden) = task.variant().implement_route_id(
+            &settings,
+            if conflict_only {
+                Tier::Mechanical
+            } else {
+                task.tier
+            },
+        );
+        if conflict_only {
+            task.decisions.push(format!(
+                "Orchestrator: the landing conflicted -> conflict-only attempt on the cheap route {route_id}"
+            ));
+        } else if overridden {
             let line = variant_route_line(&format!("tier {}", task.tier.as_str()), &route_id);
             if !task.decisions.contains(&line) {
                 task.decisions.push(line);
@@ -430,6 +469,11 @@ pub(super) async fn run_task_loop(
         }
 
         let brief_text = brief::build_brief(&task, &status_short, &diff_stat);
+        let brief_text = if conflict_only {
+            brief::with_block_before_report(&brief_text, &brief::conflict_only_block())
+        } else {
+            brief_text
+        };
         let brief_text = match &task.brief_check.conflict {
             Some(conflict) if implement_attempt_count(&task) == 0 => {
                 brief::with_block_before_report(
@@ -443,6 +487,14 @@ pub(super) async fn run_task_loop(
             &brief_text,
             &brief::landed_dependencies_block(&task, &app.repo_tasks(&task.repo), None),
         );
+        let brief_text = if implement_attempt_count(&task) == 0 {
+            brief::with_block_before_report(
+                &brief_text,
+                &brief::relay_block(&task, &app.repo_tasks(&task.repo)),
+            )
+        } else {
+            brief_text
+        };
         // A parent's first attempt gets what failed when it tried to finish.
         let brief_text = match &parent_failure {
             Some(failure) if implement_attempt_count(&task) == 0 => {
@@ -469,7 +521,11 @@ pub(super) async fn run_task_loop(
             _ => brief_text,
         };
 
-        let reason = format!("tier {} -> route {}", task.tier.as_str(), route.id);
+        let reason = if conflict_only {
+            format!("conflict only -> route {}", route.id)
+        } else {
+            format!("tier {} -> route {}", task.tier.as_str(), route.id)
+        };
         let attempt = Attempt {
             n: attempt_n,
             stage: Stage::Implement,
@@ -1090,7 +1146,7 @@ pub(super) async fn run_task_loop(
                         &task_id,
                         &mut task,
                         idx,
-                        FailureKind::Verify,
+                        FailureKind::Conflict,
                         detail,
                         &mut attempt_budget,
                         &pending_answer,

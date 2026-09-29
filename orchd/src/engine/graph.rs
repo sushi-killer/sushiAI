@@ -388,9 +388,16 @@ pub(super) async fn run_parent(
         .iter()
         .filter(|t| t.parent.as_deref() == Some(task_id) && !t.archived)
     {
+        if cancel.is_cancelled() {
+            break;
+        }
         match child.status {
+            // A part whose dependencies have not landed is not started (so
+            // not planned) yet; the graph comes back to it when they do.
             TaskStatus::Drafting | TaskStatus::Queued => {
-                app.spawn_task_loop(child.id.clone(), true);
+                if matches!(waits_state(child, &all), Waits::Ready | Waits::Nothing) {
+                    app.spawn_child_loop(&all, child);
+                }
             }
             TaskStatus::Stopped | TaskStatus::Failed if restarted => {
                 // Queued before its loop runs, so this parent never reads
@@ -401,7 +408,7 @@ pub(super) async fn run_parent(
                 child.updated_at = now_ms();
                 let _ = app.store.save_task(&child);
                 app.broadcast_task(&child);
-                app.spawn_task_loop(child.id.clone(), true);
+                app.spawn_child_loop(&all, &child);
             }
             _ => {}
         }
@@ -561,6 +568,62 @@ pub(super) fn conflict_detail(
     )
 }
 
+/// A relay link's start: its worktree continues the previous link's branch
+/// (the earlier subtask's commit), so it edits on top of that work. When the
+/// previous link cannot be continued the subtask starts from the parent's
+/// head like any other.
+pub(super) async fn start_relay_link(app: &Arc<App>, task: &mut Task, prev_id: &str) {
+    let prev = app
+        .store
+        .load_task(prev_id)
+        .ok()
+        .flatten()
+        .filter(|p| p.status == TaskStatus::Done);
+    let Some(prev) = prev else {
+        task.queue.relay_of = None;
+        task.decisions.push(
+            "Relay: the previous subtask did not finish; starting from the parent's head instead"
+                .to_string(),
+        );
+        return;
+    };
+    let (wt, from, tid, branch) = (
+        PathBuf::from(&task.worktree),
+        task.base_sha.clone(),
+        task.id.clone(),
+        prev.branch.clone(),
+    );
+    let synced =
+        tokio::task::spawn_blocking(move || git::carry_onto_moved_base(&wt, &branch, &from, &tid))
+            .await;
+    let head = match synced {
+        Ok(Ok(git::Rebase::Moved { new_sha, .. })) => new_sha,
+        Ok(Ok(git::Rebase::Unchanged)) => task.base_sha.clone(),
+        _ => {
+            task.queue.relay_of = None;
+            task.decisions.push(format!(
+                "Relay: could not continue {}; starting from the parent's head instead",
+                prev.branch
+            ));
+            return;
+        }
+    };
+    task.decisions.push(format!(
+        "Relay: continues \"{}\" on {} at {}",
+        prev.title,
+        prev.branch,
+        short_sha(&head)
+    ));
+    task.queue.relay_base = Some(
+        prev.queue
+            .relay_base
+            .clone()
+            .unwrap_or_else(|| prev.base_sha.clone()),
+    );
+    task.base_sha = head;
+    task.base_ref = Some(prev.branch);
+}
+
 pub(super) enum Landing {
     /// Committed and fast-forwarded onto the parent's branch (or the parent
     /// already held the work).
@@ -595,6 +658,32 @@ pub(super) async fn land_on_parent(
     parent_id: &str,
     cancel: &CancelToken,
 ) -> Landing {
+    // A link of a relay that a later sibling continues commits on its own
+    // branch; the last link lands the whole chain on the parent.
+    let next = app
+        .repo_tasks(&task.repo)
+        .into_iter()
+        .find(|t| t.queue.relay_of.as_deref() == Some(task.id.as_str()) && !t.archived);
+    if let Some(next) = next {
+        let (wt, title, tid) = (worktree.to_path_buf(), task.title.clone(), task.id.clone());
+        let committed =
+            tokio::task::spawn_blocking(move || git::commit(&wt, &title, &tid, attempt_n))
+                .await
+                .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
+        return match committed {
+            Ok(()) => {
+                task.decisions.push(format!(
+                    "Land: committed on {} for \"{}\" to continue from",
+                    task.branch, next.title
+                ));
+                Landing::Landed
+            }
+            Err(e) => Landing::Failed {
+                kind: FailureKind::Error,
+                detail: format!("Could not commit for the relay: {e}"),
+            },
+        };
+    }
     let lock = app.landing_lock(parent_id);
     let _landing = tokio::select! {
         _ = cancel.cancelled() => return Landing::Cancelled,
@@ -605,6 +694,28 @@ pub(super) async fn land_on_parent(
     };
     let branch = parent.branch.clone();
     let failed = |kind, detail| Landing::Failed { kind, detail };
+
+    // The last link of a relay: everything since the chain began is this
+    // task's work now, carried onto the parent like any other.
+    if let Some(chain_base) = task.queue.relay_base.clone() {
+        let (wt, base) = (worktree.to_path_buf(), chain_base.clone());
+        let reset = tokio::task::spawn_blocking(move || git::uncommit_to(&wt, &base))
+            .await
+            .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
+        if let Err(e) = reset {
+            return failed(
+                FailureKind::Error,
+                format!("Could not gather the relay's work: {e}"),
+            );
+        }
+        task.decisions.push(format!(
+            "Land: lands the relay's chain from {} onto {branch}",
+            short_sha(&chain_base)
+        ));
+        task.base_sha = chain_base;
+        task.base_ref = Some(branch.clone());
+        task.queue.relay_base = None;
+    }
 
     match carry_and_check(
         app,
@@ -796,7 +907,7 @@ pub(super) async fn carry_and_check(
             }
             task.base_sha = new_sha.clone();
             return failed(
-                FailureKind::Verify,
+                FailureKind::Conflict,
                 conflict_detail(&branch, &new_sha, &files, &task.id),
             );
         }
@@ -854,6 +965,10 @@ impl App {
             if !idle || self.controls.lock().unwrap().contains_key(&task.id) {
                 continue;
             }
+            // Waiting for a lease: `advance_queue` starts it when it is free.
+            if task.queue.queue_reason.is_some() && self.lease_blocker(task).is_some() {
+                continue;
+            }
             // A subtask never starts while its parent still waits for the
             // parent's own dependencies.
             if let Some(p) = task
@@ -861,7 +976,9 @@ impl App {
                 .as_deref()
                 .and_then(|pid| all.iter().find(|t| t.id == pid))
             {
-                if !matches!(own_waits_state(p, &all), Waits::Ready | Waits::Nothing) {
+                if !matches!(own_waits_state(p, &all), Waits::Ready | Waits::Nothing)
+                    || (p.status == TaskStatus::Waiting && implement_attempt_count(task) == 0)
+                {
                     continue;
                 }
             }
@@ -890,7 +1007,11 @@ impl App {
                         let _ = self.store.save_task(&task);
                         self.broadcast_task(&task);
                     }
-                    self.spawn_task_loop(task.id.clone(), true)
+                    if task.parent.is_some() {
+                        self.spawn_child_loop(&all, task);
+                    } else {
+                        self.spawn_task_loop(task.id.clone(), true)
+                    }
                 }
                 // Everything that had ended was restarted and still runs:
                 // the question is moot, the task just waits again.
@@ -914,6 +1035,28 @@ impl App {
                 _ => {}
             }
         }
+        self.advance_queue(repo);
+    }
+
+    /// Starts `child`'s loop unless its parent already has `childParallel`
+    /// subtasks running. `false`: not started; the graph comes back to it
+    /// when a sibling ends.
+    pub(super) fn spawn_child_loop(&self, all: &[Task], child: &Task) -> bool {
+        let cap = self.settings.read().unwrap().child_parallel.max(1) as usize;
+        let _admit = self.child_admission.lock().unwrap();
+        let running = {
+            let controls = self.controls.lock().unwrap();
+            all.iter()
+                .filter(|t| {
+                    t.parent == child.parent && t.id != child.id && controls.contains_key(&t.id)
+                })
+                .count()
+        };
+        if running >= cap {
+            return false;
+        }
+        self.spawn_task_loop(child.id.clone(), true);
+        true
     }
 
     /// Parks `task` `waiting` on the question of what to do about the

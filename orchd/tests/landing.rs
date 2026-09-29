@@ -29,6 +29,7 @@ fn daemon() -> (Daemon, tempfile::TempDir) {
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    cheap_route_on_claude(&daemon);
     (daemon, scripts)
 }
 
@@ -313,6 +314,15 @@ fn an_amended_base_that_conflicts_fails_an_attempt_and_lands_after_the_next() {
             .as_str()
             .unwrap()
             .contains("These files conflict: shared.txt"),
+        "{task}"
+    );
+    assert_eq!(attempts[0]["failure"]["kind"], "conflict", "{task}");
+    assert_eq!(attempts[1]["routeId"], "claude-haiku", "{task}");
+    assert!(
+        attempts[1]["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("conflict only"),
         "{task}"
     );
     assert_eq!(

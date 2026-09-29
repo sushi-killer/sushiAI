@@ -18,6 +18,8 @@ pub(super) struct NewTask {
     pub(super) depends_on: Vec<String>,
     pub(super) parent: Option<String>,
     pub(super) paths: Vec<String>,
+    /// The sibling subtask whose branch this one continues.
+    pub(super) relay_of: Option<String>,
     pub(super) eval_set: Option<String>,
     pub(super) eval_name: Option<String>,
     pub(super) eval_check_cmd: Option<String>,
@@ -129,6 +131,10 @@ impl App {
             checks: Vec<Check>,
             #[serde(default, rename = "heldOut")]
             held_out: Option<Check>,
+            /// Repo-relative files or directories the task edits; it waits
+            /// while another live task on the same base holds any of them.
+            #[serde(default)]
+            paths: Vec<String>,
             #[serde(default)]
             branch: Option<String>,
             /// Commit-ish the task branches from; the repo's HEAD if unset.
@@ -245,7 +251,13 @@ impl App {
                 variant,
                 depends_on,
                 parent: parent.map(|t| t.id),
-                paths: vec![],
+                paths: p
+                    .paths
+                    .iter()
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect(),
+                relay_of: None,
                 eval_set: p.eval_set.clone().filter(|s| !s.trim().is_empty()),
                 eval_name: p.eval_name.clone().filter(|s| !s.trim().is_empty()),
                 eval_check_cmd: p.eval_check.clone().filter(|s| !s.trim().is_empty()),
@@ -423,6 +435,10 @@ impl App {
             eval_check_cmd: new.eval_check_cmd,
             eval_check: None,
             brief_check: Default::default(),
+            queue: QueueState {
+                relay_of: new.relay_of,
+                ..Default::default()
+            },
             created_at: new.created_at,
             updated_at: new.created_at,
         };
@@ -523,15 +539,18 @@ impl App {
                 .await;
             self.store.save_task(&task).map_err(|e| e.to_string())?;
             self.broadcast_task(&task);
+            // Its lease lapses: whoever waited for it can go.
+            self.advance_graph(&task.repo);
         }
         if !live
-            && (parent || !task.depends_on.is_empty())
+            && (parent || !task.depends_on.is_empty() || task.queue.queue_reason.is_some())
             && matches!(
                 task.status,
                 TaskStatus::Queued | TaskStatus::Running | TaskStatus::Waiting
             )
         {
             task.question = None;
+            task.queue.queue_reason = None;
             task.status = TaskStatus::Stopped;
             task.updated_at = now_ms();
             self.store.save_task(&task).map_err(|e| e.to_string())?;

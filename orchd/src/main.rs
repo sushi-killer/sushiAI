@@ -1,5 +1,5 @@
 //! `orchd serve --data <dir> [--socket <path>]` (also the default with no
-//! subcommand), `orchd hook stop --socket <path> --token <t>`,
+//! subcommand), `orchd hook stop|edit --socket <path> --token <t>`,
 //! `orchd mcp --data <dir> [--socket <path>]`, `orchd ab --data <dir> [--eval <set>]`, `orchd failures --data <dir>`, and
 //! `orchd gc --data <dir> --socket <sock> [--dry-run]`,
 //! `orchd eval run --data <dir> --socket <sock> ...` (see `eval.rs`), and
@@ -114,11 +114,14 @@ fn run_gc(args: &[String]) -> i32 {
 }
 
 async fn run_hook(args: &[String]) -> i32 {
-    let kind = args.first().map(String::as_str);
-    if kind != Some("stop") {
-        println!("{{}}");
-        return 0;
-    }
+    let method = match args.first().map(String::as_str) {
+        Some("stop") => "hook.stop",
+        Some("edit") => "hook.edit",
+        _ => {
+            println!("{{}}");
+            return 0;
+        }
+    };
     let mut socket: Option<String> = None;
     let mut token: Option<String> = None;
     let mut i = 1;
@@ -135,17 +138,21 @@ async fn run_hook(args: &[String]) -> i32 {
             _ => i += 1,
         }
     }
-    match run_hook_inner(socket, token).await {
+    match run_hook_inner(method, socket, token).await {
         Some(v) => println!("{v}"),
         None => println!("{{}}"),
     }
     0
 }
 
-/// Reads the hook JSON on stdin, sends `hook.stop`, prints the result.
+/// Reads the hook JSON on stdin, sends `method`, prints the result.
 /// Fails open (`None` -> caller prints `{}`) on any error: missing flags,
 /// bad stdin, no daemon listening, malformed response.
-async fn run_hook_inner(socket: Option<String>, token: Option<String>) -> Option<String> {
+async fn run_hook_inner(
+    method: &str,
+    socket: Option<String>,
+    token: Option<String>,
+) -> Option<String> {
     let socket = socket?;
     let token = token?;
     let mut input = String::new();
@@ -154,7 +161,7 @@ async fn run_hook_inner(socket: Option<String>, token: Option<String>) -> Option
         serde_json::from_str(&input).unwrap_or(serde_json::Value::Null);
     let result = crate::protocol::client_request(
         Path::new(&socket),
-        "hook.stop",
+        method,
         serde_json::json!({"token": token, "payload": payload}),
     )
     .await

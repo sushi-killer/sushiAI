@@ -99,6 +99,10 @@ pub struct Settings {
     pub protected_paths: Vec<String>,
     pub max_attempts: u32,
     pub parallel: u32,
+    /// At most this many subtasks of one parent run at once (`parallel`
+    /// stays the global cap).
+    #[serde(default = "default_child_parallel")]
+    pub child_parallel: u32,
     /// Route id used for the drafting/plan stage of a `{repo, request}`
     /// `task.create`; `""` turns planning off (that create form is then
     /// rejected -- there is nothing to run it with).
@@ -341,6 +345,10 @@ impl BriefCheck {
     }
 }
 
+fn default_child_parallel() -> u32 {
+    3
+}
+
 fn default_planner() -> String {
     "claude-opus".to_string()
 }
@@ -401,6 +409,7 @@ impl Default for Settings {
             protected_paths: vec![],
             max_attempts: 4,
             parallel: 2,
+            child_parallel: default_child_parallel(),
             planner: default_planner(),
             brief_check_route: default_brief_check_route(),
             orchestrator: String::new(),
@@ -980,6 +989,10 @@ pub struct Task {
     /// Where the brief consistency check stands for this task.
     #[serde(default, skip_serializing_if = "BriefCheck::is_default")]
     pub brief_check: BriefCheck,
+    /// Where the task stands in orchd's file queue: why it waits, and the
+    /// relay it belongs to. Flat in the JSON.
+    #[serde(flatten)]
+    pub queue: QueueState,
     #[serde(default)]
     pub decisions: Vec<String>,
     /// Non-blocking planner questions answered by their recommendation.
@@ -1000,6 +1013,28 @@ pub struct Task {
     pub archived: bool,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// A task's place in the file queue (`engine/leases.rs`, `engine/graph.rs`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct QueueState {
+    /// Why the task sits `queued`: it waits for another task's lease
+    /// ("waits for <task> on <path>"). Cleared when it starts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_reason: Option<String>,
+    /// The task waited for a lease: its worktree is carried onto the base
+    /// head before its first attempt.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub waited_on_lease: bool,
+    /// The sibling subtask whose branch this one continues (a relay): it
+    /// starts from that subtask's commit instead of the parent's head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_of: Option<String>,
+    /// Where the relay's chain began; the last link lands the whole chain
+    /// on the parent as one commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_base: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1124,6 +1159,9 @@ pub enum FailureKind {
     /// The attempt's estimated cost passed `variant.max_attempt_cost_usd`.
     Budget,
     Verify,
+    /// Landing carried the work onto a moved base and files conflict: the
+    /// next attempt only resolves them.
+    Conflict,
     /// The held-out check (`variant.grounded_checks`) failed after verify.
     Heldout,
     Review,
@@ -1142,6 +1180,7 @@ impl FailureKind {
             FailureKind::Loop => "loop",
             FailureKind::Budget => "budget",
             FailureKind::Verify => "verify",
+            FailureKind::Conflict => "conflict",
             FailureKind::Heldout => "heldout",
             FailureKind::Review => "review",
             FailureKind::Evidence => "evidence",
@@ -1525,6 +1564,7 @@ mod tests {
             eval_check_cmd: None,
             eval_check: None,
             brief_check: Default::default(),
+            queue: Default::default(),
             created_at: 1,
             updated_at: 1,
         };
@@ -1759,6 +1799,7 @@ mod tests {
             eval_check_cmd: None,
             eval_check: None,
             brief_check: Default::default(),
+            queue: Default::default(),
             created_at: 1,
             updated_at: 1,
         };
@@ -1813,6 +1854,7 @@ mod tests {
             eval_check_cmd: None,
             eval_check: None,
             brief_check: Default::default(),
+            queue: Default::default(),
             created_at: 1,
             updated_at: 1,
         };

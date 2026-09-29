@@ -177,6 +177,9 @@ pub struct StopHook<'a> {
     pub token: &'a str,
 }
 
+/// The tools whose calls go through the `hook.edit` file lease check.
+pub const EDIT_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit";
+
 /// `Bash` prefixes an agent may never run directly (`permissions.deny`
 /// below).
 pub const DENIED_BASH_COMMANDS: [&str; 2] = ["git commit", "git push"];
@@ -256,6 +259,17 @@ pub fn build_claude_settings(
                 {
                     "hooks": [
                         {"type": "command", "command": command("stop"), "timeout": 600}
+                    ]
+                }
+            ],
+            // Asks the daemon whether another live task holds the file
+            // (`hook.edit`); a denial names the holder so the agent goes on
+            // with other files.
+            "PreToolUse": [
+                {
+                    "matcher": EDIT_TOOLS,
+                    "hooks": [
+                        {"type": "command", "command": command("edit"), "timeout": 30}
                     ]
                 }
             ]
@@ -896,6 +910,11 @@ mod tests {
             .is_none());
         assert_eq!(native["sandbox"]["filesystem"]["denyRead"][0], "/data");
         assert_eq!(native["hooks"]["Stop"][0]["hooks"][0]["timeout"], 600);
+        assert_eq!(native["hooks"]["PreToolUse"][0]["matcher"], EDIT_TOOLS);
+        assert!(native["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("hook edit --socket '/tmp/orchd.sock' --token 'tok-1'"));
         assert!(native["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap()

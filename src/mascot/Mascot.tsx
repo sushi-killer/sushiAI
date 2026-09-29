@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import type { MascotNotice } from "./types";
 
@@ -48,8 +48,8 @@ function Bubble({ notice }: { notice: MascotNotice }) {
         >
           <X size={13} />
         </button>
-        <strong>{notice.title}</strong>
-        <span className="bubble-body" title={notice.body}>
+        <strong title={notice.title}>{notice.title}</strong>
+        <span className="bubble-body clamped" title={notice.body}>
           {notice.body}
         </span>
         <button className="bubble-open" onClick={() => void bridge?.restart()}>
@@ -76,12 +76,10 @@ function Bubble({ notice }: { notice: MascotNotice }) {
       >
         <X size={13} />
       </button>
-      <strong>{notice.title}</strong>
-      <span className="bubble-body" title={notice.body}>
-        {notice.body}
-      </span>
-      {notice.kind === "input" && (
-        <>
+      <strong title={notice.title}>{notice.title}</strong>
+      {notice.kind === "input" ? (
+        <div className="bubble-scroll">
+          <span className="bubble-body">{notice.body}</span>
           {!!notice.options?.length && (
             <div className="bubble-options">
               {notice.options.map((option) => (
@@ -94,6 +92,14 @@ function Bubble({ notice }: { notice: MascotNotice }) {
               ))}
             </div>
           )}
+        </div>
+      ) : (
+        <span className="bubble-body clamped" title={notice.body}>
+          {notice.body}
+        </span>
+      )}
+      {notice.kind === "input" && (
+        <>
           <form
             className="bubble-answer"
             onSubmit={(event) => {
@@ -155,6 +161,8 @@ export function Mascot() {
   const [notices, setNotices] = useState<MascotNotice[]>([]);
   const [index, setIndex] = useState(0);
   const [hops, setHops] = useState(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const lastHeight = useRef(0);
 
   useEffect(
     () =>
@@ -171,6 +179,42 @@ export function Mascot() {
   );
 
   const shown = notices[Math.min(index, notices.length - 1)];
+  const hasShown = Boolean(shown);
+
+  // Reports the content's natural height (never the window's own): the
+  // laid-out children plus whatever the scroll area hides, so a capped window
+  // reports the same value it would uncapped.
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root || !hasShown) return;
+    const report = () => {
+      const style = getComputedStyle(root);
+      const kids = Array.from(root.children) as HTMLElement[];
+      const gap = parseFloat(style.rowGap) || 0;
+      const scroll = root.querySelector<HTMLElement>(".bubble-scroll");
+      const hidden = scroll
+        ? Math.max(0, scroll.scrollHeight - scroll.clientHeight)
+        : 0;
+      const height = Math.ceil(
+        (parseFloat(style.paddingTop) || 0) +
+          (parseFloat(style.paddingBottom) || 0) +
+          kids.reduce((sum, kid) => sum + kid.offsetHeight, 0) +
+          gap * Math.max(0, kids.length - 1) +
+          hidden,
+      );
+      if (height === lastHeight.current) return;
+      lastHeight.current = height;
+      window.mascot?.resize(height);
+    };
+    const observer = new ResizeObserver(report);
+    observer.observe(root);
+    root
+      .querySelectorAll(".bubble-wrap, .bubble-scroll, .bubble-wrap > *")
+      .forEach((node) => observer.observe(node));
+    report();
+    return () => observer.disconnect();
+  });
+
   if (!shown) return null;
   const extra = notices.length - 1;
   const step = (delta: number) =>
@@ -180,7 +224,7 @@ export function Mascot() {
     );
   const mood = shown.kind !== "core-update" && shown.answered ? "" : shown.kind;
   return (
-    <div className="mascot">
+    <div className="mascot" ref={rootRef}>
       <div className="bubble-wrap">
         <Bubble key={shown.id} notice={shown} />
         {extra > 0 && (

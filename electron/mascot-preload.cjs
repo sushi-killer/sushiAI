@@ -12,5 +12,8 @@ contextBridge.exposeInMainWorld("mascot", {
   open: (taskId, focus) => ipcRenderer.invoke("mascot-open", taskId, focus),
   land: (taskId) => ipcRenderer.invoke("mascot-land", taskId),
   restart: () => ipcRenderer.invoke("mascot-restart"),
+  resize: (height) => {
+    if (typeof height === "number") ipcRenderer.send("mascot-resize", height);
+  },
   dismiss: (id) => ipcRenderer.invoke("mascot-dismiss", id),
 });

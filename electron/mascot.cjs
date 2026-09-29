@@ -10,6 +10,7 @@ const WIDTH = 400;
 const HEIGHT_INPUT = 340;
 const HEIGHT_TIMED = 230;
 const MARGIN = 12;
+const MAX_HEIGHT_RATIO = 0.7;
 
 function noticeId(notice) {
   if (notice.kind === "core-update") return "core-update";
@@ -116,8 +117,19 @@ function mascotHeight(queue) {
     : HEIGHT_TIMED;
 }
 
-function mascotBounds(workArea, queue) {
-  const height = mascotHeight(queue);
+/** Height follows the content the renderer reports, between the queue's
+ * minimum and MAX_HEIGHT_RATIO of the work area; the minimum wins when the
+ * work area is too small for the cap. */
+function mascotBounds(workArea, queue, contentHeight) {
+  const minimum = mascotHeight(queue);
+  const wanted =
+    typeof contentHeight === "number" &&
+    Number.isFinite(contentHeight) &&
+    contentHeight > 0
+      ? contentHeight
+      : 0;
+  const cap = Math.floor(MAX_HEIGHT_RATIO * workArea.height);
+  const height = Math.max(minimum, Math.min(wanted, cap));
   return {
     width: WIDTH,
     height,
@@ -145,6 +157,7 @@ function registerMascot({
   let destroyed = false;
   let loaded = false;
   let timer = null;
+  let contentHeight = 0;
 
   const own = (event) =>
     Boolean(win) &&
@@ -160,7 +173,9 @@ function registerMascot({
   }
 
   function place() {
-    win.setBounds(mascotBounds(screen.getPrimaryDisplay().workArea, queue));
+    win.setBounds(
+      mascotBounds(screen.getPrimaryDisplay().workArea, queue, contentHeight),
+    );
   }
 
   function publish() {
@@ -258,6 +273,13 @@ function registerMascot({
     if (own(event)) publish();
   });
 
+  ipcMain.on("mascot-resize", (event, height) => {
+    if (!own(event) || typeof height !== "number" || !Number.isFinite(height))
+      return;
+    contentHeight = height;
+    if (loaded) place();
+  });
+
   handle("mascot-answer", async (taskId, text) => {
     if (typeof taskId !== "string" || taskId.length > 200)
       throw new Error("Invalid task.");
@@ -337,6 +359,7 @@ module.exports = {
   noticeLifetimeMs,
   queueReducer,
   validateAnswer,
+  MAX_HEIGHT_RATIO,
   mascotBounds,
   registerMascot,
 };

@@ -80,6 +80,21 @@ shows, its visibility once the queue is empty, and whether `.orch-question` /
 `.orch-report` intersect the viewport with the `.selected` task row; the script
 exits non-zero with `error` set on any failure.
 
+The needs-input bubble grows with its question up to 70% of the work area
+height, then its body/options area scrolls. Two more waiting seeds cover that:
+`artifacts/mascot-input.png` (a, the short question),
+`artifacts/mascot-input-long.png` (b, a two-line title, a four-sentence body
+and three long options) and `artifacts/mascot-input-cap.png` (c, a body of
+about 1200 characters and four options of about 40 words). They are pushed
+after the short shot and dismissed before the rest of the run. For each,
+`layout.{short,long,cap}` in `mascot-report.json` has `windowHeight` vs `cap`
+(`floor(0.7 * workArea.height)`), whether the title, Answer field, Open and
+Dismiss lie fully inside the mascot viewport, `titleLines`, each option's
+`innerText` and accessible name (they must equal the seeded option), and the
+scroll area's `scrollHeight`/`clientHeight`. The script fails unless (a) and
+(b) are not scrolled, (c) is scrolled at exactly the cap, and every window
+stays anchored bottom-right.
+
 ## Boundaries
 
 - Drivers launch with `SUSHIAI_TEST_WINDOW=hidden`; a visible window is an

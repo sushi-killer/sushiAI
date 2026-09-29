@@ -208,7 +208,8 @@ function formatCost(costUsd) {
 const REPORT_NOTICE_MS = 5 * 60 * 1000;
 
 const NOTICE_MAX_OPTIONS = 4;
-const NOTICE_OPTION_CHARS = 60;
+const NOTICE_OPTION_CHARS = 400;
+const NOTICE_INPUT_BODY_CHARS = 2000;
 
 /** The notice for a task that needs input, finished or failed - trimmed to
  * the caps a native notification can carry. Pure: the caller decides whether
@@ -217,7 +218,10 @@ function orchestratorNotice(task) {
   const cap = (value, max) => String(value ?? "").slice(0, max);
   let title = cap(task.title || "Orchestrator", 120);
   let kind = "input";
-  let body = cap(task.question?.text || "Needs your input.", 300);
+  let body = cap(
+    task.question?.text || "Needs your input.",
+    NOTICE_INPUT_BODY_CHARS,
+  );
   let focus = "question";
   let canLand = false;
   if (task.status === "done") {

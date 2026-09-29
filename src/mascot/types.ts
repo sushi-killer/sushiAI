@@ -29,6 +29,7 @@ export type MascotBridge = {
   land(taskId: string): Promise<string>;
   restart(): Promise<void>;
   dismiss(id: string): Promise<void>;
+  resize(height: number): void;
 };
 
 declare global {

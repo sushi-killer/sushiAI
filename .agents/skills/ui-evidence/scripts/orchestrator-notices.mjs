@@ -25,6 +25,21 @@ const windowMode = "hidden";
 const root = process.cwd();
 const shot = (name) => `${root}/artifacts/${name}.png`;
 
+// Case (c): as long as a notice can get (body cap 2000, option cap 400), so it
+// reaches the 70% cap even on a tall work area.
+const LONG_TITLE =
+  "orchd: a criterion checked by a command is never visual, and task.amend carries visual flags";
+const CAP_SENTENCE =
+  "The migration touches the queue, the planner and the review gate, and each of them keeps its own copy of the flag. ";
+const CAP_BODY = CAP_SENTENCE.repeat(17).trim() + " Which way should it go?";
+const CAP_WORDS =
+  "keep the existing behaviour for running tasks, migrate stored tasks lazily when they are next opened, log every flag that changes, and leave the planner prompt alone until a follow-up task owns it".split(
+    " ",
+  );
+const CAP_OPTIONS = ["Alpha", "Bravo", "Charlie", "Delta"].map(
+  (name) => `${name}: ${[...CAP_WORDS, ...CAP_WORDS.slice(0, 20)].join(" ")}.`,
+);
+
 const SEEDS = [
   {
     title: "Landed feature",
@@ -80,6 +95,51 @@ const SEEDS = [
         status: "blocked",
         summary: "Stopped to ask before removing a public export.",
         costUsd: 0.31,
+        changedFiles: [],
+        verify: [],
+        gateBlocks: 0,
+      },
+    ],
+  },
+  {
+    title:
+      "orchd: a criterion checked by a command is never visual, and task.amend carries visual flags",
+    status: "waiting",
+    costUsd: 0.2,
+    question: {
+      text: "The planner marked criterion 3 as visual, but its check is node --test tests/mascot.test.cjs, a command whose exit code decides it. A visual flag on it makes orchd demand a screenshot the implementer never needs to take, and the review stalls waiting for one. task.amend currently copies the visual flags from the old criteria by index, so reordering the criteria moves a flag onto the wrong one. How should a criterion that names a command be treated, and what should task.amend do with the flags?",
+      options: [
+        "Treat any criterion whose check names a verify command as non-visual, drop its visual flag at plan time, and have task.amend recompute every flag from the amended criteria instead of copying them from its old list by position.",
+        "Keep the visual flag wherever the planner set it, but let a passing verify command satisfy the evidence requirement, and have task.amend carry flags over by matching criterion text rather than by index, so a reorder never moves one.",
+        "Change nothing in the planner for now; only make task.amend clear every visual flag it cannot match to an identical criterion, and leave the command-versus-visual rule for a separate follow-up task that owns the planner prompt.",
+      ],
+      kind: "agent_question",
+    },
+    attempts: [
+      {
+        status: "blocked",
+        summary: "Stopped to ask about the visual flag rule.",
+        costUsd: 0.2,
+        changedFiles: [],
+        verify: [],
+        gateBlocks: 0,
+      },
+    ],
+  },
+  {
+    title: "Cap question",
+    status: "waiting",
+    costUsd: 0.2,
+    question: {
+      text: CAP_BODY,
+      options: CAP_OPTIONS,
+      kind: "agent_question",
+    },
+    attempts: [
+      {
+        status: "blocked",
+        summary: "Stopped to ask a very long question.",
+        costUsd: 0.2,
         changedFiles: [],
         verify: [],
         gateBlocks: 0,
@@ -263,6 +323,82 @@ try {
     dismiss: await mascot.getByRole("button", { name: "Dismiss" }).count(),
   };
 
+  // Layout proof for the needs-input shots (a), (b) and (c).
+  const layout = async (name, seed) => {
+    const state = await readState();
+    const inside = await mascot.evaluate(() => {
+      const viewport = { w: window.innerWidth, h: window.innerHeight };
+      const fits = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        return (
+          r.top >= 0 &&
+          r.left >= 0 &&
+          r.bottom <= viewport.h &&
+          r.right <= viewport.w
+        );
+      };
+      const bubble = document.querySelector(".bubble.input");
+      const title = bubble.querySelector("strong");
+      const scroll = bubble.querySelector(".bubble-scroll");
+      const style = getComputedStyle(title);
+      const lineHeight =
+        parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.2;
+      const buttons = [...bubble.querySelectorAll("button")];
+      const byName = (label) =>
+        buttons.find(
+          (b) =>
+            (b.getAttribute("aria-label") || b.textContent).trim() === label,
+        );
+      return {
+        title: fits(title),
+        answerField: fits(bubble.querySelector('input[aria-label="Answer"]')),
+        open: fits(byName("Open")),
+        dismiss: fits(byName("Dismiss")),
+        titleLines: Math.round(
+          title.getBoundingClientRect().height / lineHeight,
+        ),
+        options: [...bubble.querySelectorAll(".bubble-options button")].map(
+          (b) => ({
+            innerText: b.innerText,
+            accessibleName: b.getAttribute("aria-label") ?? b.textContent,
+          }),
+        ),
+        scrollHeight: scroll.scrollHeight,
+        clientHeight: scroll.clientHeight,
+      };
+    });
+    const area = state.workArea;
+    const box = state.mascot.bounds;
+    const entry = {
+      windowHeight: box.height,
+      cap: Math.floor(0.7 * area.height),
+      anchoredBottomRight:
+        box.x + box.width === area.x + area.width - 12 &&
+        box.y + box.height === area.y + area.height - 12,
+      ...inside,
+      scrolled: inside.scrollHeight > inside.clientHeight,
+      seededOptions: seed.question.options,
+    };
+    report.layout ??= {};
+    report.layout[name] = entry;
+    return entry;
+  };
+  // Pushes a waiting task on top of the queue, shoots it and dismisses it.
+  const layoutShot = async (title, file, name) => {
+    await showNotice(title, title);
+    await mascot.waitForTimeout(400);
+    await shotMascot(file);
+    await layout(name, tasks[title]);
+    await dismiss();
+    await mascot
+      .locator(".bubble.input", { hasText: "Delete the legacy export path" })
+      .waitFor();
+  };
+  await layout("short", tasks["Needs a call"]);
+  await layoutShot(LONG_TITLE, "mascot-input-long", "long");
+  await layoutShot("Cap question", "mascot-input-cap", "cap");
+
   const measure = (selector) =>
     page.evaluate((sel) => {
       const el = document.querySelector(sel);
@@ -387,6 +523,32 @@ try {
       problems.push("the mascot was visible in hidden mode");
     if (report.everFocused)
       problems.push("the mascot took focus in hidden mode");
+  }
+  for (const [name, entry] of Object.entries(report.layout ?? {})) {
+    if (!(entry.title && entry.answerField && entry.open && entry.dismiss))
+      problems.push(
+        `${name}: title, Answer, Open or Dismiss is not fully inside`,
+      );
+    if (!entry.anchoredBottomRight)
+      problems.push(`${name}: the mascot is not anchored bottom-right`);
+    if (entry.windowHeight > entry.cap)
+      problems.push(`${name}: the window is taller than the cap`);
+    if (name === "cap") {
+      if (!entry.scrolled)
+        problems.push("cap: the scroll area is not scrolled");
+      if (entry.windowHeight !== entry.cap)
+        problems.push("cap: the window height is not the cap");
+    } else if (entry.scrolled)
+      problems.push(`${name}: the scroll area scrolled`);
+    if (name === "long" && entry.titleLines !== 2)
+      problems.push(`long: the title has ${entry.titleLines} lines, not 2`);
+    const seeded = entry.seededOptions;
+    const ok =
+      entry.options.length === seeded.length &&
+      entry.options.every(
+        (o, i) => o.innerText === seeded[i] && o.accessibleName === seeded[i],
+      );
+    if (!ok) problems.push(`${name}: option text or accessible name differs`);
   }
   if (report.mascot.answered !== "Answered Thanks, the task carries on.")
     problems.push("no Answered confirmation");

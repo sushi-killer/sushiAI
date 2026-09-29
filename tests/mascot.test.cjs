@@ -9,6 +9,7 @@ const {
   queueReducer,
   validateAnswer,
   mascotBounds,
+  MAX_HEIGHT_RATIO,
 } = require("../electron/mascot.cjs");
 
 const notice = (kind, taskId, body = "b") => ({
@@ -179,6 +180,32 @@ test("mascotBounds hugs the bottom-right of the work area and grows for input", 
     assert.equal(b.y + b.height, 900 - 12);
   }
   assert.ok(input.height > timed.height);
+});
+
+test("mascotBounds clamps a reported content height and stays bottom-right", () => {
+  const area = { x: 0, y: 25, width: 1440, height: 875 };
+  const cap = Math.floor(MAX_HEIGHT_RATIO * 875);
+  const queue = add([], notice("input", "a"));
+  const min = mascotBounds(area, queue).height;
+  const cases = [
+    [100, min],
+    [500, 500],
+    [5000, cap],
+    [undefined, min],
+    [NaN, min],
+    [Infinity, min],
+    [-20, min],
+    [0, min],
+    ["600", min],
+  ];
+  for (const [given, expected] of cases) {
+    const b = mascotBounds(area, queue, given);
+    assert.equal(b.height, expected, String(given));
+    assert.equal(b.x + b.width, 1440 - 12);
+    assert.equal(b.y + b.height, 900 - 12);
+  }
+  const tiny = { x: 0, y: 0, width: 800, height: 300 };
+  assert.equal(mascotBounds(tiny, queue, 5000).height, min);
 });
 
 test("core-update is one permanent entry that only dismiss removes", () => {

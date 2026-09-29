@@ -541,7 +541,7 @@ pub(super) async fn run_task_loop(
                 task.attempts[idx].status = AttemptStatus::Interrupted;
                 task.attempts[idx].ended_at = Some(now_ms());
                 settle_unfinished_cost(&mut task, idx, &run_dir, &settings.prices);
-                task.status = TaskStatus::Stopped;
+                task.status = app.cancelled_status(&task.status);
                 task.updated_at = now_ms();
                 let _ = app.store.save_task(&task);
                 app.broadcast_task(&task);
@@ -914,7 +914,7 @@ pub(super) async fn run_task_loop(
         if cancel.is_cancelled() {
             task.attempts[idx].status = AttemptStatus::Interrupted;
             task.attempts[idx].ended_at = Some(now_ms());
-            task.status = TaskStatus::Stopped;
+            task.status = app.cancelled_status(&task.status);
             task.updated_at = now_ms();
             let _ = app.store.save_task(&task);
             app.broadcast_task(&task);
@@ -1297,7 +1297,7 @@ pub(super) async fn run_task_loop(
                         // (and the task) is simply stopped.
                         task.attempts[idx].status = AttemptStatus::Interrupted;
                         task.attempts[idx].ended_at = Some(now_ms());
-                        task.status = TaskStatus::Stopped;
+                        task.status = app.cancelled_status(&task.status);
                         task.updated_at = now_ms();
                         let _ = app.store.save_task(&task);
                         app.broadcast_task(&task);
@@ -1579,7 +1579,7 @@ pub(super) async fn run_task_loop(
                 Landing::Cancelled => {
                     task.attempts[idx].status = AttemptStatus::Interrupted;
                     task.attempts[idx].ended_at = Some(now_ms());
-                    task.status = TaskStatus::Stopped;
+                    task.status = app.cancelled_status(&task.status);
                     task.updated_at = now_ms();
                     let _ = app.store.save_task(&task);
                     app.broadcast_task(&task);
@@ -1646,7 +1646,7 @@ pub(super) async fn mark_stopped_if_not_already(app: &Arc<App>, task_id: &str) {
             task.status,
             TaskStatus::Stopped | TaskStatus::Done | TaskStatus::Failed
         ) {
-            task.status = TaskStatus::Stopped;
+            task.status = app.cancelled_status(&task.status);
             task.updated_at = now_ms();
             let _ = app.store.save_task(&task);
             app.broadcast_task(&task);

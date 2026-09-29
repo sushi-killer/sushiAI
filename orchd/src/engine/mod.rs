@@ -457,6 +457,20 @@ impl App {
         let _ = self.shutdown_tx.send(());
     }
 
+    /// The status a task takes when its loop is cancelled: `stopped` for an
+    /// owner's stop, but a daemon shutdown (upgrade, SIGTERM) leaves the task
+    /// in the state crash recovery already resumes -- a running task goes back
+    /// to `queued`, a drafting or waiting one stays as it is.
+    pub(super) fn cancelled_status(&self, current: &TaskStatus) -> TaskStatus {
+        if !self.shutting_down.load(Ordering::SeqCst) {
+            return TaskStatus::Stopped;
+        }
+        match current {
+            TaskStatus::Running => TaskStatus::Queued,
+            other => *other,
+        }
+    }
+
     pub fn subscribe_shutdown(&self) -> broadcast::Receiver<()> {
         self.shutdown_tx.subscribe()
     }

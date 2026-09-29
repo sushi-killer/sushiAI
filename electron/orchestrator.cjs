@@ -127,12 +127,13 @@ function orchdRequest(socketPath, method, params, token, timeout = 5000) {
   });
 }
 
-/** Whether a running daemon's own binary has since been rebuilt: true only
- * when it reported no in-flight attempts (a busy one keeps running its tasks
- * on the old code until a later call finds it idle) and the binary on disk is
- * more than a second newer than the one it loaded. */
+/** Whether a running daemon's own binary has since been rebuilt: the binary
+ * on disk is more than a second newer than the one it loaded. Running tasks
+ * do not block the replacement: `shutdown` leaves them queued and the next
+ * daemon resumes them exactly as it does after a crash. An in-flight chat
+ * reply (`chatTurns`) still does: chat has no resume path. */
 function isStalePing(ping, actualBinaryMtimeMs) {
-  if (!ping?.binaryMtimeMs || ping.running > 0) return false;
+  if (!ping?.binaryMtimeMs || ping.chatTurns > 0) return false;
   return actualBinaryMtimeMs > ping.binaryMtimeMs + 1000;
 }
 
@@ -202,7 +203,7 @@ class OrchestratorService {
   }
 
   async #isStale(ping) {
-    if (!ping?.binaryMtimeMs || ping.running > 0) return false;
+    if (!ping?.binaryMtimeMs || ping.chatTurns > 0) return false;
     try {
       const { mtimeMs } = await fs.stat(this.binary);
       return isStalePing(ping, mtimeMs);
@@ -223,7 +224,8 @@ class OrchestratorService {
         2000,
       );
       if (!(await this.#isStale(ping))) return ping;
-      // A rebuilt binary replaces an idle daemon; wait for the old process to
+      // A rebuilt binary replaces the daemon even with tasks running (its
+      // shutdown leaves them resumable); wait for the old process to
       // actually exit before spawning the new one on the same socket path.
       await orchdRequest(
         this.socketPath,

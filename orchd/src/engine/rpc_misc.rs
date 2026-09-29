@@ -4,16 +4,17 @@ impl App {
     pub(super) async fn handle_ping(&self) -> Result<serde_json::Value, String> {
         // Only slots actually held by a running attempt count -- a task
         // still queued behind the concurrency limit is not "running".
-        // An orchestrator chat reply in progress counts too: replacing the
-        // daemon under it would lose the reply.
-        let running = self.parallel_limit as usize - self.slots.available_permits()
-            + self.chat_turns.lock().unwrap().len();
+        // Orchestrator chat replies in progress are reported apart in
+        // `chatTurns`: a task resumes after a restart, a chat reply does not.
+        let running = self.parallel_limit as usize - self.slots.available_permits();
+        let chat_turns = self.chat_turns.lock().unwrap().len();
         Ok(json!({
             "version": env!("CARGO_PKG_VERSION"),
             "pid": self.pid,
             "dataDir": self.data_dir.to_string_lossy(),
             "binaryMtimeMs": self.binary_mtime_ms,
             "running": running,
+            "chatTurns": chat_turns,
         }))
     }
 

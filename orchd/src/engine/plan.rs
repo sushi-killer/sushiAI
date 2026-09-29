@@ -212,8 +212,9 @@ pub(super) async fn ask_plan_question(
         }
         None => {
             if let Ok(Some(mut task)) = app.store.load_task(task_id) {
-                if task.status != TaskStatus::Stopped {
-                    task.status = TaskStatus::Stopped;
+                let next = app.cancelled_status(&task.status);
+                if task.status != next {
+                    task.status = next;
                     task.updated_at = now_ms();
                     let _ = app.store.save_task(&task);
                     app.broadcast_task(&task);

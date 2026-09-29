@@ -13,6 +13,7 @@ const app = await electron.launch({
   // (electron/ipc/app.cjs), so point it at a path that does not exist.
   env: {
     ...process.env,
+    SUSHIAI_TEST_WINDOW: "hidden",
     BRIDGE_DATA_DIR: profile,
     HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
     // An agent started from `npm run dev` inherits this; set, the app loads
@@ -76,6 +77,16 @@ try {
         };
       }),
   );
+  // Proves the run was hidden: no visible or focused window, real content size.
+  report.window = await app.evaluate(({ BrowserWindow }) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    const [width, height] = win.getContentSize();
+    return {
+      isVisible: win.isVisible(),
+      isFocused: win.isFocused(),
+      contentSize: { width, height },
+    };
+  });
   await page.screenshot({ path: shot("evidence-window") });
   await page.locator(".sidebar").screenshot({ path: shot("evidence-sidebar") });
 } catch (error) {

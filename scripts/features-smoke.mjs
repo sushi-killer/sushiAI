@@ -79,7 +79,7 @@ print(r)`)
     args: process.env.SUSHIAI_EXECUTABLE ? [] : ["."],
     env: {
       ...process.env,
-      SUSHIAI_TEST_HEADLESS: "1",
+      SUSHIAI_TEST_WINDOW: "hidden",
       BRIDGE_DATA_DIR: profile,
     },
   });

@@ -159,6 +159,7 @@ if (!seedPath || !title) {
       cwd: root,
       env: {
         ...process.env,
+        SUSHIAI_TEST_WINDOW: "hidden",
         BRIDGE_DATA_DIR: profile,
         HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
         BRIDGE_DEV_URL: "",

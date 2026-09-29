@@ -20,6 +20,9 @@ import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { waitForExit } from "../../../../electron/orchestrator.cjs";
 
+// "hidden" keeps the run off the owner's screen; "visible" is the opt-out for
+// a run that must show the real mascot window (checks below adapt).
+const windowMode = "hidden";
 const root = process.cwd();
 const shot = (name) => `${root}/artifacts/${name}.png`;
 
@@ -86,7 +89,7 @@ const SEEDS = [
   },
 ];
 
-const report = { pageErrors: [] };
+const report = { pageErrors: [], everVisible: false, everFocused: false };
 const profile = await fs.mkdtemp("/tmp/sushiai-evidence-");
 const dataDir = `${profile}/orchestrator`;
 let app = null;
@@ -136,6 +139,7 @@ try {
     cwd: root,
     env: {
       ...process.env,
+      SUSHIAI_TEST_WINDOW: windowMode,
       BRIDGE_DATA_DIR: profile,
       HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
       BRIDGE_DEV_URL: "",
@@ -163,7 +167,13 @@ try {
     app.evaluate((_, task) => globalThis.__sushiaiMascot.notify(task), {
       ...tasks[title],
     });
-  const mainState = () =>
+  const mainState = async () => {
+    const state = await readState();
+    if (state.mascot?.visible) report.everVisible = true;
+    if (state.focusedIsMascot) report.everFocused = true;
+    return state;
+  };
+  const readState = () =>
     app.evaluate(({ BrowserWindow }) => {
       const seam = globalThis.__sushiaiMascot;
       const mascot = seam.window();
@@ -367,12 +377,18 @@ try {
     problems.push("the mascot is not always on top");
   if (!report.focusAfter.mascot?.isVisibleOnAllWorkspaces)
     problems.push("the mascot is not visible on all workspaces");
-  if (!report.focusAfter.mascot?.visible)
+  if (windowMode === "visible" && !report.focusAfter.mascot?.visible)
     problems.push("the mascot is not visible while a notice is queued");
   if (report.focusAfter.focusedIsMascot)
     problems.push("the mascot took focus when it showed");
-  if (report.afterEmpty.mascot?.visible)
+  if (windowMode === "visible" && report.afterEmpty.mascot?.visible)
     problems.push("the mascot stayed visible with an empty queue");
+  if (windowMode === "hidden") {
+    if (report.everVisible)
+      problems.push("the mascot was visible in hidden mode");
+    if (report.everFocused)
+      problems.push("the mascot took focus in hidden mode");
+  }
   if (report.mascot.answered !== "Answered Thanks, the task carries on.")
     problems.push("no Answered confirmation");
   if (problems.length) report.error = problems.join("; ");

@@ -5,7 +5,11 @@ import assert from "node:assert/strict";
 const profile = await fs.mkdtemp("/tmp/sushiai-agent-ui-");
 const app = await electron.launch({
   args: ["."],
-  env: { ...process.env, SUSHIAI_TEST_HEADLESS: "1", BRIDGE_DATA_DIR: profile },
+  env: {
+    ...process.env,
+    SUSHIAI_TEST_WINDOW: "hidden",
+    BRIDGE_DATA_DIR: profile,
+  },
 });
 try {
   const page = await app.firstWindow();

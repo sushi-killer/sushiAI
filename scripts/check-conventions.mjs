@@ -307,6 +307,62 @@ for (const [where, text] of agentDocs)
     if (!skills.has(ref))
       problems.push(`${where}: \`$${ref}\` is not a skill in .agents/skills`);
 
+// Test-launched Electron must stay off the owner's screen: every launcher sets
+// SUSHIAI_TEST_WINDOW (hidden, or an explicit commented "visible" opt-out), and
+// the retired flag name must not come back anywhere.
+const RETIRED_FLAG = "SUSHIAI_TEST_" + "HEADLESS";
+async function* allFiles(dir) {
+  const entries = await readdir(path.join(root, dir), {
+    withFileTypes: true,
+  }).catch(() => []);
+  for (const entry of entries) {
+    if (entry.name === "node_modules" || entry.name === ".git") continue;
+    const relative = path.join(dir, entry.name);
+    if (entry.isDirectory()) yield* allFiles(relative);
+    else yield relative;
+  }
+}
+for (const dir of ["scripts", ".agents", ".github"])
+  for await (const file of allFiles(dir)) {
+    if (!/\.(mjs|cjs|js)$/.test(file)) continue;
+    if (
+      (dir === "scripts" || /^\.agents\/skills\/[^/]+\/scripts\//.test(file)) &&
+      file !== "scripts/check-conventions.mjs"
+    ) {
+      const text = await readFile(path.join(root, file), "utf8");
+      if (
+        /electron\.launch\(/.test(text) &&
+        !text.includes("SUSHIAI_TEST_WINDOW")
+      )
+        problems.push(
+          `${file}: electron.launch without SUSHIAI_TEST_WINDOW; test launchers must run hidden`,
+        );
+    }
+  }
+for (const dir of [
+  "src",
+  "electron",
+  "scripts",
+  "tests",
+  ".agents",
+  ".github",
+  "docs",
+])
+  for await (const file of allFiles(dir)) {
+    if (!/\.(mjs|cjs|js|ts|tsx|md|yml|json)$/.test(file)) continue;
+    if ((await readFile(path.join(root, file), "utf8")).includes(RETIRED_FLAG))
+      problems.push(
+        `${file}: ${RETIRED_FLAG} was replaced by SUSHIAI_TEST_WINDOW`,
+      );
+  }
+const guide = await readFile(path.join(root, "AGENTS.md"), "utf8").catch(
+  () => "",
+);
+if (guide.includes(RETIRED_FLAG))
+  problems.push(
+    `AGENTS.md: ${RETIRED_FLAG} was replaced by SUSHIAI_TEST_WINDOW`,
+  );
+
 if (problems.length) {
   console.error("Repository conventions failed:\n");
   for (const problem of problems) console.error(`  - ${problem}`);

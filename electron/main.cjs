@@ -40,6 +40,9 @@ const {
 } = require("./window-state.cjs");
 const { registerMascot } = require("./mascot.cjs");
 const { DEV_RESTART_EXIT_CODE, watchCore } = require("./dev-restart.cjs");
+const { testWindow } = require("./test-window.cjs");
+
+const testMode = testWindow();
 const { SurfaceStateStore } = require("./extensions/surface-state.cjs");
 const { ExtensionManager } = require("./extensions/extension-manager.cjs");
 const {
@@ -214,6 +217,7 @@ const mascot = registerMascot({
   BrowserWindow,
   screen,
   root,
+  policy: testMode.mascot,
   devURL: process.env.BRIDGE_DEV_URL,
   getService: () => orchestrator,
   showMainWindow: () => attention.showWindow(),
@@ -241,6 +245,7 @@ const attention = registerAttentionIpc({
   userDataDir: app.getPath("userData"),
   trayIconPath: path.join(root, "dist/trayTemplate.png"),
   mascot,
+  hidden: testMode.hidden,
 });
 orchestrator = registerOrchestratorExtension({
   handle,
@@ -282,13 +287,14 @@ app.whenReady().then(async () => {
     openPath: (file) => shell.openPath(file),
     openExternal: (url) => shell.openExternal(url),
     onChange: (state) => send("updates-state", state),
-    automatic: app.isPackaged && process.env.SUSHIAI_TEST_HEADLESS !== "1",
+    automatic: app.isPackaged && !testMode.hidden,
   });
   await updates.init();
   await attention.init();
   preview = new PreviewServer(connections);
   await preview.start();
-  if (
+  if (process.platform === "darwin" && testMode.hidden) app.dock.hide();
+  else if (
     process.platform === "darwin" &&
     existsSync(path.join(root, "dist/sushi-dock.png"))
   )
@@ -313,17 +319,17 @@ app.whenReady().then(async () => {
     minWidth: 600,
     minHeight: 440,
     title: "sushiAI",
-    show: process.env.SUSHIAI_TEST_HEADLESS !== "1",
     backgroundColor: "#0b0b0b",
     titleBarStyle: "hidden",
     trafficLightPosition: { x: 14, y: 14 },
+    ...testMode.windowOptions,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
       webviewTag: true,
-      backgroundThrottling: process.env.SUSHIAI_TEST_HEADLESS !== "1",
+      ...testMode.windowOptions.webPreferences,
     },
   });
   // Evidence seam: pushes a task through the real notice path (no daemon).
@@ -335,7 +341,7 @@ app.whenReady().then(async () => {
       window: () => mascot.getWindow(),
       workArea: () => screen.getPrimaryDisplay().workArea,
     };
-  if (savedWindow && process.env.SUSHIAI_TEST_HEADLESS !== "1") {
+  if (savedWindow && !testMode.hidden) {
     if (savedWindow.isFullScreen) mainWindow.setFullScreen(true);
     else if (savedWindow.isMaximized) mainWindow.maximize();
   }

@@ -82,6 +82,8 @@ exits non-zero with `error` set on any failure.
 
 ## Boundaries
 
+- Drivers launch with `SUSHIAI_TEST_WINDOW=hidden`; a visible window is an
+  explicit per-driver opt-out (`"visible"` plus a comment saying why).
 - The driver launches its own Electron with a temporary `BRIDGE_DATA_DIR`.
   Never attach to, restart or kill the owner's running app or dev server.
 - Keep the template's `HERDR_SOCKET_PATH` pointing at a missing file: unset,

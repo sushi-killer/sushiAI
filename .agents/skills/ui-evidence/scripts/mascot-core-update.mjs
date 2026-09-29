@@ -24,6 +24,7 @@ try {
       HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
       BRIDGE_DEV_URL: "",
       SUSHIAI_TEST_MASCOT: "1",
+      SUSHIAI_TEST_WINDOW: "hidden",
     },
   });
   const proc = app.process();

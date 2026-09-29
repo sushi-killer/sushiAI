@@ -204,6 +204,9 @@ by `scripts/check-conventions.mjs` in CI, not just a naming convention:
 
 - `npm run dev` is not a build. `npm run package` **overwrites
   `release/mac-arm64` with no backup** — confirm before running it.
+- Every Electron test launcher passes `SUSHIAI_TEST_WINDOW=hidden` (no window,
+  focus, dock, tray or mascot, and screenshots still render); a
+  `check-conventions` rule enforces it.
 - `webUtils.getPathForFile()` returns empty paths for drag-and-drop `File`
   objects on Electron 30-33 (`electron/preload.cjs` is the only place it's
   used) — this is a known upstream Electron regression, not an app bug; don't

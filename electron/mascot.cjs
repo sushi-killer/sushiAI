@@ -131,6 +131,7 @@ function registerMascot({
   BrowserWindow,
   screen,
   root,
+  policy = "visible",
   devURL,
   getService,
   showMainWindow,
@@ -197,11 +198,12 @@ function registerMascot({
       if (win && !win.isDestroyed()) win.hide();
       return;
     }
+    if (policy === "none") return;
     ensureWindow();
     if (!loaded) return;
     place();
     publish();
-    if (!win.isVisible()) win.showInactive();
+    if (policy !== "hidden" && !win.isVisible()) win.showInactive();
   }
 
   function ensureWindow() {
@@ -212,15 +214,16 @@ function registerMascot({
       frame: false,
       transparent: true,
       backgroundColor: "#00000000",
+      ...(policy === "hidden" ? { paintWhenInitiallyHidden: true } : {}),
       hasShadow: false,
       resizable: false,
       movable: false,
       minimizable: false,
       maximizable: false,
       fullscreenable: false,
+      focusable: policy !== "hidden",
       skipTaskbar: true,
       alwaysOnTop: true,
-      focusable: true,
       title: "sushiAI mascot",
       webPreferences: {
         preload: path.join(__dirname, "mascot-preload.cjs"),

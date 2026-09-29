@@ -36,7 +36,11 @@ const app = await electron.launch({
     ? { executablePath: process.env.SUSHIAI_EXECUTABLE }
     : {}),
   args: process.env.SUSHIAI_EXECUTABLE ? [] : ["."],
-  env: { ...process.env, SUSHIAI_TEST_HEADLESS: "1", BRIDGE_DATA_DIR: profile },
+  env: {
+    ...process.env,
+    SUSHIAI_TEST_WINDOW: "hidden",
+    BRIDGE_DATA_DIR: profile,
+  },
 });
 try {
   const page = await app.firstWindow();

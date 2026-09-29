@@ -94,9 +94,48 @@ const desktop = await electron.launch({
     BRIDGE_DEV_URL: "",
     // The smoke drives a real Electron app: keep its window off screen so a
     // test run never steals focus or covers what you are working in.
-    SUSHIAI_TEST_HEADLESS: "1",
+    SUSHIAI_TEST_WINDOW: "hidden",
   },
 });
+// A hidden run must put nothing on the owner's screen and still render at the
+// real content size, so screenshots and measurements can be trusted.
+async function assertHiddenWindow(page) {
+  const state = await desktop.evaluate(({ BrowserWindow, app }) => {
+    const [win] = BrowserWindow.getAllWindows();
+    const [width, height] = win.getContentSize();
+    return {
+      visible: BrowserWindow.getAllWindows().filter((w) => w.isVisible())
+        .length,
+      focused: BrowserWindow.getFocusedWindow() !== null,
+      dockVisible: process.platform === "darwin" ? app.dock.isVisible() : false,
+      content: { width, height },
+    };
+  });
+  assert.equal(state.visible, 0, "no BrowserWindow may be visible");
+  assert.equal(state.focused, false, "no BrowserWindow may be focused");
+  assert.equal(state.dockVisible, false, "the dock icon must be hidden");
+  const viewport = await page.evaluate(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+    ratio: window.devicePixelRatio,
+  }));
+  assert.equal(viewport.width, state.content.width);
+  assert.equal(viewport.height, state.content.height);
+  assert.deepEqual(
+    [viewport.width, viewport.height],
+    [1380, 880],
+    "viewport is the 1380x880 content size",
+  );
+  const file = path.join(root, "artifacts/smoke-hidden-window.png");
+  await page.screenshot({ path: file });
+  const png = await fs.readFile(file);
+  assert.equal(png.readUInt32BE(16), viewport.width * viewport.ratio);
+  assert.equal(png.readUInt32BE(20), viewport.height * viewport.ratio);
+  console.log(
+    `Hidden window: ${state.visible} visible, none focused, dock hidden, viewport ${viewport.width}x${viewport.height}`,
+  );
+}
+
 const errors = [];
 const skipped = [];
 const preview = http.createServer((_, response) => {
@@ -113,6 +152,7 @@ try {
     console.error("Renderer:", error.stack);
   });
   await page.waitForSelector(".panel-agent");
+  await assertHiddenWindow(page);
   await page
     .waitForFunction(
       () => document.querySelectorAll(".workspace-name").length > 1,
@@ -645,6 +685,7 @@ try {
   await page.reload();
   await page.waitForSelector(".panel-agent");
   assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);
+  await assertHiddenWindow(page);
   assert.deepEqual(errors, [], "No uncaught renderer errors");
   console.log(
     JSON.stringify(

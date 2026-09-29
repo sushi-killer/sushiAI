@@ -93,6 +93,7 @@ function registerAttentionIpc({
   userDataDir,
   trayIconPath,
   mascot: mascotWindow,
+  hidden = false,
 }) {
   const preferencesFile = path.join(userDataDir, "app-preferences.json");
   let preferences = { ...DEFAULT_PREFERENCES };
@@ -104,6 +105,7 @@ function registerAttentionIpc({
   const notifications = new Set();
 
   function showWindow() {
+    if (hidden) return;
     const win = getMainWindow();
     if (!win || win.isDestroyed()) return;
     if (win.isMinimized()) win.restore();
@@ -125,7 +127,7 @@ function registerAttentionIpc({
   }
 
   function createTray() {
-    if (tray || !existsSync(trayIconPath)) return;
+    if (hidden || tray || !existsSync(trayIconPath)) return;
     tray = new Tray(trayImage(trayState(badgeCount, workingCount)));
     tray.setToolTip("sushiAI");
     tray.setTitle(trayTitle(badgeCount));

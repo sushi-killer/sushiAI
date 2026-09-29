@@ -252,3 +252,73 @@ fn after_land_commands_run_in_the_main_checkout_and_a_failure_never_unlands() {
     assert_eq!(done["landedSha"], git_out(root, &["rev-parse", "work"]));
     daemon.shutdown_and_wait();
 }
+
+#[test]
+fn a_land_task_carries_its_work_onto_an_amended_base_and_lands() {
+    let (daemon, _scripts) = daemon();
+    let repo = repo_on_work_branch();
+    let root = repo.path();
+    let task = create(&daemon, root, "one", "test -f one.txt", true);
+    let id = task["id"].as_str().unwrap().to_string();
+    let old_base = task["baseSha"].as_str().unwrap().to_string();
+    // The base tip is amended after the task recorded it.
+    std::fs::write(root.join("amended.txt"), "amended\n").unwrap();
+    git_out(root, &["add", "amended.txt"]);
+    git_out(root, &["commit", "-q", "--amend", "-m", "amended tip"]);
+    let amended = git_out(root, &["rev-parse", "HEAD"]);
+    daemon.request("task.start", serde_json::json!({"id": id}));
+    let task = until_done(&daemon, &id);
+    assert_eq!(task["status"], "done", "{task}");
+    for attempt in task["attempts"].as_array().unwrap() {
+        assert!(
+            !attempt.to_string().contains("was rewritten, not moved"),
+            "{task}"
+        );
+    }
+    assert_eq!(task["landedSha"], git_out(root, &["rev-parse", "work"]));
+    assert_eq!(commits(root, "work"), vec!["Add one", "amended tip"]);
+    let ancestor = std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", &old_base, "work"])
+        .current_dir(root)
+        .status()
+        .unwrap();
+    assert!(!ancestor.success());
+    let d = decisions(&task);
+    assert!(d.contains("rewritten") && d.contains(&amended[..8]), "{d}");
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn an_amended_base_that_conflicts_fails_an_attempt_and_lands_after_the_next() {
+    let (daemon, _scripts) = daemon();
+    let repo = repo_on_work_branch();
+    let root = repo.path();
+    let verify = "grep -q b shared.txt && ! grep -q '<<<<<<<' shared.txt";
+    let task = create(&daemon, root, "shared", verify, true);
+    let id = task["id"].as_str().unwrap().to_string();
+    std::fs::write(root.join("shared.txt"), "a\n").unwrap();
+    git_out(root, &["add", "shared.txt"]);
+    git_out(root, &["commit", "-q", "--amend", "-m", "amended tip"]);
+    let amended = git_out(root, &["rev-parse", "work"]);
+    daemon.request("task.start", serde_json::json!({"id": id}));
+    let task = until_done(&daemon, &id);
+    assert_eq!(task["status"], "done", "{task}");
+    let d = decisions(&task);
+    assert!(d.contains("rewritten") && d.contains(&amended[..8]), "{d}");
+    let attempts = task["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2, "{task}");
+    assert_eq!(attempts[0]["status"], "failed");
+    assert!(
+        attempts[0]["failure"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("These files conflict: shared.txt"),
+        "{task}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("shared.txt")).unwrap(),
+        "a\nb\n"
+    );
+    assert_eq!(task["landedSha"], git_out(root, &["rev-parse", "work"]));
+    daemon.shutdown_and_wait();
+}

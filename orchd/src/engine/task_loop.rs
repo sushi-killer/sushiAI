@@ -217,7 +217,7 @@ pub(super) async fn run_task_loop(
                     git::carry_onto_moved_base(&wt, &r, &from, &tid)
                 })
                 .await;
-                if let Ok(Ok(git::Rebase::Moved { new_sha })) = synced {
+                if let Ok(Ok(git::Rebase::Moved { new_sha, .. })) = synced {
                     task.decisions.push(format!(
                         "Rebase: started from {base_ref} at {}",
                         short_sha(&new_sha)
@@ -989,11 +989,18 @@ pub(super) async fn run_task_loop(
             .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
             match carried {
                 Ok(git::Rebase::Unchanged) => {}
-                Ok(git::Rebase::Moved { new_sha }) => {
-                    task.decisions.push(format!(
-                        "Rebase: carried the work onto {base_ref} at {}",
-                        short_sha(&new_sha)
-                    ));
+                Ok(git::Rebase::Moved { new_sha, rewritten }) => {
+                    task.decisions.push(if rewritten {
+                        format!(
+                            "Rebase: {base_ref} was rewritten; carried the work's own changes onto it at {}",
+                            short_sha(&new_sha)
+                        )
+                    } else {
+                        format!(
+                            "Rebase: carried the work onto {base_ref} at {}",
+                            short_sha(&new_sha)
+                        )
+                    });
                     task.base_sha = new_sha.clone();
                     base_sha = new_sha;
                     let (wt, b) = (worktree.clone(), base_sha.clone());
@@ -1028,7 +1035,15 @@ pub(super) async fn run_task_loop(
                         task.decisions.push(note);
                     }
                 }
-                Ok(git::Rebase::Conflicts { new_sha, files }) => {
+                Ok(git::Rebase::Conflicts {
+                    new_sha,
+                    files,
+                    rewritten,
+                }) => {
+                    if rewritten {
+                        task.decisions
+                            .push(rebase_conflict_note(&base_ref, &new_sha, &files, rewritten));
+                    }
                     task.base_sha = new_sha.clone();
                     let detail = conflict_detail(&base_ref, &new_sha, &files, &task_id);
                     match fail_and_continue(
@@ -1640,6 +1655,28 @@ pub(super) async fn run_task_loop(
     }
 }
 
+/// Decision line for a carry that stopped on conflicts.
+fn rebase_conflict_note(
+    base_ref: &str,
+    new_sha: &str,
+    files: &[String],
+    rewritten: bool,
+) -> String {
+    if rewritten {
+        format!(
+            "Rebase: {base_ref} was rewritten; carried the work's own changes onto it at {} with conflicts in {}",
+            short_sha(new_sha),
+            files.join(", ")
+        )
+    } else {
+        format!(
+            "Rebase: carried the work onto {base_ref} at {} with conflicts in {}",
+            short_sha(new_sha),
+            files.join(", ")
+        )
+    }
+}
+
 /// Carries the task's work onto its base branch as it is now, so a retry
 /// after "the base is fixed" runs on the fix. Nothing happens when the task
 /// has no base branch or it did not move.
@@ -1656,19 +1693,27 @@ async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) {
     let carried =
         tokio::task::spawn_blocking(move || git::carry_onto_moved_base(&wt, &r, &from, &tid)).await;
     match carried {
-        Ok(Ok(git::Rebase::Moved { new_sha })) => {
-            task.decisions.push(format!(
-                "Rebase: carried the work onto {base_ref} at {}",
-                short_sha(&new_sha)
-            ));
+        Ok(Ok(git::Rebase::Moved { new_sha, rewritten })) => {
+            task.decisions.push(if rewritten {
+                format!(
+                    "Rebase: {base_ref} was rewritten; carried the work's own changes onto it at {}",
+                    short_sha(&new_sha)
+                )
+            } else {
+                format!(
+                    "Rebase: carried the work onto {base_ref} at {}",
+                    short_sha(&new_sha)
+                )
+            });
             task.base_sha = new_sha;
         }
-        Ok(Ok(git::Rebase::Conflicts { new_sha, files })) => {
-            task.decisions.push(format!(
-                "Rebase: carried the work onto {base_ref} at {} with conflicts in {}",
-                short_sha(&new_sha),
-                files.join(", ")
-            ));
+        Ok(Ok(git::Rebase::Conflicts {
+            new_sha,
+            files,
+            rewritten,
+        })) => {
+            task.decisions
+                .push(rebase_conflict_note(&base_ref, &new_sha, &files, rewritten));
             task.base_sha = new_sha;
         }
         _ => {}

@@ -485,11 +485,18 @@ pub(super) async fn carry_and_check(
     .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
     match carried {
         Ok(git::Rebase::Unchanged) => {}
-        Ok(git::Rebase::Moved { new_sha }) => {
-            task.decisions.push(format!(
-                "Land: carried the work onto {branch} at {}",
-                short_sha(&new_sha)
-            ));
+        Ok(git::Rebase::Moved { new_sha, rewritten }) => {
+            task.decisions.push(if rewritten {
+                format!(
+                    "Land: {branch} was rewritten; carried the work onto it at {}",
+                    short_sha(&new_sha)
+                )
+            } else {
+                format!(
+                    "Land: carried the work onto {branch} at {}",
+                    short_sha(&new_sha)
+                )
+            });
             task.base_sha = new_sha.clone();
             let (wt, b) = (worktree.to_path_buf(), new_sha.clone());
             let changed = tokio::task::spawn_blocking(move || {
@@ -560,7 +567,18 @@ pub(super) async fn carry_and_check(
                 }
             }
         }
-        Ok(git::Rebase::Conflicts { new_sha, files }) => {
+        Ok(git::Rebase::Conflicts {
+            new_sha,
+            files,
+            rewritten,
+        }) => {
+            if rewritten {
+                task.decisions.push(format!(
+                    "Land: {branch} was rewritten; carried the work onto it at {} with conflicts in {}",
+                    short_sha(&new_sha),
+                    files.join(", ")
+                ));
+            }
             task.base_sha = new_sha.clone();
             return failed(
                 FailureKind::Verify,

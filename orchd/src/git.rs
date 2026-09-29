@@ -250,13 +250,16 @@ pub fn branch_of(repo_root: &Path, rev: &str) -> Option<String> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Rebase {
     Unchanged,
+    /// `rewritten`: the recorded base is not an ancestor of the new head.
     Moved {
         new_sha: String,
+        rewritten: bool,
     },
     /// The worktree now sits on `new_sha` with conflicts in `files`.
     Conflicts {
         new_sha: String,
         files: Vec<String>,
+        rewritten: bool,
     },
     /// Left as it was, on purpose: `reason` says why.
     Skipped {
@@ -271,9 +274,11 @@ pub fn wip_ref(task_id: &str) -> String {
 /// Carries the agent's uncommitted work from `base_sha` onto wherever
 /// `base_ref` points now. The work is first saved as a commit kept at
 /// [`wip_ref`], the branch moves to the new base, and the work is applied
-/// back uncommitted; conflicts are left for the agent. Anything that would
-/// lose work is skipped instead: commits of the agent's own on the branch,
-/// a rewritten base, or ignored local files the new base starts tracking.
+/// back uncommitted with the recorded base as merge base, so the same holds
+/// when the base was rewritten (amended) rather than moved ahead; the result
+/// says which. Conflicts are left for the agent. Anything that would lose
+/// work is skipped instead: commits of the agent's own on the branch, or
+/// ignored local files the new base starts tracking.
 /// A failure midway restores the worktree exactly as it was.
 pub fn carry_onto_moved_base(
     worktree: &Path,
@@ -299,14 +304,11 @@ pub fn carry_onto_moved_base(
     if head != base_sha {
         return skipped("the task branch has commits of its own");
     }
-    if run(
+    let rewritten = run(
         worktree,
         &["merge-base", "--is-ancestor", base_sha, &new_sha],
     )
-    .is_err()
-    {
-        return skipped("the base was rewritten, not moved ahead");
-    }
+    .is_err();
     let tracked_there: std::collections::HashSet<String> =
         run(worktree, &["ls-tree", "-r", "--name-only", &new_sha])?
             .lines()
@@ -329,7 +331,7 @@ pub fn carry_onto_moved_base(
     let dirty = !run(worktree, &["status", "--porcelain"])?.trim().is_empty();
     if !dirty {
         run(worktree, &["reset", "-q", "--hard", &new_sha])?;
-        return Ok(Rebase::Moved { new_sha });
+        return Ok(Rebase::Moved { new_sha, rewritten });
     }
     let quiet = [
         "-c",
@@ -370,11 +372,13 @@ pub fn carry_onto_moved_base(
         Ok(if files.is_empty() {
             Rebase::Moved {
                 new_sha: new_sha.clone(),
+                rewritten,
             }
         } else {
             Rebase::Conflicts {
                 new_sha: new_sha.clone(),
                 files,
+                rewritten,
             }
         })
     };
@@ -1172,7 +1176,8 @@ mod tests {
         assert_eq!(
             r,
             Rebase::Moved {
-                new_sha: moved.clone()
+                new_sha: moved.clone(),
+                rewritten: false
             }
         );
         assert_eq!(
@@ -1267,18 +1272,52 @@ mod tests {
         assert!(matches!(r, Rebase::Skipped { .. }), "{r:?}");
         assert!(wt.join("a.txt").exists());
 
-        // A base rewritten so the task's base is no longer in its history.
+        // A base rewritten so the task's base is no longer in its history:
+        // the task's own edits are carried onto the amended head.
         git(&wt, &["reset", "-q", "--hard", &created.base_sha]);
         git(&repo_root, &["reset", "-q", "--hard", &first]);
+        std::fs::write(repo_root.join("amended.txt"), "amended\n").unwrap();
+        git(&repo_root, &["add", "."]);
         git(
             &repo_root,
             &["commit", "-q", "--amend", "-m", "rewritten root"],
         );
+        let amended = git(&repo_root, &["rev-parse", "HEAD"]);
+        std::fs::write(wt.join("mine.txt"), "mine\n").unwrap();
+        std::fs::write(wt.join("README.md"), "task edit\n").unwrap();
+        let r = carry_onto_moved_base(&wt, &base, &created.base_sha, "t2").unwrap();
+        assert_eq!(
+            r,
+            Rebase::Moved {
+                new_sha: amended.clone(),
+                rewritten: true
+            }
+        );
+        assert_eq!(git(&wt, &["rev-parse", "HEAD"]), amended);
+        assert!(wt.join("amended.txt").exists() && wt.join("mine.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(wt.join("README.md")).unwrap(),
+            "task edit\n"
+        );
+        assert!(!git(&wt, &["status", "--porcelain"]).is_empty());
+
+        // The amended tip edits the line the task edits: conflicts.
+        git(&wt, &["reset", "-q", "--hard", &created.base_sha]);
+        std::fs::write(wt.join("README.md"), "task edit\n").unwrap();
+        std::fs::write(repo_root.join("README.md"), "base edit\n").unwrap();
+        git(&repo_root, &["add", "."]);
+        git(
+            &repo_root,
+            &["commit", "-q", "--amend", "-m", "rewritten again"],
+        );
         let r = carry_onto_moved_base(&wt, &base, &created.base_sha, "t2").unwrap();
         assert!(
-            matches!(r, Rebase::Skipped { ref reason } if reason.contains("rewritten")),
+            matches!(&r, Rebase::Conflicts { files, rewritten: true, .. } if files == &vec!["README.md".to_string()]),
             "{r:?}"
         );
+        assert!(std::fs::read_to_string(wt.join("README.md"))
+            .unwrap()
+            .contains("<<<<<<<"));
     }
 
     #[test]

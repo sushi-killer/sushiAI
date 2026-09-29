@@ -1,27 +1,9 @@
 //! The Stop hook's decision function (spec "Stop hook (`hook.stop`)"), kept
 //! as a pure function over facts so it can be unit tested without a socket,
-//! a git repo or a classifier call; `main.rs`/`engine.rs` do the IO and feed
+//! a git repo or a model call; `main.rs`/`engine.rs` do the IO and feed
 //! them in.
 
 use crate::model::VerifyOutcome;
-
-/// jev-belay-style probabilities the classifier returns for the
-/// no-verify-commands path (spec step 4).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ClassifiedOutcome {
-    Complete,
-    Partial,
-    Blocked,
-    Other,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct JevBelayAnswers {
-    pub claims_done: f64,
-    pub claims_verified: f64,
-    pub verification_applies: f64,
-    pub outcome: ClassifiedOutcome,
-}
 
 pub struct StopFacts<'a> {
     pub blocks_so_far: u32,
@@ -49,8 +31,8 @@ fn tail_chars(s: &str, max: usize) -> String {
     s.chars().skip(count - max).collect()
 }
 
-/// Pure decision for `hook.stop`, matching spec steps 1-5 in order.
-pub fn decide_stop(facts: &StopFacts, classifier: Option<&JevBelayAnswers>) -> StopDecision {
+/// Pure decision for `hook.stop`, matching the spec steps in order.
+pub fn decide_stop(facts: &StopFacts) -> StopDecision {
     if facts.blocks_so_far >= MAX_BLOCKS {
         return StopDecision::Allow;
     }
@@ -72,18 +54,6 @@ pub fn decide_stop(facts: &StopFacts, classifier: Option<&JevBelayAnswers>) -> S
             };
         }
         return StopDecision::Allow;
-    }
-
-    if let Some(a) = classifier {
-        let should_block = a.claims_verified < 0.5
-            && a.claims_done >= 0.7
-            && a.verification_applies >= 0.5
-            && a.outcome != ClassifiedOutcome::Blocked;
-        if should_block {
-            return StopDecision::Block {
-                reason: "You said the work is done, but nothing verified it. Run the relevant checks, then finish.".to_string(),
-            };
-        }
     }
 
     StopDecision::Allow
@@ -109,15 +79,15 @@ mod tests {
 
     #[test]
     fn allows_once_three_blocks_reached_for_this_attempt() {
-        let d = decide_stop(&facts(3, true, true, &[]), None);
+        let d = decide_stop(&facts(3, true, true, &[]));
         assert_eq!(d, StopDecision::Allow);
-        let d = decide_stop(&facts(4, true, true, &[]), None);
+        let d = decide_stop(&facts(4, true, true, &[]));
         assert_eq!(d, StopDecision::Allow);
     }
 
     #[test]
     fn allows_when_no_changed_files() {
-        let d = decide_stop(&facts(0, false, true, &[]), None);
+        let d = decide_stop(&facts(0, false, true, &[]));
         assert_eq!(d, StopDecision::Allow);
     }
 
@@ -129,7 +99,7 @@ mod tests {
             tail: "FAIL src/x.test.ts".into(),
             ms: 100,
         }];
-        let d = decide_stop(&facts(0, true, true, &verify), None);
+        let d = decide_stop(&facts(0, true, true, &verify));
         match d {
             StopDecision::Block { reason } => {
                 assert!(reason.contains("npm test exited 1"));
@@ -147,7 +117,7 @@ mod tests {
             tail: "ok".into(),
             ms: 100,
         }];
-        let d = decide_stop(&facts(0, true, true, &verify), None);
+        let d = decide_stop(&facts(0, true, true, &verify));
         assert_eq!(d, StopDecision::Allow);
     }
 
@@ -162,7 +132,7 @@ mod tests {
             tail: long_tail,
             ms: 100,
         }];
-        let d = decide_stop(&facts(0, true, true, &verify), None);
+        let d = decide_stop(&facts(0, true, true, &verify));
         match d {
             StopDecision::Block { reason } => {
                 assert!(reason.len() < 5100);
@@ -176,47 +146,8 @@ mod tests {
     }
 
     #[test]
-    fn no_verify_commands_blocks_on_jev_belay_thresholds() {
-        let a = JevBelayAnswers {
-            claims_done: 0.9,
-            claims_verified: 0.2,
-            verification_applies: 0.8,
-            outcome: ClassifiedOutcome::Complete,
-        };
-        let d = decide_stop(&facts(0, true, false, &[]), Some(&a));
-        match d {
-            StopDecision::Block { reason } => assert!(reason.contains("nothing verified it")),
-            _ => panic!("expected block"),
-        }
-    }
-
-    #[test]
-    fn no_verify_commands_allows_when_outcome_is_blocked() {
-        let a = JevBelayAnswers {
-            claims_done: 0.9,
-            claims_verified: 0.2,
-            verification_applies: 0.8,
-            outcome: ClassifiedOutcome::Blocked,
-        };
-        let d = decide_stop(&facts(0, true, false, &[]), Some(&a));
-        assert_eq!(d, StopDecision::Allow);
-    }
-
-    #[test]
-    fn no_verify_commands_and_no_classifier_allows() {
-        let d = decide_stop(&facts(0, true, false, &[]), None);
-        assert_eq!(d, StopDecision::Allow);
-    }
-
-    #[test]
-    fn no_verify_commands_allows_below_thresholds() {
-        let a = JevBelayAnswers {
-            claims_done: 0.5, // below 0.7 threshold
-            claims_verified: 0.2,
-            verification_applies: 0.8,
-            outcome: ClassifiedOutcome::Complete,
-        };
-        let d = decide_stop(&facts(0, true, false, &[]), Some(&a));
+    fn no_verify_commands_allows() {
+        let d = decide_stop(&facts(0, true, false, &[]));
         assert_eq!(d, StopDecision::Allow);
     }
 }

@@ -43,8 +43,8 @@ flowchart TB
     evolveCli["orchd evolve<br/>evolution.run / evolution.adopt"]
     costs["costs.rs<br/>costs.summary, orchd costs"]
     harness["harness.rs<br/>claude -p / codex exec"]
-    side["classify.rs (Jev)<br/>git.rs (worktrees, commit)<br/>messages.rs (merging)"]
-    store[("data dir<br/>tasks/, runs/, settings.json,<br/>decisions.jsonl, costs.jsonl, chats/, audits/,<br/>evolution/ (signals.jsonl, detected.jsonl,<br/>proposals/)")]
+    side["git.rs (worktrees, commit)<br/>messages.rs (merging)"]
+    store[("data dir<br/>tasks/, runs/, settings.json,<br/>costs.jsonl, chats/, audits/,<br/>evolution/ (signals.jsonl, detected.jsonl,<br/>proposals/)")]
     mcp["orchd mcp<br/>task_* tools, stdio"]
     proto --> engine & chat & audit & insights & evolution & costs
     engine --> side
@@ -69,7 +69,6 @@ flowchart TB
   end
 
   herdr[("Herdr daemon")]
-  ext[("OpenRouter - Jev")]
   repo[("Git repo<br/>base branch + worktrees")]
 
   owner --> shell
@@ -77,7 +76,6 @@ flowchart TB
   harness --> taskAgent & reviewer & auditor & proposer & orchAgent
   orchAgent -->|MCP| mcp
   taskAgent -->|Stop hook| proto
-  side --> ext
   side --> repo
   herdrIpc <--> herdr
 ```
@@ -177,7 +175,7 @@ flowchart TD
   split["Verify entries that are not shell commands<br/>become review criteria"]
   baseline["Baseline (variant.groundedChecks), before attempt 1<br/>planner's checks and held-out check run on the base;<br/>pass = not grounded, exit 126/127 = env, fail = gated;<br/>worktree restored afterwards"]
   basecheck["Base preflight, before attempt 1<br/>finalVerify runs on the base (cached per sha + command);<br/>a failure is re-run once, failing twice asks the pre-existing question"]
-  tier["Tier<br/>planner's tier, else Jev"]
+  tier["Tier<br/>planner's tier, else standard"]
   impl["Implement<br/>route = tiers[tier]; a retry starts a fresh session<br/>with the brief, earlier handoffs and the last failure"]
   stall["Stall watchdog<br/>no output for variant.stallTimeoutSecs -> kill"]
   rebase["Carry onto moved base<br/>conflicts go back to the agent"]
@@ -240,9 +238,6 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-  subgraph cheap["Quick decisions"]
-    jev["Jev (OpenRouter)<br/>tier, clarity, is it answerable"]
-  end
   subgraph strong["Judgement"]
     planner["Planner - claude-opus"]
     reviewerR["Reviewer - strength-first<br/>(cheapest route never weaker than the implementer, floor 2, hard tier 3)"]
@@ -253,7 +248,6 @@ flowchart LR
     std["standard - claude-sonnet"]
     hard["hard - claude-opus"]
   end
-  jev --> work
   planner --> work
   work --> reviewerR
   orch -->|task_create / task_answer via MCP| planner

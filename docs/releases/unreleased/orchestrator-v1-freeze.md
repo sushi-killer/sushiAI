@@ -22,8 +22,7 @@ with a message saying it was retired.
   reviewer marks each finding it reports `repeat: true|false`. The first
   attempt whose review fails on a repeated finding runs the advisor and tiers
   up; the second waits with the "attempts keep failing" question.
-- The plan stage no longer calls the classifier (the Jev preflight and its
-  decision line are gone), and the `task.preflight` RPC and `task_preflight`
+- The plan stage no longer runs a preflight check, and the `task.preflight` RPC and `task_preflight`
   MCP tool are removed.
 - `bestOf`, `groundedChecks` and `batchQuestions` stay available and off by
   default. The evolution loop keeps recording signals; proposals start only

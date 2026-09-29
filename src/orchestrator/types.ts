@@ -20,8 +20,6 @@ export type Route = {
 
 export type Tier = "mechanical" | "standard" | "hard";
 
-export type ClassifierBackend = "none" | "openrouter" | "typesafe" | "openai";
-
 export type Settings = {
   routes: Route[];
   tiers: Record<Tier, string>;
@@ -29,13 +27,6 @@ export type Settings = {
    * never weaker than the implementer (at least 2, 3 on the hard tier),
    * preferring another harness on a tie. */
   review: string;
-  classifier: {
-    backend: ClassifierBackend;
-    /** Model id only - the endpoint is always the selected provider's own
-     * `baseUrl` (`openai` backend included: it has no base URL of its own). */
-    model: string;
-    providerId: string;
-  };
   sandbox: "native" | "host";
   /** Claude's sandbox only: a per-domain allowlist. */
   allowedDomains: string[];
@@ -249,7 +240,7 @@ export type Attempt = {
   routeId: string;
   harness: Harness;
   model: string;
-  /** Why this route was chosen - a rule name, or a classifier probability. */
+  /** Why this route was chosen - a rule name. */
   reason: string;
   sessionId?: string;
   startedAt: number;
@@ -358,11 +349,11 @@ export type Task = {
   parent?: string;
   status: TaskStatus;
   tier: Tier;
-  /** The tier the planner chose; it routes the task, Jev only when absent. */
+  /** The tier the planner chose; it routes the task. */
   plannedTier?: Tier;
   /** Set when `tier` was picked by falling back to `standard` instead of a
-   * classified or planner choice; the fixed-set reason (e.g. "no classifier
-   * key"). Absent when Jev or the planner picked the tier. */
+   * a planner choice; the fixed-set reason (e.g. "no planner tier"). Absent
+   * when the planner picked the tier. */
   tierFallback?: string;
   /** Experiment flags this task runs with (an A/B arm); absent on tasks
    * created before variants existed. */
@@ -372,7 +363,7 @@ export type Task = {
   evalSet?: string;
   evalName?: string;
   question?: Question;
-  /** Owner and classifier decisions, newest last - includes "Owner: ..."
+  /** Owner and orchestrator decisions, newest last - includes "Owner: ..."
    * answers to a question. */
   decisions: string[];
   /** Questions the planner or the answer policy answered themselves. */

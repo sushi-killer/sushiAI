@@ -119,10 +119,8 @@ test("formatTaskTier shows just the tier when it wasn't a fallback", async () =>
 test("formatTaskTier names the fallback reason next to the tier", async () => {
   const { formatTaskTier } = await library;
   assert.equal(
-    formatTaskTier(
-      task({ tier: "standard", tierFallback: "no classifier key" }),
-    ),
-    "standard tier (fallback: no classifier key)",
+    formatTaskTier(task({ tier: "standard", tierFallback: "no planner tier" })),
+    "standard tier (fallback: no planner tier)",
   );
 });
 
@@ -338,11 +336,6 @@ function settings(overrides = {}) {
       hard: "claude-opus",
     },
     review: "auto",
-    classifier: {
-      backend: "openrouter",
-      model: "typesafe/jev-1.13",
-      providerId: "",
-    },
     sandbox: "native",
     allowedDomains: ["*"],
     codexNetwork: false,
@@ -382,25 +375,12 @@ test("settingsDifferingFromDefaults flags nothing for identical settings", async
   );
 });
 
-test("settingsDifferingFromDefaults never flags routes or the classifier's provider", async () => {
+test("settingsDifferingFromDefaults never flags routes", async () => {
   const { settingsDifferingFromDefaults } = await library;
   assert.deepEqual(
     settingsDifferingFromDefaults(
       settings({
         routes: [{ id: "mine", label: "Mine", harness: "codex" }],
-      }),
-      settings(),
-    ),
-    [],
-  );
-  assert.deepEqual(
-    settingsDifferingFromDefaults(
-      settings({
-        classifier: {
-          backend: "openrouter",
-          model: "typesafe/jev-1.13",
-          providerId: "openrouter-key",
-        },
       }),
       settings(),
     ),
@@ -429,12 +409,6 @@ test("settingsDifferingFromDefaults flags each compared field on its own", async
       },
     }),
     ["tiers.mechanical", "tiers.standard", "tiers.hard"],
-  );
-  assert.deepEqual(
-    differs({
-      classifier: { backend: "none", model: "other", providerId: "" },
-    }),
-    ["classifier.backend", "classifier.model"],
   );
   assert.deepEqual(
     differs({
@@ -472,7 +446,6 @@ test("resetSettingToDefault restores one setting and leaves the rest alone", asy
       standard: "claude-opus",
       hard: "claude-opus",
     },
-    classifier: { backend: "none", model: "x", providerId: "key" },
   });
   const defaults = settings();
 
@@ -480,8 +453,6 @@ test("resetSettingToDefault restores one setting and leaves the rest alone", asy
   assert.equal(planner.planner, "claude-opus");
   assert.deepEqual(settingsDifferingFromDefaults(planner, defaults), [
     "tiers.standard",
-    "classifier.backend",
-    "classifier.model",
   ]);
 
   const tier = resetSettingToDefault(saved, defaults, "tiers.standard");
@@ -491,12 +462,6 @@ test("resetSettingToDefault restores one setting and leaves the rest alone", asy
     hard: "claude-opus",
   });
 
-  const backend = resetSettingToDefault(saved, defaults, "classifier.backend");
-  assert.deepEqual(backend.classifier, {
-    backend: "openrouter",
-    model: "x",
-    providerId: "key",
-  });
   // The input itself is never mutated.
   assert.equal(saved.planner, "claude-sonnet");
 });

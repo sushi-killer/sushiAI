@@ -65,7 +65,7 @@ export function countChanges(saved: Settings, draft: Settings): number {
     const a = (saved as Record<string, unknown>)[key];
     const b = (draft as Record<string, unknown>)[key];
     if (same(a, b)) continue;
-    if (key === "experiments" || key === "tiers" || key === "classifier") {
+    if (key === "experiments" || key === "tiers") {
       const ao = (a ?? {}) as Record<string, unknown>;
       const bo = (b ?? {}) as Record<string, unknown>;
       for (const sub of new Set([...Object.keys(ao), ...Object.keys(bo)]))

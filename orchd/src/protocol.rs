@@ -220,7 +220,7 @@ pub async fn client_request(
             let msg = err
                 .get("message")
                 .and_then(|m| m.as_str())
-                .unwrap_or("classifier error")
+                .unwrap_or("orchd error")
                 .to_string();
             return Err(std::io::Error::other(msg));
         }

@@ -196,8 +196,8 @@ export function costByStage(task: Task): CostByStage {
 }
 
 /** The detail-view meta line's tier text, e.g. "standard tier" or, when the
- * tier was picked by falling back instead of a classified/planner choice,
- * "standard tier (fallback: no classifier key)". */
+ * tier was picked by falling back instead of a planner choice,
+ * "standard tier (fallback: no planner tier)". */
 export function formatTaskTier(task: Task): string {
   const base = `${task.tier} tier`;
   return task.tierFallback ? `${base} (fallback: ${task.tierFallback})` : base;
@@ -360,9 +360,8 @@ export function participantLabel(id: string, tasks: Task[]): string {
 }
 
 /** Every setting the panel shows a default marker for. `routes` is left out
- * (the owner's own route list), and so are `classifier.providerId` (a
- * pointer to a stored key, not a choice with a default) and `experiments`/
- * `prices` (not shown in the panel). */
+ * (the owner's own route list), and so are `experiments`/`prices` (not shown
+ * in the panel). */
 export type DefaultableSetting =
   | "tiers.mechanical"
   | "tiers.standard"
@@ -371,8 +370,6 @@ export type DefaultableSetting =
   | "planner"
   | "orchestrator"
   | "autoAnswer"
-  | "classifier.backend"
-  | "classifier.model"
   | "sandbox"
   | "codexNetwork"
   | "allowedDomains"
@@ -393,10 +390,6 @@ export function settingValue(
       return settings.tiers.standard;
     case "tiers.hard":
       return settings.tiers.hard;
-    case "classifier.backend":
-      return settings.classifier.backend;
-    case "classifier.model":
-      return settings.classifier.model;
     default:
       return settings[field];
   }
@@ -410,8 +403,6 @@ const DEFAULTABLE_SETTINGS: DefaultableSetting[] = [
   "planner",
   "orchestrator",
   "autoAnswer",
-  "classifier.backend",
-  "classifier.model",
   "sandbox",
   "codexNetwork",
   "allowedDomains",
@@ -451,19 +442,6 @@ export function resetSettingToDefault(
         tiers: { ...saved.tiers, [tier]: defaults.tiers[tier] },
       };
     }
-    case "classifier.backend":
-      return {
-        ...saved,
-        classifier: {
-          ...saved.classifier,
-          backend: defaults.classifier.backend,
-        },
-      };
-    case "classifier.model":
-      return {
-        ...saved,
-        classifier: { ...saved.classifier, model: defaults.classifier.model },
-      };
     default:
       return { ...saved, [field]: defaults[field] };
   }

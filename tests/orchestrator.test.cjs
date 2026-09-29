@@ -331,13 +331,12 @@ test("task.create proceeds without mcp when the project has no readable MCP conf
   assert.equal("mcp" in sent, false);
 });
 
-test("settings.set pushes a full-replace secrets.set: classifier key/baseUrl plus each route's resolved profile env", async (t) => {
+test("settings.set pushes a full-replace secrets.set: each route's resolved profile env", async (t) => {
   const settings = {
     routes: [
       { id: "r1", label: "Sonnet", harness: "claude", profileId: "prof-1" },
       { id: "r2", label: "Codex", harness: "codex" },
     ],
-    classifier: { backend: "openrouter", model: "", providerId: "prov-1" },
   };
   const { socketPath, directory, calls } = await fixtureServer(t, {
     ping: () => ({}),
@@ -347,14 +346,6 @@ test("settings.set pushes a full-replace secrets.set: classifier key/baseUrl plu
   });
   const service = await serviceAgainst(t, socketPath, directory, {
     getModelProviders: () => ({
-      keyFor: async (id) => (id === "prov-1" ? "sk-secret" : null),
-      listProviders: async () => [
-        {
-          id: "prov-1",
-          baseUrl: "https://openrouter.ai/api",
-          label: "OpenRouter",
-        },
-      ],
       resolveEnv: async (id) => {
         if (id !== "prof-1") throw new Error("Model profile not found.");
         return { settings: { ANTHROPIC_MODEL: "x" }, key: "prof-key" };
@@ -369,16 +360,12 @@ test("settings.set pushes a full-replace secrets.set: classifier key/baseUrl plu
   const secretsCall = calls.find((c) => c.method === "secrets.set");
   assert.ok(secretsCall, "secrets.set was pushed");
   assert.deepEqual(secretsCall.params, {
-    classifier: { key: "sk-secret", baseUrl: "https://openrouter.ai/api" },
     profiles: { "prof-1": { env: { ANTHROPIC_MODEL: "x" }, key: "prof-key" } },
   });
 });
 
-test("secrets.set is always pushed, even to clear it: no provider or key means classifier:null, profiles:{}", async (t) => {
-  const settings = {
-    routes: [],
-    classifier: { backend: "none", model: "", providerId: "" },
-  };
+test("secrets.set is always pushed, even to clear it: no profiles means profiles:{}", async (t) => {
+  const settings = { routes: [] };
   const { socketPath, directory, calls } = await fixtureServer(t, {
     ping: () => ({}),
     "settings.set": () => settings,
@@ -387,8 +374,6 @@ test("secrets.set is always pushed, even to clear it: no provider or key means c
   });
   const service = await serviceAgainst(t, socketPath, directory, {
     getModelProviders: () => ({
-      keyFor: async () => null,
-      listProviders: async () => [],
       resolveEnv: async () => {
         throw new Error("should not be called");
       },
@@ -400,14 +385,14 @@ test("secrets.set is always pushed, even to clear it: no provider or key means c
     secretsCall,
     "a full replace is pushed even when everything clears",
   );
-  assert.deepEqual(secretsCall.params, { classifier: null, profiles: {} });
+  assert.deepEqual(secretsCall.params, { profiles: {} });
 });
 
 test("connect() relays subscribe events and raises one notice per (task, question)", async (t) => {
   const { socketPath, directory, hasSubscriber, pushEvent } =
     await fixtureServer(t, {
       ping: () => ({}),
-      "settings.get": () => ({ routes: [], classifier: { providerId: "" } }),
+      "settings.get": () => ({ routes: [] }),
     });
   const relayed = [];
   const notices = [];
@@ -459,7 +444,7 @@ test("the transition detector notifies done and failed once, only for live top-l
   const { socketPath, directory, hasSubscriber, pushEvent } =
     await fixtureServer(t, {
       ping: () => ({}),
-      "settings.get": () => ({ routes: [], classifier: { providerId: "" } }),
+      "settings.get": () => ({ routes: [] }),
     });
   const notices = [];
   const service = await serviceAgainst(t, socketPath, directory, {
@@ -563,7 +548,7 @@ test("the transition detector notifies once when a top-level task lands dirty, f
   const { socketPath, directory, hasSubscriber, pushEvent } =
     await fixtureServer(t, {
       ping: () => ({}),
-      "settings.get": () => ({ routes: [], classifier: { providerId: "" } }),
+      "settings.get": () => ({ routes: [] }),
     });
   const notices = [];
   const service = await serviceAgainst(t, socketPath, directory, {

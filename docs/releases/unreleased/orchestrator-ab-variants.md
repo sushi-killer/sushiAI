@@ -17,8 +17,8 @@
   waits while orchd runs the Stop-hook verify, but an agent's own long
   command is silent too, so keep it at 15 minutes or more.
 - `plannerTier: true` routes a planned task by the tier the planner chose,
-  and uses Jev only when the plan has none. The planner's choice is recorded
-  as `plannedTier` either way, for comparison with Jev's.
+  and runs a task with no planner tier on `standard`. The planner's choice is
+  recorded as `plannedTier` either way.
 - All flags are off by default. The only change without a flag: the
   report and plan formats now ask for `handoff` and `tier`.
 - Task costs now include the plan run and the review run, which were
@@ -45,7 +45,7 @@
   review passes and before the commit, and a failure there is a normal
   retry. `task.create` also takes `finalVerify` directly.
 - A/B runs of an earlier per-turn-skills experiment flag showed that
-  injecting repo skills into task agents and letting Jev pick a task's MCP
+  injecting repo skills into task agents and letting a separate decision model pick a task's MCP
   servers added work instead of saving it, while trimming the fixed prompt
   prefix cut the first turn by about 30% with no downside. The trim is now
   the unconditional default for every Claude implement run (never review or

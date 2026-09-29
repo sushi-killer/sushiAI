@@ -408,9 +408,8 @@ pub(super) async fn run_task_loop(
             }
         }
 
-        let mut jev_tier_choice = None;
         let mut planner_tier_used = false;
-        let mut tier_fallback_reason = None;
+        let mut no_planner_tier = false;
         if implement_attempt_count(&task) == 0 {
             match task.planned_tier {
                 Some(tier) => {
@@ -418,18 +417,11 @@ pub(super) async fn run_task_loop(
                     task.tier_fallback = None;
                     planner_tier_used = true;
                 }
-                None => match classify_tier(&app, &task).await {
-                    TierPick::Classified { tier, choice, p } => {
-                        task.tier = tier;
-                        task.tier_fallback = None;
-                        jev_tier_choice = Some((choice, p));
-                    }
-                    TierPick::Fallback { reason } => {
-                        task.tier = Tier::Standard;
-                        task.tier_fallback = Some(reason.clone());
-                        tier_fallback_reason = Some(reason);
-                    }
-                },
+                None => {
+                    task.tier = Tier::Standard;
+                    task.tier_fallback = Some("no planner tier".to_string());
+                    no_planner_tier = true;
+                }
             }
         }
 
@@ -456,18 +448,14 @@ pub(super) async fn run_task_loop(
                 task.decisions.push(line);
             }
         }
-        if let Some((choice, p)) = jev_tier_choice {
-            task.decisions.push(jev_tier_line(&choice, p, &route_id));
-        }
         if planner_tier_used {
             task.decisions.push(format!(
                 "Planner: tier {} -> route {route_id}",
                 task.tier.as_str()
             ));
         }
-        if let Some(reason) = tier_fallback_reason {
-            task.decisions
-                .push(jev_tier_fallback_line(&reason, &route_id));
+        if no_planner_tier {
+            task.decisions.push(no_planner_tier_line(&route_id));
         }
         let route = settings
             .routes
@@ -1022,16 +1010,15 @@ pub(super) async fn run_task_loop(
                 .unwrap_or_default();
             // Routed through the same signature/budget accounting as any
             // other failure (spec item 8), so a recurring "blocked"
-            // question can't loop forever even when the classifier keeps
-            // saying it's answerable.
+            // question can't loop forever.
             record_failure(&mut task, idx, FailureKind::Blocked, question_text.clone());
             let protected = app.settings.read().unwrap().protected_paths.clone();
             let should_continue = advance_after_failure(&mut task, attempt_budget, &protected);
             if !should_continue {
                 // Same "attempts keep failing" escalation as
                 // `fail_and_continue`'s, inlined because a
-                // should_continue==true blocked report falls through to
-                // `classify_answerable` below instead of looping.
+                // should_continue==true blocked report goes on to ask the
+                // owner below instead of looping.
                 match wait_for_exhausted_answer(
                     &app,
                     &task_id,
@@ -1056,57 +1043,32 @@ pub(super) async fn run_task_loop(
                 }
             }
 
-            let answerable_p = classify_answerable(&app, &task, &question_text).await;
-            let blocked_decision = decide_blocked_question(answerable_p);
-            if let Some(p) = answerable_p {
-                task.decisions.push(jev_answerable_line(
-                    p,
-                    blocked_decision == BlockedDecision::AnswerSelf,
-                ));
-            }
-            match blocked_decision {
-                BlockedDecision::AnswerSelf => {
-                    let decision =
-                        format!("Answer it yourself from the repository: {question_text}");
-                    if !task.decisions.contains(&decision) {
-                        task.decisions.push(decision);
-                    }
-                    task.status = TaskStatus::Queued;
-                    task.updated_at = now_ms();
-                    let _ = app.store.save_task(&task);
-                    app.broadcast_task(&task);
+            task.question = Some(Question {
+                text: question_text,
+                options: vec![],
+                kind: QuestionKind::AgentQuestion,
+            });
+            task.status = TaskStatus::Waiting;
+            task.updated_at = now_ms();
+            match wait_for_answer_with_triage(
+                &app,
+                &task_id,
+                &mut task,
+                idx,
+                &pending_answer,
+                &cancel,
+                &mut permit,
+            )
+            .await
+            {
+                Some(_) => {
                     drop(permit);
                     continue;
                 }
-                BlockedDecision::Waiting => {
-                    task.question = Some(Question {
-                        text: question_text,
-                        options: vec![],
-                        kind: QuestionKind::AgentQuestion,
-                    });
-                    task.status = TaskStatus::Waiting;
-                    task.updated_at = now_ms();
-                    match wait_for_answer_with_triage(
-                        &app,
-                        &task_id,
-                        &mut task,
-                        idx,
-                        &pending_answer,
-                        &cancel,
-                        &mut permit,
-                    )
-                    .await
-                    {
-                        Some(_) => {
-                            drop(permit);
-                            continue;
-                        }
-                        None => {
-                            drop(permit);
-                            app.finish_task_loop(&task_id);
-                            return;
-                        }
-                    }
+                None => {
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
                 }
             }
         }

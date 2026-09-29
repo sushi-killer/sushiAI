@@ -7,43 +7,13 @@ fn variant_route_line_names_the_override() {
 }
 
 #[test]
-fn jev_tier_line_formats_choice_probability_and_route() {
+fn no_planner_tier_line_names_the_standard_route() {
+    let line = no_planner_tier_line("claude-sonnet");
     assert_eq!(
-        jev_tier_line("mechanical", 0.82, "codex"),
-        "Jev: tier mechanical (p 0.82) -> route codex"
+        line,
+        "Orchestrator: no planner tier -> standard, route claude-sonnet"
     );
-}
-
-#[test]
-fn jev_tier_fallback_line_formats_reason_and_route() {
-    assert_eq!(
-        jev_tier_fallback_line("no classifier key", "claude-sonnet"),
-        "Jev: tier unavailable (no classifier key) -> fallback standard, route claude-sonnet"
-    );
-}
-
-#[test]
-fn jev_answerable_line_names_the_outcome() {
-    assert_eq!(
-        jev_answerable_line(0.9, true),
-        "Jev: answerable from repo (p 0.90) -> agent sent back"
-    );
-    assert_eq!(
-        jev_answerable_line(0.4, false),
-        "Jev: answerable from repo (p 0.40) -> asked owner"
-    );
-}
-
-#[test]
-fn jev_stop_gate_line_names_the_outcome() {
-    assert_eq!(
-        jev_stop_gate_line(true, 0.9, 0.1),
-        "Jev: premature finish (p 0.90) -> sent back"
-    );
-    assert_eq!(
-        jev_stop_gate_line(false, 0.9, 0.85),
-        "Jev: verification looks fine (p 0.85) -> allowed"
-    );
+    assert!(!is_orchestrator_answer_decision(&line));
 }
 
 #[test]

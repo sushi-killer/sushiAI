@@ -11,10 +11,7 @@
 // non-secret metadata (readable, gitignored by virtue of living outside the
 // repo), `secrets.json` holds only encrypted key material. The key never
 // crosses the IPC boundary — renderer-facing methods only ever return
-// `hasKey`/`keyHint`. `keyFor` is the one main-process-only exception: it
-// hands the orchestrator daemon a classifier key in memory
-// (`electron/orchestrator.cjs`'s `secrets.set` push), and nothing wires it to
-// an `ipcMain.handle` channel.
+// `hasKey`/`keyHint`.
 const { randomUUID } = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -175,12 +172,6 @@ class ModelProviders {
       // treat like no key rather than crash the spawn.
       return null;
     }
-  }
-
-  /** Decrypted key for a provider, main-process only - see the header
-   * comment. Returns null when there is no key or it can't be decrypted. */
-  async keyFor(id) {
-    return this.#keyFor(id);
   }
 
   profilesFileFor() {

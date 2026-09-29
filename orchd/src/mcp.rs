@@ -259,7 +259,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
         (
             "settings_get",
             "settings.get",
-            "Read the orchd settings (parallelism, planner, classifier, profiles).",
+            "Read the orchd settings (parallelism, planner, profiles).",
             json!({"type": "object", "properties": {}}),
         ),
         (

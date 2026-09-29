@@ -18,61 +18,6 @@ impl App {
         }))
     }
 
-    /// `classify.probe {state, questions}`: asks the configured classifier
-    /// arbitrary questions about an arbitrary state, so a new judgement
-    /// point can be measured on real cases before orchd relies on it. A
-    /// question with `options` is a pick, otherwise a 0..1 probability.
-    pub(super) async fn handle_classify_probe(
-        &self,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
-        #[derive(Deserialize)]
-        struct Q {
-            name: String,
-            prompt: String,
-            #[serde(default)]
-            options: Vec<String>,
-        }
-        #[derive(Deserialize)]
-        struct P {
-            state: serde_json::Value,
-            questions: Vec<Q>,
-        }
-        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
-        let questions: Vec<classify::QuestionSpec> = p
-            .questions
-            .into_iter()
-            .map(|q| match q.options.is_empty() {
-                true => classify::QuestionSpec::Noul {
-                    name: q.name,
-                    prompt: q.prompt,
-                },
-                false => classify::QuestionSpec::Choice {
-                    name: q.name,
-                    prompt: q.prompt,
-                    options: q.options,
-                },
-            })
-            .collect();
-        let settings = self.settings.read().unwrap().classifier.clone();
-        let key = self.secrets.read().unwrap().classifier_key.clone();
-        let base_url = self.secrets.read().unwrap().classifier_base_url.clone();
-        let start = std::time::Instant::now();
-        let answers = tokio::task::spawn_blocking(move || {
-            classify::decide(
-                &settings,
-                key.as_deref(),
-                base_url.as_deref(),
-                &p.state,
-                &questions,
-            )
-        })
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
-        Ok(json!({"answers": answers, "ms": start.elapsed().as_millis() as u64}))
-    }
-
     /// `costs.summary {repo?, taskId?, sinceDays?, groupBy: [stage|model|route|repo|task|day]}`
     /// -> `{rows: [{key, keys, costUsd, runs, tokens, cacheHitRate}], totals,
     /// leadTouch: {touched, marked, rate, byRepo, byWeek},
@@ -152,25 +97,13 @@ impl App {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         #[derive(Deserialize, Default)]
-        #[serde(rename_all = "camelCase")]
-        struct ClassifierSecretIn {
-            #[serde(default)]
-            key: Option<String>,
-            #[serde(default)]
-            base_url: Option<String>,
-        }
-        #[derive(Deserialize, Default)]
         struct P {
-            #[serde(default)]
-            classifier: Option<ClassifierSecretIn>,
             #[serde(default)]
             profiles: HashMap<String, ProfileSecret>,
         }
         let p: P = serde_json::from_value(params).unwrap_or_default();
         let mut secrets = self.secrets.write().unwrap();
         *secrets = Secrets {
-            classifier_key: p.classifier.as_ref().and_then(|c| c.key.clone()),
-            classifier_base_url: p.classifier.as_ref().and_then(|c| c.base_url.clone()),
             profiles: p.profiles,
         };
         Ok(json!({}))

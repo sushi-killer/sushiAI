@@ -260,3 +260,33 @@ fn daemon_exits_when_its_data_dir_is_deleted() {
     let (status, stderr) = wait_for_exit(child, Duration::from_secs(10));
     assert!(status.success(), "daemon should exit 0: {stderr}");
 }
+
+#[test]
+fn an_old_settings_json_with_a_classifier_still_loads() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let old = serde_json::json!({
+        "routes": [], "tiers": {}, "review": "",
+        "classifier": {"backend": "openrouter", "model": "old-model", "providerId": ""},
+        "sandbox": "host", "allowedDomains": [], "protectedPaths": [],
+        "maxAttempts": 4, "parallel": 2,
+    });
+    std::fs::write(data_dir.path().join("settings.json"), old.to_string()).unwrap();
+    let socket = data_dir.path().join("orchd.sock");
+    let child = spawn_orchd_raw(data_dir.path(), &socket, &[]);
+    wait_for_socket(&socket);
+    let token = read_control_token(data_dir.path());
+
+    let settings = request_on(&socket, "settings.get", serde_json::json!({}), Some(&token));
+    assert_eq!(settings["maxAttempts"], 4, "{settings}");
+    assert!(settings.get("classifier").is_none(), "{settings}");
+
+    request_on(
+        &socket,
+        "secrets.set",
+        serde_json::json!({"classifier": {"key": "k", "baseUrl": "http://x"}, "profiles": {}}),
+        Some(&token),
+    );
+
+    let _ = request_on(&socket, "shutdown", serde_json::json!({}), Some(&token));
+    let _ = wait_for_exit(child, Duration::from_secs(5));
+}

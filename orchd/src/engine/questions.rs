@@ -589,34 +589,3 @@ pub(super) async fn ask_plan_question_with_triage(
     )
     .await
 }
-
-pub(super) async fn classify_answerable(
-    app: &Arc<App>,
-    task: &Task,
-    question: &str,
-) -> Option<f64> {
-    let settings = app.settings.read().unwrap().classifier.clone();
-    let key = app.secrets.read().unwrap().classifier_key.clone();
-    let base_url = app.secrets.read().unwrap().classifier_base_url.clone();
-    let state = json!({"goal": task.goal, "criteria": task.criteria, "question": question});
-    let questions = vec![classify::QuestionSpec::Noul {
-        name: "answerable".to_string(),
-        prompt: "Is this question answerable from the repository and task, without the owner?"
-            .to_string(),
-    }];
-    let start = std::time::Instant::now();
-    let s2 = settings.clone();
-    let k2 = key.clone();
-    let b2 = base_url.clone();
-    let q2 = questions.clone();
-    let state2 = state.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        classify::decide(&s2, k2.as_deref(), b2.as_deref(), &state2, &q2)
-    })
-    .await
-    .unwrap_or_else(|e| Err(classify::ClassifyError(e.to_string())));
-    app.journal(&task.id, "blocked_question", &result, start.elapsed());
-    result
-        .ok()
-        .and_then(|answers| answers.get("answerable").and_then(|a| a.noul))
-}

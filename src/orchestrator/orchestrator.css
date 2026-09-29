@@ -482,8 +482,8 @@
   background: var(--bg-raised);
 }
 
-/* Jev and the Orchestrator route each get a small tag so an automated call
- * reads differently from the owner's own words. */
+/* The Orchestrator route gets a small tag so an automated call reads
+ * differently from the owner's own words. */
 .orch-decision-tag {
   display: inline-block;
   margin-right: 6px;

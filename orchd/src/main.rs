@@ -8,7 +8,6 @@
 
 mod ab;
 mod brief;
-mod classify;
 mod costs;
 mod engine;
 mod eval;

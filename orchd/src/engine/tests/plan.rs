@@ -27,11 +27,11 @@ fn check_subtasks_accepts_a_serial_pair_and_rejects_bad_graphs() {
 #[test]
 fn a_subtask_request_carries_the_whole_and_what_was_decided() {
     let mut parent = task_with_status(TaskStatus::Running);
-    parent.decisions = vec!["Owner: Which default? -> dark".into(), "Jev: x".into()];
+    parent.decisions = vec!["Owner: Which default? -> dark".into(), "Planner: x".into()];
     let text = subtask_request(&parent, "  write the toggle ");
     assert!(text.starts_with("write the toggle\n\nThis is one part of a larger task, \"Do thing\""));
     assert!(text.contains("- Owner: Which default? -> dark"));
-    assert!(!text.contains("Jev: x"));
+    assert!(!text.contains("Planner: x"));
 }
 
 fn pathed(key: &str, deps: &[&str], paths: &[&str]) -> brief::PlanSubtask {

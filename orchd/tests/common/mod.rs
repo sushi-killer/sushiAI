@@ -480,8 +480,8 @@ pub fn cheap_route_on_claude(daemon: &Daemon) {
 
 /// One fake playing every role of a task whose review always FAILs: the
 /// implementer edits a file and reports, the reviewer (brief opens with
-/// "## Review") fails it, and the orchestrator's accept classifier (its brief
-/// asks for `{"accept": true}`) records the call in $LOG_DIR/classifier.called
+/// "## Review") fails it, and the orchestrator's accept judge (its brief
+/// asks for `{"accept": true}`) records the call in $LOG_DIR/judge.called
 /// and answers `{"accept": $ACCEPT_REPLY}`.
 pub const FAKE_FAILING_REVIEW_SCRIPT: &str = r###"#!/bin/sh
 input="$(cat)"
@@ -489,7 +489,7 @@ case "$input" in
   "## Review"*)
     printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"needs work\"]}\n```"}' ;;
   *'"accept": true'*)
-    touch "$LOG_DIR/classifier.called"
+    touch "$LOG_DIR/judge.called"
     printf '%s\n' "{\"type\":\"result\",\"total_cost_usd\":0.02,\"result\":\"{\\\"accept\\\": $ACCEPT_REPLY}\"}" ;;
   *)
     echo changed > CHANGED_MARKER.txt

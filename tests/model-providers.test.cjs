@@ -83,19 +83,6 @@ test("stores keys encrypted and never returns the raw key from listing", async (
   }
 });
 
-test("keyFor decrypts the raw key for a main-process caller (the orchestrator's secrets push)", async () => {
-  const f = await fixture();
-  try {
-    const provider = await f.providers.upsertProvider({ kind: "openrouter" });
-    assert.equal(await f.providers.keyFor(provider.id), null);
-    await f.providers.setProviderKey(provider.id, "sk-or-secret-value");
-    assert.equal(await f.providers.keyFor(provider.id), "sk-or-secret-value");
-    assert.equal(await f.providers.keyFor("missing-provider"), null);
-  } finally {
-    await f.cleanup();
-  }
-});
-
 test("falls back to a marked plaintext key when encryption is unavailable", async () => {
   const f = await fixture({
     safeStorage: fakeSafeStorage({ available: false }),

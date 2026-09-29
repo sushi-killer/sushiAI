@@ -112,20 +112,6 @@ pub fn decide_after_failure(input: &FailureDecisionInput) -> FailureDecision {
     FailureDecision::NextAttempt { tier }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum BlockedDecision {
-    AnswerSelf,
-    Waiting,
-}
-
-/// spec step 8, blocked branch: classifier p >= 0.7 -> agent answers itself.
-pub fn decide_blocked_question(answerable_p: Option<f64>) -> BlockedDecision {
-    match answerable_p {
-        Some(p) if p >= 0.7 => BlockedDecision::AnswerSelf,
-        _ => BlockedDecision::Waiting,
-    }
-}
-
 pub(super) fn record_failure(task: &mut Task, idx: usize, kind: FailureKind, detail: String) {
     let signature = failure_signature(kind, &detail);
     let a = &mut task.attempts[idx];

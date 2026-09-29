@@ -35,11 +35,11 @@ fn failure_signature_uses_kind_and_truncates_to_120_chars() {
 #[test]
 fn a_retry_on_the_same_tier_keeps_the_fallback_note() {
     let mut task = task_with_status(TaskStatus::Running);
-    task.tier_fallback = Some("no classifier key".into());
+    task.tier_fallback = Some("no planner tier".into());
     task.attempts = vec![attempt_with_failure(1, "sig-a")];
     assert!(advance_after_failure(&mut task, 4, &[]));
     assert_eq!(task.tier, Tier::Standard);
-    assert_eq!(task.tier_fallback.as_deref(), Some("no classifier key"));
+    assert_eq!(task.tier_fallback.as_deref(), Some("no planner tier"));
     // The same failure again moves the task up a tier: the note goes.
     task.attempts.push(attempt_with_failure(2, "sig-a"));
     assert!(advance_after_failure(&mut task, 4, &[]));
@@ -129,23 +129,6 @@ fn decide_after_failure_waits_when_attempts_exhausted() {
         FailureDecision::Waiting { .. } => {}
         _ => panic!("expected waiting"),
     }
-}
-
-#[test]
-fn decide_blocked_question_answers_self_above_threshold() {
-    assert_eq!(
-        decide_blocked_question(Some(0.7)),
-        BlockedDecision::AnswerSelf
-    );
-    assert_eq!(
-        decide_blocked_question(Some(0.9)),
-        BlockedDecision::AnswerSelf
-    );
-    assert_eq!(
-        decide_blocked_question(Some(0.69)),
-        BlockedDecision::Waiting
-    );
-    assert_eq!(decide_blocked_question(None), BlockedDecision::Waiting);
 }
 
 #[test]

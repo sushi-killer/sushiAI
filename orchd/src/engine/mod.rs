@@ -1,11 +1,10 @@
 //! The attempt loop, gates, review, commit and failure rules (spec
 //! "Engine"), plus the `Dispatcher` implementation (`App`) that wires the
-//! protocol methods to the store, git, harness and classifier. Pure
+//! protocol methods to the store, git, harness and agents. Pure
 //! decision helpers live at the top with their own unit tests; `App` and
 //! the async run loop are below.
 
 use crate::brief;
-use crate::classify;
 use crate::git;
 use crate::harness;
 use crate::hook;
@@ -185,8 +184,6 @@ struct ProfileSecret {
 /// only"); `secrets.set` is a full replace, never a merge.
 #[derive(Default)]
 struct Secrets {
-    classifier_key: Option<String>,
-    classifier_base_url: Option<String>,
     profiles: HashMap<String, ProfileSecret>,
 }
 
@@ -544,35 +541,11 @@ impl App {
         auth.map(|a| a == self.control_token).unwrap_or(false)
     }
 
-    fn journal(
-        &self,
-        task_id: &str,
-        point: &str,
-        result: &Result<classify::Answers, classify::ClassifyError>,
-        elapsed: Duration,
-    ) {
-        // A classifier the owner switched off is not a failed decision.
-        if self.settings.read().unwrap().classifier.backend == ClassifierBackend::None {
-            return;
-        }
-        let entry = classify::DecisionLogEntry {
-            ts: now_ms(),
-            point,
-            task_id,
-            answers: result.as_ref().ok(),
-            error: result.as_ref().err().map(|e| e.0.as_str()),
-            ms: elapsed.as_millis() as u64,
-        };
-        let line = classify::journal_line(&entry);
-        let _ = self.store.append_decision_line(&line);
-    }
-
-    /// Appends a `"Jev: ..."` line to a task's `decisions` and persists it
-    /// right away -- for classifier call sites that don't otherwise hold the
-    /// task in memory (`handle_hook_stop`'s stop-gate check). Call sites that
+    /// Appends a line to a task's `decisions` and persists it right away --
+    /// for call sites that don't otherwise hold the task in memory. Call sites that
     /// already hold `&mut Task` push the line onto their own copy instead, so
     /// it rides along with their next save instead of racing a reload.
-    fn append_jev_decision(&self, task_id: &str, line: String) {
+    fn append_decision(&self, task_id: &str, line: String) {
         if let Ok(Some(mut task)) = self.store.load_task(task_id) {
             task.decisions.push(line);
             task.updated_at = now_ms();
@@ -591,7 +564,6 @@ impl App {
         match method {
             "ping" => self.handle_ping().await,
             "settings.get" => self.handle_settings_get().await,
-            "classify.probe" => self.handle_classify_probe(params).await,
             "settings.set" => self.handle_settings_set(params).await,
             "settings.defaults" => self.handle_settings_defaults().await,
             "secrets.set" => self.handle_secrets_set(params).await,

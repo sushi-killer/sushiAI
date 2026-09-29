@@ -38,10 +38,10 @@ import {
 import { Chip, Criterion, StageTrack, Tag } from "./ui";
 import "./task-detail.css";
 
-const DECISION_TAGS = ["Jev", "Orchestrator"] as const;
+const DECISION_TAGS = ["Orchestrator"] as const;
 
-/** Splits a `decisions` line into its automated source (`"Jev: ..."`,
- * `"Orchestrator: ..."`) and the rest of the text, or `null` for anything
+/** Splits an `Orchestrator: ...` decisions line and the rest of the text,
+ * or `null` for anything
  * else (an `"Owner: ..."` line, most often) - the owner's own words need no
  * badge, only the automated decisions do. */
 function decisionTag(

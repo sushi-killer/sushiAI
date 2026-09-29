@@ -658,7 +658,7 @@ fn the_stall_clock_waits_while_the_stop_hook_runs_verify() {
 
 /// The prompt-prefix trim (`--disallowedTools`) used to be gated behind
 /// `variant.leanContext`; it is now unconditional for every Claude implement
-/// run, and mcp.json carries exactly the configured servers -- no Jev
+/// run, and mcp.json carries exactly the configured servers -- no
 /// filtering, no skills hook wired into `settings.json`.
 #[test]
 fn a_claude_implement_run_trims_delegation_tools_and_keeps_the_configured_mcp_servers() {

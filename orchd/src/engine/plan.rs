@@ -906,10 +906,7 @@ pub(super) async fn run_plan_stage(
                     };
                 }
                 Err(why) => {
-                    app.append_jev_decision(
-                        task_id,
-                        format!("Planner: {why}; running as one task"),
-                    );
+                    app.append_decision(task_id, format!("Planner: {why}; running as one task"));
                     if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
                         task = reloaded;
                     }
@@ -917,9 +914,8 @@ pub(super) async fn run_plan_stage(
             }
         }
 
-        // Unconditional on an empty `verify` now (review item P2e): a
-        // classifier that's off, missing a key, or simply unsure is no
-        // reason to skip asking outright.
+        // Unconditional on an empty `verify` (review item P2e): ask
+        // outright rather than skipping the question.
         if task.verify.is_empty() {
             let options = verify_options_from_package_json(&worktree);
             match ask_plan_question(

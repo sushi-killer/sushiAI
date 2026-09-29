@@ -103,23 +103,6 @@ pub enum SandboxMode {
     Host,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ClassifierBackend {
-    None,
-    Openrouter,
-    Typesafe,
-    Openai,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClassifierSettings {
-    pub backend: ClassifierBackend,
-    pub model: String,
-    pub provider_id: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -128,7 +111,6 @@ pub struct Settings {
     /// Route id; "" = off, "auto" = first configured route whose harness
     /// differs from the implement attempt's.
     pub review: String,
-    pub classifier: ClassifierSettings,
     pub sandbox: SandboxMode,
     pub allowed_domains: Vec<String>,
     /// Codex's sandbox has no per-domain filter, just a network on/off
@@ -465,11 +447,6 @@ impl Default for Settings {
             ],
             tiers,
             review: "auto".to_string(),
-            classifier: ClassifierSettings {
-                backend: ClassifierBackend::Openrouter,
-                model: "typesafe/jev-1.13".to_string(),
-                provider_id: String::new(),
-            },
             sandbox: SandboxMode::Native,
             // Open network by default: the sandbox's job is keeping writes
             // inside the worktree, not blocking package registries.
@@ -1043,14 +1020,12 @@ pub struct Task {
     pub parent: Option<String>,
     pub status: TaskStatus,
     pub tier: Tier,
-    /// The tier the planner chose, kept even when it is
-    /// off so its choice can be compared with Jev's.
+    /// The tier the planner chose; `None` when the task was not planned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planned_tier: Option<Tier>,
-    /// Set to a fixed-set reason (see `classify_tier` in `engine.rs`) when
-    /// the implement tier was picked by falling back to `Standard` instead
-    /// of a classified or planner choice; cleared as soon as Jev or the
-    /// planner picks the tier, or a failure moves the task up a tier.
+    /// Set to `no planner tier` when the implement tier fell back to
+    /// `Standard` because the planner chose none; cleared when the planner's
+    /// tier is used, or a failure moves the task up a tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier_fallback: Option<String>,
     /// `None` only on tasks created before variants existed; `orchd ab`
@@ -1646,8 +1621,6 @@ mod tests {
         assert_eq!(v["tiers"]["hard"], "claude-opus");
         assert_eq!(v["maxAttempts"], 4);
         assert_eq!(v["parallel"], 2);
-        assert_eq!(v["classifier"]["backend"], "openrouter");
-        assert_eq!(v["classifier"]["model"], "typesafe/jev-1.13");
         assert_eq!(v["planner"], "claude-opus");
         assert_eq!(v["orchestrator"], "");
         let back: Settings = serde_json::from_value(v).unwrap();
@@ -1661,7 +1634,7 @@ mod tests {
         // must still load, with planning on by default and on the hard
         // tier's route - the strongest model plans best.
         let old_json = serde_json::json!({
-            "routes": [], "tiers": {}, "review": "", "classifier": {"backend": "none", "model": "", "providerId": ""},
+            "routes": [], "tiers": {}, "review": "",
             "sandbox": "host", "allowedDomains": [], "protectedPaths": [], "maxAttempts": 4, "parallel": 2,
         });
         let s: Settings = serde_json::from_value(old_json).unwrap();

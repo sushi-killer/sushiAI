@@ -29,8 +29,6 @@ const SETTING_LABELS: Record<DefaultableSetting, string> = {
   planner: "Planner",
   orchestrator: "Orchestrator",
   autoAnswer: "Answer stuck questions",
-  "classifier.backend": "Classifier backend",
-  "classifier.model": "Classifier model",
   sandbox: "Sandbox",
   codexNetwork: "Codex network access",
   allowedDomains: "Allowed network domains",

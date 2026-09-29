@@ -1021,7 +1021,7 @@ pub struct PlanDraft {
     pub questions: Vec<PlanQuestion>,
     #[serde(default, rename = "finalVerify")]
     pub final_verify: Vec<String>,
-    /// Unknown or missing -> `None`: routing falls back to Jev.
+    /// Unknown or missing -> `None`: the task runs on the standard route.
     #[serde(default, deserialize_with = "lenient_tier")]
     pub tier: Option<Tier>,
     /// The planner's split of a request too large for one session; empty
@@ -1645,7 +1645,7 @@ Reply with only this JSON object: {\"accept\": true} or {\"accept\": false}\n",
     out
 }
 
-/// The `accept` verdict in a classifier reply; `None` when there is none.
+/// The `accept` verdict in a judge reply; `None` when there is none.
 pub fn parse_accept(text: &str) -> Option<bool> {
     let mut candidates = vec![text.to_string()];
     candidates.extend(fenced_blocks(text).into_iter().rev().map(|(_, b)| b));

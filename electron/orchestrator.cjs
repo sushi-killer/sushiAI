@@ -462,9 +462,8 @@ class OrchestratorService {
   }
 
   /** Full replace, always pushed (connect + after every `settings.set`):
-   * `classifier` is the selected provider's key/baseUrl or null, `profiles`
-   * is every route's resolved model-profile env + key. Nothing is staged to
-   * disk - `resolveEnv` hands the env map and key back in memory. */
+   * `profiles` is every route's resolved model-profile env + key. Nothing
+   * is staged to disk - `resolveEnv` hands the env map and key back in memory. */
   async #pushSecrets() {
     if (!this.getModelProviders) return;
     let settings;
@@ -480,20 +479,6 @@ class OrchestratorService {
       return;
     }
     const providers = this.getModelProviders();
-    let classifier = null;
-    const providerId = settings?.classifier?.providerId;
-    if (providerId) {
-      try {
-        const [key, list] = await Promise.all([
-          providers.keyFor(providerId),
-          providers.listProviders(),
-        ]);
-        const provider = list.find((p) => p.id === providerId);
-        if (key && provider) classifier = { key, baseUrl: provider.baseUrl };
-      } catch {
-        classifier = null;
-      }
-    }
     const profileIds = [
       ...new Set(
         (settings?.routes || [])
@@ -514,7 +499,7 @@ class OrchestratorService {
     await orchdRequest(
       this.socketPath,
       "secrets.set",
-      { classifier, profiles },
+      { profiles },
       this.token,
       5000,
     ).catch(() => {});

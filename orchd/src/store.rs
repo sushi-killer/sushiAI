@@ -1,4 +1,4 @@
-//! JSON-file store: `<data>/settings.json`, `<data>/decisions.jsonl`,
+//! JSON-file store: `<data>/settings.json`,
 //! `<data>/tasks/<id>/task.json`, `<data>/tasks/<id>/runs/<n>/*`,
 //! `<data>/audits/<id>/{audit.json,report.json,brief.md,events.jsonl}`.
 //! All writes to `task.json`/`settings.json` are atomic (write tmp file in
@@ -31,10 +31,6 @@ impl Store {
 
     pub fn settings_path(&self) -> PathBuf {
         self.data_dir.join("settings.json")
-    }
-
-    pub fn decisions_path(&self) -> PathBuf {
-        self.data_dir.join("decisions.jsonl")
     }
 
     pub fn task_dir(&self, id: &str) -> PathBuf {
@@ -121,18 +117,6 @@ impl Store {
         }
         out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(out)
-    }
-
-    pub fn append_decision_line(&self, line: &str) -> io::Result<()> {
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.decisions_path())?;
-        f.write_all(line.as_bytes())?;
-        if !line.ends_with('\n') {
-            f.write_all(b"\n")?;
-        }
-        Ok(())
     }
 
     /// On daemon start: any attempt left `running` from a previous process
@@ -695,15 +679,5 @@ mod tests {
             let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
-    }
-
-    #[test]
-    fn decisions_journal_appends_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path()).unwrap();
-        store.append_decision_line(r#"{"ts":1}"#).unwrap();
-        store.append_decision_line(r#"{"ts":2}"#).unwrap();
-        let text = fs::read_to_string(store.decisions_path()).unwrap();
-        assert_eq!(text.lines().count(), 2);
     }
 }

@@ -986,7 +986,7 @@ const ACCEPT_OPTION: &str = "accept the last attempt as done";
 
 /// A daemon whose reviewer always FAILs, one attempt per budget, no answer
 /// policy and no auto-answer: the "attempts keep failing" question reaches
-/// the owner. `orchestrator` is the classifier's route.
+/// the owner. `orchestrator` is the judge's route.
 fn failing_review_daemon(scripts_dir: &std::path::Path, accept_reply: &str) -> Daemon {
     let script = fake_harness_script(scripts_dir, "fake-claude.sh", FAKE_FAILING_REVIEW_SCRIPT);
     let daemon = Daemon::spawn(&[
@@ -1075,7 +1075,7 @@ fn the_owner_picking_the_accept_option_finishes_the_task_on_its_last_attempt() {
         matches!(s, "done" | "failed" | "stopped")
     });
     assert_accepted(&daemon, repo.path(), &done, &said);
-    assert!(!scripts_dir.path().join("classifier.called").exists());
+    assert!(!scripts_dir.path().join("judge.called").exists());
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
@@ -1098,7 +1098,7 @@ fn owner_free_text_the_orchestrator_reads_as_accepting_finishes_the_task() {
         matches!(s, "done" | "failed" | "stopped")
     });
     assert_accepted(&daemon, repo.path(), &done, said);
-    assert!(scripts_dir.path().join("classifier.called").exists());
+    assert!(scripts_dir.path().join("judge.called").exists());
     assert!(done["costUsd"].as_f64().unwrap() > 0.02, "{done}");
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
@@ -1127,7 +1127,7 @@ fn free_text_the_orchestrator_does_not_read_as_accepting_starts_another_attempt(
             std::thread::sleep(Duration::from_millis(100));
             latest = daemon.request("task.get", serde_json::json!({"id": id}));
         }
-        assert!(scripts_dir.path().join("classifier.called").exists());
+        assert!(scripts_dir.path().join("judge.called").exists());
         assert!(
             !latest["decisions"].to_string().contains("accepted attempt"),
             "{latest}"
@@ -1139,7 +1139,7 @@ fn free_text_the_orchestrator_does_not_read_as_accepting_starts_another_attempt(
 }
 
 #[test]
-fn a_verify_failed_question_offers_no_accept_and_free_text_never_reaches_the_classifier() {
+fn a_verify_failed_question_offers_no_accept_and_free_text_never_reaches_the_judge() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let daemon = failing_review_daemon(scripts_dir.path(), "true");
     let repo = init_git_repo();
@@ -1160,7 +1160,7 @@ fn a_verify_failed_question_offers_no_accept_and_free_text_never_reaches_the_cla
         latest = daemon.request("task.get", serde_json::json!({"id": id}));
     }
     assert_ne!(latest["status"], "done", "{latest}");
-    assert!(!scripts_dir.path().join("classifier.called").exists());
+    assert!(!scripts_dir.path().join("judge.called").exists());
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);

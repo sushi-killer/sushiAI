@@ -710,7 +710,7 @@ mod tests {
         let mut t = task("t", 10);
         t.decisions = vec![
             "Owner: which db? -> sqlite".into(),
-            "Jev: tier hard".into(),
+            "Planner: tier hard".into(),
             "Owner: dependency answered".into(),
         ];
         let s = run(&t, &[], &[]);

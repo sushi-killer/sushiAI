@@ -4,10 +4,6 @@
 mod common;
 
 use common::*;
-use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -405,49 +401,15 @@ fn unparseable_plan_then_owner_clarification_leads_to_a_successful_replan() {
     let _ = std::fs::remove_dir_all(worktree);
 }
 
-/// A fake OpenAI-compatible classifier that only counts the requests it
-/// gets; every answer is an empty envelope.
-fn spawn_counting_classifier() -> (String, Arc<AtomicUsize>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let seen = calls.clone();
-    let body =
-        serde_json::json!({"choices": [{"message": {"content": "{\"answers\":{}}"}}]}).to_string();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            seen.fetch_add(1, Ordering::SeqCst);
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
-            let mut chunk = [0u8; 8192];
-            let _ = stream.read(&mut chunk);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(response.as_bytes());
-        }
-    });
-    (format!("http://{addr}"), calls)
-}
-
 #[test]
-fn a_planned_task_makes_no_classifier_call_and_routes_by_the_planners_tier() {
+fn a_planned_task_routes_by_the_planners_tier() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts_dir.path(), "fake-planner.sh", FAKE_PLANNER_SCRIPT);
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
-    let (base_url, calls) = spawn_counting_classifier();
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     settings["answerPolicy"] = serde_json::json!(false);
-    settings["classifier"] =
-        serde_json::json!({"backend": "openai", "model": "fake", "providerId": "fake"});
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
-    daemon.request(
-        "secrets.set",
-        serde_json::json!({"classifier": {"key": "test-key", "baseUrl": base_url}}),
-    );
 
     let repo = init_git_repo();
     let task = daemon.request(
@@ -465,15 +427,14 @@ fn a_planned_task_makes_no_classifier_call_and_routes_by_the_planners_tier() {
     });
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
     assert_eq!(settled["plannedTier"], "hard", "{settled}");
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        0,
-        "neither the plan stage nor the tier pick calls the classifier"
+    let decisions = settled["decisions"].as_array().unwrap();
+    assert!(
+        decisions.iter().any(|d| d
+            .as_str()
+            .unwrap_or("")
+            .starts_with("Planner: tier hard -> route ")),
+        "expected a planner tier decision: {decisions:?}"
     );
-    let decisions_text =
-        std::fs::read_to_string(daemon.data_dir().join("decisions.jsonl")).unwrap_or_default();
-    assert!(!decisions_text.contains("\"point\":\"plan_preflight\""));
-    assert!(!decisions_text.contains("\"point\":\"tier\""));
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();

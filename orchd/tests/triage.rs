@@ -4,77 +4,17 @@
 mod common;
 
 use common::*;
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::time::Duration;
 
-/// A one-shot-per-connection fake HTTP server that always answers with
-/// `answers_json` wrapped as an OpenAI chat-completion envelope -- a local,
-/// deterministic stand-in for `classify::decide`'s `Openai` backend (the
-/// only backend whose base URL is a runtime setting rather than hardcoded),
-/// so a test can drive a real classifier success without a network call.
-/// Runs on a detached thread for the test process's lifetime -- ponytail:
-/// nothing ever joins it, since the process exit is what reclaims it.
-fn find_double_crlf(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"\r\n\r\n")
+/// Any `Orchestrator:` line except the standing no-planner-tier note.
+fn is_triage_decision(line: &str) -> bool {
+    line.starts_with("Orchestrator:") && !line.starts_with("Orchestrator: no planner tier")
 }
 
-fn spawn_fake_openai_classifier(answers_json: &str) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let body = serde_json::json!({
-        "choices": [{"message": {"content": answers_json}}]
-    })
-    .to_string();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-            // Drain the full request (headers + declared Content-Length)
-            // before writing anything back: closing on a socket that still
-            // has unread bytes queued can RST the connection and truncate
-            // our own response, which showed up as an intermittent ureq
-            // "invalid header" parse failure on the client side.
-            let mut received = Vec::new();
-            let mut chunk = [0u8; 4096];
-            loop {
-                match stream.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        received.extend_from_slice(&chunk[..n]);
-                        let Some(header_end) = find_double_crlf(&received) else {
-                            continue;
-                        };
-                        let headers = String::from_utf8_lossy(&received[..header_end]);
-                        let content_length: usize = headers
-                            .lines()
-                            .find_map(|l| {
-                                l.to_ascii_lowercase()
-                                    .strip_prefix("content-length:")
-                                    .map(|v| v.trim().to_string())
-                            })
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(0);
-                        if received.len() >= header_end + 4 + content_length {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(response.as_bytes());
-        }
-    });
-    format!("http://{addr}")
-}
-
+/// A task with no planner tier has no tier to route by: it runs on the
+/// standard route and says why.
 #[test]
-fn jev_tier_decision_lands_in_task_decisions_on_classifier_success() {
+fn a_task_without_a_planner_tier_runs_on_the_standard_route() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(
         scripts_dir.path(),
@@ -83,96 +23,16 @@ fn jev_tier_decision_lands_in_task_decisions_on_classifier_success() {
     );
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
 
-    // "standard" routes to the Claude harness (default `tiers` map), which
-    // is the one faked above via `ORCHD_CLAUDE_BIN` -- "mechanical" would
-    // route to Codex and hang waiting on a real `codex` binary.
-    let base_url = spawn_fake_openai_classifier(
-        r#"{"answers":{"tier":{"choice":"standard","probabilities":{"mechanical":0.08,"standard":0.82,"hard":0.1}}}}"#,
-    );
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
-    settings["classifier"] =
-        serde_json::json!({"backend": "openai", "model": "fake", "providerId": "fake"});
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
-    daemon.request(
-        "secrets.set",
-        serde_json::json!({"classifier": {"key": "test-key", "baseUrl": base_url}}),
-    );
 
     let repo = init_git_repo();
     let task = daemon.request(
         "task.create",
         serde_json::json!({
             "repo": repo.path().to_str().unwrap(),
-            "title": "Pass case",
-            "goal": "Make a trivial change",
-            "criteria": [],
-            "verify": ["true"],
-        }),
-    );
-    let task_id = task["id"].as_str().unwrap().to_string();
-    daemon.request("task.start", serde_json::json!({"id": task_id}));
-
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(15));
-    assert_eq!(settled["status"], "done", "task JSON: {settled}");
-    let decisions = settled["decisions"].as_array().unwrap();
-    assert!(
-        decisions.iter().any(|d| d
-            .as_str()
-            .unwrap_or("")
-            .starts_with("Jev: tier standard (p 0.82) -> route ")),
-        "expected a Jev tier decision: {decisions:?}"
-    );
-    assert!(
-        !decisions
-            .iter()
-            .any(|d| d.as_str().unwrap_or("").contains("tier unavailable")),
-        "a confident classifier answer must not fall back: {decisions:?}"
-    );
-    assert!(settled.get("tierFallback").is_none(), "{settled}");
-
-    let worktree = task["worktree"].as_str().unwrap().to_string();
-    daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
-}
-
-/// A low-confidence classifier answer (p < 0.5) must not be routed on the
-/// classified tier -- it falls back to standard and records why, without
-/// ever writing the misleading `Jev: tier hard (p 0.45)` line (the
-/// pre-fallback behaviour this test guards against, docs/orchd-acceptance-audit.md G8).
-#[test]
-fn jev_tier_falls_back_to_standard_on_a_low_confidence_answer() {
-    let scripts_dir = tempfile::tempdir().unwrap();
-    let script = fake_harness_script(
-        scripts_dir.path(),
-        "fake-claude.sh",
-        "#!/bin/sh\ncat > /dev/null\necho \"changed\" > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n",
-    );
-    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
-
-    // A p 0.45 "hard" answer falls back to standard, which routes to the
-    // Claude harness faked above (the default `tiers` map) -- "hard" would
-    // route to Claude Opus and still work, but standard is what the
-    // fallback path must land on regardless of the classifier's choice.
-    let base_url = spawn_fake_openai_classifier(
-        r#"{"answers":{"tier":{"choice":"hard","probabilities":{"mechanical":0.05,"standard":0.5,"hard":0.45}}}}"#,
-    );
-    let mut settings = daemon.request("settings.get", serde_json::json!({}));
-    settings["review"] = serde_json::json!("");
-    settings["classifier"] =
-        serde_json::json!({"backend": "openai", "model": "fake", "providerId": "fake"});
-    daemon.request("settings.set", serde_json::json!({"settings": settings}));
-    daemon.request(
-        "secrets.set",
-        serde_json::json!({"classifier": {"key": "test-key", "baseUrl": base_url}}),
-    );
-
-    let repo = init_git_repo();
-    let task = daemon.request(
-        "task.create",
-        serde_json::json!({
-            "repo": repo.path().to_str().unwrap(),
-            "title": "Unsure case",
+            "title": "No tier case",
             "goal": "Make a trivial change",
             "criteria": [],
             "verify": ["true"],
@@ -188,29 +48,21 @@ fn jev_tier_falls_back_to_standard_on_a_low_confidence_answer() {
         settled["attempts"][0]["routeId"], "claude-sonnet",
         "{settled}"
     );
+    assert_eq!(settled["tierFallback"], "no planner tier", "{settled}");
     let decisions = settled["decisions"].as_array().unwrap();
     assert!(
         decisions
             .iter()
-            .any(|d| d
-                == "Jev: tier unavailable (unsure: hard p 0.45) -> fallback standard, route claude-sonnet"),
-        "expected a tier-unavailable fallback decision: {decisions:?}"
+            .any(|d| d == "Orchestrator: no planner tier -> standard, route claude-sonnet"),
+        "expected the no-planner-tier decision: {decisions:?}"
     );
-    assert!(
-        !decisions
-            .iter()
-            .any(|d| d.as_str().unwrap_or("").starts_with("Jev: tier hard")),
-        "must not write the misleading pre-fallback line: {decisions:?}"
-    );
-    assert_eq!(settled["tierFallback"], "unsure: hard p 0.45", "{settled}");
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
 }
 
-/// Reports `blocked` the first time (with classifier off by default, that
-/// takes the "Jev says not answerable / Jev is off" branch straight into
+/// Reports `blocked` the first time (a blocked report goes straight into
 /// triage), then `complete` on the retry -- so a triage "answer" lets the
 /// task finish without ever reaching the owner. A brief containing
 /// "sushi-triage" (only the triage report format mentions it) picks the
@@ -250,8 +102,6 @@ fn triage_answer_lets_the_task_continue_without_the_owner() {
     );
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
 
-    // `classifier.backend: "openrouter"` with no key configured routes the
-    // first blocked report into "Jev is off" rather than a classifier call.
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     settings["orchestrator"] = serde_json::json!("claude-sonnet");
@@ -505,7 +355,7 @@ fn protected_path_approval_is_never_triaged() {
     assert!(
         !decisions
             .iter()
-            .any(|d| d.as_str().unwrap_or("").starts_with("Orchestrator:")),
+            .any(|d| is_triage_decision(d.as_str().unwrap_or(""))),
         "the orchestrator must never be asked to approve a protected path: {decisions:?}"
     );
 
@@ -556,39 +406,11 @@ fn orchestrator_off_goes_straight_to_the_owner() {
     assert!(
         !decisions
             .iter()
-            .any(|d| d.as_str().unwrap_or("").starts_with("Orchestrator:")),
+            .any(|d| is_triage_decision(d.as_str().unwrap_or(""))),
         "no triage should have run at all: {decisions:?}"
     );
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
-}
-
-#[test]
-fn classify_probe_asks_the_configured_classifier_arbitrary_questions() {
-    let daemon = Daemon::spawn(&[]);
-    let base_url = spawn_fake_openai_classifier(
-        r#"{"answers":{"consistent":{"noul":0.2},"pick":{"choice":"b"}}}"#,
-    );
-    let mut settings = daemon.request("settings.get", serde_json::json!({}));
-    settings["classifier"] =
-        serde_json::json!({"backend": "openai", "model": "fake", "providerId": "fake"});
-    daemon.request("settings.set", serde_json::json!({"settings": settings}));
-    daemon.request(
-        "secrets.set",
-        serde_json::json!({"classifier": {"key": "test-key", "baseUrl": base_url}}),
-    );
-    let result = daemon.request(
-        "classify.probe",
-        serde_json::json!({
-            "state": {"criteria": ["a", "not a"]},
-            "questions": [
-                {"name": "consistent", "prompt": "Consistent?"},
-                {"name": "pick", "prompt": "Which?", "options": ["a", "b"]}
-            ]
-        }),
-    );
-    assert_eq!(result["answers"]["consistent"]["noul"], 0.2, "{result}");
-    assert_eq!(result["answers"]["pick"]["choice"], "b", "{result}");
 }

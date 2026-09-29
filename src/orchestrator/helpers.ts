@@ -139,6 +139,7 @@ const STAGE_ORDER = [
   "final",
   "eval_check",
   "triage",
+  "answer_judge",
   "audit",
   "evolution",
   "chat",

@@ -134,6 +134,29 @@ fn add_task_cost(app: &Arc<App>, task_id: &str, cost: f64) {
     }
 }
 
+/// The `briefCheckRoute` id and the route it names (`None` when it names no
+/// route); `None` overall when the setting is empty, i.e. cheap checks are off.
+pub(super) fn check_route(app: &App) -> Option<(String, Option<Route>)> {
+    let settings = app.settings.read().unwrap();
+    let route_id = settings.brief_check_route.clone();
+    if route_id.is_empty() {
+        return None;
+    }
+    let route = settings
+        .routes
+        .iter()
+        .find(|r| r.id == route_id)
+        .cloned()
+        // Settings saved before this route existed still reach the built-in one.
+        .or_else(|| {
+            Settings::default()
+                .routes
+                .into_iter()
+                .find(|r| r.id == route_id)
+        });
+    Some((route_id, route))
+}
+
 /// Checks the stored task's goal and criteria once. `can_redraft` is true
 /// for a planner draft: a contradiction then asks the planner to draft again
 /// (at most once per task). Otherwise, and for an unusable reply, the task
@@ -151,25 +174,9 @@ pub(super) async fn check_brief(
     if task.brief_check.done {
         return BriefAction::Proceed;
     }
-    let route_id = app.settings.read().unwrap().brief_check_route.clone();
-    if route_id.is_empty() {
+    let Some((route_id, route)) = check_route(app) else {
         return BriefAction::Proceed;
-    }
-    let route = app
-        .settings
-        .read()
-        .unwrap()
-        .routes
-        .iter()
-        .find(|r| r.id == route_id)
-        .cloned()
-        // Settings saved before this route existed still reach the built-in one.
-        .or_else(|| {
-            Settings::default()
-                .routes
-                .into_iter()
-                .find(|r| r.id == route_id)
-        });
+    };
     let verdict = match &route {
         Some(route) => match run_check(app, &task, route, attempt_n, cancel).await {
             Ok(v) => v,

@@ -88,6 +88,9 @@ impl Daemon {
             let mut settings =
                 request_on(&socket, "settings.get", serde_json::json!({}), Some(&token));
             settings["briefCheckRoute"] = serde_json::json!("");
+            // The answer policy answers routine questions itself; the other
+            // tests wait for them. Its own tests turn it back on.
+            settings["answerPolicy"] = serde_json::json!(false);
             if native_sandbox_unavailable() {
                 fit_sandbox(&mut settings);
             }

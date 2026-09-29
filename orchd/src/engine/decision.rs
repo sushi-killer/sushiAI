@@ -180,6 +180,7 @@ pub(super) fn advance_after_failure(task: &mut Task, max_attempts: u32) -> bool 
             task.question = Some(Question {
                 text: question,
                 options: vec!["continue".into(), "change approach".into(), "stop".into()],
+                kind: QuestionKind::AttemptsFailing,
             });
             task.status = TaskStatus::Waiting;
             false
@@ -266,6 +267,7 @@ pub(super) fn impossible_question(task: &Task, claim: &brief::Impossible) -> Que
             claim.criterion, task.criteria[claim.criterion], claim.evidence
         ),
         options: IMPOSSIBLE_OPTIONS.iter().map(|o| o.to_string()).collect(),
+        kind: QuestionKind::Impossible,
     }
 }
 

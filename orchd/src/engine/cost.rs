@@ -182,6 +182,7 @@ pub(super) async fn wait_while_over_budget(
                 task.cost_usd
             ),
             options: vec!["raise".into(), "stop".into()],
+            kind: QuestionKind::Budget,
         };
         task.question = Some(question.clone());
         task.status = TaskStatus::Waiting;

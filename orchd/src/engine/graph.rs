@@ -700,9 +700,38 @@ impl App {
                 "drop the dependency".into(),
                 "stop".into(),
             ],
+            kind: QuestionKind::DependencyEnded,
         });
         task.status = TaskStatus::Waiting;
         task.updated_at = now_ms();
+        // The answer policy retries an ended dependency once before the owner
+        // is asked.
+        if let Some(question) = task.question.clone() {
+            if policy_open(self, &task, question.kind)
+                && !task
+                    .assumptions
+                    .iter()
+                    .any(|a| a.kind == Some(QuestionKind::DependencyEnded))
+            {
+                let answer = "retry the dependency";
+                record_policy_answer(
+                    &mut task,
+                    &question,
+                    answer,
+                    "policy",
+                    "a dependency that ended is retried once",
+                    0,
+                );
+                if self
+                    .answer_dependency_question(task.clone(), answer, false)
+                    .is_ok()
+                {
+                    return;
+                }
+                task.assumptions.pop();
+                task.decisions.pop();
+            }
+        }
         let _ = self.store.save_task(&task);
         self.broadcast_task(&task);
     }
@@ -739,6 +768,7 @@ impl App {
         &self,
         mut task: Task,
         answer: &str,
+        by_owner: bool,
     ) -> Result<serde_json::Value, String> {
         let all = self.repo_tasks(&task.repo);
         let was_parent = is_parent(&task, &all);
@@ -781,7 +811,9 @@ impl App {
         } else {
             return Err("answer retry the dependency, drop the dependency, or stop".to_string());
         }
-        task.decisions.push(format!("Owner: {}", answer.trim()));
+        if by_owner {
+            task.decisions.push(format!("Owner: {}", answer.trim()));
+        }
         task.question = None;
         let fresh = self.repo_tasks(&task.repo);
         if was_parent && !is_parent(&task, &fresh) {

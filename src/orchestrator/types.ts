@@ -50,6 +50,9 @@ export type Settings = {
   /** The orchestrator answers a stuck agent's question before it reaches
    * the owner, logged in the task as `"Orchestrator: ..."`. */
   autoAnswer: boolean;
+  /** Routine questions are answered by rules and a cheap judge (at most three
+   * per task) and recorded as assumptions; `false` asks the owner every time. */
+  answerPolicy: boolean;
   /** Experiment flags new tasks start with; `task.create` can override them. */
   experiments: Variant;
   /** Model id -> per-million-token prices, for harnesses (Codex) that
@@ -92,7 +95,23 @@ export type TaskStatus =
   | "stopped"
   | "failed";
 
-export type Question = { text: string; options: string[] };
+export type QuestionKind =
+  | "attempts_failing"
+  | "review_no_verdict"
+  | "dependency_ended"
+  | "impossible"
+  | "preexisting_failure"
+  | "budget"
+  | "protected_path"
+  | "plan_question"
+  | "agent_question";
+
+export type Question = {
+  text: string;
+  options: string[];
+  /** What the question is about; the answer policy picks its rule by it. */
+  kind: QuestionKind;
+};
 
 export type VerifyResult = {
   command: string;
@@ -151,7 +170,12 @@ export type Assumption = {
   /** The planner's recommended option. */
   answer: string;
   evidence: string;
+  /** `planner`, or for the answer policy `policy` (a rule) / `judge`. */
   by: string;
+  /** The kind of question the answer policy answered. */
+  kind?: QuestionKind;
+  /** The attempt it was asked in (answer policy only). */
+  attempt?: number;
   overturned: boolean;
   /** What the owner answered instead, once overturned. */
   ownerAnswer?: string;
@@ -300,7 +324,7 @@ export type Task = {
   /** Owner and classifier decisions, newest last - includes "Owner: ..."
    * answers to a question. */
   decisions: string[];
-  /** Questions the planner answered with its own recommendation. */
+  /** Questions the planner or the answer policy answered themselves. */
   assumptions?: Assumption[];
   attempts: Attempt[];
   costUsd: number;

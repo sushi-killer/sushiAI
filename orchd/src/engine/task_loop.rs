@@ -901,6 +901,7 @@ pub(super) async fn run_task_loop(
                     task.question = Some(Question {
                         text: question_text,
                         options: vec![],
+                        kind: QuestionKind::AgentQuestion,
                     });
                     task.status = TaskStatus::Waiting;
                     task.updated_at = now_ms();
@@ -1228,6 +1229,7 @@ pub(super) async fn run_task_loop(
             task.question = Some(Question {
                 text: format!("Change touches protected path {path}: approve or reject?"),
                 options: vec!["approve".into(), "reject".into()],
+                kind: QuestionKind::ProtectedPath,
             });
             task.status = TaskStatus::Waiting;
             task.updated_at = now_ms();
@@ -1385,6 +1387,7 @@ pub(super) async fn run_task_loop(
                         task.question = Some(Question {
                             text: format!("The review gave no verdict ({why}). Commit this attempt unreviewed?"),
                             options: vec!["approve".into(), "retry".into()],
+                            kind: QuestionKind::ReviewNoVerdict,
                         });
                         task.status = TaskStatus::Waiting;
                         task.updated_at = now_ms();
@@ -1412,7 +1415,7 @@ pub(super) async fn run_task_loop(
                                     review_result = Some(ReviewResult {
                                         verdict: Verdict::Fail,
                                         findings: vec![format!(
-                                            "Owner asked for another attempt: {answer}"
+                                            "Another attempt was asked for: {answer}"
                                         )],
                                     });
                                 }

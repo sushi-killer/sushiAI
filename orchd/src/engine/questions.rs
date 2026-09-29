@@ -9,7 +9,8 @@ const MAX_ORCHESTRATOR_CONTINUES: usize = 2;
 /// The "attempts keep failing" question: the orchestrator triages it first
 /// (it sees the last failure, e.g. the review findings, and can say what to
 /// fix or that a finding is wrong), up to [`MAX_ORCHESTRATOR_CONTINUES`]
-/// times per task; after that, or with auto-answer off, only the owner.
+/// times per task; after that, or with auto-answer off, only the owner. The
+/// answer policy goes first: it continues once on its own.
 pub(super) async fn wait_for_exhausted_answer(
     app: &Arc<App>,
     task_id: &str,
@@ -19,16 +20,35 @@ pub(super) async fn wait_for_exhausted_answer(
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Option<String> {
+    if let Some(answer) = try_policy_answer(app, task, cancel).await {
+        return Some(answer);
+    }
     let continues = task
         .decisions
         .iter()
         .filter(|d| d.starts_with(EXHAUSTED_ANSWER_PREFIX))
         .count();
     if continues < MAX_ORCHESTRATOR_CONTINUES {
-        wait_for_answer_with_triage(app, task_id, task, idx, pending_answer, cancel, permit).await
+        wait_for_triaged_answer(app, task_id, task, idx, pending_answer, cancel, permit).await
     } else {
-        wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await
+        park_for_answer(app, task_id, task, pending_answer, cancel, permit).await
     }
+}
+
+/// [`park_for_answer`] after one shot at the answer policy: a rule or the
+/// judge may answer the question before it reaches the owner.
+pub(super) async fn wait_for_answer(
+    app: &Arc<App>,
+    task_id: &str,
+    task: &mut Task,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    cancel: &CancelToken,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Option<String> {
+    if let Some(answer) = try_policy_answer(app, task, cancel).await {
+        return Some(answer);
+    }
+    park_for_answer(app, task_id, task, pending_answer, cancel, permit).await
 }
 
 /// Parks on a fresh one-shot channel until either `task.answer` delivers an
@@ -39,7 +59,7 @@ pub(super) async fn wait_for_exhausted_answer(
 /// and get wrongly rejected as "no live parked loop". Persists the
 /// decision/status transition either way afterwards, so a caller never has
 /// to duplicate that bookkeeping.
-pub(super) async fn wait_for_answer(
+async fn park_for_answer(
     app: &Arc<App>,
     task_id: &str,
     task: &mut Task,
@@ -111,6 +131,7 @@ async fn run_triage(
     worktree: &Path,
     question: &str,
     options: &[String],
+    force: bool,
     cancel: &CancelToken,
 ) -> Option<TriageRun> {
     // P1-2: at most one consecutive triage *answer* per task -- if the
@@ -129,7 +150,9 @@ async fn run_triage(
         return None;
     }
     let settings = app.settings.read().unwrap().clone();
-    if !settings.auto_answer {
+    // `force`: the answer policy asks triage to confirm a cautious option even
+    // with auto-answer off.
+    if !settings.auto_answer && !force {
         return None;
     }
     let route = chat::orchestrator_route(&settings)?;
@@ -237,12 +260,32 @@ pub(super) async fn wait_for_answer_with_triage(
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Option<String> {
+    if let Some(answer) = try_policy_answer(app, task, cancel).await {
+        return Some(answer);
+    }
+    wait_for_triaged_answer(app, task_id, task, idx, pending_answer, cancel, permit).await
+}
+
+/// [`wait_for_answer_with_triage`] once the answer policy has had its turn.
+#[allow(clippy::too_many_arguments)]
+async fn wait_for_triaged_answer(
+    app: &Arc<App>,
+    task_id: &str,
+    task: &mut Task,
+    idx: usize,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    cancel: &CancelToken,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Option<String> {
     let question = task.question.clone().unwrap_or(Question {
         text: String::new(),
         options: vec![],
+        kind: QuestionKind::AgentQuestion,
     });
     let attempt_n = task.attempts[idx].n;
     let worktree = PathBuf::from(&task.worktree);
+    let cautious = cautious_choice(app, task, &question);
+    let auto_answer = app.settings.read().unwrap().auto_answer;
     if let Some(TriageRun { decision, cost_usd }) = run_triage(
         app,
         task_id,
@@ -251,6 +294,7 @@ pub(super) async fn wait_for_answer_with_triage(
         &worktree,
         &question.text,
         &question.options,
+        cautious.is_some(),
         cancel,
     )
     .await
@@ -258,12 +302,37 @@ pub(super) async fn wait_for_answer_with_triage(
         if let Some(cost) = cost_usd {
             task.cost_usd += cost;
         }
+        let agrees = agrees_with(&decision, cautious.as_deref());
         match decision.action {
+            brief::TriageAction::Answer if !agrees && !auto_answer => {}
             brief::TriageAction::Answer => {
-                let line =
-                    orchestrator_answer_line(&question.text, &decision.answer, &decision.reason);
-                app.broadcast_log(task_id, attempt_n, line.clone());
-                task.decisions.push(line);
+                if agrees {
+                    let evidence = format!(
+                        "the cautious option, and triage agrees: {}",
+                        decision.reason
+                    );
+                    record_policy_answer(
+                        task,
+                        &question,
+                        &decision.answer,
+                        "policy",
+                        &evidence,
+                        attempt_n,
+                    );
+                    app.broadcast_log(
+                        task_id,
+                        attempt_n,
+                        task.decisions.last().cloned().unwrap_or_default(),
+                    );
+                } else {
+                    let line = orchestrator_answer_line(
+                        &question.text,
+                        &decision.answer,
+                        &decision.reason,
+                    );
+                    app.broadcast_log(task_id, attempt_n, line.clone());
+                    task.decisions.push(line);
+                }
                 task.question = None;
                 task.status = TaskStatus::Queued;
                 task.updated_at = now_ms();
@@ -271,17 +340,19 @@ pub(super) async fn wait_for_answer_with_triage(
                 app.broadcast_task(task);
                 return Some(decision.answer);
             }
+            brief::TriageAction::Escalate if !auto_answer => {}
             brief::TriageAction::Escalate => {
                 task.question = Some(Question {
                     text: decision.question,
                     options: decision.options,
+                    kind: question.kind,
                 });
                 task.decisions
                     .push(orchestrator_escalate_line(&decision.reason));
             }
         }
     }
-    wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await
+    park_for_answer(app, task_id, task, pending_answer, cancel, permit).await
 }
 
 /// Wraps [`ask_plan_question`] with the same orchestrator-triage shot, for
@@ -307,6 +378,13 @@ pub(super) async fn ask_plan_question_with_triage(
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Option<String> {
+    let asked = Question {
+        text: question_text.to_string(),
+        options: options.clone(),
+        kind: QuestionKind::PlanQuestion,
+    };
+    let cautious = cautious_choice(app, task, &asked);
+    let auto_answer = app.settings.read().unwrap().auto_answer;
     if let Some(TriageRun { decision, cost_usd }) = run_triage(
         app,
         task_id,
@@ -315,6 +393,7 @@ pub(super) async fn ask_plan_question_with_triage(
         worktree,
         question_text,
         &options,
+        cautious.is_some(),
         cancel,
     )
     .await
@@ -322,12 +401,35 @@ pub(super) async fn ask_plan_question_with_triage(
         if let Some(cost) = cost_usd {
             task.cost_usd += cost;
         }
+        let agrees = agrees_with(&decision, cautious.as_deref());
         match decision.action {
+            brief::TriageAction::Answer if !agrees && !auto_answer => {}
+            brief::TriageAction::Escalate if !auto_answer => {}
             brief::TriageAction::Answer => {
-                let line =
-                    orchestrator_answer_line(question_text, &decision.answer, &decision.reason);
-                app.broadcast_log(task_id, attempt_n, line.clone());
-                task.decisions.push(line);
+                if agrees {
+                    let evidence = format!(
+                        "the cautious option, and triage agrees: {}",
+                        decision.reason
+                    );
+                    record_policy_answer(
+                        task,
+                        &asked,
+                        &decision.answer,
+                        "policy",
+                        &evidence,
+                        attempt_n,
+                    );
+                    app.broadcast_log(
+                        task_id,
+                        attempt_n,
+                        task.decisions.last().cloned().unwrap_or_default(),
+                    );
+                } else {
+                    let line =
+                        orchestrator_answer_line(question_text, &decision.answer, &decision.reason);
+                    app.broadcast_log(task_id, attempt_n, line.clone());
+                    task.decisions.push(line);
+                }
                 task.question = None;
                 task.status = TaskStatus::Drafting;
                 task.updated_at = now_ms();

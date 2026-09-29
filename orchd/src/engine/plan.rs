@@ -185,6 +185,7 @@ pub(super) async fn ask_plan_question(
         task.question = Some(Question {
             text: question_text.to_string(),
             options,
+            kind: QuestionKind::PlanQuestion,
         });
         task.status = TaskStatus::Waiting;
         task.updated_at = now_ms();
@@ -732,6 +733,8 @@ pub(super) async fn run_plan_stage(
                     answer,
                     evidence: q.evidence.clone(),
                     by: "planner".to_string(),
+                    kind: None,
+                    attempt: None,
                     overturned: false,
                     owner_answer: None,
                 });

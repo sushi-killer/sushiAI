@@ -537,8 +537,8 @@ impl App {
         assumption.overturned = true;
         assumption.owner_answer = Some(answer.to_string());
         let text = format!(
-            "The owner overturned an assumption the planner made. Question: {}\nThe planner assumed: {}\nThe owner's answer: {answer}\nUse the owner's answer.",
-            assumption.question, assumption.answer
+            "The owner overturned an assumption made for them ({}). Question: {}\nThe assumption: {}\nThe owner's answer: {answer}\nUse the owner's answer.",
+            assumption.by, assumption.question, assumption.answer
         );
         if task.status != TaskStatus::Done {
             messages::send(self, ORCHESTRATOR, Some(&task.id), &text, None)?;
@@ -589,7 +589,7 @@ impl App {
             .as_ref()
             .is_some_and(|q| q.text.starts_with(DEPENDENCY_QUESTION))
         {
-            return self.answer_dependency_question(task, &p.answer);
+            return self.answer_dependency_question(task, &p.answer, true);
         }
 
         let delivered = {

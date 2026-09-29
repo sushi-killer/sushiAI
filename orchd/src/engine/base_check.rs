@@ -14,6 +14,7 @@ pub(super) fn pre_existing_question(command: &str, base_sha: &str, base_tail: &s
             tail_chars(base_tail.trim(), 300)
         ),
         options: PRE_EXISTING_OPTIONS.iter().map(|o| o.to_string()).collect(),
+        kind: QuestionKind::PreexistingFailure,
     }
 }
 

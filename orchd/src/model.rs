@@ -119,6 +119,11 @@ pub struct Settings {
     /// answers given on their behalf.
     #[serde(default)]
     pub auto_answer: bool,
+    /// Routine task questions are answered by fixed rules and a cheap judge
+    /// (at most three per task), each recorded as an assumption the owner can
+    /// overturn. `false` sends every question to the owner as before.
+    #[serde(default = "default_answer_policy")]
+    pub answer_policy: bool,
     /// Flags new tasks start with unless `task.create` overrides them.
     #[serde(
         default = "default_experiments",
@@ -293,6 +298,10 @@ pub struct WorkBuckets {
     pub evidence: Vec<String>,
 }
 
+fn default_answer_policy() -> bool {
+    true
+}
+
 /// Route the brief consistency check runs on unless settings name another.
 fn default_brief_check_route() -> String {
     "claude-haiku".to_string()
@@ -384,6 +393,7 @@ impl Default for Settings {
             brief_check_route: default_brief_check_route(),
             orchestrator: String::new(),
             auto_answer: false,
+            answer_policy: true,
             experiments: default_experiments(),
             prices: default_prices(),
             work_buckets: WorkBuckets::default(),
@@ -767,6 +777,25 @@ pub enum TaskStatus {
 pub struct Question {
     pub text: String,
     pub options: Vec<String>,
+    /// What the question is about; the answer policy picks its rule by it.
+    #[serde(default)]
+    pub kind: QuestionKind,
+}
+
+/// Why orchd asks a question, set where it is asked.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionKind {
+    AttemptsFailing,
+    ReviewNoVerdict,
+    DependencyEnded,
+    Impossible,
+    PreexistingFailure,
+    Budget,
+    ProtectedPath,
+    PlanQuestion,
+    #[default]
+    AgentQuestion,
 }
 
 /// A choice the planner made itself instead of asking the owner
@@ -779,7 +808,14 @@ pub struct Assumption {
     /// The planner's recommended option.
     pub answer: String,
     pub evidence: String,
+    /// `planner`, or for the answer policy `policy` (a rule) / `judge`.
     pub by: String,
+    /// The kind of question the answer policy answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<QuestionKind>,
+    /// The attempt it was asked in (answer policy only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
     pub overturned: bool,
     /// What the owner answered instead, once overturned.
     #[serde(default, skip_serializing_if = "Option::is_none")]

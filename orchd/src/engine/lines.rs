@@ -5,6 +5,12 @@ pub(super) fn orchestrator_answer_line(question: &str, answer: &str, reason: &st
     format!("Orchestrator: {question} -> {answer} ({reason})")
 }
 
+/// The decision line for a question the answer policy answered; `by` is
+/// `policy` (a rule) or `judge`.
+pub(super) fn policy_answer_line(question: &str, answer: &str, by: &str, evidence: &str) -> String {
+    format!("Policy: {question} -> {answer} ({by}: {evidence})")
+}
+
 pub(super) fn orchestrator_escalate_line(reason: &str) -> String {
     format!("Orchestrator: escalated ({reason})")
 }

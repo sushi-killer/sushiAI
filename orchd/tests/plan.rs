@@ -17,6 +17,7 @@ fn drafting_task_asks_its_planner_question_then_implements_and_passes() {
 
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
+    settings["answerPolicy"] = serde_json::json!(false);
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
     let repo = init_git_repo();
@@ -80,6 +81,7 @@ fn drafting_task_with_no_questions_goes_straight_to_done() {
 
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
+    settings["answerPolicy"] = serde_json::json!(false);
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
     let repo = init_git_repo();
@@ -112,6 +114,7 @@ fn drafting_task_created_with_start_false_stops_after_planning_for_review() {
 
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
+    settings["answerPolicy"] = serde_json::json!(false);
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
     let repo = init_git_repo();
@@ -215,6 +218,7 @@ fn a_task_waiting_on_its_plan_question_does_not_hold_a_parallel_slot() {
     );
     settings["parallel"] = serde_json::json!(1);
     settings["review"] = serde_json::json!("");
+    settings["answerPolicy"] = serde_json::json!(false);
     fit_sandbox(&mut settings);
     request_on(
         &socket1,
@@ -283,6 +287,7 @@ fn stop_then_start_while_drafting_replans_from_scratch() {
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
+    settings["answerPolicy"] = serde_json::json!(false);
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
     let repo = init_git_repo();
@@ -348,6 +353,7 @@ fn unparseable_plan_then_owner_clarification_leads_to_a_successful_replan() {
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
+    settings["answerPolicy"] = serde_json::json!(false);
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
     let repo = init_git_repo();
@@ -402,6 +408,7 @@ fn drafted_task_still_gets_classified_despite_the_plan_attempt() {
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
+    settings["answerPolicy"] = serde_json::json!(false);
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
     let repo = init_git_repo();
@@ -444,6 +451,7 @@ fn the_contract_flag_reaches_the_plan_brief() {
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
+    settings["answerPolicy"] = serde_json::json!(false);
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
     let repo = init_git_repo();

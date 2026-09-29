@@ -761,6 +761,7 @@ mod tests {
         b.question = Some(Question {
             text: "Should I reuse what Add login built?".into(),
             options: vec![],
+            kind: QuestionKind::AgentQuestion,
         });
         let repo = vec![parent.clone(), a.clone(), b.clone()];
         let run_for = |t: &Task, msgs: &[Message]| {

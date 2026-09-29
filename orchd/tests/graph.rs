@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 fn review_off(daemon: &Daemon) {
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
+    settings["answerPolicy"] = serde_json::json!(false);
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 }
 
@@ -764,6 +765,7 @@ fn a_task_queued_for_a_slot_cannot_become_a_parent_and_implements_alone() {
     );
     settings["parallel"] = serde_json::json!(1);
     settings["review"] = serde_json::json!("");
+    settings["answerPolicy"] = serde_json::json!(false);
     fit_sandbox(&mut settings);
     request_on(
         &socket1,

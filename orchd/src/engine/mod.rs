@@ -32,6 +32,7 @@ mod evolution;
 mod messages;
 
 mod advisor;
+mod answer_policy;
 mod attempt_run;
 mod base_check;
 mod best_of;
@@ -56,6 +57,7 @@ mod verify;
 mod worktrees;
 
 use advisor::*;
+use answer_policy::*;
 use attempt_run::*;
 use base_check::*;
 use best_of::*;

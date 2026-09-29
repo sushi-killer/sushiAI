@@ -1,11 +1,6 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const {
-  orchestratorTarget,
-  toastReducer,
-  toastLifetimeMs,
-  MAX_TOASTS,
-} = require("../src/orchestrator/notices.ts");
+const { orchestratorTarget } = require("../src/orchestrator/notices.ts");
 const {
   publishReveal,
   pendingReveal,
@@ -54,56 +49,6 @@ test("orchestratorTarget finds the repo's Orchestrator panel, else adds one, els
     name: "my-repo",
     cwd: "/work/my-repo",
   });
-});
-
-const notice = (kind, taskId, body = "b") => ({
-  taskId,
-  repo: "/repo",
-  kind,
-  title: "t",
-  body,
-  focus: kind === "input" ? "question" : "summary",
-});
-
-test("toastReducer caps at three, newest replacing the oldest, and dedupes", () => {
-  let state = [];
-  for (const id of ["a", "b", "c", "d"])
-    state = toastReducer(state, { type: "add", notice: notice("done", id) });
-  assert.equal(MAX_TOASTS, 3);
-  assert.deepEqual(
-    state.map((t) => t.taskId),
-    ["b", "c", "d"],
-  );
-  state = toastReducer(state, { type: "add", notice: notice("done", "b") });
-  assert.deepEqual(
-    state.map((t) => t.taskId),
-    ["c", "d", "b"],
-  );
-  state = toastReducer(state, { type: "dismiss", id: state[0].id });
-  assert.deepEqual(
-    state.map((t) => t.taskId),
-    ["d", "b"],
-  );
-});
-
-test("input toasts are sticky, done and failed fade, and a task leaving waiting drops its input toast", () => {
-  assert.equal(toastLifetimeMs(notice("input", "a")), null);
-  assert.equal(toastLifetimeMs(notice("done", "a")), 8000);
-  assert.equal(toastLifetimeMs(notice("failed", "a")), 8000);
-  let state = [];
-  state = toastReducer(state, { type: "add", notice: notice("input", "a") });
-  state = toastReducer(state, { type: "add", notice: notice("input", "b") });
-  state = toastReducer(state, { type: "add", notice: notice("done", "a") });
-  state = toastReducer(state, { type: "task", taskId: "a", status: "waiting" });
-  assert.equal(state.length, 3);
-  state = toastReducer(state, { type: "task", taskId: "a", status: "running" });
-  assert.deepEqual(
-    state.map((t) => [t.kind, t.taskId]),
-    [
-      ["input", "b"],
-      ["done", "a"],
-    ],
-  );
 });
 
 test("the reveal store keeps a request for its repo's panels until it goes stale", () => {

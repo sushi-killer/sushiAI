@@ -1,5 +1,4 @@
-// Pure logic behind the orchd task notices: what a toast stack does with a
-// notice, and which workspace a notice opens. No React, no bridge.
+// Pure logic behind the orchd task notices: which workspace a notice opens. No React, no bridge.
 import { contains } from "../layout.ts";
 import type { Workspace } from "../types.ts";
 
@@ -13,6 +12,8 @@ export type TaskNotice = {
   title: string;
   body: string;
   focus: TaskNoticeFocus;
+  /** Answer choices of a needs-input notice. */
+  options?: string[];
 };
 
 /** What opening a notice needs: the task, its repo and where to scroll. */
@@ -21,48 +22,6 @@ export type TaskTarget = {
   repo: string;
   focus: TaskNoticeFocus;
 };
-
-export const MAX_TOASTS = 3;
-export const TIMED_TOAST_MS = 8000;
-
-export type Toast = TaskNotice & { id: string };
-
-export type ToastAction =
-  | { type: "add"; notice: TaskNotice }
-  | { type: "dismiss"; id: string }
-  | { type: "task"; taskId: string; status: string };
-
-/** How long a toast stays: a needs-input one until the owner acts (null),
- * a done/failed one for a few seconds. */
-export function toastLifetimeMs(
-  notice: Pick<TaskNotice, "kind">,
-): number | null {
-  return notice.kind === "input" ? null : TIMED_TOAST_MS;
-}
-
-export function toastId(notice: TaskNotice): string {
-  return `${notice.kind}:${notice.taskId}:${notice.body}`;
-}
-
-export function toastReducer(state: Toast[], action: ToastAction): Toast[] {
-  switch (action.type) {
-    case "add": {
-      const id = toastId(action.notice);
-      const rest = state.filter((toast) => toast.id !== id);
-      return [...rest, { ...action.notice, id }].slice(-MAX_TOASTS);
-    }
-    case "dismiss":
-      return state.filter((toast) => toast.id !== action.id);
-    case "task":
-      // A question that is no longer being asked has nothing left to answer.
-      return action.status === "waiting"
-        ? state
-        : state.filter(
-            (toast) =>
-              !(toast.kind === "input" && toast.taskId === action.taskId),
-          );
-  }
-}
 
 export type OrchestratorTarget =
   | { kind: "panel"; workspaceId: string; panelId: string }

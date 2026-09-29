@@ -59,18 +59,26 @@ exits non-zero with `error` set on any failure, including an unmatched title.
 
 ## Orchestrator task notices
 
-To photograph the orchd notices (needs input, done, failed) and what "Open"
-does, run
+To photograph the orchd notices on the desktop mascot (needs input, done,
+failed), the quick answer and what "Open" does, run
 `npm run build && npm run build:orchd && node .agents/skills/ui-evidence/scripts/orchestrator-notices.mjs`
 (no arguments). It seeds one landed done task with cost, one failed task whose
-last attempt failed with kind `verify`, and one waiting task with a question,
-opens a Local Evidence workspace with no Orchestrator panel, and emits each
-notice as the `orchestrator-notice` IPC, built by the exported
-`orchestratorNotice`. It saves `artifacts/orchestrator-toast-{done,failed,input}.png`
-(the bottom-right corner), then clicks Open on the input and done toasts and
-saves `artifacts/orchestrator-open-{input,done}.png`. The JSON report says
-whether `.orch-question` / `.orch-report` intersect the viewport and which
-task row is `.selected`; it exits non-zero with `error` set on any failure.
+last attempt failed with kind `verify`, and one waiting task with a question
+and the options Delete it / Keep behind a flag / Stop, opens a Local Evidence
+workspace with no Orchestrator panel, and pushes each task through the real
+main-process path (`orchestratorNotice` -> the mascot queue) using the
+`SUSHIAI_TEST_MASCOT=1` seam in `electron/main.cjs` (a main-process global; no
+renderer-reachable channel injects notices). The mascot is a separate Electron
+window, found with Playwright `app.windows()` by its `mascot.html` URL. It
+saves `artifacts/mascot-{done,failed,input,answered}.png` (the answered shot
+clicks the Stop option - orchd treats `stop` as stop, so no harness runs), and
+after clicking Open on the mascot's input and done bubbles
+`artifacts/orchestrator-open-{input,done}.png`. `artifacts/mascot-report.json`
+holds the mascot bounds vs the primary work area, `isAlwaysOnTop`,
+`isVisibleOnAllWorkspaces`, the focused window before and after the mascot
+shows, its visibility once the queue is empty, and whether `.orch-question` /
+`.orch-report` intersect the viewport with the `.selected` task row; the script
+exits non-zero with `error` set on any failure.
 
 ## Boundaries
 

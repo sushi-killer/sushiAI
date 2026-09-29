@@ -1,0 +1,154 @@
+import { useEffect, useState } from "react";
+import { ChevronLeft, ChevronRight, X } from "lucide-react";
+import type { MascotNotice } from "./types";
+
+const FADE_MS = 700;
+
+function Bubble({ notice }: { notice: MascotNotice }) {
+  const [text, setText] = useState("");
+  const [error, setError] = useState("");
+  const [fading, setFading] = useState(false);
+  const bridge = window.mascot;
+
+  useEffect(() => {
+    setFading(false);
+    if (notice.expiresAt === null) return;
+    const timer = setTimeout(
+      () => setFading(true),
+      Math.max(0, notice.expiresAt - Date.now() - FADE_MS),
+    );
+    return () => clearTimeout(timer);
+  }, [notice.id, notice.expiresAt]);
+
+  const answer = async (value: string) => {
+    setError("");
+    try {
+      await bridge?.answer(notice.taskId, value);
+      setText("");
+    } catch (failure) {
+      setError(
+        String(failure instanceof Error ? failure.message : failure).replace(
+          /^Error invoking remote method '[^']*': (Error: )?/,
+          "",
+        ),
+      );
+    }
+  };
+
+  if (notice.answered)
+    return (
+      <div className="bubble answered" role="status">
+        <strong>Answered</strong>
+        <span>Thanks, the task carries on.</span>
+      </div>
+    );
+  return (
+    <div
+      className={`bubble ${notice.kind} ${fading ? "leaving" : ""}`}
+      role="status"
+    >
+      <button
+        className="bubble-dismiss"
+        aria-label="Dismiss"
+        onClick={() => void bridge?.dismiss(notice.id)}
+      >
+        <X size={13} />
+      </button>
+      <strong>{notice.title}</strong>
+      <span className="bubble-body" title={notice.body}>
+        {notice.body}
+      </span>
+      {notice.kind === "input" && (
+        <>
+          {!!notice.options?.length && (
+            <div className="bubble-options">
+              {notice.options.map((option) => (
+                <button key={option} onClick={() => void answer(option)}>
+                  {option}
+                </button>
+              ))}
+            </div>
+          )}
+          <form
+            className="bubble-answer"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void answer(text);
+            }}
+          >
+            <input
+              value={text}
+              maxLength={2000}
+              placeholder="Type an answer"
+              aria-label="Answer"
+              onChange={(event) => setText(event.target.value)}
+            />
+            <button type="submit" disabled={!text.trim()}>
+              Answer
+            </button>
+          </form>
+          {error && <span className="bubble-error">{error}</span>}
+        </>
+      )}
+      <button
+        className="bubble-open"
+        onClick={() => void bridge?.open(notice.taskId, notice.focus)}
+      >
+        Open
+      </button>
+    </div>
+  );
+}
+
+/** The desktop mascot: the sushi with a speech bubble for the newest
+ * queued orchd notice, and a +N count with arrows for the rest. */
+export function Mascot() {
+  const [notices, setNotices] = useState<MascotNotice[]>([]);
+  const [index, setIndex] = useState(0);
+  const [hops, setHops] = useState(0);
+
+  useEffect(
+    () =>
+      window.mascot?.onNotices((next) => {
+        setNotices((previous) => {
+          if (next[0]?.id !== previous[0]?.id) {
+            setIndex(0);
+            setHops((count) => count + 1);
+          }
+          return next;
+        });
+      }),
+    [],
+  );
+
+  const shown = notices[Math.min(index, notices.length - 1)];
+  if (!shown) return null;
+  const extra = notices.length - 1;
+  const step = (delta: number) =>
+    setIndex(
+      (Math.min(index, notices.length - 1) + delta + notices.length) %
+        notices.length,
+    );
+  const mood = shown.answered ? "" : shown.kind;
+  return (
+    <div className="mascot">
+      <div className="bubble-wrap">
+        <Bubble key={shown.id} notice={shown} />
+        {extra > 0 && (
+          <div className="queue">
+            <button aria-label="Previous notice" onClick={() => step(-1)}>
+              <ChevronLeft size={13} />
+            </button>
+            <span>+{extra}</span>
+            <button aria-label="Next notice" onClick={() => step(1)}>
+              <ChevronRight size={13} />
+            </button>
+          </div>
+        )}
+      </div>
+      <div className={`sushi-hop hop-${hops % 2}`}>
+        <img className={`sushi ${mood}`} src="./sushi.svg" alt="" />
+      </div>
+    </div>
+  );
+}

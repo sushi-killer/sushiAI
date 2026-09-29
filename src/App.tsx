@@ -34,7 +34,6 @@ import { useMergedCanvas } from "./workspace/mergedLayouts";
 import { useProjectView } from "./workspace/projectView";
 import { useSkills } from "./app/useSkills";
 import { useToast } from "./app/useToast";
-import { OrchestratorToasts } from "./orchestrator/OrchestratorToasts";
 import { useOrchestratorNotices } from "./orchestrator/useOrchestratorNotices";
 import { useUpdates } from "./app/useUpdates";
 import {
@@ -199,7 +198,7 @@ export function App() {
     ws,
     saved,
   );
-  const orchestratorNotices = useOrchestratorNotices({
+  useOrchestratorNotices({
     workspaces,
     showWorkspace,
     switchWorkspace,
@@ -485,7 +484,6 @@ export function App() {
           )}
         </main>
       </div>
-      <OrchestratorToasts {...orchestratorNotices} />
       {toast && (
         <div className="toast" role="status">
           <span>{toast}</span>

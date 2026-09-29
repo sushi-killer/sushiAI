@@ -1,0 +1,262 @@
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  color: var(--text);
+  font:
+    var(--text-md) system-ui,
+    sans-serif;
+}
+.mascot {
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: flex-end;
+  gap: var(--gap-sm);
+  padding: var(--gap-sm);
+}
+.bubble-wrap {
+  position: relative;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--gap-xs);
+}
+.bubble {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  padding: var(--gap-md);
+  padding-right: var(--gap-xl);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-popover);
+}
+.bubble::after {
+  content: "";
+  position: absolute;
+  right: 34px;
+  bottom: -6px;
+  width: 10px;
+  height: 10px;
+  transform: rotate(45deg);
+  border-right: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+  background: var(--bg-elevated);
+}
+.bubble.failed {
+  border-color: var(--danger-line);
+  background: var(--danger-bg);
+}
+.bubble.failed::after {
+  border-color: var(--danger-line);
+  background: var(--danger-bg);
+}
+.bubble.answered {
+  border-color: var(--tone-ok);
+  background: var(--tone-ok-bg);
+}
+.bubble strong {
+  font-size: var(--text-md);
+  overflow-wrap: anywhere;
+}
+.bubble-body {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.bubble button,
+.bubble input,
+.queue button {
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+}
+.bubble button,
+.queue button {
+  cursor: pointer;
+  padding: var(--gap-xs) var(--gap-md);
+}
+.bubble button:hover:not(:disabled),
+.queue button:hover {
+  background: var(--bg-hover);
+}
+.bubble button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.bubble button:focus-visible,
+.bubble input:focus-visible,
+.queue button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.bubble-open {
+  align-self: flex-start;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.bubble .bubble-open {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+.bubble .bubble-open:hover:not(:disabled) {
+  background: var(--accent-sage);
+}
+.bubble .bubble-dismiss {
+  position: absolute;
+  top: var(--gap-sm);
+  right: var(--gap-sm);
+  display: grid;
+  place-items: center;
+  padding: var(--gap-xs);
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-muted);
+}
+.bubble-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-xs);
+}
+.bubble-answer {
+  display: flex;
+  gap: var(--gap-xs);
+}
+.bubble-answer input {
+  flex: 1;
+  min-width: 0;
+  padding: var(--gap-xs) var(--gap-sm);
+}
+.bubble-error {
+  color: var(--danger);
+  font-size: var(--text-xs);
+}
+.queue {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-xs);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.queue button {
+  display: grid;
+  place-items: center;
+  padding: 2px;
+}
+.sushi-hop {
+  margin-right: var(--gap-md);
+}
+.sushi {
+  display: block;
+  width: 56px;
+  height: 56px;
+  transform-origin: 50% 100%;
+  animation: sushi-bob 2.4s ease-in-out infinite;
+}
+.sushi.done {
+  animation:
+    sushi-bob 2.4s ease-in-out infinite,
+    sushi-wave 0.9s ease-in-out 0.4s 2;
+}
+.sushi.failed {
+  animation:
+    sushi-bob 2.4s ease-in-out infinite,
+    sushi-wobble 0.6s ease-in-out 0.3s 3;
+}
+.sushi-hop.hop-0 {
+  animation: sushi-hop 0.5s ease-out;
+}
+.sushi-hop.hop-1 {
+  animation: sushi-hop-b 0.5s ease-out;
+}
+.bubble.leaving {
+  animation: bubble-fade 0.7s ease-in forwards;
+}
+@keyframes sushi-bob {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+  50% {
+    translate: 0 -3px;
+  }
+}
+@keyframes sushi-hop {
+  0% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-16px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+@keyframes sushi-hop-b {
+  0% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-16px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+@keyframes sushi-wave {
+  0%,
+  100% {
+    rotate: 0deg;
+  }
+  25% {
+    rotate: -14deg;
+  }
+  75% {
+    rotate: 14deg;
+  }
+}
+@keyframes sushi-wobble {
+  0%,
+  100% {
+    rotate: 0deg;
+  }
+  25% {
+    rotate: -6deg;
+  }
+  75% {
+    rotate: 6deg;
+  }
+}
+@keyframes bubble-fade {
+  to {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sushi,
+  .sushi.done,
+  .sushi.failed,
+  .sushi-hop.hop-0,
+  .sushi-hop.hop-1,
+  .bubble.leaving {
+    animation: none;
+  }
+}

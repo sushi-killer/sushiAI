@@ -187,6 +187,9 @@ function formatCost(costUsd) {
 /** How long after its `reportAt` a report still counts as fresh. */
 const REPORT_NOTICE_MS = 5 * 60 * 1000;
 
+const NOTICE_MAX_OPTIONS = 4;
+const NOTICE_OPTION_CHARS = 60;
+
 /** The notice for a task that needs input, finished or failed - trimmed to
  * the caps a native notification can carry. Pure: the caller decides whether
  * the task is worth one. */
@@ -217,7 +220,7 @@ function orchestratorNotice(task) {
     const label = FAILURE_LABELS[failure] || failure || "failed";
     body = cap(`${label} · ${formatCost(task.costUsd)}`, 300);
   }
-  return {
+  const notice = {
     taskId: cap(task.id, 200),
     repo: cap(task.repo, 1000),
     kind,
@@ -225,6 +228,16 @@ function orchestratorNotice(task) {
     body,
     focus,
   };
+  if (kind === "input") {
+    const options = (
+      Array.isArray(task.question?.options) ? task.question.options : []
+    )
+      .filter((option) => typeof option === "string" && option.trim())
+      .slice(0, NOTICE_MAX_OPTIONS)
+      .map((option) => cap(option, NOTICE_OPTION_CHARS));
+    if (options.length) notice.options = options;
+  }
+  return notice;
 }
 
 class OrchestratorService {
@@ -235,6 +248,7 @@ class OrchestratorService {
     packaged,
     send,
     notify,
+    onTask,
     getClaudeMcp,
     getModelProviders,
     spawnRetries = 50,
@@ -245,6 +259,7 @@ class OrchestratorService {
     this.binary = orchdBinaryPath({ root, resourcesPath, packaged });
     this.send = send;
     this.notify = notify;
+    this.onTask = onTask;
     this.getClaudeMcp = getClaudeMcp;
     this.getModelProviders = getModelProviders;
     this.spawnRetries = spawnRetries;
@@ -460,8 +475,10 @@ class OrchestratorService {
    * finished or failed. Subtasks never raise done/failed, archived tasks
    * raise nothing. */
   #notifyTransition(message) {
-    if (!this.notify || message.event !== "task") return;
+    if (message.event !== "task") return;
     const task = message.task;
+    if (task && typeof task === "object") this.onTask?.(task);
+    if (!this.notify) return;
     if (!task || typeof task !== "object" || task.archived) return;
     let key;
     if (task.status === "waiting")
@@ -527,6 +544,7 @@ function registerOrchestratorExtension({
   handle,
   send,
   notify,
+  onTask,
   dataDir,
   root,
   resourcesPath,
@@ -541,6 +559,7 @@ function registerOrchestratorExtension({
     packaged,
     send,
     notify,
+    onTask,
     getClaudeMcp,
     getModelProviders,
   });

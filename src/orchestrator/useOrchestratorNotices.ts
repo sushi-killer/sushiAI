@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { PanelKind, Workspace } from "../types";
-import { orchestratorTarget, toastReducer, type TaskTarget } from "./notices";
+import { orchestratorTarget, type TaskTarget } from "./notices";
 import { publishReveal } from "./reveal";
 
 type Shell = {
@@ -25,31 +25,12 @@ type Shell = {
   ): Promise<boolean>;
 };
 
-/** Toast stack plus the one open path both a toast's Open button and a
- * native notification click go through: reveal the task, then bring its
- * Orchestrator panel (adding the panel or the workspace when missing) to the
- * front. */
+/** The open path a desktop-mascot Open button and a native notification
+ * click both go through: reveal the task, then bring its Orchestrator panel
+ * (adding the panel or the workspace when missing) to the front. */
 export function useOrchestratorNotices(shell: Shell) {
-  const [toasts, dispatch] = useReducer(toastReducer, []);
   const [pending, setPending] = useState<TaskTarget | null>(null);
   const kicked = useRef("");
-
-  useEffect(() => {
-    const offs = [
-      window.bridge?.onOrchestratorNotice((notice) =>
-        dispatch({ type: "add", notice }),
-      ),
-      window.bridge?.onOrchestrator((event) => {
-        if (event.event === "task")
-          dispatch({
-            type: "task",
-            taskId: event.task.id,
-            status: event.task.status,
-          });
-      }),
-    ];
-    return () => offs.forEach((off) => off?.());
-  }, []);
 
   const { showWorkspace } = shell;
   const openTask = useCallback(
@@ -103,5 +84,5 @@ export function useOrchestratorNotices(shell: Shell) {
     createWorkspace,
   ]);
 
-  return { toasts, dispatch, openTask };
+  return { openTask };
 }

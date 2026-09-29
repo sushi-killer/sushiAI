@@ -1,22 +1,24 @@
-// Screenshot recipe for orchd task notices: the three toasts and the two
-// "Open" landings. Builds nothing itself; run
+// Screenshot recipe for orchd task notices on the desktop mascot: the
+// done/failed/needs-input bubbles, the quick answer and the two "Open"
+// landings. Builds nothing itself; run
 //   npm run build && npm run build:orchd && node .agents/skills/ui-evidence/scripts/orchestrator-notices.mjs
-// It seeds one landed done task with a fresh report, one failed task (last attempt failed with
-// kind "verify") and one waiting task into a throwaway profile, opens the
-// Evidence workspace with no Orchestrator panel, then emits each notice as
-// the `orchestrator-notice` IPC (built by the same `orchestratorNotice` main
-// uses). Saves artifacts/orchestrator-toast-{done,failed,input}.png and, after
-// clicking Open on the input and done toasts,
-// artifacts/orchestrator-open-{input,done}.png (the done landing scrolls the
-// task's Report section, `.orch-report`, into view). Prints a JSON report and
-// exits non-zero on any failure.
+// It seeds one landed done task with a fresh report, one failed task (last
+// attempt failed with kind "verify") and one waiting task (options Delete it,
+// Keep behind a flag, Stop) into a throwaway profile and opens the Evidence
+// workspace with no Orchestrator panel. Each seeded task then goes through the
+// real main-process path - `orchestratorNotice` -> the mascot queue - via the
+// env-gated SUSHIAI_TEST_MASCOT seam in electron/main.cjs (never an IPC the
+// renderer can reach). The mascot is its own window (found by its
+// mascot.html URL). Saves artifacts/mascot-{done,failed,input,answered}.png,
+// artifacts/orchestrator-open-{input,done}.png (reached by clicking Open on
+// the mascot) and artifacts/mascot-report.json (bounds vs the primary work
+// area, always-on-top, all-workspaces, the focused window before and after the
+// mascot shows, visibility once the queue is empty). Prints the JSON report
+// and exits non-zero on any failure.
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import {
-  orchestratorNotice,
-  waitForExit,
-} from "../../../../electron/orchestrator.cjs";
+import { waitForExit } from "../../../../electron/orchestrator.cjs";
 
 const root = process.cwd();
 const shot = (name) => `${root}/artifacts/${name}.png`;
@@ -68,7 +70,7 @@ const SEEDS = [
     costUsd: 0.31,
     question: {
       text: "Delete the legacy export path, or keep it behind a flag?",
-      options: ["Delete it", "Keep behind a flag"],
+      options: ["Delete it", "Keep behind a flag", "Stop"],
       kind: "agent_question",
     },
     attempts: [
@@ -137,6 +139,7 @@ try {
       BRIDGE_DATA_DIR: profile,
       HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
       BRIDGE_DEV_URL: "",
+      SUSHIAI_TEST_MASCOT: "1",
     },
   });
   const page = await app.firstWindow();
@@ -155,55 +158,101 @@ try {
   await page.waitForSelector(".panel-agent, .panel-terminal");
   report.panelBefore = await page.locator(".orchestrator-panel").count();
 
-  const emit = (notice) =>
-    app.evaluate(({ BrowserWindow }, value) => {
-      BrowserWindow.getAllWindows()[0].webContents.send(
-        "orchestrator-notice",
-        value,
-      );
-    }, notice);
-  const noticeFor = (title) => orchestratorNotice(tasks[title]);
-  const dismissAll = async () => {
-    for (const button of await page
-      .getByRole("button", { name: "Dismiss" })
-      .all())
-      await button.click();
-  };
-  // A crop of the window's bottom-right corner, wide enough to read.
-  const corner = async () => {
-    const { width, height } = await page.evaluate(() => ({
-      width: window.innerWidth,
-      height: window.innerHeight,
-    }));
-    return {
-      x: Math.max(0, width - 560),
-      y: Math.max(0, height - 260),
-      width: Math.min(560, width),
-      height: Math.min(260, height),
-    };
-  };
-
-  report.toasts = {};
-  for (const [name, title] of [
-    ["done", "Landed feature"],
-    ["failed", "Verify broke"],
-    ["input", "Needs a call"],
-  ]) {
-    await emit(noticeFor(title));
-    const toast = page.locator(".orch-toast").first();
-    await toast.waitFor();
-    await page.screenshot({
-      path: shot(`orchestrator-toast-${name}`),
-      clip: await corner(),
+  // The real notice path: orchestratorNotice(task) -> attention -> mascot queue.
+  const push = (title) =>
+    app.evaluate((_, task) => globalThis.__sushiaiMascot.notify(task), {
+      ...tasks[title],
     });
-    report.toasts[name] = {
-      text: (await toast.innerText()).replace(/\s+/g, " ").trim(),
-      mascot: await toast.locator("img.orch-toast-mascot").count(),
-      role: await toast.getAttribute("role"),
-      box: await toast.boundingBox(),
-    };
-    await dismissAll();
-  }
+  const mainState = () =>
+    app.evaluate(({ BrowserWindow }) => {
+      const seam = globalThis.__sushiaiMascot;
+      const mascot = seam.window();
+      const focused = BrowserWindow.getFocusedWindow();
+      return {
+        focusedTitle: focused ? focused.getTitle() : null,
+        focusedIsMascot: Boolean(mascot && focused && focused.id === mascot.id),
+        mascot: mascot && {
+          bounds: mascot.getBounds(),
+          visible: mascot.isVisible(),
+          isAlwaysOnTop: mascot.isAlwaysOnTop(),
+          isVisibleOnAllWorkspaces: mascot.isVisibleOnAllWorkspaces(),
+        },
+        workArea: seam.workArea(),
+        queue: seam.queue().map((item) => `${item.kind}:${item.title}`),
+      };
+    });
+  const mascotPage = async () => {
+    for (let i = 0; i < 100; i += 1) {
+      const found = app.windows().find((w) => w.url().includes("mascot.html"));
+      if (found) return found;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("the mascot window never appeared");
+  };
+  let mascot = null;
+  const showNotice = async (title, bubbleText) => {
+    await push(title);
+    mascot ??= await mascotPage();
+    if (!mascot.__watched) {
+      mascot.__watched = true;
+      mascot.on("pageerror", (error) => report.pageErrors.push(error.message));
+    }
+    const bubble = mascot.locator(".bubble", { hasText: bubbleText }).first();
+    await bubble.waitFor({ timeout: 10000 });
+    // Let the hop settle so the frame is steady.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    return bubble;
+  };
+  const bubbleText = async () =>
+    (await mascot.locator(".bubble").first().innerText())
+      .replace(/\s+/g, " ")
+      .trim();
+  const dismiss = () =>
+    mascot.getByRole("button", { name: "Dismiss" }).first().click();
+  const shotMascot = (name) => mascot.screenshot({ path: shot(name) });
+
+  report.focusBefore = await mainState();
+  report.mascot = {};
+
+  // Done.
+  await showNotice("Landed feature", "Feature done: Landed feature");
+  report.focusAfter = await mainState();
+  await shotMascot("mascot-done");
+  report.mascot.done = {
+    text: await bubbleText(),
+    sushi: await mascot.locator("img.sushi").count(),
+    open: await mascot.getByRole("button", { name: "Open" }).count(),
+    dismiss: await mascot.getByRole("button", { name: "Dismiss" }).count(),
+  };
+  await dismiss();
+
+  // Needs input stays queued; the failed notice lands on top of it.
+  await push("Needs a call");
+  await showNotice("Verify broke", "Verify broke");
+  await shotMascot("mascot-failed");
+  report.mascot.failed = {
+    text: await bubbleText(),
+    queueCount: await mascot.locator(".queue span").innerText(),
+    arrows: await mascot
+      .getByRole("button", { name: /(Previous|Next) notice/ })
+      .count(),
+    open: await mascot.getByRole("button", { name: "Open" }).count(),
+    dismiss: await mascot.getByRole("button", { name: "Dismiss" }).count(),
+  };
+  await dismiss();
+
+  await mascot
+    .locator(".bubble.input", { hasText: "Delete the legacy export path" })
+    .waitFor();
+  await shotMascot("mascot-input");
+  report.mascot.input = {
+    text: await bubbleText(),
+    options: await mascot.locator(".bubble-options button").allInnerTexts(),
+    answerField: await mascot.getByLabel("Answer", { exact: true }).count(),
+    answerButton: await mascot.getByRole("button", { name: "Answer" }).count(),
+    open: await mascot.getByRole("button", { name: "Open" }).count(),
+    dismiss: await mascot.getByRole("button", { name: "Dismiss" }).count(),
+  };
 
   const measure = (selector) =>
     page.evaluate((sel) => {
@@ -225,13 +274,11 @@ try {
       .catch(() => "");
 
   async function openFrom(title, name, selector) {
-    await emit(noticeFor(title));
-    await page.locator(".orch-toast").first().waitFor();
-    await page
-      .locator(".orch-toast")
-      .first()
-      .getByRole("button", { name: "Open" })
-      .click();
+    await showNotice(
+      title,
+      title === "Landed feature" ? "Feature done" : title,
+    );
+    await mascot.getByRole("button", { name: "Open" }).first().click();
     await page.locator(".orch-detail").waitFor({ timeout: 15000 });
     await page.waitForFunction(
       ({ sel, expected }) => {
@@ -274,10 +321,23 @@ try {
   report.openedFrom = "Routines section page";
   report.openDone = await openFrom("Landed feature", "done", ".orch-report");
   report.leftSection = (await routines.count()) === 0;
+
+  // Quick answer: the Stop option, then the short confirmation.
+  await mascot.locator(".bubble.input").waitFor();
+  await mascot.getByRole("button", { name: "Stop", exact: true }).click();
+  await mascot.locator(".bubble.answered").waitFor({ timeout: 10000 });
+  await shotMascot("mascot-answered");
+  report.mascot.answered = await bubbleText();
+  await mascot
+    .locator(".bubble")
+    .waitFor({ state: "detached", timeout: 10000 });
+  await page.waitForTimeout(500);
+  report.afterEmpty = await mainState();
   report.screenshots = {
-    toastDone: shot("orchestrator-toast-done"),
-    toastFailed: shot("orchestrator-toast-failed"),
-    toastInput: shot("orchestrator-toast-input"),
+    mascotDone: shot("mascot-done"),
+    mascotFailed: shot("mascot-failed"),
+    mascotInput: shot("mascot-input"),
+    mascotAnswered: shot("mascot-answered"),
     openInput: shot("orchestrator-open-input"),
     openDone: shot("orchestrator-open-done"),
   };
@@ -293,6 +353,28 @@ try {
     problems.push("done open selected the wrong task");
   if (!report.leftSection) problems.push("the section page was not left");
   if (!report.openDone.inViewport) problems.push(".orch-report is not in view");
+  const box = report.focusAfter.mascot?.bounds;
+  const area = report.focusAfter.workArea;
+  if (
+    !box ||
+    box.x + box.width > area.x + area.width ||
+    box.y + box.height > area.y + area.height ||
+    area.x + area.width - (box.x + box.width) > 40 ||
+    area.y + area.height - (box.y + box.height) > 40
+  )
+    problems.push("the mascot is not at the bottom-right of the work area");
+  if (!report.focusAfter.mascot?.isAlwaysOnTop)
+    problems.push("the mascot is not always on top");
+  if (!report.focusAfter.mascot?.isVisibleOnAllWorkspaces)
+    problems.push("the mascot is not visible on all workspaces");
+  if (!report.focusAfter.mascot?.visible)
+    problems.push("the mascot is not visible while a notice is queued");
+  if (report.focusAfter.focusedIsMascot)
+    problems.push("the mascot took focus when it showed");
+  if (report.afterEmpty.mascot?.visible)
+    problems.push("the mascot stayed visible with an empty queue");
+  if (report.mascot.answered !== "Answered Thanks, the task carries on.")
+    problems.push("no Answered confirmation");
   if (problems.length) report.error = problems.join("; ");
 } catch (error) {
   report.error = String(error?.message ?? error);
@@ -316,6 +398,12 @@ try {
     await waitForExit(Number(orchdPid));
   }
   await fs.rm(profile, { recursive: true, force: true });
+  await fs
+    .writeFile(
+      `${root}/artifacts/mascot-report.json`,
+      JSON.stringify(report, null, 2),
+    )
+    .catch(() => {});
   console.log(JSON.stringify(report, null, 2));
   if (report.error || report.pageErrors.length > 0) process.exitCode = 1;
 }

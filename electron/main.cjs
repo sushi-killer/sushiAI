@@ -2,6 +2,7 @@ const {
   app,
   BrowserWindow,
   ipcMain,
+  screen,
   dialog,
   Menu,
   session,
@@ -30,6 +31,7 @@ const { registerChatIpc } = require("./ipc/chat.cjs");
 const { registerAppIpc } = require("./ipc/app.cjs");
 const { registerExtensionIpc } = require("./ipc/extensions.cjs");
 const { registerAttentionIpc } = require("./attention.cjs");
+const { registerMascot } = require("./mascot.cjs");
 const { SurfaceStateStore } = require("./extensions/surface-state.cjs");
 const { ExtensionManager } = require("./extensions/extension-manager.cjs");
 const {
@@ -39,6 +41,7 @@ const {
 const {
   ORCHESTRATOR_MANIFEST,
   registerOrchestratorExtension,
+  orchestratorNotice,
 } = require("./orchestrator.cjs");
 const {
   install,
@@ -189,6 +192,17 @@ registerAppIpc({
   userDataDir: () => app.getPath("userData"),
   stageModelSettings,
 });
+let orchestrator;
+const mascot = registerMascot({
+  ipcMain,
+  BrowserWindow,
+  screen,
+  root,
+  devURL: process.env.BRIDGE_DEV_URL,
+  getService: () => orchestrator,
+  showMainWindow: () => attention.showWindow(),
+  send,
+});
 const attention = registerAttentionIpc({
   handle,
   send,
@@ -196,11 +210,13 @@ const attention = registerAttentionIpc({
   getMainWindow: () => mainWindow,
   userDataDir: app.getPath("userData"),
   trayIconPath: path.join(root, "dist/trayTemplate.png"),
+  mascot,
 });
-registerOrchestratorExtension({
+orchestrator = registerOrchestratorExtension({
   handle,
   send,
   notify: (notice) => attention.notifyTask(notice),
+  onTask: (task) => mascot.onTask(task),
   dataDir: path.join(app.getPath("userData"), "orchestrator"),
   root,
   resourcesPath: process.resourcesPath,
@@ -269,6 +285,15 @@ app.whenReady().then(async () => {
       backgroundThrottling: process.env.SUSHIAI_TEST_HEADLESS !== "1",
     },
   });
+  // Evidence seam: pushes a task through the real notice path (no daemon).
+  if (process.env.SUSHIAI_TEST_MASCOT === "1")
+    globalThis.__sushiaiMascot = {
+      notify: (task) => attention.notifyTask(orchestratorNotice(task)),
+      queue: () => mascot.snapshot(),
+      window: () => mascot.getWindow(),
+      workArea: () => screen.getPrimaryDisplay().workArea,
+    };
+  mainWindow.on("closed", () => mascot.destroy());
   mainWindow.on("close", (event) => {
     if (attention.handleWindowClose(mainWindow)) event.preventDefault();
   });
@@ -358,6 +383,7 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   updates?.close();
   attention.close();
+  mascot.destroy();
   preview?.close();
   terminalIpc.close();
   for (const pending of terminalPending.values()) pending.cancelled = true;

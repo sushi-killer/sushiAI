@@ -3,7 +3,11 @@ const path = require("node:path");
 const { existsSync } = require("node:fs");
 const { Tray, Menu, Notification, nativeImage } = require("electron");
 
-const DEFAULT_PREFERENCES = { runInMenuBar: true, notifications: true };
+const DEFAULT_PREFERENCES = {
+  runInMenuBar: true,
+  notifications: true,
+  desktopMascot: true,
+};
 
 /** Falls back to a default for anything missing, non-boolean or unknown -
  * a corrupt or hand-edited preferences file never blocks startup. */
@@ -51,10 +55,10 @@ function mascotIconPath(trayIconPath) {
 }
 
 /** Where an orchd task notice goes: nowhere when notifications are off, the
- * renderer's own toast while the window is focused, else a native one. */
-function taskNoticeRoute({ enabled, focused }) {
+ * desktop mascot when it is on (focused window or not), else a native one. */
+function taskNoticeRoute({ enabled, mascot }) {
   if (!enabled) return "none";
-  return focused ? "in-app" : "native";
+  return mascot ? "mascot" : "native";
 }
 
 function boundedString(value, max) {
@@ -88,6 +92,7 @@ function registerAttentionIpc({
   getMainWindow,
   userDataDir,
   trayIconPath,
+  mascot: mascotWindow,
 }) {
   const preferencesFile = path.join(userDataDir, "app-preferences.json");
   let preferences = { ...DEFAULT_PREFERENCES };
@@ -144,6 +149,12 @@ function registerAttentionIpc({
     tray = null;
   }
 
+  /** The mascot only lives while both it and notifications are on. */
+  function syncMascot() {
+    if (!preferences.notifications || !preferences.desktopMascot)
+      mascotWindow?.clear();
+  }
+
   function syncTray() {
     if (preferences.runInMenuBar) createTray();
     else destroyTray();
@@ -178,6 +189,7 @@ function registerAttentionIpc({
     preferences = merged;
     await save();
     syncTray();
+    syncMascot();
     return preferences;
   }
 
@@ -228,15 +240,12 @@ function registerAttentionIpc({
   /** An orchd task notice (needs input, done, failed). Clicking the native
    * one shows the window and asks the renderer to open that exact task. */
   function notifyTask(notice) {
-    const win = getMainWindow();
     const route = taskNoticeRoute({
       enabled: preferences.notifications,
-      focused: Boolean(
-        win && !win.isDestroyed() && win.isVisible() && win.isFocused(),
-      ),
+      mascot: preferences.desktopMascot,
     });
     if (route === "none") return;
-    if (route === "in-app") return send("orchestrator-notice", notice);
+    if (route === "mascot") return mascotWindow?.add(notice);
     const options = { title: notice.title, body: notice.body };
     const icon = mascotImage();
     if (icon) options.icon = icon;

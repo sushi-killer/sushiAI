@@ -1,0 +1,14 @@
+const { contextBridge, ipcRenderer } = require("electron");
+
+contextBridge.exposeInMainWorld("mascot", {
+  onNotices: (callback) => {
+    const listener = (_event, notices) => callback(notices);
+    ipcRenderer.on("mascot-notices", listener);
+    // The page subscribes after main's first publish may have gone out.
+    ipcRenderer.send("mascot-sync");
+    return () => ipcRenderer.removeListener("mascot-notices", listener);
+  },
+  answer: (taskId, text) => ipcRenderer.invoke("mascot-answer", taskId, text),
+  open: (taskId, focus) => ipcRenderer.invoke("mascot-open", taskId, focus),
+  dismiss: (id) => ipcRenderer.invoke("mascot-dismiss", id),
+});

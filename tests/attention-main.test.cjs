@@ -14,41 +14,52 @@ const {
 
 test("normalizePreferences keeps valid booleans and falls back to defaults otherwise", () => {
   assert.deepEqual(
-    normalizePreferences({ runInMenuBar: false, notifications: false }),
+    normalizePreferences({
+      runInMenuBar: false,
+      notifications: false,
+      desktopMascot: false,
+    }),
     {
       runInMenuBar: false,
       notifications: false,
+      desktopMascot: false,
     },
   );
   assert.deepEqual(normalizePreferences({}), {
     runInMenuBar: true,
     notifications: true,
+    desktopMascot: true,
   });
   assert.deepEqual(normalizePreferences(null), {
     runInMenuBar: true,
     notifications: true,
+    desktopMascot: true,
   });
   assert.deepEqual(normalizePreferences(undefined), {
     runInMenuBar: true,
     notifications: true,
+    desktopMascot: true,
   });
   assert.deepEqual(normalizePreferences("not an object"), {
     runInMenuBar: true,
     notifications: true,
+    desktopMascot: true,
   });
   assert.deepEqual(normalizePreferences([true, false]), {
     runInMenuBar: true,
     notifications: true,
+    desktopMascot: true,
   });
   // Non-boolean values for a known key fall back to the default for that key.
   assert.deepEqual(
     normalizePreferences({ runInMenuBar: "yes", notifications: false }),
-    { runInMenuBar: true, notifications: false },
+    { runInMenuBar: true, notifications: false, desktopMascot: true },
   );
   // Unknown keys are ignored rather than adopted.
   assert.deepEqual(normalizePreferences({ somethingElse: true }), {
     runInMenuBar: true,
     notifications: true,
+    desktopMascot: true,
   });
 });
 
@@ -188,11 +199,11 @@ test("trayIconFile picks the state's mark and falls back to the plain one", () =
   );
 });
 
-test("taskNoticeRoute is silent when off, in-app when focused, native otherwise", () => {
-  assert.equal(taskNoticeRoute({ enabled: false, focused: true }), "none");
-  assert.equal(taskNoticeRoute({ enabled: false, focused: false }), "none");
-  assert.equal(taskNoticeRoute({ enabled: true, focused: true }), "in-app");
-  assert.equal(taskNoticeRoute({ enabled: true, focused: false }), "native");
+test("taskNoticeRoute is silent when off, the mascot when on, native when the mascot is off", () => {
+  for (const mascot of [true, false])
+    assert.equal(taskNoticeRoute({ enabled: false, mascot }), "none");
+  assert.equal(taskNoticeRoute({ enabled: true, mascot: true }), "mascot");
+  assert.equal(taskNoticeRoute({ enabled: true, mascot: false }), "native");
 });
 
 test("mascotIconPath sits beside the tray icon", () => {

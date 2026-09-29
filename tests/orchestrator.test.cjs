@@ -547,6 +547,18 @@ test("orchestratorNotice shapes input, done and failed notices and trims to the 
   assert.equal(input.focus, "question");
   assert.equal(input.title.length, 120);
   assert.equal(input.body.length, 300);
+  assert.equal(input.options, undefined);
+  const withOptions = orchestratorNotice({
+    ...task,
+    status: "waiting",
+    question: {
+      text: "q",
+      options: ["Stop", "", 7, "b".repeat(200), "c", "d", "e", "f"],
+    },
+  });
+  assert.equal(withOptions.options.length, 4);
+  assert.equal(withOptions.options[0], "Stop");
+  assert.equal(withOptions.options[1].length, 60);
   assert.equal(
     orchestratorNotice({ ...task, status: "waiting" }).body,
     "Needs your input.",

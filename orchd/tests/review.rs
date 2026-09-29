@@ -545,8 +545,8 @@ case "$brief" in
 *)
   echo x >> "$d/impl.count"
   if [ "$(wc -l < "$d/impl.count" | tr -d ' ')" = 1 ]; then
-    mkdir -p src artifacts/ui
-    echo one > src/panel.txt
+    mkdir -p src/components artifacts/ui
+    echo one > src/components/panel.tsx
     echo png > artifacts/ui/panel.png
   else
     mkdir -p ATTEMPT_TWO_DIR
@@ -621,7 +621,7 @@ fn a_retry_that_changed_only_tests_reuses_the_accepted_evidence() {
     )
     .unwrap();
     assert!(brief.contains(paths[0]), "{brief}");
-    assert!(brief.contains("saved by attempt 1"), "{brief}");
+    assert!(brief.contains("(attempt 1)"), "{brief}");
     let decisions: Vec<&str> = settled["decisions"]
         .as_array()
         .unwrap()
@@ -638,8 +638,8 @@ fn a_retry_that_changed_only_tests_reuses_the_accepted_evidence() {
 }
 
 #[test]
-fn a_retry_that_changed_source_still_needs_new_evidence() {
-    let (daemon, settled, _task_id) = run_retry_task("src/other.txt");
+fn a_retry_that_changed_the_same_ui_file_still_needs_new_evidence() {
+    let (daemon, settled, _task_id) = run_retry_task("src/components/panel.tsx");
     let implement: Vec<_> = settled["attempts"]
         .as_array()
         .unwrap()
@@ -649,8 +649,29 @@ fn a_retry_that_changed_source_still_needs_new_evidence() {
     assert!(implement.len() >= 2, "{settled}");
     assert_eq!(implement[1]["failure"]["kind"], "evidence", "{settled}");
     let detail = implement[1]["failure"]["detail"].as_str().unwrap();
-    assert!(detail.contains("src/other.txt"), "{detail}");
+    assert!(detail.contains("src/components/panel.tsx"), "{detail}");
     assert!(implement[1].get("evidenceFrom").is_none(), "{settled}");
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_retry_that_changed_other_source_carries_the_earlier_images_once() {
+    let (daemon, settled, _task_id) = run_retry_task("src/other.txt");
+    assert_eq!(settled["status"], "done", "{settled}");
+    let implement: Vec<_> = settled["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["stage"] == "implement")
+        .collect();
+    assert_eq!(implement.len(), 2, "{settled}");
+    let paths: Vec<&str> = implement[1]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e.as_str())
+        .collect();
+    assert_eq!(paths.len(), 1, "{settled}");
     daemon.shutdown_and_wait();
 }
 

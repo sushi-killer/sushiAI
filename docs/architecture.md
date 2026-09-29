@@ -138,6 +138,22 @@ cost is its plan plus its children. When something a task waits for ends
 `failed`/`stopped`, the task waits with a question: retry the dependency,
 drop it, or stop.
 
+### Self-healing briefs
+
+`engine/healing.rs` lets orchd repair a task's own contract without the owner,
+each change a decision line plus an assumption (`by: orchd`) the owner can
+overturn. Before the first attempt every verify/finalVerify/check command runs
+on the base (`base_check.rs`); one that fails goes to the cheap judge
+(`briefCheckRoute`), which leaves it, rewrites it to a check the repo can run,
+or marks it non-gating. When review marks the same criterion unmet in two
+attempts, the judge rules `code gap` (retry) or `infeasible as written` (the
+criterion is amended and the same attempt reviewed again). A planner-named
+screenshot command is run by orchd itself; otherwise an earlier attempt's
+images count while no UI file it changed has changed. After the first attempt
+only P0/P1 findings about the task's own work block; the rest are report
+follow-ups. An owner or policy answer that contradicts a criterion amends it
+before the next attempt and review.
+
 ## 2b. Evolution flow
 
 ```mermaid

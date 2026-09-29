@@ -309,22 +309,22 @@ pub(super) async fn run_review(
     } else {
         attempt_screenshots(worktree, this_attempt.map_or(0, |a| a.started_at))
     };
-    // The saved copies outlive the worktree, so they are what the reviewer
-    // is pointed at; the worktree paths only when nothing was copied.
+    // The saved copies outlive the worktree, so reviewers can open them.
     let saved = this_attempt.map(|a| a.evidence.clone()).unwrap_or_default();
-    let shown: Vec<String> = if saved.is_empty() {
+    let source_attempt = evidence_from.unwrap_or(attempt_n);
+    let shown: Vec<(String, Option<u32>)> = if saved.is_empty() {
         images
             .iter()
             .map(|image| {
-                image
-                    .strip_prefix(worktree)
-                    .unwrap_or(image)
-                    .display()
-                    .to_string()
+                let rel = image.strip_prefix(worktree).unwrap_or(image);
+                (rel.display().to_string(), Some(attempt_n))
             })
             .collect()
     } else {
         saved
+            .into_iter()
+            .map(|s| (s, Some(source_attempt)))
+            .collect()
     };
     let mut brief_text = brief::build_review_brief(
         task,

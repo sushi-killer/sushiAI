@@ -14,7 +14,8 @@ use std::time::Duration;
 /// - a review answers PASS on run `$PASS_REVIEW_FROM` (0-based) and later,
 ///   and with prose without a verdict before that;
 /// - the judge (its brief opens "A coding agent claims") answers `$JUDGE_REPLY`;
-/// - the brief check finds nothing;
+/// - the brief check finds nothing, and the healing judges ("You judge ...")
+///   rule on nothing;
 /// - an implement run edits a file and reports, or with `$IMPOSSIBLE` set
 ///   claims criterion 1 is impossible on its first run.
 const FAKE: &str = r#"#!/bin/sh
@@ -36,6 +37,10 @@ fi
 if grep -q 'A coding agent claims' "$LOG_DIR/brief.$$"; then
   touch "$LOG_DIR/judge.ran"
   emit "$JUDGE_REPLY"
+  exit 0
+fi
+if grep -q 'You judge' "$LOG_DIR/brief.$$"; then
+  emit '"{}"'
   exit 0
 fi
 if grep -q 'You check a coding task brief' "$LOG_DIR/brief.$$"; then

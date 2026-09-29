@@ -294,6 +294,7 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
             let who = match a.by.as_str() {
                 "policy" => "answered by rule",
                 "judge" => "answered by the cheap judge",
+                "orchd" => "amended by orchd itself",
                 _ => "assumed by the planner",
             };
             let state = if a.overturned {
@@ -351,6 +352,10 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
         if let Some(h) = handoff {
             any = true;
             out.push_str(&format!("- {}: {h}\n", task.title));
+        }
+        for f in &task.brief_check.follow_ups {
+            any = true;
+            out.push_str(&format!("- {}: {f}\n", task.title));
         }
     }
     if !any {

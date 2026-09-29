@@ -264,6 +264,25 @@ pub(super) async fn run_task_loop(
             }
         }
 
+        // Every check command runs on the base once: one the repository
+        // cannot run is rewritten, one broken for an unrelated reason stops
+        // gating, before an attempt is spent on either.
+        if implement_attempt_count(&task) == 0
+            && !task.brief_check.feasibility_done
+            && parent_failure.is_none()
+        {
+            let attempt_n = task.attempts.len() as u32 + 1;
+            if !heal_feasibility(&app, &task_id, attempt_n, &cancel).await {
+                drop(permit);
+                mark_stopped_if_not_already(&app, &task_id).await;
+                app.finish_task_loop(&task_id);
+                return;
+            }
+            if let Ok(Some(reloaded)) = app.store.load_task(&task_id) {
+                task = reloaded;
+            }
+        }
+
         let status = task.status;
         if !wait_while_over_budget(
             &app,
@@ -519,6 +538,17 @@ pub(super) async fn run_task_loop(
             }
         }
 
+        // An owner or policy answer that contradicts a criterion amends it
+        // before the attempt is briefed.
+        if heal_answers(&app, &mut task, attempt_n, &cancel)
+            .await
+            .is_err()
+        {
+            drop(permit);
+            mark_stopped_if_not_already(&app, &task_id).await;
+            app.finish_task_loop(&task_id);
+            return;
+        }
         let brief_text = brief::build_brief(&task, &status_short, &diff_stat);
         let brief_text = if conflict_only {
             brief::with_block_before_report(&brief_text, &brief::conflict_only_block())
@@ -1275,7 +1305,7 @@ pub(super) async fn run_task_loop(
                     if let Ok(paths) = diff {
                         let other: Vec<String> = paths
                             .into_iter()
-                            .filter(|p| !p.starts_with("artifacts/") && !is_test_path(p))
+                            .filter(|p| crate::engine::healing::is_ui_path(p) && !is_test_path(p))
                             .collect();
                         if other.is_empty() {
                             task.attempts[idx].evidence = old_evidence;
@@ -1436,8 +1466,28 @@ pub(super) async fn run_task_loop(
             }
         }
 
+        // The planner named the command that captures the images: orchd
+        // runs it itself, so an attempt is never failed for a missing image.
+        capture_screenshots(
+            &mut task,
+            idx,
+            &worktree,
+            &run_dir,
+            settings.sandbox,
+            &cancel,
+        )
+        .await;
+        if cancel.is_cancelled() {
+            interrupt_attempt(&app, &mut task, idx);
+            drop(permit);
+            app.finish_task_loop(&task_id);
+            return;
+        }
         let visual: Vec<&str> = task.visual_criteria_texts();
-        if !visual.is_empty() && task.attempts[idx].evidence.is_empty() {
+        if !visual.is_empty()
+            && task.attempts[idx].evidence.is_empty()
+            && task.brief_check.screenshot.is_none()
+        {
             let mut detail = format!(
                 "These criteria are visual and no image was saved under artifacts/ during this attempt:\n{}\nSave one screenshot per criterion under artifacts/ (for example artifacts/<name>.png) and look at it before finishing.",
                 visual
@@ -1564,6 +1614,15 @@ pub(super) async fn run_task_loop(
         }
 
         apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
+        if heal_answers(&app, &mut task, attempt_n, &cancel)
+            .await
+            .is_err()
+        {
+            interrupt_attempt(&app, &mut task, idx);
+            drop(permit);
+            app.finish_task_loop(&task_id);
+            return;
+        }
         let mut review_result: Option<ReviewResult> = None;
         if !settings.review.is_empty() {
             if let Some((review_route, why)) = select_review_route(&settings, &route, task.tier) {
@@ -1650,30 +1709,51 @@ pub(super) async fn run_task_loop(
                                         .to_string(),
                                 );
                             }
-                            if r.verdict == Verdict::Fail
-                                && !r.repeated.is_empty()
-                                && !task.attempts[idx].disputes.is_empty()
-                            {
+                            if r.verdict == Verdict::Fail {
                                 let task_tier = task.tier;
-                                let newly = judge_disputed_findings(
-                                    &app,
-                                    &mut task,
-                                    idx,
-                                    attempt_n,
-                                    &r.repeated,
-                                    &settings,
-                                    review_route,
-                                    &route,
-                                    task_tier,
-                                    &mut judge_runs,
-                                    &cancel,
-                                )
-                                .await;
-                                if !newly.is_empty() {
-                                    dropped.extend(newly);
-                                    round += 1;
-                                    after_no_verdict = false;
-                                    continue;
+                                if !r.repeated.is_empty() && !task.attempts[idx].disputes.is_empty()
+                                {
+                                    let newly = judge_disputed_findings(
+                                        &app,
+                                        &mut task,
+                                        idx,
+                                        attempt_n,
+                                        &r.repeated,
+                                        &settings,
+                                        review_route,
+                                        &route,
+                                        task_tier,
+                                        &mut judge_runs,
+                                        &cancel,
+                                    )
+                                    .await;
+                                    if !newly.is_empty() {
+                                        dropped.extend(newly);
+                                        round += 1;
+                                        after_no_verdict = false;
+                                        continue;
+                                    }
+                                }
+                                match heal_repeated_unmet(&app, &mut task, idx, &r, &cancel).await {
+                                    Ok(true) => {
+                                        task.updated_at = now_ms();
+                                        let _ = app.store.save_task(&task);
+                                        app.broadcast_task(&task);
+                                        round += 1;
+                                        continue;
+                                    }
+                                    Ok(false) => {}
+                                    Err(_) => {
+                                        task.attempts[idx].status = AttemptStatus::Interrupted;
+                                        task.attempts[idx].ended_at = Some(now_ms());
+                                        task.status = app.cancelled_status(&task.status);
+                                        task.updated_at = now_ms();
+                                        let _ = app.store.save_task(&task);
+                                        app.broadcast_task(&task);
+                                        drop(permit);
+                                        app.finish_task_loop(&task_id);
+                                        return;
+                                    }
                                 }
                             }
                             review_result = Some(r);
@@ -1751,6 +1831,7 @@ pub(super) async fn run_task_loop(
                                 verdict: Verdict::Fail,
                                 findings: vec![format!("Another attempt was asked for: {answer}")],
                                 repeated: Vec::new(),
+                                severities: Vec::new(),
                             });
                             break;
                         }
@@ -1764,6 +1845,29 @@ pub(super) async fn run_task_loop(
                 if !task.decisions.contains(&note) {
                     task.decisions.push(note);
                 }
+            }
+        }
+        if let Some(r) = review_result.as_mut() {
+            // After the first attempt only P1+ findings about the task's own
+            // work cost an attempt; the rest go to the report.
+            if r.verdict == Verdict::Fail && attempt_n >= 2 {
+                let was = r.findings.len();
+                let follow_ups = scope_review(&task, idx, &changed, r);
+                if !follow_ups.is_empty() {
+                    task.decisions.push(if r.verdict == Verdict::Pass {
+                        format!(
+                            "Orchestrator: review FAIL of attempt {attempt_n} recorded as PASS: its {was} finding(s) are P2/P3 or unrelated to this task, kept as follow-ups"
+                        )
+                    } else {
+                        format!(
+                            "Orchestrator: attempt {attempt_n}'s review: {} finding(s) are P2/P3 or unrelated to this task and are follow-ups, not blockers",
+                            follow_ups.len()
+                        )
+                    });
+                    add_follow_ups(&mut task, follow_ups);
+                }
+            } else if r.verdict == Verdict::Pass {
+                add_follow_ups(&mut task, r.findings.clone());
             }
         }
         task.attempts[idx].review = review_result.clone();

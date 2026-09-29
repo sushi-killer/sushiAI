@@ -773,6 +773,11 @@ pub(super) async fn run_plan_stage(
             .filter(|c| !c.trim().is_empty())
             .cloned()
             .collect();
+        task.brief_check.screenshot = draft
+            .screenshot
+            .clone()
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty());
         task.attempts[idx].status = AttemptStatus::Passed;
         task.attempts[idx].ended_at = Some(now_ms());
         task.attempts[idx].summary = Some(format!("Drafted: {}", draft.title));

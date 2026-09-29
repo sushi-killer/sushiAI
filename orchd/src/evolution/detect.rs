@@ -558,6 +558,7 @@ mod tests {
             verdict: Verdict::Fail,
             findings: findings.iter().map(|f| f.to_string()).collect(),
             repeated: Vec::new(),
+            severities: Vec::new(),
         });
         a
     }

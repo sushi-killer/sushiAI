@@ -60,9 +60,44 @@ async fn run_check(
     attempt_n: u32,
     cancel: &CancelToken,
 ) -> Result<Verdict, RunError> {
+    let brief_text = build_check_brief(&task.goal, &task.criteria);
+    let (reply, cost) = run_judge(
+        app,
+        task,
+        route,
+        attempt_n,
+        "brief_check",
+        "brief-check",
+        &brief_text,
+        cancel,
+    )
+    .await?;
+    add_task_cost(app, &task.id, cost);
+    Ok(match reply {
+        Ok(text) => parse_verdict(&text),
+        Err(why) => Verdict::Unusable(why),
+    })
+}
+
+/// One cheap read-only run of `route` on `prompt` in the task's worktree,
+/// files under `<run dir>/<name>`. Returns the reply (`Err` is a run that
+/// ended in an error, `Ok` its final text) and the run's cost, which the
+/// caller adds to its own copy of the task; only a cancelled run's partial
+/// cost is added to the stored task here.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_judge(
+    app: &Arc<App>,
+    task: &Task,
+    route: &Route,
+    attempt_n: u32,
+    stage: &'static str,
+    name: &str,
+    prompt: &str,
+    cancel: &CancelToken,
+) -> Result<(Result<String, String>, f64), RunError> {
     let settings = app.settings.read().unwrap().clone();
     let worktree = PathBuf::from(&task.worktree);
-    let run_dir = app.store.run_dir(&task.id, attempt_n).join("brief-check");
+    let run_dir = app.store.run_dir(&task.id, attempt_n).join(name);
     let _ = std::fs::create_dir_all(&run_dir);
     let mcp_path = run_dir.join("mcp.json");
     let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
@@ -79,8 +114,7 @@ async fn run_check(
             &settings_path,
         );
     }
-    let brief_text = build_check_brief(&task.goal, &task.criteria);
-    let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
+    let _ = std::fs::write(run_dir.join("brief.md"), prompt);
     let events_path = run_dir.join("events.jsonl");
     let req = harness::RunRequest {
         repo_settings: false,
@@ -93,8 +127,8 @@ async fn run_check(
         false,
         &worktree,
         &req,
-        CostTag::task("brief_check", &route.id),
-        &brief_text,
+        CostTag::task(stage, &route.id),
+        prompt,
         &events_path,
         cancel,
         None,
@@ -115,14 +149,14 @@ async fn run_check(
         }
         Err(e) => return Err(e),
     };
-    add_task_cost(app, &task.id, outcome.cost_usd.unwrap_or(0.0));
+    let cost = outcome.cost_usd.unwrap_or(0.0);
     if let Some(error) = outcome.error {
-        return Ok(Verdict::Unusable(format!("the run failed ({error})")));
+        return Ok((Err(format!("the run failed ({error})")), cost));
     }
-    Ok(parse_verdict(&outcome.final_text.unwrap_or_default()))
+    Ok((Ok(outcome.final_text.unwrap_or_default()), cost))
 }
 
-fn add_task_cost(app: &Arc<App>, task_id: &str, cost: f64) {
+pub(super) fn add_task_cost(app: &Arc<App>, task_id: &str, cost: f64) {
     if cost <= 0.0 {
         return;
     }

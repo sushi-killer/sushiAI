@@ -608,7 +608,7 @@ pub fn parse_review(text: &str) -> Option<ReviewResult> {
 
 /// A leading P0-P3 token (optionally bracketed) followed by a
 /// non-alphanumeric character or the end of the text.
-fn severity_of(text: &str) -> Option<u8> {
+pub fn severity_of(text: &str) -> Option<u8> {
     let t = text.trim_start();
     let t = t.strip_prefix('[').unwrap_or(t);
     let mut chars = t.chars();
@@ -833,6 +833,7 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
         verdict,
         findings,
         repeated,
+        severities: severities.clone(),
     };
     let mut any_unmet = false;
     // Any reply that rules on criteria, asked for or not: a PASS that marks
@@ -880,7 +881,7 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
     Some((result, recorded_as_pass))
 }
 
-const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise.\n\nWhen the work changes what a screen shows, the goal must name the exact repo command that produces its screenshot evidence -- look for one before assuming none exists, so the implementer never has to rediscover it.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
+const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise.\n\nWhen the work changes what a screen shows, the goal must name the exact repo command that produces its screenshot evidence -- look for one before assuming none exists, so the implementer never has to rediscover it. Also put that command in the plan's `screenshot` field: orchd then runs it itself after verify passes and saves the images.\n\nEvery `-- check:` must be something this repository can actually run today (its test runner, harness or script exists); do not ask for a kind of test the repo has no harness for.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
 
 const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"tier\":\"mechanical|standard|hard\",\"criteria\":[],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"]}]}\n```\n";
 
@@ -1037,6 +1038,10 @@ pub struct PlanDraft {
     /// paths overlap another live task's waits for it.
     #[serde(default)]
     pub paths: Vec<String>,
+    /// The repo command that captures the screenshot evidence, when a screen
+    /// changes.
+    #[serde(default)]
+    pub screenshot: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1391,13 +1396,14 @@ const REVIEW_REPORT_EXAMPLE: &str = "{\"verdict\":\"PASS|FAIL\",\"findings\":[\"
 const REVIEW_VERDICT_RULE: &str = "Verdict rule: FAIL only for an unmet acceptance criterion or a P0/P1 finding. P2/P3 findings are reported with a PASS verdict. Start each finding with its severity (P0-P3).\n";
 
 /// The review session's brief. Pure: `screenshots` are paths relative to the
-/// worktree, `agent_decisions` the attempt's own `Agent: ...` lines.
+/// worktree, each with the attempt that produced it, `agent_decisions` the
+/// attempt's own `Agent: ...` lines.
 pub fn build_review_brief(
     task: &Task,
     implementer_note: &str,
     agent_decisions: &[String],
     verify_results: &[VerifyOutcome],
-    screenshots: &[String],
+    screenshots: &[(String, Option<u32>)],
     evidence_from: Option<u32>,
     diff: &str,
 ) -> String {
@@ -1444,13 +1450,15 @@ pub fn build_review_brief(
         ));
     }
     if !screenshots.is_empty() {
-        let by = match evidence_from {
-            Some(m) => format!("These copies were saved by attempt {m}, not by this attempt, which changed only artifacts/ or tests since."),
-            None => "Saved by this attempt.".to_string(),
-        };
-        out.push_str(&format!("\n## Screenshots\n\n{by} Open each one and check it against the criteria it is meant to prove; a screenshot that does not show what a criterion claims is a finding.\n\n"));
-        for shown in screenshots {
-            out.push_str(&format!("- `{shown}`\n"));
+        let carry_note = evidence_from
+            .map(|n| format!(" Earlier images from attempt {n} count because no UI file it changed has changed since."))
+            .unwrap_or_default();
+        out.push_str(&format!("\n## Screenshots\n\nOpen each one and check it against the criteria it is meant to prove; a screenshot that does not show what a criterion claims is a finding. Each is labelled with the attempt that saved it.{carry_note}\n\n"));
+        for (shown, attempt) in screenshots {
+            match attempt {
+                Some(n) => out.push_str(&format!("- `{shown}` (attempt {n})\n")),
+                None => out.push_str(&format!("- `{shown}`\n")),
+            }
         }
     }
     let previous = previous_review_findings(task);
@@ -2148,6 +2156,7 @@ mod tests {
             verdict: Verdict::Fail,
             findings: vec!["P1: a.rs:1 - null check missing".into()],
             repeated: Vec::new(),
+            severities: Vec::new(),
         });
         let mut second = first.clone();
         second.n = 2;
@@ -2819,7 +2828,7 @@ mod tests {
             "Implementer report: complete",
             &["Agent: kept the old name".into()],
             &[],
-            &["artifacts/a.png".into()],
+            &[("artifacts/a.png".into(), Some(1))],
             None,
             "diff body",
         );

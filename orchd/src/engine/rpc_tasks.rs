@@ -136,6 +136,9 @@ impl App {
             /// while another live task on the same base holds any of them.
             #[serde(default)]
             paths: Vec<String>,
+            /// The repo command that captures screenshot evidence.
+            #[serde(default)]
+            screenshot: Option<String>,
             #[serde(default)]
             branch: Option<String>,
             /// Commit-ish the task branches from; the repo's HEAD if unset.
@@ -250,7 +253,7 @@ impl App {
             None => "cli".to_string(),
         };
         let in_graph = parent.is_some() || !depends_on.is_empty();
-        let task = self
+        let mut task = self
             .create_task_record(NewTask {
                 id: uuid::Uuid::new_v4().to_string(),
                 repo_root,
@@ -281,6 +284,10 @@ impl App {
                 created_at: now_ms(),
             })
             .await?;
+        if let Some(cmd) = p.screenshot.as_ref().filter(|c| !c.trim().is_empty()) {
+            task.brief_check.screenshot = Some(cmd.trim().to_string());
+            self.store.save_task(&task).map_err(|e| e.to_string())?;
+        }
         let id = task.id.clone();
         if let Some(mcp) = &p.mcp {
             let path = self.store.task_dir(&id).join("mcp.json");

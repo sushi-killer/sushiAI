@@ -377,6 +377,31 @@ pub struct BriefCheck {
     /// The conflict the implement and review briefs must name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<String>,
+    /// The command the planner named that captures the screenshot evidence;
+    /// orchd runs it itself once verify has passed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<String>,
+    /// Every check command was run on the base once (see `base_check`).
+    #[serde(default)]
+    pub feasibility_done: bool,
+    /// Commands that fail on the base for a reason unrelated to the task: kept
+    /// out of the gates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub non_gating: Vec<String>,
+    /// Criteria the repeated-unmet judge has already ruled on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub judged: Vec<String>,
+    /// How many `decisions` the owner-answer check has already read.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub answers_seen: usize,
+    /// Findings that did not cost an attempt (P2, or unrelated to the task),
+    /// for the report.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follow_ups: Vec<String>,
+}
+
+fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
 }
 
 impl BriefCheck {
@@ -1160,6 +1185,10 @@ pub struct ReviewResult {
     /// the previous attempt's review reported them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repeated: Vec<String>,
+    /// The severity (0-3) of each finding by position, `None` when it named
+    /// none; findings past the end (criterion rulings) have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub severities: Vec<Option<u8>>,
 }
 
 /// Image extensions an evidence screenshot may have, with their MIME types.

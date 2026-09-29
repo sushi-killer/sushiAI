@@ -242,13 +242,13 @@ The owner gives a task and leaves; `$sushiai-task` carries it to a local
 commit and a report whose only questions are the ones the owner must answer.
 Roles are subagents in `.claude/agents/`, each with a deliberate model:
 
-| Role            | Model  | Job                                                     |
-| --------------- | ------ | ------------------------------------------------------- |
-| main session    | —      | lead: scope, briefs, integration, commit, report        |
-| `implementer`   | sonnet | one bounded code lane and its tests                     |
-| `functional-qa` | sonnet | proof against the acceptance criteria                   |
-| `reviewer`      | opus   | fresh review of the diff before commit                  |
-| `design-critic` | opus   | judgement of screenshots when a screen changes          |
+| Role            | Model  | Job                                              |
+| --------------- | ------ | ------------------------------------------------ |
+| main session    | —      | lead: scope, briefs, integration, commit, report |
+| `implementer`   | sonnet | one bounded code lane and its tests              |
+| `functional-qa` | sonnet | proof against the acceptance criteria            |
+| `reviewer`      | opus   | fresh review of the diff before commit           |
+| `design-critic` | opus   | judgement of screenshots when a screen changes   |
 
 Skills live in `.agents/skills/<name>/SKILL.md` (Codex reads them there),
 each linked from `.claude/skills/`. The harness loads a skill from its

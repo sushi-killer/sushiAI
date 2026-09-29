@@ -541,6 +541,7 @@ impl App {
             "task.start" => self.handle_task_start(params).await,
             "task.stop" => self.handle_task_stop(params).await,
             "task.answer" => self.handle_task_answer(params).await,
+            "task.overturn" => self.handle_task_overturn(params).await,
             "task.delete" => self.handle_task_delete(params).await,
             "task.archive" => self.handle_task_archive(params).await,
             "task.unarchive" => self.handle_task_unarchive(params).await,

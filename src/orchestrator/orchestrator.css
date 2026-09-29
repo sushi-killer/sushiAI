@@ -659,6 +659,35 @@
   color: var(--text-muted);
 }
 
+/* The planner's own answers: one block per assumption, the overturn action
+ * under it. */
+.orch-assumptions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+}
+
+.orch-assumption {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.orch-assumption p {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.orch-assumption-evidence,
+.orch-assumption-overturned {
+  color: var(--text-muted);
+}
+
+.orch-assumption .orch-question-free {
+  align-self: stretch;
+}
+
 .orch-decision-tag {
   display: inline-block;
   margin-right: 6px;

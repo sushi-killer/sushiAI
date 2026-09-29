@@ -297,6 +297,17 @@ pub struct Variant {
     /// `max_cost_usd`. 0 = none, left out of the JSON.
     #[serde(skip_serializing_if = "is_no_budget")]
     pub max_attempt_cost_usd: f64,
+    /// The planner marks each question with a recommended option and whether
+    /// it is blocking (irreversible or consequential). Non-blocking ones are
+    /// not asked: each becomes an assumption on the task and the task goes
+    /// on; blocking ones go to triage and the owner as one question. Left
+    /// out of the JSON while off.
+    #[serde(skip_serializing_if = "is_false")]
+    pub batch_questions: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 #[cfg(test)]
@@ -455,11 +466,12 @@ impl Variant {
 
     /// Keys a serialized default `Variant` leaves out, but a partial
     /// override object may still name.
-    pub const OPTIONAL_KEYS: [&'static str; 4] = [
+    pub const OPTIONAL_KEYS: [&'static str; 5] = [
         "plannerRoute",
         "tierRoutes",
         "maxCostUsd",
         "maxAttemptCostUsd",
+        "batchQuestions",
     ];
 
     /// Every route override names a route in `routes`.
@@ -524,6 +536,23 @@ pub enum TaskStatus {
 pub struct Question {
     pub text: String,
     pub options: Vec<String>,
+}
+
+/// A choice the planner made itself instead of asking the owner
+/// (`variant.batch_questions`). The owner can overturn it later with
+/// `task.overturn`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Assumption {
+    pub question: String,
+    /// The planner's recommended option.
+    pub answer: String,
+    pub evidence: String,
+    pub by: String,
+    pub overturned: bool,
+    /// What the owner answered instead, once overturned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_answer: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -592,6 +621,9 @@ pub struct Task {
     pub question: Option<Question>,
     #[serde(default)]
     pub decisions: Vec<String>,
+    /// Non-blocking planner questions answered by their recommendation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<Assumption>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
     #[serde(default)]
@@ -995,6 +1027,7 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             budget_raises: 0,
+            assumptions: vec![],
             archived: false,
             planned_tier: None,
             tier_fallback: None,
@@ -1207,6 +1240,7 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             budget_raises: 0,
+            assumptions: vec![],
             archived: false,
             planned_tier: None,
             tier_fallback: None,
@@ -1247,6 +1281,7 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             budget_raises: 0,
+            assumptions: vec![],
             archived: true,
             planned_tier: None,
             tier_fallback: None,

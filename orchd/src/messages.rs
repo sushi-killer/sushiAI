@@ -76,7 +76,7 @@ fn str_param<'a>(params: &'a serde_json::Value, key: &str) -> Option<&'a str> {
 /// Validates and stores one message; nothing is persisted when it fails.
 /// A reply goes back to whoever sent the message it answers, and only its
 /// recipient may answer it.
-fn send(
+pub(super) fn send(
     app: &App,
     from: &str,
     to: Option<&str>,
@@ -350,6 +350,7 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             budget_raises: 0,
+            assumptions: vec![],
             archived: false,
             planned_tier: None,
             tier_fallback: None,

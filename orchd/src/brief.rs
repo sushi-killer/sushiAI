@@ -113,6 +113,23 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
         out.push('\n');
     }
 
+    if !task.assumptions.is_empty() {
+        out.push_str("## Assumptions\n\nThe planner decided these instead of asking the owner; an owner answer replaces the assumption.\n\n");
+        for a in &task.assumptions {
+            match (&a.owner_answer, a.overturned) {
+                (Some(owner), true) => out.push_str(&format!(
+                    "- {} -> owner answered: {owner} (overturns the planner's {})\n",
+                    a.question, a.answer
+                )),
+                _ => out.push_str(&format!(
+                    "- {} -> {} ({})\n",
+                    a.question, a.answer, a.evidence
+                )),
+            }
+        }
+        out.push('\n');
+    }
+
     // The plan attempt (if any) drafted the brief the agent is reading right
     // now, not a previous *implement* try -- it has no place in this list.
     let implement_attempts: Vec<&Attempt> = task
@@ -375,6 +392,8 @@ const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.
 
 const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"tier\":\"mechanical|standard|hard\",\"criteria\":[],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"]}]}\n```\n";
 
+const PLAN_BATCH_QUESTIONS: &str = "Give every question a `recommended` option (one of its `options`), the `evidence` for it, and `blocking`: true only when a wrong guess is irreversible or consequential (data loss, a public API or contract, money, security). A non-blocking question is not asked: your recommendation is recorded as an assumption and the work goes on, so recommend what you would pick yourself. Blocking questions are asked together in one message.";
+
 const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app.";
 
 const PLAN_SUBTASKS: &str = "When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. List in each part's `paths` the repo-relative files or directories it edits; parts whose paths overlap (or that list none) are run one after another instead of side by side. Each part's `request` is what its own planner will draft from, so make it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. When the request fits one session, leave `subtasks` out.";
@@ -399,6 +418,13 @@ fn plan_brief(request: &str, variant: &Variant, split: bool) -> String {
         extra.push_str(&format!("\n\n{PLAN_CONTRACT}"));
     }
     let mut format = PLAN_REPORT_FORMAT.to_string();
+    if variant.batch_questions {
+        extra.push_str(&format!("\n\n{PLAN_BATCH_QUESTIONS}"));
+        format = format.replace(
+            "\"options\":[\"...\",\"...\"]}",
+            "\"options\":[\"...\",\"...\"],\"recommended\":\"...\",\"evidence\":\"...\",\"blocking\":false}",
+        );
+    }
     if variant.defer_heavy_checks {
         extra.push_str(&format!("\n\n{PLAN_FINAL_VERIFY}"));
         format = format.replace("\"verify\":[],", "\"verify\":[],\"finalVerify\":[],");
@@ -445,6 +471,29 @@ pub struct PlanQuestion {
     pub text: String,
     #[serde(default)]
     pub options: Vec<String>,
+    /// `variant.batch_questions`: the option to take when nobody answers.
+    #[serde(default)]
+    pub recommended: Option<String>,
+    #[serde(default)]
+    pub evidence: String,
+    /// Missing means blocking: only a planner that says otherwise skips the
+    /// owner.
+    #[serde(default = "default_blocking")]
+    pub blocking: bool,
+}
+
+fn default_blocking() -> bool {
+    true
+}
+
+impl PlanQuestion {
+    /// The recommendation, when it can stand in for an answer: non-empty
+    /// and, if the question lists options, one of them.
+    pub fn usable_recommendation(&self) -> Option<&str> {
+        let r = self.recommended.as_deref()?.trim();
+        (!r.is_empty() && (self.options.is_empty() || self.options.iter().any(|o| o == r)))
+            .then_some(r)
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -850,6 +899,7 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             budget_raises: 0,
+            assumptions: vec![],
             archived: false,
             planned_tier: None,
             tier_fallback: None,

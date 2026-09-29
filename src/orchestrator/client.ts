@@ -53,6 +53,8 @@ export const orchestratorClient = {
   taskStop: (id: string) => call<Task>("task.stop", { id }),
   taskAnswer: (id: string, answer: string) =>
     call<Task>("task.answer", { id, answer }),
+  taskOverturn: (id: string, index: number, answer: string) =>
+    call<Task>("task.overturn", { id, index, answer }),
   taskDelete: (id: string) =>
     call<Record<string, never>>("task.delete", { id }),
   taskArchive: (id: string) => call<Task>("task.archive", { id }),

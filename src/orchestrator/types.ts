@@ -104,6 +104,21 @@ export type Variant = {
   /** Dollar cap on one implement attempt: past it the run is stopped and
    * fails with kind "budget". Absent or 0 = none. */
   maxAttemptCostUsd?: number;
+  /** Non-blocking planner questions become assumptions instead of waiting
+   * for the owner; blocking ones are asked together. Absent = off. */
+  batchQuestions?: boolean;
+};
+
+/** A choice the planner made itself (`variant.batchQuestions`). */
+export type Assumption = {
+  question: string;
+  /** The planner's recommended option. */
+  answer: string;
+  evidence: string;
+  by: string;
+  overturned: boolean;
+  /** What the owner answered instead, once overturned. */
+  ownerAnswer?: string;
 };
 
 export type FailureKind =
@@ -225,6 +240,8 @@ export type Task = {
   /** Owner and classifier decisions, newest last - includes "Owner: ..."
    * answers to a question. */
   decisions: string[];
+  /** Questions the planner answered with its own recommendation. */
+  assumptions?: Assumption[];
   attempts: Attempt[];
   costUsd: number;
   /** Times the owner raised the `variant.maxCostUsd` budget; the budget in

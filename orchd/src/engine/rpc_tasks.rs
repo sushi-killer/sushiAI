@@ -335,6 +335,7 @@ impl App {
             attempts: vec![],
             cost_usd: 0.0,
             budget_raises: 0,
+            assumptions: vec![],
             archived: false,
             planned_tier: None,
             tier_fallback: None,
@@ -447,6 +448,49 @@ impl App {
             self.broadcast_task(&task);
             self.advance_graph(&task.repo);
         }
+        serde_json::to_value(&task).map_err(|e| e.to_string())
+    }
+
+    /// `task.overturn {id, index, answer}`: the owner disagrees with one of
+    /// the planner's assumptions. It is marked overturned and, unless the
+    /// task is done, the answer reaches the task's next attempt as a message.
+    pub(super) async fn handle_task_overturn(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            id: String,
+            index: usize,
+            answer: String,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        validate_task_id(&self.store, &p.id)?;
+        let answer = p.answer.trim();
+        if answer.is_empty() {
+            return Err("answer is required".to_string());
+        }
+        let mut task = self
+            .store
+            .load_task(&p.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        let assumption = task
+            .assumptions
+            .get_mut(p.index)
+            .ok_or_else(|| format!("task has no assumption {}", p.index))?;
+        assumption.overturned = true;
+        assumption.owner_answer = Some(answer.to_string());
+        let text = format!(
+            "The owner overturned an assumption the planner made. Question: {}\nThe planner assumed: {}\nThe owner's answer: {answer}\nUse the owner's answer.",
+            assumption.question, assumption.answer
+        );
+        if task.status != TaskStatus::Done {
+            messages::send(self, ORCHESTRATOR, Some(&task.id), &text, None)?;
+        }
+        task.updated_at = now_ms();
+        self.store.save_task(&task).map_err(|e| e.to_string())?;
+        self.broadcast_task(&task);
         serde_json::to_value(&task).map_err(|e| e.to_string())
     }
 

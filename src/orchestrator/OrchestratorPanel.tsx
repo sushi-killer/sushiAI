@@ -299,6 +299,94 @@ function QuestionCard({
   );
 }
 
+/** The planner's own answers to its non-blocking questions, each with an
+ * Overturn action: the owner's text replaces the assumption and reaches the
+ * task's next attempt. */
+function AssumptionsList({
+  task,
+  disabled,
+  onOverturn,
+}: {
+  task: Task;
+  disabled: boolean;
+  onOverturn(index: number, answer: string): void;
+}) {
+  const [editing, setEditing] = useState<number | null>(null);
+  const [text, setText] = useState("");
+  const assumptions = task.assumptions ?? [];
+  if (assumptions.length === 0) return null;
+  return (
+    <div className="orch-assumptions">
+      <span className="dialog-eyebrow">ASSUMPTIONS</span>
+      {assumptions.map((assumption, index) => (
+        <div key={index} className="orch-assumption">
+          <p className="orch-assumption-question">{assumption.question}</p>
+          <p className="orch-assumption-answer">
+            <span className="orch-decision-tag orch-decision-jev">
+              {assumption.by}
+            </span>
+            {assumption.answer}
+            {assumption.overturned && (
+              <span className="orch-assumption-overturned">
+                {" "}
+                - overturned: {assumption.ownerAnswer}
+              </span>
+            )}
+          </p>
+          {assumption.evidence && (
+            <p className="orch-assumption-evidence">{assumption.evidence}</p>
+          )}
+          {editing === index ? (
+            <form
+              className="orch-question-free"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (!text.trim()) return;
+                onOverturn(index, text.trim());
+                setEditing(null);
+                setText("");
+              }}
+            >
+              <input
+                value={text}
+                onChange={(event) => setText(event.target.value)}
+                placeholder="Your answer instead…"
+                aria-label="Your answer instead"
+                autoFocus
+              />
+              <button
+                className="primary"
+                type="submit"
+                disabled={disabled || !text.trim()}
+              >
+                Send
+              </button>
+              <button
+                className="secondary"
+                type="button"
+                onClick={() => setEditing(null)}
+              >
+                Cancel
+              </button>
+            </form>
+          ) : (
+            <button
+              className="secondary"
+              disabled={disabled}
+              onClick={() => {
+                setEditing(index);
+                setText("");
+              }}
+            >
+              {assumption.overturned ? "Overturn again" : "Overturn"}
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** The orchestrator agent's conversations for this repo. The daemon runs each
  * turn and keeps every session, so a reply keeps coming and stays readable
  * when the window closes or the app restarts. A live reply pins the current
@@ -1296,6 +1384,16 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                 })}
               </div>
             )}
+            <AssumptionsList
+              key={selected.id}
+              task={selected}
+              disabled={busy}
+              onOverturn={(index, answer) =>
+                act(() =>
+                  orchestratorClient.taskOverturn(selected.id, index, answer),
+                )
+              }
+            />
             {selected.decisions.length > 0 && (
               <div className="orch-decisions">
                 {selected.decisions.map((line, index) => {

@@ -136,6 +136,28 @@ pub(super) fn subtask_request(parent: &Task, part: &str) -> String {
     out
 }
 
+/// The one owner question for a plan's blocking questions: each with its
+/// options and the planner's recommendation, answered in one free-text reply.
+fn batched_question_text(questions: &[&brief::PlanQuestion]) -> String {
+    let mut out = format!(
+        "The planner has {} blocking question(s); answer them all in one reply:\n",
+        questions.len()
+    );
+    for (i, q) in questions.iter().enumerate() {
+        out.push_str(&format!("\n{}. {}", i + 1, q.text));
+        if !q.options.is_empty() {
+            out.push_str(&format!(" (options: {})", q.options.join(" / ")));
+        }
+        if let Some(r) = q.usable_recommendation() {
+            out.push_str(&format!(" -- recommended: {r}"));
+        }
+        if !q.evidence.trim().is_empty() {
+            out.push_str(&format!(" ({})", q.evidence.trim()));
+        }
+    }
+    out
+}
+
 /// Sets the question/waiting state, parks on a fresh one-shot the same way
 /// [`wait_for_answer`] does, then records the decision as `"Owner: <question>
 /// -> <answer>"` (spec step 5) instead of the generic attempt-failure
@@ -664,7 +686,68 @@ pub(super) async fn run_plan_stage(
             }
         }
 
-        for q in draft.questions.iter().take(3) {
+        let mut asked: Vec<&brief::PlanQuestion> = draft.questions.iter().take(3).collect();
+        if task.variant().batch_questions {
+            // Non-blocking questions with a usable recommendation are not
+            // asked: each becomes an assumption and planning goes on.
+            let (assumed, blocking): (Vec<_>, Vec<_>) = asked
+                .into_iter()
+                .partition(|q| !q.blocking && q.usable_recommendation().is_some());
+            if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
+                task = reloaded;
+            }
+            for q in assumed {
+                // Planning reruns until a plan attempt passes, so the same
+                // question can come back after an interruption: record it once.
+                if task.assumptions.iter().any(|a| a.question == q.text) {
+                    continue;
+                }
+                let answer = q.usable_recommendation().unwrap_or_default().to_string();
+                app.broadcast_log(
+                    task_id,
+                    attempt_n,
+                    format!("Planner assumed: {} -> {answer}", q.text),
+                );
+                task.assumptions.push(Assumption {
+                    question: q.text.clone(),
+                    answer,
+                    evidence: q.evidence.clone(),
+                    by: "planner".to_string(),
+                    overturned: false,
+                    owner_answer: None,
+                });
+            }
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
+            asked = Vec::new();
+            if !blocking.is_empty() {
+                // One owner question for all of them, one free-text answer.
+                let text = batched_question_text(&blocking);
+                if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
+                    task = reloaded;
+                }
+                match ask_plan_question_with_triage(
+                    app,
+                    task_id,
+                    &mut task,
+                    attempt_n,
+                    &worktree,
+                    &text,
+                    vec![],
+                    true,
+                    pending_answer,
+                    cancel,
+                    permit,
+                )
+                .await
+                {
+                    Some(_) => {}
+                    None => return end_plan_stage(app, task_id, Some(idx)).await,
+                }
+            }
+        }
+        for q in asked {
             // P2: reload before each question -- an earlier question in
             // this same loop may have gone to the owner and back (or been
             // triage-answered) since `task` was last captured, and triage's
@@ -680,6 +763,7 @@ pub(super) async fn run_plan_stage(
                 &worktree,
                 &q.text,
                 q.options.clone(),
+                false,
                 pending_answer,
                 cancel,
                 permit,

@@ -232,7 +232,7 @@ pub fn report_with(
             .push(fp.clone());
     }
     let mut out = String::from(
-        "| variant | fingerprint | tasks | done | attempts/task | $/task | median $ | median min to done | review FAIL | owner answers/task | process % | evidence % | verify % | task % | explore % | tool calls/attempt | stalls | median prefix tokens | cache-read tokens/attempt |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
+        "| variant | fingerprint | tasks | done | attempts/task | $/task | median $ | median min to done | review FAIL | owner answers/task | assumptions/task | overturn rate | process % | evidence % | verify % | task % | explore % | tool calls/attempt | stalls | median prefix tokens | cache-read tokens/attempt |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     for ((variant, fingerprint), ts) in groups {
         let n = ts.len() as f64;
@@ -277,6 +277,13 @@ pub fn report_with(
                     .count()
             })
             .sum();
+        let assumed: usize = ts.iter().map(|t| t.assumptions.len()).sum();
+        let overturned: usize = ts
+            .iter()
+            .flat_map(|t| &t.assumptions)
+            .filter(|a| a.overturned)
+            .count();
+        let overturn_rate = (assumed > 0).then(|| overturned as f64 / assumed as f64 * 100.0);
         let implement_attempts: Vec<&Attempt> = ts
             .iter()
             .flat_map(|t| &t.attempts)
@@ -321,7 +328,7 @@ pub fn report_with(
             .filter(|a| a.failure.as_ref().map(|f| f.kind) == Some(FailureKind::Stall))
             .count();
         out.push_str(&format!(
-            "| `{variant}` | {fingerprint} | {} | {} | {:.1} | {:.2} | {} | {} | {review_fails}/{} | {:.1} | {} | {} | {} | {} | {} | {} | {stalls} | {} | {} |\n",
+            "| `{variant}` | {fingerprint} | {} | {} | {:.1} | {:.2} | {} | {} | {review_fails}/{} | {:.1} | {:.1} | {} | {} | {} | {} | {} | {} | {} | {stalls} | {} | {} |\n",
             ts.len(),
             done.len(),
             attempts as f64 / n,
@@ -330,6 +337,10 @@ pub fn report_with(
             fmt(median(minutes), 0),
             reviews.len(),
             owner as f64 / n,
+            assumed as f64 / n,
+            overturn_rate
+                .map(|r| format!("{r:.0}%"))
+                .unwrap_or_else(|| "-".into()),
             fmt(share(|b| b.process), 0),
             fmt(share(|b| b.evidence), 0),
             fmt(share(|b| b.verify), 0),

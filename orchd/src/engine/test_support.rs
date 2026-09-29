@@ -46,6 +46,7 @@ pub(super) fn task_with_status(status: TaskStatus) -> Task {
         attempts: vec![],
         cost_usd: 0.0,
         budget_raises: 0,
+        assumptions: vec![],
         archived: false,
         planned_tier: None,
         tier_fallback: None,

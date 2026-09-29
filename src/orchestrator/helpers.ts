@@ -52,7 +52,11 @@ export function formatCost(costUsd: number | undefined): string {
  * task with several differing flags always reads the same way. */
 const VARIANT_KEYS: Exclude<
   keyof Variant,
-  "plannerRoute" | "tierRoutes" | "maxCostUsd" | "maxAttemptCostUsd"
+  | "plannerRoute"
+  | "tierRoutes"
+  | "maxCostUsd"
+  | "maxAttemptCostUsd"
+  | "batchQuestions"
 >[] = [
   "retryMode",
   "stallTimeoutSecs",
@@ -101,6 +105,11 @@ export function variantLabel(task: Task, experiments: Variant): string {
     diffs.push(
       `maxAttemptCostUsd ${attemptCap ? formatCost(attemptCap) : "none"}`,
     );
+  }
+  if (
+    (variant.batchQuestions ?? false) !== (experiments.batchQuestions ?? false)
+  ) {
+    diffs.push(`batchQuestions ${variant.batchQuestions ? "on" : "off"}`);
   }
   if (diffs.length === 0) return "default";
   return diffs.join(" · ");

@@ -122,3 +122,14 @@
   `orchd eval` split a variant's rows by real model and harness version and
   say so when one variant mixes them; the panel shows `model (version)` on
   the attempt line. Older attempts show `-`.
+- `batchQuestions: true` lets the planner mark each question with a
+  `recommended` option, its `evidence` and whether it is `blocking` (only
+  for irreversible or consequential choices: data loss, a public API or
+  contract, money, security). A non-blocking question is not asked: its
+  recommendation is recorded as an assumption on the task and planning goes
+  on. Blocking questions still go to triage, but reach the owner as one
+  question listing each with its recommended option and one free-text
+  answer. `task.overturn {id, index, answer}` (the task detail's Overturn
+  action) records the owner's answer against an assumption and delivers it
+  to the task's next attempt as a message; on a finished task it only
+  records. `orchd ab` gets assumptions per task and overturn rate columns.

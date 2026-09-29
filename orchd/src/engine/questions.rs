@@ -287,7 +287,10 @@ pub(super) async fn wait_for_answer_with_triage(
 /// verification command" synthesized question or the retry-clarification
 /// question, which still go straight to the owner unchanged. Same P1-1 fix
 /// as [`wait_for_answer_with_triage`]: mutates and saves the caller's own
-/// `task` in place rather than an independent reload.
+/// `task` in place rather than an independent reload. With `keep_text` an
+/// escalation asks the owner `question_text` and `options` as given instead
+/// of triage's sharpened version (a batched question lists several
+/// questions, which a single sharpened one would drop).
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn ask_plan_question_with_triage(
     app: &Arc<App>,
@@ -297,6 +300,7 @@ pub(super) async fn ask_plan_question_with_triage(
     worktree: &Path,
     question_text: &str,
     options: Vec<String>,
+    keep_text: bool,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
@@ -335,11 +339,16 @@ pub(super) async fn ask_plan_question_with_triage(
                 task.updated_at = now_ms();
                 let _ = app.store.save_task(task);
                 app.broadcast_task(task);
+                let (text, options) = if keep_text {
+                    (question_text.to_string(), options)
+                } else {
+                    (decision.question, decision.options)
+                };
                 return ask_plan_question(
                     app,
                     task_id,
-                    &decision.question,
-                    decision.options,
+                    &text,
+                    options,
                     pending_answer,
                     cancel,
                     permit,

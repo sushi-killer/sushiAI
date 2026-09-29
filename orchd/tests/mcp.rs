@@ -207,13 +207,14 @@ fn initialize_tools_list_and_tools_call_over_stdio() {
         "orchestrator_reply",
         "repo_audit",
         "task_amend",
+        "evolution_run",
     ] {
         assert!(
             names.contains(&expected),
             "missing tool {expected}: {names:?}"
         );
     }
-    assert_eq!(names.len(), 17, "unexpected extra tools: {names:?}");
+    assert_eq!(names.len(), 18, "unexpected extra tools: {names:?}");
     for tool in tools {
         assert!(
             !tool["inputSchema"]["properties"].is_null(),

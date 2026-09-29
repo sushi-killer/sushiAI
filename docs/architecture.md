@@ -39,14 +39,20 @@ flowchart TB
     chat["chat.rs<br/>orchestrator chat"]
     audit["audit.rs<br/>repo.audit, read-only"]
     insights["timeline.rs<br/>task.timeline, failures.catalogue"]
+    evolution["evolution/<br/>signals when a task ends,<br/>clusters, proposals, measurement"]
+    evolveCli["orchd evolve<br/>evolution.run / evolution.adopt"]
     harness["harness.rs<br/>claude -p / codex exec"]
     side["classify.rs (Jev)<br/>git.rs (worktrees, commit)<br/>messages.rs (merging)"]
-    store[("data dir<br/>tasks/, runs/, settings.json,<br/>decisions.jsonl, chats/, audits/")]
+    store[("data dir<br/>tasks/, runs/, settings.json,<br/>decisions.jsonl, chats/, audits/,<br/>evolution/ (signals.jsonl, detected.jsonl,<br/>proposals/)")]
     mcp["orchd mcp<br/>task_* tools, stdio"]
-    proto --> engine & chat & audit & insights
+    proto --> engine & chat & audit & insights & evolution
     engine --> side
+    engine -->|task done or failed| evolution
+    evolution -->|append signals| store
+    evolution -->|evolution.run: proposer run, read-only| harness
+    evolveCli -->|socket| proto
     engine & chat & audit --> harness
-    engine & chat & audit <--> store
+    engine & chat & audit & evolution <--> store
     insights --> store
     mcp -->|socket| proto
   end
@@ -56,6 +62,7 @@ flowchart TB
     taskAgent["Task agent<br/>in its own worktree"]
     reviewer["Reviewer<br/>read-only"]
     auditor["Auditor<br/>read-only, in the repo's checkout"]
+    proposer["Proposer<br/>read-only, in the cluster's main repo"]
     orchAgent["Orchestrator agent<br/>Opus, read-only + MCP"]
   end
 
@@ -66,7 +73,7 @@ flowchart TB
 
   owner --> shell
   orchSvc <-->|socket| proto
-  harness --> taskAgent & reviewer & auditor & orchAgent
+  harness --> taskAgent & reviewer & auditor & proposer & orchAgent
   orchAgent -->|MCP| mcp
   taskAgent -->|Stop hook| proto
   taskAgent -->|rtk rewrite hook<br/>leanOutput, no socket| rtk
@@ -117,6 +124,21 @@ its gated and held-out checks run once here) and is done; its
 cost is its plan plus its children. When something a task waits for ends
 `failed`/`stopped`, the task waits with a question: retry the dependency,
 drop it, or stop.
+
+## 2b. Evolution flow
+
+```mermaid
+flowchart LR
+  ended([task done or failed]) --> detect[detect signals]
+  detect --> cluster[cluster by cause]
+  cluster --> propose["propose<br/>read-only proposer run"]
+  propose --> gate{gate}
+  gate -->|weakens a check or protected path,<br/>targets AGENTS.md or memory| rejected([stored rejected, with a reason])
+  gate -->|passes| proposed([proposed])
+  proposed -->|repo track: Approve| task[task runs] -->|done| adopted([adopted])
+  proposed -->|harness track: orchd eval run,<br/>evolution.adopt| adopted
+  adopted --> measure[measure later tasks] -->|metric regressed| revert([revert_suggested])
+```
 
 ## 3. One attempt: from plan to commit
 

@@ -2,13 +2,15 @@
 //! subcommand), `orchd hook stop --socket <path> --token <t>`,
 //! `orchd hook rtk` (no socket or token -- it never contacts the daemon),
 //! `orchd mcp --data <dir> [--socket <path>]`, `orchd ab --data <dir> [--eval <set>]`, `orchd failures --data <dir>`, and
-//! `orchd eval run --data <dir> --socket <sock> ...` (see `eval.rs`).
+//! `orchd eval run --data <dir> --socket <sock> ...` (see `eval.rs`), and
+//! `orchd evolve --data <dir> [--socket <sock>] [--adopt <id>]` (see `evolve.rs`).
 
 mod ab;
 mod brief;
 mod classify;
 mod engine;
 mod eval;
+mod evolve;
 mod git;
 mod harness;
 mod hook;
@@ -40,6 +42,9 @@ async fn run(args: Vec<String>) -> i32 {
     }
     if args.len() >= 2 && args[1] == "eval" {
         return eval::run(&args[2..]);
+    }
+    if args.len() >= 2 && args[1] == "evolve" {
+        return evolve::run(&args[2..]);
     }
     if args.len() >= 2 && args[1] == "mcp" {
         return mcp::run(&args[2..]);

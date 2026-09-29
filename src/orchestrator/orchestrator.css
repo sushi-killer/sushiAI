@@ -1155,3 +1155,97 @@
   color: var(--text-faint);
   font-size: var(--text-xs);
 }
+
+/* Evolution proposals above the orchestrator chat. */
+.orch-proposals {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-xs);
+  max-height: 440px;
+  overflow-y: auto;
+  padding-bottom: var(--gap-sm);
+}
+
+.orch-proposal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-xs);
+  padding: var(--gap-xs) var(--gap-sm);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+.orch-proposal.revert {
+  border-left: 3px solid var(--tone-danger);
+}
+
+.orch-proposal-head {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+}
+
+.orch-proposal-track {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.orch-proposal-form {
+  color: var(--text-muted);
+}
+
+.orch-proposal-status {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+
+.orch-proposal-status.status-revert_suggested {
+  color: var(--tone-danger);
+}
+
+.orch-proposal-change {
+  overflow-wrap: anywhere;
+}
+
+.orch-proposal-meta {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.orch-proposal-command {
+  padding: var(--gap-xs) var(--gap-sm);
+  border-radius: var(--radius-md);
+  background: var(--bg-hover);
+  font-family: monospace;
+  font-size: var(--text-xs);
+  user-select: text;
+  overflow-wrap: anywhere;
+}
+
+.orch-proposal-actions {
+  display: flex;
+  gap: var(--gap-sm);
+}
+
+.orch-proposal-error {
+  color: var(--tone-danger);
+  font-size: var(--text-xs);
+}
+
+.orch-proposal-button {
+  padding: var(--gap-xs) var(--gap-sm);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: var(--text-xs);
+}
+
+.orch-proposal-button:hover {
+  background: var(--bg-hover);
+}

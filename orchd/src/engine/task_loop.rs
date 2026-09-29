@@ -1706,5 +1706,6 @@ impl App {
         if let Ok(Some(task)) = self.store.load_task(task_id) {
             self.advance_graph(&task.repo);
         }
+        self.record_evolution_signals(task_id);
     }
 }

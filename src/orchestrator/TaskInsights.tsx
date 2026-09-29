@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { orchestratorClient } from "./client";
 import { formatCost, formatDuration } from "./helpers";
-import type { FailureRow, Task, TimelineSegment } from "./types";
+import type { FailureRow, Proposal, Task, TimelineSegment } from "./types";
 
 const TOP_FAILURES = 10;
 
@@ -110,6 +110,136 @@ export function RecurringFailures({
             {row.tasks.length} {row.tasks.length === 1 ? "task" : "tasks"}
           </span>
         </button>
+      ))}
+    </div>
+  );
+}
+
+function upsertProposal(rows: Proposal[], proposal: Proposal): Proposal[] {
+  const index = rows.findIndex((row) => row.id === proposal.id);
+  if (index < 0) return [proposal, ...rows];
+  return rows.map((row, i) => (i === index ? proposal : row));
+}
+
+/** The daemon's evolution proposals for this repo: what to change, the
+ * evidence and the metric that will judge it. A repo-track one is approved
+ * (it becomes a task) or rejected; a harness-track one carries the A/B eval
+ * command and is marked adopted by hand. `refresh` changes whenever the task
+ * list does. */
+export function EvolutionProposals({
+  cwd,
+  refresh,
+}: {
+  cwd: string;
+  refresh: string;
+}) {
+  const [rows, setRows] = useState<Proposal[]>([]);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    orchestratorClient
+      .evolutionList(cwd)
+      .then((loaded) => !cancelled && setRows(loaded))
+      .catch(() => !cancelled && setRows([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, refresh]);
+
+  useEffect(() => {
+    const off = window.bridge?.onOrchestrator((event) => {
+      if (event.event === "proposal" && event.proposal.repo === cwd)
+        setRows((old) => upsertProposal(old, event.proposal));
+    });
+    return () => off?.();
+  }, [cwd]);
+
+  function act(id: string, run: () => Promise<Proposal>) {
+    run()
+      .then((proposal) => {
+        setRows((old) => upsertProposal(old, proposal));
+        setErrors((old) => ({ ...old, [id]: "" }));
+      })
+      .catch((error: unknown) =>
+        setErrors((old) => ({
+          ...old,
+          [id]: error instanceof Error ? error.message : String(error),
+        })),
+      );
+  }
+
+  if (rows.length === 0) return null;
+  return (
+    <div className="orch-proposals">
+      <span className="dialog-eyebrow">PROPOSALS</span>
+      {rows.map((row) => (
+        <div
+          key={row.id}
+          className={`orch-proposal${
+            row.status === "revert_suggested" ? " revert" : ""
+          }`}
+        >
+          <div className="orch-proposal-head">
+            <span className="orch-proposal-track">{row.track}</span>
+            <span className="orch-proposal-form">{row.form}</span>
+            <span className={`orch-proposal-status status-${row.status}`}>
+              {row.status.replace("_", " ")}
+            </span>
+          </div>
+          <div className="orch-proposal-change">{row.change}</div>
+          <div className="orch-proposal-meta">{row.evidence}</div>
+          <div className="orch-proposal-meta">Metric: {row.metric}</div>
+          {row.reason && (
+            <div className="orch-proposal-meta">Reason: {row.reason}</div>
+          )}
+          {row.track === "harness" && row.evalCommand && (
+            <code className="orch-proposal-command">{row.evalCommand}</code>
+          )}
+          <div className="orch-proposal-actions">
+            {row.track === "repo" && row.status === "proposed" && (
+              <>
+                <button
+                  className="orch-proposal-button"
+                  onClick={() =>
+                    act(row.id, () =>
+                      orchestratorClient.evolutionApprove(row.id),
+                    )
+                  }
+                >
+                  Approve
+                </button>
+                <button
+                  className="orch-proposal-button"
+                  onClick={() =>
+                    act(row.id, () =>
+                      orchestratorClient.evolutionReject(row.id),
+                    )
+                  }
+                >
+                  Reject
+                </button>
+              </>
+            )}
+            {row.track === "harness" &&
+              row.status !== "adopted" &&
+              row.status !== "rejected" && (
+                <button
+                  className="orch-proposal-button"
+                  onClick={() =>
+                    act(row.id, () => orchestratorClient.evolutionAdopt(row.id))
+                  }
+                >
+                  Mark adopted
+                </button>
+              )}
+          </div>
+          {errors[row.id] && (
+            <div className="orch-proposal-error" role="alert">
+              {errors[row.id]}
+            </div>
+          )}
+        </div>
       ))}
     </div>
   );

@@ -4,11 +4,14 @@
 //
 //   node .agents/skills/ui-evidence/scripts/orchestrator-panel.mjs <seed.json> <task title>
 //
-// <seed.json> is a JSON array of task objects (see SKILL.md for the shape);
-// only `title` is required, everything else defaults. The tasks are written
-// as task.json files into the throwaway profile's orchd data dir before the
-// app starts; the app then spawns orchd on that profile as usual, which loads
-// them. Only finished/waiting statuses are accepted, because orchd resumes
+// <seed.json> is a JSON array of task objects, or {tasks, proposals} (see
+// SKILL.md for the shape); only `title` is required on a task, everything
+// else defaults. The tasks are written as task.json files into the throwaway
+// profile's orchd data dir before the app starts; the app then spawns orchd
+// on that profile as usual, which loads them. Each proposal is completed
+// (id, repo, createdAt) and written to <dataDir>/evolution/proposals/<id>.json,
+// the path orchd's store reads; when any were seeded the run also saves
+// artifacts/orchestrator-proposals.png, a crop of the PROPOSALS list. Only finished/waiting statuses are accepted, because orchd resumes
 // queued/running/drafting tasks on start - a fixture must never run a harness.
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
@@ -76,11 +79,14 @@ function taskJson(seed, repo, now, id, ids) {
   };
 }
 
-async function loadSeedTasks(seedPath) {
+async function loadSeed(seedPath) {
   const raw = JSON.parse(await fs.readFile(seedPath, "utf8"));
-  if (!Array.isArray(raw))
-    throw new Error("seed file must be a JSON array of tasks");
-  return raw;
+  if (Array.isArray(raw)) return { tasks: raw, proposals: [] };
+  if (raw && Array.isArray(raw.tasks))
+    return { tasks: raw.tasks, proposals: raw.proposals ?? [] };
+  throw new Error(
+    "seed file must be a JSON array of tasks or {tasks, proposals}",
+  );
 }
 
 const [, , seedPath, title] = process.argv;
@@ -96,7 +102,7 @@ if (!seedPath || !title) {
   let app = null;
 
   try {
-    const tasks = await loadSeedTasks(seedPath);
+    const { tasks, proposals } = await loadSeed(seedPath);
     const now = Date.now();
     const ids = new Map(
       tasks.filter((seed) => seed.key).map((seed) => [seed.key, randomUUID()]),
@@ -108,6 +114,18 @@ if (!seedPath || !title) {
       const dir = `${dataDir}/tasks/${task.id}`;
       await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(`${dir}/task.json`, JSON.stringify(task, null, 2));
+    }
+    if (!Array.isArray(proposals))
+      throw new Error("proposals must be an array");
+    const proposalsDir = `${dataDir}/evolution/proposals`;
+    await fs.mkdir(proposalsDir, { recursive: true });
+    for (const [index, seed] of proposals.entries()) {
+      const id = seed.id ?? randomUUID();
+      const proposal = { ...seed, id, repo: root, createdAt: now + index };
+      await fs.writeFile(
+        `${proposalsDir}/${id}.json`,
+        JSON.stringify(proposal, null, 2),
+      );
     }
     report.seededTitles = tasks.map((t) => t.title);
 
@@ -173,6 +191,12 @@ if (!seedPath || !title) {
     await page
       .locator(".orch-main")
       .screenshot({ path: shot("orchestrator-home") });
+    if (proposals.length > 0) {
+      await page.locator(".orch-proposals").waitFor({ timeout: 10000 });
+      await page
+        .locator(".orch-proposals")
+        .screenshot({ path: shot("orchestrator-proposals") });
+    }
     await row.first().click();
     await page.locator(".orch-detail").waitFor();
 
@@ -184,6 +208,9 @@ if (!seedPath || !title) {
       window: shot("orchestrator-window"),
       detail: shot("orchestrator-detail"),
       home: shot("orchestrator-home"),
+      ...(proposals.length > 0
+        ? { proposals: shot("orchestrator-proposals") }
+        : {}),
     };
     report.selectedTitle = title;
   } catch (error) {

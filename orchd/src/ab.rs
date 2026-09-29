@@ -87,8 +87,8 @@ impl Breakdown {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Bucket {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Bucket {
     Process,
     Evidence,
     Verify,
@@ -123,7 +123,7 @@ const EVIDENCE_WORDS: [&str; 3] = ["screenshot", "playwright", ".png"];
 
 /// Sorts one top-level tool call into a bucket, first match wins in the
 /// order process, evidence, verify, task, explore.
-fn classify_call(
+pub(crate) fn classify_call(
     name: &str,
     input: &Value,
     changed: &[String],
@@ -155,6 +155,30 @@ fn classify_call(
     Bucket::Explore
 }
 
+/// The top-level tool calls in `events.jsonl` order as (index of the event,
+/// tool name, input); a subagent's calls carry `parent_tool_use_id` and are
+/// skipped. This is the one definition of "a tool call" for the breakdown
+/// and for evolution signals.
+pub(crate) fn top_level_calls(events: &[Value]) -> impl Iterator<Item = (usize, &str, &Value)> {
+    events.iter().enumerate().flat_map(|(i, ev)| {
+        let blocks = if ev.get("type").and_then(Value::as_str) != Some("assistant")
+            || ev.get("parent_tool_use_id").is_some_and(|p| !p.is_null())
+        {
+            None
+        } else {
+            ev.pointer("/message/content").and_then(Value::as_array)
+        };
+        blocks
+            .into_iter()
+            .flatten()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+            .map(move |b| {
+                let name = b.get("name").and_then(Value::as_str).unwrap_or("");
+                (i, name, b.get("input").unwrap_or(&Value::Null))
+            })
+    })
+}
+
 /// Splits an implement attempt's top-level tool calls (assistant `tool_use`
 /// blocks in `events.jsonl`; a subagent's carry `parent_tool_use_id` and are
 /// ignored) into process, evidence, verify, task and explore, given the files
@@ -170,28 +194,13 @@ pub fn work_breakdown(
     rules: &WorkBuckets,
 ) -> Breakdown {
     let mut b = Breakdown::default();
-    for ev in events {
-        if ev.get("type").and_then(Value::as_str) != Some("assistant")
-            || ev.get("parent_tool_use_id").is_some_and(|p| !p.is_null())
-        {
-            continue;
-        }
-        let Some(blocks) = ev.pointer("/message/content").and_then(Value::as_array) else {
-            continue;
-        };
-        for block in blocks {
-            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
-                continue;
-            }
-            let name = block.get("name").and_then(Value::as_str).unwrap_or("");
-            let input = block.get("input").unwrap_or(&Value::Null);
-            match classify_call(name, input, changed, verify, rules) {
-                Bucket::Process => b.process += 1,
-                Bucket::Evidence => b.evidence += 1,
-                Bucket::Verify => b.verify += 1,
-                Bucket::Task => b.task += 1,
-                Bucket::Explore => b.explore += 1,
-            }
+    for (_, name, input) in top_level_calls(events) {
+        match classify_call(name, input, changed, verify, rules) {
+            Bucket::Process => b.process += 1,
+            Bucket::Evidence => b.evidence += 1,
+            Bucket::Verify => b.verify += 1,
+            Bucket::Task => b.task += 1,
+            Bucket::Explore => b.explore += 1,
         }
     }
     b

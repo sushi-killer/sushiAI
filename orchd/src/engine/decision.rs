@@ -14,7 +14,7 @@ fn find_error_line(text: &str) -> Option<&str> {
 /// Strips digits and absolute-path-looking tokens (so `/tmp/xyz123/a.ts:42`
 /// across two runs still normalizes to the same signature) and collapses
 /// whitespace.
-fn normalize_signature_line(line: &str) -> String {
+pub(crate) fn normalize_signature_line(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {

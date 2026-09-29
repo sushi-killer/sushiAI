@@ -62,6 +62,10 @@ it is running is never interrupted.
 - repo_audit {repo} starts a read-only audit of how ready a repository is \
 for autonomous agent work. It runs in the background: give the owner the \
 audit id it returns.
+- evolution_run clusters the signals finished tasks left behind and starts \
+read-only proposer runs for the clusters worth acting on. It returns at once \
+with the clusters it started; proposals appear in the owner's evolution list, \
+and the owner approves them. Never approve, reject or adopt one yourself.
 ";
 
 /// The role handed to a task agent attached through `orchd mcp --task`.
@@ -84,7 +88,7 @@ pub const TASK_TOOLS: [&str; 4] = [
 ];
 
 /// What the orchestrator agent gets: every tool below.
-pub const ORCHESTRATOR_TOOLS: [&str; 17] = [
+pub const ORCHESTRATOR_TOOLS: [&str; 18] = [
     "task_list",
     "task_get",
     "task_create",
@@ -102,6 +106,7 @@ pub const ORCHESTRATOR_TOOLS: [&str; 17] = [
     "ask_orchestrator",
     "orchestrator_reply",
     "repo_audit",
+    "evolution_run",
 ];
 
 fn from_schema() -> Value {
@@ -321,6 +326,12 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                 },
                 "required": ["repo"],
             }),
+        ),
+        (
+            "evolution_run",
+            "evolution.run",
+            "Cluster the recorded task signals (repeated waste: loops, throwaway scripts, repeated owner questions, ...) and start a read-only proposer run for each cluster that meets the evidence thresholds and has no proposal yet, at most the configured maximum. Returns the started clusters at once; each proposal is stored when its run ends. Also updates the measurement of adopted proposals.",
+            json!({"type": "object", "properties": {}}),
         ),
     ]
 }
@@ -718,6 +729,7 @@ mod tests {
                 "ask_orchestrator",
                 "orchestrator_reply",
                 "repo_audit",
+                "evolution_run",
             ]
         );
         assert_eq!(names, ORCHESTRATOR_TOOLS);

@@ -65,6 +65,21 @@ export type Settings = {
     }
   >; /** Repository-specific path fragments for `orchd ab`'s work breakdown. */
   workBuckets?: { process: string[]; evidence: string[] };
+  /** Thresholds for the evolution loop; absent in older settings. */
+  evolution?: EvolutionSettings;
+};
+
+export type EvolutionSettings = {
+  /** Earlier tasks a repo needs before per-repo baselines mean anything. */
+  minTasks: number;
+  /** Tool calls a cluster of signals must have wasted to be worth a proposal. */
+  minWastedCalls: number;
+  minWastedUsd: number;
+  maxProposals: number;
+  /** Route id that writes proposals; "" means the hard tier's route. */
+  proposerRoute: string;
+  /** Tasks after which an accepted change is judged and possibly reverted. */
+  revertAfterTasks: number;
 };
 
 export type TaskStatus =
@@ -364,9 +379,87 @@ export type Audit = {
 /** Pushed when an audit starts and when it ends; its progress lines are
  * `LogEvent`s whose `taskId` is the audit id (`attempt` 0). */
 export type AuditEvent = { event: "audit"; audit: Audit };
+export type SignalKind =
+  | "loop"
+  | "discovery"
+  | "throwaway_script"
+  | "verify_signature"
+  | "review_finding"
+  | "owner_question"
+  | "process_read"
+  | "graph"
+  | "repeated_review"
+  | "preexisting";
+
+/** Where a signal's evidence is: a file relative to the data dir and a
+ * 1-based inclusive line range. */
+export type ExcerptRef = { file: string; fromLine: number; toLine: number };
+
+/** What a finished task left behind that an evolution proposal can cite. */
+export type Signal = {
+  kind: SignalKind;
+  taskId: string;
+  repo: string;
+  /** 0 for a signal about the whole task. */
+  attempt: number;
+  detail: string;
+  wastedCalls: number;
+  wastedUsd: number;
+  excerptRef: ExcerptRef;
+};
+
+export type ProposalStatus =
+  "proposed" | "approved" | "rejected" | "adopted" | "revert_suggested";
+
+/** Repo: a change to the audited repository, done as a task. Harness: a
+ * change to orchd's own settings, adopted after an A/B eval. */
+export type ProposalTrack = "repo" | "harness";
+
+export type ProposalForm =
+  | "script"
+  | "test"
+  | "lint"
+  | "doc"
+  | "command"
+  | "skill"
+  | "prompt"
+  | "gate"
+  | "routing"
+  | "default";
+
+export type ProposalCounts = { tasks: number; signals: number };
+
+export type Proposal = {
+  id: string;
+  clusterKey: string;
+  kind: string;
+  repo: string;
+  track: ProposalTrack;
+  form: ProposalForm;
+  change: string;
+  evidence: string;
+  metric: string;
+  test: string;
+  status: ProposalStatus;
+  createdAt: number;
+  costUsd: number;
+  fingerprint?: Fingerprint;
+  /** Harness track: the `orchd eval run` A/B command. */
+  evalCommand?: string;
+  /** Repo track, once approved: the task that carries the change. */
+  taskId?: string;
+  adoptedAt?: number;
+  before?: ProposalCounts;
+  after?: ProposalCounts;
+  /** Why it was rejected, or what regressed. */
+  reason?: string;
+};
+
+/** A proposal was stored or changed - an upsert by id. */
+export type ProposalEvent = { event: "proposal"; proposal: Proposal };
 /** Pushed over `onOrchestrator` from the daemon's one `subscribe` connection. */
 export type OrchestratorEvent =
-  TaskEvent | LogEvent | ChatEvent | MessageEvent | AuditEvent;
+  TaskEvent | LogEvent | ChatEvent | MessageEvent | AuditEvent | ProposalEvent;
 
 export type TimelineStage =
   "plan" | "implement" | "verify" | "review" | "advisor" | "final" | "wait";

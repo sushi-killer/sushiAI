@@ -26,6 +26,8 @@ use tokio::sync::{broadcast, oneshot, Notify, Semaphore};
 mod audit;
 #[path = "../chat.rs"]
 mod chat;
+#[path = "../evolution/mod.rs"]
+mod evolution;
 #[path = "../messages.rs"]
 mod messages;
 
@@ -257,6 +259,14 @@ pub struct App {
     /// Set by `shutdown()`: the loops it cancels end `stopped`, and that
     /// must not read as a dependency ending.
     shutting_down: AtomicBool,
+    /// Held across the check-and-append of evolution signal detection so one
+    /// task is never recorded twice.
+    evolution_lock: tokio::sync::Mutex<()>,
+    /// Keyed by cluster key: the `evolution.run` proposer runs still in
+    /// flight.
+    proposals: std::sync::Mutex<HashMap<String, CancelToken>>,
+    /// Held across a read-modify-write of a stored proposal.
+    proposal_lock: tokio::sync::Mutex<()>,
     self_ref: OnceLock<std::sync::Weak<App>>,
 }
 
@@ -409,6 +419,9 @@ impl App {
             parallel_limit,
             landing_locks: StdMutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
+            evolution_lock: tokio::sync::Mutex::new(()),
+            proposals: std::sync::Mutex::new(HashMap::new()),
+            proposal_lock: tokio::sync::Mutex::new(()),
             self_ref: OnceLock::new(),
         });
         let _ = app.self_ref.set(Arc::downgrade(&app));
@@ -454,6 +467,9 @@ impl App {
         for cancel in self.audits.lock().unwrap().values() {
             cancel.cancel();
         }
+        for cancel in self.proposals.lock().unwrap().values() {
+            cancel.cancel();
+        }
         let _ = self.shutdown_tx.send(());
     }
 
@@ -491,10 +507,10 @@ impl App {
         !self.chat_turns.lock().unwrap().is_empty()
     }
 
-    /// Same again for `repo.audit` runs: an entry goes only once its run
-    /// has returned.
+    /// Same again for `repo.audit` and evolution proposer runs: an entry
+    /// goes only once its run has returned.
     pub fn any_audit_running(&self) -> bool {
-        !self.audits.lock().unwrap().is_empty()
+        !self.audits.lock().unwrap().is_empty() || !self.proposals.lock().unwrap().is_empty()
     }
 
     /// `ping`/`hook.stop` are the only methods reachable without the
@@ -592,6 +608,11 @@ impl App {
             "repo.audit" => audit::handle_start(self, params).await,
             "repo.audit.get" => audit::handle_get(self, params).await,
             "repo.audit.list" => audit::handle_list(self, params).await,
+            "evolution.run" => self.handle_evolution_run().await,
+            "evolution.list" => self.handle_evolution_list(params).await,
+            "evolution.approve" => self.handle_evolution_approve(params).await,
+            "evolution.reject" => self.handle_evolution_reject(params).await,
+            "evolution.adopt" => self.handle_evolution_adopt(params).await,
             "hook.stop" => self.handle_hook_stop(params).await,
             "shutdown" => self.handle_shutdown().await,
             other => Err(format!("unknown method: {other}")),

@@ -129,7 +129,7 @@ pub async fn handle_list(
 /// A review run's read-only request, minus the audited checkout's own
 /// Claude settings: orchd does not own that checkout, and its settings'
 /// hooks are shell commands that would run outside the sandbox, in it.
-fn audit_request<'a>(
+pub(super) fn audit_request<'a>(
     route: &'a Route,
     repo: &'a Path,
     mcp: &'a Path,
@@ -144,7 +144,7 @@ fn audit_request<'a>(
 /// Writes the run's empty MCP config and, for Claude, the same read-only
 /// `settings.json` a review gets (plus the route's profile, as the planner
 /// route may carry one). Returns the MCP config, settings and key paths.
-fn prepare_run(
+pub(super) fn prepare_run(
     app: &App,
     route: &Route,
     dir: &Path,

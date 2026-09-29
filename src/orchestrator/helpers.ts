@@ -320,7 +320,8 @@ export function applyOrchestratorEvent(
   if (
     event.event === "chat" ||
     event.event === "message" ||
-    event.event === "audit"
+    event.event === "audit" ||
+    event.event === "proposal"
   )
     return state;
   const lines = [...(state.logLines[event.taskId] || []), event.line].slice(

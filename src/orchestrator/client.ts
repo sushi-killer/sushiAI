@@ -7,6 +7,7 @@ import type {
   ChatThread,
   FailureRow,
   Message,
+  Proposal,
   Settings,
   Task,
   TimelineSegment,
@@ -70,4 +71,11 @@ export const orchestratorClient = {
     call<ChatThread>("chat.switch", { repo, id }),
   chatClear: (repo: string) => call<ChatThread>("chat.clear", { repo }),
   messageList: (repo: string) => call<Message[]>("message.list", { repo }),
+  evolutionRun: () => call<unknown>("evolution.run"),
+  evolutionList: (repo?: string) =>
+    call<Proposal[]>("evolution.list", repo ? { repo } : {}),
+  evolutionApprove: (id: string) => call<Proposal>("evolution.approve", { id }),
+  evolutionReject: (id: string, reason?: string) =>
+    call<Proposal>("evolution.reject", { id, ...(reason ? { reason } : {}) }),
+  evolutionAdopt: (id: string) => call<Proposal>("evolution.adopt", { id }),
 };

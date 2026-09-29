@@ -211,6 +211,14 @@ test("call() rejects a method outside the protocol allowlist before touching the
   assert.equal(ALLOWED_METHODS.has("message.list"), true);
   // Read-only built-in defaults, compared against the saved settings.
   assert.equal(ALLOWED_METHODS.has("settings.defaults"), true);
+  for (const method of [
+    "evolution.run",
+    "evolution.list",
+    "evolution.approve",
+    "evolution.reject",
+    "evolution.adopt",
+  ])
+    assert.equal(ALLOWED_METHODS.has(method), true, method);
   assert.equal(ALLOWED_METHODS.has("hook.stop"), false);
 });
 

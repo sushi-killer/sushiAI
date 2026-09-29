@@ -126,6 +126,129 @@ pub struct Settings {
     /// Repository-specific path fragments for `orchd ab`'s work breakdown.
     #[serde(default)]
     pub work_buckets: WorkBuckets,
+    #[serde(default)]
+    pub evolution: EvolutionSettings,
+}
+
+/// Thresholds for the evolution loop (`engine/evolution`): what counts as
+/// enough evidence and how many proposals one round may make.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EvolutionSettings {
+    /// Earlier tasks a repo needs before per-repo baselines mean anything.
+    pub min_tasks: u32,
+    /// Tool calls a cluster of signals must have wasted to be worth a proposal.
+    pub min_wasted_calls: u32,
+    pub min_wasted_usd: f64,
+    pub max_proposals: u32,
+    /// Route id that writes proposals; "" means the hard tier's route.
+    pub proposer_route: String,
+    /// Tasks after which an accepted change is judged and possibly reverted.
+    pub revert_after_tasks: u32,
+}
+
+impl Default for EvolutionSettings {
+    fn default() -> Self {
+        EvolutionSettings {
+            min_tasks: 3,
+            min_wasted_calls: 20,
+            min_wasted_usd: 1.0,
+            max_proposals: 3,
+            proposer_route: String::new(),
+            revert_after_tasks: 10,
+        }
+    }
+}
+
+/// Which side of the line a proposed change lands on: orchd's own
+/// harness/settings, or the audited repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Track {
+    Harness,
+    Repo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProposalForm {
+    Script,
+    Test,
+    Lint,
+    Doc,
+    Command,
+    Skill,
+    Prompt,
+    Gate,
+    Routing,
+    Default,
+}
+
+/// What a proposer run hands back in its ```sushi-proposal block.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProposalReply {
+    pub track: Track,
+    pub form: ProposalForm,
+    pub change: String,
+    pub evidence: String,
+    pub metric: String,
+    pub test: String,
+    /// The experiment flags of the harness-track change, as an `orchd eval`
+    /// arm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arm: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalStatus {
+    Proposed,
+    Rejected,
+    Approved,
+    Adopted,
+    RevertSuggested,
+}
+
+/// Finished tasks of a repo on one side of an adoption, and the signals of
+/// the proposal's cluster those tasks left.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalCounts {
+    pub tasks: u32,
+    pub signals: u32,
+}
+
+/// One evolution proposal, stored at `<data>/evolution/proposals/<id>.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Proposal {
+    pub id: String,
+    pub cluster_key: String,
+    pub kind: String,
+    pub repo: String,
+    pub track: Track,
+    pub form: ProposalForm,
+    pub change: String,
+    pub evidence: String,
+    pub metric: String,
+    pub test: String,
+    pub status: ProposalStatus,
+    pub created_at: i64,
+    #[serde(default)]
+    pub cost_usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<Fingerprint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eval_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<ProposalCounts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<ProposalCounts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Tool-call inputs containing one of these count as process work (lesson
@@ -199,6 +322,7 @@ impl Default for Settings {
             experiments: default_experiments(),
             prices: default_prices(),
             work_buckets: WorkBuckets::default(),
+            evolution: EvolutionSettings::default(),
         }
     }
 }
@@ -1040,6 +1164,23 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_without_evolution_load_with_evolution_defaults() {
+        let mut v = serde_json::to_value(Settings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("evolution");
+        let s: Settings = serde_json::from_value(v).unwrap();
+        assert_eq!(s.evolution, EvolutionSettings::default());
+        assert_eq!(s.evolution.min_tasks, 3);
+        assert_eq!(s.evolution.min_wasted_calls, 20);
+        assert_eq!(s.evolution.min_wasted_usd, 1.0);
+        assert_eq!(s.evolution.max_proposals, 3);
+        assert_eq!(s.evolution.proposer_route, "");
+        assert_eq!(s.evolution.revert_after_tasks, 10);
+        let partial: EvolutionSettings = serde_json::from_str(r#"{"minTasks":5}"#).unwrap();
+        assert_eq!(partial.min_tasks, 5);
+        assert_eq!(partial.max_proposals, 3);
+    }
 
     #[test]
     fn settings_default_round_trips_through_json() {

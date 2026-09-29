@@ -41,6 +41,10 @@ pub enum Event {
     /// audit id.
     #[serde(rename = "audit")]
     Audit { audit: Box<serde_json::Value> },
+    /// An evolution proposal, as `evolution.list` returns it, each time it
+    /// is stored or changes.
+    #[serde(rename = "proposal")]
+    Proposal { proposal: Box<serde_json::Value> },
 }
 
 #[derive(Debug, Deserialize)]

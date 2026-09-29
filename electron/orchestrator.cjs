@@ -48,6 +48,11 @@ const ALLOWED_METHODS = new Set([
   "chat.switch",
   "chat.clear",
   "message.list",
+  "evolution.run",
+  "evolution.list",
+  "evolution.approve",
+  "evolution.reject",
+  "evolution.adopt",
 ]);
 
 const NOT_BUILT =

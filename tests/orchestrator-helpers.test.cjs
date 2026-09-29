@@ -177,6 +177,17 @@ test("implementAttemptCount counts only implementation attempts", async () => {
   );
 });
 
+test("a waiting row shows the real question count", async () => {
+  const { statusDetail } = await library;
+  const waiting = (text) =>
+    statusDetail(task({ status: "waiting", question: { text, options: [] } }));
+  assert.equal(
+    waiting("The planner has 3 blocking question(s); answer them all:\n\n1. a"),
+    "3 questions for you",
+  );
+  assert.equal(waiting("Which one?"), "1 question for you");
+});
+
 test("statusDetail adds only what the pill and progress don't say, never the question text", async () => {
   const { statusDetail } = await library;
   assert.equal(statusDetail(task({ status: "drafting" })), "");
@@ -766,4 +777,60 @@ test("dependencyTitles names what a task waits for and skips deleted ids", async
   ];
   assert.deepEqual(dependencyTitles(tasks[1], tasks), ["Part A"]);
   assert.deepEqual(dependencyTitles(tasks[0], tasks), []);
+});
+
+test("owner Inbox rows search by title or project and open the task at its question or summary", async () => {
+  const { matchesOwnerTask, ownerTarget } =
+    await import("../src/orchestrator/ownerAttention.ts");
+  const task = {
+    id: "t1",
+    title: "Ship it",
+    repo: "/work/Alpha",
+    status: "waiting",
+  };
+  assert.ok(matchesOwnerTask(task, "ship"));
+  assert.ok(matchesOwnerTask(task, "alpha"));
+  assert.ok(!matchesOwnerTask(task, "beta"));
+  assert.deepEqual(ownerTarget(task), {
+    taskId: "t1",
+    repo: "/work/Alpha",
+    focus: "question",
+  });
+  assert.equal(ownerTarget({ ...task, status: "failed" }).focus, "summary");
+});
+
+test("ownerInboxRows lists only tasks needing the owner and a row click opens its task", async () => {
+  const { ownerInboxRows } =
+    await import("../src/orchestrator/ownerAttention.ts");
+  const { orchestratorTarget } = await import("../src/orchestrator/notices.ts");
+  const base = { repo: "/work/Alpha", decisions: [], attempts: [] };
+  const tasks = [
+    { ...base, id: "w", title: "Ask", status: "waiting", updatedAt: 2 },
+    { ...base, id: "a", title: "Old", status: "failed", archived: true },
+    {
+      ...base,
+      id: "o",
+      title: "Mine",
+      status: "stopped",
+      decisions: ["Owner: stop"],
+    },
+    { ...base, id: "r", title: "Busy", status: "running" },
+  ];
+  const opened = [];
+  const rows = ownerInboxRows(tasks, "", (target) => opened.push(target));
+  assert.deepEqual(
+    rows.map((row) => row.key),
+    ["w"],
+  );
+  assert.equal(rows[0].reason, "1 question for you");
+  rows[0].open();
+  assert.deepEqual(opened, [
+    { taskId: "w", repo: "/work/Alpha", focus: "question" },
+  ]);
+  assert.equal(ownerInboxRows(tasks, "beta", () => {}).length, 0);
+  const workspace = { id: "ws", cwd: "/work/Alpha", panels: [], layout: null };
+  assert.deepEqual(orchestratorTarget([workspace], "/work/Alpha"), {
+    kind: "add-panel",
+    workspaceId: "ws",
+  });
 });

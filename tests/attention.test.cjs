@@ -178,6 +178,34 @@ test("waitingCount counts blocked and done-not-seen panels across every workspac
   assert.equal(waitingCount(ws, state, []), 1);
 });
 
+test("waitingCount adds orchd tasks that need the owner, not archived or owner-stopped ones", async () => {
+  const { createAttentionState, waitingCount } = await library;
+  const task = (id, status, extra = {}) => ({
+    id,
+    title: id,
+    repo: "/r",
+    status,
+    archived: false,
+    decisions: [],
+    attempts: [],
+    updatedAt: 1,
+    ...extra,
+  });
+  const tasks = [
+    task("w", "waiting"),
+    task("f", "failed"),
+    task("l", "landing"),
+    task("e", "stopped", { decisions: ["Orchestrator: nothing left"] }),
+    task("o", "stopped", { decisions: ["Owner: stop"] }),
+    task("i", "stopped", { attempts: [{ n: 1, status: "interrupted" }] }),
+    task("r", "running"),
+    task("d", "done"),
+    task("a", "failed", { archived: true }),
+  ];
+  assert.equal(waitingCount([], createAttentionState(), [], tasks), 4);
+  assert.equal(waitingCount([], createAttentionState(), []), 0);
+});
+
 test("cleanupSelection checks idle shells and seen idle/finished agents, never blocked or working", async () => {
   const { cleanupSelection } = await library;
   const w = workspace("w1", []);

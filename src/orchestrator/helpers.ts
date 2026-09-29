@@ -1,5 +1,6 @@
 // Pure helpers the renderer bends the protocol into a screen with - no
 // window.bridge access here, so they're cheap to unit test directly.
+import { questionCount, questionsLabel } from "./ownerAttention.ts";
 import type {
   Attempt,
   Fingerprint,
@@ -289,7 +290,7 @@ export function statusDetail(task: Task): string {
     case "running":
       return formatCost(task.costUsd);
     case "waiting":
-      return "1 question for you";
+      return questionsLabel(questionCount(task));
     case "landing":
       return "waiting to land";
     case "done": {

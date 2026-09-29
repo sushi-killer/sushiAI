@@ -198,7 +198,7 @@ export function App() {
     ws,
     saved,
   );
-  useOrchestratorNotices({
+  const { openTask: openOrchestratorTask } = useOrchestratorNotices({
     workspaces,
     showWorkspace,
     switchWorkspace,
@@ -218,7 +218,6 @@ export function App() {
     setZoomed(panel.id);
   }
   const primaryExtensionNavigation = primaryNavigation(extensionRegistry);
-
   const openPanelPicker = useCallback(() => setDialog({ kind: "pane" }), []);
 
   useAppPersistence(
@@ -441,6 +440,7 @@ export function App() {
               activeEndpoint={activeEndpoint}
               home={system?.home}
               switchWorkspace={switchWorkspace}
+              openOrchestratorTask={openOrchestratorTask}
               addExtensionPanel={addExtensionPanel}
               setExtensionEnabled={(extensionId, enabled) =>
                 void setExtensionEnabled(extensionId, enabled)

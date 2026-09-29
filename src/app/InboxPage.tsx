@@ -23,6 +23,9 @@ import {
 } from "./attention.ts";
 import { LOCAL_GROUP, groupKey, groupLabel } from "./workspaceMerge.ts";
 import type { WorkspaceController } from "../workspace/useWorkspaces.ts";
+import { ownerInboxRows } from "../orchestrator/ownerAttention.ts";
+import type { TaskTarget } from "../orchestrator/notices.ts";
+import type { Task } from "../orchestrator/types.ts";
 import type { ConnectionProfile, Workspace } from "../types";
 
 /** Rounded to whatever unit reads best - minutes under an hour, then hours,
@@ -51,6 +54,8 @@ function matchesQuery(row: InboxRow, query: string): boolean {
 export function InboxPage({
   groups,
   markSeen,
+  ownerTasks,
+  openOrchestratorTask,
   switchWorkspace,
   ws,
   connectionProfiles,
@@ -62,6 +67,8 @@ export function InboxPage({
 }: {
   groups: InboxGroup[];
   markSeen(panelId: string): void;
+  ownerTasks: Task[];
+  openOrchestratorTask(target: TaskTarget): void;
   switchWorkspace(id: string): void;
   ws: WorkspaceController;
   connectionProfiles: ConnectionProfile[];
@@ -102,7 +109,8 @@ export function InboxPage({
   }));
   const visibleRows = visibleGroups.flatMap((group) => group.rows);
   const selected = visibleRows.filter((row) => checked.includes(row.panel.id));
-  const empty = allRows.length === 0;
+  const visibleTasks = ownerInboxRows(ownerTasks, query, openOrchestratorTask);
+  const empty = allRows.length === 0 && ownerTasks.length === 0;
 
   function toggle(panelId: string, on: boolean) {
     setChecked((ids) =>
@@ -205,6 +213,27 @@ export function InboxPage({
             {selected.length > 0 && <span>{selected.length} selected</span>}
           </div>
           <div className="inbox-groups">
+            {visibleTasks.length > 0 && (
+              <div className="inbox-group">
+                <div className="inbox-group-head">
+                  <span>Orchestrator</span>
+                  <span className="count">{visibleTasks.length}</span>
+                </div>
+                {visibleTasks.map((row) => (
+                  <div className="session-row" key={row.key}>
+                    <button
+                      className="inbox-row-open"
+                      title={`Open ${row.title} in the Orchestrator`}
+                      aria-label={`Open task ${row.title}`}
+                      onClick={row.open}
+                    >
+                      <strong>{row.title}</strong>
+                      <small>{row.reason}</small>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             {visibleGroups
               .filter((group) => group.rows.length > 0)
               .map((group) => (

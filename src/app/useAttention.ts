@@ -11,6 +11,8 @@ import {
   type AttentionState,
 } from "./attention.ts";
 import { groupKey, groupLabel } from "./workspaceMerge.ts";
+import { ownerTasks } from "../orchestrator/ownerAttention.ts";
+import { useOrchestratorTasks } from "./useOrchestratorTasks.ts";
 import type { SectionRef } from "./navigation.ts";
 import type { ConnectionProfile, Workspace } from "../types";
 
@@ -45,6 +47,8 @@ export function useAttention({
   setSelected(id: string): void;
   setZoomed(id: string | null): void;
 }) {
+  // The orchd tasks waiting on the owner count and get Inbox rows.
+  const orchdTasks = useOrchestratorTasks();
   const [state, setState] = useState<AttentionState>(createAttentionState);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -123,7 +127,12 @@ export function useAttention({
     return () => clearInterval(timer);
   }, [findPanel]);
 
-  const waiting = waitingCount(workspaces, state, connectionProfiles);
+  const waiting = waitingCount(
+    workspaces,
+    state,
+    connectionProfiles,
+    orchdTasks,
+  );
   const working = workingCount(workspaces, state, connectionProfiles);
   const lastBadge = useRef("");
   useEffect(() => {
@@ -155,6 +164,7 @@ export function useAttention({
 
   return {
     groups: inboxGroups(workspaces, state, connectionProfiles),
+    ownerTasks: ownerTasks(orchdTasks),
     waiting,
     markSeen: (panelId: string) =>
       setState((current) => markSeen(current, panelId)),

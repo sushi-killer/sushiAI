@@ -472,6 +472,7 @@ test("the transition detector notifies done and failed once, only for live top-l
     event: "task",
     task: { ...base, id: "d3", status: "done", report: "# Old", reportAt: 1 },
   });
+  pushEvent({ event: "task", task: { ...base, id: "f1", status: "running" } });
   pushEvent({
     event: "task",
     task: {
@@ -531,6 +532,80 @@ test("the transition detector notifies done and failed once, only for live top-l
       ["d3", "done", "Ship it", "$1.23 · on task/ship, not landed", "report"],
       ["f1", "failed", "Ship it", "verify failed · $1.23", "summary"],
       ["s3", "input", "Ship it", "Which?", "question"],
+    ],
+  );
+});
+
+test("the transition detector notifies once when a top-level task lands dirty, fails or is stopped by the engine, never for an owner stop", async (t) => {
+  const { socketPath, directory, hasSubscriber, pushEvent } =
+    await fixtureServer(t, {
+      ping: () => ({}),
+      "settings.get": () => ({ routes: [], classifier: { providerId: "" } }),
+    });
+  const notices = [];
+  const service = await serviceAgainst(t, socketPath, directory, {
+    send: () => {},
+    notify: (notice) => {
+      notices.push(notice);
+    },
+  });
+  service.connect();
+  await waitUntil(hasSubscriber);
+  const base = {
+    title: "Ship it",
+    repo: "/repo",
+    costUsd: 0,
+    archived: false,
+    attempts: [],
+    decisions: [],
+  };
+  const running = (id, extra = {}) =>
+    pushEvent({
+      event: "task",
+      task: { ...base, id, status: "running", ...extra },
+    });
+  for (const id of ["l1", "e1", "o1", "o2", "f1", "a1"]) running(id);
+  const landing = { ...base, id: "l1", status: "landing" };
+  pushEvent({ event: "task", task: landing });
+  pushEvent({ event: "task", task: { ...landing, costUsd: 1 } });
+  const engineStopped = {
+    ...base,
+    id: "e1",
+    status: "stopped",
+    decisions: ["Orchestrator: no subtasks are left"],
+  };
+  pushEvent({ event: "task", task: engineStopped });
+  pushEvent({ event: "task", task: { ...engineStopped, costUsd: 2 } });
+  const failed = { ...base, id: "f1", status: "failed" };
+  pushEvent({ event: "task", task: failed });
+  pushEvent({ event: "task", task: { ...failed, costUsd: 3 } });
+  pushEvent({
+    event: "task",
+    task: { ...base, id: "o1", status: "stopped", decisions: ["Owner: stop"] },
+  });
+  pushEvent({
+    event: "task",
+    task: {
+      ...base,
+      id: "o2",
+      status: "stopped",
+      attempts: [{ n: 1, status: "interrupted" }],
+    },
+  });
+  pushEvent({
+    event: "task",
+    task: { ...base, id: "a1", status: "landing", archived: true },
+  });
+  // Already landing when first seen: not a transition, no notice.
+  pushEvent({ event: "task", task: { ...base, id: "n1", status: "landing" } });
+  await waitUntil(() => notices.length >= 3);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(
+    notices.map((n) => [n.taskId, n.kind, n.body]),
+    [
+      ["l1", "landing", "Waiting for a clean checkout to land."],
+      ["e1", "stopped", "Stopped on its own - needs a look."],
+      ["f1", "failed", "failed · $0.00"],
     ],
   );
 });

@@ -185,6 +185,20 @@ const FAILURE_LABELS = {
   error: "error",
 };
 
+/** A stop the engine chose rather than the owner (mirrors
+ * `stoppedByEngine` in src/orchestrator/ownerAttention.ts): the owner's stop
+ * leaves an "Owner:" decision or an interrupted attempt. */
+function stoppedByEngine(task) {
+  if (task.status !== "stopped") return false;
+  const decisions = Array.isArray(task.decisions) ? task.decisions : [];
+  const last = String(decisions[decisions.length - 1] ?? "");
+  if (last.startsWith("Owner:")) return false;
+  if (last.startsWith("Orchestrator:")) return true;
+  const attempts = Array.isArray(task.attempts) ? task.attempts : [];
+  const attempt = attempts[attempts.length - 1];
+  return !!attempt && attempt.status !== "interrupted" && !!attempt.failure;
+}
+
 function formatCost(costUsd) {
   return `$${(costUsd || 0).toFixed(2)}`;
 }
@@ -224,6 +238,14 @@ function orchestratorNotice(task) {
     const failure = last?.failure?.kind;
     const label = FAILURE_LABELS[failure] || failure || "failed";
     body = cap(`${label} · ${formatCost(task.costUsd)}`, 300);
+  } else if (task.status === "landing") {
+    kind = "landing";
+    focus = "summary";
+    body = "Waiting for a clean checkout to land.";
+  } else if (task.status === "stopped") {
+    kind = "stopped";
+    focus = "summary";
+    body = "Stopped on its own - needs a look.";
   }
   const notice = {
     taskId: cap(task.id, 200),
@@ -282,6 +304,9 @@ class OrchestratorService {
     // Keys of notices already raised (see #notifyTransition): a task
     // re-entering a state with the same question never re-notifies.
     this.notified = new Set();
+    // Last status seen per task: failed/landing/stopped notify only on a
+    // real change into that status, not when first seen already there.
+    this.lastStatus = new Map();
   }
 
   async #refreshToken() {
@@ -498,22 +523,33 @@ class OrchestratorService {
 
   /** The transition detector: raises one notice per (task, question) for a
    * task needing input, and one per (task, status) for a top-level task that
-   * finished or failed. Subtasks never raise done/failed, archived tasks
+   * finished, failed, waits to land or was stopped by the engine. Subtasks never raise those, archived tasks
    * raise nothing. */
   #notifyTransition(message) {
     if (message.event !== "task") return;
     const task = message.task;
     if (task && typeof task === "object") this.onTask?.(task);
+    let previous;
+    if (task && typeof task === "object" && task.id !== undefined) {
+      previous = this.lastStatus.get(task.id);
+      this.lastStatus.set(task.id, task.status);
+    }
     if (!this.notify) return;
     if (!task || typeof task !== "object" || task.archived) return;
+    const changed = previous !== undefined && previous !== task.status;
     let key;
     if (task.status === "waiting")
       key = `input:${task.id}:${task.question?.text || ""}`;
+    else if (task.status === "done" && !task.parent)
+      key = `${task.status}:${task.id}`;
     else if (
-      (task.status === "done" || task.status === "failed") &&
+      (task.status === "failed" || task.status === "landing") &&
+      changed &&
       !task.parent
     )
       key = `${task.status}:${task.id}`;
+    else if (stoppedByEngine(task) && changed && !task.parent)
+      key = `stopped:${task.id}`;
     if (!key || this.notified.has(key)) return;
     this.notified.add(key);
     this.notify(orchestratorNotice(task));

@@ -8,7 +8,7 @@ export type TaskNoticeFocus = "question" | "summary" | "report";
 export type TaskNotice = {
   taskId: string;
   repo: string;
-  kind: "input" | "done" | "failed";
+  kind: "input" | "done" | "failed" | "landing" | "stopped";
   title: string;
   body: string;
   focus: TaskNoticeFocus;

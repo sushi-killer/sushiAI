@@ -580,6 +580,19 @@ impl App {
                     }
                     self.spawn_task_loop(task.id.clone(), true)
                 }
+                // Everything that had ended was restarted and still runs:
+                // the question is moot, the task just waits again.
+                Waits::Pending if asking => {
+                    let mut task = task.clone();
+                    task.question = None;
+                    task.status = TaskStatus::Queued;
+                    task.updated_at = now_ms();
+                    let _ = self.store.save_task(&task);
+                    self.broadcast_task(&task);
+                    if unstarted_children {
+                        self.spawn_task_loop(task.id.clone(), true)
+                    }
+                }
                 Waits::Pending if unstarted_children => self.spawn_task_loop(task.id.clone(), true),
                 Waits::Ended(ended) => {
                     if !asking {

@@ -344,4 +344,17 @@ mod tests {
         ));
         assert!(parse_judgement("no idea").is_none());
     }
+
+    #[test]
+    fn the_rule_never_answers_the_accept_option() {
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.attempts = vec![attempt_with_failure(1, "review:x")];
+        let q = Question {
+            text: "Attempts keep failing".into(),
+            options: opts(&["continue", brief::ACCEPT_LAST_ATTEMPT, "stop"]),
+            kind: QuestionKind::AttemptsFailing,
+        };
+        let (answer, _) = rule_answer(&task, &q, 1).unwrap();
+        assert_eq!(answer, "continue");
+    }
 }

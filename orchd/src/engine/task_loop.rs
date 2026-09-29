@@ -164,6 +164,45 @@ pub(super) async fn run_task_loop(
             }
         }
 
+        // The owner accepted the last attempt while no loop was live: only
+        // its final checks and the commit are left.
+        if let Some(idx) = pending_acceptance(&task) {
+            let attempt_n = task.attempts[idx].n;
+            let run_dir = app.store.run_dir(&task_id, attempt_n);
+            let _ = std::fs::create_dir_all(&run_dir);
+            let settings = app.settings.read().unwrap().clone();
+            let worktree = PathBuf::from(&task.worktree);
+            let a = &mut task.attempts[idx];
+            a.status = AttemptStatus::Running;
+            a.ended_at = None;
+            a.failure = None;
+            task.status = TaskStatus::Running;
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
+            match finish_after_review(
+                &app,
+                &task_id,
+                &mut task,
+                idx,
+                attempt_n,
+                &worktree,
+                &run_dir,
+                &settings,
+                &mut attempt_budget,
+                &pending_answer,
+                &cancel,
+                &mut permit,
+            )
+            .await
+            {
+                Tail::Continue => {
+                    continue;
+                }
+                Tail::Return => return,
+            }
+        }
+
         if needs_planning(&task) {
             match run_plan_stage(
                 &app,
@@ -297,16 +336,19 @@ pub(super) async fn run_task_loop(
         // A check that already fails on the base can never be met by the
         // work: ask about it now, before an attempt is spent on it.
         if implement_attempt_count(&task) == 0 && parent_failure.is_none() {
-            if let Some(base_run) =
-                failing_twice_on_base(&app, &task, &task.final_verify, &cancel).await
-            {
-                task.question = Some(pre_existing_question(
-                    &base_run.command,
-                    &task.base_sha,
-                    &base_run.tail,
-                ));
+            let unanswered: Vec<String> = task
+                .final_verify
+                .iter()
+                .filter(|c| !owner_answered_base_check(&task, c, &task.base_sha))
+                .cloned()
+                .collect();
+            if let Some(base_run) = failing_twice_on_base(&app, &task, &unanswered, &cancel).await {
+                let question =
+                    pre_existing_question(&base_run.command, &task.base_sha, &base_run.tail);
+                task.question = Some(question.clone());
                 task.status = TaskStatus::Waiting;
                 task.updated_at = now_ms();
+                let assumed = task.assumptions.len();
                 let Some(answer) = wait_for_answer(
                     &app,
                     &task_id,
@@ -321,13 +363,21 @@ pub(super) async fn run_task_loop(
                     app.finish_task_loop(&task_id);
                     return;
                 };
-                if answer == PRE_EXISTING_DROP {
-                    task.verify.retain(|c| c != &base_run.command);
-                    task.final_verify.retain(|c| c != &base_run.command);
+                let policy_answered = task.assumptions.len() > assumed;
+                let base_sha = task.base_sha.clone();
+                record_owner_base_check(
+                    &mut task,
+                    &base_run.command,
+                    &base_sha,
+                    &answer,
+                    policy_answered,
+                );
+                if is_option(&answer, PRE_EXISTING_DROP) {
+                    apply_base_check_answer(&mut task, &question, &answer);
                     app.verify_cache.lock().unwrap().remove(&task_id);
-                    task.decisions
-                        .push(format!("Orchestrator: dropped check {}", base_run.command));
                 } else {
+                    // Retry: on the newest base. On an unmoved one the
+                    // answered pair keeps the preflight from asking again.
                     let wt = PathBuf::from(&task.worktree);
                     carry_onto_newest_base(&mut task, &wt).await;
                 }
@@ -944,7 +994,8 @@ pub(super) async fn run_task_loop(
             // question can't loop forever even when the classifier keeps
             // saying it's answerable.
             record_failure(&mut task, idx, FailureKind::Blocked, question_text.clone());
-            let should_continue = advance_after_failure(&mut task, attempt_budget);
+            let protected = app.settings.read().unwrap().protected_paths.clone();
+            let should_continue = advance_after_failure(&mut task, attempt_budget, &protected);
             if !should_continue {
                 // Same "attempts keep failing" escalation as
                 // `fail_and_continue`'s, inlined because a
@@ -1401,7 +1452,7 @@ pub(super) async fn run_task_loop(
                     paths.join(", ")
                 ));
             }
-            match fail_and_continue(
+            match fail_or_accept(
                 &app,
                 &task_id,
                 &mut task,
@@ -1415,14 +1466,37 @@ pub(super) async fn run_task_loop(
             )
             .await
             {
-                LoopSignal::Continue => {
+                FailSignal::Continue => {
                     drop(permit);
                     continue;
                 }
-                LoopSignal::Stop => {
+                FailSignal::Stop => {
                     drop(permit);
                     app.finish_task_loop(&task_id);
                     return;
+                }
+                FailSignal::Accept => {
+                    match finish_after_review(
+                        &app,
+                        &task_id,
+                        &mut task,
+                        idx,
+                        attempt_n,
+                        &worktree,
+                        &run_dir,
+                        &settings,
+                        &mut attempt_budget,
+                        &pending_answer,
+                        &cancel,
+                        &mut permit,
+                    )
+                    .await
+                    {
+                        Tail::Continue => {
+                            continue;
+                        }
+                        Tail::Return => return,
+                    }
                 }
             }
         }
@@ -1696,7 +1770,7 @@ pub(super) async fn run_task_loop(
 
         if let Some(r) = &review_result {
             if r.verdict == Verdict::Fail {
-                match fail_and_continue(
+                match fail_or_accept(
                     &app,
                     &task_id,
                     &mut task,
@@ -1710,137 +1784,43 @@ pub(super) async fn run_task_loop(
                 )
                 .await
                 {
-                    LoopSignal::Continue => {
+                    FailSignal::Continue => {
                         drop(permit);
                         continue;
                     }
-                    LoopSignal::Stop => {
+                    FailSignal::Stop => {
                         drop(permit);
                         app.finish_task_loop(&task_id);
                         return;
                     }
-                }
-            }
-        }
-
-        if !task.final_verify.is_empty() {
-            // Not through the verify cache: it keys on the diff alone and
-            // would hand back the fast checks' results.
-            let final_results = run_verify_commands(
-                &worktree,
-                &run_dir.join("final"),
-                &task.final_verify,
-                settings.sandbox,
-                &task.base_sha,
-                &cancel,
-            )
-            .await;
-            if cancel.is_cancelled() {
-                interrupt_attempt(&app, &mut task, idx);
-                drop(permit);
-                app.finish_task_loop(&task_id);
-                return;
-            }
-            task.attempts[idx]
-                .verify
-                .extend(final_results.iter().cloned());
-            let failed_finals: Vec<VerifyOutcome> = final_results
-                .iter()
-                .filter(|v| v.code != Some(0))
-                .cloned()
-                .collect();
-            for failed in &failed_finals {
-                let detail = format!(
-                    "Final check {} exited {}.\n{}",
-                    failed.command,
-                    failed
-                        .code
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "null".to_string()),
-                    failed.tail
-                );
-                let base_dir = run_dir.join("final-base");
-                let on_base = failing_on_base(&app, &task, failed, &base_dir, &cancel).await;
-                let Some(base_run) = on_base else {
-                    match fail_and_continue(
-                        &app,
-                        &task_id,
-                        &mut task,
-                        idx,
-                        FailureKind::Verify,
-                        detail,
-                        &mut attempt_budget,
-                        &pending_answer,
-                        &cancel,
-                        &mut permit,
-                    )
-                    .await
-                    {
-                        LoopSignal::Continue => {
-                            drop(permit);
-                            continue 'attempts;
-                        }
-                        LoopSignal::Stop => {
-                            drop(permit);
-                            app.finish_task_loop(&task_id);
-                            return;
+                    FailSignal::Accept => {
+                        match finish_after_review(
+                            &app,
+                            &task_id,
+                            &mut task,
+                            idx,
+                            attempt_n,
+                            &worktree,
+                            &run_dir,
+                            &settings,
+                            &mut attempt_budget,
+                            &pending_answer,
+                            &cancel,
+                            &mut permit,
+                        )
+                        .await
+                        {
+                            Tail::Continue => {
+                                continue;
+                            }
+                            Tail::Return => return,
                         }
                     }
-                };
-                // The failure is older than this task: no retry can fix it.
-                // The owner decides what the check is worth.
-                record_failure(&mut task, idx, FailureKind::Verify, detail);
-                task.question = Some(pre_existing_question(
-                    &failed.command,
-                    &task.base_sha,
-                    &base_run.tail,
-                ));
-                task.status = TaskStatus::Waiting;
-                task.updated_at = now_ms();
-                let Some(answer) = wait_for_answer(
-                    &app,
-                    &task_id,
-                    &mut task,
-                    &pending_answer,
-                    &cancel,
-                    &mut permit,
-                )
-                .await
-                else {
-                    drop(permit);
-                    app.finish_task_loop(&task_id);
-                    return;
-                };
-                if answer == PRE_EXISTING_DROP {
-                    task.final_verify.retain(|c| c != &failed.command);
-                    task.decisions.push(format!(
-                        "Orchestrator: dropped final check {}",
-                        failed.command
-                    ));
-                    // The check no longer counts: the attempt is not failed.
-                    let a = &mut task.attempts[idx];
-                    a.status = AttemptStatus::Running;
-                    a.ended_at = None;
-                    a.failure = None;
-                    task.status = TaskStatus::Running;
-                    task.updated_at = now_ms();
-                    let _ = app.store.save_task(&task);
-                    app.broadcast_task(&task);
-                    continue;
                 }
-                // Retry (any other answer): one more attempt on the newest
-                // base, even when the attempt budget is spent.
-                carry_onto_newest_base(&mut task, &worktree).await;
-                attempt_budget = attempt_budget.max(implement_attempt_count(&task) + 1);
-                task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
-                app.broadcast_task(&task);
-                drop(permit);
-                continue 'attempts;
             }
         }
 
-        match finish_attempt(
+        match finish_after_review(
             &app,
             &task_id,
             &mut task,
@@ -2013,6 +1993,155 @@ impl App {
 pub(super) enum Tail {
     Continue,
     Return,
+}
+
+/// A passed review (or an accepted attempt): the task's final checks run on
+/// the worktree, then `finish_attempt` commits or lands it. A failing final
+/// check is a `Verify` failure -- or, when it already failed on the base, a
+/// question to the owner.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn finish_after_review(
+    app: &Arc<App>,
+    task_id: &str,
+    task: &mut Task,
+    idx: usize,
+    attempt_n: u32,
+    worktree: &Path,
+    run_dir: &Path,
+    settings: &Settings,
+    attempt_budget: &mut u32,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    cancel: &CancelToken,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Tail {
+    if !task.final_verify.is_empty() {
+        // Not through the verify cache: it keys on the diff alone and
+        // would hand back the fast checks' results.
+        let final_results = run_verify_commands(
+            worktree,
+            &run_dir.join("final"),
+            &task.final_verify,
+            settings.sandbox,
+            &task.base_sha,
+            cancel,
+        )
+        .await;
+        if cancel.is_cancelled() {
+            interrupt_attempt(app, task, idx);
+            *permit = None;
+            app.finish_task_loop(task_id);
+            return Tail::Return;
+        }
+        task.attempts[idx]
+            .verify
+            .extend(final_results.iter().cloned());
+        let failed_finals: Vec<VerifyOutcome> = final_results
+            .iter()
+            .filter(|v| v.code != Some(0))
+            .cloned()
+            .collect();
+        for failed in &failed_finals {
+            let detail = format!(
+                "Final check {} exited {}.\n{}",
+                failed.command,
+                failed
+                    .code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "null".to_string()),
+                failed.tail
+            );
+            let base_dir = run_dir.join("final-base");
+            let on_base = failing_on_base(app, task, failed, &base_dir, cancel).await;
+            let Some(base_run) = on_base else {
+                match fail_and_continue(
+                    app,
+                    task_id,
+                    task,
+                    idx,
+                    FailureKind::Verify,
+                    detail,
+                    attempt_budget,
+                    pending_answer,
+                    cancel,
+                    permit,
+                )
+                .await
+                {
+                    LoopSignal::Continue => {
+                        *permit = None;
+                        return Tail::Continue;
+                    }
+                    LoopSignal::Stop => {
+                        *permit = None;
+                        app.finish_task_loop(task_id);
+                        return Tail::Return;
+                    }
+                }
+            };
+            // The failure is older than this task: no retry can fix it.
+            // The owner decides what the check is worth.
+            record_failure(task, idx, FailureKind::Verify, detail);
+            task.question = Some(pre_existing_question(
+                &failed.command,
+                &task.base_sha,
+                &base_run.tail,
+            ));
+            task.status = TaskStatus::Waiting;
+            task.updated_at = now_ms();
+            let assumed = task.assumptions.len();
+            let Some(answer) =
+                wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await
+            else {
+                *permit = None;
+                app.finish_task_loop(task_id);
+                return Tail::Return;
+            };
+            let policy_answered = task.assumptions.len() > assumed;
+            let base_sha = task.base_sha.clone();
+            record_owner_base_check(task, &failed.command, &base_sha, &answer, policy_answered);
+            if is_option(&answer, PRE_EXISTING_DROP) {
+                task.final_verify.retain(|c| c != &failed.command);
+                task.decisions.push(format!(
+                    "Orchestrator: dropped final check {}",
+                    failed.command
+                ));
+                // The check no longer counts: the attempt is not failed.
+                let a = &mut task.attempts[idx];
+                a.status = AttemptStatus::Running;
+                a.ended_at = None;
+                a.failure = None;
+                task.status = TaskStatus::Running;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(task);
+                app.broadcast_task(task);
+                continue;
+            }
+            // Retry (any other answer): one more attempt on the newest
+            // base, even when the attempt budget is spent.
+            carry_onto_newest_base(task, worktree).await;
+            *attempt_budget = (*attempt_budget).max(implement_attempt_count(task) + 1);
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(task);
+            app.broadcast_task(task);
+            *permit = None;
+            return Tail::Continue;
+        }
+    }
+    finish_attempt(
+        app,
+        task_id,
+        task,
+        idx,
+        attempt_n,
+        worktree,
+        run_dir,
+        settings,
+        attempt_budget,
+        pending_answer,
+        cancel,
+        permit,
+    )
+    .await
 }
 
 /// What follows a passed attempt: the task lands on its parent or its base

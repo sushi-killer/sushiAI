@@ -247,7 +247,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string"},
-                    "criteria": {"type": "array", "items": {"type": "string"}},
+                    "criteria": {"type": "array", "items": {"oneOf": [{"type": "string"}, {"type": "object", "properties": {"text": {"type": "string"}, "visual": {"type": "boolean", "description": "True only when the criterion is proven by looking at a saved image; never for a criterion checked by a command."}}, "required": ["text"]}]}},
                     "verify": {"type": "array", "items": {"type": "string"}},
                     "finalVerify": {"type": "array", "items": {"type": "string"}, "description": "Slow checks run once, after review passes."},
                     "checks": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "integer", "description": "0-based index into criteria."}, "run": {"type": "string"}}, "required": ["criterion", "run"]}, "description": "Replaces the task's checks; a criterion index out of range is rejected."},

@@ -477,3 +477,23 @@ pub fn cheap_route_on_claude(daemon: &Daemon) {
     settings["tiers"]["mechanical"] = serde_json::json!("claude-haiku");
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 }
+
+/// One fake playing every role of a task whose review always FAILs: the
+/// implementer edits a file and reports, the reviewer (brief opens with
+/// "## Review") fails it, and the orchestrator's accept classifier (its brief
+/// asks for `{"accept": true}`) records the call in $LOG_DIR/classifier.called
+/// and answers `{"accept": $ACCEPT_REPLY}`.
+pub const FAKE_FAILING_REVIEW_SCRIPT: &str = r###"#!/bin/sh
+input="$(cat)"
+case "$input" in
+  "## Review"*)
+    printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"needs work\"]}\n```"}' ;;
+  *'"accept": true'*)
+    touch "$LOG_DIR/classifier.called"
+    printf '%s\n' "{\"type\":\"result\",\"total_cost_usd\":0.02,\"result\":\"{\\\"accept\\\": $ACCEPT_REPLY}\"}" ;;
+  *)
+    echo changed > CHANGED_MARKER.txt
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+    printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}' ;;
+esac
+"###;

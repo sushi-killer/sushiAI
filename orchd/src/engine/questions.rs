@@ -19,9 +19,14 @@ pub(super) async fn wait_for_exhausted_answer(
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
-) -> Option<String> {
-    if let Some(answer) = try_policy_answer(app, task, cancel).await {
-        return Some(answer);
+) -> Option<Answered> {
+    let asked = task.question.clone();
+    if let Some(text) = try_policy_answer(app, task, cancel).await {
+        return Some(Answered {
+            text,
+            by_owner: false,
+            shown: asked,
+        });
     }
     let continues = task
         .decisions
@@ -31,7 +36,107 @@ pub(super) async fn wait_for_exhausted_answer(
     if continues < MAX_ORCHESTRATOR_CONTINUES {
         wait_for_triaged_answer(app, task_id, task, idx, pending_answer, cancel, permit).await
     } else {
-        park_for_answer(app, task_id, task, pending_answer, cancel, permit).await
+        let shown = task.question.clone();
+        park_for_answer(app, task_id, task, pending_answer, cancel, permit)
+            .await
+            .map(|text| Answered {
+                text,
+                by_owner: true,
+                shown,
+            })
+    }
+}
+
+/// An answer to a parked question and where it came from: only the owner's
+/// may accept an attempt. `shown` is the question the owner actually saw
+/// (triage may have replaced it on escalation), captured before parking
+/// clears `task.question`.
+pub(super) struct Answered {
+    pub text: String,
+    pub by_owner: bool,
+    pub shown: Option<Question>,
+}
+
+/// Whether the owner's free text tells orchd to accept the last attempt: one
+/// read-only session on the orchestrator route. No route, a harness error,
+/// a cancellation or a reply without a verdict all mean no.
+pub(super) async fn owner_accepts(
+    app: &Arc<App>,
+    task_id: &str,
+    task: &mut Task,
+    idx: usize,
+    question: &Question,
+    answer: &str,
+    cancel: &CancelToken,
+) -> bool {
+    let settings = app.settings.read().unwrap().clone();
+    let Some(route) = chat::orchestrator_route(&settings) else {
+        return false;
+    };
+    let attempt_n = task.attempts[idx].n;
+    let worktree = PathBuf::from(&task.worktree);
+    let run_dir = app.store.run_dir(task_id, attempt_n).join("accept-check");
+    let _ = std::fs::create_dir_all(&run_dir);
+    let mcp_path = run_dir.join("mcp.json");
+    let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
+    let settings_path = run_dir.join("settings.json");
+    let key_path = run_dir.join("key");
+    let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
+    if matches!(route.harness, Harness::Claude) {
+        write_readonly_claude_settings_with_profile(
+            &route,
+            app,
+            &key_path,
+            &settings,
+            &deny_read,
+            &settings_path,
+        );
+    }
+    let req = harness::RunRequest {
+        harness: route.harness,
+        worktree: &worktree,
+        model: route.model.as_deref(),
+        effort: route.effort.as_deref(),
+        max_budget_usd: None,
+        review: true,
+        mcp_config: Some(&mcp_path),
+        settings_path: Some(&settings_path),
+        network_allowed: false,
+        codex_mcp: None,
+        images: &[],
+        repo_settings: true,
+    };
+    let brief_text = brief::build_accept_brief(task, &question.text, &question.options, answer);
+    let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
+    let events_path = run_dir.join("events.jsonl");
+    let run_result = run_harness(
+        app,
+        task_id,
+        attempt_n,
+        false,
+        &worktree,
+        &req,
+        CostTag::task("triage", &route.id),
+        &brief_text,
+        &events_path,
+        cancel,
+        None,
+        None,
+    )
+    .await;
+    let _ = std::fs::remove_file(&key_path);
+    match run_result {
+        Ok(o) => {
+            if let Some(cost) = o.cost_usd {
+                task.cost_usd += cost;
+            }
+            o.error.is_none()
+                && o.final_text
+                    .as_deref()
+                    .and_then(brief::parse_accept)
+                    .unwrap_or(false)
+        }
+        Err(_) => false,
     }
 }
 
@@ -262,7 +367,9 @@ pub(super) async fn wait_for_answer_with_triage(
     if let Some(answer) = try_policy_answer(app, task, cancel).await {
         return Some(answer);
     }
-    wait_for_triaged_answer(app, task_id, task, idx, pending_answer, cancel, permit).await
+    wait_for_triaged_answer(app, task_id, task, idx, pending_answer, cancel, permit)
+        .await
+        .map(|a| a.text)
 }
 
 /// [`wait_for_answer_with_triage`] once the answer policy has had its turn.
@@ -275,7 +382,7 @@ async fn wait_for_triaged_answer(
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
-) -> Option<String> {
+) -> Option<Answered> {
     let question = task.question.clone().unwrap_or(Question {
         text: String::new(),
         options: vec![],
@@ -337,7 +444,11 @@ async fn wait_for_triaged_answer(
                 task.updated_at = now_ms();
                 let _ = app.store.save_task(task);
                 app.broadcast_task(task);
-                return Some(decision.answer);
+                return Some(Answered {
+                    text: decision.answer,
+                    by_owner: false,
+                    shown: Some(question),
+                });
             }
             brief::TriageAction::Escalate if !auto_answer => {}
             brief::TriageAction::Escalate => {
@@ -351,7 +462,14 @@ async fn wait_for_triaged_answer(
             }
         }
     }
-    park_for_answer(app, task_id, task, pending_answer, cancel, permit).await
+    let shown = task.question.clone();
+    park_for_answer(app, task_id, task, pending_answer, cancel, permit)
+        .await
+        .map(|text| Answered {
+            text,
+            by_owner: true,
+            shown,
+        })
 }
 
 /// Wraps [`ask_plan_question`] with the same orchestrator-triage shot, for

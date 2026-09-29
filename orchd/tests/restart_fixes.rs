@@ -201,3 +201,90 @@ fn verify_and_final_checks_see_the_tasks_base_commit_in_orchd_base_sha() {
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
 }
+
+#[test]
+fn an_accept_answer_after_a_restart_commits_the_last_attempt() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        FAKE_FAILING_REVIEW_SCRIPT,
+    );
+    let env = [
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("LOG_DIR", scripts_dir.path().to_str().unwrap()),
+        ("ACCEPT_REPLY", "false"),
+    ];
+    let data_holder = tempfile::tempdir().unwrap();
+    let data = data_holder.path().to_path_buf();
+    let (first, socket1, token1) = first_daemon(&data, &env);
+    let mut settings = request_on(
+        &socket1,
+        "settings.get",
+        serde_json::json!({}),
+        Some(&token1),
+    );
+    settings["review"] = serde_json::json!("claude-opus");
+    settings["maxAttempts"] = serde_json::json!(1);
+    request_on(
+        &socket1,
+        "settings.set",
+        serde_json::json!({"settings": settings}),
+        Some(&token1),
+    );
+    let repo = init_git_repo();
+    let task = request_on(
+        &socket1,
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Accept after restart",
+            "goal": "g",
+            "verify": ["true"],
+            "start": true,
+        }),
+        Some(&token1),
+    );
+    let id = task["id"].as_str().unwrap().to_string();
+    let waiting = wait_status(&socket1, &token1, &id, "waiting", 20);
+    assert!(waiting["question"]["options"]
+        .to_string()
+        .contains("accept the last attempt as done"));
+    let _ = request_on(&socket1, "shutdown", serde_json::json!({}), Some(&token1));
+    let _ = wait_for_exit(first, Duration::from_secs(15));
+
+    let socket2 = data.join("orchd2.sock");
+    let second = spawn_orchd_raw(&data, &socket2, &env);
+    wait_for_socket(&socket2);
+    let token2 = read_control_token(&data);
+    let still = wait_status(&socket2, &token2, &id, "waiting", 15);
+    assert!(still["question"].is_object(), "{still}");
+    request_on(
+        &socket2,
+        "task.answer",
+        serde_json::json!({"id": id, "answer": "Accept the last attempt as done"}),
+        Some(&token2),
+    );
+    let done = wait_status(&socket2, &token2, &id, "done", 30);
+    let implement = done["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["stage"] == "implement")
+        .count();
+    assert_eq!(implement, 1, "{done}");
+    let tree = git_out(
+        repo.path(),
+        &["ls-tree", "--name-only", done["branch"].as_str().unwrap()],
+    );
+    assert!(tree.contains("CHANGED_MARKER.txt"), "{tree}");
+    assert!(
+        done["decisions"]
+            .to_string()
+            .contains("Owner: accepted attempt 1 as done; review skipped"),
+        "{done}"
+    );
+    let _ = request_on(&socket2, "shutdown", serde_json::json!({}), Some(&token2));
+    let _ = wait_for_exit(second, Duration::from_secs(15));
+    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+}

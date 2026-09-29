@@ -36,6 +36,48 @@ pub(super) fn parent_check_question(command: &str, base_sha: &str, base_tail: &s
     q
 }
 
+/// Whether `answer` picks `option`: whitespace, trailing punctuation and
+/// case do not matter, so `Drop this check.` is `drop this check`.
+pub(super) fn is_option(answer: &str, option: &str) -> bool {
+    answer
+        .trim()
+        .trim_end_matches(['.', ',', '!', '?', ';', ':'])
+        .trim_end()
+        .eq_ignore_ascii_case(option)
+}
+
+fn owner_base_check_prefix(command: &str, base_sha: &str) -> String {
+    let sha: String = base_sha.chars().take(7).collect();
+    format!("Owner: base check {command} on {sha} -> ")
+}
+
+/// The decision line recording an owner's answer to a base-check question.
+pub(super) fn owner_base_check_line(command: &str, base_sha: &str, answer: &str) -> String {
+    format!("{}{answer}", owner_base_check_prefix(command, base_sha))
+}
+
+/// Whether the owner already answered the base-check question for this
+/// command on this base.
+pub(super) fn owner_answered_base_check(task: &Task, command: &str, base_sha: &str) -> bool {
+    let prefix = owner_base_check_prefix(command, base_sha);
+    task.decisions.iter().any(|d| d.starts_with(&prefix))
+}
+
+/// Records an owner answer to a base-check question about `command`, asked
+/// on `base_sha`, unless the answer policy gave it (`policy_answered`).
+pub(super) fn record_owner_base_check(
+    task: &mut Task,
+    command: &str,
+    base_sha: &str,
+    answer: &str,
+    policy_answered: bool,
+) {
+    if !policy_answered {
+        task.decisions
+            .push(owner_base_check_line(command, base_sha, answer));
+    }
+}
+
 /// The command a pre-existing-failure question is about.
 pub(super) fn pre_existing_command(question: &Question) -> Option<&str> {
     if question.kind != QuestionKind::PreexistingFailure {
@@ -241,6 +283,8 @@ pub(super) async fn baseline_on_base(
 #[derive(Debug, Clone, Default)]
 pub(super) struct Amendment {
     pub criteria: Option<Vec<String>>,
+    /// The `criteria` texts flagged visual; only meaningful when `criteria` is set.
+    pub visual_criteria: Vec<String>,
     pub verify: Option<Vec<String>>,
     pub final_verify: Option<Vec<String>>,
     pub checks: Option<Vec<Check>>,
@@ -275,7 +319,10 @@ impl Amendment {
 
     /// A later amendment wins field by field.
     pub fn merge(&mut self, later: Amendment) {
-        self.criteria = later.criteria.or(self.criteria.take());
+        if later.criteria.is_some() {
+            self.criteria = later.criteria;
+            self.visual_criteria = later.visual_criteria;
+        }
         self.verify = later.verify.or(self.verify.take());
         self.final_verify = later.final_verify.or(self.final_verify.take());
         self.checks = later.checks.or(self.checks.take());
@@ -288,6 +335,7 @@ impl Amendment {
         let line = format!("Amended: {}", self.fields().join(", "));
         if let Some(v) = self.criteria {
             task.criteria = v;
+            task.visual_criteria = self.visual_criteria;
         }
         if let Some(v) = self.verify {
             task.verify = v;
@@ -329,4 +377,37 @@ pub(super) async fn apply_pending_amendment(
     }
     let _ = app.store.save_task(task);
     app.broadcast_task(task);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn options_match_ignoring_case_space_and_trailing_punctuation() {
+        assert!(is_option("Drop this check.", PRE_EXISTING_DROP));
+        assert!(is_option("  DROP THIS CHECK! ", PRE_EXISTING_DROP));
+        assert!(is_option("drop this check", PRE_EXISTING_DROP));
+        assert!(is_option("Stop?!", "stop"));
+        assert!(!is_option("drop this check please", PRE_EXISTING_DROP));
+        assert!(!is_option("keep this check", PRE_EXISTING_DROP));
+    }
+
+    #[test]
+    fn an_answered_pair_is_found_by_command_and_short_base_sha() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Queued);
+        let sha = "0123456789abcdef";
+        assert!(!owner_answered_base_check(&task, "npm test", sha));
+        record_owner_base_check(&mut task, "npm test", sha, "drop this check", true);
+        assert!(!owner_answered_base_check(&task, "npm test", sha));
+        record_owner_base_check(&mut task, "npm test", sha, "drop this check", false);
+        assert_eq!(
+            task.decisions.last().unwrap(),
+            "Owner: base check npm test on 0123456 -> drop this check"
+        );
+        assert!(owner_answered_base_check(&task, "npm test", sha));
+        assert!(owner_answered_base_check(&task, "npm test", "0123456ffff"));
+        assert!(!owner_answered_base_check(&task, "npm test", "fedcba9876"));
+        assert!(!owner_answered_base_check(&task, "npm run lint", sha));
+    }
 }

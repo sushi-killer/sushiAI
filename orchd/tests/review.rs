@@ -960,3 +960,187 @@ fn a_disputed_finding_judged_valid_goes_on_to_the_existing_escalation() {
         .map(|a| a.iter().all(|x| x["by"] != "review-judge"))
         .unwrap_or(true));
 }
+
+const ACCEPT_OPTION: &str = "accept the last attempt as done";
+
+/// A daemon whose reviewer always FAILs, one attempt per budget, no answer
+/// policy and no auto-answer: the "attempts keep failing" question reaches
+/// the owner. `orchestrator` is the classifier's route.
+fn failing_review_daemon(scripts_dir: &std::path::Path, accept_reply: &str) -> Daemon {
+    let script = fake_harness_script(scripts_dir, "fake-claude.sh", FAKE_FAILING_REVIEW_SCRIPT);
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("LOG_DIR", scripts_dir.to_str().unwrap()),
+        ("ACCEPT_REPLY", accept_reply),
+    ]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("claude-opus");
+    settings["maxAttempts"] = serde_json::json!(1);
+    settings["answerPolicy"] = serde_json::json!(false);
+    settings["autoAnswer"] = serde_json::json!(false);
+    settings["orchestrator"] = serde_json::json!("claude-sonnet");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    daemon
+}
+
+fn create_started(daemon: &Daemon, repo: &std::path::Path, verify: &str) -> serde_json::Value {
+    daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.to_str().unwrap(),
+            "title": "Accept case",
+            "goal": "Make a trivial change",
+            "criteria": [],
+            "verify": [verify],
+            "start": true,
+        }),
+    )
+}
+
+fn implement_attempts(task: &serde_json::Value) -> usize {
+    task["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["stage"] == "implement")
+        .count()
+}
+
+fn assert_accepted(daemon: &Daemon, repo: &std::path::Path, done: &serde_json::Value, said: &str) {
+    assert_eq!(done["status"], "done", "task JSON: {done}");
+    assert_eq!(implement_attempts(done), 1, "task JSON: {done}");
+    let tree = git_out(
+        repo,
+        &["ls-tree", "--name-only", done["branch"].as_str().unwrap()],
+    );
+    assert!(tree.contains("CHANGED_MARKER.txt"), "{tree}");
+    let decisions = done["decisions"].as_array().unwrap();
+    let owner = decisions
+        .iter()
+        .position(|d| *d == format!("Owner: {said}"))
+        .unwrap_or_else(|| panic!("{decisions:?}"));
+    assert_eq!(
+        decisions[owner + 1],
+        "Owner: accepted attempt 1 as done; review skipped"
+    );
+    let assumption = done["assumptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["by"] == "owner")
+        .unwrap_or_else(|| panic!("{done}"));
+    assert_eq!(assumption["kind"], "attempts_failing", "{done}");
+    assert_eq!(assumption["attempt"], 1, "{done}");
+    assert_eq!(assumption["answer"], said, "{done}");
+    let _ = daemon;
+}
+
+#[test]
+fn the_owner_picking_the_accept_option_finishes_the_task_on_its_last_attempt() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let daemon = failing_review_daemon(scripts_dir.path(), "false");
+    let repo = init_git_repo();
+    let task = create_started(&daemon, repo.path(), "true");
+    let id = task["id"].as_str().unwrap().to_string();
+    let waiting = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
+        s != "running" && s != "queued"
+    });
+    assert_eq!(waiting["status"], "waiting", "task JSON: {waiting}");
+    let options = waiting["question"]["options"].to_string();
+    assert!(options.contains(ACCEPT_OPTION), "{options}");
+    let said = format!("  {}  ", ACCEPT_OPTION.to_uppercase());
+    daemon.request("task.answer", serde_json::json!({"id": id, "answer": said}));
+    let done = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
+        matches!(s, "done" | "failed" | "stopped")
+    });
+    assert_accepted(&daemon, repo.path(), &done, &said);
+    assert!(!scripts_dir.path().join("classifier.called").exists());
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
+fn owner_free_text_the_orchestrator_reads_as_accepting_finishes_the_task() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let daemon = failing_review_daemon(scripts_dir.path(), "true");
+    let repo = init_git_repo();
+    let task = create_started(&daemon, repo.path(), "true");
+    let id = task["id"].as_str().unwrap().to_string();
+    let waiting = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
+        s != "running" && s != "queued"
+    });
+    assert_eq!(waiting["status"], "waiting", "task JSON: {waiting}");
+    let said = "the review is being picky, ship it";
+    daemon.request("task.answer", serde_json::json!({"id": id, "answer": said}));
+    let done = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
+        matches!(s, "done" | "failed" | "stopped")
+    });
+    assert_accepted(&daemon, repo.path(), &done, said);
+    assert!(scripts_dir.path().join("classifier.called").exists());
+    assert!(done["costUsd"].as_f64().unwrap() > 0.02, "{done}");
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
+fn free_text_the_orchestrator_does_not_read_as_accepting_starts_another_attempt() {
+    // A "no" and a reply that is not JSON both count as not accepting.
+    for reply in ["false", "maybe"] {
+        let scripts_dir = tempfile::tempdir().unwrap();
+        let daemon = failing_review_daemon(scripts_dir.path(), reply);
+        let repo = init_git_repo();
+        let task = create_started(&daemon, repo.path(), "true");
+        let id = task["id"].as_str().unwrap().to_string();
+        poll_until(&daemon, &id, Duration::from_secs(20), |s| s == "waiting");
+        daemon.request(
+            "task.answer",
+            serde_json::json!({"id": id, "answer": "try again, more carefully"}),
+        );
+        let again = poll_until(&daemon, &id, Duration::from_secs(20), |s| s == "waiting");
+        let mut latest = again;
+        let start = std::time::Instant::now();
+        while implement_attempts(&latest) < 2 {
+            assert!(start.elapsed() < Duration::from_secs(20), "{latest}");
+            std::thread::sleep(Duration::from_millis(100));
+            latest = daemon.request("task.get", serde_json::json!({"id": id}));
+        }
+        assert!(scripts_dir.path().join("classifier.called").exists());
+        assert!(
+            !latest["decisions"].to_string().contains("accepted attempt"),
+            "{latest}"
+        );
+        let worktree = task["worktree"].as_str().unwrap().to_string();
+        daemon.shutdown_and_wait();
+        let _ = std::fs::remove_dir_all(worktree);
+    }
+}
+
+#[test]
+fn a_verify_failed_question_offers_no_accept_and_free_text_never_reaches_the_classifier() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let daemon = failing_review_daemon(scripts_dir.path(), "true");
+    let repo = init_git_repo();
+    let task = create_started(&daemon, repo.path(), "false");
+    let id = task["id"].as_str().unwrap().to_string();
+    let waiting = poll_until(&daemon, &id, Duration::from_secs(20), |s| s == "waiting");
+    let options = waiting["question"]["options"].to_string();
+    assert!(!options.contains(ACCEPT_OPTION), "{options}");
+    daemon.request(
+        "task.answer",
+        serde_json::json!({"id": id, "answer": "accept it, the last attempt is fine"}),
+    );
+    let mut latest = waiting;
+    let start = std::time::Instant::now();
+    while implement_attempts(&latest) < 2 {
+        assert!(start.elapsed() < Duration::from_secs(20), "{latest}");
+        std::thread::sleep(Duration::from_millis(100));
+        latest = daemon.request("task.get", serde_json::json!({"id": id}));
+    }
+    assert_ne!(latest["status"], "done", "{latest}");
+    assert!(!scripts_dir.path().join("classifier.called").exists());
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}

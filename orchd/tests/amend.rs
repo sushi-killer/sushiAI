@@ -141,3 +141,41 @@ fn amended_checks_are_baselined_on_the_base_and_only_failing_ones_gate() {
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
 }
+
+#[test]
+fn amending_criteria_replaces_the_visual_flags_with_the_amended_ones() {
+    let daemon = Daemon::spawn(&[]);
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Visual amend",
+            "goal": "Something",
+            "criteria": ["old"],
+            "verify": ["true"],
+            "start": false,
+        }),
+    );
+    let id = task["id"].as_str().unwrap().to_string();
+
+    daemon.request("task.amend", json!({"id": id, "criteria": ["a", "b"]}));
+    let saved = daemon.request("task.get", json!({"id": id}));
+    assert!(saved.get("visualCriteria").is_none(), "{saved}");
+
+    daemon.request(
+        "task.amend",
+        json!({"id": id, "criteria": ["a", {"text": "b", "visual": true}]}),
+    );
+    let saved = daemon.request("task.get", json!({"id": id}));
+    assert_eq!(saved["criteria"], json!(["a", "b"]), "{saved}");
+    assert_eq!(saved["visualCriteria"], json!(["b"]), "{saved}");
+
+    daemon.request("task.amend", json!({"id": id, "criteria": ["a", "b"]}));
+    let saved = daemon.request("task.get", json!({"id": id}));
+    assert!(saved.get("visualCriteria").is_none(), "{saved}");
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}

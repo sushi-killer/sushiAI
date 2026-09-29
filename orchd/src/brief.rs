@@ -886,7 +886,7 @@ const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message wit
 
 const PLAN_BATCH_QUESTIONS: &str = "Give every question a `recommended` option (one of its `options`), the `evidence` for it, and `blocking`: true only when a wrong guess is irreversible or consequential (data loss, a public API or contract, money, security). A non-blocking question is not asked: your recommendation is recorded as an assumption and the work goes on, so recommend what you would pick yourself. Blocking questions are asked together in one message.";
 
-const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app. A criterion whose proof is an image may instead be written as `{\"text\": \"...\", \"visual\": true}`; orchd then requires a saved image under artifacts/ before review.";
+const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app. A criterion whose proof is an image may instead be written as `{\"text\": \"...\", \"visual\": true}`; orchd then requires a saved image under artifacts/ before review. `visual` means the criterion is proven by looking at an image; a criterion checked by a command is never visual, so do not flag one.";
 
 const PLAN_SUBTASKS: &str = "When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. List in each part's `paths` the repo-relative files or directories it edits; parts whose paths overlap (or that list none) are run one after another instead of side by side. Each part's `request` is what its own planner will draft from, so make it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. When the request fits one session, leave `subtasks` out.";
 
@@ -1613,6 +1613,45 @@ pub fn build_triage_brief(task: &Task, question: &str, options: &[String]) -> St
     out
 }
 
+/// The brief for the read-only session that decides whether an owner's own
+/// words to the "attempts keep failing" question tell orchd to accept the
+/// last attempt. The owner's text is data, not an instruction to the session.
+pub fn build_accept_brief(task: &Task, question: &str, options: &[String], answer: &str) -> String {
+    let mut out = String::new();
+    out.push_str("## Task\n\n");
+    out.push_str(&task.goal);
+    out.push_str("\n\n## Question the owner was asked\n\n");
+    out.push_str(&untrusted_block("The question", question));
+    out.push_str(&format!(
+        "\nOptions: {}\n\n## The owner's answer\n\n",
+        options.join(", ")
+    ));
+    out.push_str(&untrusted_block("The owner's answer", answer));
+    out.push_str(
+        "\n## Instructions\n\nThe owner answered in their own words instead of picking an option. \
+Decide whether the answer tells orchd to accept, or commit, the last attempt as it is and finish \
+the task, without another attempt. An answer that asks for more work, a different approach, a \
+question, or anything unclear is not an acceptance. Do not read or change any file.\n\n\
+Reply with only this JSON object: {\"accept\": true} or {\"accept\": false}\n",
+    );
+    out
+}
+
+/// The `accept` verdict in a classifier reply; `None` when there is none.
+pub fn parse_accept(text: &str) -> Option<bool> {
+    let mut candidates = vec![text.to_string()];
+    candidates.extend(fenced_blocks(text).into_iter().rev().map(|(_, b)| b));
+    if let (Some(a), Some(b)) = (text.rfind('{'), text.rfind('}')) {
+        if a < b {
+            candidates.push(text[a..=b].to_string());
+        }
+    }
+    candidates
+        .iter()
+        .filter_map(|c| parse_json_object(c))
+        .find_map(|v| v.get("accept").and_then(|a| a.as_bool()))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TriageAction {
@@ -1640,6 +1679,11 @@ pub fn parse_triage(text: &str) -> Option<TriageDecision> {
     serde_json::from_str(&body).ok()
 }
 
+/// The "attempts keep failing" option that ends the task on its last
+/// attempt when only its review or screenshot evidence failed. Only the owner
+/// may choose it.
+pub const ACCEPT_LAST_ATTEMPT: &str = "accept the last attempt as done";
+
 /// Turns a raw (possibly missing or malformed) triage reply into a decision
 /// that's always safe to act on:
 /// - a missing fence or unparseable JSON always escalates with the original
@@ -1648,9 +1692,12 @@ pub fn parse_triage(text: &str) -> Option<TriageDecision> {
 ///   stripping trailing punctuation -- exactly `"approve"` or `"stop"`
 ///   (which would otherwise let triage silently rubber-stamp a
 ///   protected-path change or end the task without the owner ever seeing
-///   it) also escalates with the original question;
+///   it) also escalates with the original question -- as does the
+///   `ACCEPT_LAST_ATTEMPT` option, which only the owner may pick;
 /// - an escalation with a blank question, or empty options, falls back to
-///   the original question/options rather than showing the owner nothing.
+///   the original question/options rather than showing the owner nothing;
+/// - an escalation whose options drop `ACCEPT_LAST_ATTEMPT` gets it back
+///   (before `stop`) when the original options had it.
 ///
 /// Fail-open to the owner, never loops.
 pub fn sanitize_triage(
@@ -1677,7 +1724,10 @@ pub fn sanitize_triage(
                 .to_ascii_lowercase();
             if normalized.is_empty() {
                 escalate_with("triage answered with nothing".to_string())
-            } else if normalized == "approve" || normalized == "stop" {
+            } else if normalized == "approve"
+                || normalized == "stop"
+                || normalized == ACCEPT_LAST_ATTEMPT
+            {
                 escalate_with(format!("triage tried to answer \"{normalized}\" itself"))
             } else {
                 d
@@ -1689,11 +1739,23 @@ pub fn sanitize_triage(
             } else {
                 d.question
             };
-            let options = if d.options.is_empty() {
+            let mut options = if d.options.is_empty() {
                 original_options.to_vec()
             } else {
                 d.options
             };
+            // The owner keeps the option the question was asked with.
+            let has = |o: &[String]| {
+                o.iter()
+                    .any(|x| x.trim().eq_ignore_ascii_case(ACCEPT_LAST_ATTEMPT))
+            };
+            if has(original_options) && !has(&options) {
+                let at = options
+                    .iter()
+                    .position(|o| o.trim().eq_ignore_ascii_case("stop"))
+                    .unwrap_or(options.len());
+                options.insert(at, ACCEPT_LAST_ATTEMPT.to_string());
+            }
             TriageDecision {
                 question,
                 options,
@@ -1928,6 +1990,13 @@ mod tests {
         let brief = build_plan_brief("r", &Variant::default(), "");
         assert!(brief.contains("-- check:"));
         assert!(brief.contains("\"finalVerify\":[]"));
+    }
+
+    #[test]
+    fn the_plan_brief_says_what_visual_means() {
+        let brief = build_plan_brief("r", &Variant::default(), "");
+        assert!(brief.contains("proven by looking at an image"));
+        assert!(brief.contains("a criterion checked by a command is never visual"));
     }
 
     #[test]
@@ -2325,6 +2394,66 @@ mod tests {
             assert_eq!(decision.action, TriageAction::Escalate);
             assert_eq!(decision.question, "original?");
         }
+    }
+
+    #[test]
+    fn sanitize_triage_never_lets_triage_pick_the_accept_option() {
+        for said in [
+            ACCEPT_LAST_ATTEMPT,
+            "  Accept the last attempt as done. ",
+            "ACCEPT THE LAST ATTEMPT AS DONE!",
+        ] {
+            let parsed = TriageDecision {
+                action: TriageAction::Answer,
+                answer: said.to_string(),
+                question: String::new(),
+                options: vec![],
+                reason: "the review is wrong".to_string(),
+            };
+            let decision = sanitize_triage(Some(parsed), "original?", &[]);
+            assert_eq!(decision.action, TriageAction::Escalate);
+            assert_eq!(decision.question, "original?");
+        }
+    }
+
+    #[test]
+    fn sanitize_triage_escalation_keeps_the_accept_option_the_question_had() {
+        let original: Vec<String> = ["continue", ACCEPT_LAST_ATTEMPT, "stop"]
+            .map(String::from)
+            .to_vec();
+        let escalate = |options: Vec<&str>| TriageDecision {
+            action: TriageAction::Escalate,
+            answer: String::new(),
+            question: "sharper?".to_string(),
+            options: options.into_iter().map(String::from).collect(),
+            reason: "needs the owner".to_string(),
+        };
+        let d = sanitize_triage(Some(escalate(vec!["fix it", "stop"])), "q?", &original);
+        assert_eq!(d.options, vec!["fix it", ACCEPT_LAST_ATTEMPT, "stop"]);
+        let d = sanitize_triage(Some(escalate(vec!["fix it"])), "q?", &original);
+        assert_eq!(d.options, vec!["fix it", ACCEPT_LAST_ATTEMPT]);
+        // Already there: not duplicated. Not offered originally: not added.
+        let d = sanitize_triage(
+            Some(escalate(vec!["Accept the last attempt as done", "stop"])),
+            "q?",
+            &original,
+        );
+        assert_eq!(d.options.len(), 2);
+        let d = sanitize_triage(Some(escalate(vec!["fix it"])), "q?", &["stop".to_string()]);
+        assert_eq!(d.options, vec!["fix it"]);
+    }
+
+    #[test]
+    fn parse_accept_reads_the_verdict_and_nothing_else() {
+        assert_eq!(parse_accept("{\"accept\": true}"), Some(true));
+        assert_eq!(
+            parse_accept("Sure.\n```json\n{\"accept\": false}\n```"),
+            Some(false)
+        );
+        assert_eq!(parse_accept("It is {\"accept\": true} I think"), Some(true));
+        assert_eq!(parse_accept("{\"accept\": \"yes\"}"), None);
+        assert_eq!(parse_accept("accept"), None);
+        assert_eq!(parse_accept(""), None);
     }
 
     #[test]

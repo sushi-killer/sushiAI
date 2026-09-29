@@ -163,15 +163,15 @@ fn kept_check_line(command: &str) -> String {
     format!("Orchestrator: kept check {command}, it fails on the base until the subtasks land")
 }
 
-/// Applies the owner's (or the policy's) answer to a parent's base-check
-/// question: `drop this check` removes the command, `keep this check`
-/// records that it stays. Shared by the live loop and the post-restart
+/// Applies the owner's (or the policy's) answer to a base-check question of
+/// any task: `drop this check` removes the command, `keep this check`
+/// records that it stays. Shared by the live loops and the post-restart
 /// branch of `task.answer`.
-pub(super) fn apply_parent_check_answer(task: &mut Task, question: &Question, answer: &str) {
+pub(super) fn apply_base_check_answer(task: &mut Task, question: &Question, answer: &str) {
     let Some(command) = pre_existing_command(question).map(str::to_string) else {
         return;
     };
-    if answer == PRE_EXISTING_DROP {
+    if is_option(answer, PRE_EXISTING_DROP) {
         task.verify.retain(|c| c != &command);
         task.final_verify.retain(|c| c != &command);
         task.decisions
@@ -199,7 +199,12 @@ async fn parent_base_preflight(
         // An amendment made while this loop was live (or parked on the
         // question) reaches every pass.
         apply_pending_amendment(app, task, pending_amend, cancel).await;
-        let finals = task.final_verify.clone();
+        let finals: Vec<String> = task
+            .final_verify
+            .iter()
+            .filter(|c| !owner_answered_base_check(task, c, &task.base_sha))
+            .cloned()
+            .collect();
         let mut failed = failing_twice_on_base(app, task, &finals, cancel).await;
         let mut is_final = failed.is_some();
         if failed.is_none() && !cancel.is_cancelled() {
@@ -207,6 +212,7 @@ async fn parent_base_preflight(
                 .verify
                 .iter()
                 .filter(|c| !task.decisions.contains(&kept_check_line(c)))
+                .filter(|c| !owner_answered_base_check(task, c, &task.base_sha))
                 .cloned()
                 .collect();
             failed = failing_twice_on_base(app, task, &unkept, cancel).await;
@@ -228,12 +234,14 @@ async fn parent_base_preflight(
         task.status = TaskStatus::Waiting;
         task.updated_at = now_ms();
         let task_id = task.id.clone();
+        let assumed = task.assumptions.len();
         let Some(answer) =
             wait_for_answer(app, &task_id, task, pending_answer, cancel, &mut None).await
         else {
             return false;
         };
-        if answer.trim().eq_ignore_ascii_case("stop") {
+        let policy_answered = task.assumptions.len() > assumed;
+        if is_option(&answer, "stop") {
             task.decisions.push("Owner: stop".to_string());
             task.question = None;
             task.status = TaskStatus::Stopped;
@@ -243,8 +251,15 @@ async fn parent_base_preflight(
             app.stop_children(&task_id, &task.repo);
             return false;
         }
-        apply_parent_check_answer(task, &question, &answer);
-        if answer == PRE_EXISTING_DROP {
+        record_owner_base_check(
+            task,
+            &base_run.command,
+            &task.base_sha.clone(),
+            &answer,
+            policy_answered,
+        );
+        apply_base_check_answer(task, &question, &answer);
+        if is_option(&answer, PRE_EXISTING_DROP) {
             app.verify_cache.lock().unwrap().remove(&task_id);
         } else if is_final {
             // Retry after the base is fixed: on the newest base.

@@ -37,12 +37,12 @@ fn a_retry_on_the_same_tier_keeps_the_fallback_note() {
     let mut task = task_with_status(TaskStatus::Running);
     task.tier_fallback = Some("no classifier key".into());
     task.attempts = vec![attempt_with_failure(1, "sig-a")];
-    assert!(advance_after_failure(&mut task, 4));
+    assert!(advance_after_failure(&mut task, 4, &[]));
     assert_eq!(task.tier, Tier::Standard);
     assert_eq!(task.tier_fallback.as_deref(), Some("no classifier key"));
     // The same failure again moves the task up a tier: the note goes.
     task.attempts.push(attempt_with_failure(2, "sig-a"));
-    assert!(advance_after_failure(&mut task, 4));
+    assert!(advance_after_failure(&mut task, 4, &[]));
     assert_eq!(task.tier, Tier::Hard);
     assert_eq!(task.tier_fallback, None);
 }
@@ -198,4 +198,83 @@ fn a_repeated_review_finding_tiers_up_once_then_waits() {
         decide_after_failure(&input(2)),
         FailureDecision::Waiting { .. }
     ));
+}
+
+fn failed_with(kind: FailureKind, verify_codes: &[Option<i32>], changed: &[&str]) -> Task {
+    let mut task = task_with_status(TaskStatus::Running);
+    let mut a = attempt_with_failure(1, "sig");
+    a.failure.as_mut().unwrap().kind = kind;
+    a.verify = verify_codes
+        .iter()
+        .map(|c| VerifyOutcome {
+            command: "cmd".into(),
+            code: *c,
+            tail: String::new(),
+            ms: 1,
+        })
+        .collect();
+    a.changed_files = changed.iter().map(|f| f.to_string()).collect();
+    task.attempts = vec![a];
+    task
+}
+
+fn options_after(task: &mut Task, protected: &[&str]) -> Vec<String> {
+    let protected: Vec<String> = protected.iter().map(|p| p.to_string()).collect();
+    assert!(!advance_after_failure(task, 1, &protected));
+    task.question.clone().unwrap().options
+}
+
+#[test]
+fn accepting_is_offered_before_stop_after_review_and_evidence_with_clean_verify() {
+    for kind in [FailureKind::Review, FailureKind::Evidence] {
+        let mut task = failed_with(kind, &[Some(0), Some(0)], &["src/a.ts"]);
+        assert_eq!(
+            options_after(&mut task, &["src/app/**"]),
+            vec!["continue", "change approach", brief::ACCEPT_LAST_ATTEMPT, "stop"]
+        );
+    }
+    let mut task = failed_with(FailureKind::Review, &[], &[]);
+    assert!(options_after(&mut task, &[]).contains(&brief::ACCEPT_LAST_ATTEMPT.to_string()));
+}
+
+#[test]
+fn accepting_is_not_offered_after_other_failures_or_a_bad_verify() {
+    for kind in [
+        FailureKind::Verify,
+        FailureKind::Heldout,
+        FailureKind::Error,
+        FailureKind::NoDeliverable,
+    ] {
+        let mut task = failed_with(kind, &[Some(0)], &[]);
+        assert_eq!(
+            options_after(&mut task, &[]),
+            vec!["continue", "change approach", "stop"]
+        );
+    }
+    for codes in [vec![Some(0), Some(1)], vec![None]] {
+        let mut task = failed_with(FailureKind::Review, &codes, &[]);
+        assert!(!options_after(&mut task, &[]).contains(&brief::ACCEPT_LAST_ATTEMPT.to_string()));
+    }
+}
+
+#[test]
+fn accepting_is_not_offered_after_evidence_when_a_changed_file_is_protected() {
+    let mut task = failed_with(FailureKind::Evidence, &[Some(0)], &["src/x.ts", "src/app/Shell.tsx"]);
+    assert!(!options_after(&mut task, &["src/app/**"]).contains(&brief::ACCEPT_LAST_ATTEMPT.to_string()));
+    // A review failure means the protected-path approval already happened.
+    let mut task = failed_with(FailureKind::Review, &[Some(0)], &["src/app/Shell.tsx"]);
+    assert!(options_after(&mut task, &["src/app/**"]).contains(&brief::ACCEPT_LAST_ATTEMPT.to_string()));
+}
+
+#[test]
+fn a_pending_acceptance_is_the_failed_review_attempt_with_the_accept_line_last() {
+    let mut task = failed_with(FailureKind::Review, &[Some(0)], &[]);
+    assert_eq!(pending_acceptance(&task), None);
+    task.decisions.push(accept_line(1));
+    assert_eq!(pending_acceptance(&task), Some(0));
+    task.decisions.push("Owner: continue".into());
+    assert_eq!(pending_acceptance(&task), None);
+    let mut task = failed_with(FailureKind::Verify, &[Some(0)], &[]);
+    task.decisions.push(accept_line(1));
+    assert_eq!(pending_acceptance(&task), None);
 }

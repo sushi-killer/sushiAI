@@ -191,7 +191,43 @@ fn retry_after_the_base_is_fixed_moves_to_the_new_base_and_runs_the_first_attemp
 }
 
 #[test]
-fn an_unmoved_base_is_asked_about_again_and_re_run_once_past_the_cache() {
+fn an_owner_retry_on_an_unmoved_base_keeps_the_check_and_runs_attempt_one() {
+    let scripts = tempfile::tempdir().unwrap();
+    let log = scripts.path().join("ran.log");
+    let daemon = spawn(scripts.path());
+    let repo = init_git_repo();
+    let check = format!("echo ran >> {}; test -f CHANGED_MARKER.txt", log.display());
+    let id = start(&daemon, repo.path(), &check);
+    let waiting = waiting_with_attempts(&daemon, &id, 0);
+    let base_sha = waiting["baseSha"].as_str().unwrap().to_string();
+
+    // Nothing moved on the base: the answer sticks, the check stays and the
+    // first attempt runs without a second question.
+    daemon.request("task.answer", json!({"id": id, "answer": RETRY}));
+    let done = poll_until(&daemon, &id, Duration::from_secs(30), |s| s == "done");
+    assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
+    assert_eq!(done["finalVerify"][0], check.as_str(), "{done}");
+    let decisions: Vec<&str> = done["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_str().unwrap())
+        .collect();
+    let retries = decisions
+        .iter()
+        .filter(|d| **d == format!("Owner: {RETRY}"))
+        .count();
+    assert_eq!(retries, 1, "{decisions:?}");
+    let line = format!("Owner: base check {check} on {} -> {RETRY}", &base_sha[..7]);
+    assert!(decisions.contains(&line.as_str()), "{decisions:?}");
+
+    let worktree = done["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
+fn an_answer_matches_its_option_whatever_its_case_or_trailing_punctuation() {
     let scripts = tempfile::tempdir().unwrap();
     let log = scripts.path().join("ran.log");
     let daemon = spawn(scripts.path());
@@ -199,26 +235,150 @@ fn an_unmoved_base_is_asked_about_again_and_re_run_once_past_the_cache() {
     let check = format!("echo ran >> {}; false", log.display());
     let id = start(&daemon, repo.path(), &check);
     waiting_with_attempts(&daemon, &id, 0);
-    assert_eq!(lines(&log), 2);
 
-    // Nothing moved on the base: the cached failure stands as the first run,
-    // the one re-run goes past the cache, and the owner is asked again.
-    daemon.request("task.answer", json!({"id": id, "answer": RETRY}));
-    let start_wait = std::time::Instant::now();
-    while lines(&log) < 3 {
-        assert!(start_wait.elapsed() < Duration::from_secs(30));
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let again = waiting_with_attempts(&daemon, &id, 0);
-    assert_eq!(lines(&log), 3, "{again}");
-    assert!(again["question"]["text"]
-        .as_str()
-        .unwrap()
-        .contains("already fails on base"));
-
-    let worktree = again["worktree"].as_str().unwrap().to_string();
+    daemon.request(
+        "task.answer",
+        json!({"id": id, "answer": "Drop this check."}),
+    );
+    let done = poll_until(&daemon, &id, Duration::from_secs(30), |s| s == "done");
+    assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
+    assert!(
+        done["finalVerify"].as_array().is_none_or(Vec::is_empty),
+        "{done}"
+    );
+    let dropped = format!("Orchestrator: dropped check {check}");
+    let decisions = done["decisions"].as_array().unwrap();
+    assert!(
+        decisions
+            .iter()
+            .any(|d| d.as_str() == Some(dropped.as_str())),
+        "{decisions:?}"
+    );
+    let base_sha = done["baseSha"].as_str().unwrap();
+    assert!(
+        decisions.iter().any(|d| {
+            let d = d.as_str().unwrap();
+            d.contains(&check) && d.contains(&base_sha[..7]) && d.starts_with("Owner: base check")
+        }),
+        "{decisions:?}"
+    );
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
+fn a_drop_answered_after_a_restart_sticks_for_a_single_task() {
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts.path(), "fake.sh", FAKE);
+    let env = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
+    let data_holder = tempfile::tempdir().unwrap();
+    let data = data_holder.path().to_path_buf();
+    let log = scripts.path().join("ran.log");
+    let check = format!("echo ran >> {}; false", log.display());
+
+    let socket1 = data.join("orchd1.sock");
+    let first = spawn_orchd_raw(&data, &socket1, &env);
+    wait_for_socket(&socket1);
+    let token1 = read_control_token(&data);
+    let mut settings = request_on(&socket1, "settings.get", json!({}), Some(&token1));
+    settings["review"] = json!("claude-opus");
+    settings["briefCheckRoute"] = json!("");
+    settings["answerPolicy"] = json!(false);
+    fit_sandbox(&mut settings);
+    request_on(
+        &socket1,
+        "settings.set",
+        json!({"settings": settings}),
+        Some(&token1),
+    );
+    let repo = init_git_repo();
+    let task = request_on(
+        &socket1,
+        "task.create",
+        json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Pre-existing",
+            "goal": "Write the marker",
+            "verify": ["true"],
+            "finalVerify": [check],
+            "start": true,
+        }),
+        Some(&token1),
+    );
+    let id = task["id"].as_str().unwrap().to_string();
+    let wait_waiting = |socket: &Path, token: &str| {
+        let start = std::time::Instant::now();
+        loop {
+            let t = request_on(socket, "task.get", json!({"id": id}), Some(token));
+            if t["status"] == "waiting" {
+                return t;
+            }
+            assert!(start.elapsed() < Duration::from_secs(30), "{t}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let waiting = wait_waiting(&socket1, &token1);
+    assert_eq!(
+        waiting["question"]["kind"], "preexisting_failure",
+        "{waiting}"
+    );
+    let base_sha = waiting["baseSha"].as_str().unwrap().to_string();
+    let _ = request_on(&socket1, "shutdown", json!({}), Some(&token1));
+    let _ = wait_for_exit(first, Duration::from_secs(15));
+
+    let socket2 = data.join("orchd2.sock");
+    let second = spawn_orchd_raw(&data, &socket2, &env);
+    wait_for_socket(&socket2);
+    let token2 = read_control_token(&data);
+    let still = wait_waiting(&socket2, &token2);
+    assert_eq!(still["question"]["kind"], "preexisting_failure", "{still}");
+    request_on(
+        &socket2,
+        "task.answer",
+        json!({"id": id, "answer": "drop this check"}),
+        Some(&token2),
+    );
+    let start = std::time::Instant::now();
+    let done = loop {
+        let t = request_on(&socket2, "task.get", json!({"id": id}), Some(&token2));
+        if matches!(t["status"].as_str(), Some("done" | "failed")) {
+            break t;
+        }
+        assert!(start.elapsed() < Duration::from_secs(30), "{t}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
+    for field in ["verify", "finalVerify"] {
+        let list = done[field].as_array();
+        assert!(
+            list.is_none_or(|l| l.iter().all(|c| c.as_str() != Some(check.as_str()))),
+            "{done}"
+        );
+    }
+    let decisions: Vec<&str> = done["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_str().unwrap())
+        .collect();
+    assert!(
+        decisions.contains(&format!("Orchestrator: dropped check {check}").as_str()),
+        "{decisions:?}"
+    );
+    let line = format!(
+        "Owner: base check {check} on {} -> drop this check",
+        &base_sha[..7]
+    );
+    assert!(decisions.contains(&line.as_str()), "{decisions:?}");
+    let drops = decisions
+        .iter()
+        .filter(|d| **d == "Owner: drop this check")
+        .count();
+    assert_eq!(drops, 1, "{decisions:?}");
+
+    let _ = request_on(&socket2, "shutdown", json!({}), Some(&token2));
+    let _ = wait_for_exit(second, Duration::from_secs(15));
+    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
 }
 
 #[test]

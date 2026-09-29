@@ -762,10 +762,43 @@ impl App {
                 drop_criterion(&mut task, n);
             }
             if let Some(q) = task.question.clone() {
-                // A parent's base-check question: the subtasks start again
-                // only with the answer applied.
-                if is_parent(&task, &self.repo_tasks(&task.repo)) {
-                    apply_parent_check_answer(&mut task, &q, &p.answer);
+                // A base-check question: the task starts again only with the
+                // answer applied, and the owner's answer is remembered.
+                if let Some(command) = pre_existing_command(&q).map(str::to_string) {
+                    let base_sha = task.base_sha.clone();
+                    record_owner_base_check(&mut task, &command, &base_sha, &p.answer, false);
+                    apply_base_check_answer(&mut task, &q, &p.answer);
+                    if is_option(&p.answer, PRE_EXISTING_DROP) {
+                        self.verify_cache.lock().unwrap().remove(&task.id);
+                    }
+                }
+            }
+            // The owner accepted the last attempt: the relaunched loop
+            // commits it instead of starting another (`pending_acceptance`).
+            if let Some(q) = task.question.clone().filter(|q| {
+                q.kind == QuestionKind::AttemptsFailing
+                    && is_accept_option(&p.answer)
+                    && q.options.iter().any(|o| is_accept_option(o))
+            }) {
+                if let Some(a) = task
+                    .attempts
+                    .iter()
+                    .rfind(|a| a.stage == Stage::Implement)
+                    .filter(|a| {
+                        matches!(
+                            a.failure.as_ref().map(|f| f.kind),
+                            Some(FailureKind::Review | FailureKind::Evidence)
+                        )
+                    })
+                {
+                    let n = a.n;
+                    record_owner_accept(
+                        &mut task,
+                        &q.text,
+                        &p.answer,
+                        "owner picked the option",
+                        n,
+                    );
                 }
             }
             if task
@@ -823,8 +856,32 @@ impl App {
                     .map_err(|_| "heldOut must be an object {criterion, run} or null")?,
             )),
         };
+        let (criteria, visual_criteria) = match params.get("criteria") {
+            None => (None, Vec::new()),
+            Some(v) => {
+                let bad = || "criteria must be an array of strings or {text, visual} objects";
+                let items = v.as_array().ok_or_else(bad)?;
+                let mut texts = Vec::new();
+                let mut visual = Vec::new();
+                for item in items {
+                    match item {
+                        serde_json::Value::String(s) => texts.push(s.clone()),
+                        serde_json::Value::Object(o) => {
+                            let text = o.get("text").and_then(|t| t.as_str()).ok_or_else(bad)?;
+                            if o.get("visual").and_then(|f| f.as_bool()) == Some(true) {
+                                visual.push(text.to_string());
+                            }
+                            texts.push(text.to_string());
+                        }
+                        _ => return Err(bad().to_string()),
+                    }
+                }
+                (Some(texts), visual)
+            }
+        };
         let amendment = Amendment {
-            criteria: field(&params, "criteria", "an array of strings")?,
+            criteria,
+            visual_criteria,
             verify: field(&params, "verify", "an array of strings")?,
             final_verify: field(&params, "finalVerify", "an array of strings")?,
             checks: field(&params, "checks", "an array of {criterion, run} objects")?,

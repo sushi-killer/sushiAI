@@ -1180,31 +1180,65 @@ pub fn image_mime(path: &std::path::Path) -> Option<&'static str> {
     IMAGE_TYPES.iter().find(|(e, _)| *e == ext).map(|(_, m)| *m)
 }
 
+/// Words that make an `artifacts/` path in a check an image.
+const IMAGE_WORDS: &[&str] = &[
+    "image",
+    "img",
+    "picture",
+    "photo",
+    "snapshot",
+    "capture",
+    "visual",
+    "thumbnail",
+    "render",
+];
+
+/// The text after `-- check:`, lowercased with `-` and `_` made spaces.
+fn normalized_check(text: &str) -> Option<String> {
+    let (_, check) = text.split_once("-- check:")?;
+    Some(check.to_ascii_lowercase().replace(['-', '_'], " "))
+}
+
+/// Whether a normalized check mentions a screenshot, an image word or an
+/// image extension.
+fn mentions_image(check: &str) -> bool {
+    check.contains("screenshot")
+        || check.contains("screen shot")
+        || IMAGE_WORDS.iter().any(|word| check.contains(word))
+        || IMAGE_TYPES.iter().any(|(ext, _)| check.contains(ext))
+}
+
 /// A criterion is visual when its `-- check:` names a screenshot or an image
 /// under `artifacts/`.
 pub fn is_visual_criterion(text: &str) -> bool {
-    let Some((_, check)) = text.split_once("-- check:") else {
+    let Some(check) = normalized_check(text) else {
         return false;
     };
-    let check = check.to_ascii_lowercase();
-    let check = check.replace(['-', '_'], " ");
     check.contains("screenshot")
         || check.contains("screen shot")
-        || (check.contains("artifacts/")
-            && [
-                "image",
-                "img",
-                "picture",
-                "photo",
-                "snapshot",
-                "capture",
-                "visual",
-                "thumbnail",
-                "render",
-            ]
-            .iter()
-            .any(|word| check.contains(word))
+        || (check.contains("artifacts/") && IMAGE_WORDS.iter().any(|word| check.contains(word))
             || IMAGE_TYPES.iter().any(|(ext, _)| check.contains(ext)))
+}
+
+/// A criterion whose `-- check:` runs a test or build command and mentions no
+/// image: its proof is the command's output, never a picture.
+pub fn is_command_check(text: &str) -> bool {
+    let Some(check) = normalized_check(text) else {
+        return false;
+    };
+    if mentions_image(&check) {
+        return false;
+    }
+    const TOOLS: &[&str] = &[
+        "cargo", "npm", "npx", "pnpm", "yarn", "node", "pytest", "make", "jest", "vitest",
+    ];
+    let has_word = check
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| TOOLS.contains(&w));
+    has_word
+        || ["go test", "playwright test", "test runner"]
+            .iter()
+            .any(|p| check.contains(p))
 }
 
 impl Task {
@@ -1212,7 +1246,9 @@ impl Task {
     pub fn visual_criteria_texts(&self) -> Vec<&str> {
         self.criteria
             .iter()
-            .filter(|c| self.visual_criteria.contains(c) || is_visual_criterion(c))
+            .filter(|c| {
+                !is_command_check(c) && (self.visual_criteria.contains(c) || is_visual_criterion(c))
+            })
             .map(String::as_str)
             .collect()
     }
@@ -1893,6 +1929,87 @@ mod tests {
         assert_eq!(v["baseSha"], "abc");
         assert_eq!(v["createdAt"], 1);
         assert!(v.get("base_sha").is_none());
+    }
+
+    fn task_with_criteria(criteria: &[&str], flagged: &[&str]) -> Task {
+        Task {
+            id: "t1".into(),
+            title: "Title".into(),
+            goal: "Goal".into(),
+            criteria: criteria.iter().map(|c| c.to_string()).collect(),
+            verify: vec![],
+            final_verify: vec![],
+            checks: vec![],
+            held_out: None,
+            request: None,
+            repo: "/repo".into(),
+            worktree: "/repo-task".into(),
+            worktree_removed: false,
+            visual_criteria: flagged.iter().map(|c| c.to_string()).collect(),
+            landed_sha: None,
+            report: None,
+            report_at: None,
+            lead_touch: None,
+            follow_up_of: None,
+            follow_ups: vec![],
+            branch: "task/x".into(),
+            base_sha: "abc".into(),
+            base_ref: None,
+            depends_on: vec![],
+            paths: vec![],
+            parent: None,
+            status: TaskStatus::Done,
+            tier: Tier::Standard,
+            question: None,
+            decisions: vec![],
+            attempts: vec![],
+            cost_usd: 0.0,
+            budget_raises: 0,
+            assumptions: vec![],
+            archived: false,
+            planned_tier: None,
+            tier_fallback: None,
+            variant: Default::default(),
+            eval_set: None,
+            eval_name: None,
+            eval_check_cmd: None,
+            eval_check: None,
+            source: None,
+            judged_findings: vec![],
+            brief_check: Default::default(),
+            queue: Default::default(),
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn a_criterion_checked_by_a_command_is_never_visual() {
+        for check in [
+            "x -- check: cargo test --bin orchd",
+            "x -- check: npm run test:orchd",
+            "x -- check: node --test tests/a.cjs",
+            "x -- check: pytest tests/",
+        ] {
+            let task = task_with_criteria(&[check], &[check]);
+            assert!(is_command_check(check), "{check}");
+            assert!(task.visual_criteria_texts().is_empty(), "{check}");
+        }
+    }
+
+    #[test]
+    fn a_check_that_mentions_an_image_is_still_visual() {
+        for check in [
+            "x -- check: screenshot under artifacts/",
+            "x -- check: npm run screenshot -- artifacts/x.png",
+        ] {
+            let task = task_with_criteria(&[check], &[check]);
+            assert!(!is_command_check(check), "{check}");
+            assert_eq!(task.visual_criteria_texts(), vec![check], "{check}");
+        }
+        assert!(!is_command_check("cargo test"));
+        assert!(is_command_check("x -- check: go test ./..."));
+        assert!(!is_command_check("x -- check: read the makefile"));
     }
 
     #[test]

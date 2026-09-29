@@ -33,62 +33,85 @@ fn task_create_rejects_an_unknown_variant_flag() {
 }
 
 #[test]
-fn the_planner_s_tier_routes_the_task_only_when_the_variant_asks_for_it() {
-    for (planner_tier, route) in [(true, "claude-opus"), (false, "claude-sonnet")] {
-        let scripts_dir = tempfile::tempdir().unwrap();
-        let script =
-            fake_harness_script(scripts_dir.path(), "fake-planner.sh", FAKE_PLANNER_SCRIPT);
-        let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
-        let mut settings = daemon.request("settings.get", serde_json::json!({}));
-        settings["review"] = serde_json::json!("");
-        daemon.request("settings.set", serde_json::json!({"settings": settings}));
-
-        let repo = init_git_repo();
-        let task = daemon.request(
+fn task_create_rejects_a_retired_variant_flag_with_a_clear_message() {
+    let daemon = Daemon::spawn(&[]);
+    let repo = init_git_repo();
+    for flag in [
+        "retryMode",
+        "plannerTier",
+        "contract",
+        "reviewOtherFamily",
+        "deferHeavyChecks",
+        "leanOutput",
+        "reviewBlind",
+    ] {
+        let result = raw_request_with_params(
+            &daemon.socket,
             "task.create",
             serde_json::json!({
                 "repo": repo.path().to_str().unwrap(),
-                "request": "add dark mode to the settings screen",
-                "variant": {"plannerTier": planner_tier},
-                "start": true,
+                "title": "t",
+                "goal": "g",
+                "variant": {flag: true},
             }),
+            Some(&daemon.token),
         );
-        let task_id = task["id"].as_str().unwrap().to_string();
-        let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
-            s == "done" || s == "failed" || s == "stopped" || s == "waiting"
-        });
-        assert_eq!(settled["status"], "done", "{settled}");
-        assert_eq!(settled["plannedTier"], "hard", "{settled}");
-        // The plan run's cost counts toward the task, not only the implement run's.
-        assert_eq!(settled["attempts"][0]["costUsd"], 0.01, "{settled}");
         assert!(
-            (settled["costUsd"].as_f64().unwrap() - 0.02).abs() < 1e-9,
-            "{settled}"
+            result
+                .to_string()
+                .contains(&format!("variant flag {flag} was retired")),
+            "{flag}: {result}"
         );
-        assert_eq!(settled["attempts"][1]["routeId"], route, "{settled}");
-        let decisions = settled["decisions"].as_array().unwrap();
-        let noted = decisions
-            .iter()
-            .any(|d| d == "Planner: tier hard -> route claude-opus");
-        assert_eq!(noted, planner_tier, "{settled}");
-        // With `plannerTier: false` and no classifier key configured (the
-        // default), the tier falls back to standard instead of the
-        // planner's "hard" -- `plannedTier` above still records the
-        // planner's choice, just unused for routing.
-        let fell_back = decisions.iter().any(|d| {
-            d == "Jev: tier unavailable (no classifier key) -> fallback standard, route claude-sonnet"
-        });
-        assert_eq!(fell_back, !planner_tier, "{settled}");
-        if planner_tier {
-            assert!(settled.get("tierFallback").is_none(), "{settled}");
-        } else {
-            assert_eq!(settled["tierFallback"], "no classifier key", "{settled}");
-        }
-
-        let worktree = task["worktree"].as_str().unwrap().to_string();
-        daemon.shutdown_and_wait();
-        let _ = std::fs::remove_dir_all(worktree);
     }
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn the_planner_s_tier_routes_the_task() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-planner.sh", FAKE_PLANNER_SCRIPT);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "add dark mode to the settings screen",
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+        s == "done" || s == "failed" || s == "stopped" || s == "waiting"
+    });
+    assert_eq!(settled["status"], "done", "{settled}");
+    assert_eq!(settled["plannedTier"], "hard", "{settled}");
+    // The plan run's cost counts toward the task, not only the implement run's.
+    assert_eq!(settled["attempts"][0]["costUsd"], 0.01, "{settled}");
+    assert!(
+        (settled["costUsd"].as_f64().unwrap() - 0.02).abs() < 1e-9,
+        "{settled}"
+    );
+    assert_eq!(
+        settled["attempts"][1]["routeId"], "claude-opus",
+        "{settled}"
+    );
+    let decisions = settled["decisions"].as_array().unwrap();
+    assert!(
+        decisions
+            .iter()
+            .any(|d| d == "Planner: tier hard -> route claude-opus"),
+        "{settled}"
+    );
+    assert!(settled.get("tierFallback").is_none(), "{settled}");
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
 }
 
 /// Runs `orchd eval run` against `daemon` from `repo`; `(exit ok, stdout, stderr)`.
@@ -146,7 +169,7 @@ fn eval_run_creates_one_task_at_the_resolved_base_with_its_eval_fields() {
             "--only",
             "one",
             "--variant",
-            r#"{"retryMode":"fresh"}"#,
+            r#"{"advisor":true}"#,
         ],
     );
     assert!(ok, "stderr: {stderr}");
@@ -160,7 +183,7 @@ fn eval_run_creates_one_task_at_the_resolved_base_with_its_eval_fields() {
     assert_eq!(task["baseSha"], parent.as_str(), "{task}");
     assert_eq!(task["evalSet"], "set-x");
     assert_eq!(task["evalName"], "one");
-    assert_eq!(task["variant"]["retryMode"], "fresh");
+    assert_eq!(task["variant"]["advisor"], true);
 
     // Ad-hoc pair: one task per arm, same request and base, one shared name.
     let (ok, stdout, stderr) = eval_run(
@@ -170,7 +193,7 @@ fn eval_run_creates_one_task_at_the_resolved_base_with_its_eval_fields() {
             "--request",
             "try the thing",
             "--arms",
-            r#"[{"retryMode":"fresh"},{"contract":true}]"#,
+            r#"[{"advisor":true},{"reviewEvidence":true}]"#,
         ],
     );
     assert!(ok, "stderr: {stderr}");
@@ -216,7 +239,6 @@ fn variant_route_overrides_pick_the_planner_and_the_tier_s_implement_route() {
             "repo": repo.path().to_str().unwrap(),
             "request": "add dark mode to the settings screen",
             "variant": {
-                "plannerTier": true,
                 "plannerRoute": "claude-sonnet",
                 "tierRoutes": {"hard": "claude-sonnet"},
             },

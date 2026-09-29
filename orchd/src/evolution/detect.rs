@@ -557,6 +557,7 @@ mod tests {
         a.review = Some(ReviewResult {
             verdict: Verdict::Fail,
             findings: findings.iter().map(|f| f.to_string()).collect(),
+            repeated: Vec::new(),
         });
         a
     }

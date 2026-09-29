@@ -6,6 +6,14 @@ mod common;
 use common::*;
 use std::time::Duration;
 
+/// Review by the Claude hard route, the same fake as the implementer (`auto`
+/// picks a route on the other harness).
+fn review_by_claude(daemon: &Daemon) {
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("claude-opus");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+}
+
 #[test]
 fn a_review_without_a_verdict_waits_for_the_owner_instead_of_passing() {
     // One fake plays both roles: the implementer edits a file and reports;
@@ -18,10 +26,12 @@ fn a_review_without_a_verdict_waits_for_the_owner_instead_of_passing() {
         "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n\"## Review\"*) echo '{\"type\":\"result\",\"result\":\"Looks fine to me.\"}' ;;\n*) echo changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}' ;;\nesac\n",
     );
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
-    // `auto` review of the standard route lands on the hard tier's route,
-    // which is also Claude here, so the same fake answers it.
-    let settings = daemon.request("settings.get", serde_json::json!({}));
+    // Review by the Claude hard route, which is the same fake (`auto` would
+    // pick a route on the other harness).
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
     assert_eq!(settings["review"], "auto");
+    settings["review"] = serde_json::json!("claude-opus");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
     let repo = init_git_repo();
     let task = daemon.request(
@@ -104,7 +114,7 @@ fn the_advisor_runs_once_before_a_retry_and_its_advice_reaches_the_next_brief() 
                 "title": "Two tries",
                 "goal": "Needs a second attempt",
                 "verify": ["test -f SECOND"],
-                "variant": {"advisor": advisor, "retryMode": "fresh"},
+                "variant": {"advisor": advisor},
                 "start": true,
             }),
         );
@@ -157,52 +167,6 @@ fn the_advisor_runs_once_before_a_retry_and_its_advice_reaches_the_next_brief() 
     }
 }
 
-#[test]
-fn a_blind_review_brief_leaves_out_the_implementer_s_account() {
-    for blind in [false, true] {
-        let scripts_dir = tempfile::tempdir().unwrap();
-        let claude = fake_harness_script(
-            scripts_dir.path(),
-            "fake-claude.sh",
-            "#!/bin/sh\ncat > /dev/null\necho changed > CHANGED_MARKER.txt\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n",
-        );
-        let args_log = scripts_dir.path().join("codex-args");
-        let codex = fake_harness_script(
-            scripts_dir.path(),
-            "fake-codex.sh",
-            "#!/bin/sh\ncat > \"$CODEX_ARGS.brief\"\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"```sushi-review\\n{\\\"verdict\\\":\\\"PASS\\\",\\\"findings\\\":[]}\\n```\"}}'\n",
-        );
-        let daemon = Daemon::spawn(&[
-            ("ORCHD_CLAUDE_BIN", claude.to_str().unwrap()),
-            ("ORCHD_CODEX_BIN", codex.to_str().unwrap()),
-            ("CODEX_ARGS", args_log.to_str().unwrap()),
-        ]);
-        let repo = init_git_repo();
-        let task = daemon.request(
-            "task.create",
-            serde_json::json!({
-                "repo": repo.path().to_str().unwrap(),
-                "title": "Blind",
-                "goal": "Write a marker",
-                "verify": ["true"],
-                "variant": {"reviewOtherFamily": true, "reviewBlind": blind},
-                "start": true,
-            }),
-        );
-        let task_id = task["id"].as_str().unwrap().to_string();
-        let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
-        assert_eq!(settled["status"], "done", "{settled}");
-        let brief = std::fs::read_to_string(format!("{}.brief", args_log.display())).unwrap();
-        assert!(brief.contains("## Diff"), "{brief}");
-        assert_eq!(brief.contains("## Implementer"), !blind, "{brief}");
-        assert_eq!(brief.contains("<untrusted-data>\ndone"), !blind, "{brief}");
-
-        let worktree = task["worktree"].as_str().unwrap().to_string();
-        daemon.shutdown_and_wait();
-        let _ = std::fs::remove_dir_all(worktree);
-    }
-}
-
 /// Implements like the other fakes; as reviewer, answers PASS but marks a
 /// criterion unmet when the brief asks for a ruling per criterion.
 const FAKE_CONTRACT_SCRIPT: &str = r###"#!/bin/sh
@@ -225,51 +189,45 @@ esac
 "###;
 
 #[test]
-fn with_a_contract_the_reviewer_s_unmet_criterion_fails_the_attempt() {
-    for (contract, status) in [(true, "waiting"), (false, "done")] {
-        let scripts_dir = tempfile::tempdir().unwrap();
-        let script =
-            fake_harness_script(scripts_dir.path(), "fake-contract.sh", FAKE_CONTRACT_SCRIPT);
-        let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
-        let mut settings = daemon.request("settings.get", serde_json::json!({}));
-        settings["maxAttempts"] = serde_json::json!(1);
-        // Review by the Claude hard route, which is the same fake.
-        settings["review"] = serde_json::json!("claude-opus");
-        daemon.request("settings.set", serde_json::json!({"settings": settings}));
+fn the_reviewer_s_unmet_criterion_fails_the_attempt() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-contract.sh", FAKE_CONTRACT_SCRIPT);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["maxAttempts"] = serde_json::json!(1);
+    // Review by the Claude hard route, which is the same fake.
+    settings["review"] = serde_json::json!("claude-opus");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
-        let repo = init_git_repo();
-        let task = daemon.request(
-            "task.create",
-            serde_json::json!({
-                "repo": repo.path().to_str().unwrap(),
-                "title": "Contract",
-                "goal": "Write the marker",
-                "criteria": ["Marker exists -- check: CHANGED_MARKER.txt"],
-                "verify": ["true"],
-                "variant": {"contract": contract},
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Contract",
+            "goal": "Write the marker",
+            "criteria": ["Marker exists -- check: CHANGED_MARKER.txt"],
+            "verify": ["true"],
                 "start": true,
-            }),
-        );
-        let task_id = task["id"].as_str().unwrap().to_string();
-        let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
-        assert_eq!(settled["status"], status, "contract={contract}: {settled}");
-        if contract {
-            let attempt = &settled["attempts"][0];
-            assert_eq!(attempt["failure"]["kind"], "review", "{settled}");
-            assert_eq!(
-                attempt["review"]["findings"][0], "Unmet criterion: Marker exists (wrong file)",
-                "{settled}"
-            );
-        }
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    assert_eq!(settled["status"], "waiting", "{settled}");
+    let attempt = &settled["attempts"][0];
+    assert_eq!(attempt["failure"]["kind"], "review", "{settled}");
+    assert_eq!(
+        attempt["review"]["findings"][0], "Unmet criterion: Marker exists (wrong file)",
+        "{settled}"
+    );
 
-        let worktree = task["worktree"].as_str().unwrap().to_string();
-        daemon.shutdown_and_wait();
-        let _ = std::fs::remove_dir_all(worktree);
-    }
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
 }
 
 #[test]
-fn review_other_family_sends_claude_work_to_the_codex_reviewer() {
+fn auto_review_sends_claude_work_to_the_codex_reviewer() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let claude = fake_harness_script(
         scripts_dir.path(),
@@ -296,7 +254,6 @@ fn review_other_family_sends_claude_work_to_the_codex_reviewer() {
             "title": "Other family",
             "goal": "Write the marker",
             "verify": ["true"],
-            "variant": {"reviewOtherFamily": true},
             "start": true,
         }),
     );
@@ -342,7 +299,7 @@ fn review_evidence_attaches_the_attempt_s_screenshots_to_the_codex_reviewer() {
             "title": "Evidence",
             "goal": "Save a screenshot",
             "verify": ["true"],
-            "variant": {"reviewOtherFamily": true, "reviewEvidence": true},
+            "variant": {"reviewEvidence": true},
             "start": true,
         }),
     );
@@ -371,11 +328,18 @@ fn review_evidence_attaches_the_attempt_s_screenshots_to_the_codex_reviewer() {
 
 #[test]
 fn final_checks_run_once_after_review_passes_and_gate_the_commit() {
-    for (final_check, status) in [("false", "waiting"), ("true", "done")] {
+    // The failing check passes on the base and fails once the marker exists.
+    for (final_check, status) in [
+        ("test ! -f CHANGED_MARKER.txt", "waiting"),
+        ("true", "done"),
+    ] {
         let scripts_dir = tempfile::tempdir().unwrap();
         // Implements, and as the (Claude) reviewer answers a plain PASS.
-        let script =
-            fake_harness_script(scripts_dir.path(), "fake-contract.sh", FAKE_CONTRACT_SCRIPT);
+        let script = fake_harness_script(
+            scripts_dir.path(),
+            "fake-contract.sh",
+            FAKE_SCREENSHOT_SCRIPT,
+        );
         let ran_log = scripts_dir.path().join("final.log");
         let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
         let mut settings = daemon.request("settings.get", serde_json::json!({}));
@@ -400,7 +364,7 @@ fn final_checks_run_once_after_review_passes_and_gate_the_commit() {
         assert_eq!(settled["status"], status, "{final_check}: {settled}");
         let attempt = &settled["attempts"][0];
         assert_eq!(attempt["review"]["verdict"], "PASS", "{settled}");
-        if final_check == "false" {
+        if status == "waiting" {
             assert!(
                 attempt["failure"]["detail"]
                     .as_str()
@@ -408,14 +372,12 @@ fn final_checks_run_once_after_review_passes_and_gate_the_commit() {
                     .starts_with("Final check echo ran"),
                 "{settled}"
             );
-            let question = settled["question"]["text"].as_str().unwrap();
-            assert!(question.contains(" already fails on base "), "{settled}");
+            assert_eq!(settled["question"]["kind"], "attempts_failing", "{settled}");
         }
         let worktree = task["worktree"].as_str().unwrap().to_string();
         let ran = std::fs::read_to_string(&ran_log).unwrap();
-        // A failing one is run once more, on the base.
-        let runs = if final_check == "false" { 2 } else { 1 };
-        assert_eq!(ran.lines().count(), runs, "{final_check}: {ran}");
+        // Once on the base before the attempt, once after review passes.
+        assert_eq!(ran.lines().count(), 2, "{final_check}: {ran}");
         let brief = std::fs::read_to_string(
             daemon
                 .data_dir()
@@ -437,11 +399,15 @@ fn final_checks_run_once_after_review_passes_and_gate_the_commit() {
 #[test]
 fn a_failed_final_check_shows_the_failing_test_not_the_bundler_noise() {
     let scripts_dir = tempfile::tempdir().unwrap();
-    let script = fake_harness_script(scripts_dir.path(), "fake-contract.sh", FAKE_CONTRACT_SCRIPT);
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-contract.sh",
+        FAKE_SCREENSHOT_SCRIPT,
+    );
     let check = fake_harness_script(
         scripts_dir.path(),
         "noisy-check.sh",
-        "#!/bin/sh\ni=0\nwhile [ $i -lt 300 ]; do echo \"WARNING bundler chunk $i is large\" >&2; i=$((i+1)); done\necho 'test a_broken_thing ... FAILED'\necho \"thread 'a_broken_thing' panicked at t.rs:3:5:\"\necho 'assertion failed: boom_message'\nj=0\nwhile [ $j -lt 300 ]; do echo \"test fine_$j ... ok\"; j=$((j+1)); done\nexit 1\n",
+        "#!/bin/sh\n[ -f CHANGED_MARKER.txt ] || exit 0\ni=0\nwhile [ $i -lt 300 ]; do echo \"WARNING bundler chunk $i is large\" >&2; i=$((i+1)); done\necho 'test a_broken_thing ... FAILED'\necho \"thread 'a_broken_thing' panicked at t.rs:3:5:\"\necho 'assertion failed: boom_message'\nj=0\nwhile [ $j -lt 300 ]; do echo \"test fine_$j ... ok\"; j=$((j+1)); done\nexit 1\n",
     );
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
@@ -496,6 +462,7 @@ fn a_visual_criterion_needs_a_saved_image_and_the_copies_outlive_the_worktree() 
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts_dir.path(), "fake-shot.sh", FAKE_SCREENSHOT_SCRIPT);
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_by_claude(&daemon);
     let repo = init_git_repo();
     std::fs::write(repo.path().join(".gitignore"), "artifacts/\n").unwrap();
     let task = daemon.request(
@@ -561,6 +528,7 @@ fn a_gif_or_svg_saved_for_a_visual_criterion_counts_as_evidence() {
     let body = FAKE_SCREENSHOT_SCRIPT.replace("panel.png", "panel.svg");
     let script = fake_harness_script(scripts_dir.path(), "fake-svg.sh", &body);
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_by_claude(&daemon);
     let repo = init_git_repo();
     std::fs::write(repo.path().join(".gitignore"), "artifacts/\n").unwrap();
     let task = daemon.request(
@@ -598,4 +566,113 @@ fn a_gif_or_svg_saved_for_a_visual_criterion_counts_as_evidence() {
         "{url}"
     );
     daemon.shutdown_and_wait();
+}
+
+/// Implements (appending, so every attempt's diff differs), answers the
+/// advisor, and reviews: FAIL with a plain finding at first, and once the
+/// review brief carries the previous review, FAIL with the same finding
+/// marked `repeat`. Every review brief is kept as $LOG_DIR/review.<pid>.
+const FAKE_REPEAT_SCRIPT: &str = r###"#!/bin/sh
+brief=$(cat)
+case "$brief" in
+*"An implement attempt at this task failed"*)
+  echo advisor >> "$LOG_DIR/advisor.log"
+  printf '%s\n' '{"type":"result","total_cost_usd":0.03,"usage":{"input_tokens":1,"output_tokens":1},"result":"Fix the null check."}' ;;
+"## Review"*)
+  printf '%s' "$brief" > "$LOG_DIR/review.$$"
+  case "$brief" in
+  *"## Previous review"*)
+    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[{\"finding\":\"P1: a.rs:1 - null check missing\",\"repeat\":true}]}\n```"}' ;;
+  *)
+    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: a.rs:1 - null check missing\"]}\n```"}' ;;
+  esac
+  printf '%s\n' "$json" ;;
+*)
+  echo changed >> CHANGED_MARKER.txt
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}' ;;
+esac
+"###;
+
+#[test]
+fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_escalates() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-repeat.sh", FAKE_REPEAT_SCRIPT);
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("LOG_DIR", scripts_dir.path().to_str().unwrap()),
+    ]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["maxAttempts"] = serde_json::json!(6);
+    settings["answerPolicy"] = serde_json::json!(false);
+    settings["review"] = serde_json::json!("claude-opus");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Repeat",
+            "goal": "Write the marker",
+            "verify": ["true"],
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
+    assert_eq!(settled["status"], "waiting", "{settled}");
+    assert_eq!(settled["question"]["kind"], "attempts_failing", "{settled}");
+    let attempts = settled["attempts"].as_array().unwrap();
+    let implements: Vec<&serde_json::Value> = attempts
+        .iter()
+        .filter(|a| a["stage"] == "implement")
+        .collect();
+    // Attempt 1: a first finding. Attempt 2: the same finding, marked as a
+    // repeat -> advisor and a tier up. Attempt 3: repeated again -> waiting.
+    assert_eq!(implements.len(), 3, "{settled}");
+    assert!(
+        implements[0]["review"].get("repeated").is_none(),
+        "{settled}"
+    );
+    assert_eq!(
+        implements[1]["review"]["repeated"][0], "P1: a.rs:1 - null check missing",
+        "{settled}"
+    );
+    assert_eq!(implements[0]["routeId"], "claude-sonnet", "{settled}");
+    assert_eq!(implements[1]["routeId"], "claude-sonnet", "{settled}");
+    assert_eq!(implements[2]["routeId"], "claude-opus", "{settled}");
+    assert_eq!(implements[1]["advice"], "Fix the null check.", "{settled}");
+    assert!(implements[0].get("advice").is_none(), "{settled}");
+    let runs = std::fs::read_to_string(scripts_dir.path().join("advisor.log"))
+        .map(|t| t.lines().count())
+        .unwrap_or(0);
+    assert_eq!(runs, 1, "{settled}");
+    let reviews: Vec<String> = std::fs::read_dir(scripts_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("review."))
+        .map(|e| std::fs::read_to_string(e.path()).unwrap())
+        .collect();
+    assert_eq!(reviews.len(), 3, "one review per attempt");
+    assert_eq!(
+        reviews
+            .iter()
+            .filter(|b| b.contains("## Previous review") && b.contains("null check missing"))
+            .count(),
+        2,
+        "attempts 2 and 3 carry the previous findings"
+    );
+    let decisions = settled["decisions"].as_array().unwrap();
+    assert!(
+        decisions.iter().any(|d| d
+            .as_str()
+            .unwrap()
+            .contains("a review finding repeated -> advisor, tier hard")),
+        "{settled}"
+    );
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
 }

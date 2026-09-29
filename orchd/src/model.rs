@@ -405,18 +405,6 @@ impl Default for Settings {
     }
 }
 
-/// How a retry after a failed attempt starts.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RetryMode {
-    /// Continue the failed attempt's session with only the failure.
-    #[default]
-    Resume,
-    /// A new session with the full brief, the earlier attempts' handoffs
-    /// and the last failure.
-    Fresh,
-}
-
 fn default_experiments() -> Variant {
     Variant {
         loop_detect: true,
@@ -443,35 +431,14 @@ fn experiments_or_default<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vari
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Variant {
-    pub retry_mode: RetryMode,
     /// Kill an implement attempt whose harness prints nothing for this
     /// long; 0 = off. The clock pauses during orchd's own Stop-hook verify,
     /// but not during an agent's long Bash call (up to 600s), so values
     /// under ~15 min can kill a busy agent.
     pub stall_timeout_secs: u64,
-    /// Route by the tier the planner chose; Jev only when there is none.
-    pub planner_tier: bool,
-    /// The planner checks the request's claims against the code and pairs
-    /// every criterion with how to check it; the reviewer rules on each.
-    pub contract: bool,
-    /// With review `auto` and a route on the other harness configured, the
-    /// reviewer runs there (Claude work reviewed by Codex and back).
-    pub review_other_family: bool,
     /// The reviewer gets the screenshots the attempt saved (Codex as
     /// attachments, Claude as paths to open) and longer verify output.
     pub review_evidence: bool,
-    /// The planner splits slow whole-repo checks into `final_verify`, run
-    /// once after review passes instead of on every attempt and stop.
-    pub defer_heavy_checks: bool,
-    /// A Claude implement run's `settings.json` gets a PreToolUse hook
-    /// (`orchd hook rtk`) that offers `rtk rewrite`'s shorter form of a
-    /// `Bash` command, and `bashOutputMaxChars` caps how much of a
-    /// command's own output comes back. Codex runs and review/plan
-    /// sessions are untouched either way.
-    pub lean_output: bool,
-    /// The review brief leaves out the implementer's summary and decisions,
-    /// so the reviewer judges the diff without the author's account.
-    pub review_blind: bool,
     /// After an implement attempt fails, one read-only call on the planner's
     /// route diagnoses it; the answer goes into the next attempt's brief.
     pub advisor: bool,
@@ -691,6 +658,19 @@ impl Variant {
         }
         Ok(())
     }
+
+    /// Flags that won or lost and left the struct. An old `task.json` or
+    /// `settings.json` naming one still loads (serde ignores it); a variant
+    /// override naming one is rejected.
+    pub const RETIRED_KEYS: [&'static str; 7] = [
+        "retryMode",
+        "plannerTier",
+        "contract",
+        "reviewOtherFamily",
+        "deferHeavyChecks",
+        "leanOutput",
+        "reviewBlind",
+    ];
 
     /// Keys a serialized default `Variant` leaves out, but a partial
     /// override object may still name.
@@ -949,7 +929,7 @@ pub struct Task {
     pub parent: Option<String>,
     pub status: TaskStatus,
     pub tier: Tier,
-    /// The tier the planner chose, kept even when `variant.planner_tier` is
+    /// The tier the planner chose, kept even when it is
     /// off so its choice can be compared with Jev's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planned_tier: Option<Tier>,
@@ -1053,6 +1033,10 @@ pub struct ReviewResult {
     pub verdict: Verdict,
     #[serde(default)]
     pub findings: Vec<String>,
+    /// The findings the reviewer marked `repeat: true`: still present after
+    /// the previous attempt's review reported them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repeated: Vec<String>,
 }
 
 /// Image extensions an evidence screenshot may have, with their MIME types.
@@ -1216,7 +1200,6 @@ pub struct Attempt {
     /// `killpg` it back on recovery instead of leaving it orphaned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pgid: Option<i32>,
-    pub resumed: bool,
     pub started_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<i64>,
@@ -1235,7 +1218,7 @@ pub struct Attempt {
     pub gate_blocks: u32,
     /// Tokens of the first turn's prompt (input + cache creation + cache
     /// read) of a fresh Claude implement attempt: the fixed prefix plus the
-    /// brief. `None` for resumed and Codex attempts.
+    /// brief. `None` for Codex attempts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1252,9 +1235,8 @@ pub struct Attempt {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cost_estimated: bool,
     /// Cost of the review run(s) that reviewed this implement attempt. Kept
-    /// separate from `cost_usd` on purpose: `attempt_cost()` subtracts
-    /// earlier attempts' `cost_usd` when a session resumes, and a review's
-    /// cost must never be part of that subtraction. Always added to
+    /// separate from `cost_usd` on purpose: a review's cost is never part
+    /// of the attempt's own. Always added to
     /// `task.cost_usd` too, at the point the review runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_cost_usd: Option<f64>,
@@ -1537,21 +1519,29 @@ mod tests {
     }
 
     #[test]
-    fn lean_output_is_camel_case_off_by_default_and_optional_on_disk() {
-        assert!(!Variant::default().lean_output);
-        let on = Variant {
-            lean_output: true,
-            ..Variant::default()
-        };
-        let v = serde_json::to_value(&on).unwrap();
-        assert_eq!(v["leanOutput"], true);
-        let back: Variant = serde_json::from_value(v).unwrap();
-        assert_eq!(back, on);
-        // A task.json variant written before the flag existed.
-        let old: Variant =
-            serde_json::from_value(serde_json::json!({"retryMode": "fresh"})).unwrap();
-        assert!(!old.lean_output);
-        assert_eq!(old.retry_mode, RetryMode::Fresh);
+    fn a_variant_written_with_retired_flags_still_loads_and_drops_them() {
+        let old: Variant = serde_json::from_value(serde_json::json!({
+            "retryMode": "resume", "leanOutput": true, "reviewBlind": true, "advisor": true
+        }))
+        .unwrap();
+        assert!(old.advisor);
+        let json = serde_json::to_string(&old).unwrap();
+        for key in Variant::RETIRED_KEYS {
+            assert!(!json.contains(key), "{json}");
+        }
+    }
+
+    #[test]
+    fn settings_written_with_retired_flags_still_load() {
+        let retired = serde_json::json!({
+            "retryMode": "fresh", "plannerTier": true, "contract": true,
+            "reviewOtherFamily": true, "deferHeavyChecks": true,
+            "leanOutput": true, "reviewBlind": true, "advisor": true
+        });
+        let mut settings = serde_json::to_value(Settings::default()).unwrap();
+        settings["experiments"] = retired.clone();
+        let s: Settings = serde_json::from_value(settings).unwrap();
+        assert!(s.experiments.advisor && s.experiments.loop_detect);
     }
 
     #[test]
@@ -1579,7 +1569,7 @@ mod tests {
     fn a_variant_without_route_overrides_serializes_as_before() {
         assert_eq!(
             serde_json::to_string(&Variant::default()).unwrap(),
-            r#"{"retryMode":"resume","stallTimeoutSecs":0,"plannerTier":false,"contract":false,"reviewOtherFamily":false,"reviewEvidence":false,"deferHeavyChecks":false,"leanOutput":false,"reviewBlind":false,"advisor":false,"loopDetect":false}"#
+            r#"{"stallTimeoutSecs":0,"reviewEvidence":false,"advisor":false,"loopDetect":false}"#
         );
     }
 

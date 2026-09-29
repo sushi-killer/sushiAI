@@ -14,11 +14,6 @@ pub(super) async fn run_task_loop(
     auto_start_after_plan: bool,
 ) {
     let mut attempt_budget = app.settings.read().unwrap().max_attempts;
-    // Never resume immediately after a waiting/answer cycle -- a fresh
-    // brief carries the owner's answer instead (spec item 11). Reset each
-    // iteration; set back to `true` only when this iteration itself ends
-    // via an answered wait.
-    let mut just_answered = false;
 
     'attempts: loop {
         if cancel.is_cancelled() {
@@ -128,8 +123,7 @@ pub(super) async fn run_task_loop(
             )
             .await
             {
-                Tail::Continue { answered } => {
-                    just_answered = answered;
+                Tail::Continue => {
                     continue;
                 }
                 Tail::Return => return,
@@ -187,9 +181,6 @@ pub(super) async fn run_task_loop(
                 task = reloaded;
             }
         }
-
-        let resume_eligible = !just_answered;
-        just_answered = false;
 
         let status = task.status;
         if !wait_while_over_budget(
@@ -252,11 +243,54 @@ pub(super) async fn run_task_loop(
         }
         apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
 
+        // A check that already fails on the base can never be met by the
+        // work: ask about it now, before an attempt is spent on it.
+        if implement_attempt_count(&task) == 0 {
+            if let Some(base_run) = failing_twice_on_base(&app, &task, &cancel).await {
+                task.question = Some(pre_existing_question(
+                    &base_run.command,
+                    &task.base_sha,
+                    &base_run.tail,
+                ));
+                task.status = TaskStatus::Waiting;
+                task.updated_at = now_ms();
+                let Some(answer) = wait_for_answer(
+                    &app,
+                    &task_id,
+                    &mut task,
+                    &pending_answer,
+                    &cancel,
+                    &mut permit,
+                )
+                .await
+                else {
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                };
+                if answer == PRE_EXISTING_DROP {
+                    task.verify.retain(|c| c != &base_run.command);
+                    task.final_verify.retain(|c| c != &base_run.command);
+                    app.verify_cache.lock().unwrap().remove(&task_id);
+                    task.decisions
+                        .push(format!("Orchestrator: dropped check {}", base_run.command));
+                } else {
+                    let wt = PathBuf::from(&task.worktree);
+                    carry_onto_newest_base(&mut task, &wt).await;
+                }
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+                drop(permit);
+                continue 'attempts;
+            }
+        }
+
         let mut jev_tier_choice = None;
         let mut planner_tier_used = false;
         let mut tier_fallback_reason = None;
         if implement_attempt_count(&task) == 0 {
-            match task.planned_tier.filter(|_| task.variant().planner_tier) {
+            match task.planned_tier {
                 Some(tier) => {
                     task.tier = tier;
                     task.tier_fallback = None;
@@ -313,34 +347,6 @@ pub(super) async fn run_task_loop(
                 profile_id: None,
             });
 
-        // The plan attempt (if any) is never a resume candidate -- it's a
-        // different route/harness shape entirely, and has nothing to do
-        // with the implement route's own session history.
-        let prev = task
-            .attempts
-            .iter()
-            .rev()
-            .find(|a| a.stage == Stage::Implement)
-            .cloned();
-        let resume_session = if resume_eligible && task.variant().retry_mode == RetryMode::Resume {
-            prev.as_ref().and_then(|p| {
-                let route_matches = p.route_id == route.id;
-                let has_session = p.session_id.is_some();
-                let verify_failure = matches!(
-                    p.failure.as_ref().map(|f| f.kind),
-                    Some(FailureKind::Verify | FailureKind::Heldout)
-                );
-                let was_interrupted = p.status == AttemptStatus::Interrupted;
-                if route_matches && has_session && (verify_failure || was_interrupted) {
-                    p.session_id.clone()
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        };
-
         let worktree = PathBuf::from(&task.worktree);
         let base_sha = task.base_sha.clone();
         let wt2 = worktree.clone();
@@ -354,9 +360,19 @@ pub(super) async fn run_task_loop(
         .await
         .unwrap_or_default();
 
-        if task.variant().advisor {
+        // A finding the reviewer says came back gets the advisor whether or
+        // not the variant asks for it.
+        let repeated_finding = last_review_repeated(&task);
+        if task.variant().advisor || repeated_finding {
             if let Some(cost) = run_advisor_before_retry(
-                &app, &mut task, &settings, &route, &worktree, &base_sha, &cancel,
+                &app,
+                &mut task,
+                &settings,
+                &route,
+                &worktree,
+                &base_sha,
+                repeated_finding,
+                &cancel,
             )
             .await
             {
@@ -385,13 +401,7 @@ pub(super) async fn run_task_loop(
             }
         }
 
-        let brief_text = match (
-            &resume_session,
-            prev.as_ref().and_then(|p| p.failure.as_ref()),
-        ) {
-            (Some(_), Some(failure)) => brief::build_resume_delta(failure),
-            _ => brief::build_brief(&task, &status_short, &diff_stat),
-        };
+        let brief_text = brief::build_brief(&task, &status_short, &diff_stat);
         let brief_text = match &task.brief_check.conflict {
             Some(conflict) if implement_attempt_count(&task) == 0 => {
                 brief::with_block_before_report(
@@ -414,7 +424,7 @@ pub(super) async fn run_task_loop(
             .find(|a| a.stage == Stage::Implement)
             .and_then(|a| a.advice.clone());
         let brief_text = match advice.as_deref() {
-            Some(advice) if task.variant().advisor => {
+            Some(advice) => {
                 brief::with_block_before_report(&brief_text, &brief::advisor_block(advice))
             }
             _ => brief_text,
@@ -430,7 +440,6 @@ pub(super) async fn run_task_loop(
             reason,
             session_id: None,
             pgid: None,
-            resumed: resume_session.is_some(),
             started_at: now_ms(),
             ended_at: None,
             status: AttemptStatus::Running,
@@ -483,7 +492,6 @@ pub(super) async fn run_task_loop(
             effort: route.effort.as_deref(),
             max_budget_usd: (task.variant().max_attempt_cost_usd > 0.0)
                 .then(|| task.variant().max_attempt_cost_usd),
-            resume: resume_session.as_deref(),
             review: false,
             mcp_config: Some(&mcp_path),
             settings_path: Some(&settings_path),
@@ -614,8 +622,7 @@ pub(super) async fn run_task_loop(
                 )
                 .await
                 {
-                    LoopSignal::Continue { answered } => {
-                        just_answered = answered;
+                    LoopSignal::Continue => {
                         drop(permit);
                         continue;
                     }
@@ -637,18 +644,10 @@ pub(super) async fn run_task_loop(
             output: outcome.usage_output,
             cached: outcome.usage_cached,
         });
-        // A resumed first turn also carries the whole earlier conversation.
-        if route.harness == Harness::Claude && resume_session.is_none() {
+        if route.harness == Harness::Claude {
             task.attempts[idx].prefix_tokens = outcome.first_turn_tokens;
         }
-        let cost = outcome.cost_usd.map(|total| {
-            attempt_cost(
-                &task.attempts[..idx],
-                &task.attempts[idx],
-                total,
-                outcome.cost_estimated,
-            )
-        });
+        let cost = outcome.cost_usd;
         task.attempts[idx].cost_usd = cost;
         task.attempts[idx].cost_estimated = outcome.cost_estimated;
         if let Some(cost) = cost {
@@ -682,8 +681,7 @@ pub(super) async fn run_task_loop(
             )
             .await
             {
-                LoopSignal::Continue { answered } => {
-                    just_answered = answered;
+                LoopSignal::Continue => {
                     drop(permit);
                     continue;
                 }
@@ -716,8 +714,7 @@ pub(super) async fn run_task_loop(
             )
             .await
             {
-                LoopSignal::Continue { answered } => {
-                    just_answered = answered;
+                LoopSignal::Continue => {
                     drop(permit);
                     continue;
                 }
@@ -822,7 +819,6 @@ pub(super) async fn run_task_loop(
                             let _ = app.store.save_task(&task);
                             app.broadcast_task(&task);
                         }
-                        just_answered = true;
                         drop(permit);
                         continue;
                     }
@@ -864,7 +860,6 @@ pub(super) async fn run_task_loop(
                 {
                     Some(_) => {
                         attempt_budget += 2;
-                        just_answered = true;
                         drop(permit);
                         continue;
                     }
@@ -918,7 +913,6 @@ pub(super) async fn run_task_loop(
                     .await
                     {
                         Some(_) => {
-                            just_answered = true;
                             drop(permit);
                             continue;
                         }
@@ -951,8 +945,7 @@ pub(super) async fn run_task_loop(
             )
             .await
             {
-                LoopSignal::Continue { answered } => {
-                    just_answered = answered;
+                LoopSignal::Continue => {
                     drop(permit);
                     continue;
                 }
@@ -1052,8 +1045,7 @@ pub(super) async fn run_task_loop(
                     )
                     .await
                     {
-                        LoopSignal::Continue { answered } => {
-                            just_answered = answered;
+                        LoopSignal::Continue => {
                             drop(permit);
                             continue;
                         }
@@ -1129,8 +1121,7 @@ pub(super) async fn run_task_loop(
             )
             .await
             {
-                LoopSignal::Continue { answered } => {
-                    just_answered = answered;
+                LoopSignal::Continue => {
                     drop(permit);
                     continue;
                 }
@@ -1218,8 +1209,7 @@ pub(super) async fn run_task_loop(
                 )
                 .await
                 {
-                    LoopSignal::Continue { answered } => {
-                        just_answered = answered;
+                    LoopSignal::Continue => {
                         drop(permit);
                         continue;
                     }
@@ -1256,8 +1246,7 @@ pub(super) async fn run_task_loop(
             )
             .await
             {
-                LoopSignal::Continue { answered } => {
-                    just_answered = answered;
+                LoopSignal::Continue => {
                     drop(permit);
                     continue;
                 }
@@ -1298,7 +1287,6 @@ pub(super) async fn run_task_loop(
                     return;
                 }
                 Some(answer) => {
-                    just_answered = true;
                     // Proceeds only on an exact "approve"; anything else --
                     // "reject", a typo, free text -- rejects the change.
                     if answer != "approve" {
@@ -1316,8 +1304,7 @@ pub(super) async fn run_task_loop(
                         )
                         .await
                         {
-                            LoopSignal::Continue { answered } => {
-                                just_answered = just_answered || answered;
+                            LoopSignal::Continue => {
                                 drop(permit);
                                 continue;
                             }
@@ -1336,11 +1323,9 @@ pub(super) async fn run_task_loop(
         apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
         let mut review_result: Option<ReviewResult> = None;
         if !settings.review.is_empty() {
-            if let Some(review_route) =
-                select_review_route(&settings, &route, task.variant().review_other_family)
-            {
-                if task.variant().review_other_family && review_route.harness == route.harness {
-                    // The A/B arm says other family; record when it wasn't.
+            if let Some(review_route) = select_review_route(&settings, &route) {
+                if settings.review == "auto" && review_route.harness == route.harness {
+                    // Auto review prefers the other family; record when it wasn't.
                     let note = format!(
                         "Orchestrator: no review route on another harness; reviewed by {}",
                         review_route.id
@@ -1398,7 +1383,7 @@ pub(super) async fn run_task_loop(
                 // The task's total, and separately the attempt's
                 // review_cost_usd for display: an attempt's own cost_usd is
                 // what later resumes of its session subtract
-                // (`attempt_cost`), so the review's cost must never join it.
+                // (session cost accounting), so the review's cost must never join it.
                 task.cost_usd += review_cost;
                 if review_fingerprint.is_some() {
                     task.attempts[idx].review_fingerprint = review_fingerprint;
@@ -1466,6 +1451,7 @@ pub(super) async fn run_task_loop(
                                         findings: vec![format!(
                                             "Another attempt was asked for: {answer}"
                                         )],
+                                        repeated: Vec::new(),
                                     });
                                 }
                             }
@@ -1500,8 +1486,7 @@ pub(super) async fn run_task_loop(
                 )
                 .await
                 {
-                    LoopSignal::Continue { answered } => {
-                        just_answered = answered;
+                    LoopSignal::Continue => {
                         drop(permit);
                         continue;
                     }
@@ -1567,8 +1552,7 @@ pub(super) async fn run_task_loop(
                     )
                     .await
                     {
-                        LoopSignal::Continue { answered } => {
-                            just_answered = answered;
+                        LoopSignal::Continue => {
                             drop(permit);
                             continue 'attempts;
                         }
@@ -1622,41 +1606,11 @@ pub(super) async fn run_task_loop(
                 }
                 // Retry (any other answer): one more attempt on the newest
                 // base, even when the attempt budget is spent.
-                if let Some(base_ref) = task.base_ref.clone() {
-                    let (wt, from, tid, r) = (
-                        worktree.clone(),
-                        task.base_sha.clone(),
-                        task_id.clone(),
-                        base_ref.clone(),
-                    );
-                    let carried = tokio::task::spawn_blocking(move || {
-                        git::carry_onto_moved_base(&wt, &r, &from, &tid)
-                    })
-                    .await;
-                    match carried {
-                        Ok(Ok(git::Rebase::Moved { new_sha })) => {
-                            task.decisions.push(format!(
-                                "Rebase: carried the work onto {base_ref} at {}",
-                                short_sha(&new_sha)
-                            ));
-                            task.base_sha = new_sha;
-                        }
-                        Ok(Ok(git::Rebase::Conflicts { new_sha, files })) => {
-                            task.decisions.push(format!(
-                                "Rebase: carried the work onto {base_ref} at {} with conflicts in {}",
-                                short_sha(&new_sha),
-                                files.join(", ")
-                            ));
-                            task.base_sha = new_sha;
-                        }
-                        _ => {}
-                    }
-                }
+                carry_onto_newest_base(&mut task, &worktree).await;
                 attempt_budget = attempt_budget.max(implement_attempt_count(&task) + 1);
                 task.updated_at = now_ms();
                 let _ = app.store.save_task(&task);
                 app.broadcast_task(&task);
-                just_answered = true;
                 drop(permit);
                 continue 'attempts;
             }
@@ -1678,12 +1632,46 @@ pub(super) async fn run_task_loop(
         )
         .await
         {
-            Tail::Continue { answered } => {
-                just_answered = answered;
+            Tail::Continue => {
                 continue;
             }
             Tail::Return => return,
         }
+    }
+}
+
+/// Carries the task's work onto its base branch as it is now, so a retry
+/// after "the base is fixed" runs on the fix. Nothing happens when the task
+/// has no base branch or it did not move.
+async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) {
+    let Some(base_ref) = task.base_ref.clone() else {
+        return;
+    };
+    let (wt, from, tid, r) = (
+        worktree.to_path_buf(),
+        task.base_sha.clone(),
+        task.id.clone(),
+        base_ref.clone(),
+    );
+    let carried =
+        tokio::task::spawn_blocking(move || git::carry_onto_moved_base(&wt, &r, &from, &tid)).await;
+    match carried {
+        Ok(Ok(git::Rebase::Moved { new_sha })) => {
+            task.decisions.push(format!(
+                "Rebase: carried the work onto {base_ref} at {}",
+                short_sha(&new_sha)
+            ));
+            task.base_sha = new_sha;
+        }
+        Ok(Ok(git::Rebase::Conflicts { new_sha, files })) => {
+            task.decisions.push(format!(
+                "Rebase: carried the work onto {base_ref} at {} with conflicts in {}",
+                short_sha(&new_sha),
+                files.join(", ")
+            ));
+            task.base_sha = new_sha;
+        }
+        _ => {}
     }
 }
 
@@ -1769,7 +1757,7 @@ impl App {
 }
 
 pub(super) enum Tail {
-    Continue { answered: bool },
+    Continue,
     Return,
 }
 
@@ -1846,9 +1834,9 @@ pub(super) async fn finish_attempt(
                 )
                 .await
                 {
-                    LoopSignal::Continue { answered } => {
+                    LoopSignal::Continue => {
                         *permit = None;
-                        return Tail::Continue { answered };
+                        return Tail::Continue;
                     }
                     LoopSignal::Stop => {
                         *permit = None;

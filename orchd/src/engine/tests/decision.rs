@@ -67,6 +67,7 @@ fn decide_after_failure_ties_up_on_repeat_signature() {
         previous_signature: Some("sig-b"),
         consecutive_same: 2,
         loops: 0,
+        repeated_reviews: 0,
         attempt_n: 2,
         max_attempts: 4,
     };
@@ -84,6 +85,7 @@ fn decide_after_failure_stays_same_tier_on_new_signature() {
         previous_signature: Some("sig-b"),
         consecutive_same: 1,
         loops: 0,
+        repeated_reviews: 0,
         attempt_n: 2,
         max_attempts: 4,
     };
@@ -101,6 +103,7 @@ fn decide_after_failure_waits_after_three_consecutive() {
         previous_signature: Some("sig-b"),
         consecutive_same: 3,
         loops: 0,
+        repeated_reviews: 0,
         attempt_n: 3,
         max_attempts: 10,
     };
@@ -118,6 +121,7 @@ fn decide_after_failure_waits_when_attempts_exhausted() {
         previous_signature: None,
         consecutive_same: 1,
         loops: 0,
+        repeated_reviews: 0,
         attempt_n: 4,
         max_attempts: 4,
     };
@@ -152,6 +156,7 @@ fn a_second_loop_escalates_the_tier_even_with_a_different_signature() {
         previous_signature: Some("loop:a"),
         consecutive_same: 1,
         loops,
+        repeated_reviews: 0,
         attempt_n: 2,
         max_attempts: 4,
     };
@@ -165,4 +170,32 @@ fn a_second_loop_escalates_the_tier_even_with_a_different_signature() {
         decide_after_failure(&input(2)),
         FailureDecision::NextAttempt { tier: Tier::Hard }
     );
+}
+
+#[test]
+fn a_repeated_review_finding_tiers_up_once_then_waits() {
+    let input = |repeated_reviews| FailureDecisionInput {
+        tier: Tier::Standard,
+        signature: "review:x",
+        previous_signature: Some("review:y"),
+        consecutive_same: 1,
+        loops: 0,
+        repeated_reviews,
+        attempt_n: 2,
+        max_attempts: 4,
+    };
+    assert_eq!(
+        decide_after_failure(&input(0)),
+        FailureDecision::NextAttempt {
+            tier: Tier::Standard
+        }
+    );
+    assert_eq!(
+        decide_after_failure(&input(1)),
+        FailureDecision::NextAttempt { tier: Tier::Hard }
+    );
+    assert!(matches!(
+        decide_after_failure(&input(2)),
+        FailureDecision::Waiting { .. }
+    ));
 }

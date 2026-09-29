@@ -71,14 +71,12 @@ flowchart TB
   herdr[("Herdr daemon")]
   ext[("OpenRouter - Jev")]
   repo[("Git repo<br/>base branch + worktrees")]
-  rtk[("rtk CLI")]
 
   owner --> shell
   orchSvc <-->|socket| proto
   harness --> taskAgent & reviewer & auditor & proposer & orchAgent
   orchAgent -->|MCP| mcp
   taskAgent -->|Stop hook| proto
-  taskAgent -->|rtk rewrite hook<br/>leanOutput, no socket| rtk
   side --> ext
   side --> repo
   herdrIpc <--> herdr
@@ -149,8 +147,9 @@ flowchart TD
   plan["Plan<br/>planner route (Opus) drafts goal, criteria, verify"]
   split["Verify entries that are not shell commands<br/>become review criteria"]
   baseline["Baseline (variant.groundedChecks), before attempt 1<br/>planner's checks and held-out check run on the base;<br/>pass = not grounded, exit 126/127 = env, fail = gated;<br/>worktree restored afterwards"]
-  tier["Tier<br/>planner's tier (variant.plannerTier), else Jev"]
-  impl["Implement<br/>route = tiers[tier]; retry resumes the session,<br/>or starts fresh with handoffs (variant.retryMode)"]
+  basecheck["Base preflight, before attempt 1<br/>finalVerify runs on the base (cached per sha + command);<br/>a failure is re-run once, failing twice asks the pre-existing question"]
+  tier["Tier<br/>planner's tier, else Jev"]
+  impl["Implement<br/>route = tiers[tier]; a retry starts a fresh session<br/>with the brief, earlier handoffs and the last failure"]
   stall["Stall watchdog<br/>no output for variant.stallTimeoutSecs -> kill"]
   rebase["Carry onto moved base<br/>conflicts go back to the agent"]
   verify["Verify<br/>task.verify in the worktree<br/>cached by diff + untracked contents"]
@@ -169,7 +168,7 @@ flowchart TD
   triage["Orchestrator triages, max 2 per task<br/>continue / reject finding / escalate"]
   ownerQ(["Owner question"])
 
-  plan --> split --> baseline --> tier --> impl --> rebase --> verify
+  plan --> split --> baseline --> basecheck --> tier --> impl --> rebase --> verify
   impl -.- stall
   stall -->|stalled| fail
   verify -->|all exit 0| gated -->|pass| heldout -->|pass| protect --> review
@@ -179,6 +178,7 @@ flowchart TD
   impossible -->|"drop criterion / retry / stop"| ownerQ
   ownerQ -->|drop criterion or retry| impl
   ownerQ -->|"drop this check"| commit
+  basecheck -->|"a finalVerify check fails twice on the base"| ownerQ
   land["Subtask: land on the parent's branch<br/>one at a time per parent; carry onto its head,<br/>verify again if it moved, fast-forward"]
   review -->|PASS| final -->|all exit 0| commit --> done
   final -->|all exit 0, subtask| land --> done
@@ -189,6 +189,7 @@ flowchart TD
   review -->|no verdict| ownerQ
   verify -->|non-zero| fail
   review -->|FAIL| fail
+  fail -->|"review finding marked repeat: first one runs the advisor and tiers up, second waits"| triage
   fail --> budget
   budget -->|yes| impl
   budget -->|no| triage --> ownerQ

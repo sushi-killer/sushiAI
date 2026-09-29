@@ -15,8 +15,6 @@ pub struct RunRequest<'a> {
     /// Claude only: `--max-budget-usd`. Every harness: orchd itself stops the
     /// run once its streamed usage, priced with `settings.prices`, exceeds it.
     pub max_budget_usd: Option<f64>,
-    /// Resume the given session id instead of starting fresh.
-    pub resume: Option<&'a str>,
     /// Read-only review session instead of an implement session.
     pub review: bool,
     /// Claude only: paths to the run's `mcp.json` / `settings.json`.
@@ -64,7 +62,7 @@ pub fn codex_mcp_flags(name: &str, server: &serde_json::Value) -> Vec<String> {
 /// project,local --disable-slash-commands --strict-mcp-config --mcp-config
 /// <mcp.json> --settings <settings.json> --permission-mode acceptEdits
 /// --disallowedTools <DELEGATION_TOOLS> --permission-prompts none [--model]
-/// [--effort] [--max-budget-usd] [--resume <id>]`; review swaps `--permission-mode acceptEdits`
+/// [--effort] [--max-budget-usd] `; review swaps `--permission-mode acceptEdits`
 /// (and the delegation-tools trim, which review never gets) for
 /// `--tools Read,Grep,Glob --permission-mode plan`.
 pub fn claude_argv(req: &RunRequest) -> Vec<String> {
@@ -117,59 +115,15 @@ pub fn claude_argv(req: &RunRequest) -> Vec<String> {
         argv.push("--max-budget-usd".to_string());
         argv.push(cap.to_string());
     }
-    if !req.review {
-        if let Some(session) = req.resume {
-            argv.push("--resume".to_string());
-            argv.push(session.to_string());
-        }
-    }
     argv
 }
 
-/// Fresh (non-resume) or review: `codex exec --json --skip-git-repo-check -C
+/// `codex exec --json --skip-git-repo-check -C
 /// <worktree> --sandbox workspace-write -c
 /// sandbox_workspace_write.network_access=<bool> [--model] [-c
 /// model_reasoning_effort="<e>"] -`; review uses `--sandbox read-only` and
 /// drops the network flag (nothing to write, nothing to reach).
-///
-/// Resume is a different shape entirely -- `codex exec resume <id> --json
-/// --skip-git-repo-check -c sandbox_mode="workspace-write" -c
-/// sandbox_workspace_write.network_access=<bool> [-m model] [-c
-/// model_reasoning_effort=...] -`, with no `-C`/`--sandbox` at all (cwd is
-/// set at the process level instead; `resume` doesn't accept them).
 pub fn codex_argv(req: &RunRequest) -> Vec<String> {
-    if let Some(session) = req.resume {
-        if !req.review {
-            let mut argv = vec![
-                "exec".to_string(),
-                "resume".to_string(),
-                session.to_string(),
-                "--json".to_string(),
-                "--skip-git-repo-check".to_string(),
-                "-c".to_string(),
-                "sandbox_mode=\"workspace-write\"".to_string(),
-                "-c".to_string(),
-                format!(
-                    "sandbox_workspace_write.network_access={}",
-                    req.network_allowed
-                ),
-            ];
-            if let Some((name, server)) = req.codex_mcp {
-                argv.extend(codex_mcp_flags(name, server));
-            }
-            if let Some(model) = req.model {
-                argv.push("-m".to_string());
-                argv.push(model.to_string());
-            }
-            if let Some(effort) = req.effort {
-                argv.push("-c".to_string());
-                argv.push(format!("model_reasoning_effort=\"{effort}\""));
-            }
-            argv.push("-".to_string());
-            return argv;
-        }
-    }
-
     let mut argv = vec!["exec".to_string()];
     // `--image=` right after `exec`: the flag takes several values, so it
     // must not sit where it could swallow the trailing `-`.
@@ -216,36 +170,16 @@ pub fn build_argv(req: &RunRequest) -> Vec<String> {
 
 /// The Stop hook wiring for a Claude run: `orchd`'s own path, the daemon's
 /// socket, and the token that maps this run's `hook.stop` calls back to its
-/// task/attempt. `lean_output` wires `orchd hook rtk` to PreToolUse and sets
-/// `bashOutputMaxChars` -- it needs no socket or token, since the hook never
-/// contacts the daemon.
+/// task/attempt.
 pub struct StopHook<'a> {
     pub orchd_path: &'a str,
     pub socket_path: &'a str,
     pub token: &'a str,
-    pub lean_output: bool,
 }
 
-/// A few seconds' margin over the rtk subprocess's own 2s timeout
-/// (`hook::RTK_REWRITE_TIMEOUT`) so Claude Code's own hook-level timeout
-/// never fires first and the hook always gets to answer `{}` itself.
-const RTK_HOOK_TIMEOUT_SECS: u64 = 5;
-
 /// `Bash` prefixes an agent may never run directly (`permissions.deny`
-/// below) and `orchd hook rtk` must never rewrite into an allow answer
-/// either: a rewrite like `rtk git commit ...` would otherwise escape these
-/// same deny rules through the hook's own `permissionDecision: allow`.
+/// below).
 pub const DENIED_BASH_COMMANDS: [&str; 2] = ["git commit", "git push"];
-
-/// `bashOutputMaxChars` under `variant.lean_output` (Claude Code's inline
-/// Bash limit; `BASH_MAX_OUTPUT_LENGTH` only sizes the read-back of an
-/// output saved to a file, so it would cap nothing): bigger than the
-/// 2000-char failure tail orchd itself feeds back in a Stop-hook block
-/// (`hook::TAIL_CHARS`), so a failing command's own reported output still
-/// fits, and well below Claude Code's 30000-char default, so it actually
-/// shrinks what a noisy command bills. Output past it is saved to a file
-/// the agent can read.
-pub const BASH_OUTPUT_MAX_CHARS: u32 = 10_000;
 
 /// The `settings.json` written alongside a Claude run: profile
 /// env/apiKeyHelper (opaque, passed through) + sandbox block (omitted for
@@ -317,7 +251,7 @@ pub fn build_claude_settings(
                 shell_quote(hook.token)
             )
         };
-        let mut hooks = serde_json::json!({
+        let hooks = serde_json::json!({
             "Stop": [
                 {
                     "hooks": [
@@ -326,19 +260,6 @@ pub fn build_claude_settings(
                 }
             ]
         });
-        if hook.lean_output {
-            let rtk_command = format!("{} hook rtk", shell_quote(hook.orchd_path));
-            hooks["PreToolUse"] = serde_json::json!([{
-                "matcher": "Bash",
-                "hooks": [
-                    {"type": "command", "command": rtk_command, "timeout": RTK_HOOK_TIMEOUT_SECS}
-                ]
-            }]);
-            obj.insert(
-                "bashOutputMaxChars".to_string(),
-                serde_json::json!(BASH_OUTPUT_MAX_CHARS),
-            );
-        }
         obj.insert("hooks".to_string(), hooks);
     }
 
@@ -779,7 +700,6 @@ mod tests {
             model: None,
             effort: None,
             max_budget_usd: None,
-            resume: None,
             review: false,
             mcp_config: None,
             settings_path: None,
@@ -791,30 +711,26 @@ mod tests {
     }
 
     #[test]
-    fn codex_gets_the_messages_server_fresh_and_resumed() {
+    fn codex_gets_the_messages_server() {
         let wt = PathBuf::from("/repo-task");
         let server = serde_json::json!({"command": "/o", "args": ["mcp", "--task", "t"]});
         let mut req = base_req(Harness::Codex, &wt);
         req.codex_mcp = Some(("sushiai-messages", &server));
         let command = "mcp_servers.sushiai-messages.command=\"/o\"".to_string();
         let args = "mcp_servers.sushiai-messages.args=[\"mcp\",\"--task\",\"t\"]".to_string();
-        let fresh = codex_argv(&req);
-        assert!(fresh.contains(&command));
-        assert!(fresh.contains(&args));
-        req.resume = Some("thread-1");
-        let resumed = codex_argv(&req);
-        assert!(resumed.contains(&command));
-        assert_eq!(resumed.last().unwrap(), "-");
+        let argv = codex_argv(&req);
+        assert!(argv.contains(&command));
+        assert!(argv.contains(&args));
+        assert_eq!(argv.last().unwrap(), "-");
     }
 
     #[test]
     fn effort_and_the_attempt_cap_reach_every_argv_shape_or_none() {
         let wt = PathBuf::from("/repo-task");
         for harness in [Harness::Claude, Harness::Codex] {
-            for (review, resume) in [(false, None), (true, None), (false, Some("sess"))] {
+            for review in [false, true] {
                 let mut req = base_req(harness, &wt);
                 req.review = review;
-                req.resume = resume;
                 let none = build_argv(&req);
                 assert!(!none.iter().any(|a| a.contains("effort")), "{none:?}");
                 assert!(!none.contains(&"--max-budget-usd".to_string()));
@@ -853,7 +769,6 @@ mod tests {
         assert!(!argv.contains(&"--tools".to_string()));
         assert!(argv.contains(&"--mcp-config".to_string()));
         assert!(argv.contains(&"--model".to_string()));
-        assert!(!argv.contains(&"--resume".to_string()));
     }
 
     /// Pins today's argv: an implement run always trims the delegation
@@ -868,7 +783,6 @@ mod tests {
         req.settings_path = Some(&settings);
         req.model = Some("opus");
         req.effort = Some("high");
-        req.resume = Some("sess-1");
         let expected: Vec<String> = [
             "-p",
             "--output-format",
@@ -892,8 +806,6 @@ mod tests {
             "opus",
             "--effort",
             "high",
-            "--resume",
-            "sess-1",
         ]
         .map(String::from)
         .to_vec();
@@ -912,28 +824,16 @@ mod tests {
     }
 
     #[test]
-    fn claude_resume_appends_resume_flag() {
-        let wt = PathBuf::from("/repo-task");
-        let mut req = base_req(Harness::Claude, &wt);
-        req.resume = Some("sess-123");
-        let argv = claude_argv(&req);
-        let idx = argv.iter().position(|a| a == "--resume").unwrap();
-        assert_eq!(argv[idx + 1], "sess-123");
-    }
-
-    #[test]
-    fn claude_review_uses_read_only_tools_and_plan_mode_and_never_resumes() {
+    fn claude_review_uses_read_only_tools_and_plan_mode() {
         let wt = PathBuf::from("/repo-task");
         let mut req = base_req(Harness::Claude, &wt);
         req.review = true;
-        req.resume = Some("sess-123"); // must be ignored in review mode
         let argv = claude_argv(&req);
         assert!(argv.contains(&"--tools".to_string()));
         let tools_idx = argv.iter().position(|a| a == "--tools").unwrap();
         assert_eq!(argv[tools_idx + 1], "Read,Grep,Glob");
         let mode_idx = argv.iter().position(|a| a == "--permission-mode").unwrap();
         assert_eq!(argv[mode_idx + 1], "plan");
-        assert!(!argv.contains(&"--resume".to_string()));
     }
 
     #[test]
@@ -959,31 +859,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_resume_uses_resume_subcommand_with_no_dash_c_flag_or_sandbox_flag() {
-        let wt = PathBuf::from("/repo-task");
-        let mut req = base_req(Harness::Codex, &wt);
-        req.resume = Some("thread-1");
-        req.model = Some("gpt-5-codex");
-        req.effort = Some("high");
-        req.network_allowed = true;
-        let argv = codex_argv(&req);
-        assert_eq!(argv[0], "exec");
-        assert_eq!(argv[1], "resume");
-        assert_eq!(argv[2], "thread-1");
-        // `codex exec resume` doesn't accept `-C`/`--sandbox` at all (cwd is
-        // set at the process level, sandbox mode goes through `-c` instead).
-        assert!(!argv.contains(&"-C".to_string()));
-        assert!(!argv.contains(&"--sandbox".to_string()));
-        assert!(argv.contains(&"sandbox_mode=\"workspace-write\"".to_string()));
-        assert!(argv.contains(&"sandbox_workspace_write.network_access=true".to_string()));
-        // resume takes the model via `-m`, not `--model`.
-        assert!(!argv.contains(&"--model".to_string()));
-        let m_idx = argv.iter().position(|a| a == "-m").unwrap();
-        assert_eq!(argv[m_idx + 1], "gpt-5-codex");
-        assert_eq!(argv.last().unwrap(), "-");
-    }
-
-    #[test]
     fn codex_review_is_sandboxed_read_only() {
         let wt = PathBuf::from("/repo-task");
         let mut req = base_req(Harness::Codex, &wt);
@@ -1001,7 +876,6 @@ mod tests {
             orchd_path: "/usr/local/bin/orchd",
             socket_path: "/tmp/orchd.sock",
             token: "tok-1",
-            lean_output: false,
         };
         let deny_read = vec!["/data".to_string()];
         let native = build_claude_settings(
@@ -1031,51 +905,11 @@ mod tests {
             orchd_path: "/usr/local/bin/orchd",
             socket_path: "/tmp/orchd.sock",
             token: "tok-1",
-            lean_output: false,
         };
         let host =
             build_claude_settings(None, SandboxMode::Host, &domains, &deny_read, Some(hook2));
         assert!(host.get("sandbox").is_none());
         assert!(host.get("hooks").is_some());
-    }
-
-    #[test]
-    fn claude_settings_wire_the_rtk_hook_and_output_cap_only_when_asked() {
-        let hook = |lean_output| StopHook {
-            orchd_path: "/bin/orchd",
-            socket_path: "/tmp/o.sock",
-            token: "tok",
-            lean_output,
-        };
-        let profile = serde_json::json!({"env": {"ANTHROPIC_API_KEY_HELPER": "x"}});
-        let off = build_claude_settings(
-            Some(&profile),
-            SandboxMode::Host,
-            &[],
-            &[],
-            Some(hook(false)),
-        );
-        let keys: Vec<&String> = off["hooks"].as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["Stop"], "the Stop hook only: {off}");
-        assert!(off.get("bashOutputMaxChars").is_none());
-        assert_eq!(off["env"]["ANTHROPIC_API_KEY_HELPER"], "x");
-
-        let on = build_claude_settings(
-            Some(&profile),
-            SandboxMode::Host,
-            &[],
-            &[],
-            Some(hook(true)),
-        );
-        assert_eq!(on["hooks"]["Stop"], off["hooks"]["Stop"]);
-        let pre = &on["hooks"]["PreToolUse"][0];
-        assert_eq!(pre["matcher"], "Bash");
-        let rtk = &pre["hooks"][0];
-        assert_eq!(rtk["command"], "'/bin/orchd' hook rtk");
-        assert!(rtk["timeout"].as_u64().unwrap() > 0);
-        // A profile's own env keys stay.
-        assert_eq!(on["env"]["ANTHROPIC_API_KEY_HELPER"], "x");
-        assert_eq!(on["bashOutputMaxChars"], BASH_OUTPUT_MAX_CHARS);
     }
 
     #[test]

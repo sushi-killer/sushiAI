@@ -37,7 +37,6 @@ const ALLOWED_METHODS = new Set([
   "task.delete",
   "task.archive",
   "task.unarchive",
-  "task.preflight",
   "task.timeline",
   "task.evidence",
   "failures.catalogue",

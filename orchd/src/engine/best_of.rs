@@ -80,7 +80,6 @@ pub(super) fn prepare_run(
             orchd_path: &app.orchd_path,
             socket_path: &socket_path_str,
             token: &token,
-            lean_output: task.variant().lean_output,
         };
         let mut claude_settings = harness::build_claude_settings(
             profile_value.as_ref(),
@@ -326,7 +325,6 @@ where
         effort: b_route.effort.as_deref(),
         max_budget_usd: (variant.max_attempt_cost_usd > 0.0)
             .then_some(variant.max_attempt_cost_usd),
-        resume: None,
         review: false,
         mcp_config: Some(&prep.mcp_path),
         settings_path: Some(&prep.settings_path),
@@ -541,7 +539,7 @@ async fn run_pick(
 ) -> Result<(Option<(bool, String)>, f64), RunError> {
     // The reviewer on the other family; without a review route, whichever
     // family candidate a was not.
-    let route = select_review_route(settings, a_route, true)
+    let route = select_review_route(settings, a_route)
         .filter(|r| r.harness != a_route.harness)
         .unwrap_or(b_route)
         .clone();

@@ -68,7 +68,7 @@ fn run_with(
         json!({
             "repo": repo.path().to_str().unwrap(),
             "request": "write a file two ways",
-            "variant": {"plannerTier": true, "bestOf": best_of, "bestOfRoute": "claude-sonnet", "groundedChecks": grounded},
+            "variant": {"bestOf": best_of, "bestOfRoute": "claude-sonnet", "groundedChecks": grounded},
             "start": true,
         }),
     );
@@ -205,7 +205,7 @@ fn with_best_of_off_a_hard_task_runs_one_candidate() {
         json!({
             "repo": repo.path().to_str().unwrap(),
             "request": "write a file",
-            "variant": {"plannerTier": true, "bestOf": 1},
+            "variant": {"bestOf": 1},
             "start": true,
         }),
     );

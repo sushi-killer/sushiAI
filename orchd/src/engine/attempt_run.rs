@@ -142,7 +142,7 @@ pub(super) async fn run_harness(
                     task_id,
                     attempt_n,
                     &tag,
-                    (req.harness, req.model, req.resume.is_some()),
+                    (req.harness, req.model, false),
                     &partial,
                     started_at,
                 );
@@ -245,7 +245,7 @@ pub(super) async fn run_harness(
         task_id,
         attempt_n,
         &tag,
-        (req.harness, req.model, req.resume.is_some()),
+        (req.harness, req.model, false),
         &outcome,
         started_at,
     );

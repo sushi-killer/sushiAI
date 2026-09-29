@@ -41,7 +41,6 @@ fn an_amendment_during_an_attempt_reaches_the_next_review_brief() {
             "goal": "Write a marker",
             "criteria": ["the OLDCRITERION holds"],
             "verify": ["true"],
-            "variant": {"reviewOtherFamily": true},
             "start": true,
         }),
     );

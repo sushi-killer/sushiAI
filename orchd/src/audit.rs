@@ -309,7 +309,6 @@ mod tests {
                 model: Some("m"),
                 effort: Some("high"),
                 max_budget_usd: None,
-                resume: None,
                 review: true,
                 mcp_config: Some(&mcp),
                 settings_path: Some(&settings_path),

@@ -305,15 +305,6 @@ impl Dispatcher for App {
     }
 }
 
-fn which_on_path(program: &str) -> bool {
-    if program.contains('/') {
-        return Path::new(program).is_file();
-    }
-    let path = std::env::var("PATH").unwrap_or_default();
-    path.split(':')
-        .any(|dir| Path::new(dir).join(program).is_file())
-}
-
 fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(8)]
 }
@@ -601,7 +592,6 @@ impl App {
             "worktrees.gc" => self.handle_worktrees_gc(params).await,
             "task.archive" => self.handle_task_archive(params).await,
             "task.unarchive" => self.handle_task_unarchive(params).await,
-            "task.preflight" => self.handle_task_preflight(params).await,
             "task.timeline" => {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 validate_task_id(&self.store, id)?;

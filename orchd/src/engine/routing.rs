@@ -13,6 +13,11 @@ pub(super) fn resolve_variant(
     };
     let mut merged = serde_json::to_value(defaults).map_err(|e| e.to_string())?;
     for (k, v) in fields {
+        if Variant::RETIRED_KEYS.contains(&k.as_str()) {
+            return Err(format!(
+                "variant flag {k} was retired: its winning behaviour is now the default (or it was removed), so drop it from the override"
+            ));
+        }
         // Checked here, not with deny_unknown_fields: a task.json keeps
         // loading after a flag it names is retired.
         if merged.get(k).is_none() && !Variant::OPTIONAL_KEYS.contains(&k.as_str()) {

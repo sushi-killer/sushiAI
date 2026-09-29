@@ -30,8 +30,7 @@ const INSTRUCTIONS: &str = "\
 You are the owner's task orchestrator. Turn a request into tasks tracked by \
 orchd -- don't write the code yourself.
 
-- Before creating a task, call task_preflight with the goal/criteria/verify \
-you have. If clarity is low, ask the owner one precise question at a time \
+- If the request is unclear, ask the owner one precise question at a time \
 in chat before creating anything.
 - Prefer task_create with {repo, request, start: true}: the planner drafts \
 title/goal/criteria/verify for you. Use the full {repo, title, goal, \
@@ -67,7 +66,8 @@ really had to fix the work.
 for autonomous agent work. It runs in the background: give the owner the \
 audit id it returns.
 - evolution_run clusters the signals finished tasks left behind and starts \
-read-only proposer runs for the clusters worth acting on. It returns at once \
+read-only proposer runs for the clusters worth acting on. Call it only when \
+the owner asks: nothing proposes on its own. It returns at once \
 with the clusters it started; proposals appear in the owner's evolution list, \
 and the owner approves them. Never approve, reject or adopt one yourself.
 ";
@@ -92,7 +92,7 @@ pub const TASK_TOOLS: [&str; 4] = [
 ];
 
 /// What the orchestrator agent gets: every tool below.
-pub const ORCHESTRATOR_TOOLS: [&str; 20] = [
+pub const ORCHESTRATOR_TOOLS: [&str; 19] = [
     "task_list",
     "task_get",
     "task_create",
@@ -102,7 +102,6 @@ pub const ORCHESTRATOR_TOOLS: [&str; 20] = [
     "task_stop",
     "task_answer",
     "task_amend",
-    "task_preflight",
     "settings_get",
     "task_archive",
     "task_unarchive",
@@ -168,7 +167,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "finalVerify": {"type": "array", "items": {"type": "string"}, "description": "Slow checks (full CI, desktop smoke) run once, after review passes."},
                     "branch": {"type": "string"},
                     "base": {"type": "string", "description": "Branch or commit to start from; defaults to the repo's current HEAD."},
-                    "variant": {"type": "object", "description": "Experiment flags for this task only, over the settings defaults: retryMode (\"resume\"|\"fresh\"), stallTimeoutSecs (0 = off), plannerTier, contract, reviewOtherFamily, reviewEvidence, deferHeavyChecks, leanOutput, reviewBlind, advisor (bool), loopDetect (bool; on by default: stops an attempt that repeats itself), groundedChecks (bool; the planner writes an executable check per criterion, the ones that fail on the base gate every attempt, and one hidden held-out check is run after verify); bestOf (2 = on: on the hard tier the first implement attempt runs twice at once in two worktrees, on the tier route and on bestOfRoute, default the first route of the other harness; verify and the checks pick, the other-family reviewer picks when both pass, the loser is removed and both costs count; 0/1 = off); bestOfRoute (route id of the second candidate); plannerRoute (route id the plan stage runs on instead of the settings' planner) and tierRoutes (object tier -> route id, e.g. {\"hard\": \"claude-sonnet\"}, replacing the settings' tier route for implementing; must name configured routes); maxCostUsd (dollar budget; the task waits for the owner before its next run once spent, 0 = none); maxAttemptCostUsd (dollar cap on one implement attempt, stopped mid-run once its streamed usage passes it and retried, 0 = none). Create the same task twice with different variants to A/B them."},
+                    "variant": {"type": "object", "description": "Experiment flags for this task only, over the settings defaults: stallTimeoutSecs (0 = off), reviewEvidence, advisor (bool), loopDetect (bool; on by default: stops an attempt that repeats itself), groundedChecks (bool; the planner writes an executable check per criterion, the ones that fail on the base gate every attempt, and one hidden held-out check is run after verify); bestOf (2 = on: on the hard tier the first implement attempt runs twice at once in two worktrees, on the tier route and on bestOfRoute, default the first route of the other harness; verify and the checks pick, the other-family reviewer picks when both pass, the loser is removed and both costs count; 0/1 = off); bestOfRoute (route id of the second candidate); plannerRoute (route id the plan stage runs on instead of the settings' planner) and tierRoutes (object tier -> route id, e.g. {\"hard\": \"claude-sonnet\"}, replacing the settings' tier route for implementing; must name configured routes); maxCostUsd (dollar budget; the task waits for the owner before its next run once spent, 0 = none); maxAttemptCostUsd (dollar cap on one implement attempt, stopped mid-run once its streamed usage passes it and retried, 0 = none). Create the same task twice with different variants to A/B them."},
                     "land": {"type": "boolean", "description": "Land the finished top-level task on its base branch by itself (same as variant.land, default false): a per-(repo, branch) queue carries its work onto the branch head, squashes it to one commit, runs verify and finalVerify on that tree, and moves the branch (git merge --ff-only in its clean checkout, else update-ref). Conflicts or failing checks come back as an ordinary failed attempt; a dirty checkout makes the task wait `landing`, retried every 2 minutes and on task.start. Never pushes, and never lands on the default branch unless settings.landOnDefault. settings.afterLand [{repo, run}] runs commands in the checkout after a landing."},
                     "checks": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "integer", "description": "0-based index into criteria."}, "run": {"type": "string", "description": "Shell command run from the repo root; must fail before the work and pass after it."}}, "required": ["criterion", "run"]}, "description": "With variant.groundedChecks: executable checks per criterion. Entries with an out-of-range criterion or an empty run are dropped."},
                     "heldOut": {"type": "object", "properties": {"criterion": {"type": "integer"}, "run": {"type": "string"}}, "required": ["criterion", "run"], "description": "With variant.groundedChecks: one extra check the implementer never sees."},
@@ -248,19 +247,6 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "heldOut": {"type": ["object", "null"], "properties": {"criterion": {"type": "integer"}, "run": {"type": "string"}}, "required": ["criterion", "run"], "description": "Replaces the held-out check; null removes it."},
                 },
                 "required": ["id"],
-            }),
-        ),
-        (
-            "task_preflight",
-            "task.preflight",
-            "Check whether a goal/criteria/verify are specific enough to act on before creating a task.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "goal": {"type": "string"},
-                    "criteria": {"type": "array", "items": {"type": "string"}},
-                    "verify": {"type": "array", "items": {"type": "string"}},
-                },
             }),
         ),
         (
@@ -717,7 +703,7 @@ mod tests {
         let result = dispatch(&orchestrator(), "initialize", &params).unwrap();
         assert_eq!(result["protocolVersion"], "2024-11-05");
         assert_eq!(result["serverInfo"]["name"], "sushiai-orchestrator");
-        assert!(result["instructions"]
+        assert!(!result["instructions"]
             .as_str()
             .unwrap()
             .contains("task_preflight"));
@@ -752,7 +738,6 @@ mod tests {
                 "task_stop",
                 "task_answer",
                 "task_amend",
-                "task_preflight",
                 "settings_get",
                 "task_archive",
                 "task_unarchive",

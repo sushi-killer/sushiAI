@@ -284,8 +284,8 @@ async fn end_plan_stage(app: &Arc<App>, task_id: &str, idx: Option<usize>) -> Pl
 /// via the `{repo, request}` form: a fresh read-only planner session drafts
 /// title/goal/criteria/verify from the owner's one-sentence request (one
 /// retry if the reply doesn't parse, then the owner is asked directly, up
-/// to 2 such clarification rounds before giving up), runs the classifier
-/// preflight on the draft, and asks any of the planner's own questions
+/// to 2 such clarification rounds before giving up), and asks any of the
+/// planner's own questions
 /// (plus a verification question whenever the draft still has none) one at
 /// a time before handing off to the ordinary implement loop.
 pub(super) async fn run_plan_stage(
@@ -373,7 +373,6 @@ pub(super) async fn run_plan_stage(
             reason: "drafting".to_string(),
             session_id: None,
             pgid: None,
-            resumed: false,
             started_at: now_ms(),
             ended_at: None,
             status: AttemptStatus::Running,
@@ -428,7 +427,6 @@ pub(super) async fn run_plan_stage(
             model: route.model.as_deref(),
             effort: route.effort.as_deref(),
             max_budget_usd: None,
-            resume: None,
             review: true,
             mcp_config: Some(&mcp_path),
             settings_path: Some(&settings_path),
@@ -656,56 +654,6 @@ pub(super) async fn run_plan_stage(
         }
         if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
             task = reloaded;
-        }
-
-        // Classifier preflight on the draft (spec step 4), same three
-        // checks as `task.preflight`, journaled under its own point --
-        // still run for its goal/criteria signal even though it no longer
-        // gates the verify question (that's unconditional on
-        // `verify.is_empty()` now, review item P2e).
-        let classifier_settings = settings.classifier.clone();
-        let key = app.secrets.read().unwrap().classifier_key.clone();
-        let base_url = app.secrets.read().unwrap().classifier_base_url.clone();
-        if classifier_settings.backend != ClassifierBackend::None && key.is_some() {
-            let state =
-                json!({"goal": task.goal, "criteria": task.criteria, "verify": task.verify});
-            let questions = vec![
-                classify::QuestionSpec::Noul {
-                    name: "goal_specific".to_string(),
-                    prompt: "Is the goal specific enough to act on without asking?".to_string(),
-                },
-                classify::QuestionSpec::Noul {
-                    name: "criteria_checkable".to_string(),
-                    prompt: "Can each acceptance criterion be checked objectively from outside?"
-                        .to_string(),
-                },
-                classify::QuestionSpec::Noul {
-                    name: "has_verification".to_string(),
-                    prompt: "Do the verification commands actually exercise the criteria?"
-                        .to_string(),
-                },
-            ];
-            let start = std::time::Instant::now();
-            let s2 = classifier_settings.clone();
-            let k2 = key.clone();
-            let b2 = base_url.clone();
-            let q2 = questions.clone();
-            let state2 = state.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                classify::decide(&s2, k2.as_deref(), b2.as_deref(), &state2, &q2)
-            })
-            .await
-            .unwrap_or_else(|e| Err(classify::ClassifyError(e.to_string())));
-            app.journal(task_id, "plan_preflight", &result, start.elapsed());
-            if let Ok(answers) = &result {
-                if let (Some(g), Some(c), Some(v)) = (
-                    answers.get("goal_specific").and_then(|a| a.noul),
-                    answers.get("criteria_checkable").and_then(|a| a.noul),
-                    answers.get("has_verification").and_then(|a| a.noul),
-                ) {
-                    app.append_jev_decision(task_id, jev_plan_preflight_line(g, c, v));
-                }
-            }
         }
 
         let mut asked: Vec<&brief::PlanQuestion> = draft.questions.iter().take(3).collect();

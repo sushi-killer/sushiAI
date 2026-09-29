@@ -1,35 +1,4 @@
 #[test]
-fn attempt_cost_subtracts_what_earlier_attempts_on_the_session_already_paid() {
-    // Real figures from one task: fresh $2.13, resumed $2.94, resumed $3.04.
-    let with = |n, resumed, cost: Option<f64>| Attempt {
-        session_id: Some("s1".into()),
-        resumed,
-        cost_usd: cost,
-        ..attempt_with_failure(n, "x")
-    };
-    let first = with(1, false, Some(2.13));
-    let second = with(2, true, None);
-    let second_cost = attempt_cost(std::slice::from_ref(&first), &second, 2.94, false);
-    assert!((second_cost - 0.81).abs() < 1e-9);
-    let third = with(3, true, None);
-    let paid = [first, with(2, true, Some(second_cost))];
-    assert!((attempt_cost(&paid, &third, 3.04, false) - 0.10).abs() < 1e-9);
-    // A fresh session is never discounted.
-    assert_eq!(attempt_cost(&paid, &with(4, false, None), 1.5, false), 1.5);
-    // An estimate covers its own run only.
-    assert_eq!(attempt_cost(&paid, &third, 0.4, true), 0.4);
-    // An attempt killed mid-run and estimated on recovery is still part
-    // of the session total the resume reports, so it is subtracted too:
-    // the task pays 2.13 + 0.5 + 0.37 = 3.0, the session's own total.
-    let killed = Attempt {
-        cost_estimated: true,
-        ..with(2, true, Some(0.5))
-    };
-    let after_kill = [with(1, false, Some(2.13)), killed];
-    assert!((attempt_cost(&after_kill, &third, 3.0, false) - 0.37).abs() < 1e-9);
-}
-
-#[test]
 fn a_plan_attempt_settles_only_the_runs_whose_cost_is_not_saved_yet() {
     let tmp = tempfile::tempdir().unwrap();
     let plan = tmp.path().join("plan");

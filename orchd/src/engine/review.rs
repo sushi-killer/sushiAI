@@ -30,40 +30,27 @@ pub fn matches_any_protected(path: &str, globs: &[String]) -> bool {
     globs.iter().any(|g| glob_match(g, path))
 }
 
-/// `review == "auto"` -> the hard tier's route, so a cheaper implementer is
-/// checked by the strongest model; when the implementer already *is* that
-/// route, the first route on a different harness instead. Explicit id ->
-/// that route; `""` -> no review (handled by the caller before this).
-pub fn select_review_route<'a>(
-    settings: &'a Settings,
-    implementer: &Route,
-    other_family: bool,
-) -> Option<&'a Route> {
+/// `review == "auto"` -> a route on the other harness than the implementer's
+/// (the hard tier's route when it is on one), so Claude work is reviewed by
+/// Codex and back; with none configured, the hard tier's route unless the
+/// implementer already *is* it. Explicit id -> that route; `""` -> no review (handled by the caller before this).
+pub fn select_review_route<'a>(settings: &'a Settings, implementer: &Route) -> Option<&'a Route> {
     if settings.review != "auto" {
         return settings.routes.iter().find(|r| r.id == settings.review);
     }
     let hard = settings.tiers.get(&Tier::Hard);
-    if other_family {
-        let other = |r: &&Route| r.harness != implementer.harness;
-        let found = settings
-            .routes
-            .iter()
-            .filter(other)
-            .find(|r| Some(&r.id) == hard)
-            .or_else(|| settings.routes.iter().find(other));
-        if found.is_some() {
-            return found;
-        }
-    }
+    let other = |r: &&Route| r.harness != implementer.harness;
     settings
         .routes
         .iter()
-        .find(|r| Some(&r.id) == hard && r.id != implementer.id)
+        .filter(other)
+        .find(|r| Some(&r.id) == hard)
+        .or_else(|| settings.routes.iter().find(other))
         .or_else(|| {
             settings
                 .routes
                 .iter()
-                .find(|r| r.harness != implementer.harness)
+                .find(|r| Some(&r.id) == hard && r.id != implementer.id)
         })
 }
 
@@ -148,7 +135,6 @@ pub(super) fn review_request<'a>(
         model: route.model.as_deref(),
         effort: route.effort.as_deref(),
         max_budget_usd: None,
-        resume: None,
         review: true,
         mcp_config: Some(mcp_config),
         settings_path: Some(settings_path),

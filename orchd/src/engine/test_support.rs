@@ -95,7 +95,6 @@ pub(super) fn attempt_with_failure(n: u32, signature: &str) -> Attempt {
         reason: "r".into(),
         session_id: None,
         pgid: None,
-        resumed: false,
         started_at: 0,
         ended_at: None,
         status: AttemptStatus::Failed,

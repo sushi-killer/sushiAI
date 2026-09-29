@@ -1,29 +1,5 @@
 use super::*;
 
-/// Claude's `total_cost_usd` covers the whole session, so a resumed
-/// attempt's figure already includes every earlier attempt on that session;
-/// adding it as-is counted the first attempt's cost once per resume.
-/// That includes an earlier attempt whose cost was estimated after the
-/// daemon killed it: its messages are part of the session the resume
-/// continues, so it is subtracted like any other. An estimated cost covers
-/// only its own run's messages, so it is taken as is.
-pub(super) fn attempt_cost(
-    earlier: &[Attempt],
-    attempt: &Attempt,
-    run_cost: f64,
-    estimated: bool,
-) -> f64 {
-    if estimated || !attempt.resumed || attempt.session_id.is_none() {
-        return run_cost;
-    }
-    let already: f64 = earlier
-        .iter()
-        .filter(|a| a.session_id == attempt.session_id)
-        .filter_map(|a| a.cost_usd)
-        .sum();
-    (run_cost - already).max(0.0)
-}
-
 type Prices = std::collections::BTreeMap<String, crate::model::Price>;
 
 /// What a Claude run spent, replayed from its saved `events.jsonl`: the
@@ -80,7 +56,6 @@ pub(super) fn settle_unfinished_cost(task: &mut Task, idx: usize, run_dir: &Path
                 continue;
             };
             let cost = outcome.cost_usd.unwrap_or(0.0);
-            let cost = attempt_cost(&task.attempts[..idx], attempt, cost, outcome.cost_estimated);
             *total.get_or_insert(0.0) += cost;
             estimated |= outcome.cost_estimated;
             usage.input += outcome.usage_input;

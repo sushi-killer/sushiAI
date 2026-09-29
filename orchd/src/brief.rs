@@ -4,8 +4,8 @@
 //! harness (spec step 3).
 
 use crate::model::{
-    Attempt, AttemptStatus, Baseline, Check, Failure, Message, MessageKind, RetryMode,
-    ReviewResult, Stage, Task, Tier, Variant, VerifyOutcome,
+    Attempt, AttemptStatus, Baseline, Check, Message, MessageKind, ReviewResult, Stage, Task, Tier,
+    Variant, VerifyOutcome,
 };
 
 /// Bump when any brief template or fixed instruction block changes: it is
@@ -13,9 +13,9 @@ use crate::model::{
 pub const BRIEF_TEMPLATE_VERSION: u32 = 2;
 
 const MAX_FAILURE_DETAIL: usize = 1500;
-/// The resumed session sees only this one failure, so it gets the whole
+/// The latest failure is the one the next attempt has to fix, so it gets the whole
 /// verify tail rather than the attempt list's short excerpt.
-const MAX_RESUME_FAILURE_DETAIL: usize = 4500;
+const MAX_LATEST_FAILURE_DETAIL: usize = 4500;
 
 /// Truncate to at most `max` bytes on a char boundary, so we never split a
 /// multi-byte UTF-8 sequence.
@@ -148,7 +148,7 @@ pub fn parse_pick(text: &str) -> Option<(bool, String)> {
     }
 }
 
-/// Full brief for a fresh (non-resumed) attempt.
+/// Full brief for an implement attempt.
 pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> String {
     let mut out = String::new();
 
@@ -261,21 +261,16 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
                 attempt.route_id,
                 attempt_outcome_label(attempt)
             ));
-            let fresh = task.variant().retry_mode == RetryMode::Fresh;
-            if let Some(handoff) = attempt
-                .handoff
-                .as_deref()
-                .filter(|h| fresh && !h.trim().is_empty())
-            {
+            if let Some(handoff) = attempt.handoff.as_deref().filter(|h| !h.trim().is_empty()) {
                 out.push_str("  - handoff: ");
                 out.push_str(&clip_middle(handoff, MAX_FAILURE_DETAIL));
                 out.push('\n');
             }
             if let Some(failure) = &attempt.failure {
                 // The latest failure is what this attempt has to fix: give it
-                // the same room a resumed session gets.
-                let max = if fresh && i == last {
-                    MAX_RESUME_FAILURE_DETAIL
+                // more room than the earlier ones.
+                let max = if i == last {
+                    MAX_LATEST_FAILURE_DETAIL
                 } else {
                     MAX_FAILURE_DETAIL
                 };
@@ -331,23 +326,11 @@ pub fn build_advisor_brief(task: &Task, diff: &str, failure_detail: &str) -> Str
     out.push_str("\n## Failure detail\n\n");
     out.push_str(&untrusted_block(
         "How the attempt failed",
-        &clip_middle(failure_detail, MAX_RESUME_FAILURE_DETAIL),
+        &clip_middle(failure_detail, MAX_LATEST_FAILURE_DETAIL),
     ));
     out.push_str("\n## Diff of the failed attempt\n\n```diff\n");
     out.push_str(diff);
     out.push_str("\n```\n");
-    out
-}
-
-/// A resumed session only needs the delta: the failure that ended the
-/// previous attempt, and a reminder of the report format (spec step 3,
-/// "A resumed session gets only the delta").
-pub fn build_resume_delta(failure: &Failure) -> String {
-    let mut out = String::new();
-    out.push_str("## Previous attempt failed\n\n");
-    out.push_str(&clip_middle(&failure.detail, MAX_RESUME_FAILURE_DETAIL));
-    out.push_str("\n\n");
-    out.push_str(REPORT_FORMAT_BLOCK);
     out
 }
 
@@ -396,8 +379,7 @@ pub fn review_conflict_block(conflict: &str) -> String {
     )
 }
 
-/// Puts `block` in front of the brief's report format, which both
-/// [`build_brief`] and [`build_resume_delta`] end with.
+/// Puts `block` in front of the brief's report format, which [`build_brief`] ends with.
 pub fn with_block_before_report(brief: &str, block: &str) -> String {
     match brief.rfind("## Report format") {
         Some(at) => format!("{}{block}{}", &brief[..at], &brief[at..]),
@@ -469,6 +451,19 @@ fn severity_of(text: &str) -> Option<u8> {
     }
 }
 
+/// Lenient reading of a `repeat` mark: `true`, `"true"`, `"yes"` or a
+/// non-zero number; anything else, and an absent mark, is `false`.
+fn truthy(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::String(s) => {
+            matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "yes")
+        }
+        serde_json::Value::Number(n) => n.as_f64().is_some_and(|n| n != 0.0),
+        _ => false,
+    }
+}
+
 /// [`parse_review`] plus whether the reviewer's FAIL was recorded as PASS:
 /// it gave findings of its own, every one labelled P2/P3, and no criterion
 /// is unmet. All findings are kept.
@@ -477,7 +472,8 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
     let verdict = serde_json::from_value(v.get("verdict")?.clone()).ok()?;
     let mut severities: Vec<Option<u8>> = Vec::new();
-    let findings = v
+    let mut repeated: Vec<String> = Vec::new();
+    let findings: Vec<String> = v
         .get("findings")
         .and_then(|f| f.as_array())
         .map(|items| {
@@ -495,15 +491,22 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
                 })
                 .map(|item| match item {
                     serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Object(o) => o
-                        .values()
-                        .map(|x| {
-                            x.as_str()
-                                .map(str::to_string)
-                                .unwrap_or_else(|| x.to_string())
-                        })
-                        .collect::<Vec<_>>()
-                        .join(": "),
+                    serde_json::Value::Object(o) => {
+                        let text = o
+                            .iter()
+                            .filter(|(k, _)| k.as_str() != "repeat")
+                            .map(|(_, x)| {
+                                x.as_str()
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| x.to_string())
+                            })
+                            .collect::<Vec<_>>()
+                            .join(": ");
+                        if o.get("repeat").is_some_and(truthy) {
+                            repeated.push(text.clone());
+                        }
+                        text
+                    }
                     other => other.to_string(),
                 })
                 .collect()
@@ -511,7 +514,11 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
         .unwrap_or_default();
     let own_findings_are_minor =
         !severities.is_empty() && severities.iter().all(|s| matches!(s, Some(2 | 3)));
-    let mut result = ReviewResult { verdict, findings };
+    let mut result = ReviewResult {
+        verdict,
+        findings,
+        repeated,
+    };
     let mut any_unmet = false;
     // Any reply that rules on criteria, asked for or not: a PASS that marks
     // one unmet contradicts itself, and the ruling on the criterion wins. A
@@ -592,9 +599,7 @@ pub fn build_subtask_plan_brief(request: &str, variant: &Variant) -> String {
 
 fn plan_brief(request: &str, variant: &Variant, split: bool) -> String {
     let mut extra = String::new();
-    if variant.contract {
-        extra.push_str(&format!("\n\n{PLAN_CONTRACT}"));
-    }
+    extra.push_str(&format!("\n\n{PLAN_CONTRACT}"));
     let mut format = PLAN_REPORT_FORMAT.to_string();
     if variant.batch_questions {
         extra.push_str(&format!("\n\n{PLAN_BATCH_QUESTIONS}"));
@@ -603,10 +608,8 @@ fn plan_brief(request: &str, variant: &Variant, split: bool) -> String {
             "\"options\":[\"...\",\"...\"],\"recommended\":\"...\",\"evidence\":\"...\",\"blocking\":false}",
         );
     }
-    if variant.defer_heavy_checks {
-        extra.push_str(&format!("\n\n{PLAN_FINAL_VERIFY}"));
-        format = format.replace("\"verify\":[],", "\"verify\":[],\"finalVerify\":[],");
-    }
+    extra.push_str(&format!("\n\n{PLAN_FINAL_VERIFY}"));
+    format = format.replace("\"verify\":[],", "\"verify\":[],\"finalVerify\":[],");
     if variant.grounded_checks {
         extra.push_str(&format!("\n\n{PLAN_CHECKS}"));
         format = format.replace(
@@ -633,7 +636,7 @@ const PLAN_CHECKS: &str = "For each criterion that a command can prove, add an e
 
 const PLAN_FINAL_VERIFY: &str = "Split the checks by cost. `verify` holds the fast, targeted commands that run after every attempt (a unit test file, the type checker, a linter on the touched paths). `finalVerify` holds the slow whole-repo checks (the full CI script, a desktop smoke) that the orchestrator runs once, after review passes and before the commit.";
 
-/// Asks the reviewer for a ruling on every criterion (`variant.contract`).
+/// Asks the reviewer for a ruling on every criterion.
 pub const REVIEW_CONTRACT: &str = "Rule on every acceptance criterion, using its `check:` where it has one and the verify results as evidence. Add `\"criteria\":[{\"criterion\":\"...\",\"met\":true|false|null,\"evidence\":\"...\"}]` to your reply, with `null` for a criterion you cannot check read-only. The verdict is PASS only if no criterion is `false`; a claim in the task that the code contradicts is a finding.";
 
 /// Sent instead of [`build_plan_brief`] on the one retry after an
@@ -1072,19 +1075,16 @@ pub fn build_review_brief(
         out.push('\n');
     }
     let variant = task.variant();
-    // Blind review: the implementer's account is left out entirely.
-    if !variant.review_blind {
-        out.push_str("\n## Implementer\n\n");
-        out.push_str(implementer_note);
-        if !agent_decisions.is_empty() {
-            out.push_str("\n\n");
-            out.push_str(&untrusted_block(
-                "The implementer's decisions in this attempt",
-                &agent_decisions.join("\n"),
-            ));
-        }
-        out.push_str("\nA deliberate, explained deviation is judged on its merits.");
+    out.push_str("\n## Implementer\n\n");
+    out.push_str(implementer_note);
+    if !agent_decisions.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&untrusted_block(
+            "The implementer's decisions in this attempt",
+            &agent_decisions.join("\n"),
+        ));
     }
+    out.push_str("\nA deliberate, explained deviation is judged on its merits.");
     if variant.grounded_checks {
         out.push_str(&grounded_checks_block(task, verify_results));
     }
@@ -1113,15 +1113,43 @@ pub fn build_review_brief(
             out.push_str(&format!("- `{shown}`\n"));
         }
     }
+    let previous = previous_review_findings(task);
+    if !previous.is_empty() {
+        out.push_str("\n## Previous review\n\n");
+        out.push_str(&untrusted_block(
+            "The findings the previous attempt's review reported",
+            &previous.join("\n"),
+        ));
+        out.push_str("\nThe implementer has tried to fix them. Mark each finding you report now with `repeat`: true when it is the same problem still present, false when it is new.\n");
+    }
     out.push_str("\n## Diff\n\n```diff\n");
     out.push_str(diff);
-    out.push_str("\n```\n\n## Report format\n\nReply with:\n\n```sushi-review\n{\"verdict\":\"PASS|FAIL\",\"findings\":[\"P2: path:line - issue\"]}\n```\n");
-    if variant.contract {
-        out.push('\n');
-        out.push_str(REVIEW_CONTRACT);
-        out.push('\n');
-    }
+    out.push_str("\n```\n\n## Report format\n\nReply with:\n\n```sushi-review\n");
+    out.push_str(if previous.is_empty() {
+        "{\"verdict\":\"PASS|FAIL\",\"findings\":[\"P2: path:line - issue\"]}"
+    } else {
+        "{\"verdict\":\"PASS|FAIL\",\"findings\":[{\"finding\":\"P2: path:line - issue\",\"repeat\":true}]}"
+    });
+    out.push_str("\n```\n");
+    out.push('\n');
+    out.push_str(REVIEW_CONTRACT);
+    out.push('\n');
     out
+}
+
+/// The findings the review of the implement attempt before the current one
+/// (the last) reported; empty for a first attempt or one that had none.
+fn previous_review_findings(task: &Task) -> Vec<String> {
+    let mut implements = task.attempts.iter().filter(|a| a.stage == Stage::Implement);
+    let count = implements.clone().count();
+    if count < 2 {
+        return Vec::new();
+    }
+    implements
+        .nth(count - 2)
+        .and_then(|a| a.review.as_ref())
+        .map(|r| r.findings.clone())
+        .unwrap_or_default()
 }
 
 fn is_held_out(v: &VerifyOutcome) -> bool {
@@ -1367,7 +1395,7 @@ fn last_fenced_block(text: &str, tag: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{FailureKind, Harness, Stage, TaskStatus, Tier, Verdict};
+    use crate::model::{Failure, FailureKind, Harness, Stage, TaskStatus, Tier, Verdict};
 
     fn sample_task() -> Task {
         Task {
@@ -1430,11 +1458,8 @@ mod tests {
         assert!(for_claude.contains("sushi-report"));
     }
 
-    #[test]
-    fn brief_includes_previous_attempt_failure_truncated() {
-        let mut task = sample_task();
-        let long_detail = "x".repeat(2000);
-        task.attempts.push(Attempt {
+    fn failed_implement_attempt(detail: String) -> Attempt {
+        Attempt {
             n: 1,
             stage: Stage::Implement,
             route_id: "claude-sonnet".into(),
@@ -1443,7 +1468,6 @@ mod tests {
             reason: "tier default".into(),
             session_id: None,
             pgid: None,
-            resumed: false,
             started_at: 1,
             ended_at: Some(2),
             status: AttemptStatus::Failed,
@@ -1456,7 +1480,7 @@ mod tests {
             review: None,
             failure: Some(Failure {
                 kind: FailureKind::Verify,
-                detail: long_detail,
+                detail,
                 signature: "verify:xxxx".into(),
             }),
             usage: None,
@@ -1470,27 +1494,24 @@ mod tests {
             review_fingerprint: None,
             advisor_fingerprint: None,
             candidates: vec![],
-        });
+        }
+    }
+
+    #[test]
+    fn brief_includes_previous_attempt_failure_truncated() {
+        let mut task = sample_task();
+        let long_detail = "x".repeat(2000);
+        task.attempts.push(failed_implement_attempt(long_detail));
         let mut second = task.attempts[0].clone();
         second.n = 2;
         second.handoff = Some("tried bumping the timeout".into());
         task.attempts.push(second);
-        let resume_brief = build_brief(&task, "", "");
-        assert!(
-            !resume_brief.contains("handoff:"),
-            "the resume arm keeps the old brief"
-        );
-        assert!(!resume_brief.contains(&"x".repeat(2000)));
-        task.variant = Some(crate::model::Variant {
-            retry_mode: RetryMode::Fresh,
-            ..Default::default()
-        });
         let brief = build_brief(&task, "", "");
         assert!(brief.contains("Previous attempts"));
         assert!(brief.contains("Attempt 1 (claude-sonnet): failed"));
         assert!(brief.contains("  - handoff: tried bumping the timeout"));
         // An older failure is clipped to MAX_FAILURE_DETAIL; the latest one,
-        // the one to fix now, keeps the resume budget.
+        // the one to fix now, keeps a larger budget.
         let failures: Vec<&str> = brief.lines().filter(|l| l.contains("failure:")).collect();
         assert!(failures[0].len() < 2000, "{}", failures[0].len());
         assert!(failures[1].contains(&"x".repeat(2000)));
@@ -1547,21 +1568,10 @@ mod tests {
     }
 
     #[test]
-    fn the_plan_brief_asks_for_a_contract_only_with_the_flag() {
-        let with = |contract, defer_heavy_checks| {
-            build_plan_brief(
-                "r",
-                &Variant {
-                    contract,
-                    defer_heavy_checks,
-                    ..Variant::default()
-                },
-            )
-        };
-        assert!(with(true, false).contains("-- check:"));
-        assert!(!with(false, false).contains("-- check:"));
-        assert!(with(false, true).contains("\"finalVerify\":[]"));
-        assert!(!with(false, false).contains("finalVerify"));
+    fn the_plan_brief_always_asks_for_a_contract_and_a_final_verify_split() {
+        let brief = build_plan_brief("r", &Variant::default());
+        assert!(brief.contains("-- check:"));
+        assert!(brief.contains("\"finalVerify\":[]"));
     }
 
     #[test]
@@ -1611,7 +1621,6 @@ mod tests {
             reason: "drafting".into(),
             session_id: None,
             pgid: None,
-            resumed: false,
             started_at: 1,
             ended_at: Some(2),
             status: AttemptStatus::Passed,
@@ -1640,36 +1649,6 @@ mod tests {
             !brief.contains("Previous attempts"),
             "a plan-only history should never render the section at all: {brief}"
         );
-    }
-
-    #[test]
-    fn resume_delta_keeps_the_end_of_a_long_verify_failure() {
-        let detail = format!(
-            "npm test exited 1.\n{}\ntest foo ... FAILED",
-            "noise\n".repeat(2000)
-        );
-        let failure = Failure {
-            kind: FailureKind::Verify,
-            detail,
-            signature: "s".into(),
-        };
-        let delta = build_resume_delta(&failure);
-        assert!(delta.contains("npm test exited 1."));
-        assert!(delta.contains("test foo ... FAILED"));
-    }
-
-    #[test]
-    fn resume_delta_contains_only_failure_and_report_format() {
-        let failure = Failure {
-            kind: FailureKind::Verify,
-            detail: "npm test exited 1".into(),
-            signature: "verify:npm test exited 1".into(),
-        };
-        let delta = build_resume_delta(&failure);
-        assert!(delta.contains("npm test exited 1"));
-        assert!(delta.contains("sushi-report"));
-        assert!(!delta.contains("## Task"));
-        assert!(!delta.contains("## Acceptance criteria"));
     }
 
     #[test]
@@ -1718,6 +1697,45 @@ mod tests {
         let text = "Plan:\n\n```sushi-plan\n{\"title\":\"T\",\"goal\":\"no parseable ```sushi-review``` block\"}\n```\n";
         let plan = parse_plan(text).unwrap();
         assert!(plan.goal.contains("```sushi-review```"));
+    }
+
+    #[test]
+    fn parse_review_reads_repeat_marks_leniently() {
+        let text = "```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: plain string\",{\"finding\":\"P1: a\",\"repeat\":true},{\"finding\":\"P1: b\",\"repeat\":\"Yes\"},{\"finding\":\"P1: c\",\"repeat\":false},{\"finding\":\"P1: d\"},{\"finding\":\"P1: e\",\"repeat\":\"maybe\"}]}\n```";
+        let r = parse_review(text).unwrap();
+        assert_eq!(r.findings.len(), 6);
+        assert_eq!(r.findings[1], "P1: a", "the mark is not part of the text");
+        assert_eq!(r.repeated, vec!["P1: a".to_string(), "P1: b".to_string()]);
+        let plain =
+            parse_review("```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: x\"]}\n```")
+                .unwrap();
+        assert!(plain.repeated.is_empty());
+    }
+
+    #[test]
+    fn the_review_brief_carries_the_previous_attempts_findings_and_asks_for_repeat_marks() {
+        let mut task = sample_task();
+        let mut first = failed_implement_attempt(String::new());
+        first.review = Some(ReviewResult {
+            verdict: Verdict::Fail,
+            findings: vec!["P1: a.rs:1 - null check missing".into()],
+            repeated: Vec::new(),
+        });
+        let mut second = first.clone();
+        second.n = 2;
+        second.review = None;
+        task.attempts = vec![first];
+        let one = build_review_brief(&task, "note", &[], &[], &[], "d");
+        assert!(!one.contains("## Previous review"), "{one}");
+        assert!(!one.contains("\"repeat\""), "{one}");
+        task.attempts.push(second);
+        let two = build_review_brief(&task, "note", &[], &[], &[], "d");
+        assert!(two.contains("## Previous review"), "{two}");
+        assert!(
+            two.contains("<untrusted-data>\nP1: a.rs:1 - null check missing"),
+            "{two}"
+        );
+        assert!(two.contains("\"repeat\":true"), "{two}");
     }
 
     #[test]
@@ -1836,7 +1854,6 @@ mod tests {
             reason: "tier default".into(),
             session_id: None,
             pgid: None,
-            resumed: false,
             started_at: 1,
             ended_at: Some(2),
             status: AttemptStatus::Failed,
@@ -2224,18 +2241,9 @@ mod tests {
         assert!(!flag);
     }
 
-    fn review_task(blind: bool) -> Task {
-        let mut task = sample_task();
-        task.variant = Some(Variant {
-            review_blind: blind,
-            ..Default::default()
-        });
-        task
-    }
-
     #[test]
     fn the_review_brief_states_the_rule_and_carries_agent_lines() {
-        let task = review_task(false);
+        let task = sample_task();
         let text = build_review_brief(
             &task,
             "Implementer report: complete",
@@ -2250,22 +2258,7 @@ mod tests {
         assert!(text.contains("<untrusted-data>\nAgent: kept the old name\n</untrusted-data>"));
         assert!(text.contains("judged on its merits"));
         assert!(text.contains("- `artifacts/a.png`"));
-        assert!(!text.contains("Rule on every acceptance criterion"));
-    }
-
-    #[test]
-    fn a_blind_review_brief_has_neither_implementer_section_nor_agent_lines() {
-        let text = build_review_brief(
-            &review_task(true),
-            "note",
-            &["Agent: secret".into()],
-            &[],
-            &[],
-            "d",
-        );
-        assert!(!text.contains("## Implementer"));
-        assert!(!text.contains("Agent: secret"));
-        assert!(!text.contains("judged on its merits"));
+        assert!(text.contains("Rule on every acceptance criterion"));
     }
 
     #[test]
@@ -2277,10 +2270,19 @@ mod tests {
     }
 
     #[test]
-    fn plan_brief_without_grounded_checks_is_unchanged() {
+    fn plan_brief_without_grounded_checks_asks_for_none() {
         let variant = Variant::default();
-        assert_eq!(build_plan_brief("Fix it", &variant), "## Request\n\nFix it\n\n## Instructions\n\nRead the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise.\n\nWhen the work changes what a screen shows, the goal must name the exact repo command that produces its screenshot evidence -- look for one before assuming none exists, so the implementer never has to rediscover it.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.\n\nWhen the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. List in each part's `paths` the repo-relative files or directories it edits; parts whose paths overlap (or that list none) are run one after another instead of side by side. Each part's `request` is what its own planner will draft from, so make it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. When the request fits one session, leave `subtasks` out.\n\n## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"tier\":\"mechanical|standard|hard\",\"criteria\":[],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"]}],\"subtasks\":[{\"key\":\"a\",\"title\":\"...\",\"request\":\"...\",\"dependsOn\":[],\"paths\":[\"src/...\"]}]}\n```\n");
-        assert_eq!(build_subtask_plan_brief("Fix it", &variant), "## Request\n\nFix it\n\n## Instructions\n\nRead the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise.\n\nWhen the work changes what a screen shows, the goal must name the exact repo command that produces its screenshot evidence -- look for one before assuming none exists, so the implementer never has to rediscover it.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.\n\n## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"tier\":\"mechanical|standard|hard\",\"criteria\":[],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"]}]}\n```\n");
+        let plan = build_plan_brief("Fix it", &variant);
+        let subtask = build_subtask_plan_brief("Fix it", &variant);
+        for brief in [&plan, &subtask] {
+            assert!(brief.starts_with("## Request\n\nFix it\n\n## Instructions\n\n"));
+            assert!(!brief.contains("heldOut"));
+            assert!(!brief.contains("\"checks\""));
+            assert!(!brief.contains("\"recommended\""));
+            assert!(brief.contains("\"finalVerify\":[]"));
+        }
+        assert!(plan.contains("\"subtasks\""));
+        assert!(!subtask.contains("\"subtasks\""));
         // The retry briefs only add their one-line reminder in front.
         assert!(build_plan_retry_brief("Fix it", &variant)
             .ends_with(&build_plan_brief("Fix it", &variant)));

@@ -561,66 +561,58 @@ fn a_silent_harness_is_stopped_as_stalled_when_the_variant_sets_a_stall_timeout(
 
 #[test]
 fn a_fresh_retry_starts_a_new_session_that_reads_the_earlier_handoff() {
-    for (mode, expect_resume) in [("fresh", false), ("resume", true)] {
-        let scripts_dir = tempfile::tempdir().unwrap();
-        let script = fake_harness_script(scripts_dir.path(), "fake-retry.sh", FAKE_RETRY_SCRIPT);
-        let args_log = scripts_dir.path().join("args.log");
-        let daemon = Daemon::spawn(&[
-            ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
-            ("ARGS_LOG", args_log.to_str().unwrap()),
-        ]);
-        let mut settings = daemon.request("settings.get", serde_json::json!({}));
-        settings["review"] = serde_json::json!("");
-        daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-retry.sh", FAKE_RETRY_SCRIPT);
+    let args_log = scripts_dir.path().join("args.log");
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("ARGS_LOG", args_log.to_str().unwrap()),
+    ]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
-        let repo = init_git_repo();
-        let task = daemon.request(
-            "task.create",
-            serde_json::json!({
-                "repo": repo.path().to_str().unwrap(),
-                "title": "Two tries",
-                "goal": "Needs a second attempt",
-                "verify": ["test -f SECOND"],
-                "variant": {"retryMode": mode},
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Two tries",
+            "goal": "Needs a second attempt",
+            "verify": ["test -f SECOND"],
                 "start": true,
-            }),
-        );
-        let task_id = task["id"].as_str().unwrap().to_string();
-        let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
-        assert_eq!(settled["status"], "done", "{mode}: {settled}");
-        let attempts = settled["attempts"].as_array().unwrap();
-        assert_eq!(attempts.len(), 2, "{mode}: {settled}");
-        assert_eq!(attempts[0]["handoff"], "tried the quick fix", "{mode}");
-        assert_eq!(attempts[1]["resumed"], expect_resume, "{mode}: {settled}");
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    assert_eq!(settled["status"], "done", "{settled}");
+    let attempts = settled["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2, "{settled}");
+    assert_eq!(attempts[0]["handoff"], "tried the quick fix", "");
 
-        let argv: Vec<String> = std::fs::read_to_string(&args_log)
-            .unwrap()
-            .lines()
-            .map(str::to_string)
-            .collect();
-        assert_eq!(
-            argv[1].contains("--resume sess-fake"),
-            expect_resume,
-            "{mode}: {argv:?}"
-        );
-        if !expect_resume {
-            let brief = std::fs::read_to_string(
-                daemon
-                    .data_dir()
-                    .join("tasks")
-                    .join(&task_id)
-                    .join("runs/2/brief.md"),
-            )
-            .unwrap();
-            assert!(brief.contains("## Task"), "not the full brief: {brief}");
-            assert!(brief.contains("handoff: tried the quick fix"), "{brief}");
-            assert!(brief.contains("test -f SECOND exited"), "{brief}");
-        }
-
-        let worktree = task["worktree"].as_str().unwrap().to_string();
-        daemon.shutdown_and_wait();
-        let _ = std::fs::remove_dir_all(worktree);
+    let argv: Vec<String> = std::fs::read_to_string(&args_log)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert!(!argv[1].contains("--resume"), "{argv:?}");
+    {
+        let brief = std::fs::read_to_string(
+            daemon
+                .data_dir()
+                .join("tasks")
+                .join(&task_id)
+                .join("runs/2/brief.md"),
+        )
+        .unwrap();
+        assert!(brief.contains("## Task"), "not the full brief: {brief}");
+        assert!(brief.contains("handoff: tried the quick fix"), "{brief}");
+        assert!(brief.contains("test -f SECOND exited"), "{brief}");
     }
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
 }
 
 #[test]
@@ -758,7 +750,6 @@ fn a_looping_harness_is_stopped_and_a_second_loop_escalates_the_tier() {
             "title": "Loops",
             "goal": "Repeat yourself",
             "verify": ["true"],
-            "variant": {"retryMode": "fresh", "plannerTier": false},
             "start": true,
         }),
     );

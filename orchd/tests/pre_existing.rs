@@ -1,5 +1,6 @@
 //! Black-box integration tests: a final check that already fails on the
-//! task's base commit goes to the owner instead of being retried.
+//! task's base commit goes to the owner, before any attempt, instead of being
+//! retried.
 
 mod common;
 
@@ -64,7 +65,7 @@ fn lines(path: &Path) -> usize {
 }
 
 #[test]
-fn a_final_check_that_fails_on_base_waits_after_one_attempt_and_leaves_no_worktree() {
+fn a_final_check_that_fails_twice_on_base_waits_before_any_attempt_and_leaves_no_scratch_dir() {
     let scripts = tempfile::tempdir().unwrap();
     let log = scripts.path().join("ran.log");
     let daemon = spawn(scripts.path());
@@ -72,7 +73,7 @@ fn a_final_check_that_fails_on_base_waits_after_one_attempt_and_leaves_no_worktr
     let check = format!("echo ran >> {}; echo boom; exit 3", log.display());
     let id = start(&daemon, repo.path(), &check);
 
-    let task = waiting_with_attempts(&daemon, &id, 1);
+    let task = waiting_with_attempts(&daemon, &id, 0);
     let base = task["baseSha"].as_str().unwrap();
     assert_eq!(
         task["question"]["text"].as_str().unwrap(),
@@ -82,8 +83,11 @@ fn a_final_check_that_fails_on_base_waits_after_one_attempt_and_leaves_no_worktr
         task["question"]["options"],
         json!([RETRY, "drop this check", "stop"])
     );
-    assert_eq!(task["attempts"][0]["failure"]["kind"], "verify");
-    assert_eq!(lines(&log), 2, "once in the worktree, once on the base");
+    assert!(
+        !task["attempts"][0]["failure"]["kind"].is_string(),
+        "{task}"
+    );
+    assert_eq!(lines(&log), 2, "the base run and its one re-run");
 
     let listed = git_out(repo.path(), &["worktree", "list"]);
     assert_eq!(listed.lines().count(), 2, "{listed}");
@@ -120,14 +124,14 @@ fn a_check_that_passes_on_base_still_retries() {
 }
 
 #[test]
-fn drop_this_check_removes_it_and_the_same_attempt_lands() {
+fn drop_this_check_removes_it_and_the_first_attempt_lands() {
     let scripts = tempfile::tempdir().unwrap();
     let log = scripts.path().join("ran.log");
     let daemon = spawn(scripts.path());
     let repo = init_git_repo();
     let check = format!("echo ran >> {}; false", log.display());
     let id = start(&daemon, repo.path(), &check);
-    waiting_with_attempts(&daemon, &id, 1);
+    waiting_with_attempts(&daemon, &id, 0);
 
     daemon.request(
         "task.answer",
@@ -158,12 +162,12 @@ fn drop_this_check_removes_it_and_the_same_attempt_lands() {
 }
 
 #[test]
-fn retry_after_the_base_is_fixed_carries_the_work_and_runs_a_second_attempt() {
+fn retry_after_the_base_is_fixed_moves_to_the_new_base_and_runs_the_first_attempt() {
     let scripts = tempfile::tempdir().unwrap();
     let daemon = spawn(scripts.path());
     let repo = init_git_repo();
     let id = start(&daemon, repo.path(), "test -f FIXED.txt");
-    let waiting = waiting_with_attempts(&daemon, &id, 1);
+    let waiting = waiting_with_attempts(&daemon, &id, 0);
     let old_base = waiting["baseSha"].as_str().unwrap().to_string();
 
     std::fs::write(repo.path().join("FIXED.txt"), "fixed\n").unwrap();
@@ -172,7 +176,7 @@ fn retry_after_the_base_is_fixed_carries_the_work_and_runs_a_second_attempt() {
     daemon.request("task.answer", json!({"id": id, "answer": RETRY}));
 
     let done = poll_until(&daemon, &id, Duration::from_secs(60), |s| s == "done");
-    assert_eq!(done["attempts"].as_array().unwrap().len(), 2, "{done}");
+    assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
     assert_ne!(done["baseSha"].as_str().unwrap(), old_base);
     assert!(
         done["decisions"].as_array().unwrap().iter().any(|d| d
@@ -187,21 +191,26 @@ fn retry_after_the_base_is_fixed_carries_the_work_and_runs_a_second_attempt() {
 }
 
 #[test]
-fn the_base_run_is_cached_per_base_and_command() {
+fn an_unmoved_base_is_asked_about_again_and_re_run_once_past_the_cache() {
     let scripts = tempfile::tempdir().unwrap();
     let log = scripts.path().join("ran.log");
     let daemon = spawn(scripts.path());
     let repo = init_git_repo();
     let check = format!("echo ran >> {}; false", log.display());
     let id = start(&daemon, repo.path(), &check);
-    waiting_with_attempts(&daemon, &id, 1);
+    waiting_with_attempts(&daemon, &id, 0);
     assert_eq!(lines(&log), 2);
 
-    // Nothing moved on the base: the second attempt fails the same way and
-    // asks again without running the check on the base a second time.
+    // Nothing moved on the base: the cached failure stands as the first run,
+    // the one re-run goes past the cache, and the owner is asked again.
     daemon.request("task.answer", json!({"id": id, "answer": RETRY}));
-    let again = waiting_with_attempts(&daemon, &id, 2);
-    assert_eq!(lines(&log), 3, "worktree, base, worktree: {again}");
+    let start_wait = std::time::Instant::now();
+    while lines(&log) < 3 {
+        assert!(start_wait.elapsed() < Duration::from_secs(30));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let again = waiting_with_attempts(&daemon, &id, 0);
+    assert_eq!(lines(&log), 3, "{again}");
     assert!(again["question"]["text"]
         .as_str()
         .unwrap()
@@ -213,12 +222,35 @@ fn the_base_run_is_cached_per_base_and_command() {
 }
 
 #[test]
+fn a_check_that_fails_once_on_the_base_and_then_passes_is_not_asked_about() {
+    let scripts = tempfile::tempdir().unwrap();
+    let count = scripts.path().join("count");
+    let daemon = spawn(scripts.path());
+    let repo = init_git_repo();
+    // Exit 1 on its first run anywhere, 0 on every later one: load-flaky.
+    let check = format!(
+        "n=$(cat {c} 2>/dev/null || echo 0); echo $((n+1)) > {c}; [ \"$n\" -ge 1 ]",
+        c = count.display()
+    );
+    let id = start(&daemon, repo.path(), &check);
+    let done = poll_until(&daemon, &id, Duration::from_secs(60), |s| {
+        matches!(s, "done" | "waiting" | "failed")
+    });
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
+    assert!(done["question"].is_null(), "{done}");
+    let worktree = done["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
 fn stop_leaves_the_task_stopped() {
     let scripts = tempfile::tempdir().unwrap();
     let daemon = spawn(scripts.path());
     let repo = init_git_repo();
     let id = start(&daemon, repo.path(), "false");
-    let waiting = waiting_with_attempts(&daemon, &id, 1);
+    let waiting = waiting_with_attempts(&daemon, &id, 0);
     daemon.request("task.answer", json!({"id": id, "answer": "stop"}));
     let stopped = daemon.request("task.get", json!({"id": id}));
     assert_eq!(stopped["status"], "stopped", "{stopped}");

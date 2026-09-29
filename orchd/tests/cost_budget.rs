@@ -13,7 +13,7 @@ fn a_daemon_restart_mid_attempt_keeps_the_interrupted_attempt_s_estimated_cost()
     // The first run streams one message (twice, as Claude does per content
     // block) and a second one, then hangs with no `result`; the daemon is
     // killed under it. Any later run finishes the task, reporting $0.20 as
-    // the session total so far, as the CLI does on a resumed session.
+    // the session total so far, as the CLI does.
     let msg = |id: &str, input: u32, write: u32, read: u32, output: u32| {
         format!(
             r#"{{"type":"assistant","message":{{"model":"claude-opus-5-5","id":"{id}","type":"message","role":"assistant","content":[],"usage":{{"input_tokens":{input},"cache_creation_input_tokens":{write},"cache_read_input_tokens":{read},"output_tokens":{output}}}}},"parent_tool_use_id":null,"session_id":"sess-fake"}}"#
@@ -105,15 +105,13 @@ fn a_daemon_restart_mid_attempt_keeps_the_interrupted_attempt_s_estimated_cost()
     let cost = interrupted["costUsd"].as_f64().unwrap();
     assert!((cost - estimated).abs() < 1e-9, "{cost} vs {estimated}");
     assert_eq!(interrupted["usage"]["output"], 2_100, "{settled}");
-    // The finished attempt resumed the same session, so its session total
-    // already covers the interrupted run: the estimate is subtracted from
-    // it, and the task pays the session's total once.
-    let resumed = &settled["attempts"][1];
-    assert!(resumed.get("costEstimated").is_none());
-    let resumed_cost = resumed["costUsd"].as_f64().unwrap();
-    assert!((resumed_cost - (0.2 - estimated)).abs() < 1e-9, "{settled}");
+    // The retry is a fresh session: its own $0.20 is added to the interrupted
+    // run's estimate.
+    let retried = &settled["attempts"][1];
+    assert!(retried.get("costEstimated").is_none());
+    assert_eq!(retried["costUsd"], 0.2, "{settled}");
     let total = settled["costUsd"].as_f64().unwrap();
-    assert!((total - 0.2).abs() < 1e-9, "{total}");
+    assert!((total - (0.2 + estimated)).abs() < 1e-9, "{total}");
     let _ = call("shutdown", serde_json::json!({}));
     let _ = wait_for_exit(second, Duration::from_secs(5));
     let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
@@ -255,11 +253,11 @@ fn a_daemon_restart_mid_review_keeps_the_review_s_estimated_cost() {
     let review = interrupted["reviewCostUsd"].as_f64().unwrap();
     assert!((review - PRICED_MESSAGE_COST).abs() < 1e-9, "{settled}");
     assert_eq!(interrupted["costUsd"], 0.01, "{settled}");
-    // The resumed attempt's $0.01 session total is attempt 1's, so it adds
-    // nothing; its own review adds $0.05.
+    // The retry is a fresh session with its own $0.01, and its own review
+    // adds $0.05.
     assert_eq!(runs, ["implement", "implement", "review"], "{settled}");
     let total = settled["costUsd"].as_f64().unwrap();
-    let expected = 0.01 + PRICED_MESSAGE_COST + 0.05;
+    let expected = 0.01 + PRICED_MESSAGE_COST + 0.01 + 0.05;
     assert!((total - expected).abs() < 1e-9, "{total} vs {expected}");
 }
 
@@ -269,7 +267,7 @@ fn a_daemon_restart_mid_advisor_keeps_the_advisor_s_estimated_cost() {
         "*An implement attempt at this task failed*",
         "",
         serde_json::json!({"title": "Advised", "goal": "g", "verify": ["test -f SECOND"],
-            "variant": {"advisor": true, "retryMode": "fresh"}}),
+            "variant": {"advisor": true}}),
         "1/advisor/events.jsonl",
     );
     let failed = &settled["attempts"][0];
@@ -553,8 +551,7 @@ fn review_cost_lands_on_the_attempt_s_review_cost_usd_and_the_task_total() {
     let attempt = &settled["attempts"][0];
     assert_eq!(attempt["review"]["verdict"], "PASS", "{settled}");
     // The review's cost sits on the implement attempt's own reviewCostUsd,
-    // never folded into that attempt's costUsd (attempt_cost() subtracts
-    // costUsd from earlier attempts on a resumed session).
+    // never folded into that attempt's costUsd.
     assert_eq!(attempt["reviewCostUsd"], 0.05, "{settled}");
     assert_eq!(attempt["costUsd"], 0.01, "{settled}");
     assert!(

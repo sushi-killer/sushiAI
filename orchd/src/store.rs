@@ -420,7 +420,6 @@ mod tests {
                 reason: "tier default".into(),
                 session_id: Some("sess-1".into()),
                 pgid: None,
-                resumed: false,
                 started_at: 1,
                 ended_at: None,
                 status: attempt_status,

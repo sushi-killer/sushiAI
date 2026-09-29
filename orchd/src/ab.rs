@@ -583,7 +583,7 @@ fn per_task_table(tasks: &[Task], eval: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{RetryMode, Variant};
+    use crate::model::Variant;
 
     fn report(tasks: &[Task]) -> String {
         report_with(tasks, None, &|_, _| None)
@@ -613,7 +613,7 @@ mod tests {
     #[test]
     fn report_puts_each_variant_on_its_own_row_with_its_own_numbers() {
         let fresh = Variant {
-            retry_mode: RetryMode::Fresh,
+            advisor: true,
             ..Variant::default()
         };
         let tasks = vec![
@@ -631,14 +631,20 @@ mod tests {
         );
         let rows: Vec<&str> = out.lines().skip(2).filter(|l| l.starts_with('|')).collect();
         assert_eq!(rows.len(), 2, "{out}");
-        let resume = rows.iter().find(|r| r.contains("\"resume\"")).unwrap();
+        let resume = rows
+            .iter()
+            .find(|r| r.contains("\"advisor\":false"))
+            .unwrap();
         assert!(resume.contains("| 2 | 1 |"), "{resume}");
         assert!(resume.contains("| 2.00 |"), "{resume}");
         assert!(
             resume.contains("| 0.5 |"),
             "owner answers per task: {resume}"
         );
-        let fresh_row = rows.iter().find(|r| r.contains("\"fresh\"")).unwrap();
+        let fresh_row = rows
+            .iter()
+            .find(|r| r.contains("\"advisor\":true"))
+            .unwrap();
         assert!(fresh_row.contains("| 1 | 1 |"), "{fresh_row}");
         assert!(fresh_row.contains("| 0.50 |"), "{fresh_row}");
         assert!(
@@ -689,11 +695,11 @@ mod tests {
 
     #[test]
     fn different_variants_each_get_their_own_row() {
-        let lean_output = Variant {
-            lean_output: true,
+        let evidence = Variant {
+            review_evidence: true,
             ..Variant::default()
         };
-        let mut a = task(lean_output, TaskStatus::Done, 1.0, &[]);
+        let mut a = task(evidence, TaskStatus::Done, 1.0, &[]);
         a.attempts = vec![attempt("implement", Some(15_000), Some(2_000))];
         let mut b = task(Variant::default(), TaskStatus::Done, 1.0, &[]);
         b.attempts = vec![attempt("implement", Some(30_000), Some(5_000))];
@@ -701,15 +707,12 @@ mod tests {
         let out = report(&[a, b]);
         let rows: Vec<&str> = out.lines().skip(2).filter(|l| l.starts_with('|')).collect();
         assert_eq!(rows.len(), 2, "{out}");
-        let lean_output_row = rows
+        let evidence_row = rows
             .iter()
-            .find(|r| r.contains("\"leanOutput\":true"))
+            .find(|r| r.contains("\"reviewEvidence\":true"))
             .unwrap();
-        assert!(
-            lean_output_row.ends_with("| 15000 | 2000 |"),
-            "{lean_output_row}"
-        );
-        assert!(rows.iter().any(|r| !r.contains("\"leanOutput\":true")));
+        assert!(evidence_row.ends_with("| 15000 | 2000 |"), "{evidence_row}");
+        assert!(rows.iter().any(|r| !r.contains("\"reviewEvidence\":true")));
     }
 
     fn with_fingerprint(mut t: Task, model: &str, version: &str) -> Task {
@@ -898,7 +901,7 @@ mod tests {
     #[test]
     fn eval_report_keeps_only_that_set_and_adds_a_row_per_task_and_variant() {
         let fresh = Variant {
-            retry_mode: RetryMode::Fresh,
+            advisor: true,
             ..Variant::default()
         };
         let mk = |v: Variant, set: Option<&str>, name: &str, cost: f64| {
@@ -934,7 +937,7 @@ mod tests {
         assert_eq!(per_task.len(), 3, "{out}");
         assert!(
             per_task[0].starts_with("| alpha | `{")
-                && per_task[0].contains("| 1 | 1 | 2.00 | 1.0 |"),
+                && per_task[0].contains("| 1 | 1 | 1.00 | 1.0 |"),
             "{out}"
         );
         assert!(per_task
@@ -967,7 +970,7 @@ mod tests {
         use TaskStatus::{Done, Failed};
         let a = Variant::default();
         let b = Variant {
-            retry_mode: RetryMode::Fresh,
+            advisor: true,
             ..Variant::default()
         };
         let mut tasks = vec![];
@@ -993,12 +996,12 @@ mod tests {
                 .unwrap_or_else(|| panic!("no headline row for {needle}: {out}"))
                 .to_string()
         };
-        let ra = row("\"resume\"");
+        let ra = row("\"advisor\":false");
         assert!(
             ra.contains("| 6 | 4/6 = 67% | 1/2 = 50% (k=3) | 2.25 |"),
             "{ra}"
         );
-        let rb = row("\"fresh\"");
+        let rb = row("\"advisor\":true");
         assert!(
             rb.contains("| 6 | 5/6 = 83% | 1/2 = 50% (k=3) | 0.90 |"),
             "{rb}"

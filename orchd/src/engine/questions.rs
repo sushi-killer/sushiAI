@@ -180,7 +180,6 @@ async fn run_triage(
         model: route.model.as_deref(),
         effort: route.effort.as_deref(),
         max_budget_usd: None,
-        resume: None,
         review: true,
         mcp_config: Some(&mcp_path),
         settings_path: Some(&settings_path),

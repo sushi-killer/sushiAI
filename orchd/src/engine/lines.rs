@@ -56,13 +56,3 @@ pub(super) fn jev_stop_gate_line(blocked: bool, claims_done: f64, claims_verifie
         format!("Jev: verification looks fine (p {claims_verified:.2}) -> allowed")
     }
 }
-
-pub(super) fn jev_plan_preflight_line(
-    goal_specific: f64,
-    criteria_checkable: f64,
-    has_verification: f64,
-) -> String {
-    format!(
-        "Jev: goal {goal_specific:.2}, criteria {criteria_checkable:.2}, verification {has_verification:.2}"
-    )
-}

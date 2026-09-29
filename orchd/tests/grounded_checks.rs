@@ -59,11 +59,10 @@ fn setup(script: &str, review: bool, env: &[(&str, &str)]) -> Setup {
     ];
     vars.extend_from_slice(env);
     let daemon = Daemon::spawn(&vars);
-    if !review {
-        let mut settings = daemon.request("settings.get", json!({}));
-        settings["review"] = json!("");
-        daemon.request("settings.set", json!({"settings": settings}));
-    }
+    // The same fake reviews (`auto` would pick a route on the other harness).
+    let mut settings = daemon.request("settings.get", json!({}));
+    settings["review"] = json!(if review { "claude-opus" } else { "" });
+    daemon.request("settings.set", json!({"settings": settings}));
     Setup {
         daemon,
         log,

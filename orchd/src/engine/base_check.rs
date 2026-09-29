@@ -119,6 +119,71 @@ pub(super) async fn failing_on_base(
     base.code.is_some_and(|c| c != 0).then_some(base)
 }
 
+/// Runs the task's `final_verify` on the base before the first implement
+/// attempt. A command that exits non-zero is run once more on the base, past
+/// the cache, so a load-flaky test does not count; the first one that fails
+/// both times is returned. `None` when every command passes, the base cannot
+/// be checked out, or the run was cancelled.
+///
+/// Only `final_verify`: those are the whole-repo checks that must already be
+/// green on the base. A `verify` command is usually the very test the work is
+/// meant to turn green, so failing on the base is what it is for.
+pub(super) async fn failing_twice_on_base(
+    app: &Arc<App>,
+    task: &Task,
+    cancel: &CancelToken,
+) -> Option<VerifyOutcome> {
+    let mut commands: Vec<String> = Vec::new();
+    for c in &task.final_verify {
+        if !commands.contains(c) {
+            commands.push(c.clone());
+        }
+    }
+    if commands.is_empty() {
+        return None;
+    }
+    let dir = app.store.task_dir(&task.id);
+    let fails = |r: &VerifyOutcome| r.code.is_some_and(|c| c != 0);
+    let first = run_on_base(
+        app,
+        &task.repo,
+        &task.base_sha,
+        &commands,
+        &dir.join("preflight-base"),
+        cancel,
+    )
+    .await
+    .ok()?;
+    let failed: Vec<String> = first
+        .iter()
+        .filter(|r| fails(r))
+        .map(|r| r.command.clone())
+        .collect();
+    if failed.is_empty() || cancel.is_cancelled() {
+        return None;
+    }
+    {
+        let mut cache = app.base_runs.lock().unwrap();
+        for c in &failed {
+            cache.remove(&(task.base_sha.clone(), c.clone()));
+        }
+    }
+    let second = run_on_base(
+        app,
+        &task.repo,
+        &task.base_sha,
+        &failed,
+        &dir.join("preflight-base-retry"),
+        cancel,
+    )
+    .await
+    .ok()?;
+    if cancel.is_cancelled() {
+        return None;
+    }
+    second.into_iter().find(fails)
+}
+
 /// Baselines the checks that have none yet on the base commit (not in the
 /// task's worktree, which may hold the implementer's changes). `false` when
 /// cancelled or the base could not be checked out; nothing is stored then.

@@ -61,16 +61,7 @@ const VARIANT_KEYS: Exclude<
   | "bestOf"
   | "bestOfRoute"
   | "land"
->[] = [
-  "retryMode",
-  "stallTimeoutSecs",
-  "plannerTier",
-  "contract",
-  "reviewOtherFamily",
-  "reviewEvidence",
-  "deferHeavyChecks",
-  "leanOutput",
-];
+>[] = ["stallTimeoutSecs", "reviewEvidence"];
 
 function variantFlagText(value: boolean | string | number): string {
   return typeof value === "boolean" ? (value ? "on" : "off") : String(value);

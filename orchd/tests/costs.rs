@@ -39,13 +39,17 @@ fn a_full_task_leaves_one_cost_record_per_run_and_summaries_add_up() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts_dir.path(), "fake-full.sh", FAKE_FULL_TASK_SCRIPT);
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    // The same fake reviews (`auto` would pick a route on the other harness).
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("claude-opus");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
     let repo = init_git_repo();
     let task = daemon.request(
         "task.create",
         serde_json::json!({
             "repo": repo.path().to_str().unwrap(),
             "request": "add a second file",
-            "variant": {"advisor": true, "retryMode": "fresh"},
+            "variant": {"advisor": true},
             "start": true,
         }),
     );

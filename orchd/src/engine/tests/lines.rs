@@ -47,14 +47,6 @@ fn jev_stop_gate_line_names_the_outcome() {
 }
 
 #[test]
-fn jev_plan_preflight_line_reports_all_three_scores() {
-    assert_eq!(
-        jev_plan_preflight_line(0.9, 0.8, 0.3),
-        "Jev: goal 0.90, criteria 0.80, verification 0.30"
-    );
-}
-
-#[test]
 fn orchestrator_answer_line_includes_question_answer_and_reason() {
     assert_eq!(
         orchestrator_answer_line("Which theme?", "light", "README says so"),

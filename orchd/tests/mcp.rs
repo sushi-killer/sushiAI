@@ -184,7 +184,7 @@ fn initialize_tools_list_and_tools_call_over_stdio() {
     assert!(init["result"]["instructions"]
         .as_str()
         .unwrap()
-        .contains("task_preflight"));
+        .contains("task_create"));
 
     let list = mcp.request(2, "tools/list", serde_json::json!({}));
     let tools = list["result"]["tools"].as_array().unwrap();
@@ -196,7 +196,6 @@ fn initialize_tools_list_and_tools_call_over_stdio() {
         "task_start",
         "task_stop",
         "task_answer",
-        "task_preflight",
         "settings_get",
         "task_archive",
         "task_unarchive",
@@ -216,7 +215,7 @@ fn initialize_tools_list_and_tools_call_over_stdio() {
             "missing tool {expected}: {names:?}"
         );
     }
-    assert_eq!(names.len(), 20, "unexpected extra tools: {names:?}");
+    assert_eq!(names.len(), 19, "unexpected extra tools: {names:?}");
     for tool in tools {
         assert!(
             !tool["inputSchema"]["properties"].is_null(),

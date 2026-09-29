@@ -29,37 +29,19 @@ fn matches_any_protected_checks_every_glob() {
 }
 
 #[test]
-fn select_review_route_auto_prefers_the_hard_tier_then_another_harness() {
+fn select_review_route_auto_never_reviews_claude_with_claude() {
     let settings = Settings::default();
     let route = |id: &str| settings.routes.iter().find(|r| r.id == id).unwrap();
-    let hard = settings.tiers.get(&Tier::Hard).unwrap();
-    assert_eq!(
-        &select_review_route(&settings, route("claude-sonnet"), false)
-            .unwrap()
-            .id,
-        hard
-    );
-    assert_eq!(
-        &select_review_route(&settings, route("codex"), false)
-            .unwrap()
-            .id,
-        hard
-    );
-    let for_hard = select_review_route(&settings, route(hard), false).unwrap();
-    assert_ne!(for_hard.harness, route(hard).harness);
-}
-
-#[test]
-fn select_review_route_other_family_never_reviews_claude_with_claude() {
-    let settings = Settings::default();
-    let route = |id: &str| settings.routes.iter().find(|r| r.id == id).unwrap();
-    let for_sonnet = select_review_route(&settings, route("claude-sonnet"), true).unwrap();
+    let for_sonnet = select_review_route(&settings, route("claude-sonnet")).unwrap();
     assert_eq!(for_sonnet.harness, Harness::Codex);
-    let for_codex = select_review_route(&settings, route("codex"), true).unwrap();
+    let for_codex = select_review_route(&settings, route("codex")).unwrap();
     assert_eq!(
         for_codex.id, "claude-opus",
         "the hard route when it is the other family"
     );
+    let hard = settings.tiers.get(&Tier::Hard).unwrap();
+    let for_hard = select_review_route(&settings, route(hard)).unwrap();
+    assert_ne!(for_hard.harness, route(hard).harness);
 
     // A hard route on Codex, listed after another Codex route, still wins.
     let mut settings = Settings::default();
@@ -78,7 +60,7 @@ fn select_review_route_other_family_never_reviews_claude_with_claude() {
         .find(|r| r.id == "claude-sonnet")
         .unwrap();
     assert_eq!(
-        select_review_route(&settings, sonnet, true).unwrap().id,
+        select_review_route(&settings, sonnet).unwrap().id,
         "codex-strong"
     );
 }
@@ -90,6 +72,6 @@ fn select_review_route_explicit_id() {
         ..Settings::default()
     };
     let implementer = settings.routes.iter().find(|r| r.id == "codex").unwrap();
-    let route = select_review_route(&settings, implementer, false).unwrap();
+    let route = select_review_route(&settings, implementer).unwrap();
     assert_eq!(route.id, "claude-opus");
 }

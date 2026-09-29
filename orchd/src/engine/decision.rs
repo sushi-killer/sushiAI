@@ -67,6 +67,9 @@ pub struct FailureDecisionInput<'a> {
     /// Implement attempts on this task the loop detector stopped, this one
     /// included.
     pub loops: u32,
+    /// Implement attempts on this task whose review failed with a finding the
+    /// reviewer marked as repeating an earlier one, this one included.
+    pub repeated_reviews: u32,
     pub attempt_n: u32,
     pub max_attempts: u32,
 }
@@ -77,8 +80,9 @@ pub enum FailureDecision {
     Waiting { question: String },
 }
 
-/// spec step 8: same signature as previous, or a second loop -> tier up; same signature 3x in
-/// a row, or attempts exhausted -> waiting.
+/// spec step 8: same signature as previous, a second loop, or a first
+/// repeated review finding -> tier up; same signature 3x in a row, a second
+/// repeated review finding, or attempts exhausted -> waiting.
 pub(super) const EXHAUSTED_QUESTION: &str = "Attempts keep failing";
 
 /// The decision line an orchestrator answer to that question leaves
@@ -86,7 +90,10 @@ pub(super) const EXHAUSTED_QUESTION: &str = "Attempts keep failing";
 pub(super) const EXHAUSTED_ANSWER_PREFIX: &str = "Orchestrator: Attempts keep failing";
 
 pub fn decide_after_failure(input: &FailureDecisionInput) -> FailureDecision {
-    if input.consecutive_same >= 3 || input.attempt_n >= input.max_attempts {
+    if input.consecutive_same >= 3
+        || input.repeated_reviews >= 2
+        || input.attempt_n >= input.max_attempts
+    {
         return FailureDecision::Waiting {
             question: format!(
                 "{EXHAUSTED_QUESTION} with {}: continue, change approach, or stop?",
@@ -94,7 +101,10 @@ pub fn decide_after_failure(input: &FailureDecisionInput) -> FailureDecision {
             ),
         };
     }
-    let tier = if input.previous_signature == Some(input.signature) || input.loops >= 2 {
+    let tier = if input.previous_signature == Some(input.signature)
+        || input.loops >= 2
+        || input.repeated_reviews >= 1
+    {
         input.tier.up()
     } else {
         input.tier
@@ -137,6 +147,28 @@ pub(super) fn implement_attempt_count(task: &Task) -> u32 {
         .count() as u32
 }
 
+/// Implement attempts whose review failed with a repeated finding.
+pub(super) fn repeated_review_count(task: &Task) -> u32 {
+    task.attempts
+        .iter()
+        .filter(|a| a.stage == Stage::Implement)
+        .filter(|a| a.failure.as_ref().map(|f| f.kind) == Some(FailureKind::Review))
+        .filter(|a| a.review.as_ref().is_some_and(|r| !r.repeated.is_empty()))
+        .count() as u32
+}
+
+/// Whether the latest implement attempt failed its review on a finding the
+/// reviewer marked as repeating.
+pub(super) fn last_review_repeated(task: &Task) -> bool {
+    task.attempts
+        .iter()
+        .rfind(|a| a.stage == Stage::Implement)
+        .is_some_and(|a| {
+            a.failure.as_ref().map(|f| f.kind) == Some(FailureKind::Review)
+                && a.review.as_ref().is_some_and(|r| !r.repeated.is_empty())
+        })
+}
+
 pub(super) fn advance_after_failure(task: &mut Task, max_attempts: u32) -> bool {
     let last = task.attempts.last().expect("failure just recorded");
     let signature = last
@@ -163,6 +195,7 @@ pub(super) fn advance_after_failure(task: &mut Task, max_attempts: u32) -> bool 
             .iter()
             .filter(|a| a.failure.as_ref().map(|f| f.kind) == Some(FailureKind::Loop))
             .count() as u32,
+        repeated_reviews: repeated_review_count(task),
         attempt_n: implement_attempt_count(task),
         max_attempts,
     };
@@ -171,6 +204,12 @@ pub(super) fn advance_after_failure(task: &mut Task, max_attempts: u32) -> bool 
             // The fallback note stays until the tier actually changes.
             if tier != task.tier {
                 task.tier_fallback = None;
+            }
+            if last_review_repeated(task) {
+                task.decisions.push(format!(
+                    "Orchestrator: a review finding repeated -> advisor, tier {}",
+                    tier.as_str()
+                ));
             }
             task.tier = tier;
             task.status = TaskStatus::Queued;
@@ -189,13 +228,7 @@ pub(super) fn advance_after_failure(task: &mut Task, max_attempts: u32) -> bool 
 }
 
 pub(super) enum LoopSignal {
-    /// `answered` is `true` when this iteration ends because the owner just
-    /// answered a waiting question -- the caller uses it to decide whether
-    /// the *next* attempt is still allowed to resume a previous session
-    /// (spec: "never resume after a waiting/answer cycle").
-    Continue {
-        answered: bool,
-    },
+    Continue,
     Stop,
 }
 
@@ -222,14 +255,14 @@ pub(super) async fn fail_and_continue(
     if should_continue {
         let _ = app.store.save_task(task);
         app.broadcast_task(task);
-        return LoopSignal::Continue { answered: false };
+        return LoopSignal::Continue;
     }
     // Not persisted here: the wait does it itself, after the one-shot is
     // installed (see `wait_for_answer`).
     match wait_for_exhausted_answer(app, task_id, task, idx, pending_answer, cancel, permit).await {
         Some(_answer) => {
             *attempt_budget += 2;
-            LoopSignal::Continue { answered: true }
+            LoopSignal::Continue
         }
         None => LoopSignal::Stop,
     }

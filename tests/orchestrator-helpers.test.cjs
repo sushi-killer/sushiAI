@@ -47,7 +47,6 @@ function attempt(overrides = {}) {
     harness: "codex",
     model: "default",
     reason: "tier: standard",
-    resumed: false,
     startedAt: 0,
     status: "running",
     changedFiles: [],
@@ -616,14 +615,8 @@ test("resetSettingToDefault restores one setting and leaves the rest alone", asy
 
 function variant(overrides = {}) {
   return {
-    retryMode: "resume",
     stallTimeoutSecs: 120,
-    plannerTier: false,
-    contract: false,
-    reviewOtherFamily: false,
     reviewEvidence: false,
-    deferHeavyChecks: false,
-    leanOutput: false,
     ...overrides,
   };
 }
@@ -647,10 +640,10 @@ test("variantLabel says 'default' when the task's variant matches the current ex
 test("variantLabel lists only the differing flags, in Variant's field order, booleans as on/off", async () => {
   const { variantLabel } = await library;
   const experiments = variant();
-  const taskVariant = variant({ retryMode: "fresh", leanOutput: true });
+  const taskVariant = variant({ stallTimeoutSecs: 300, reviewEvidence: true });
   assert.equal(
     variantLabel(task({ variant: taskVariant }), experiments),
-    "retryMode fresh · leanOutput on",
+    "stallTimeoutSecs 300 · reviewEvidence on",
   );
 });
 
@@ -658,30 +651,29 @@ test("variantLabel leaves an unchanged flag out even when it sits between two di
   const { variantLabel } = await library;
   const experiments = variant();
   const taskVariant = variant({
-    plannerTier: true,
-    contract: false,
-    reviewOtherFamily: true,
+    stallTimeoutSecs: 300,
+    reviewEvidence: true,
   });
   assert.equal(
     variantLabel(task({ variant: taskVariant }), experiments),
-    "plannerTier on · reviewOtherFamily on",
+    "stallTimeoutSecs 300 · reviewEvidence on",
   );
 });
 
 test("variantLabel lists route overrides after the flags", async () => {
   const { variantLabel } = await library;
   const taskVariant = variant({
-    leanOutput: true,
+    reviewEvidence: true,
     plannerRoute: "claude-sonnet",
     tierRoutes: { hard: "claude-sonnet" },
   });
   assert.equal(
     variantLabel(task({ variant: taskVariant }), variant()),
-    "leanOutput on · plannerRoute claude-sonnet · tierRoutes hard=claude-sonnet",
+    "reviewEvidence on · plannerRoute claude-sonnet · tierRoutes hard=claude-sonnet",
   );
   assert.equal(
     variantLabel(task({ variant: variant() }), taskVariant),
-    "leanOutput off · plannerRoute settings · tierRoutes settings",
+    "reviewEvidence off · plannerRoute settings · tierRoutes settings",
   );
 });
 

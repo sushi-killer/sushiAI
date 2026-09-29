@@ -10,7 +10,10 @@ const MAX_ADVICE_CHARS: usize = 1500;
 /// A failed attempt is advised at most once: a run that was stopped or gave
 /// no answer is not paid for again. Never fails the task: no route, an
 /// escalation to the advisor's own model, a failed or stopped run or an
-/// empty answer all just mean no advice.
+/// empty answer all just mean no advice. `force` skips the check that the
+/// advisor is not the model about to implement: a repeated review finding
+/// gets a fresh diagnosis even when the tier went up to the planner's route.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_advisor_before_retry(
     app: &Arc<App>,
     task: &mut Task,
@@ -18,6 +21,7 @@ pub(super) async fn run_advisor_before_retry(
     next_route: &Route,
     worktree: &Path,
     base_sha: &str,
+    force: bool,
     cancel: &CancelToken,
 ) -> Option<f64> {
     let failed = task
@@ -36,10 +40,11 @@ pub(super) async fn run_advisor_before_retry(
     let variant = task.variant();
     let planner = variant.plan_route_id(settings);
     let advisor = settings.routes.iter().find(|r| r.id == planner)?;
-    if advisor.id == next_route.id
-        || (advisor.harness == next_route.harness
-            && advisor.model.is_some()
-            && advisor.model == next_route.model)
+    if !force
+        && (advisor.id == next_route.id
+            || (advisor.harness == next_route.harness
+                && advisor.model.is_some()
+                && advisor.model == next_route.model))
     {
         return None;
     }
@@ -78,7 +83,6 @@ pub(super) async fn run_advisor_before_retry(
         model: advisor.model.as_deref(),
         effort: advisor.effort.as_deref(),
         max_budget_usd: None,
-        resume: None,
         review: true,
         mcp_config: Some(&mcp_path),
         settings_path: Some(&settings_path),

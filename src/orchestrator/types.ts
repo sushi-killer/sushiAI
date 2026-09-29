@@ -120,18 +120,16 @@ export type VerifyResult = {
   ms: number;
 };
 
-export type ReviewResult = { verdict: "PASS" | "FAIL"; findings: string[] };
+export type ReviewResult = {
+  verdict: "PASS" | "FAIL";
+  findings: string[];
+  /** The findings the reviewer marked as repeating the previous attempt's. */
+  repeated?: string[];
+};
 
 export type Variant = {
-  retryMode: "resume" | "fresh";
   stallTimeoutSecs: number;
-  plannerTier: boolean;
-  contract: boolean;
-  reviewOtherFamily: boolean;
   reviewEvidence: boolean;
-  deferHeavyChecks: boolean;
-  leanOutput: boolean;
-  reviewBlind: boolean;
   advisor: boolean;
   loopDetect: boolean;
   /** Route id the plan stage runs on instead of `settings.planner`. */
@@ -239,7 +237,6 @@ export type Attempt = {
   /** Why this route was chosen - a rule name, or a classifier probability. */
   reason: string;
   sessionId?: string;
-  resumed: boolean;
   startedAt: number;
   endedAt?: number;
   status: AttemptStatus;
@@ -326,7 +323,7 @@ export type Task = {
   parent?: string;
   status: TaskStatus;
   tier: Tier;
-  /** The planner's tier; routes the task only with `variant.plannerTier`. */
+  /** The tier the planner chose; it routes the task, Jev only when absent. */
   plannedTier?: Tier;
   /** Set when `tier` was picked by falling back to `standard` instead of a
    * classified or planner choice; the fixed-set reason (e.g. "no classifier

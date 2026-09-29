@@ -40,3 +40,72 @@ fn waits_state_reads_dependencies_and_children() {
     tasks[2].archived = true;
     assert_eq!(waits_state(&tasks[0], &tasks), Waits::Ready);
 }
+
+#[tokio::test]
+async fn an_amendment_made_while_a_parent_loop_is_live_is_applied_before_its_check() {
+    let (app, dir) = test_app();
+    let repo = dir.path().join("repo");
+    let worktree = dir.path().join("worktree");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&worktree).unwrap();
+    let mut parent = graph_task("p", TaskStatus::Running, &[], None);
+    parent.repo = repo.to_string_lossy().into();
+    parent.worktree = worktree.to_string_lossy().into();
+    parent.verify = vec!["exit 1".into()];
+    let mut child = graph_task("c", TaskStatus::Done, &[], Some("p"));
+    child.repo = parent.repo.clone();
+    app.store.save_task(&parent).unwrap();
+    app.store.save_task(&child).unwrap();
+
+    let pending = Arc::new(StdMutex::new(Some(Amendment {
+        verify: Some(vec!["touch amended-ran".into()]),
+        ..Default::default()
+    })));
+    let answers = Arc::new(StdMutex::new(None));
+    let end = run_parent(&app, "p", &answers, &pending, &CancelToken::new()).await;
+
+    // The old command would have failed the parent into an agent attempt.
+    assert!(matches!(end, ParentEnd::Finished));
+    assert!(pending.lock().unwrap().is_none());
+    assert!(worktree.join("amended-ran").exists(), "the amended command ran");
+    let saved = app.store.load_task("p").unwrap().unwrap();
+    assert_eq!(saved.verify, vec!["touch amended-ran"]);
+    assert!(
+        saved.decisions.contains(&"Amended: verify".to_string()),
+        "{:?}",
+        saved.decisions
+    );
+    assert_eq!(saved.status, TaskStatus::Done);
+}
+
+#[tokio::test]
+async fn an_amendment_pending_before_the_base_preflight_replaces_the_checked_command() {
+    let (app, dir) = test_app();
+    let repo = dir.path().join("repo");
+    let worktree = dir.path().join("worktree");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&worktree).unwrap();
+    let mut parent = graph_task("p", TaskStatus::Running, &[], None);
+    parent.repo = repo.to_string_lossy().into();
+    parent.worktree = worktree.to_string_lossy().into();
+    parent.verify = vec!["exit 1".into()];
+    app.store.save_task(&parent).unwrap();
+
+    let pending = Arc::new(StdMutex::new(Some(Amendment {
+        verify: Some(vec!["touch amended-ran".into()]),
+        ..Default::default()
+    })));
+    let answers = Arc::new(StdMutex::new(None));
+    let end = run_parent(&app, "p", &answers, &pending, &CancelToken::new()).await;
+
+    // The old command would have parked the parent on a base-check question.
+    assert!(matches!(end, ParentEnd::Finished));
+    let saved = app.store.load_task("p").unwrap().unwrap();
+    assert!(saved.question.is_none(), "{:?}", saved.question);
+    assert_eq!(saved.verify, vec!["touch amended-ran"]);
+    assert!(
+        saved.decisions.contains(&"Amended: verify".to_string()),
+        "{:?}",
+        saved.decisions
+    );
+}

@@ -38,6 +38,22 @@ pub(super) fn policy_open(app: &App, task: &Task, kind: QuestionKind) -> bool {
 /// (the review rule once per attempt); a repeat goes on as before.
 fn rule_answer(task: &Task, question: &Question, attempt_n: u32) -> Option<(String, String)> {
     let kind = question.kind;
+    if kind == QuestionKind::PreexistingFailure
+        && question
+            .options
+            .iter()
+            .any(|o| o == base_check::PARENT_KEEP)
+    {
+        let kept = task.assumptions.iter().any(|a| {
+            a.by == "policy" && a.kind == Some(kind) && a.answer == base_check::PARENT_KEEP
+        });
+        return (!kept).then(|| {
+            (
+                base_check::PARENT_KEEP.to_string(),
+                "the subtasks are meant to make the check pass: keep it, once".to_string(),
+            )
+        });
+    }
     let (answer, evidence, once_per) = match kind {
         QuestionKind::ReviewNoVerdict => (
             "retry",

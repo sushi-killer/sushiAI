@@ -142,13 +142,188 @@ pub(super) async fn discard_children(app: &Arc<App>, children: Vec<Task>) {
     }
 }
 
-/// A parent's loop: starts its children that have not started yet, and once
-/// every child has landed runs its own checks on its branch and ends `done`
-/// (`failed` when a check fails). Until then it leaves the task `running`
-/// with no loop; `advance_graph` comes back to it.
-pub(super) async fn run_parent(app: &Arc<App>, task_id: &str, cancel: &CancelToken) {
-    let Ok(Some(mut task)) = app.store.load_task(task_id) else {
+/// How a parent's loop ended.
+pub(super) enum ParentEnd {
+    /// Nothing more for this loop to do: the parent is done, parked, waiting
+    /// for its children or landing, or stopped.
+    Finished,
+    /// Every subtask landed but finishing the parent failed. The loop goes on
+    /// as an ordinary implement attempt on the parent's own worktree, with
+    /// `failure` in its brief. `budget` caps the attempts (`None`: the usual
+    /// `maxAttempts`).
+    Attempt {
+        failure: String,
+        budget: Option<u32>,
+    },
+}
+
+/// The decision line that keeps a parent's `verify` command although it
+/// fails on the base; it is what stops a relaunch from asking again.
+fn kept_check_line(command: &str) -> String {
+    format!("Orchestrator: kept check {command}, it fails on the base until the subtasks land")
+}
+
+/// Applies the owner's (or the policy's) answer to a parent's base-check
+/// question: `drop this check` removes the command, `keep this check`
+/// records that it stays. Shared by the live loop and the post-restart
+/// branch of `task.answer`.
+pub(super) fn apply_parent_check_answer(task: &mut Task, question: &Question, answer: &str) {
+    let Some(command) = pre_existing_command(question).map(str::to_string) else {
         return;
+    };
+    if answer == PRE_EXISTING_DROP {
+        task.verify.retain(|c| c != &command);
+        task.final_verify.retain(|c| c != &command);
+        task.decisions
+            .push(format!("Orchestrator: dropped check {command}"));
+    } else if question.options.iter().any(|o| o == PARENT_KEEP) {
+        let line = kept_check_line(&command);
+        if !task.decisions.contains(&line) {
+            task.decisions.push(line);
+        }
+    }
+}
+
+/// Before any subtask starts: the parent's own checks run on its base. A
+/// `finalVerify` and a `verify` that still fail there on a second run are
+/// asked about, and the subtasks start only after the answer. `false`: the
+/// loop has to end (cancelled, or stopped by the answer).
+async fn parent_base_preflight(
+    app: &Arc<App>,
+    task: &mut Task,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_amend: &Arc<StdMutex<Option<Amendment>>>,
+    cancel: &CancelToken,
+) -> bool {
+    loop {
+        // An amendment made while this loop was live (or parked on the
+        // question) reaches every pass.
+        apply_pending_amendment(app, task, pending_amend, cancel).await;
+        let finals = task.final_verify.clone();
+        let mut failed = failing_twice_on_base(app, task, &finals, cancel).await;
+        let mut is_final = failed.is_some();
+        if failed.is_none() && !cancel.is_cancelled() {
+            let unkept: Vec<String> = task
+                .verify
+                .iter()
+                .filter(|c| !task.decisions.contains(&kept_check_line(c)))
+                .cloned()
+                .collect();
+            failed = failing_twice_on_base(app, task, &unkept, cancel).await;
+            is_final = false;
+        }
+        if cancel.is_cancelled() {
+            mark_stopped_if_not_already(app, &task.id).await;
+            return false;
+        }
+        let Some(base_run) = failed else {
+            return true;
+        };
+        let question = if is_final {
+            pre_existing_question(&base_run.command, &task.base_sha, &base_run.tail)
+        } else {
+            parent_check_question(&base_run.command, &task.base_sha, &base_run.tail)
+        };
+        task.question = Some(question.clone());
+        task.status = TaskStatus::Waiting;
+        task.updated_at = now_ms();
+        let task_id = task.id.clone();
+        let Some(answer) =
+            wait_for_answer(app, &task_id, task, pending_answer, cancel, &mut None).await
+        else {
+            return false;
+        };
+        if answer.trim().eq_ignore_ascii_case("stop") {
+            task.decisions.push("Owner: stop".to_string());
+            task.question = None;
+            task.status = TaskStatus::Stopped;
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(task);
+            app.broadcast_task(task);
+            app.stop_children(&task_id, &task.repo);
+            return false;
+        }
+        apply_parent_check_answer(task, &question, &answer);
+        if answer == PRE_EXISTING_DROP {
+            app.verify_cache.lock().unwrap().remove(&task_id);
+        } else if is_final {
+            // Retry after the base is fixed: on the newest base.
+            let wt = PathBuf::from(&task.worktree);
+            carry_onto_newest_base(task, &wt).await;
+        }
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(task);
+        app.broadcast_task(task);
+    }
+}
+
+/// A parent whose checks passed (or that has none) is done; with
+/// `variant.land` it first lands on its base branch as one commit titled
+/// with its title, exactly like a single task. A landing that fails goes to
+/// an agent attempt.
+async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> ParentEnd {
+    let task_id = task.id.clone();
+    let worktree = PathBuf::from(&task.worktree);
+    let mut reason = "every subtask landed";
+    if task.variant().land && task.parent.is_none() {
+        let run_dir = app.store.task_dir(&task_id).join("runs").join("parent");
+        let _ = std::fs::create_dir_all(&run_dir);
+        match land_on_base(app, task, None, 0, &worktree, &run_dir, cancel).await {
+            Landing::Landed => {
+                git::delete_wip_ref(&worktree, &task_id);
+                reason = "landed";
+            }
+            Landing::Waiting => {
+                task.status = TaskStatus::Landing;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(task);
+                app.broadcast_task(task);
+                return ParentEnd::Finished;
+            }
+            Landing::Failed { detail, .. } => {
+                task.status = TaskStatus::Running;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(task);
+                app.broadcast_task(task);
+                return ParentEnd::Attempt {
+                    failure: detail,
+                    budget: None,
+                };
+            }
+            Landing::Cancelled => {
+                let _ = app.store.save_task(task);
+                mark_stopped_if_not_already(app, &task_id).await;
+                return ParentEnd::Finished;
+            }
+            // Refused: done on its own branch, as with land off.
+            Landing::NoParent => {}
+        }
+    }
+    task.status = TaskStatus::Done;
+    task.updated_at = now_ms();
+    app.write_report(task).await;
+    app.release_worktree(task, reason).await;
+    task.updated_at = now_ms();
+    let _ = app.store.save_task(task);
+    app.broadcast_task(task);
+    ParentEnd::Finished
+}
+
+/// A parent's loop: starts its children that have not started yet, and once
+/// every child has landed runs its own checks on its branch, lands (with
+/// `variant.land`) and ends `done`. Until then it leaves the task `running`
+/// with no loop; `advance_graph` comes back to it. A failing check or
+/// landing is not the end of the graph: the parent gets an agent attempt
+/// (`ParentEnd::Attempt`).
+pub(super) async fn run_parent(
+    app: &Arc<App>,
+    task_id: &str,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_amend: &Arc<StdMutex<Option<Amendment>>>,
+    cancel: &CancelToken,
+) -> ParentEnd {
+    let Ok(Some(mut task)) = app.store.load_task(task_id) else {
+        return ParentEnd::Finished;
     };
     let all = app.repo_tasks(&task.repo);
     // No child starts before the parent's own dependencies are done.
@@ -156,7 +331,7 @@ pub(super) async fn run_parent(app: &Arc<App>, task_id: &str, cancel: &CancelTok
         Waits::Ready | Waits::Nothing => {}
         Waits::Ended(ended) => {
             app.ask_dependency_question(&task, &all, &ended);
-            return;
+            return ParentEnd::Finished;
         }
         Waits::Pending => {
             if task.status != TaskStatus::Queued {
@@ -165,8 +340,21 @@ pub(super) async fn run_parent(app: &Arc<App>, task_id: &str, cancel: &CancelTok
                 let _ = app.store.save_task(&task);
                 app.broadcast_task(&task);
             }
-            return;
+            return ParentEnd::Finished;
         }
+    }
+    // A parent that passed everything and waited to land: only the landing
+    // is tried again, no check re-runs and no child is touched.
+    if task.status == TaskStatus::Landing {
+        let permit = tokio::select! {
+            _ = cancel.cancelled() => None,
+            p = app.slots.clone().acquire_owned() => p.ok(),
+        };
+        if permit.is_none() {
+            mark_stopped_if_not_already(app, task_id).await;
+            return ParentEnd::Finished;
+        }
+        return land_parent(app, &mut task, cancel).await;
     }
     // Before the first child starts: the parent's checks judge the base, not
     // the children's work. Idempotent across relaunches.
@@ -174,10 +362,23 @@ pub(super) async fn run_parent(app: &Arc<App>, task_id: &str, cancel: &CancelTok
         let wt = PathBuf::from(&task.worktree);
         if !baseline_checks(app, task_id, &mut task, &wt, cancel).await {
             mark_stopped_if_not_already(app, task_id).await;
-            return;
+            return ParentEnd::Finished;
         }
         let _ = app.store.save_task(&task);
         app.broadcast_task(&task);
+    }
+    // The parent's own commands, run on the base while no child has started.
+    let none_started = all
+        .iter()
+        .filter(|t| t.parent.as_deref() == Some(task_id) && !t.archived)
+        .all(|t| {
+            matches!(t.status, TaskStatus::Drafting | TaskStatus::Queued)
+                && implement_attempt_count(t) == 0
+        });
+    if none_started
+        && !parent_base_preflight(app, &mut task, pending_answer, pending_amend, cancel).await
+    {
+        return ParentEnd::Finished;
     }
     // `advance_graph` only relaunches a queued or running parent, so a
     // stopped or failed one here is the owner's own restart: its unfinished
@@ -217,7 +418,7 @@ pub(super) async fn run_parent(app: &Arc<App>, task_id: &str, cancel: &CancelTok
             let _ = app.store.save_task(&task);
             app.broadcast_task(&task);
         }
-        return;
+        return ParentEnd::Finished;
     }
 
     let permit = tokio::select! {
@@ -226,12 +427,18 @@ pub(super) async fn run_parent(app: &Arc<App>, task_id: &str, cancel: &CancelTok
     };
     if permit.is_none() {
         mark_stopped_if_not_already(app, task_id).await;
-        return;
+        return ParentEnd::Finished;
     }
     task.status = TaskStatus::Running;
     task.updated_at = now_ms();
     let _ = app.store.save_task(&task);
     app.broadcast_task(&task);
+    // An amendment made at any point (also while this loop waited for a
+    // slot) reaches this check.
+    apply_pending_amendment(app, &mut task, pending_amend, cancel).await;
+    let Ok(Some(task)) = app.store.load_task(task_id) else {
+        return ParentEnd::Finished;
+    };
 
     let checks: Vec<String> = task
         .verify
@@ -290,49 +497,49 @@ pub(super) async fn run_parent(app: &Arc<App>, task_id: &str, cancel: &CancelTok
     }
     if cancel.is_cancelled() {
         mark_stopped_if_not_already(app, task_id).await;
-        return;
+        return ParentEnd::Finished;
     }
     let Ok(Some(mut task)) = app.store.load_task(task_id) else {
-        return;
+        return ParentEnd::Finished;
     };
     task.cost_usd = parent_cost(&task, &app.repo_tasks(&task.repo));
-    match results.iter().find(|v| v.code != Some(0)) {
+    let failure = match results.iter().find(|v| v.code != Some(0)) {
         Some(failed) => {
+            let code = failed
+                .code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "null".to_string());
             task.decisions.push(format!(
-                "Orchestrator: every subtask landed, but `{}` exited {} on {}: {}",
+                "Orchestrator: every subtask landed, but `{}` exited {code} on {}: {}",
                 failed.command,
-                failed
-                    .code
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "null".to_string()),
                 task.branch,
                 tail_chars(failed.tail.trim(), 600)
             ));
-            task.status = TaskStatus::Failed;
+            Some(format!(
+                "`{}` exited {code} on {}:\n{}",
+                failed.command,
+                task.branch,
+                failed.tail.trim()
+            ))
         }
-        None => match grounded_failure {
-            Some(line) => {
-                task.decisions.push(line);
-                task.status = TaskStatus::Failed;
-            }
-            None => {
-                task.decisions.push(format!(
-                    "Orchestrator: every subtask landed on {}",
-                    task.branch
-                ));
-                task.status = TaskStatus::Done;
-            }
-        },
-    }
-    if task.status == TaskStatus::Done {
+        None => grounded_failure.inspect(|line| task.decisions.push(line.clone())),
+    };
+    if let Some(failure) = failure {
+        // A check that fails after the subtasks landed gets one agent
+        // attempt on the parent's branch, not the end of the graph.
         task.updated_at = now_ms();
-        app.write_report(&mut task).await;
-        app.release_worktree(&mut task, "every subtask landed")
-            .await;
+        let _ = app.store.save_task(&task);
+        app.broadcast_task(&task);
+        return ParentEnd::Attempt {
+            failure,
+            budget: Some(1),
+        };
     }
-    task.updated_at = now_ms();
-    let _ = app.store.save_task(&task);
-    app.broadcast_task(&task);
+    task.decisions.push(format!(
+        "Orchestrator: every subtask landed on {}",
+        task.branch
+    ));
+    land_parent(app, &mut task, cancel).await
 }
 
 /// The carry-onto-moved-base failure detail the agent gets: which files
@@ -402,7 +609,7 @@ pub(super) async fn land_on_parent(
     match carry_and_check(
         app,
         task,
-        idx,
+        Some(idx),
         worktree,
         run_dir,
         &branch,
@@ -452,12 +659,14 @@ pub(super) async fn land_on_parent(
 /// Carries the task's work onto `branch`'s current head; when the head had
 /// moved, `verify` and then `extra_final` run again on the carried tree.
 /// `Ok(true)`: the branch already holds this work. `Err` is what the caller
-/// returns: a failed attempt, or a cancel.
+/// returns: a failed attempt, or a cancel. `idx` is the attempt record that
+/// takes the changed files and verify results; a parent landing without an
+/// attempt has none.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn carry_and_check(
     app: &Arc<App>,
     task: &mut Task,
-    idx: usize,
+    idx: Option<usize>,
     worktree: &Path,
     run_dir: &Path,
     branch: &str,
@@ -504,7 +713,9 @@ pub(super) async fn carry_and_check(
             })
             .await
             .unwrap_or_default();
-            task.attempts[idx].changed_files = changed.clone();
+            if let Some(idx) = idx {
+                task.attempts[idx].changed_files = changed.clone();
+            }
             if changed.is_empty() {
                 task.decisions
                     .push(format!("Land: {branch} already contains this work"));
@@ -523,7 +734,9 @@ pub(super) async fn carry_and_check(
             if cancel.is_cancelled() {
                 return Err(Landing::Cancelled);
             }
-            task.attempts[idx].verify = results.clone();
+            if let Some(idx) = idx {
+                task.attempts[idx].verify = results.clone();
+            }
             if let Some(v) = results.iter().find(|v| v.code != Some(0)) {
                 return failed(
                     FailureKind::Verify,
@@ -551,7 +764,9 @@ pub(super) async fn carry_and_check(
                 if cancel.is_cancelled() {
                     return Err(Landing::Cancelled);
                 }
-                task.attempts[idx].verify.extend(finals.iter().cloned());
+                if let Some(idx) = idx {
+                    task.attempts[idx].verify.extend(finals.iter().cloned());
+                }
                 if let Some(v) = finals.iter().find(|v| v.code != Some(0)) {
                     return failed(
                         FailureKind::Verify,

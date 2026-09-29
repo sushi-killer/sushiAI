@@ -123,7 +123,25 @@ fn a_plan_with_two_dependent_subtasks_lands_both_on_the_parent_in_order() {
     );
     let parent_id = parent["id"].as_str().unwrap().to_string();
 
-    let parent = settle(&daemon, &parent_id);
+    // The parent's verify needs both files, so it fails on the base: the
+    // parent asks before any subtask starts, and the subtasks are meant to
+    // make it pass.
+    let asked = settle(&daemon, &parent_id);
+    assert_eq!(asked["status"], "waiting", "task JSON: {asked}");
+    assert_eq!(asked["question"]["kind"], "preexisting_failure", "{asked}");
+    assert!(
+        asked["question"]["options"]
+            .to_string()
+            .contains("keep this check"),
+        "{asked}"
+    );
+    daemon.request(
+        "task.answer",
+        serde_json::json!({"id": parent_id, "answer": "keep this check"}),
+    );
+    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(30), |s| {
+        matches!(s, "done" | "failed" | "stopped")
+    });
     assert_eq!(parent["status"], "done", "task JSON: {parent}");
     assert!(
         implement_attempts(&parent).is_empty(),
@@ -1143,4 +1161,257 @@ fn a_dependency_with_many_changed_files_lists_twenty_and_counts_the_rest() {
     for wt in worktrees {
         let _ = std::fs::remove_dir_all(wt.as_str().unwrap());
     }
+}
+
+/// Plans a request as a parent (title "Parent", verify `__PARENT_VERIFY__`)
+/// with two independent parts that write one.txt and two.txt. Only a run
+/// whose brief carries the parent's failure output writes fix.txt.
+const SPLIT_SCRIPT: &str = r#"#!/bin/sh
+input="$(cat)"
+out() {
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  printf '%s\n' "{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":$1}"
+}
+report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
+case "$input" in
+  *sushi-plan*)
+    case "$input" in
+      *PART_ONE*) out '"```sushi-plan\n{\"title\":\"Part One\",\"goal\":\"PART_ONE: create one.txt\",\"verify\":[\"test -f one.txt\"]}\n```"' ;;
+      *PART_TWO*) out '"```sushi-plan\n{\"title\":\"Part Two\",\"goal\":\"PART_TWO: create two.txt\",\"verify\":[\"test -f two.txt\"]}\n```"' ;;
+      *) out '"```sushi-plan\n{\"title\":\"Parent\",\"goal\":\"Both parts\",\"verify\":[\"__PARENT_VERIFY__\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part One\",\"request\":\"PART_ONE create one.txt\"},{\"key\":\"b\",\"title\":\"Part Two\",\"request\":\"PART_TWO create two.txt\"}]}\n```"' ;;
+    esac
+    ;;
+  *NEEDS-FIX*) echo fix > fix.txt; out "$report" ;;
+  *PART_ONE*) echo one > one.txt; out "$report" ;;
+  *PART_TWO*) echo two > two.txt; out "$report" ;;
+esac
+"#;
+
+fn split_daemon(parent_verify: &str) -> (Daemon, tempfile::TempDir) {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let body = SPLIT_SCRIPT.replace("__PARENT_VERIFY__", parent_verify);
+    let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", &body);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_off(&daemon);
+    (daemon, scripts_dir)
+}
+
+/// A repo whose current branch is the non-default `work`.
+fn repo_on_work_branch() -> tempfile::TempDir {
+    let repo = init_git_repo();
+    git_out(repo.path(), &["checkout", "-q", "-b", "work"]);
+    repo
+}
+
+fn create_split(daemon: &Daemon, repo: &Path, land: bool) -> String {
+    let parent = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.to_str().unwrap(),
+            "request": "build both parts",
+            "land": land,
+            "start": true,
+        }),
+    );
+    parent["id"].as_str().unwrap().to_string()
+}
+
+fn children_of(daemon: &Daemon, parent: &serde_json::Value) -> Vec<serde_json::Value> {
+    let tasks = daemon.request("task.list", serde_json::json!({"repo": parent["repo"]}));
+    tasks
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["parent"] == parent["id"])
+        .cloned()
+        .collect()
+}
+
+fn remove_worktrees(tasks: &[&serde_json::Value]) {
+    for t in tasks {
+        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+    }
+}
+
+#[test]
+fn a_finished_parent_lands_on_its_base_as_one_commit_titled_with_its_title() {
+    let (daemon, _scripts) = split_daemon("test -f README.md");
+    let repo = repo_on_work_branch();
+    let parent_id = create_split(&daemon, repo.path(), true);
+
+    let parent = settle(&daemon, &parent_id);
+    assert_eq!(parent["status"], "done", "task JSON: {parent}");
+    assert!(
+        implement_attempts(&parent).is_empty(),
+        "a parent implements nothing itself: {parent}"
+    );
+    let head = git_out(repo.path(), &["rev-parse", "work"]);
+    assert_eq!(parent["landedSha"], head.as_str(), "task JSON: {parent}");
+    let subjects = git_out(repo.path(), &["log", "--format=%s", "work"]);
+    assert_eq!(subjects, "Parent\ninit", "log of work");
+    for file in ["one.txt", "two.txt"] {
+        git_out(repo.path(), &["cat-file", "-e", &format!("work:{file}")]);
+    }
+    assert!(!Path::new(parent["worktree"].as_str().unwrap()).exists());
+    let children = children_of(&daemon, &parent);
+    assert_eq!(children.len(), 2);
+
+    daemon.shutdown_and_wait();
+    remove_worktrees(&children.iter().chain([&parent]).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_parent_check_that_fails_after_its_subtasks_landed_gets_one_agent_attempt_and_then_lands() {
+    // Passes on the base, fails once the subtasks' files are there.
+    let (daemon, _scripts) = split_daemon(
+        "if [ -f one.txt ] && [ ! -f fix.txt ]; then echo NEEDS-$(echo FIX); exit 3; fi",
+    );
+    let repo = repo_on_work_branch();
+    let parent_id = create_split(&daemon, repo.path(), true);
+
+    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(60), |s| {
+        matches!(s, "done" | "failed" | "stopped" | "waiting")
+    });
+    assert_eq!(parent["status"], "done", "task JSON: {parent}");
+    assert_eq!(implement_attempts(&parent).len(), 1, "task JSON: {parent}");
+    assert!(
+        run_file(&daemon, &parent_id, "brief.md").contains("NEEDS-FIX"),
+        "the brief carries the failure output"
+    );
+    let head = git_out(repo.path(), &["rev-parse", "work"]);
+    assert_eq!(parent["landedSha"], head.as_str(), "task JSON: {parent}");
+    for file in ["one.txt", "two.txt", "fix.txt"] {
+        git_out(repo.path(), &["cat-file", "-e", &format!("work:{file}")]);
+    }
+    let subjects = git_out(repo.path(), &["log", "--format=%s", "work"]);
+    assert_eq!(subjects, "Parent\ninit", "log of work");
+
+    let children = children_of(&daemon, &parent);
+    daemon.shutdown_and_wait();
+    remove_worktrees(&children.iter().chain([&parent]).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_parent_verify_that_fails_on_the_base_asks_before_any_subtask_starts() {
+    let (daemon, _scripts) = split_daemon("echo no library targets; exit 101");
+    let repo = repo_on_work_branch();
+    let parent_id = create_split(&daemon, repo.path(), false);
+
+    let parent = settle(&daemon, &parent_id);
+    assert_eq!(parent["status"], "waiting", "task JSON: {parent}");
+    let question = &parent["question"];
+    assert_eq!(question["kind"], "preexisting_failure", "{parent}");
+    let text = question["text"].as_str().unwrap();
+    assert!(text.contains("echo no library targets; exit 101"), "{text}");
+    assert!(text.contains("no library targets"), "{text}");
+    assert!(
+        text.contains(&parent["baseSha"].as_str().unwrap()[..7]),
+        "{text}"
+    );
+    assert_eq!(
+        question["options"],
+        serde_json::json!(["keep this check", "drop this check", "stop"])
+    );
+    let children = children_of(&daemon, &parent);
+    assert_eq!(children.len(), 2);
+    for c in &children {
+        assert!(
+            c["attempts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["stage"] != "implement"),
+            "a subtask started before the answer: {c}"
+        );
+        assert!(c["status"] != "running" && c["status"] != "done", "{c}");
+    }
+
+    // Dropping the check lets the subtasks run and the parent finish.
+    daemon.request(
+        "task.answer",
+        serde_json::json!({"id": parent_id, "answer": "drop this check"}),
+    );
+    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(60), |s| {
+        matches!(s, "done" | "failed" | "stopped")
+    });
+    assert_eq!(parent["status"], "done", "task JSON: {parent}");
+    assert_eq!(parent["verify"], serde_json::json!([]), "{parent}");
+
+    let children = children_of(&daemon, &parent);
+    daemon.shutdown_and_wait();
+    remove_worktrees(&children.iter().chain([&parent]).collect::<Vec<_>>());
+}
+
+#[test]
+fn answering_stop_to_a_parents_base_check_question_stops_the_parent() {
+    let (daemon, _scripts) = split_daemon("echo no library targets; exit 101");
+    let repo = repo_on_work_branch();
+    let parent_id = create_split(&daemon, repo.path(), false);
+
+    let parent = settle(&daemon, &parent_id);
+    assert_eq!(parent["status"], "waiting", "task JSON: {parent}");
+    daemon.request(
+        "task.answer",
+        serde_json::json!({"id": parent_id, "answer": "stop"}),
+    );
+    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(60), |s| {
+        matches!(s, "done" | "failed" | "stopped")
+    });
+    assert_eq!(parent["status"], "stopped", "task JSON: {parent}");
+    let children = children_of(&daemon, &parent);
+    for c in &children {
+        assert!(
+            c["attempts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["stage"] != "implement"),
+            "{c}"
+        );
+    }
+    daemon.shutdown_and_wait();
+    remove_worktrees(&children.iter().chain([&parent]).collect::<Vec<_>>());
+}
+
+#[test]
+fn answering_stop_after_a_daemon_restart_stops_the_parent_and_its_subtasks() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let body = SPLIT_SCRIPT.replace("__PARENT_VERIFY__", "echo no library targets; exit 101");
+    let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", &body);
+    let env = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
+    let mut daemon = Daemon::spawn(&env);
+    review_off(&daemon);
+    let repo = repo_on_work_branch();
+    let parent_id = create_split(&daemon, repo.path(), false);
+    let parent = settle(&daemon, &parent_id);
+    assert_eq!(parent["status"], "waiting", "task JSON: {parent}");
+
+    // Restart onto the same data dir: no live loop holds the question now.
+    let _ = daemon.request("shutdown", serde_json::json!({}));
+    let start = Instant::now();
+    while !matches!(daemon.child.try_wait(), Ok(Some(_))) {
+        assert!(start.elapsed() < Duration::from_secs(10), "no exit");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    daemon.socket = daemon.data_dir().join("orchd2.sock");
+    daemon.child = spawn_orchd_raw(daemon.data_dir(), &daemon.socket, &env);
+    wait_for_socket(&daemon.socket);
+    daemon.token = read_control_token(daemon.data_dir());
+
+    daemon.request(
+        "task.answer",
+        serde_json::json!({"id": parent_id, "answer": "stop"}),
+    );
+    // Give a wrongly relaunched loop time to run its preflight again.
+    std::thread::sleep(Duration::from_millis(1500));
+    let parent = daemon.request("task.get", serde_json::json!({"id": parent_id}));
+    assert_eq!(parent["status"], "stopped", "task JSON: {parent}");
+    assert!(parent["question"].is_null(), "{parent}");
+    let children = children_of(&daemon, &parent);
+    for c in &children {
+        assert!(implement_attempts(c).is_empty(), "{c}");
+        assert!(c["status"] != "running" && c["status"] != "done", "{c}");
+    }
+    daemon.shutdown_and_wait();
+    remove_worktrees(&children.iter().chain([&parent]).collect::<Vec<_>>());
 }

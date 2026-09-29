@@ -457,6 +457,15 @@ pub fn conflict_block(conflict: &str, impossible: bool) -> String {
     )
 }
 
+/// Tells the implementer of a parent task why finishing the parent failed
+/// after every subtask landed on its branch: a check, or landing on the base.
+pub fn parent_failure_block(detail: &str) -> String {
+    format!(
+        "## Finishing this task\n\nThis task was split into subtasks and every one of them landed on this branch: their work is in the diff below. Finishing the task then failed:\n\n{}\nFix it here so the task's own checks pass and the work can land. If a check cannot pass for a reason outside the code, report outcome blocked with a question naming the command and why it cannot pass.\n\n",
+        untrusted_block("The failure", detail)
+    )
+}
+
 /// Tells the reviewer about the same conflict.
 pub fn review_conflict_block(conflict: &str) -> String {
     format!(

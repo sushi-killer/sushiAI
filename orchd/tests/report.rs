@@ -47,6 +47,10 @@ fn a_done_graph_gets_a_report_with_children_assumption_dropped_criterion_and_cos
     let script = fake_harness_script(scripts.path(), "fake-claude.sh", GRAPH_SCRIPT);
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     review_off(&daemon);
+    // The parent's verify fails on the base by design: the policy keeps it.
+    let mut settings = daemon.request("settings.get", json!({}));
+    settings["answerPolicy"] = json!(true);
+    daemon.request("settings.set", json!({"settings": settings}));
     let repo = init_git_repo();
     let parent = daemon.request(
         "task.create",

@@ -5,6 +5,12 @@ pub(super) const PRE_EXISTING_RETRY: &str = "retry after the base is fixed";
 pub(super) const PRE_EXISTING_DROP: &str = "drop this check";
 const PRE_EXISTING_OPTIONS: [&str; 3] = [PRE_EXISTING_RETRY, PRE_EXISTING_DROP, "stop"];
 
+/// Options of the question about a parent's `verify` command that fails on
+/// the base: the subtasks are usually meant to make it pass.
+pub(super) const PARENT_KEEP: &str = "keep this check";
+const PARENT_CHECK_OPTIONS: [&str; 3] = [PARENT_KEEP, PRE_EXISTING_DROP, "stop"];
+const ALREADY_FAILS: &str = " already fails on base ";
+
 /// The owner question for a final check that fails on the base as well.
 pub(super) fn pre_existing_question(command: &str, base_sha: &str, base_tail: &str) -> Question {
     let sha: String = base_sha.chars().take(7).collect();
@@ -16,6 +22,29 @@ pub(super) fn pre_existing_question(command: &str, base_sha: &str, base_tail: &s
         options: PRE_EXISTING_OPTIONS.iter().map(|o| o.to_string()).collect(),
         kind: QuestionKind::PreexistingFailure,
     }
+}
+
+/// The owner question for a parent's `verify` command that fails on the base:
+/// unlike a final check, it is usually meant to turn green through the work.
+pub(super) fn parent_check_question(command: &str, base_sha: &str, base_tail: &str) -> Question {
+    let mut q = pre_existing_question(command, base_sha, base_tail);
+    q.text = format!(
+        "{} The subtasks may be meant to make it pass: keep this check, or drop it?",
+        q.text.trim_end()
+    );
+    q.options = PARENT_CHECK_OPTIONS.iter().map(|o| o.to_string()).collect();
+    q
+}
+
+/// The command a pre-existing-failure question is about.
+pub(super) fn pre_existing_command(question: &Question) -> Option<&str> {
+    if question.kind != QuestionKind::PreexistingFailure {
+        return None;
+    }
+    question
+        .text
+        .split_once(ALREADY_FAILS)
+        .map(|(command, _)| command)
 }
 
 /// Runs `commands` on the commit `base_sha` of `repo`, in a throwaway
@@ -119,22 +148,24 @@ pub(super) async fn failing_on_base(
     base.code.is_some_and(|c| c != 0).then_some(base)
 }
 
-/// Runs the task's `final_verify` on the base before the first implement
-/// attempt. A command that exits non-zero is run once more on the base, past
-/// the cache, so a load-flaky test does not count; the first one that fails
-/// both times is returned. `None` when every command passes, the base cannot
-/// be checked out, or the run was cancelled.
+/// Runs `checks` on the task's base before its first implement attempt. A
+/// command that exits non-zero is run once more on the base, past the cache,
+/// so a load-flaky test does not count; the first one that fails both times
+/// is returned. `None` when every command passes, the base cannot be checked
+/// out, or the run was cancelled.
 ///
-/// Only `final_verify`: those are the whole-repo checks that must already be
-/// green on the base. A `verify` command is usually the very test the work is
-/// meant to turn green, so failing on the base is what it is for.
+/// A single task passes only its `final_verify`: those are the whole-repo
+/// checks that must already be green on the base. A `verify` command is
+/// usually the very test the work is meant to turn green, so failing on the
+/// base is what it is for. A parent also passes its `verify`, and asks first.
 pub(super) async fn failing_twice_on_base(
     app: &Arc<App>,
     task: &Task,
+    checks: &[String],
     cancel: &CancelToken,
 ) -> Option<VerifyOutcome> {
     let mut commands: Vec<String> = Vec::new();
-    for c in &task.final_verify {
+    for c in checks {
         if !commands.contains(c) {
             commands.push(c.clone());
         }

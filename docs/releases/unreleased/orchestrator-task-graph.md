@@ -13,9 +13,16 @@
   time: its work is moved onto the branch as it is now, checked again, and
   added on top. A conflict or failing check goes back to its agent to fix,
   never silently dropped.
-- The parent is done when every subtask has landed and its own checks pass
-  on its branch; its cost includes its subtasks'. You merge the parent's
-  branch as usual.
+- The parent is done when every subtask has landed and its own checks pass;
+  its cost includes its subtasks'.
+- The parent's own checks run on the base before any subtask starts, and one
+  that fails there asks first: keep it (the subtasks are meant to make it
+  pass), drop it, or stop.
+- With land on, a finished parent lands on its base branch as one commit
+  titled with its title.
+- A failing parent check, or a conflict when it lands, goes to an agent
+  attempt on the parent's branch instead of failing the graph.
+- `task.amend` on a parent takes effect at its next check.
 - If a subtask or a dependency ends failed or stopped, the tasks waiting for
   it ask you: retry it, drop it, or stop.
 - The orchestrator agent can build such a graph by hand: `task_create`

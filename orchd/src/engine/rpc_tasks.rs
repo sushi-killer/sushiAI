@@ -647,6 +647,13 @@ impl App {
             {
                 drop_criterion(&mut task, n);
             }
+            if let Some(q) = task.question.clone() {
+                // A parent's base-check question: the subtasks start again
+                // only with the answer applied.
+                if is_parent(&task, &self.repo_tasks(&task.repo)) {
+                    apply_parent_check_answer(&mut task, &q, &p.answer);
+                }
+            }
             if task
                 .question
                 .as_ref()

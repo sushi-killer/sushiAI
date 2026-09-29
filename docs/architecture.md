@@ -96,7 +96,7 @@ stateDiagram-v2
   running --> waiting: blocked / protected path /<br/>review gave no verdict /<br/>attempts exhausted
   waiting --> queued: answer
   running --> queued: failed attempt, budget left
-  running --> done: gates passed, committed<br/>(a subtask: landed on its parent's branch;<br/>a parent: every child landed, its checks passed)
+  running --> done: gates passed, committed<br/>(a subtask: landed on its parent's branch;<br/>a parent: every child landed, its checks passed,<br/>landed on its base branch with land on)
   running --> stopped: task.stop
   waiting --> stopped: answer "stop"
   stopped --> queued: task.start
@@ -110,17 +110,30 @@ stateDiagram-v2
 A task graph is state orchd keeps, never a split it decides: the planner
 may answer a top-level request with `subtasks` (keys, requests, `dependsOn`
 between keys), or the orchestrator agent builds one with `task.create
-{parent, dependsOn}`. A parent runs no implement attempt; each child
+{parent, dependsOn}`. A parent runs no implement attempt unless finishing fails (below); each child
 branches from the parent's branch, is drafted and run as a normal task, and
 starts implementing only once its `dependsOn` tasks are done (it syncs to
 the parent's head first, so it sees their work). A finished child lands
 through a per-parent merge queue: its work is carried onto the parent's
 current head, verify runs again when that head moved, and the parent's
 branch fast-forwards to the child's commit; a conflict or failing verify is
-an ordinary failure the agent retries. When every child has landed, the
-parent runs its own verify and final checks on its branch (with
-`groundedChecks`, its checks were baselined before the first child started and
-its gated and held-out checks run once here) and is done; its
+an ordinary failure the agent retries. Before the first child starts, the
+parent's own verify and final checks run on its base (a failure is re-run
+once past the cache): one that still fails there parks the parent `waiting`
+with a keep / drop / stop question, and the children start only after the
+answer. When every child has landed, the parent runs its own verify and final
+checks on its branch (with `groundedChecks`, its checks were baselined before
+the first child started and its gated and held-out checks run once here). With
+`land` on it then lands on its base branch like a single task: carried onto
+the base head, squashed to one commit titled with its title, checked again
+when the head moved, and done (`landing` while the base checkout is dirty,
+retried without re-running checks; a refused landing leaves it done on its own
+branch). A failing parent check, or a landing that conflicts or fails its
+re-check, is not the end of the graph: the parent gets an ordinary implement
+attempt on its own worktree, with the failure in its brief (one attempt for a
+failed check, `maxAttempts` for a landing), and waits with the
+attempts-exhausted question when that is spent. `task.amend` on a parent with a
+live loop is applied right before its next check. Its
 cost is its plan plus its children. When something a task waits for ends
 `failed`/`stopped`, the task waits with a question: retry the dependency,
 drop it, or stop.

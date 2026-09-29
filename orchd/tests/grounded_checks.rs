@@ -526,6 +526,12 @@ fn parent_run(with_held: bool) -> (Setup, Value, tempfile::TempDir) {
             &[]
         },
     );
+    // The parent's verify fails on the empty base by design; the policy
+    // answers "keep this check" so the children start.
+    let mut settings = s.daemon.request("settings.get", json!({}));
+    settings["answerPolicy"] = json!(true);
+    s.daemon
+        .request("settings.set", json!({"settings": settings}));
     let repo = repo_with(&[]);
     let parent = s.daemon.request(
         "task.create",
@@ -560,10 +566,23 @@ fn a_parents_checks_are_baselined_before_the_children_and_run_once_after_they_la
 #[test]
 fn a_failing_parent_held_out_check_fails_the_parent_without_naming_the_command() {
     let (s, parent, _repo) = parent_run(true);
-    assert_eq!(parent["status"], "failed", "task JSON: {parent}");
+    // A failing parent check goes to agent attempts, then waits.
+    assert_eq!(parent["status"], "waiting", "task JSON: {parent}");
     assert_eq!(parent["heldOut"]["baseline"], "fail", "{parent}");
-    assert_eq!(log_lines(&s, "checks.log"), 1);
-    assert_eq!(log_lines(&s, "held.log"), 1);
+    assert!(
+        !parent["question"].to_string().contains("c.txt"),
+        "{parent}"
+    );
+    let attempts = parent["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["stage"] == "implement")
+        .count();
+    assert!(attempts >= 1, "{parent}");
+    // One parent check, then one run per agent attempt.
+    assert_eq!(log_lines(&s, "checks.log"), 1 + attempts);
+    assert_eq!(log_lines(&s, "held.log"), 1 + attempts);
     let decisions = parent["decisions"].to_string();
     assert!(
         decisions.contains("the held-out check for criterion 0 failed (heldout)"),

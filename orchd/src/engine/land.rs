@@ -13,7 +13,7 @@ const AFTER_LAND_TIMEOUT: Duration = Duration::from_secs(600);
 pub(super) async fn land_on_base(
     app: &Arc<App>,
     task: &mut Task,
-    idx: usize,
+    idx: Option<usize>,
     attempt_n: u32,
     worktree: &Path,
     run_dir: &Path,

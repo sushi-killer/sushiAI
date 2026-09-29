@@ -14,6 +14,10 @@ pub(super) async fn run_task_loop(
     auto_start_after_plan: bool,
 ) {
     let mut attempt_budget = app.settings.read().unwrap().max_attempts;
+    // Set once a parent's finish failed after every subtask landed: the
+    // failure its own implement attempt has to fix. While it is set (and once
+    // the parent has an attempt) the parent never goes back to `run_parent`.
+    let mut parent_failure: Option<String> = None;
 
     'attempts: loop {
         if cancel.is_cancelled() {
@@ -55,10 +59,22 @@ pub(super) async fn run_task_loop(
         // `advance_graph` starts it again. Drafting runs meanwhile.
         if !needs_planning(&task) {
             let all = app.repo_tasks(&task.repo);
-            if is_parent(&task, &all) {
-                run_parent(&app, &task_id, &cancel).await;
-                app.finish_task_loop(&task_id);
-                return;
+            if is_parent(&task, &all)
+                && parent_failure.is_none()
+                && (implement_attempt_count(&task) == 0
+                    || !matches!(waits_state(&task, &all), Waits::Ready | Waits::Nothing))
+            {
+                match run_parent(&app, &task_id, &pending_answer, &pending_amend, &cancel).await {
+                    ParentEnd::Finished => {
+                        app.finish_task_loop(&task_id);
+                        return;
+                    }
+                    ParentEnd::Attempt { failure, budget } => {
+                        parent_failure = Some(failure);
+                        attempt_budget = budget.unwrap_or(attempt_budget);
+                        continue 'attempts;
+                    }
+                }
             }
             let parent_blocked = task
                 .parent
@@ -155,19 +171,28 @@ pub(super) async fn run_task_loop(
 
         // A child may have been attached while this task waited for a slot:
         // it must never implement the whole request itself then.
-        if implement_attempt_count(&task) == 0 {
+        if implement_attempt_count(&task) == 0 && parent_failure.is_none() {
             let all = app.repo_tasks(&task.repo);
             if is_parent(&task, &all) {
                 drop(permit);
-                run_parent(&app, &task_id, &cancel).await;
-                app.finish_task_loop(&task_id);
-                return;
+                match run_parent(&app, &task_id, &pending_answer, &pending_amend, &cancel).await {
+                    ParentEnd::Finished => {
+                        app.finish_task_loop(&task_id);
+                        return;
+                    }
+                    ParentEnd::Attempt { failure, budget } => {
+                        parent_failure = Some(failure);
+                        attempt_budget = budget.unwrap_or(attempt_budget);
+                        continue 'attempts;
+                    }
+                }
             }
         }
 
         // Explicit criteria are checked once, before the first attempt; a
         // planned brief was already checked in the plan stage.
-        if implement_attempt_count(&task) == 0 && !task.brief_check.done {
+        if implement_attempt_count(&task) == 0 && !task.brief_check.done && parent_failure.is_none()
+        {
             let attempt_n = task.attempts.len() as u32 + 1;
             if let BriefAction::Cancelled =
                 check_brief(&app, &task_id, attempt_n, false, &cancel).await
@@ -204,6 +229,7 @@ pub(super) async fn run_task_loop(
         // dependent begins on top of the work it waited for (a subtask on
         // its parent's head, with every earlier sibling landed).
         if implement_attempt_count(&task) == 0
+            && parent_failure.is_none()
             && (task.parent.is_some() || !task.depends_on.is_empty())
         {
             if let Some(base_ref) = task.base_ref.clone() {
@@ -245,8 +271,10 @@ pub(super) async fn run_task_loop(
 
         // A check that already fails on the base can never be met by the
         // work: ask about it now, before an attempt is spent on it.
-        if implement_attempt_count(&task) == 0 {
-            if let Some(base_run) = failing_twice_on_base(&app, &task, &cancel).await {
+        if implement_attempt_count(&task) == 0 && parent_failure.is_none() {
+            if let Some(base_run) =
+                failing_twice_on_base(&app, &task, &task.final_verify, &cancel).await
+            {
                 task.question = Some(pre_existing_question(
                     &base_run.command,
                     &task.base_sha,
@@ -415,6 +443,13 @@ pub(super) async fn run_task_loop(
             &brief_text,
             &brief::landed_dependencies_block(&task, &app.repo_tasks(&task.repo), None),
         );
+        // A parent's first attempt gets what failed when it tried to finish.
+        let brief_text = match &parent_failure {
+            Some(failure) if implement_attempt_count(&task) == 0 => {
+                brief::with_block_before_report(&brief_text, &brief::parent_failure_block(failure))
+            }
+            _ => brief_text,
+        };
         // The messages sent to this task since its last attempt are
         // delivered here, with the attempt about to start.
         let brief_text = brief::with_block_before_report(
@@ -1715,7 +1750,7 @@ fn rebase_conflict_note(
 /// Carries the task's work onto its base branch as it is now, so a retry
 /// after "the base is fixed" runs on the fix. Nothing happens when the task
 /// has no base branch or it did not move.
-async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) {
+pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) {
     let Some(base_ref) = task.base_ref.clone() else {
         return;
     };
@@ -1867,7 +1902,7 @@ pub(super) async fn finish_attempt(
             .await,
         )
     } else if task.variant().land {
-        Some(land_on_base(app, task, idx, attempt_n, worktree, run_dir, cancel).await)
+        Some(land_on_base(app, task, Some(idx), attempt_n, worktree, run_dir, cancel).await)
     } else {
         None
     };

@@ -207,7 +207,7 @@ flowchart TD
   verify -->|non-zero| fail
   review -->|FAIL| fail
   review -->|"FAIL, repeated finding the implementer disputed"| judge
-  judge["Tie-break judge<br/>read-only, on another harness, once per finding"]
+  judge["Tie-break judge<br/>read-only, cheapest route never weaker than the implementer, not the reviewer, once per finding"]
   judge -->|"invalid: drop the finding as an assumption, review the same attempt again"| review
   judge -->|"valid / no verdict / no route"| fail
   fail -->|"review finding marked repeat: first one runs the advisor and tiers up, second waits"| triage
@@ -229,7 +229,7 @@ flowchart LR
   end
   subgraph strong["Judgement"]
     planner["Planner - claude-opus"]
-    reviewerR["Reviewer - tiers.hard<br/>(another harness when the implementer is hard)"]
+    reviewerR["Reviewer - strength-first<br/>(cheapest route never weaker than the implementer, floor 2, hard tier 3)"]
     orch["Orchestrator chat - claude-opus"]
   end
   subgraph work["Implementation by tier"]

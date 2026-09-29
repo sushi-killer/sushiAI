@@ -976,7 +976,9 @@
 
 .orch-route-row {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) repeat(4, minmax(96px, auto)) 28px;
+  grid-template-columns:
+    minmax(120px, 1fr) repeat(4, minmax(96px, auto))
+    56px 28px;
   gap: var(--gap-xs);
   align-items: center;
 }
@@ -996,8 +998,15 @@
 .orch-route-profile {
   grid-column: 5;
 }
-.orch-route-delete {
+.orch-route-tail {
   grid-column: 6;
+  display: flex;
+  align-items: center;
+  gap: var(--gap-xs);
+}
+.orch-route-tail .orch-route-strength {
+  flex: none;
+  width: 56px;
 }
 
 /* Below ~640px the list and the main pane can't sit side by side readably:
@@ -1030,9 +1039,12 @@
   .orch-route-harness,
   .orch-route-model,
   .orch-route-effort,
-  .orch-route-profile,
-  .orch-route-delete {
+  .orch-route-profile {
     grid-column: auto;
+  }
+  .orch-route-tail {
+    grid-column: 2;
+    justify-content: flex-end;
   }
   .orch-tier-row,
   .orch-review-planner-row {

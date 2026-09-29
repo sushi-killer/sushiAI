@@ -30,28 +30,107 @@ pub fn matches_any_protected(path: &str, globs: &[String]) -> bool {
     globs.iter().any(|g| glob_match(g, path))
 }
 
-/// `review == "auto"` -> a route on the other harness than the implementer's
-/// (the hard tier's route when it is on one), so Claude work is reviewed by
-/// Codex and back; with none configured, the hard tier's route unless the
-/// implementer already *is* it. Explicit id -> that route; `""` -> no review (handled by the caller before this).
-pub fn select_review_route<'a>(settings: &'a Settings, implementer: &Route) -> Option<&'a Route> {
-    if settings.review != "auto" {
-        return settings.routes.iter().find(|r| r.id == settings.review);
-    }
-    let hard = settings.tiers.get(&Tier::Hard);
-    let other = |r: &&Route| r.harness != implementer.harness;
-    settings
+/// The weakest strength a reviewer or judge may have: never below the
+/// implementer's, and at least 2 for mechanical/standard work, 3 for hard.
+pub(super) fn review_floor(implementer: &Route, tier: Tier) -> u32 {
+    let tier_floor = if tier == Tier::Hard { 3 } else { 2 };
+    route_strength(implementer).max(tier_floor)
+}
+
+/// The cheapest route at `floor` or above, skipping `exclude`; with none, the
+/// strongest one (cheapest first) when `fallback` is set. Unpriced routes
+/// sort after priced ones. Ties go to a route on a harness other than
+/// `other_than`'s, then to `own_id`, then settings order. The bool is true
+/// when the route reaches the floor.
+pub(super) fn cheapest_route_at<'a>(
+    settings: &'a Settings,
+    floor: u32,
+    exclude: Option<&str>,
+    other_than: &Route,
+    own_id: Option<&str>,
+    fallback: bool,
+) -> Option<(&'a Route, bool)> {
+    let pool: Vec<(usize, &Route)> = settings
         .routes
         .iter()
-        .filter(other)
-        .find(|r| Some(&r.id) == hard)
-        .or_else(|| settings.routes.iter().find(other))
-        .or_else(|| {
-            settings
-                .routes
-                .iter()
-                .find(|r| Some(&r.id) == hard && r.id != implementer.id)
-        })
+        .enumerate()
+        .filter(|(_, r)| Some(r.id.as_str()) != exclude)
+        .collect();
+    let key = |(i, r): &(usize, &Route)| {
+        let cost = route_cost(&settings.prices, r);
+        (
+            cost.is_none(),
+            cost.unwrap_or(0.0),
+            r.harness == other_than.harness,
+            Some(r.id.as_str()) != own_id,
+            *i,
+        )
+    };
+    let cmp = |a: &(usize, &Route), b: &(usize, &Route)| {
+        let (ka, kb) = (key(a), key(b));
+        ka.0.cmp(&kb.0)
+            .then(ka.1.total_cmp(&kb.1))
+            .then(ka.2.cmp(&kb.2))
+            .then(ka.3.cmp(&kb.3))
+            .then(ka.4.cmp(&kb.4))
+    };
+    if let Some(found) = pool
+        .iter()
+        .filter(|(_, r)| route_strength(r) >= floor)
+        .min_by(|a, b| cmp(a, b))
+    {
+        return Some((found.1, true));
+    }
+    if !fallback {
+        return None;
+    }
+    let top = pool.iter().map(|(_, r)| route_strength(r)).max()?;
+    pool.iter()
+        .filter(|(_, r)| route_strength(r) == top)
+        .min_by(|a, b| cmp(a, b))
+        .map(|(_, r)| (*r, false))
+}
+
+/// The review route and a one-line reason. An explicit `review` id is used
+/// as is. `"auto"` picks the cheapest route no weaker than
+/// `review_floor` (ties: another harness, then the implementer's own route),
+/// else the strongest one. `""` -> no review (handled by the caller).
+pub fn select_review_route<'a>(
+    settings: &'a Settings,
+    implementer: &Route,
+    tier: Tier,
+) -> Option<(&'a Route, String)> {
+    if settings.review != "auto" {
+        let route = settings.routes.iter().find(|r| r.id == settings.review)?;
+        return Some((route, "explicit setting".to_string()));
+    }
+    let floor = review_floor(implementer, tier);
+    let (route, reached) = cheapest_route_at(
+        settings,
+        floor,
+        None,
+        implementer,
+        Some(&implementer.id),
+        true,
+    )?;
+    let reason = if reached {
+        format!(
+            "{} tier, strength {}",
+            tier_name(tier),
+            route_strength(route)
+        )
+    } else {
+        format!("no route at strength {floor}; strongest available")
+    };
+    Some((route, reason))
+}
+
+fn tier_name(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Mechanical => "mechanical",
+        Tier::Standard => "standard",
+        Tier::Hard => "hard",
+    }
 }
 
 const MAX_REVIEW_SCREENSHOTS: usize = 8;

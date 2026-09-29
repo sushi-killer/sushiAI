@@ -10,4 +10,4 @@
   for a low-confidence answer.
 - The task detail view's meta line now shows the tier (`standard tier`), and
   on a fallback the reason next to it in a warning tone (`standard tier
-  (fallback: no classifier key)`).
+(fallback: no classifier key)`).

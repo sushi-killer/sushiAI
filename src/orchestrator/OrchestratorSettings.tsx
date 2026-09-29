@@ -72,7 +72,7 @@ function defaultText(
   if (routeId)
     return routes.find((route) => route.id === routeId)?.label || routeId;
   if (field === "review")
-    return value === "auto" ? "Other vendor (auto)" : "Off";
+    return value === "auto" ? "Auto (never weaker)" : "Off";
   if (field === "planner") return "Off";
   if (field === "orchestrator") return "Standard route";
   if (field === "classifier.backend")
@@ -98,6 +98,13 @@ function linesToList(text: string): string[] {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+/** Mirrors the engine's built-in strength for a route's model. */
+function defaultStrength(model?: string): number {
+  const m = (model || "").toLowerCase();
+  if (/haiku|luna|mini/.test(m)) return 1;
+  return m.includes("opus") ? 3 : 2;
 }
 
 function RouteRow({
@@ -190,14 +197,33 @@ function RouteRow({
           ))}
         </select>
       )}
-      <button
-        className="icon-button orch-route-delete"
-        title={`Remove route ${route.label}`}
-        onClick={onDelete}
-        type="button"
-      >
-        <Trash2 size={13} />
-      </button>
+      <div className="orch-route-tail">
+        <input
+          className="orch-route-strength"
+          type="number"
+          min={1}
+          max={3}
+          value={route.strength ?? ""}
+          placeholder={String(defaultStrength(route.model))}
+          onChange={(event) =>
+            onChange({
+              ...route,
+              strength: event.target.value
+                ? Number(event.target.value)
+                : undefined,
+            })
+          }
+          aria-label="Strength"
+        />
+        <button
+          className="icon-button orch-route-delete"
+          title={`Remove route ${route.label}`}
+          onClick={onDelete}
+          type="button"
+        >
+          <Trash2 size={13} />
+        </button>
+      </div>
     </div>
   );
 }
@@ -426,7 +452,7 @@ export function OrchestratorSettings() {
                 onChange={(event) => update({ review: event.target.value })}
               >
                 <option value="">Off</option>
-                <option value="auto">Other vendor (auto)</option>
+                <option value="auto">Auto (never weaker)</option>
                 {settings.routes.map((route) => (
                   <option key={route.id} value={route.id}>
                     {route.label}

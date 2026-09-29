@@ -822,6 +822,7 @@ mod tests {
             model: Some("m".into()),
             effort: None,
             profile_id: None,
+            strength: None,
         }
     }
 

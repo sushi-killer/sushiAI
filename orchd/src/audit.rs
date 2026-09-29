@@ -277,6 +277,7 @@ mod tests {
             model: Some("m".into()),
             effort: Some("high".into()),
             profile_id: None,
+            strength: None,
         }
     }
 

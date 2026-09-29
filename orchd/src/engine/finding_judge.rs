@@ -44,16 +44,18 @@ pub(super) fn pair_disputes<'a>(
         .collect()
 }
 
-/// A route on another harness than the reviewer's, the hard tier's first.
-pub(super) fn judge_route<'a>(settings: &'a Settings, reviewer: &Route) -> Option<&'a Route> {
-    let hard = settings.tiers.get(&Tier::Hard);
-    let other = |r: &&Route| r.harness != reviewer.harness;
-    settings
-        .routes
-        .iter()
-        .filter(other)
-        .find(|r| Some(&r.id) == hard)
-        .or_else(|| settings.routes.iter().find(other))
+/// The cheapest route no weaker than the implementer's floor (see
+/// `review_floor`), never the reviewer's own; on a tie, one on another
+/// harness than the reviewer's.
+pub(super) fn judge_route<'a>(
+    settings: &'a Settings,
+    reviewer: &Route,
+    implementer: &Route,
+    tier: Tier,
+) -> Option<&'a Route> {
+    let floor = review_floor(implementer, tier);
+    cheapest_route_at(settings, floor, Some(&reviewer.id), reviewer, None, false)
+        .map(|(route, _)| route)
 }
 
 /// The judge's reply: the last ```sushi-judge fence, else the outermost
@@ -251,6 +253,8 @@ pub(super) async fn judge_disputed_findings(
     repeated: &[String],
     settings: &Settings,
     review_route: &Route,
+    implementer: &Route,
+    tier: Tier,
     judge_runs: &mut u32,
     cancel: &CancelToken,
 ) -> Vec<(String, String)> {
@@ -264,9 +268,10 @@ pub(super) async fn judge_disputed_findings(
         task.judged_findings.push(key);
         task.updated_at = now_ms();
         let _ = app.store.save_task(task);
-        let Some(route) = judge_route(settings, review_route) else {
+        let Some(route) = judge_route(settings, review_route, implementer, tier) else {
             task.decisions.push(format!(
-                "Orchestrator: disputed review finding could not be judged (no route on another harness): {finding}"
+                "Orchestrator: disputed review finding could not be judged (no other route at strength {}): {finding}",
+                review_floor(implementer, tier)
             ));
             continue;
         };
@@ -376,27 +381,56 @@ mod tests {
             model: None,
             effort: None,
             profile_id: None,
+            strength: None,
         }
     }
 
+    fn strong(mut r: Route, strength: u32) -> Route {
+        r.strength = Some(strength);
+        r
+    }
+
     #[test]
-    fn the_judge_is_on_another_harness_preferring_the_hard_tier() {
-        let mut settings = Settings {
+    fn the_judge_is_never_weaker_than_the_floor_nor_the_reviewer() {
+        let settings = Settings::default();
+        let by_id = |id: &str| settings.routes.iter().find(|r| r.id == id).unwrap().clone();
+        let (sonnet, opus, codex) = (by_id("claude-sonnet"), by_id("claude-opus"), by_id("codex"));
+        // Standard work: the cheapest other route at strength 2 (codex is
+        // unpriced, so it sorts after priced opus).
+        let judge = |reviewer: &Route, tier| judge_route(&settings, reviewer, &sonnet, tier);
+        assert_eq!(judge(&sonnet, Tier::Standard).unwrap().id, "claude-opus");
+        // Hard work: only opus reaches 3, and it is not the judge when it reviews.
+        assert_eq!(judge(&sonnet, Tier::Hard).unwrap().id, "claude-opus");
+        assert!(judge(&opus, Tier::Hard).is_none());
+        // A strong implementer raises the floor above the tier's.
+        assert!(judge_route(&settings, &opus, &opus, Tier::Standard).is_none());
+        assert_ne!(judge(&codex, Tier::Standard).unwrap().id, "codex");
+    }
+
+    #[test]
+    fn a_judge_tie_prefers_another_harness_than_the_reviewer() {
+        let settings = Settings {
             routes: vec![
-                route("c1", Harness::Claude),
-                route("x1", Harness::Codex),
-                route("x2", Harness::Codex),
+                strong(route("c1", Harness::Claude), 2),
+                strong(route("c2", Harness::Claude), 2),
+                strong(route("x1", Harness::Codex), 2),
             ],
             ..Default::default()
         };
         let reviewer = route("c1", Harness::Claude);
-        assert_eq!(judge_route(&settings, &reviewer).unwrap().id, "x1");
-        settings.tiers.insert(Tier::Hard, "x2".into());
-        assert_eq!(judge_route(&settings, &reviewer).unwrap().id, "x2");
-        settings.tiers.insert(Tier::Hard, "c1".into());
-        assert_eq!(judge_route(&settings, &reviewer).unwrap().id, "x1");
-        settings.routes.retain(|r| r.harness == Harness::Claude);
-        assert!(judge_route(&settings, &reviewer).is_none());
+        assert_eq!(
+            judge_route(&settings, &reviewer, &reviewer, Tier::Standard)
+                .unwrap()
+                .id,
+            "x1"
+        );
+        let reviewer = route("x1", Harness::Codex);
+        assert_eq!(
+            judge_route(&settings, &reviewer, &reviewer, Tier::Standard)
+                .unwrap()
+                .id,
+            "c1"
+        );
     }
 
     #[test]

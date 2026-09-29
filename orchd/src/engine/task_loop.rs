@@ -412,6 +412,7 @@ pub(super) async fn run_task_loop(
                 model: None,
                 effort: None,
                 profile_id: None,
+                strength: None,
             });
 
         let worktree = PathBuf::from(&task.worktree);
@@ -1491,16 +1492,10 @@ pub(super) async fn run_task_loop(
         apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
         let mut review_result: Option<ReviewResult> = None;
         if !settings.review.is_empty() {
-            if let Some(review_route) = select_review_route(&settings, &route) {
-                if settings.review == "auto" && review_route.harness == route.harness {
-                    // Auto review prefers the other family; record when it wasn't.
-                    let note = format!(
-                        "Orchestrator: no review route on another harness; reviewed by {}",
-                        review_route.id
-                    );
-                    if !task.decisions.contains(&note) {
-                        task.decisions.push(note);
-                    }
+            if let Some((review_route, why)) = select_review_route(&settings, &route, task.tier) {
+                let note = format!("Orchestrator: review: {} ({why})", review_route.id);
+                if !task.decisions.contains(&note) {
+                    task.decisions.push(note);
                 }
                 if !wait_while_over_budget(
                     &app,
@@ -1585,6 +1580,7 @@ pub(super) async fn run_task_loop(
                                 && !r.repeated.is_empty()
                                 && !task.attempts[idx].disputes.is_empty()
                             {
+                                let task_tier = task.tier;
                                 let newly = judge_disputed_findings(
                                     &app,
                                     &mut task,
@@ -1593,6 +1589,8 @@ pub(super) async fn run_task_loop(
                                     &r.repeated,
                                     &settings,
                                     review_route,
+                                    &route,
+                                    task_tier,
                                     &mut judge_runs,
                                     &cancel,
                                 )

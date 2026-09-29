@@ -27,6 +27,46 @@ pub struct Route {
     /// run's `settings.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
+    /// 1 (cheap, mechanical) to 3 (hard). Review routing never picks a route
+    /// weaker than the implementer's; unset uses `route_strength`'s default
+    /// for the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strength: Option<u32>,
+}
+
+/// The route's explicit strength, else a default from its model:
+/// haiku/luna/mini -> 1, opus -> 3, anything else (or no model) -> 2.
+pub fn route_strength(route: &Route) -> u32 {
+    if let Some(s) = route.strength {
+        return s;
+    }
+    let model = route.model.as_deref().unwrap_or_default().to_lowercase();
+    if ["haiku", "luna", "mini"].iter().any(|k| model.contains(k)) {
+        1
+    } else if model.contains("opus") {
+        3
+    } else {
+        2
+    }
+}
+
+/// Input + output price per million tokens of the route's model: `price_for`,
+/// else the cheapest price key holding the bare alias (`sonnet`) as a
+/// dash-separated segment. `None` without a model or a match.
+pub fn route_cost(
+    prices: &std::collections::BTreeMap<String, Price>,
+    route: &Route,
+) -> Option<f64> {
+    let model = route.model.as_deref()?;
+    let cost = |p: &Price| p.input + p.output;
+    if let Some(p) = price_for(prices, model) {
+        return Some(cost(&p));
+    }
+    prices
+        .iter()
+        .filter(|(key, _)| key.split('-').any(|seg| seg == model))
+        .map(|(_, p)| cost(p))
+        .min_by(|a, b| a.total_cmp(b))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -368,6 +408,7 @@ impl Default for Settings {
                     model: Some("sonnet".to_string()),
                     effort: None,
                     profile_id: None,
+                    strength: None,
                 },
                 Route {
                     id: "claude-opus".to_string(),
@@ -376,6 +417,7 @@ impl Default for Settings {
                     model: Some("opus".to_string()),
                     effort: Some("high".to_string()),
                     profile_id: None,
+                    strength: None,
                 },
                 Route {
                     id: "claude-haiku".to_string(),
@@ -384,6 +426,7 @@ impl Default for Settings {
                     model: Some("claude-haiku-4-5".to_string()),
                     effort: None,
                     profile_id: None,
+                    strength: None,
                 },
                 Route {
                     id: "codex".to_string(),
@@ -392,6 +435,7 @@ impl Default for Settings {
                     model: None,
                     effort: None,
                     profile_id: None,
+                    strength: None,
                 },
             ],
             tiers,

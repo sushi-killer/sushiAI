@@ -4,6 +4,7 @@
 mod common;
 
 use common::*;
+use serde_json::json;
 use std::time::Duration;
 
 /// Review by the Claude hard route, the same fake as the implementer (`auto`
@@ -227,7 +228,7 @@ fn the_reviewer_s_unmet_criterion_fails_the_attempt() {
 }
 
 #[test]
-fn auto_review_sends_claude_work_to_the_codex_reviewer() {
+fn an_explicit_codex_review_route_sends_claude_work_to_codex() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let claude = fake_harness_script(
         scripts_dir.path(),
@@ -245,7 +246,9 @@ fn auto_review_sends_claude_work_to_the_codex_reviewer() {
         ("ORCHD_CODEX_BIN", codex.to_str().unwrap()),
         ("CODEX_MARKER", marker.to_str().unwrap()),
     ]);
-    // review stays "auto": Sonnet's work would go to the Claude hard route.
+    let mut settings = daemon.request("settings.get", json!({}));
+    settings["review"] = json!("codex");
+    daemon.request("settings.set", json!({"settings": settings}));
     let repo = init_git_repo();
     let task = daemon.request(
         "task.create",
@@ -290,6 +293,9 @@ fn review_evidence_attaches_the_attempt_s_screenshots_to_the_codex_reviewer() {
         ("ORCHD_CODEX_BIN", codex.to_str().unwrap()),
         ("CODEX_ARGS", args_log.to_str().unwrap()),
     ]);
+    let mut settings = daemon.request("settings.get", json!({}));
+    settings["review"] = json!("codex");
+    daemon.request("settings.set", json!({"settings": settings}));
     let repo = init_git_repo();
     std::fs::write(repo.path().join(".gitignore"), "artifacts/\n").unwrap();
     let task = daemon.request(
@@ -860,6 +866,12 @@ fn run_dispute_task(finding_valid: bool, wait: Duration) -> (serde_json::Value, 
     settings["maxAttempts"] = serde_json::json!(6);
     settings["answerPolicy"] = serde_json::json!(false);
     settings["review"] = serde_json::json!("claude-opus");
+    // Sonnet stays the implementer but is too weak to judge, so the judge is Codex.
+    for route in settings["routes"].as_array_mut().unwrap() {
+        if route["id"] == "claude-sonnet" {
+            route["strength"] = serde_json::json!(1);
+        }
+    }
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
     let repo = init_git_repo();
     let task = daemon.request(

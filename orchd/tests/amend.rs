@@ -32,6 +32,9 @@ fn an_amendment_during_an_attempt_reaches_the_next_review_brief() {
         ("ORCHD_CODEX_BIN", codex.to_str().unwrap()),
         ("BRIEF_LOG", brief_log.to_str().unwrap()),
     ]);
+    let mut settings = daemon.request("settings.get", json!({}));
+    settings["review"] = json!("codex");
+    daemon.request("settings.set", json!({"settings": settings}));
     let repo = init_git_repo();
     let task = daemon.request(
         "task.create",

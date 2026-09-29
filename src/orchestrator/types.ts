@@ -13,6 +13,9 @@ export type Route = {
   /** Claude only: routes through a custom model provider instead of the
    * Anthropic API. */
   profileId?: string;
+  /** 1-3. Auto review never uses a route weaker than the implementer's;
+   * unset uses a default from the model (haiku/luna/mini 1, opus 3, else 2). */
+  strength?: number;
 };
 
 export type Tier = "mechanical" | "standard" | "hard";
@@ -22,8 +25,9 @@ export type ClassifierBackend = "none" | "openrouter" | "typesafe" | "openai";
 export type Settings = {
   routes: Route[];
   tiers: Record<Tier, string>;
-  /** Route id; "" turns review off, "auto" picks the first route whose
-   * harness differs from the implementing attempt's. */
+  /** Route id; "" turns review off, "auto" picks the cheapest route that is
+   * never weaker than the implementer (at least 2, 3 on the hard tier),
+   * preferring another harness on a tie. */
   review: string;
   classifier: {
     backend: ClassifierBackend;

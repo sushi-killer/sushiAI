@@ -1,7 +1,10 @@
 // The orchestrator daemon (`orchd/`, Rust) outlives the app: this module only
 // finds/spawns it, speaks its NDJSON protocol, and relays its `subscribe`
-// stream to the renderer. It never stops the daemon - a running task must
-// survive both a window close and an app quit.
+// stream to the renderer. It never stops the daemon on a normal quit - a
+// running task must survive both a window close and an app quit. The one
+// exception is a test launch (`stopDaemonOnQuit`, set from SUSHIAI_TEST_WINDOW):
+// its throwaway daemon is shut down on quit so it does not linger. orchd also
+// exits on its own when its data dir is deleted.
 const net = require("node:net");
 const path = require("node:path");
 const os = require("node:os");
@@ -255,6 +258,8 @@ class OrchestratorService {
     getModelProviders,
     spawnRetries = 50,
     spawnIntervalMs = 100,
+    stopDaemonOnQuit = false,
+    quitTimeoutMs = 2000,
   }) {
     this.dataDir = dataDir;
     this.socketPath = socketPathFor(dataDir);
@@ -266,11 +271,14 @@ class OrchestratorService {
     this.getModelProviders = getModelProviders;
     this.spawnRetries = spawnRetries;
     this.spawnIntervalMs = spawnIntervalMs;
+    this.stopDaemonOnQuit = stopDaemonOnQuit;
+    this.quitTimeoutMs = quitTimeoutMs;
     this.token = null;
     this.subscribeSocket = null;
     this.backoff = 500;
     this.closed = false;
     this.starting = null;
+    this.running = null;
     // Keys of notices already raised (see #notifyTransition): a task
     // re-entering a state with the same question never re-notifies.
     this.notified = new Set();
@@ -296,7 +304,20 @@ class OrchestratorService {
     }
   }
 
+  // Tracks the whole in-flight call so quit() can wait for it, not only for
+  // the spawn at its end.
   async #ensureRunning() {
+    const run = this.#ensureRunningInner();
+    this.running = run;
+    try {
+      return await run;
+    } finally {
+      if (this.running === run) this.running = null;
+    }
+  }
+
+  async #ensureRunningInner() {
+    if (this.closed) throw new Error("orchestrator closed");
     if (!existsSync(this.binary)) throw new Error(NOT_BUILT);
     await this.#refreshToken();
     try {
@@ -323,6 +344,7 @@ class OrchestratorService {
       // Fall through to spawn: one in-flight spawn per service, so a burst of
       // calls before the daemon is up doesn't race several children.
     }
+    if (this.closed) throw new Error("orchestrator closed");
     if (!this.starting) this.starting = this.#spawnAndWait();
     try {
       return await this.starting;
@@ -332,7 +354,9 @@ class OrchestratorService {
   }
 
   async #spawnAndWait() {
+    if (this.closed) throw new Error("orchestrator closed");
     await fs.mkdir(this.dataDir, { recursive: true });
+    if (this.closed) throw new Error("orchestrator closed");
     const child = spawn(
       this.binary,
       ["--data", this.dataDir, "--socket", this.socketPath],
@@ -535,10 +559,55 @@ class OrchestratorService {
   }
 
   // Closes only this app's subscribe connection, never the daemon: tasks
-  // must keep running after the window (or the app) closes.
+  // must keep running after the window (or the app) closes. The one exception
+  // is a test launch, which stops its throwaway daemon in quit() below.
   close() {
     this.closed = true;
     this.subscribeSocket?.destroy();
+  }
+
+  // What close() does, plus - only for a test launch (`stopDaemonOnQuit`) -
+  // stopping the throwaway daemon: `shutdown`, then SIGKILL if it lingers.
+  // Never throws.
+  async quit() {
+    this.close();
+    if (!this.stopDaemonOnQuit) return;
+    try {
+      await this.running?.catch(() => {});
+      await this.starting?.catch(() => {});
+      await this.#refreshToken();
+      let pid;
+      try {
+        pid = (
+          await orchdRequest(this.socketPath, "ping", {}, this.token, 1000)
+        )?.pid;
+      } catch {
+        // Daemon not reachable; fall back to the pidfile below.
+      }
+      if (!pid) {
+        const raw = await fs
+          .readFile(path.join(this.dataDir, "orchd.pid"), "utf8")
+          .catch(() => "");
+        pid = Number.parseInt(raw, 10) || undefined;
+      }
+      await orchdRequest(
+        this.socketPath,
+        "shutdown",
+        {},
+        this.token,
+        this.quitTimeoutMs,
+      ).catch(() => {});
+      if (!pid) return;
+      await waitForExit(pid, { timeoutMs: this.quitTimeoutMs });
+      try {
+        process.kill(pid, 0);
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    } catch {
+      // Quitting must never fail on the daemon.
+    }
   }
 }
 
@@ -553,6 +622,7 @@ function registerOrchestratorExtension({
   packaged,
   getClaudeMcp,
   getModelProviders,
+  stopDaemonOnQuit,
 }) {
   const service = new OrchestratorService({
     dataDir,
@@ -564,6 +634,7 @@ function registerOrchestratorExtension({
     onTask,
     getClaudeMcp,
     getModelProviders,
+    stopDaemonOnQuit,
   });
   handle("orchestrator", (method, params) => service.call(method, params));
   service.connect();

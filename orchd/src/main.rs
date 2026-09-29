@@ -227,6 +227,7 @@ async fn run_serve(args: &[String]) -> i32 {
         );
 
     let mut shutdown_rx = app.subscribe_shutdown();
+    let data_identity = dir_identity(&data_dir);
     let mut already_joined = false;
     let exit_code;
     #[cfg(unix)]
@@ -236,6 +237,7 @@ async fn run_serve(args: &[String]) -> i32 {
         exit_code = tokio::select! {
             _ = sigterm.recv() => { app.shutdown(); 0 }
             _ = shutdown_rx.recv() => { 0 }
+            _ = data_dir_gone(&data_dir, data_identity) => { app.shutdown(); 0 }
             // The socket server can also end on its own -- most notably
             // when `UnixListener::bind` fails (e.g. the socket path is too
             // long). Without this branch the daemon would sit here forever
@@ -250,6 +252,7 @@ async fn run_serve(args: &[String]) -> i32 {
     {
         exit_code = tokio::select! {
             _ = shutdown_rx.recv() => { 0 }
+            _ = data_dir_gone(&data_dir, data_identity) => { app.shutdown(); 0 }
             joined = &mut serve_task => {
                 already_joined = true;
                 report_serve_outcome(&socket_path, joined)
@@ -273,6 +276,31 @@ async fn run_serve(args: &[String]) -> i32 {
     }
     let _ = std::fs::remove_file(&pidfile);
     exit_code
+}
+
+/// Identity of the data dir (device, inode) on unix; existence elsewhere.
+#[cfg(unix)]
+fn dir_identity(dir: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(dir).ok().map(|m| (m.dev(), m.ino()))
+}
+
+#[cfg(not(unix))]
+fn dir_identity(dir: &Path) -> Option<(u64, u64)> {
+    dir.is_dir().then_some((0, 0))
+}
+
+/// Resolves once the data dir is gone or names a different directory (one
+/// recreated by a late write), polling about once a second. A test-launched
+/// app's profile is deleted after it quits; this keeps a crashed app from
+/// leaving its daemon behind.
+async fn data_dir_gone(dir: &Path, identity: Option<(u64, u64)>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if dir_identity(dir) != identity {
+            return;
+        }
+    }
 }
 
 fn report_serve_outcome(

@@ -604,3 +604,75 @@ test("orchestratorNotice shapes input, done and failed notices and trims to the 
     focus: "summary",
   });
 });
+
+test("a test-mode quit() sends an authenticated shutdown and kills a daemon that ignores it", async (t) => {
+  const { spawn } = require("node:child_process");
+  const child = spawn("sleep", ["60"], { stdio: "ignore" });
+  t.after(() => child.kill("SIGKILL"));
+  const exited = new Promise((resolve) => child.on("exit", resolve));
+  const { socketPath, directory, calls, token } = await fixtureServer(t, {
+    ping: () => ({ pid: child.pid }),
+    shutdown: () => {},
+  });
+  const service = await serviceAgainst(t, socketPath, directory, {
+    stopDaemonOnQuit: true,
+    quitTimeoutMs: 300,
+  });
+  await service.quit();
+  const shutdown = calls.find((c) => c.method === "shutdown");
+  assert.ok(shutdown, "quit() must send shutdown");
+  assert.equal(shutdown.auth, token);
+  await Promise.race([
+    exited,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("daemon still alive")), 2000),
+    ),
+  ]);
+});
+
+test("a normal quit() leaves the daemon alone and only closes the subscribe socket", async (t) => {
+  const { spawn } = require("node:child_process");
+  const child = spawn("sleep", ["60"], { stdio: "ignore" });
+  t.after(() => child.kill("SIGKILL"));
+  const { socketPath, directory, calls, hasSubscriber } = await fixtureServer(
+    t,
+    { ping: () => ({ pid: child.pid }) },
+  );
+  const service = await serviceAgainst(t, socketPath, directory);
+  service.connect();
+  await waitUntil(hasSubscriber);
+  await service.quit();
+  await waitUntil(() => !hasSubscriber());
+  assert.equal(
+    calls.some((c) => c.method === "shutdown"),
+    false,
+  );
+  assert.doesNotThrow(() => process.kill(child.pid, 0));
+});
+
+test("quit() during a slow first ping never lets a later spawn start a daemon", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const { socketPath, directory } = await fixtureServer(t, {
+    ping: async () => {
+      await gate;
+      throw new Error("no daemon");
+    },
+  });
+  const service = await serviceAgainst(t, socketPath, directory, {
+    stopDaemonOnQuit: true,
+    quitTimeoutMs: 100,
+  });
+  const marker = path.join(directory, "spawned");
+  await fs.writeFile(service.binary, `#!/bin/sh\ntouch "${marker}"\n`, {
+    mode: 0o755,
+  });
+  const call = service.call("task.list", {}).catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const quitting = service.quit();
+  release();
+  await quitting;
+  await call;
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  await assert.rejects(fs.access(marker));
+});

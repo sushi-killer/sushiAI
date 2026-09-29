@@ -258,6 +258,7 @@ orchestrator = registerOrchestratorExtension({
   packaged: app.isPackaged,
   getClaudeMcp: () => claudeMcp,
   getModelProviders: () => modelProviders,
+  stopDaemonOnQuit: testMode.test,
 });
 function validWebURL(value) {
   try {
@@ -481,6 +482,7 @@ app.on("before-quit", (event) => {
   Promise.allSettled([
     Promise.resolve(connections?.close()),
     agents.close(),
+    orchestrator.quit(),
   ]).finally(() => {
     quitReady = true;
     app.quit();

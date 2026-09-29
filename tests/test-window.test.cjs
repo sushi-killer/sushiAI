@@ -29,3 +29,9 @@ test("visible and unset modes keep today's window options", () => {
     assert.equal(mode.mascot, "visible");
   }
 });
+
+test("test reports every SUSHIAI_TEST_WINDOW launch and not an unset one", () => {
+  assert.equal(testWindow({ SUSHIAI_TEST_WINDOW: "hidden" }).test, true);
+  assert.equal(testWindow({ SUSHIAI_TEST_WINDOW: "visible" }).test, true);
+  assert.equal(testWindow({}).test, false);
+});

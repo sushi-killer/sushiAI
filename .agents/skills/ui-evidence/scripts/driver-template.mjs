@@ -102,17 +102,6 @@ try {
       .catch((error) => (report.cleanupError = String(error)));
   }
   await app.close();
-  // orchd outlives the app on purpose; this throwaway profile's daemon must not.
-  const orchdPid = await fs
-    .readFile(`${profile}/orchestrator/orchd.pid`, "utf8")
-    .catch(() => "");
-  if (Number(orchdPid)) {
-    try {
-      process.kill(Number(orchdPid), "SIGTERM");
-    } catch {
-      // already gone
-    }
-  }
   await fs.rm(profile, { recursive: true, force: true });
   console.log(JSON.stringify(report, null, 2));
 }

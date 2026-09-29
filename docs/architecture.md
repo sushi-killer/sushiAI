@@ -32,7 +32,7 @@ flowchart TB
     orchPanel <--> preload <--> orchSvc
   end
 
-  subgraph orchd["orchd daemon - Rust, outlives the app"]
+  subgraph orchd["orchd daemon - Rust, outlives the app; a test-launched app stops it on quit, and it exits when its data dir is deleted"]
     direction LR
     proto["protocol.rs<br/>NDJSON socket + token"]
     engine["engine/<br/>task loop, gates, routing"]

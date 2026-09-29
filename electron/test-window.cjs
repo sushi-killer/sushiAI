@@ -4,6 +4,7 @@
 function testWindow(env = process.env) {
   const hidden = env.SUSHIAI_TEST_WINDOW === "hidden";
   return {
+    test: Boolean(env.SUSHIAI_TEST_WINDOW),
     hidden,
     mascot: hidden
       ? env.SUSHIAI_TEST_MASCOT === "1"

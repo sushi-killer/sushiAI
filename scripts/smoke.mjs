@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { readdir, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 const root = process.cwd();
 
 // Polls a check instead of sleeping a fixed time: run straight after
@@ -61,6 +63,22 @@ const navLabel = (id) => contributed("navigation", id).label;
 const ledger = surfaceOf("probe.ledger");
 const itemLabel = ledger.view.document.itemLabel;
 const profile = await fs.mkdtemp("/tmp/sushiai-smoke-");
+const orchdBuilt = existsSync(path.join(root, "orchd/target/release/orchd"));
+// Polls `ps` until a daemon for this profile's data dir is (or is no longer)
+// running; true when the wanted state was reached in time.
+async function pollOrchd(wantRunning, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const running = execFileSync("ps", ["-axo", "pid=,command="], {
+      encoding: "utf8",
+    })
+      .split("\n")
+      .some((line) => line.includes(`--data ${profile}/orchestrator`));
+    if (running === wantRunning) return true;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  } while (Date.now() < deadline);
+  return false;
+}
 await fs.mkdir("artifacts", { recursive: true });
 // The app under test is the built bundle, not the sources: a stale dist silently
 // tests the previous build. Fail loudly instead.
@@ -706,6 +724,7 @@ try {
           "settings connection",
           "routine execution",
           "layout persistence",
+          "orchd for this data dir exits with the app",
           "no renderer errors",
           ...(skipped.length ? [] : ["Herdr ping + workspace sync"]),
         ],
@@ -723,17 +742,12 @@ try {
   throw error;
 } finally {
   await new Promise((resolve) => preview.close(resolve));
+  // A test-launched app stops its own daemon on quit. Prove one ran (so the
+  // check below cannot pass trivially), then that none outlives the app.
+  const orchdRan = orchdBuilt && (await pollOrchd(true, 10000));
   await desktop.close();
-  // orchd outlives the app on purpose; this throwaway profile's daemon must not.
-  const orchdPid = await fs
-    .readFile(`${profile}/orchestrator/orchd.pid`, "utf8")
-    .catch(() => "");
-  if (Number(orchdPid)) {
-    try {
-      process.kill(Number(orchdPid), "SIGTERM");
-    } catch {
-      // already gone
-    }
-  }
+  const orchdGone = !orchdBuilt || (await pollOrchd(false, 3000));
   await fs.rm(profile, { recursive: true, force: true });
+  assert.ok(!orchdBuilt || orchdRan, "orchd never started for this data dir");
+  assert.ok(orchdGone, "orchd for this data dir outlived the app");
 }

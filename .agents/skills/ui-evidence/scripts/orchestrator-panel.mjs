@@ -20,7 +20,6 @@
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { waitForExit } from "../../../../electron/orchestrator.cjs";
 
 const root = process.cwd();
 const shot = (name) => `${root}/artifacts/${name}.png`;
@@ -272,18 +271,6 @@ if (!seedPath || !title) {
     report.error = String(error?.message ?? error);
   } finally {
     if (app) await app.close().catch(() => {});
-    // orchd outlives the app on purpose; this throwaway profile's daemon must not.
-    const orchdPid = await fs
-      .readFile(`${dataDir}/orchd.pid`, "utf8")
-      .catch(() => "");
-    if (Number(orchdPid)) {
-      try {
-        process.kill(Number(orchdPid), "SIGTERM");
-      } catch {
-        // already gone
-      }
-      await waitForExit(Number(orchdPid));
-    }
     await fs.rm(profile, { recursive: true, force: true });
     console.log(JSON.stringify(report, null, 2));
     if (report.error || report.pageErrors.length > 0) process.exitCode = 1;

@@ -241,3 +241,22 @@ fn task_create_rejects_neither_request_nor_title_and_goal() {
 
     daemon.shutdown_and_wait();
 }
+
+#[test]
+fn daemon_exits_when_its_data_dir_is_deleted() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let root = data_dir.path().join("orchestrator");
+    std::fs::create_dir_all(&root).unwrap();
+    let socket = root.join("orchd.sock");
+    let child = spawn_orchd_raw(&root, &socket, &[]);
+    wait_for_socket(&socket);
+
+    // An intact data dir keeps serving past several poll intervals.
+    std::thread::sleep(Duration::from_millis(2500));
+    let ping = request_on(&socket, "ping", serde_json::json!({}), None);
+    assert!(ping["pid"].as_u64().unwrap() > 0);
+
+    std::fs::remove_dir_all(&root).unwrap();
+    let (status, stderr) = wait_for_exit(child, Duration::from_secs(10));
+    assert!(status.success(), "daemon should exit 0: {stderr}");
+}

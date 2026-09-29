@@ -77,6 +77,35 @@ impl App {
         Ok(value)
     }
 
+    /// One saved evidence image of a task as a data URL, for a renderer that
+    /// cannot read the data directory. Only paths an attempt lists.
+    pub(super) async fn handle_task_evidence(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            id: String,
+            path: String,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        validate_task_id(&self.store, &p.id)?;
+        let task = self
+            .store
+            .load_task(&p.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        if !task.attempts.iter().any(|a| a.evidence.contains(&p.path)) {
+            return Err("not an evidence image of this task".to_string());
+        }
+        let bytes = std::fs::read(&p.path).map_err(|e| e.to_string())?;
+        let mime = crate::model::image_mime(Path::new(&p.path))
+            .ok_or_else(|| "not an image".to_string())?;
+        Ok(serde_json::json!({
+            "dataUrl": format!("data:{mime};base64,{}", base64(&bytes)),
+        }))
+    }
+
     pub(super) async fn handle_task_create(
         &self,
         params: serde_json::Value,
@@ -365,6 +394,7 @@ impl App {
             repo: new.repo_root.to_string_lossy().to_string(),
             worktree: created.path.to_string_lossy().to_string(),
             worktree_removed: false,
+            visual_criteria: vec![],
             landed_sha: None,
             branch,
             base_sha: created.base_sha,
@@ -950,4 +980,23 @@ impl App {
         }
         Ok(json!({"available": false, "checks": checks}))
     }
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | (*b as u32) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }

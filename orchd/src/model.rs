@@ -871,6 +871,10 @@ pub struct Task {
     pub title: String,
     pub goal: String,
     pub criteria: Vec<String>,
+    /// Criteria the planner marked `visual` (kept by text, so removing a
+    /// criterion never shifts them); others are visual by their `check:`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visual_criteria: Vec<String>,
     pub verify: Vec<String>,
     /// Slow checks (full CI, desktop smoke) run once, after review passes
     /// and before the commit; `verify` runs after every attempt.
@@ -1027,6 +1031,62 @@ pub struct ReviewResult {
     pub findings: Vec<String>,
 }
 
+/// Image extensions an evidence screenshot may have, with their MIME types.
+pub const IMAGE_TYPES: &[(&str, &str)] = &[
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("webp", "image/webp"),
+    ("gif", "image/gif"),
+    ("svg", "image/svg+xml"),
+    ("bmp", "image/bmp"),
+    ("avif", "image/avif"),
+];
+
+/// The MIME type of an image path, if its extension is an evidence image type.
+pub fn image_mime(path: &std::path::Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    IMAGE_TYPES.iter().find(|(e, _)| *e == ext).map(|(_, m)| *m)
+}
+
+/// A criterion is visual when its `-- check:` names a screenshot or an image
+/// under `artifacts/`.
+pub fn is_visual_criterion(text: &str) -> bool {
+    let Some((_, check)) = text.split_once("-- check:") else {
+        return false;
+    };
+    let check = check.to_ascii_lowercase();
+    let check = check.replace(['-', '_'], " ");
+    check.contains("screenshot")
+        || check.contains("screen shot")
+        || (check.contains("artifacts/")
+            && [
+                "image",
+                "img",
+                "picture",
+                "photo",
+                "snapshot",
+                "capture",
+                "visual",
+                "thumbnail",
+                "render",
+            ]
+            .iter()
+            .any(|word| check.contains(word))
+            || IMAGE_TYPES.iter().any(|(ext, _)| check.contains(ext)))
+}
+
+impl Task {
+    /// The criteria that need an image as evidence.
+    pub fn visual_criteria_texts(&self) -> Vec<&str> {
+        self.criteria
+            .iter()
+            .filter(|c| self.visual_criteria.contains(c) || is_visual_criterion(c))
+            .map(String::as_str)
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureKind {
@@ -1041,6 +1101,8 @@ pub enum FailureKind {
     /// The held-out check (`variant.grounded_checks`) failed after verify.
     Heldout,
     Review,
+    /// A visual criterion, and the attempt saved no image under `artifacts/`.
+    Evidence,
     Protected,
     Blocked,
     Error,
@@ -1056,6 +1118,7 @@ impl FailureKind {
             FailureKind::Verify => "verify",
             FailureKind::Heldout => "heldout",
             FailureKind::Review => "review",
+            FailureKind::Evidence => "evidence",
             FailureKind::Protected => "protected",
             FailureKind::Blocked => "blocked",
             FailureKind::Error => "error",
@@ -1171,6 +1234,10 @@ pub struct Attempt {
     /// `task.cost_usd` too, at the point the review runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_cost_usd: Option<f64>,
+    /// Absolute paths of the images this attempt saved, copied to
+    /// `runs/<n>/evidence/` so they outlive the worktree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
     /// The advisor's short diagnosis of this attempt's failure, shown to the
     /// next attempt. Its cost is added to the task, not to this attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1404,6 +1471,7 @@ mod tests {
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
             worktree_removed: false,
+            visual_criteria: vec![],
             landed_sha: None,
             branch: "task/x".into(),
             base_sha: "abc".into(),
@@ -1624,6 +1692,7 @@ mod tests {
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
             worktree_removed: false,
+            visual_criteria: vec![],
             landed_sha: None,
             branch: "task/x".into(),
             base_sha: "abc".into(),
@@ -1672,6 +1741,7 @@ mod tests {
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
             worktree_removed: false,
+            visual_criteria: vec![],
             landed_sha: None,
             branch: "task/x".into(),
             base_sha: "abc".into(),

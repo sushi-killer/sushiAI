@@ -39,6 +39,8 @@ export const orchestratorClient = {
     sinceDays?: number;
     groupBy: SpendGroup[];
   }) => call<SpendSummary>("costs.summary", params),
+  taskEvidence: (id: string, path: string) =>
+    call<{ dataUrl: string }>("task.evidence", { id, path }),
   taskTimeline: (id: string) =>
     call<TimelineSegment[]>("task.timeline", { id }),
   failuresCatalogue: (repo?: string, sinceDays?: number) =>

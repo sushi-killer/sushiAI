@@ -572,7 +572,7 @@ const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message wit
 
 const PLAN_BATCH_QUESTIONS: &str = "Give every question a `recommended` option (one of its `options`), the `evidence` for it, and `blocking`: true only when a wrong guess is irreversible or consequential (data loss, a public API or contract, money, security). A non-blocking question is not asked: your recommendation is recorded as an assumption and the work goes on, so recommend what you would pick yourself. Blocking questions are asked together in one message.";
 
-const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app.";
+const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app. A criterion whose proof is an image may instead be written as `{\"text\": \"...\", \"visual\": true}`; orchd then requires a saved image under artifacts/ before review.";
 
 const PLAN_SUBTASKS: &str = "When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. List in each part's `paths` the repo-relative files or directories it edits; parts whose paths overlap (or that list none) are run one after another instead of side by side. Each part's `request` is what its own planner will draft from, so make it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. When the request fits one session, leave `subtasks` out.";
 
@@ -689,8 +689,12 @@ pub struct PlanDraft {
     pub title: String,
     #[serde(default)]
     pub goal: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_criteria")]
     pub criteria: Vec<String>,
+    /// Criteria the planner wrote as `{text, visual: true}`; filled by
+    /// [`parse_plan`].
+    #[serde(skip)]
+    pub visual_criteria: Vec<String>,
     #[serde(default)]
     pub verify: Vec<String>,
     #[serde(default)]
@@ -739,6 +743,20 @@ fn lenient_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Err
     })
 }
 
+/// A criterion is a string or an object `{text, visual}`; the object keeps
+/// its text here and `visual` is read by [`parse_plan`].
+fn lenient_criteria<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let v: Option<Vec<serde_json::Value>> = serde::Deserialize::deserialize(d).unwrap_or(None);
+    Ok(v.unwrap_or_default()
+        .into_iter()
+        .filter_map(|c| match c {
+            serde_json::Value::String(s) => Some(s),
+            serde_json::Value::Object(o) => o.get("text")?.as_str().map(str::to_string),
+            _ => None,
+        })
+        .collect())
+}
+
 fn lenient_checks<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Check>, D::Error> {
     let v: Option<Vec<serde_json::Value>> = serde::Deserialize::deserialize(d).unwrap_or(None);
     Ok(v.unwrap_or_default()
@@ -761,7 +779,18 @@ fn lenient_tier<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Tier>, 
 /// [`parse_review`].
 pub fn parse_plan(text: &str) -> Option<PlanDraft> {
     let body = last_fenced_block(text, "sushi-plan")?;
-    serde_json::from_str(&body).ok()
+    let mut draft: PlanDraft = serde_json::from_str(&body).ok()?;
+    if let Some(items) = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("criteria").and_then(|c| c.as_array().cloned()))
+    {
+        draft.visual_criteria = items
+            .iter()
+            .filter(|c| c.get("visual").and_then(|v| v.as_bool()) == Some(true))
+            .filter_map(|c| c.get("text")?.as_str().map(str::to_string))
+            .collect();
+    }
+    Some(draft)
 }
 
 /// The fixed rubric a `repo.audit` run grades a repository against. Kept
@@ -1354,6 +1383,7 @@ mod tests {
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
             worktree_removed: false,
+            visual_criteria: vec![],
             landed_sha: None,
             branch: "task/add-a-button".into(),
             base_sha: "abc123".into(),
@@ -1430,6 +1460,7 @@ mod tests {
             cost_usd: None,
             cost_estimated: false,
             review_cost_usd: None,
+            evidence: vec![],
             advice: None,
             advisor_cost_usd: None,
             fingerprint: None,
@@ -1593,6 +1624,7 @@ mod tests {
             cost_usd: None,
             cost_estimated: false,
             review_cost_usd: None,
+            evidence: vec![],
             advice: None,
             advisor_cost_usd: None,
             fingerprint: None,
@@ -1732,6 +1764,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_plan_reads_criteria_objects_and_their_visual_mark() {
+        let text = "```sushi-plan\n{\"title\":\"t\",\"criteria\":[\"plain\",{\"text\":\"looks right\",\"visual\":true},{\"text\":\"unmarked\"}]}\n```";
+        let draft = parse_plan(text).unwrap();
+        assert_eq!(draft.criteria, vec!["plain", "looks right", "unmarked"]);
+        assert_eq!(draft.visual_criteria, vec!["looks right"]);
+    }
+
+    #[test]
+    fn a_check_naming_a_screenshot_or_an_artifacts_image_is_visual() {
+        use crate::model::is_visual_criterion;
+        assert!(is_visual_criterion(
+            "x -- check: screenshot under artifacts/"
+        ));
+        assert!(is_visual_criterion(
+            "x -- check: artifacts/panel.png shows it"
+        ));
+        assert!(!is_visual_criterion("x -- check: integration test"));
+        assert!(is_visual_criterion("x -- check: an image under artifacts/"));
+        assert!(is_visual_criterion("x -- check: artifacts/shot.gif"));
+        assert!(!is_visual_criterion(
+            "x -- check: artifacts/report.json lists it"
+        ));
+        assert!(!is_visual_criterion("a screenshot is nice"));
+    }
+
+    #[test]
     fn parse_plan_reads_title_goal_criteria_verify_and_questions() {
         let text = "```sushi-plan\n{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"criteria\":[\"Toggle visible in settings\"],\"verify\":[\"npm test\"],\"questions\":[{\"text\":\"Which default?\",\"options\":[\"light\",\"dark\",\"system\"]}]}\n```";
         let draft = parse_plan(text).unwrap();
@@ -1795,6 +1853,7 @@ mod tests {
             cost_usd: None,
             cost_estimated: false,
             review_cost_usd: None,
+            evidence: vec![],
             advice: None,
             advisor_cost_usd: None,
             fingerprint: None,

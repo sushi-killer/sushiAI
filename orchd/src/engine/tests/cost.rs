@@ -72,6 +72,7 @@ fn backfill_turns_task_costs_into_records_once() {
         Attempt {
             cost_usd: Some(1.0),
             review_cost_usd: Some(0.5),
+            evidence: vec![],
             advisor_cost_usd: Some(0.25),
             review_fingerprint: Some(Fingerprint {
                 models: vec!["claude-opus-5-5".into()],

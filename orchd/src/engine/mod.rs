@@ -604,6 +604,7 @@ impl App {
                 validate_task_id(&self.store, id)?;
                 crate::timeline::timeline_json(&self.store, id)
             }
+            "task.evidence" => self.handle_task_evidence(params).await,
             "failures.catalogue" => crate::timeline::catalogue_json(&self.store, &params),
             "chat.get" => chat::handle_get(self, params).await,
             "chat.send" => chat::handle_send(self, params).await,

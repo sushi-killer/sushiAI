@@ -234,6 +234,72 @@ function AttemptRow({ attempt }: { attempt: Attempt }) {
   );
 }
 
+/** The images the latest passing implement attempt saved, as thumbnails that
+ * open full size. Orchd serves them as data URLs (the renderer cannot read
+ * its data directory). */
+function EvidenceGallery({ task }: { task: Task }) {
+  const latest = [...task.attempts]
+    .reverse()
+    .find(
+      (a) =>
+        a.stage === "implement" &&
+        a.status === "passed" &&
+        (a.evidence?.length ?? 0) > 0,
+    );
+  const paths = latest?.evidence ?? [];
+  const key = paths.join("\n");
+  const [urls, setUrls] = useState<Record<string, string>>({});
+  const [open, setOpen] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setUrls({});
+    for (const path of key ? key.split("\n") : []) {
+      orchestratorClient
+        .taskEvidence(task.id, path)
+        .then(({ dataUrl }) => {
+          if (!cancelled) setUrls((prev) => ({ ...prev, [path]: dataUrl }));
+        })
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [task.id, key]);
+  if (paths.length === 0) return null;
+  const name = (path: string) => path.split("/").pop() ?? path;
+  return (
+    <div className="orch-evidence">
+      <span className="dialog-eyebrow">EVIDENCE</span>
+      <div className="orch-evidence-grid">
+        {paths.map((path) =>
+          urls[path] ? (
+            <button
+              key={path}
+              className="orch-evidence-thumb"
+              title={name(path)}
+              aria-label={`Open ${name(path)}`}
+              onClick={() => setOpen(path)}
+            >
+              <img src={urls[path]} alt={name(path)} />
+              <span>{name(path)}</span>
+            </button>
+          ) : null,
+        )}
+      </div>
+      {open && urls[open] && (
+        <div
+          className="orch-evidence-full"
+          role="dialog"
+          aria-label={name(open)}
+          onClick={() => setOpen(null)}
+        >
+          <img src={urls[open]} alt={name(open)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** An upcoming stage that hasn't run yet - review, most often - shown dimmed
  * on the rail so the rail reads as "what will happen", not just history. */
 function PendingStageRow({ label }: { label: string }) {
@@ -1441,6 +1507,7 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                 })}
               </div>
             )}
+            <EvidenceGallery task={selected} />
             <div className="orch-attempts">
               {selected.attempts.map((attempt) => (
                 <AttemptRow key={attempt.n} attempt={attempt} />

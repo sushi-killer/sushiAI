@@ -389,6 +389,7 @@ pub(super) async fn run_plan_stage(
             cost_usd: None,
             cost_estimated: false,
             review_cost_usd: None,
+            evidence: vec![],
             advice: None,
             advisor_cost_usd: None,
             fingerprint: None,
@@ -621,6 +622,7 @@ pub(super) async fn run_plan_stage(
             split_verify_commands(&worktree, &draft.verify)
         };
         task.criteria = draft.criteria.clone();
+        task.visual_criteria = draft.visual_criteria.clone();
         task.criteria.extend(
             judged
                 .into_iter()

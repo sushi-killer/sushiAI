@@ -55,7 +55,7 @@ function taskJson(seed, repo, now, id, ids) {
       (sum, a) => sum + (a.costUsd ?? 0) + (a.reviewCostUsd ?? 0),
       0,
     );
-  const { key: _key, parent, dependsOn, ...rest } = seed;
+  const { key: _key, parent, dependsOn, evidence: _evidence, ...rest } = seed;
   return {
     goal: seed.title,
     criteria: [],
@@ -113,6 +113,21 @@ if (!seedPath || !title) {
       const task = taskJson(seed, root, now + index, id, ids);
       const dir = `${dataDir}/tasks/${task.id}`;
       await fs.mkdir(dir, { recursive: true });
+      // `evidence: {"<attempt n>": ["<image path>", ...]}` copies images into
+      // runs/<n>/evidence/, where orchd keeps an attempt's screenshots, and
+      // lists them on that attempt the way orchd records them.
+      for (const [n, files] of Object.entries(seed.evidence ?? {})) {
+        const to = `${dir}/runs/${n}/evidence`;
+        await fs.mkdir(to, { recursive: true });
+        const saved = [];
+        for (const file of files) {
+          const dest = `${to}/${file.split("/").pop()}`;
+          await fs.copyFile(file, dest);
+          saved.push(dest);
+        }
+        const attempt = task.attempts.find((a) => a.n === Number(n));
+        if (attempt) attempt.evidence = saved;
+      }
       await fs.writeFile(`${dir}/task.json`, JSON.stringify(task, null, 2));
     }
     if (!Array.isArray(proposals))

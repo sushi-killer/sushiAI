@@ -50,7 +50,7 @@ proposal is completed with an id (unless it has one), `repo` = this repo and
 `createdAt`, then written to `<dataDir>/evolution/proposals/<id>.json`, where
 orchd's store reads it. Task objects - only `title` is required, `status`/`tier`/`decisions`/`criteria`/
 `attempts` (with `costUsd`) all default; `status` must be done, failed,
-stopped or waiting. Give a seed a `key` to let others name it in `parent`
+stopped or waiting. `evidence: {"<attempt n>": [image paths]}` copies screenshots into that attempt's evidence dir. Give a seed a `key` to let others name it in `parent`
 or `dependsOn` (a task graph). The tasks are written into the throwaway profile before
 the app starts its own orchd there - no harness run, no API key. It opens the
 panel, picks the task by title, saves

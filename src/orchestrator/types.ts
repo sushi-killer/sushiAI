@@ -198,6 +198,7 @@ export type FailureKind =
   | "verify"
   | "heldout"
   | "review"
+  | "evidence"
   | "protected"
   | "blocked"
   | "error";
@@ -254,6 +255,9 @@ export type Attempt = {
    * separate from `costUsd` because that field is what a later resume of
    * the same session subtracts, and a review's cost must never join it. */
   reviewCostUsd?: number;
+  /** Absolute paths of the images this attempt saved under artifacts/, kept
+   * in the task's run directory after the worktree is removed. */
+  evidence?: string[];
   /** The advisor's diagnosis of this attempt's failure, shown to the next
    * attempt. */
   advice?: string;
@@ -281,6 +285,8 @@ export type Task = {
   title: string;
   goal: string;
   criteria: string[];
+  /** Criteria the planner marked visual (a saved image is required). */
+  visualCriteria?: string[];
   verify: string[];
   /** Slow checks run once, after review passes and before the commit. */
   finalVerify?: string[];

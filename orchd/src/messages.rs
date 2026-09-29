@@ -340,6 +340,7 @@ mod tests {
             repo: repo.into(),
             worktree: "/wt".into(),
             worktree_removed: false,
+            visual_criteria: vec![],
             landed_sha: None,
             branch: "b".into(),
             base_sha: "s".into(),

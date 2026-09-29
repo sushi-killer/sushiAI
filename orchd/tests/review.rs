@@ -356,7 +356,7 @@ fn review_evidence_attaches_the_attempt_s_screenshots_to_the_codex_reviewer() {
     );
     let brief = std::fs::read_to_string(format!("{}.brief", args_log.display())).unwrap();
     assert!(
-        brief.contains("## Screenshots") && brief.contains("`artifacts/after.png`"),
+        brief.contains("## Screenshots") && brief.contains("evidence/after.png`"),
         "{brief}"
     );
     assert!(
@@ -472,4 +472,130 @@ fn a_failed_final_check_shows_the_failing_test_not_the_bundler_noise() {
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(&worktree);
+}
+
+/// Implements; saves a screenshot only once its brief says none was saved
+/// (the evidence failure's feedback); as the reviewer answers PASS.
+const FAKE_SCREENSHOT_SCRIPT: &str = r###"#!/bin/sh
+brief=$(cat)
+case "$brief" in
+"## Review"*)
+  printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
+*)
+  echo changed > CHANGED_MARKER.txt
+  case "$brief" in
+  *"no image was saved"*) mkdir -p artifacts/ui; echo png > artifacts/ui/panel.png ;;
+  esac
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}' ;;
+esac
+"###;
+
+#[test]
+fn a_visual_criterion_needs_a_saved_image_and_the_copies_outlive_the_worktree() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-shot.sh", FAKE_SCREENSHOT_SCRIPT);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let repo = init_git_repo();
+    std::fs::write(repo.path().join(".gitignore"), "artifacts/\n").unwrap();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Visual",
+            "goal": "Change the panel",
+            "criteria": ["The panel shows thumbnails -- check: screenshot under artifacts/"],
+            "verify": ["true"],
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
+    assert_eq!(settled["status"], "done", "{settled}");
+
+    let attempts = settled["attempts"].as_array().unwrap();
+    let implement: Vec<_> = attempts
+        .iter()
+        .filter(|a| a["stage"] == "implement")
+        .collect();
+    assert_eq!(implement[0]["failure"]["kind"], "evidence", "{settled}");
+    let feedback = implement[0]["failure"]["detail"].as_str().unwrap();
+    assert!(
+        feedback.contains("The panel shows thumbnails") && feedback.contains("under artifacts/"),
+        "{feedback}"
+    );
+    assert!(implement[0].get("evidence").is_none(), "{settled}");
+    assert_eq!(
+        implement[1]["failure"],
+        serde_json::Value::Null,
+        "{settled}"
+    );
+
+    // Gone with the worktree, still listed and still on disk.
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    let _ = std::fs::remove_dir_all(&worktree);
+    let got = daemon.request("task.get", serde_json::json!({"id": task_id}));
+    let listed: Vec<&str> = got["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|a| a["evidence"].as_array().into_iter().flatten())
+        .filter_map(|e| e.as_str())
+        .collect();
+    assert_eq!(listed.len(), 1, "{got}");
+    assert!(listed[0].contains("/runs/2/evidence/"), "{listed:?}");
+    assert_eq!(std::fs::read_to_string(listed[0]).unwrap().trim(), "png");
+    // "png\n" as a data URL.
+    let url = daemon.request(
+        "task.evidence",
+        serde_json::json!({"id": task_id, "path": listed[0]}),
+    );
+    assert_eq!(url["dataUrl"], "data:image/png;base64,cG5nCg==", "{url}");
+
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_gif_or_svg_saved_for_a_visual_criterion_counts_as_evidence() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let body = FAKE_SCREENSHOT_SCRIPT.replace("panel.png", "panel.svg");
+    let script = fake_harness_script(scripts_dir.path(), "fake-svg.sh", &body);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let repo = init_git_repo();
+    std::fs::write(repo.path().join(".gitignore"), "artifacts/\n").unwrap();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Visual svg",
+            "goal": "Change the panel",
+            "criteria": ["Shows a chart -- check: svg image under artifacts/"],
+            "verify": ["true"],
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
+    assert_eq!(settled["status"], "done", "{settled}");
+    let listed: Vec<String> = settled["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|a| a["evidence"].as_array().into_iter().flatten())
+        .filter_map(|e| e.as_str().map(String::from))
+        .collect();
+    assert_eq!(listed.len(), 1, "{settled}");
+    assert!(listed[0].ends_with("panel.svg"), "{listed:?}");
+    let url = daemon.request(
+        "task.evidence",
+        serde_json::json!({"id": task_id, "path": listed[0]}),
+    );
+    assert!(
+        url["dataUrl"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/svg+xml;base64,"),
+        "{url}"
+    );
+    daemon.shutdown_and_wait();
 }

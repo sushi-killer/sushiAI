@@ -266,6 +266,7 @@ mod tests {
             repo: "/r".into(),
             worktree: "/r-t".into(),
             worktree_removed: false,
+            visual_criteria: vec![],
             landed_sha: None,
             branch: "task/t".into(),
             base_sha: "abc".into(),

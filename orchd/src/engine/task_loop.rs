@@ -446,6 +446,7 @@ pub(super) async fn run_task_loop(
             cost_usd: None,
             cost_estimated: false,
             review_cost_usd: None,
+            evidence: vec![],
             advice: None,
             advisor_cost_usd: None,
             fingerprint: None,
@@ -1074,6 +1075,15 @@ pub(super) async fn run_task_loop(
             }
         }
 
+        {
+            let since = task.attempts[idx].started_at;
+            let saved = save_evidence(&worktree, since, &run_dir.join("evidence"));
+            if !saved.is_empty() {
+                task.attempts[idx].evidence = saved;
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+            }
+        }
         apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
         let mut verify_results = run_verify_cached(
             &app,
@@ -1216,6 +1226,43 @@ pub(super) async fn run_task_loop(
                         app.finish_task_loop(&task_id);
                         return;
                     }
+                }
+            }
+        }
+
+        let visual: Vec<&str> = task.visual_criteria_texts();
+        if !visual.is_empty() && task.attempts[idx].evidence.is_empty() {
+            let detail = format!(
+                "These criteria are visual and no image was saved under artifacts/ during this attempt:\n{}\nSave one screenshot per criterion under artifacts/ (for example artifacts/<name>.png) and look at it before finishing.",
+                visual
+                    .iter()
+                    .map(|c| format!("- {c}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            match fail_and_continue(
+                &app,
+                &task_id,
+                &mut task,
+                idx,
+                FailureKind::Evidence,
+                detail,
+                &mut attempt_budget,
+                &pending_answer,
+                &cancel,
+                &mut permit,
+            )
+            .await
+            {
+                LoopSignal::Continue { answered } => {
+                    just_answered = answered;
+                    drop(permit);
+                    continue;
+                }
+                LoopSignal::Stop => {
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
                 }
             }
         }

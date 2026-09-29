@@ -70,8 +70,40 @@ pub fn select_review_route<'a>(
 const MAX_REVIEW_SCREENSHOTS: usize = 8;
 
 /// Images under the worktree's `artifacts/` (gitignored, so never in the
-/// diff) written since `since_ms`, newest first.
+/// diff) written since `since_ms`, newest first, at most
+/// `MAX_REVIEW_SCREENSHOTS`.
 pub(super) fn attempt_screenshots(worktree: &Path, since_ms: i64) -> Vec<PathBuf> {
+    let mut found = attempt_images(worktree, since_ms);
+    found.truncate(MAX_REVIEW_SCREENSHOTS);
+    found
+}
+
+/// Copies every image the attempt wrote under `artifacts/` into `evidence_dir`
+/// (flattened names), so it survives the worktree. Returns the copies.
+pub(super) fn save_evidence(worktree: &Path, since_ms: i64, evidence_dir: &Path) -> Vec<String> {
+    let images = attempt_images(worktree, since_ms);
+    if images.is_empty() || std::fs::create_dir_all(evidence_dir).is_err() {
+        return Vec::new();
+    }
+    let root = worktree.join("artifacts");
+    let mut saved = Vec::new();
+    for image in images {
+        let rel = image.strip_prefix(&root).unwrap_or(&image);
+        let name = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("_");
+        let target = evidence_dir.join(name);
+        if std::fs::copy(&image, &target).is_ok() {
+            saved.push(target.display().to_string());
+        }
+    }
+    saved.sort();
+    saved
+}
+
+fn attempt_images(worktree: &Path, since_ms: i64) -> Vec<PathBuf> {
     let mut found: Vec<(i64, PathBuf)> = Vec::new();
     let mut dirs = vec![worktree.join("artifacts")];
     while let Some(dir) = dirs.pop() {
@@ -85,12 +117,7 @@ pub(super) fn attempt_screenshots(worktree: &Path, since_ms: i64) -> Vec<PathBuf
                 dirs.push(path);
                 continue;
             }
-            let is_image = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-                matches!(
-                    e.to_ascii_lowercase().as_str(),
-                    "png" | "jpg" | "jpeg" | "webp"
-                )
-            });
+            let is_image = crate::model::image_mime(&path).is_some();
             let modified = meta
                 .modified()
                 .ok()
@@ -102,11 +129,7 @@ pub(super) fn attempt_screenshots(worktree: &Path, since_ms: i64) -> Vec<PathBuf
         }
     }
     found.sort_by(|a, b| b.0.cmp(&a.0));
-    found
-        .into_iter()
-        .take(MAX_REVIEW_SCREENSHOTS)
-        .map(|(_, p)| p)
-        .collect()
+    found.into_iter().map(|(_, p)| p).collect()
 }
 
 /// The run request of a read-only session: review's, and anything that must
@@ -171,16 +194,28 @@ pub(super) async fn run_review(
     } else {
         Vec::new()
     };
-    let shown: Vec<String> = images
+    // The saved copies outlive the worktree, so they are what the reviewer
+    // is pointed at; the worktree paths only when nothing was copied.
+    let saved = task
+        .attempts
         .iter()
-        .map(|image| {
-            image
-                .strip_prefix(worktree)
-                .unwrap_or(image)
-                .display()
-                .to_string()
-        })
-        .collect();
+        .find(|a| a.n == attempt_n && a.stage == Stage::Implement)
+        .map(|a| a.evidence.clone())
+        .unwrap_or_default();
+    let shown: Vec<String> = if saved.is_empty() {
+        images
+            .iter()
+            .map(|image| {
+                image
+                    .strip_prefix(worktree)
+                    .unwrap_or(image)
+                    .display()
+                    .to_string()
+            })
+            .collect()
+    } else {
+        saved
+    };
     let brief_text = brief::build_review_brief(
         task,
         implementer_note,

@@ -176,6 +176,10 @@ pub struct Settings {
     /// Commands run in the repo's main checkout after a task lands.
     #[serde(default)]
     pub after_land: Vec<AfterLand>,
+    /// Start ready `next`-bucket backlog tasks by themselves while live task
+    /// loops are below `parallel`.
+    #[serde(default)]
+    pub autopilot: bool,
     /// Commands that only run when the task's diff touches their `paths`.
     #[serde(default = "default_scoped_checks")]
     pub scoped_checks: Vec<ScopedCheck>,
@@ -503,6 +507,7 @@ impl Default for Settings {
             land_on_default: false,
             after_land: vec![],
             scoped_checks: default_scoped_checks(),
+            autopilot: false,
         }
     }
 }
@@ -1140,6 +1145,27 @@ pub struct QueueState {
     /// on the parent as one commit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relay_base: Option<String>,
+    /// The planning backlog the task sits in until `task.start` or the
+    /// autopilot starts it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backlog: Option<Backlog>,
+}
+
+/// Which planning bucket a backlog task is in; the autopilot only starts
+/// `next`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BacklogBucket {
+    Next,
+    Later,
+}
+
+/// A task's place in the planning backlog: its bucket and its order within
+/// it (ascending).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Backlog {
+    pub bucket: BacklogBucket,
+    pub order: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

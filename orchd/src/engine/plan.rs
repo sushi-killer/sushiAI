@@ -1008,6 +1008,7 @@ async fn split_into_subtasks(
         let title = titles_by_key[part.key.trim()].clone();
         let created = app
             .create_task_record(NewTask {
+                backlog: None,
                 id: ids[part.key.trim()].clone(),
                 repo_root: PathBuf::from(&parent.repo),
                 title: title.clone(),

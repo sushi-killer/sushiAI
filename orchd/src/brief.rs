@@ -1096,7 +1096,9 @@ fn lenient_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Err
 
 /// A criterion is a string or an object `{text, visual}`; the object keeps
 /// its text here and `visual` is read by [`parse_plan`].
-fn lenient_criteria<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+pub(crate) fn lenient_criteria<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<String>, D::Error> {
     let v: Option<Vec<serde_json::Value>> = serde::Deserialize::deserialize(d).unwrap_or(None);
     Ok(v.unwrap_or_default()
         .into_iter()
@@ -1121,7 +1123,9 @@ fn lenient_check<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Check>
     Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }
 
-fn lenient_tier<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Tier>, D::Error> {
+pub(crate) fn lenient_tier<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Tier>, D::Error> {
     let v: Option<serde_json::Value> = serde::Deserialize::deserialize(d)?;
     Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }
@@ -1800,7 +1804,7 @@ pub fn sanitize_triage(
 /// `text`, whichever opens later. A fence closes only on a line that is
 /// just ` ``` `, so a JSON string quoting ` ```sushi-review``` ` inline
 /// doesn't cut the body short. Models use both shapes, so either counts.
-fn last_fenced_block(text: &str, tag: &str) -> Option<String> {
+pub(crate) fn last_fenced_block(text: &str, tag: &str) -> Option<String> {
     let fence = format!("```{tag}");
     let open_tag = format!("<{tag}>");
     let fence_at = text.rfind(&fence);

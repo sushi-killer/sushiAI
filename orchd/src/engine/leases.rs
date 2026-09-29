@@ -180,6 +180,7 @@ impl App {
             if task.archived
                 || task.status != TaskStatus::Queued
                 || task.queue.queue_reason.is_none()
+                || task.queue.backlog.is_some()
                 || self.controls.lock().unwrap().contains_key(&task.id)
                 || self.lease_blocker(&task).is_some()
             {

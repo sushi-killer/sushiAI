@@ -315,6 +315,7 @@ impl App {
         .await
         .map_err(|e| e.to_string())?;
         self.create_task_record(NewTask {
+            backlog: None,
             id: uuid::Uuid::new_v4().to_string(),
             repo_root: PathBuf::from(&task.repo),
             title: truncate_chars(&request, 60),

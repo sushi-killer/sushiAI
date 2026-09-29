@@ -738,9 +738,11 @@ pub fn worktree_tree(worktree: &Path) -> Result<String, GitError> {
     )
     .ok()
     .map(|p| PathBuf::from(p.trim()));
+    static INDEX_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = std::env::temp_dir().join(format!(
-        "orchd-index-{}-{}",
+        "orchd-index-{}-{}-{}",
         std::process::id(),
+        INDEX_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos())

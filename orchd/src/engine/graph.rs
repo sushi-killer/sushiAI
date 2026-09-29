@@ -992,7 +992,10 @@ impl App {
             let idle = task.status == TaskStatus::Queued
                 || (parent && task.status == TaskStatus::Running)
                 || asking;
-            if !idle || self.controls.lock().unwrap().contains_key(&task.id) {
+            if !idle
+                || task.queue.backlog.is_some()
+                || self.controls.lock().unwrap().contains_key(&task.id)
+            {
                 continue;
             }
             // Waiting for a lease: `advance_queue` starts it when it is free.
@@ -1066,6 +1069,7 @@ impl App {
             }
         }
         self.advance_queue(repo);
+        self.advance_autopilot();
     }
 
     /// Starts `child`'s loop unless its parent already has `childParallel`

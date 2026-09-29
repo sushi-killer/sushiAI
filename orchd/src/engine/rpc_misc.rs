@@ -87,6 +87,7 @@ impl App {
             .save_settings(&p.settings)
             .map_err(|e| e.to_string())?;
         *self.settings.write().unwrap() = p.settings.clone();
+        self.advance_autopilot();
         serde_json::to_value(&p.settings).map_err(|e| e.to_string())
     }
 

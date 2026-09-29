@@ -3,6 +3,7 @@ use super::*;
 /// Everything `create_task_record` needs for a new task.
 pub(super) struct NewTask {
     pub(super) id: String,
+    pub(super) backlog: Option<Backlog>,
     pub(super) repo_root: PathBuf,
     pub(super) title: String,
     pub(super) goal: String,
@@ -180,8 +181,14 @@ impl App {
             /// caller when unset.
             #[serde(default)]
             source: Option<String>,
+            /// Puts the task in the planning backlog instead of starting it.
+            #[serde(default)]
+            backlog: Option<BacklogIn>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        if p.backlog.is_some() && p.parent.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+            return Err("a subtask cannot be in the backlog".to_string());
+        }
         let settings = self.settings.read().unwrap().clone();
         let mut variant = resolve_variant(&settings.experiments, p.variant.as_ref())?;
         if let Some(land) = p.land {
@@ -253,9 +260,14 @@ impl App {
             None => "cli".to_string(),
         };
         let in_graph = parent.is_some() || !depends_on.is_empty();
+        let backlog = match &p.backlog {
+            Some(b) => Some(self.backlog_slot(&repo, None, b.bucket, b.order)?),
+            None => None,
+        };
         let mut task = self
             .create_task_record(NewTask {
                 id: uuid::Uuid::new_v4().to_string(),
+                backlog,
                 repo_root,
                 title,
                 goal,
@@ -298,13 +310,16 @@ impl App {
             // Planning always runs regardless of `start`; only whether the
             // loop falls through into implementing once it's done depends
             // on it (spec step 6).
-            self.spawn_task_loop(id.clone(), p.start.unwrap_or(true));
-        } else if p.start.unwrap_or(true) || in_graph {
+            self.spawn_task_loop(id.clone(), p.start.unwrap_or(true) && backlog.is_none());
+        } else if backlog.is_none() && (p.start.unwrap_or(true) || in_graph) {
             // Same default as the request form: a `queued` task that never
             // starts until a daemon restart looks like work in progress. A
             // task in a graph starts on its own: its loop waits for what it
             // depends on.
             self.start_task_loop(id.clone());
+        }
+        if backlog.is_some() {
+            self.advance_autopilot();
         }
         serde_json::to_value(&task).map_err(|e| e.to_string())
     }
@@ -463,6 +478,7 @@ impl App {
             brief_check: Default::default(),
             queue: QueueState {
                 relay_of: new.relay_of,
+                backlog: new.backlog,
                 ..Default::default()
             },
             created_at: new.created_at,
@@ -515,7 +531,7 @@ impl App {
                 // A manual `task.start` on a still-drafting task (e.g. one
                 // left there by a daemon that died mid-plan) means proceed
                 // straight to implementing once planning finishes.
-                self.spawn_task_loop(p.id.clone(), true);
+                self.start_task(&p.id, Starter::Owner);
             }
         }
         let latest = self

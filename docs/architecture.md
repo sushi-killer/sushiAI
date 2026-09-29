@@ -101,12 +101,22 @@ stateDiagram-v2
   running --> stopped: task.stop
   waiting --> stopped: answer "stop"
   stopped --> queued: task.start
+  queued --> running: backlog start: task.start or the autopilot<br/>(queued/stopped, never implemented)
+  stopped --> running: backlog start: task.start or the autopilot
   done --> [*]
   note right of done
     archived is a flag, not a state:
     task.archive hides done/stopped/failed/queued-idle tasks
   end note
 ```
+
+A task can be parked in the planning backlog (`task.backlog`, or `backlog` on
+`task.create`): a `next` or `later` bucket with an integer order. A backlog
+task is started only by `task.start` or the autopilot; recovery and the graph
+never start it (a drafting one resumes planning but stops after the plan). With
+`settings.autopilot` on, orchd starts the ready `next` tasks (every `dependsOn`
+done) in (order, createdAt, id) order while live loops are below `parallel`.
+Starting clears the backlog and records who started it in `decisions`.
 
 A task graph is state orchd keeps, never a split it decides: the planner
 may answer a top-level request with `subtasks` (keys, requests, `dependsOn`

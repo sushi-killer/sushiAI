@@ -33,6 +33,7 @@ mod messages;
 mod advisor;
 mod answer_policy;
 mod attempt_run;
+mod backlog;
 mod base_check;
 mod best_of;
 mod brief_check;
@@ -64,6 +65,7 @@ mod worktrees;
 use advisor::*;
 use answer_policy::*;
 use attempt_run::*;
+use backlog::*;
 use base_check::*;
 use best_of::*;
 use brief_check::*;
@@ -254,6 +256,9 @@ pub struct App {
     /// Held while a graph start counts a parent's running children and
     /// spawns one more, so `childParallel` is never exceeded by a race.
     child_admission: StdMutex<()>,
+    /// Held while the autopilot counts live loops and starts backlog tasks,
+    /// so `parallel` is never exceeded by a race.
+    autopilot_admission: StdMutex<()>,
     /// Keyed by task id: the diff+untracked-list hash a verify run was last
     /// computed for, and its results -- shared by `hook.stop` and the
     /// post-session gate so an unchanged diff never re-runs verify twice.
@@ -425,6 +430,7 @@ impl App {
             hook_tokens: RwLock::new(HashMap::new()),
             leases: StdMutex::new(HashMap::new()),
             child_admission: StdMutex::new(()),
+            autopilot_admission: StdMutex::new(()),
             verify_cache: std::sync::Mutex::new(HashMap::new()),
             base_runs: std::sync::Mutex::new(HashMap::new()),
             pid: std::process::id(),
@@ -571,6 +577,7 @@ impl App {
             "task.get" => self.handle_task_get(params).await,
             "task.create" => self.handle_task_create(params).await,
             "task.start" => self.handle_task_start(params).await,
+            "task.backlog" => self.handle_task_backlog(params).await,
             "task.land" => self.handle_task_land(params).await,
             "task.stop" => self.handle_task_stop(params).await,
             "task.answer" => self.handle_task_answer(params).await,
@@ -597,6 +604,7 @@ impl App {
             "chat.new" => chat::handle_new(self, params).await,
             "chat.switch" => chat::handle_switch(self, params).await,
             "chat.clear" => chat::handle_clear(self, params).await,
+            "chat.clearDraft" => chat::handle_clear_draft(self, params).await,
             "peer.list" => messages::handle_peers(self, params).await,
             "message.send" => messages::handle_send(self, params).await,
             "message.inbox" => messages::handle_inbox(self, params).await,

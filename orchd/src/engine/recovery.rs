@@ -38,7 +38,12 @@ impl App {
                     self.store.save_task(&t)?;
                     self.broadcast_task(&t);
                 }
-                self.start_task_loop(t.id);
+                if t.status == TaskStatus::Drafting && t.queue.backlog.is_some() {
+                    // Planning resumes but never rolls into implementing.
+                    self.spawn_task_loop(t.id, false);
+                } else if t.status != TaskStatus::Queued || t.queue.backlog.is_none() {
+                    self.start_task_loop(t.id);
+                }
             }
         }
         self.spawn_landing_retries();

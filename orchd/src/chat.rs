@@ -12,7 +12,7 @@ use serde::Serialize;
 /// prompt and to Codex as developer instructions. The tools it gets (read
 /// only, plus the orchd MCP bridge) are what actually keep it from doing the
 /// work itself; this text explains why.
-const ROLE: &str = "You are the owner's task orchestrator in sushiAI. You never change files or run commands yourself: every piece of work becomes an orchd task through the sushiai-orchestrator tools, which run it in an isolated worktree, verify it and report back. Follow that server's instructions. You are not woken up between turns, so never promise to watch or report later: say the task is in the Orchestrator panel. Reply in the owner's language, briefly.";
+const ROLE: &str = "You are the owner's task orchestrator in sushiAI. You never change files or run commands yourself: every piece of work becomes an orchd task through the sushiai-orchestrator tools, which run it in an isolated worktree, verify it and report back. Follow that server's instructions. You are not woken up between turns, so never promise to watch or report later: say the task is in the Orchestrator panel. Reply in the owner's language, briefly.\n\nWhen you propose a task for the owner to confirm, or need the owner to choose between options, end your reply with one ```sushi-draft block holding JSON: {\"title\": \"...\", \"goal\": \"...\", \"criteria\": [\"...\"], \"dependsOn\": [\"task ids\"], \"tier\": \"mechanical|standard|hard\", \"questions\": [{\"text\": \"...\", \"options\": [\"...\"]}]}. A block may carry only questions (leave out the title) when you just need an answer. Keep the prose above the block short: the app shows the draft and the questions as cards.";
 
 const SERVER: &str = "sushiai-orchestrator";
 const MAX_MESSAGES: usize = 200;
@@ -29,6 +29,132 @@ pub struct ChatMessage {
     pub role: String,
     pub text: String,
     pub ts: i64,
+    /// The task the orchestrator proposed in this reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<ChatDraft>,
+    /// Choices the orchestrator asked the owner to make in this reply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<ChatQuestion>,
+}
+
+/// A task the orchestrator proposed for the owner to confirm, read from a
+/// `sushi-draft` block.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatDraft {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub goal: String,
+    #[serde(default, deserialize_with = "crate::brief::lenient_criteria")]
+    pub criteria: Vec<String>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default, deserialize_with = "crate::brief::lenient_tier")]
+    pub tier: Option<Tier>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ChatQuestion {
+    pub text: String,
+    #[serde(default)]
+    pub options: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct DraftBlock {
+    #[serde(flatten)]
+    draft: ChatDraft,
+    #[serde(default, deserialize_with = "lenient_questions")]
+    questions: Vec<ChatQuestion>,
+}
+
+fn lenient_questions<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<ChatQuestion>, D::Error> {
+    let v: Option<Vec<serde_json::Value>> = Deserialize::deserialize(d).unwrap_or(None);
+    Ok(v.unwrap_or_default()
+        .into_iter()
+        .filter_map(|q| serde_json::from_value::<ChatQuestion>(q).ok())
+        .filter(|q| !q.text.trim().is_empty())
+        .collect())
+}
+
+/// The reply with its `sushi-draft` block removed, plus what the block held.
+struct ParsedReply {
+    text: String,
+    draft: Option<ChatDraft>,
+    questions: Vec<ChatQuestion>,
+}
+
+/// Byte span of the block [`crate::brief::last_fenced_block`] reads: from its
+/// opening marker through its closing fence or tag.
+fn draft_block_span(text: &str) -> Option<(usize, usize)> {
+    let fence = "```sushi-draft";
+    let open_tag = "<sushi-draft>";
+    let fence_at = text.rfind(fence);
+    let tag_at = text.rfind(open_tag);
+    if tag_at.is_some() && (fence_at.is_none() || tag_at > fence_at) {
+        let start = tag_at?;
+        let content = start + open_tag.len();
+        let close = "</sushi-draft>";
+        return Some((start, content + text[content..].find(close)? + close.len()));
+    }
+    let start = fence_at?;
+    let after_open = start + fence.len();
+    let content = after_open + text[after_open..].find('\n')? + 1;
+    let mut offset = content;
+    for line in text[content..].split_inclusive('\n') {
+        offset += line.len();
+        if line.trim() == "```" {
+            return Some((start, offset));
+        }
+    }
+    let close = text[content..].rfind("```")?;
+    Some((start, content + close + 3))
+}
+
+/// Reads the reply's last `sushi-draft` block. A block that does not parse,
+/// or holds neither a title nor a question, is no block: the text stays as is.
+fn parse_reply(reply: &str) -> ParsedReply {
+    let verbatim = || ParsedReply {
+        text: reply.to_string(),
+        draft: None,
+        questions: Vec::new(),
+    };
+    let Some(body) = crate::brief::last_fenced_block(reply, "sushi-draft") else {
+        return verbatim();
+    };
+    let Ok(block) = serde_json::from_str::<DraftBlock>(&body) else {
+        return verbatim();
+    };
+    let Some((start, end)) = draft_block_span(reply) else {
+        return verbatim();
+    };
+    let mut draft = block.draft;
+    draft.title = draft.title.trim().to_string();
+    if draft.title.is_empty() && block.questions.is_empty() {
+        return verbatim();
+    }
+    let before = reply[..start].trim_end();
+    let after = reply[end..].trim_start();
+    let mut text = match (before.is_empty(), after.is_empty()) {
+        (false, false) => format!("{before}\n\n{after}"),
+        (false, true) => before.to_string(),
+        _ => after.to_string(),
+    };
+    if text.trim().is_empty() {
+        text = if draft.title.is_empty() {
+            block.questions[0].text.clone()
+        } else {
+            draft.title.clone()
+        };
+    }
+    ParsedReply {
+        text,
+        draft: (!draft.title.is_empty()).then_some(draft),
+        questions: block.questions,
+    }
 }
 
 /// One conversation with the orchestrator agent.
@@ -58,6 +184,9 @@ pub struct ChatSession {
     /// creates for the same repo get it (`ORCHD_TASK_MCP`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_mcp: Option<serde_json::Value>,
+    /// The latest task the orchestrator proposed, until the owner acts on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<ChatDraft>,
 }
 
 impl ChatSession {
@@ -320,6 +449,8 @@ fn push(session: &mut ChatSession, role: &str, text: &str) {
         role: role.to_string(),
         text: truncate_chars(text, MAX_TEXT),
         ts: now_ms(),
+        draft: None,
+        questions: Vec::new(),
     });
     let excess = session.messages.len().saturating_sub(MAX_MESSAGES);
     session.messages.drain(..excess);
@@ -394,6 +525,20 @@ pub async fn handle_clear(
         session.title = None;
         session.session_id = None;
         session.error = None;
+        session.draft = None;
+        Ok(())
+    })?;
+    Ok(chats.thread_json())
+}
+
+/// Drops the current session's proposed task; its messages stay.
+pub async fn handle_clear_draft(
+    app: &App,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let repo = repo_param(&params)?;
+    let chats = change_idle(app, &repo, |chats| {
+        chats.current_mut().draft = None;
         Ok(())
     })?;
     Ok(chats.thread_json())
@@ -686,7 +831,16 @@ async fn run_turn(
                 outcome.error,
                 &turn,
             ) {
-                (Some(reply), _, Turn::Owner) => push(&mut thread, "assistant", &reply),
+                (Some(reply), _, Turn::Owner) => {
+                    let parsed = parse_reply(&reply);
+                    push(&mut thread, "assistant", &parsed.text);
+                    if parsed.draft.is_some() {
+                        thread.draft = parsed.draft.clone();
+                    }
+                    let message = thread.messages.last_mut().expect("just pushed");
+                    message.draft = parsed.draft;
+                    message.questions = parsed.questions;
+                }
                 (Some(reply), _, Turn::Questions(ids)) => {
                     messages::reply_where_unanswered(app, ids, &reply)
                 }
@@ -1103,5 +1257,131 @@ mod tests {
         }
         assert_eq!(thread.messages.len(), MAX_MESSAGES);
         assert_eq!(thread.messages[0].text, "5");
+    }
+
+    fn block(json: &str) -> String {
+        format!("```sushi-draft\n{json}\n```")
+    }
+
+    #[test]
+    fn the_last_draft_block_wins_and_prose_around_it_stays() {
+        let reply = format!(
+            "Before.\n\n{}\n\nMiddle.\n\n{}\n\nAfter.",
+            block(r#"{"title":"First"}"#),
+            block(
+                r#"{"title":"Second","goal":"g","criteria":["a"],"dependsOn":["t1"],"tier":"hard"}"#
+            )
+        );
+        let parsed = parse_reply(&reply);
+        let draft = parsed.draft.unwrap();
+        assert_eq!(draft.title, "Second");
+        assert_eq!(draft.goal, "g");
+        assert_eq!(draft.criteria, vec!["a"]);
+        assert_eq!(draft.depends_on, vec!["t1"]);
+        assert_eq!(draft.tier, Some(Tier::Hard));
+        assert!(parsed.text.starts_with("Before."));
+        assert!(parsed.text.contains("Middle."));
+        assert!(parsed.text.ends_with("After."));
+        assert!(
+            parsed.text.contains("sushi-draft"),
+            "the earlier block stays"
+        );
+        assert!(!parsed.text.contains("Second"));
+    }
+
+    #[test]
+    fn stripping_covers_a_fence_closed_on_the_json_line_and_the_tag_form() {
+        let inline = parse_reply("Intro.\n```sushi-draft\n{\"title\":\"T\"}```\nOutro.");
+        assert_eq!(inline.text, "Intro.\n\nOutro.");
+        let tagged = parse_reply("Intro. <sushi-draft>{\"title\":\"T\"}</sushi-draft> Outro.");
+        assert_eq!(tagged.text, "Intro.\n\nOutro.");
+        assert_eq!(tagged.draft.unwrap().title, "T");
+    }
+
+    #[test]
+    fn a_malformed_or_empty_block_is_no_block() {
+        for reply in [
+            block("{not json"),
+            block(r#"{"title":"  ","goal":"g","questions":[{"text":""}]}"#),
+            block("[]"),
+        ] {
+            let parsed = parse_reply(&format!("Hi\n{reply}"));
+            assert_eq!(parsed.text, format!("Hi\n{reply}"));
+            assert!(parsed.draft.is_none());
+            assert!(parsed.questions.is_empty());
+        }
+    }
+
+    #[test]
+    fn an_unknown_tier_is_none_and_text_criteria_read_as_text() {
+        let parsed = parse_reply(&block(
+            r#"{"title":"T","tier":"huge","criteria":[{"text":"c1"},"c2",5]}"#,
+        ));
+        let draft = parsed.draft.unwrap();
+        assert_eq!(draft.tier, None);
+        assert_eq!(draft.criteria, vec!["c1", "c2"]);
+    }
+
+    #[test]
+    fn a_questions_only_block_has_no_draft_and_empty_questions_are_dropped() {
+        let parsed = parse_reply(&format!(
+            "Which one?\n{}",
+            block(r#"{"questions":[{"text":"A or B?","options":["A","B"]},{"text":" "}]}"#)
+        ));
+        assert!(parsed.draft.is_none());
+        assert_eq!(parsed.text, "Which one?");
+        assert_eq!(
+            parsed.questions,
+            vec![ChatQuestion {
+                text: "A or B?".into(),
+                options: vec!["A".into(), "B".into()]
+            }]
+        );
+    }
+
+    #[test]
+    fn a_block_only_reply_reads_as_the_title_else_the_first_question() {
+        let titled = parse_reply(&block(r#"{"title":"Do it","questions":[{"text":"Q?"}]}"#));
+        assert_eq!(titled.text, "Do it");
+        let asked = parse_reply(&block(r#"{"questions":[{"text":"Q1?"},{"text":"Q2?"}]}"#));
+        assert_eq!(asked.text, "Q1?");
+    }
+
+    #[tokio::test]
+    async fn clearing_the_draft_keeps_messages_and_other_sessions_and_is_refused_while_busy() {
+        let (app, _dir, repo) = test_app();
+        let draft = ChatDraft {
+            title: "T".into(),
+            ..Default::default()
+        };
+        converse(&app, &repo, "first", "h1");
+        let first = load(&app, &repo).current.clone();
+        let mut session = load(&app, &repo).current().clone();
+        session.draft = Some(draft.clone());
+        save(&app, &repo, &session);
+        handle_new(&app, json!({"repo": repo})).await.unwrap();
+        converse(&app, &repo, "second", "h2");
+        let mut session = load(&app, &repo).current().clone();
+        session.draft = Some(draft.clone());
+        save(&app, &repo, &session);
+
+        app.chat_turns
+            .lock()
+            .unwrap()
+            .insert(repo.clone(), CancelToken::new());
+        let busy = handle_clear_draft(&app, json!({"repo": repo})).await;
+        assert_eq!(busy.unwrap_err(), BUSY);
+        assert!(load(&app, &repo).current().draft.is_some());
+        app.chat_turns.lock().unwrap().remove(&repo);
+
+        let thread = handle_clear_draft(&app, json!({"repo": repo}))
+            .await
+            .unwrap();
+        assert!(thread.get("draft").is_none());
+        assert_eq!(thread["messages"].as_array().unwrap().len(), 2);
+        let chats = load(&app, &repo);
+        assert!(chats.current().draft.is_none());
+        let other = chats.sessions.iter().find(|s| s.id == first).unwrap();
+        assert_eq!(other.draft, Some(draft));
     }
 }

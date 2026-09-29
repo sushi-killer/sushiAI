@@ -8,6 +8,7 @@ import {
 } from "./helpers";
 import type {
   FailureRow,
+  Note,
   Proposal,
   SpendSummary,
   Task,
@@ -418,6 +419,108 @@ export function EvolutionProposals({
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+/** The owner's standing notes for this repo, shown to the planner. Always
+ * rendered, because it is where the first note is added. A note saved from an
+ * approved proposal is marked. `refresh` changes whenever the task list does. */
+export function RepoNotes({ cwd, refresh }: { cwd: string; refresh: string }) {
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    orchestratorClient
+      .repoNotesList(cwd)
+      .then((loaded) => {
+        if (cancelled) return;
+        setNotes(loaded);
+        setError("");
+      })
+      .catch((caught: unknown) => {
+        if (cancelled) return;
+        setError(caught instanceof Error ? caught.message : String(caught));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, refresh]);
+
+  function fail(caught: unknown) {
+    setError(caught instanceof Error ? caught.message : String(caught));
+  }
+
+  function add() {
+    const text = draft.trim();
+    if (!text) return;
+    orchestratorClient
+      .repoNotesAdd(cwd, text)
+      .then((note) => {
+        setNotes((old) => [...old, note]);
+        setDraft("");
+        setError("");
+      })
+      .catch(fail);
+  }
+
+  function remove(id: string) {
+    orchestratorClient
+      .repoNotesRemove(cwd, id)
+      .then(() => {
+        setNotes((old) => old.filter((note) => note.id !== id));
+        setError("");
+      })
+      .catch(fail);
+  }
+
+  return (
+    <div className="orch-notes">
+      <span className="dialog-eyebrow">REPO NOTES</span>
+      {notes.map((note) => (
+        <div key={note.id} className="orch-note">
+          <span className="orch-note-text">{note.text}</span>
+          {note.source.startsWith("proposal:") && (
+            <span className="orch-note-source">from proposal</span>
+          )}
+          <button
+            className="orch-proposal-button"
+            aria-label="Remove note"
+            onClick={() => remove(note.id)}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <form
+        className="orch-note-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          add();
+        }}
+      >
+        <input
+          className="orch-note-input"
+          aria-label="New repo note"
+          placeholder="Standing guidance for the planner"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+        />
+        <button
+          className="orch-proposal-button"
+          type="submit"
+          disabled={!draft.trim()}
+        >
+          Add
+        </button>
+      </form>
+      {error && (
+        <div className="orch-proposal-error" role="alert">
+          {error}
+        </div>
+      )}
     </div>
   );
 }

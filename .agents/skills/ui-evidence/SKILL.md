@@ -45,16 +45,16 @@ open every image you produced before you describe it.
 To screenshot one orchd task's detail view, skip the steps above and run
 `node .agents/skills/ui-evidence/scripts/orchestrator-panel.mjs <seed.json> <task title>`
 (build prerequisites still apply). `<seed.json>` is a JSON array of task
-objects, or `{tasks, proposals}` to also seed evolution proposals: each
+objects, or `{tasks, proposals, notes}` to also seed evolution proposals and repo notes: each
 proposal is completed with an id (unless it has one), `repo` = this repo and
 `createdAt`, then written to `<dataDir>/evolution/proposals/<id>.json`, where
-orchd's store reads it. Task objects - only `title` is required, `status`/`tier`/`decisions`/`criteria`/
+orchd's store reads it. Each note (`text`, optional `id`, `source` - default `owner`, or `proposal:<id>` - and `createdAt`) is written under this repo's root in `<dataDir>/repo-notes.json`, the one file keyed by repo that orchd reads. Task objects - only `title` is required, `status`/`tier`/`decisions`/`criteria`/
 `attempts` (with `costUsd`) all default; `status` must be done, failed,
 stopped or waiting. `evidence: {"<attempt n>": [image paths]}` copies screenshots into that attempt's evidence dir. Give a seed a `key` to let others name it in `parent`,
 `dependsOn` (a task graph), `followUps` or `followUpOf`. The tasks are written into the throwaway profile before
 the app starts its own orchd there - no harness run, no API key. It opens the
 panel, picks the task by title, saves
-`artifacts/orchestrator-{window,detail,home}.png` (`home` is the orchestrator page before a task is picked), plus `artifacts/orchestrator-proposals.png` (a crop of the PROPOSALS list, only when proposals were seeded; `report.screenshots.proposals`), prints a JSON report, and
+`artifacts/orchestrator-{window,detail,home}.png` (`home` is the orchestrator page before a task is picked), plus `artifacts/orchestrator-proposals.png` (a crop of the PROPOSALS list, only when proposals were seeded; `report.screenshots.proposals`), plus `artifacts/orchestrator-repo-notes.png` (a crop of the REPO NOTES section, only when notes were seeded; `report.screenshots.notes`), prints a JSON report, and
 exits non-zero with `error` set on any failure, including an unmatched title.
 
 ## Orchestrator task notices

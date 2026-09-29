@@ -614,6 +614,10 @@ impl App {
             .handle_task_create(json!({"repo": p.repo, "request": request, "start": true}))
             .await?;
         p.task_id = task.get("id").and_then(|v| v.as_str()).map(String::from);
+        if matches!(p.form, ProposalForm::Doc | ProposalForm::Command) {
+            self.add_repo_note(&p.repo, &p.change, format!("proposal:{}", p.id))
+                .await?;
+        }
         p.status = ProposalStatus::Approved;
         self.store_proposal(&p)?;
         serde_json::to_value(&p).map_err(|e| e.to_string())

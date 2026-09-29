@@ -4,14 +4,18 @@
 //
 //   node .agents/skills/ui-evidence/scripts/orchestrator-panel.mjs <seed.json> <task title>
 //
-// <seed.json> is a JSON array of task objects, or {tasks, proposals} (see
+// <seed.json> is a JSON array of task objects, or {tasks, proposals, notes} (see
 // SKILL.md for the shape); only `title` is required on a task, everything
 // else defaults. The tasks are written as task.json files into the throwaway
 // profile's orchd data dir before the app starts; the app then spawns orchd
 // on that profile as usual, which loads them. Each proposal is completed
 // (id, repo, createdAt) and written to <dataDir>/evolution/proposals/<id>.json,
 // the path orchd's store reads; when any were seeded the run also saves
-// artifacts/orchestrator-proposals.png, a crop of the PROPOSALS list. Only finished/waiting statuses are accepted, because orchd resumes
+// artifacts/orchestrator-proposals.png, a crop of the PROPOSALS list. Each note is completed (id, source
+// "owner", createdAt) and written under this repo's root in
+// <dataDir>/repo-notes.json ({repo: [note]}, what orchd's store reads); when
+// any were seeded the run also saves artifacts/orchestrator-repo-notes.png,
+// a crop of the REPO NOTES section. Only finished/waiting statuses are accepted, because orchd resumes
 // queued/running/drafting tasks on start - a fixture must never run a harness.
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
@@ -91,11 +95,15 @@ function taskJson(seed, repo, now, id, ids) {
 
 async function loadSeed(seedPath) {
   const raw = JSON.parse(await fs.readFile(seedPath, "utf8"));
-  if (Array.isArray(raw)) return { tasks: raw, proposals: [] };
+  if (Array.isArray(raw)) return { tasks: raw, proposals: [], notes: [] };
   if (raw && Array.isArray(raw.tasks))
-    return { tasks: raw.tasks, proposals: raw.proposals ?? [] };
+    return {
+      tasks: raw.tasks,
+      proposals: raw.proposals ?? [],
+      notes: raw.notes ?? [],
+    };
   throw new Error(
-    "seed file must be a JSON array of tasks or {tasks, proposals}",
+    "seed file must be a JSON array of tasks or {tasks, proposals, notes}",
   );
 }
 
@@ -112,7 +120,7 @@ if (!seedPath || !title) {
   let app = null;
 
   try {
-    const { tasks, proposals } = await loadSeed(seedPath);
+    const { tasks, proposals, notes } = await loadSeed(seedPath);
     const now = Date.now();
     const ids = new Map(
       tasks.filter((seed) => seed.key).map((seed) => [seed.key, randomUUID()]),
@@ -150,6 +158,20 @@ if (!seedPath || !title) {
       await fs.writeFile(
         `${proposalsDir}/${id}.json`,
         JSON.stringify(proposal, null, 2),
+      );
+    }
+    if (!Array.isArray(notes)) throw new Error("notes must be an array");
+    if (notes.length > 0) {
+      const seeded = notes.map((seed, index) => ({
+        id: randomUUID(),
+        source: "owner",
+        ...seed,
+        createdAt: now + index,
+      }));
+      await fs.mkdir(dataDir, { recursive: true });
+      await fs.writeFile(
+        `${dataDir}/repo-notes.json`,
+        JSON.stringify({ [root]: seeded }, null, 2),
       );
     }
     report.seededTitles = tasks.map((t) => t.title);
@@ -223,6 +245,12 @@ if (!seedPath || !title) {
         .locator(".orch-proposals")
         .screenshot({ path: shot("orchestrator-proposals") });
     }
+    if (notes.length > 0) {
+      await page.locator(".orch-notes").waitFor({ timeout: 10000 });
+      await page
+        .locator(".orch-notes")
+        .screenshot({ path: shot("orchestrator-repo-notes") });
+    }
     await row.first().click();
     await page.locator(".orch-detail").waitFor();
 
@@ -237,6 +265,7 @@ if (!seedPath || !title) {
       ...(proposals.length > 0
         ? { proposals: shot("orchestrator-proposals") }
         : {}),
+      ...(notes.length > 0 ? { notes: shot("orchestrator-repo-notes") } : {}),
     };
     report.selectedTitle = title;
   } catch (error) {

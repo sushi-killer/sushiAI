@@ -837,7 +837,7 @@ mod tests {
         assert_eq!(at("--tools"), "Read,Grep,Glob");
         assert_eq!(at("--mcp-config"), "/d/mcp.json");
         assert_eq!(at("--resume"), "sess");
-        assert_eq!(at("--allowedTools").split(',').count(), 19);
+        assert_eq!(at("--allowedTools").split(',').count(), 22);
         assert!(at("--allowedTools").contains("mcp__sushiai-orchestrator__orchestrator_reply"));
         assert!(!at("--allowedTools").contains("task_delete"));
         assert!(!argv.iter().any(|a| a == "acceptEdits"));

@@ -1459,3 +1459,55 @@
   padding: 2px 10px 2px 0;
   text-align: left;
 }
+
+.orch-proposal-button:disabled {
+  opacity: 0.5;
+}
+
+/* The owner's repo notes beside the proposals. */
+.orch-notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-xs);
+  padding-bottom: var(--gap-sm);
+}
+
+.orch-note {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  padding: var(--gap-xs) var(--gap-sm);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+.orch-note-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.orch-note-source {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.orch-note-form {
+  display: flex;
+  gap: var(--gap-sm);
+}
+
+.orch-note-input {
+  flex: 1;
+  min-width: 0;
+  padding: var(--gap-xs) var(--gap-sm);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: var(--text-sm);
+}

@@ -130,8 +130,8 @@ fn a_dependency_question_that_became_moot_while_down_clears_on_start() {
     let call1 = |m: &str, p: serde_json::Value| request_on(&socket1, m, p, Some(&token1));
     let dep = call1(
         "task.create",
-        serde_json::json!({"repo": repo.path().to_str().unwrap(), "title": "SLOW dependency",
-        "goal": "g", "verify": ["true"], "start": true}),
+        serde_json::json!({"repo": repo.path().to_str().unwrap(), "title": "Slow dependency",
+        "goal": "SLOW g", "verify": ["true"], "start": true}),
     );
     let dep_id = dep["id"].as_str().unwrap().to_string();
     let dependent = call1(

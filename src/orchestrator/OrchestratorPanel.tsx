@@ -60,6 +60,7 @@ import { RichText } from "../agents/AgentsView";
 import {
   EvolutionProposals,
   RecurringFailures,
+  RepoNotes,
   SpendBlock,
   TaskCostLine,
   TaskTimelineBar,
@@ -1347,10 +1348,16 @@ export function OrchestratorPanel({
           />
         )}
         {current.kind === "chat" && (
-          <EvolutionProposals
-            cwd={cwd}
-            refresh={live.tasks.map((t) => `${t.id}:${t.updatedAt}`).join()}
-          />
+          <>
+            <EvolutionProposals
+              cwd={cwd}
+              refresh={live.tasks.map((t) => `${t.id}:${t.updatedAt}`).join()}
+            />
+            <RepoNotes
+              cwd={cwd}
+              refresh={live.tasks.map((t) => `${t.id}:${t.updatedAt}`).join()}
+            />
+          </>
         )}
         <OrchestratorChat
           cwd={cwd}

@@ -4,13 +4,13 @@
 //! harness (spec step 3).
 
 use crate::model::{
-    Attempt, AttemptStatus, Baseline, Check, Message, MessageKind, ReviewResult, Stage, Task, Tier,
-    Variant, VerifyOutcome,
+    Attempt, AttemptStatus, Baseline, Check, Message, MessageKind, ReviewResult, Stage, Task,
+    TaskStatus, Tier, Variant, VerifyOutcome,
 };
 
 /// Bump when any brief template or fixed instruction block changes: it is
 /// part of every run's `promptHash`.
-pub const BRIEF_TEMPLATE_VERSION: u32 = 2;
+pub const BRIEF_TEMPLATE_VERSION: u32 = 3;
 
 const MAX_FAILURE_DETAIL: usize = 1500;
 /// The latest failure is the one the next attempt has to fix, so it gets the whole
@@ -357,6 +357,91 @@ pub fn coordination_block(task_id: &str, inbox: &[(String, Message)]) -> String 
         }
     }
     out
+}
+
+const LANDED_ENTRY_MAX: usize = 1500;
+const LANDED_DECISIONS_MAX: usize = 5;
+const LANDED_FILES_MAX: usize = 20;
+const LANDED_LABEL: &str = "Result of this dependency";
+
+/// What the dependencies of `task` that are done delivered: title, summary,
+/// decisions, handoff and changed files of each, so a dependent starts from
+/// its results instead of rediscovering them. With `landed_after`, only
+/// dependencies whose last attempt ended after that time (a resume delta
+/// only needs what landed since the previous attempt). Empty when nothing
+/// qualifies. Every agent-written line sits in an untrusted block; the text
+/// is clipped before it is wrapped so the closing tag stays whole.
+pub fn landed_dependencies_block(task: &Task, all: &[Task], landed_after: Option<i64>) -> String {
+    let mut entries = String::new();
+    for id in &task.depends_on {
+        let Some(dep) = all.iter().find(|t| &t.id == id) else {
+            continue;
+        };
+        if dep.status != TaskStatus::Done {
+            continue;
+        }
+        let ended = dep.attempts.last().and_then(|a| a.ended_at);
+        if landed_after.is_some_and(|after| ended.is_none_or(|e| e <= after)) {
+            continue;
+        }
+        let passed = dep
+            .attempts
+            .iter()
+            .rev()
+            .find(|a| a.stage == Stage::Implement && a.status == AttemptStatus::Passed);
+        let mut text = format!("Title: {}", dep.title);
+        if let Some(summary) = passed.and_then(|a| a.summary.as_deref()) {
+            text.push_str(&format!("\nSummary: {summary}"));
+        }
+        let decisions: Vec<&String> = dep
+            .decisions
+            .iter()
+            .filter(|d| d.starts_with("Agent:") || d.starts_with("Owner:"))
+            .collect();
+        let skip = decisions.len().saturating_sub(LANDED_DECISIONS_MAX);
+        if !decisions[skip..].is_empty() {
+            text.push_str("\nDecisions:");
+            for d in &decisions[skip..] {
+                text.push_str(&format!("\n{d}"));
+            }
+        }
+        if let Some(handoff) = passed.and_then(|a| a.handoff.as_deref()) {
+            if !handoff.trim().is_empty() {
+                text.push_str(&format!("\nHandoff: {handoff}"));
+            }
+        }
+        if let Some(a) = passed.filter(|a| !a.changed_files.is_empty()) {
+            text.push_str("\nChanged files:");
+            for f in a.changed_files.iter().take(LANDED_FILES_MAX) {
+                text.push_str(&format!("\n{f}"));
+            }
+            if a.changed_files.len() > LANDED_FILES_MAX {
+                text.push_str(&format!(
+                    "\n+{} more",
+                    a.changed_files.len() - LANDED_FILES_MAX
+                ));
+            }
+        }
+        let heading = format!("### {}\n", dep.id);
+        let overhead = heading.len() + untrusted_block(LANDED_LABEL, "").len();
+        // The cap is measured in bytes; `truncate_chars` cuts at a char boundary and
+        // appends a 3-byte ellipsis, so a byte budget also bounds the character count.
+        let room = LANDED_ENTRY_MAX.saturating_sub(overhead);
+        let text = if text.len() > room {
+            truncate_chars(&text, room.saturating_sub(3))
+        } else {
+            text
+        };
+        entries.push_str(&heading);
+        entries.push_str(&untrusted_block(LANDED_LABEL, &text));
+        entries.push('\n');
+    }
+    if entries.is_empty() {
+        return String::new();
+    }
+    format!(
+        "## Landed dependencies\n\nThe tasks this one depends on are done and their work is already in this branch. What they reported:\n\n{entries}"
+    )
 }
 
 /// Tells the implementer that a check found two of its requirements in
@@ -723,17 +808,17 @@ const PLAN_SUBTASKS: &str = "When the request is too large for one agent session
 /// verbatim, then the fixed planning instructions and report format (spec:
 /// "harness-agnostic", so this takes no harness parameter, same as
 /// [`build_brief`]). The planner may split the request into subtasks.
-pub fn build_plan_brief(request: &str, variant: &Variant) -> String {
-    plan_brief(request, variant, true)
+pub fn build_plan_brief(request: &str, variant: &Variant, past_work: &str) -> String {
+    plan_brief(request, variant, past_work, true)
 }
 
 /// The drafting-stage brief for a subtask: the same, without the option to
 /// split again (a subtask never has subtasks of its own).
-pub fn build_subtask_plan_brief(request: &str, variant: &Variant) -> String {
-    plan_brief(request, variant, false)
+pub fn build_subtask_plan_brief(request: &str, variant: &Variant, past_work: &str) -> String {
+    plan_brief(request, variant, past_work, false)
 }
 
-fn plan_brief(request: &str, variant: &Variant, split: bool) -> String {
+fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) -> String {
     let mut extra = String::new();
     extra.push_str(&format!("\n\n{PLAN_CONTRACT}"));
     let mut format = PLAN_REPORT_FORMAT.to_string();
@@ -760,8 +845,13 @@ fn plan_brief(request: &str, variant: &Variant, split: bool) -> String {
             "]}],\"subtasks\":[{\"key\":\"a\",\"title\":\"...\",\"request\":\"...\",\"dependsOn\":[],\"paths\":[\"src/...\"]}]}\n```",
         );
     }
+    let past_work = if past_work.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", past_work.trim_end())
+    };
     format!(
-        "## Request\n\n{}\n\n## Instructions\n\n{}{extra}\n\n{format}",
+        "## Request\n\n{}\n\n{past_work}## Instructions\n\n{}{extra}\n\n{format}",
         request.trim(),
         PLAN_INSTRUCTIONS,
     )
@@ -779,12 +869,12 @@ pub const REVIEW_CONTRACT: &str = "Rule on every acceptance criterion, using its
 /// unparseable draft -- a fresh read-only session (planning never resumes,
 /// same as review), so it still needs the full request, just with an
 /// explicit reminder in front of it.
-pub fn build_plan_retry_brief(request: &str, variant: &Variant) -> String {
-    plan_retry(&build_plan_brief(request, variant))
+pub fn build_plan_retry_brief(request: &str, variant: &Variant, past_work: &str) -> String {
+    plan_retry(&build_plan_brief(request, variant, past_work))
 }
 
-pub fn build_subtask_plan_retry_brief(request: &str, variant: &Variant) -> String {
-    plan_retry(&build_subtask_plan_brief(request, variant))
+pub fn build_subtask_plan_retry_brief(request: &str, variant: &Variant, past_work: &str) -> String {
+    plan_retry(&build_subtask_plan_brief(request, variant, past_work))
 }
 
 fn plan_retry(brief: &str) -> String {
@@ -1717,14 +1807,14 @@ mod tests {
 
     #[test]
     fn the_plan_brief_always_asks_for_a_contract_and_a_final_verify_split() {
-        let brief = build_plan_brief("r", &Variant::default());
+        let brief = build_plan_brief("r", &Variant::default(), "");
         assert!(brief.contains("-- check:"));
         assert!(brief.contains("\"finalVerify\":[]"));
     }
 
     #[test]
     fn the_plan_brief_asks_for_the_exact_screenshot_command_on_a_screen_change() {
-        let brief = build_plan_brief("r", &Variant::default());
+        let brief = build_plan_brief("r", &Variant::default(), "");
         assert!(brief.contains("name the exact repo command that produces its screenshot evidence"));
     }
 
@@ -1896,7 +1986,11 @@ mod tests {
 
     #[test]
     fn plan_brief_carries_the_request_verbatim_and_asks_for_the_sushi_plan_fence() {
-        let brief = build_plan_brief("add dark mode to the settings screen", &Variant::default());
+        let brief = build_plan_brief(
+            "add dark mode to the settings screen",
+            &Variant::default(),
+            "",
+        );
         assert!(brief.contains("add dark mode to the settings screen"));
         assert!(brief.contains("sushi-plan"));
         assert!(brief.contains("AGENTS.md"));
@@ -1904,12 +1998,14 @@ mod tests {
 
     #[test]
     fn only_a_top_level_plan_brief_offers_subtasks() {
-        let top = build_plan_brief("r", &Variant::default());
+        let top = build_plan_brief("r", &Variant::default(), "");
         assert!(top.contains("\"subtasks\":[{\"key\""));
         assert!(top.contains("prefer 2-5 parts"));
-        let part = build_subtask_plan_brief("r", &Variant::default());
+        let part = build_subtask_plan_brief("r", &Variant::default(), "");
         assert!(!part.contains("subtasks"));
-        assert!(build_subtask_plan_retry_brief("r", &Variant::default()).contains("previous reply"));
+        assert!(
+            build_subtask_plan_retry_brief("r", &Variant::default(), "").contains("previous reply")
+        );
     }
 
     #[test]
@@ -1926,7 +2022,7 @@ mod tests {
 
     #[test]
     fn plan_retry_brief_still_carries_the_original_request() {
-        let retry = build_plan_retry_brief("add dark mode", &Variant::default());
+        let retry = build_plan_retry_brief("add dark mode", &Variant::default(), "");
         assert!(retry.contains("add dark mode"));
         assert!(retry.contains("sushi-plan"));
         assert!(retry.to_lowercase().contains("previous reply"));
@@ -2496,10 +2592,28 @@ mod tests {
     }
 
     #[test]
+    fn plan_brief_places_past_work_between_request_and_instructions() {
+        let variant = Variant::default();
+        let section = "## Past work\n\nx\n";
+        for brief in [
+            build_plan_brief("Fix it", &variant, section),
+            build_subtask_plan_brief("Fix it", &variant, section),
+            build_plan_retry_brief("Fix it", &variant, section),
+            build_subtask_plan_retry_brief("Fix it", &variant, section),
+        ] {
+            let request = brief.find("## Request").unwrap();
+            let past = brief.find("## Past work").unwrap();
+            let instructions = brief.find("## Instructions").unwrap();
+            assert!(request < past && past < instructions);
+        }
+        assert!(!build_plan_brief("Fix it", &variant, "").contains("## Past work"));
+    }
+
+    #[test]
     fn plan_brief_without_grounded_checks_asks_for_none() {
         let variant = Variant::default();
-        let plan = build_plan_brief("Fix it", &variant);
-        let subtask = build_subtask_plan_brief("Fix it", &variant);
+        let plan = build_plan_brief("Fix it", &variant, "");
+        let subtask = build_subtask_plan_brief("Fix it", &variant, "");
         for brief in [&plan, &subtask] {
             assert!(brief.starts_with("## Request\n\nFix it\n\n## Instructions\n\n"));
             assert!(!brief.contains("heldOut"));
@@ -2510,8 +2624,8 @@ mod tests {
         assert!(plan.contains("\"subtasks\""));
         assert!(!subtask.contains("\"subtasks\""));
         // The retry briefs only add their one-line reminder in front.
-        assert!(build_plan_retry_brief("Fix it", &variant)
-            .ends_with(&build_plan_brief("Fix it", &variant)));
+        assert!(build_plan_retry_brief("Fix it", &variant, "")
+            .ends_with(&build_plan_brief("Fix it", &variant, "")));
     }
 
     #[test]
@@ -2521,10 +2635,10 @@ mod tests {
             ..Variant::default()
         };
         for brief in [
-            build_plan_brief("Fix it", &variant),
-            build_subtask_plan_brief("Fix it", &variant),
-            build_plan_retry_brief("Fix it", &variant),
-            build_subtask_plan_retry_brief("Fix it", &variant),
+            build_plan_brief("Fix it", &variant, ""),
+            build_subtask_plan_brief("Fix it", &variant, ""),
+            build_plan_retry_brief("Fix it", &variant, ""),
+            build_subtask_plan_retry_brief("Fix it", &variant, ""),
         ] {
             assert!(
                 brief.contains("\"checks\":[{\"criterion\":0,\"run\":\"...\"}],\"heldOut\":{\"criterion\":0,\"run\":\"...\"}"),
@@ -2541,8 +2655,8 @@ mod tests {
             // The format stays valid JSON-ish: checks sit before questions.
             assert!(brief.find("\"checks\"").unwrap() < brief.find("\"questions\"").unwrap());
         }
-        assert!(build_plan_brief("Fix it", &variant).contains("\"subtasks\""));
-        assert!(!build_subtask_plan_brief("Fix it", &variant).contains("\"subtasks\""));
+        assert!(build_plan_brief("Fix it", &variant, "").contains("\"subtasks\""));
+        assert!(!build_subtask_plan_brief("Fix it", &variant, "").contains("\"subtasks\""));
     }
 
     fn grounded_task() -> Task {
@@ -2755,6 +2869,147 @@ mod tests {
         assert_eq!(brief.matches("{\"raw\":0,").count(), 5);
         assert_eq!(brief.matches("{\"raw\":39,").count(), 5);
         assert_eq!(brief.matches("{\"raw\":40,").count(), 0);
+    }
+
+    fn done_dependency(id: &str, ended_at: i64) -> Task {
+        let mut dep = sample_task();
+        dep.id = id.into();
+        dep.title = format!("Dependency {id}");
+        dep.status = TaskStatus::Done;
+        dep.decisions.clear();
+        let mut attempt = Attempt {
+            n: 1,
+            stage: Stage::Implement,
+            route_id: "claude-sonnet".into(),
+            harness: Harness::Claude,
+            model: "sonnet".into(),
+            reason: "tier default".into(),
+            session_id: None,
+            pgid: None,
+            started_at: 1,
+            ended_at: Some(ended_at),
+            status: AttemptStatus::Passed,
+            summary: Some("DEP_SUMMARY".into()),
+            handoff: Some("DEP_HANDOFF".into()),
+            changed_files: vec![],
+            verify: vec![],
+            gate_blocks: 0,
+            prefix_tokens: None,
+            review: None,
+            failure: None,
+            usage: None,
+            cost_usd: None,
+            cost_estimated: false,
+            review_cost_usd: None,
+            evidence: vec![],
+            advice: None,
+            advisor_cost_usd: None,
+            fingerprint: None,
+            review_fingerprint: None,
+            advisor_fingerprint: None,
+            candidates: vec![],
+        };
+        attempt.changed_files = vec!["a.txt".into()];
+        dep.attempts.push(attempt);
+        dep
+    }
+
+    fn dependent_of(ids: &[&str]) -> Task {
+        let mut task = sample_task();
+        task.id = "child".into();
+        task.depends_on = ids.iter().map(|s| s.to_string()).collect();
+        task
+    }
+
+    #[test]
+    fn landed_dependencies_skip_a_dependency_that_is_not_done() {
+        let mut dep = done_dependency("d1", 10);
+        dep.status = TaskStatus::Running;
+        let task = dependent_of(&["d1"]);
+        assert_eq!(landed_dependencies_block(&task, &[dep.clone()], None), "");
+        dep.status = TaskStatus::Done;
+        let block = landed_dependencies_block(&task, &[dep], None);
+        assert!(block.starts_with("## Landed dependencies"));
+        assert!(block.contains("### d1\n"));
+        assert!(block.contains("DEP_SUMMARY") && block.contains("DEP_HANDOFF"));
+        assert!(block.contains("a.txt"));
+    }
+
+    #[test]
+    fn landed_dependencies_keep_the_last_five_agent_and_owner_decisions() {
+        let mut dep = done_dependency("d1", 10);
+        dep.decisions = vec!["Rebase: onto main".into(), "Planner: split".into()];
+        for i in 0..7 {
+            dep.decisions.push(format!("Agent: choice {i}"));
+        }
+        dep.decisions.push("Owner: final call".into());
+        dep.decisions.push("Land: landed".into());
+        let block = landed_dependencies_block(&dependent_of(&["d1"]), &[dep], None);
+        assert!(!block.contains("Rebase:") && !block.contains("Planner:"));
+        assert!(!block.contains("Land:"));
+        assert!(!block.contains("choice 0") && !block.contains("choice 2"));
+        for i in 3..7 {
+            assert!(block.contains(&format!("Agent: choice {i}")));
+        }
+        assert!(block.contains("Owner: final call"));
+        assert_eq!(block.matches("Agent: choice").count(), 4);
+    }
+
+    #[test]
+    fn landed_dependencies_list_twenty_files_then_the_rest_as_a_count() {
+        let mut dep = done_dependency("d1", 10);
+        dep.attempts[0].changed_files = (1..=25).map(|i| format!("f{i:02}.txt")).collect();
+        let block = landed_dependencies_block(&dependent_of(&["d1"]), &[dep], None);
+        assert_eq!(block.matches(".txt").count(), 20);
+        assert!(block.contains("f20.txt") && !block.contains("f21.txt"));
+        assert!(block.contains("+5 more"));
+    }
+
+    #[test]
+    fn landed_dependencies_clip_each_entry_and_keep_the_closing_fence() {
+        let mut dep = done_dependency("d1", 10);
+        dep.attempts[0].summary = Some("x".repeat(5000));
+        let other = done_dependency("d2", 10);
+        let block = landed_dependencies_block(&dependent_of(&["d1", "d2"]), &[dep, other], None);
+        let first = block.split("### d2").next().unwrap();
+        let entry = first.split("### d1\n").nth(1).unwrap().trim_end();
+        assert!(entry.len() <= 1500, "entry was {} bytes", entry.len());
+        assert!(entry.ends_with("</untrusted-data>"));
+        assert_eq!(block.matches("</untrusted-data>").count(), 2);
+    }
+
+    #[test]
+    fn landed_dependencies_clip_multibyte_text_within_the_cap() {
+        let mut dep = done_dependency("d1", 10);
+        dep.attempts[0].summary = Some("\u{1F642}".repeat(1000));
+        let block = landed_dependencies_block(&dependent_of(&["d1"]), &[dep], None);
+        let entry = block.split("### d1\n").nth(1).unwrap().trim_end();
+        assert!(entry.chars().count() <= 1500);
+        assert!(entry.len() <= 1500, "entry was {} bytes", entry.len());
+        assert!(entry.ends_with("</untrusted-data>"));
+    }
+
+    #[test]
+    fn landed_dependencies_only_include_those_that_ended_after_landed_after() {
+        let old = done_dependency("old", 10);
+        let new = done_dependency("new", 30);
+        let task = dependent_of(&["old", "new"]);
+        let all = [old, new];
+        let both = landed_dependencies_block(&task, &all, None);
+        assert!(both.contains("### old") && both.contains("### new"));
+        let since = landed_dependencies_block(&task, &all, Some(20));
+        assert!(!since.contains("### old") && since.contains("### new"));
+        assert_eq!(landed_dependencies_block(&task, &all, Some(30)), "");
+    }
+
+    #[test]
+    fn a_parent_dependency_shows_only_its_title_and_decisions() {
+        let mut dep = done_dependency("d1", 10);
+        dep.attempts.clear();
+        dep.decisions = vec!["Agent: split it".into()];
+        let block = landed_dependencies_block(&dependent_of(&["d1"]), &[dep], None);
+        assert!(block.contains("Dependency d1") && block.contains("Agent: split it"));
+        assert!(!block.contains("Summary:") && !block.contains("Changed files"));
     }
 }
 

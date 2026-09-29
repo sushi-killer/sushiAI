@@ -503,6 +503,14 @@ export type ProposalForm =
 
 export type ProposalCounts = { tasks: number; signals: number };
 
+/** One owner-approved standing note about a repo (`repo.notes.*`). */
+export type Note = {
+  id: string;
+  text: string;
+  source: "owner" | `proposal:${string}`;
+  createdAt: number;
+};
+
 export type Proposal = {
   id: string;
   clusterKey: string;

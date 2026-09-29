@@ -919,3 +919,228 @@ fn dropping_the_only_subtask_stops_the_parent_instead_of_implementing_it() {
         let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
     }
 }
+
+/// The dependency (goal MAKE_DEP) runs `dep_writes` and reports DEP_*;
+/// the dependent (goal MAKE_CHILD) writes child.txt; a planner brief gets a
+/// plan whose goal is MAKE_CHILD.
+fn dependency_results_script(dep_writes: &str) -> String {
+    format!(
+        r#"#!/bin/sh
+input="$(cat)"
+out() {{
+  printf '%s\n' '{{"type":"system","subtype":"init","session_id":"sess-fake"}}'
+  printf '%s\n' "{{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}},\"result\":$1}}"
+}}
+case "$input" in
+  *sushi-plan*)
+    out '"```sushi-plan\n{{\"title\":\"Child\",\"goal\":\"MAKE_CHILD: create child.txt\",\"verify\":[\"test -f child.txt\"]}}\n```"' ;;
+  *MAKE_CHILD*)
+    echo child > child.txt
+    out '"```sushi-report\n{{\"outcome\":\"complete\",\"summary\":\"child done\",\"decisions\":[],\"question\":\"\"}}\n```"' ;;
+  *MAKE_DEP*)
+    {dep_writes}
+    out '"```sushi-report\n{{\"outcome\":\"complete\",\"summary\":\"DEP_SUMMARY\",\"handoff\":\"DEP_HANDOFF\",\"decisions\":[\"DEP_DECISION\"],\"question\":\"\"}}\n```"' ;;
+esac
+"#
+    )
+}
+
+fn create_dependency(daemon: &Daemon, repo: &Path, verify: &str) -> serde_json::Value {
+    let dep = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.to_str().unwrap(),
+            "title": "The dependency",
+            "goal": "MAKE_DEP: write the dependency's files",
+            "verify": [verify],
+            "start": false,
+        }),
+    );
+    let id = dep["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": id}));
+    let dep = settle(daemon, &id);
+    assert_eq!(dep["status"], "done", "task JSON: {dep}");
+    dep
+}
+
+fn create_dependent(
+    daemon: &Daemon,
+    repo: &Path,
+    dep_id: &str,
+    fields: serde_json::Value,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "repo": repo.to_str().unwrap(),
+        "dependsOn": [dep_id],
+        "start": false,
+    });
+    for (k, v) in fields.as_object().unwrap() {
+        body[k] = v.clone();
+    }
+    let created = daemon.request("task.create", body);
+    let id = created["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": id}));
+    settle(daemon, &id)
+}
+
+#[test]
+fn a_dependents_first_brief_carries_the_landed_dependencys_results() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        &dependency_results_script("echo dep > dep.txt"),
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_off(&daemon);
+    let repo = init_git_repo();
+    let dep = create_dependency(&daemon, repo.path(), "test -f dep.txt");
+    let dep_id = dep["id"].as_str().unwrap().to_string();
+    let child = create_dependent(
+        &daemon,
+        repo.path(),
+        &dep_id,
+        serde_json::json!({
+            "title": "The dependent",
+            "goal": "MAKE_CHILD: create child.txt",
+            "verify": ["test -f child.txt"],
+        }),
+    );
+    assert_eq!(child["status"], "done", "task JSON: {child}");
+    let child_id = child["id"].as_str().unwrap();
+
+    let brief = run_file(&daemon, child_id, "brief.md");
+    assert!(brief.contains("## Landed dependencies"), "{brief}");
+    assert!(brief.contains("DEP_SUMMARY"), "{brief}");
+    assert!(brief.contains("Agent: DEP_DECISION"), "{brief}");
+    assert!(brief.contains("DEP_HANDOFF"), "{brief}");
+    assert!(brief.contains("dep.txt"), "{brief}");
+    assert!(
+        brief.find("## Landed dependencies").unwrap() < brief.find("## Report format").unwrap()
+    );
+    assert!(!run_file(&daemon, &dep_id, "brief.md").contains("## Landed dependencies"));
+
+    let worktrees = [dep["worktree"].clone(), child["worktree"].clone()];
+    daemon.shutdown_and_wait();
+    for wt in worktrees {
+        let _ = std::fs::remove_dir_all(wt.as_str().unwrap());
+    }
+}
+
+#[test]
+fn a_plan_brief_carries_the_results_of_a_dependency_that_was_already_done() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        &dependency_results_script("echo dep > dep.txt"),
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_off(&daemon);
+    let repo = init_git_repo();
+    let dep = create_dependency(&daemon, repo.path(), "test -f dep.txt");
+    let dep_id = dep["id"].as_str().unwrap().to_string();
+    let child = create_dependent(
+        &daemon,
+        repo.path(),
+        &dep_id,
+        serde_json::json!({"request": "build on the dependency"}),
+    );
+    // The plan attempt passed; the drafted task waits for the owner.
+    assert_eq!(child["attempts"][0]["stage"], "plan", "task JSON: {child}");
+    let brief = run_file(&daemon, child["id"].as_str().unwrap(), "plan/brief.md");
+    assert!(brief.contains("sushi-plan"), "not the plan brief: {brief}");
+    assert!(brief.contains("## Landed dependencies"), "{brief}");
+    assert!(brief.contains("DEP_SUMMARY"), "{brief}");
+    assert!(
+        brief.find("## Landed dependencies").unwrap() < brief.find("## Report format").unwrap()
+    );
+
+    let worktrees = [dep["worktree"].clone(), child["worktree"].clone()];
+    daemon.shutdown_and_wait();
+    for wt in worktrees {
+        let _ = std::fs::remove_dir_all(wt.as_str().unwrap());
+    }
+}
+
+#[test]
+fn a_plan_brief_written_before_its_dependency_lands_has_no_landed_section() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        &dependency_results_script("echo dep > dep.txt"),
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_off(&daemon);
+    let repo = init_git_repo();
+    let dep = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "The dependency",
+            "goal": "MAKE_DEP: write the dependency's files",
+            "verify": ["test -f dep.txt"],
+            "start": false,
+        }),
+    );
+    let dep_id = dep["id"].as_str().unwrap().to_string();
+    let child = create_dependent(
+        &daemon,
+        repo.path(),
+        &dep_id,
+        serde_json::json!({"request": "build on the dependency"}),
+    );
+    assert_eq!(child["attempts"][0]["stage"], "plan", "task JSON: {child}");
+    let brief = run_file(&daemon, child["id"].as_str().unwrap(), "plan/brief.md");
+    assert!(brief.contains("sushi-plan"), "not the plan brief: {brief}");
+    assert!(!brief.contains("## Landed dependencies"), "{brief}");
+
+    let worktrees = [dep["worktree"].clone(), child["worktree"].clone()];
+    daemon.shutdown_and_wait();
+    for wt in worktrees {
+        if let Some(wt) = wt.as_str() {
+            let _ = std::fs::remove_dir_all(wt);
+        }
+    }
+}
+
+#[test]
+fn a_dependency_with_many_changed_files_lists_twenty_and_counts_the_rest() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        &dependency_results_script(
+            "for i in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25; do echo x > f$i.txt; done",
+        ),
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_off(&daemon);
+    let repo = init_git_repo();
+    let dep = create_dependency(&daemon, repo.path(), "test -f f25.txt");
+    let dep_id = dep["id"].as_str().unwrap().to_string();
+    let child = create_dependent(
+        &daemon,
+        repo.path(),
+        &dep_id,
+        serde_json::json!({
+            "title": "The dependent",
+            "goal": "MAKE_CHILD: create child.txt",
+            "verify": ["test -f child.txt"],
+        }),
+    );
+    assert_eq!(child["status"], "done", "task JSON: {child}");
+    let brief = run_file(&daemon, child["id"].as_str().unwrap(), "brief.md");
+    let listed = (1..=25)
+        .filter(|i| brief.contains(&format!("f{i:02}.txt")))
+        .count();
+    assert_eq!(listed, 20, "{brief}");
+    assert!(brief.contains("+5 more"), "{brief}");
+
+    let worktrees = [dep["worktree"].clone(), child["worktree"].clone()];
+    daemon.shutdown_and_wait();
+    for wt in worktrees {
+        let _ = std::fs::remove_dir_all(wt.as_str().unwrap());
+    }
+}

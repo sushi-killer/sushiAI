@@ -7,6 +7,7 @@ import type {
   ChatThread,
   FailureRow,
   Message,
+  Note,
   Proposal,
   Settings,
   SpendGroup,
@@ -97,4 +98,14 @@ export const orchestratorClient = {
   evolutionReject: (id: string, reason?: string) =>
     call<Proposal>("evolution.reject", { id, ...(reason ? { reason } : {}) }),
   evolutionAdopt: (id: string) => call<Proposal>("evolution.adopt", { id }),
+  repoNotesList: (repo: string) =>
+    call<{ repo: string; notes: Note[] }>("repo.notes.list", { repo }).then(
+      (result) => result.notes,
+    ),
+  repoNotesAdd: (repo: string, text: string) =>
+    call<Note>("repo.notes.add", { repo, text }),
+  repoNotesRemove: (repo: string, id: string) =>
+    call<{ removed: string }>("repo.notes.remove", { repo, id }).then(
+      () => undefined,
+    ),
 };

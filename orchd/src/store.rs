@@ -6,8 +6,9 @@
 //! file for the next read.
 
 use crate::model::{
-    AttemptStatus, Audit, AuditReport, AuditStatus, Proposal, Settings, Task, TaskStatus,
+    AttemptStatus, Audit, AuditReport, AuditStatus, Proposal, RepoNote, Settings, Task, TaskStatus,
 };
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -246,6 +247,21 @@ impl Store {
             }
         }
         Ok(recovered)
+    }
+
+    // -- repo notes ----------------------------------------------------------
+
+    pub fn repo_notes_path(&self) -> PathBuf {
+        self.data_dir.join("repo-notes.json")
+    }
+
+    /// Every repo's notes, keyed by repo root.
+    pub fn load_repo_notes(&self) -> io::Result<BTreeMap<String, Vec<RepoNote>>> {
+        Ok(read_json(&self.repo_notes_path())?.unwrap_or_default())
+    }
+
+    pub fn save_repo_notes(&self, notes: &BTreeMap<String, Vec<RepoNote>>) -> io::Result<()> {
+        write_json_atomic(&self.repo_notes_path(), notes)
     }
 
     // -- evolution proposals -----------------------------------------------

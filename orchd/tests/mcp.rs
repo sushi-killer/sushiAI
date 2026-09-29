@@ -209,13 +209,16 @@ fn initialize_tools_list_and_tools_call_over_stdio() {
         "task_report",
         "task_lead_touch",
         "evolution_run",
+        "repo_notes_list",
+        "repo_notes_add",
+        "repo_notes_remove",
     ] {
         assert!(
             names.contains(&expected),
             "missing tool {expected}: {names:?}"
         );
     }
-    assert_eq!(names.len(), 19, "unexpected extra tools: {names:?}");
+    assert_eq!(names.len(), 22, "unexpected extra tools: {names:?}");
     for tool in tools {
         assert!(
             !tool["inputSchema"]["properties"].is_null(),

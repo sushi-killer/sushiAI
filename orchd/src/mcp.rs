@@ -70,6 +70,10 @@ read-only proposer runs for the clusters worth acting on. Call it only when \
 the owner asks: nothing proposes on its own. It returns at once \
 with the clusters it started; proposals appear in the owner's evolution list, \
 and the owner approves them. Never approve, reject or adopt one yourself.
+- Repo notes are the owner's standing guidance for a repo, shown to the \
+planner in every plan brief. repo_notes_list shows them; add one with \
+repo_notes_add only when the owner asks, and remove one with \
+repo_notes_remove only when the owner asks.
 ";
 
 /// The role handed to a task agent attached through `orchd mcp --task`.
@@ -92,7 +96,7 @@ pub const TASK_TOOLS: [&str; 4] = [
 ];
 
 /// What the orchestrator agent gets: every tool below.
-pub const ORCHESTRATOR_TOOLS: [&str; 19] = [
+pub const ORCHESTRATOR_TOOLS: [&str; 22] = [
     "task_list",
     "task_get",
     "task_create",
@@ -112,6 +116,9 @@ pub const ORCHESTRATOR_TOOLS: [&str; 19] = [
     "orchestrator_reply",
     "repo_audit",
     "evolution_run",
+    "repo_notes_list",
+    "repo_notes_add",
+    "repo_notes_remove",
 ];
 
 fn from_schema() -> Value {
@@ -349,6 +356,42 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
             "evolution.run",
             "Cluster the recorded task signals (repeated waste: loops, throwaway scripts, repeated owner questions, ...) and start a read-only proposer run for each cluster that meets the evidence thresholds and has no proposal yet, at most the configured maximum. Returns the started clusters at once; each proposal is stored when its run ends. Also updates the measurement of adopted proposals.",
             json!({"type": "object", "properties": {}}),
+        ),
+        (
+            "repo_notes_list",
+            "repo.notes.list",
+            "List the owner's standing notes for a repository (id, text, source, createdAt). They are shown to the planner in every plan brief.",
+            json!({
+                "type": "object",
+                "properties": {"repo": {"type": "string", "description": "Absolute path of the repository, or any directory in it."}},
+                "required": ["repo"],
+            }),
+        ),
+        (
+            "repo_notes_add",
+            "repo.notes.add",
+            "Add a standing note for a repository. Only when the owner asks for it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Absolute path of the repository, or any directory in it."},
+                    "text": {"type": "string"},
+                },
+                "required": ["repo", "text"],
+            }),
+        ),
+        (
+            "repo_notes_remove",
+            "repo.notes.remove",
+            "Remove a repository note by id. Only when the owner asks for it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Absolute path of the repository, or any directory in it."},
+                    "id": {"type": "string"},
+                },
+                "required": ["repo", "id"],
+            }),
         ),
     ]
 }
@@ -748,6 +791,9 @@ mod tests {
                 "orchestrator_reply",
                 "repo_audit",
                 "evolution_run",
+                "repo_notes_list",
+                "repo_notes_add",
+                "repo_notes_remove",
             ]
         );
         assert_eq!(names, ORCHESTRATOR_TOOLS);

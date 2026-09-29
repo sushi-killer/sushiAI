@@ -54,6 +54,9 @@ const ALLOWED_METHODS = new Set([
   "evolution.approve",
   "evolution.reject",
   "evolution.adopt",
+  "repo.notes.list",
+  "repo.notes.add",
+  "repo.notes.remove",
 ]);
 
 const NOT_BUILT =

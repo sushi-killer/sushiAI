@@ -43,9 +43,11 @@ mod graph;
 mod hooks;
 mod land;
 mod lines;
+mod past_work;
 mod plan;
 mod questions;
 mod recovery;
+mod repo_notes;
 mod reports;
 mod review;
 mod routing;
@@ -277,6 +279,8 @@ pub struct App {
     proposals: std::sync::Mutex<HashMap<String, CancelToken>>,
     /// Held across a read-modify-write of a stored proposal.
     proposal_lock: tokio::sync::Mutex<()>,
+    /// Held across a read-modify-write of `repo-notes.json`.
+    notes_lock: tokio::sync::Mutex<()>,
     self_ref: OnceLock<std::sync::Weak<App>>,
 }
 
@@ -423,6 +427,7 @@ impl App {
             evolution_lock: tokio::sync::Mutex::new(()),
             proposals: std::sync::Mutex::new(HashMap::new()),
             proposal_lock: tokio::sync::Mutex::new(()),
+            notes_lock: tokio::sync::Mutex::new(()),
             self_ref: OnceLock::new(),
         });
         let _ = app.self_ref.set(Arc::downgrade(&app));
@@ -618,6 +623,9 @@ impl App {
             "evolution.approve" => self.handle_evolution_approve(params).await,
             "evolution.reject" => self.handle_evolution_reject(params).await,
             "evolution.adopt" => self.handle_evolution_adopt(params).await,
+            "repo.notes.list" => self.handle_repo_notes_list(params).await,
+            "repo.notes.add" => self.handle_repo_notes_add(params).await,
+            "repo.notes.remove" => self.handle_repo_notes_remove(params).await,
             "hook.stop" => self.handle_hook_stop(params).await,
             "shutdown" => self.handle_shutdown().await,
             other => Err(format!("unknown method: {other}")),

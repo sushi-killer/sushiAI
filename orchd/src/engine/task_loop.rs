@@ -411,6 +411,10 @@ pub(super) async fn run_task_loop(
             }
             _ => brief_text,
         };
+        let brief_text = brief::with_block_before_report(
+            &brief_text,
+            &brief::landed_dependencies_block(&task, &app.repo_tasks(&task.repo), None),
+        );
         // The messages sent to this task since its last attempt are
         // delivered here, with the attempt about to start.
         let brief_text = brief::with_block_before_report(

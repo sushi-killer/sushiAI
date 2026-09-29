@@ -220,6 +220,12 @@ test("call() rejects a method outside the protocol allowlist before touching the
     "evolution.adopt",
   ])
     assert.equal(ALLOWED_METHODS.has(method), true, method);
+  for (const method of [
+    "repo.notes.list",
+    "repo.notes.add",
+    "repo.notes.remove",
+  ])
+    assert.equal(ALLOWED_METHODS.has(method), true, method);
   assert.equal(ALLOWED_METHODS.has("hook.stop"), false);
 });
 

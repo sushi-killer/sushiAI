@@ -42,7 +42,7 @@ fn path_components(path: &str) -> Vec<&str> {
 
 /// The first pair of paths where one equals or is a directory prefix of the
 /// other, compared per path component: returns the shorter (the shared area).
-fn overlapping_path<'a>(a: &'a [String], b: &'a [String]) -> Option<&'a str> {
+pub(super) fn overlapping_path<'a>(a: &'a [String], b: &'a [String]) -> Option<&'a str> {
     for pa in a {
         let ca = path_components(pa);
         for pb in b {
@@ -436,6 +436,17 @@ pub(super) async fn run_plan_stage(
             repo_settings: true,
         };
 
+        // Once per round: the retry brief carries the same section.
+        let past_work = {
+            let all_tasks = app.store.list_tasks().unwrap_or_default();
+            let notes = app
+                .store
+                .load_repo_notes()
+                .unwrap_or_default()
+                .remove(&task.repo)
+                .unwrap_or_default();
+            super::past_work::past_work_section(&task, &notes, &all_tasks)
+        };
         let mut draft: Option<brief::PlanDraft> = None;
         let mut hard_failure = false;
         let mut over_budget = false;
@@ -457,13 +468,25 @@ pub(super) async fn run_plan_stage(
                 let _ = app.store.save_task(&task);
             }
             let brief_text = match (retry == 0, task.parent.is_some()) {
-                (true, false) => brief::build_plan_brief(&request_text, &task.variant()),
-                (false, false) => brief::build_plan_retry_brief(&request_text, &task.variant()),
-                (true, true) => brief::build_subtask_plan_brief(&request_text, &task.variant()),
-                (false, true) => {
-                    brief::build_subtask_plan_retry_brief(&request_text, &task.variant())
+                (true, false) => {
+                    brief::build_plan_brief(&request_text, &task.variant(), &past_work)
                 }
+                (false, false) => {
+                    brief::build_plan_retry_brief(&request_text, &task.variant(), &past_work)
+                }
+                (true, true) => {
+                    brief::build_subtask_plan_brief(&request_text, &task.variant(), &past_work)
+                }
+                (false, true) => brief::build_subtask_plan_retry_brief(
+                    &request_text,
+                    &task.variant(),
+                    &past_work,
+                ),
             };
+            let brief_text = brief::with_block_before_report(
+                &brief_text,
+                &brief::landed_dependencies_block(&task, &app.repo_tasks(&task.repo), None),
+            );
             let file_stem = if retry == 0 { "" } else { "-retry" };
             let _ = std::fs::write(run_dir.join(format!("brief{file_stem}.md")), &brief_text);
             let events_path = run_dir.join(format!("events{file_stem}.jsonl"));

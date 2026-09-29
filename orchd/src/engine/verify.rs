@@ -104,6 +104,42 @@ pub(super) async fn run_verify_commands(
     results
 }
 
+/// Grades an eval task: runs its set's `check` from the root of a throwaway
+/// detached worktree at `sha` (never the task's own), with the verify timeout.
+pub(super) async fn run_eval_check(
+    repo: &Path,
+    run_dir: &Path,
+    sha: &str,
+    cmd: &str,
+    sandbox: SandboxMode,
+    cancel: &CancelToken,
+) -> EvalCheck {
+    let path = run_dir.join("eval-check");
+    let failed = |tail: String| EvalCheck { code: None, tail };
+    let (r, p, s) = (repo.to_path_buf(), path.clone(), sha.to_string());
+    let made = tokio::task::spawn_blocking(move || {
+        git::remove_worktree(&r, &p);
+        git::add_detached_worktree(&r, &p, &s)?;
+        let _ = git::bootstrap_worktree(&r, &p);
+        Ok::<(), git::GitError>(())
+    })
+    .await;
+    match made {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return failed(format!("could not check out {sha}: {e}")),
+        Err(e) => return failed(format!("check checkout panicked: {e}")),
+    }
+    let allow_write = verify_allow_write_paths(&path, run_dir);
+    let out =
+        run_one_verify_command(&path, cmd, VERIFY_TIMEOUT, sandbox, &allow_write, cancel).await;
+    let (r, p) = (repo.to_path_buf(), path);
+    let _ = tokio::task::spawn_blocking(move || git::remove_worktree(&r, &p)).await;
+    EvalCheck {
+        code: out.code,
+        tail: out.tail,
+    }
+}
+
 /// Cached by a hash of `git diff <base>` + the untracked-file list: if
 /// nothing has changed since the last run (by the hook or the previous
 /// gate check), reuse its result instead of re-running the commands.

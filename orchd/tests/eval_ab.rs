@@ -366,3 +366,80 @@ fn task_create_rejects_a_route_override_naming_an_unknown_route_and_creates_noth
     assert_eq!(listed.matches("worktree ").count(), 1, "{listed}");
     daemon.shutdown_and_wait();
 }
+
+#[test]
+fn a_done_eval_task_counts_as_a_success_only_when_its_check_passes() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        FAKE_CLAUDE_PASS_NO_ARGS,
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    fit_sandbox(&mut settings);
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let create = |title: &str, check: &str| {
+        daemon.request(
+            "task.create",
+            serde_json::json!({
+                "repo": repo.path().to_str().unwrap(),
+                "title": title,
+                "goal": "Make a trivial change",
+                "verify": ["true"],
+                "evalSet": "set-x",
+                "evalName": title,
+                "evalCheck": check,
+            }),
+        )
+    };
+    // The check sees the task's final commit in a throwaway checkout, not
+    // the task's own worktree.
+    let good = create(
+        "good",
+        "test -f CHANGED_MARKER.txt && pwd | grep -q eval-check",
+    );
+    let bad = create("bad", "test -f NO_SUCH_FILE.txt; echo missing >&2; exit 3");
+    let mut worktrees = vec![];
+    for (task, code) in [(&good, 0), (&bad, 3)] {
+        let id = task["id"].as_str().unwrap().to_string();
+        let settled = poll_until(&daemon, &id, Duration::from_secs(30), |s| {
+            s == "done" || s == "failed" || s == "stopped" || s == "waiting"
+        });
+        assert_eq!(settled["status"], "done", "{settled}");
+        assert_eq!(settled["evalCheck"]["code"], code, "{settled}");
+        if code != 0 {
+            assert!(
+                settled["evalCheck"]["tail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("missing"),
+                "{settled}"
+            );
+        }
+        worktrees.push(settled["worktree"].as_str().unwrap().to_string());
+        let leftover = Path::new(&settled["worktree"].as_str().unwrap()).exists();
+        assert!(leftover, "the task's own worktree is left alone");
+    }
+
+    // The daemon's data dir feeds the report exactly as `orchd ab` reads it.
+    let out = Command::new(env!("CARGO_BIN_EXE_orchd"))
+        .args(["ab", "--eval", "set-x", "--data"])
+        .arg(daemon.data_dir())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("1/2 = 50%"), "{text}");
+    let listed = git_out(repo.path(), &["worktree", "list", "--porcelain"]);
+    assert!(!listed.contains("eval-check"), "{listed}");
+
+    daemon.shutdown_and_wait();
+    for w in worktrees {
+        let _ = std::fs::remove_dir_all(w);
+    }
+}
+
+const FAKE_CLAUDE_PASS_NO_ARGS: &str = "#!/bin/sh\ncat > /dev/null\necho changed > CHANGED_MARKER.txt\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n";

@@ -617,6 +617,14 @@ pub struct Task {
     pub eval_set: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eval_name: Option<String>,
+    /// Shell command that grades this eval task's final commit (from the
+    /// set's `check`); run from the repo root in a throwaway worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eval_check_cmd: Option<String>,
+    /// What that check returned; a task counts as a success only when it is
+    /// done and this is `code == 0` (or there is no check command).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eval_check: Option<EvalCheck>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<Question>,
     #[serde(default)]
@@ -659,6 +667,13 @@ pub enum AttemptStatus {
     Failed,
     Interrupted,
     Blocked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalCheck {
+    pub code: Option<i32>,
+    pub tail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1034,6 +1049,8 @@ mod tests {
             variant: Default::default(),
             eval_set: None,
             eval_name: None,
+            eval_check_cmd: None,
+            eval_check: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -1247,6 +1264,8 @@ mod tests {
             variant: Default::default(),
             eval_set: None,
             eval_name: None,
+            eval_check_cmd: None,
+            eval_check: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -1288,6 +1307,8 @@ mod tests {
             variant: Default::default(),
             eval_set: None,
             eval_name: None,
+            eval_check_cmd: None,
+            eval_check: None,
             created_at: 1,
             updated_at: 1,
         };

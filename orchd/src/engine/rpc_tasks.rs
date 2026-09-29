@@ -18,6 +18,7 @@ pub(super) struct NewTask {
     pub(super) paths: Vec<String>,
     pub(super) eval_set: Option<String>,
     pub(super) eval_name: Option<String>,
+    pub(super) eval_check_cmd: Option<String>,
     pub(super) created_at: i64,
 }
 
@@ -103,6 +104,9 @@ impl App {
             eval_set: Option<String>,
             #[serde(default, rename = "evalName")]
             eval_name: Option<String>,
+            /// The set entry's `check`: grades the task's final commit.
+            #[serde(default, rename = "evalCheck")]
+            eval_check: Option<String>,
             /// Ids of tasks that must be done before this one implements.
             #[serde(default, rename = "dependsOn")]
             depends_on: Vec<String>,
@@ -187,6 +191,7 @@ impl App {
                 paths: vec![],
                 eval_set: p.eval_set.clone().filter(|s| !s.trim().is_empty()),
                 eval_name: p.eval_name.clone().filter(|s| !s.trim().is_empty()),
+                eval_check_cmd: p.eval_check.clone().filter(|s| !s.trim().is_empty()),
                 created_at: now_ms(),
             })
             .await?;
@@ -342,6 +347,8 @@ impl App {
             variant: Some(new.variant),
             eval_set: new.eval_set,
             eval_name: new.eval_name,
+            eval_check_cmd: new.eval_check_cmd,
+            eval_check: None,
             created_at: new.created_at,
             updated_at: new.created_at,
         };

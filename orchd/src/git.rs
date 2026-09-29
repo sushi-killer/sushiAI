@@ -369,6 +369,23 @@ pub fn delete_wip_ref(worktree: &Path, task_id: &str) {
     let _ = run(worktree, &["update-ref", "-d", &wip_ref(task_id)]);
 }
 
+/// A detached, throwaway checkout of `sha` at `path` (for grading a
+/// finished task without touching its own worktree).
+pub fn add_detached_worktree(repo_root: &Path, path: &Path, sha: &str) -> Result<(), GitError> {
+    let p = path
+        .to_str()
+        .ok_or_else(|| GitError("non-utf8 path".into()))?;
+    run(repo_root, &["worktree", "add", "--detach", p, sha]).map(|_| ())
+}
+
+/// Removes a worktree made by `add_detached_worktree` (best effort).
+pub fn remove_worktree(repo_root: &Path, path: &Path) {
+    if let Some(p) = path.to_str() {
+        let _ = run(repo_root, &["worktree", "remove", "--force", p]);
+    }
+    let _ = run(repo_root, &["worktree", "prune"]);
+}
+
 /// Removes a worktree and its branch that nothing has used yet (best
 /// effort: an undone step leaves at most an unused branch or directory).
 pub fn discard_worktree(repo_root: &Path, path: &Path, branch: &str) {

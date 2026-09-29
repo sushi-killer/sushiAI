@@ -53,6 +53,8 @@ pub(super) fn task_with_status(status: TaskStatus) -> Task {
         variant: Default::default(),
         eval_set: None,
         eval_name: None,
+        eval_check_cmd: None,
+        eval_check: None,
         created_at: 1,
         updated_at: 1,
     }

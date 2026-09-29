@@ -1374,6 +1374,20 @@ pub(super) async fn run_task_loop(
                 task.attempts[idx].status = AttemptStatus::Passed;
                 task.attempts[idx].ended_at = Some(now_ms());
                 task.status = TaskStatus::Done;
+                if let Some(cmd) = task.eval_check_cmd.clone() {
+                    let sha = git::head_sha(&worktree).unwrap_or_default();
+                    task.eval_check = Some(
+                        run_eval_check(
+                            Path::new(&task.repo),
+                            &run_dir,
+                            &sha,
+                            &cmd,
+                            settings.sandbox,
+                            &cancel,
+                        )
+                        .await,
+                    );
+                }
             }
             Ok(Err(e)) => {
                 record_failure(&mut task, idx, FailureKind::Error, e.to_string());

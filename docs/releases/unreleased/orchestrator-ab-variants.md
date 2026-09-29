@@ -133,3 +133,18 @@
   action) records the owner's answer against an assumption and delivers it
   to the task's next attempt as a message; on a finished task it only
   records. `orchd ab` gets assumptions per task and overturn rate columns.
+- `orchd eval` grades and reports what labs report. A set entry may carry a
+  `check` (a shell command): once an eval task ends done, orchd runs it from
+  the root of a throwaway worktree at the task's final commit (never the
+  task's own), with the verify timeout, and stores `evalCheck: {code, tail}`;
+  a task is a success only when it is done and its check exits 0. All
+  four tasks in `orchd/evals/set-1.json` carry checks that run the reference
+  commit's own test by exact name. `orchd ab --eval <set>` adds, per variant
+  and fingerprint, success rate (pass@1), pass^k (the share of eval tasks
+  whose k repeats all succeeded), cost per successful task and median minutes
+  to done, plus a table of each variant's successes/k and $ per task, and
+  prints `baseline stale: <old> -> <new>` when a variant's older runs carry a
+  fingerprint other than its newest. `orchd eval harvest --data <dir> --repo
+<path> --out <file>` writes candidate entries (name, base, request,
+  reference, source task id, outcome) from the repo's finished non-eval
+  tasks (subtasks included); it never edits a set and skips tasks it already wrote.

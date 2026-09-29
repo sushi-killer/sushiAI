@@ -224,6 +224,7 @@ pub fn report_with(
             .or_default()
             .push(t);
     }
+    let headline_groups = groups.clone();
     let mut fingerprints: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (variant, fp) in groups.keys() {
         fingerprints
@@ -359,6 +360,9 @@ pub fn report_with(
         ));
     }
     if eval.is_some() {
+        out.push_str(&headline_table(&headline_groups));
+        out.push_str(&stale_baselines(&headline_groups));
+        out.push_str(&paired_table(&headline_groups));
         out.push_str(&per_task_table(tasks, eval));
     }
     let before = tasks
@@ -370,6 +374,139 @@ pub fn report_with(
         out.push_str(&format!(
             "\n{before} task(s) from before variants left out.\n"
         ));
+    }
+    out
+}
+
+/// A task is a success when it is done and its eval check, if the set gave
+/// one, exited 0. A check that was set but never ran (or was cut off) is not.
+fn succeeded(t: &Task) -> bool {
+    t.status == TaskStatus::Done
+        && match (&t.eval_check_cmd, &t.eval_check) {
+            (None, _) => true,
+            (Some(_), Some(c)) => c.code == Some(0),
+            (Some(_), None) => false,
+        }
+}
+
+type Groups<'a> = BTreeMap<(String, String), Vec<&'a Task>>;
+
+/// Tasks of one group by eval name, in name order.
+fn by_name<'a>(ts: &[&'a Task]) -> BTreeMap<String, Vec<&'a Task>> {
+    let mut names: BTreeMap<String, Vec<&Task>> = BTreeMap::new();
+    for t in ts {
+        let name = t.eval_name.clone().unwrap_or_else(|| "-".into());
+        names.entry(name).or_default().push(t);
+    }
+    names
+}
+
+/// What labs report, per variant and fingerprint: pass@1 over all runs, pass^k
+/// (the share of eval tasks whose every one of k repeats succeeded, k the
+/// largest repeat count seen), cost per successful task and median minutes to
+/// done.
+fn headline_table(groups: &Groups) -> String {
+    let mut out = String::from(
+        "\n| variant | fingerprint | runs | success rate | pass^k | $/successful task | median min to done |\n|---|---|---|---|---|---|---|\n",
+    );
+    for ((variant, fingerprint), ts) in groups {
+        let successes = ts.iter().filter(|t| succeeded(t)).count();
+        let names = by_name(ts);
+        let k = names.values().map(Vec::len).max().unwrap_or(0);
+        let all_k = names
+            .values()
+            .filter(|runs| runs.len() == k && runs.iter().all(|t| succeeded(t)))
+            .count();
+        let cost: f64 = ts.iter().map(|t| t.cost_usd).sum();
+        let minutes: Vec<f64> = ts
+            .iter()
+            .filter(|t| t.status == TaskStatus::Done)
+            .filter_map(|t| {
+                let start = t
+                    .attempts
+                    .iter()
+                    .find(|a| a.stage == Stage::Implement)?
+                    .started_at;
+                let end = t.attempts.iter().filter_map(|a| a.ended_at).max()?;
+                Some((end - start) as f64 / 60_000.0)
+            })
+            .collect();
+        out.push_str(&format!(
+            "| `{variant}` | {fingerprint} | {} | {}/{} = {:.0}% | {all_k}/{} = {:.0}% (k={k}) | {} | {} |\n",
+            ts.len(),
+            successes,
+            ts.len(),
+            successes as f64 / ts.len() as f64 * 100.0,
+            names.len(),
+            all_k as f64 / names.len().max(1) as f64 * 100.0,
+            fmt((successes > 0).then(|| cost / successes as f64), 2),
+            fmt(median(minutes), 0),
+        ));
+    }
+    out
+}
+
+/// One line per variant whose runs in this set carry a fingerprint other than
+/// the newest one for that variant: its older numbers were measured on a
+/// different model, harness version or prompt.
+fn stale_baselines(groups: &Groups) -> String {
+    let mut newest: BTreeMap<&str, (i64, &str)> = BTreeMap::new();
+    for ((variant, fingerprint), ts) in groups {
+        if fingerprint == "-" {
+            continue;
+        }
+        let latest = ts.iter().map(|t| t.created_at).max().unwrap_or(0);
+        let e = newest.entry(variant).or_insert((latest, fingerprint));
+        if latest > e.0 {
+            *e = (latest, fingerprint);
+        }
+    }
+    let mut out = String::new();
+    for (variant, fingerprint) in groups.keys() {
+        if let Some((_, new)) = newest.get(variant.as_str()) {
+            if fingerprint != "-" && fingerprint != new {
+                out.push_str(&format!(
+                    "\nbaseline stale: {fingerprint} -> {new} (variant `{variant}`)\n"
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// Per eval task, each variant's successes/k and total $.
+fn paired_table(groups: &Groups) -> String {
+    let mut variants: Vec<&String> = groups.keys().map(|(v, _)| v).collect();
+    variants.dedup();
+    let mut cells: BTreeMap<String, BTreeMap<&String, (usize, usize, f64)>> = BTreeMap::new();
+    for ((variant, _), ts) in groups {
+        for (name, runs) in by_name(ts) {
+            let c = cells
+                .entry(name)
+                .or_default()
+                .entry(variant)
+                .or_insert((0, 0, 0.0));
+            c.0 += runs.iter().filter(|t| succeeded(t)).count();
+            c.1 += runs.len();
+            c.2 += runs.iter().map(|t| t.cost_usd).sum::<f64>();
+        }
+    }
+    let mut out = String::from("\n| eval task |");
+    for v in &variants {
+        out.push_str(&format!(" `{v}` successes/k, $ |"));
+    }
+    out.push_str("\n|---|");
+    out.push_str(&"---|".repeat(variants.len()));
+    out.push('\n');
+    for (name, row) in cells {
+        out.push_str(&format!("| {name} |"));
+        for v in &variants {
+            match row.get(v) {
+                Some((ok, k, cost)) => out.push_str(&format!(" {ok}/{k}, ${cost:.2} |")),
+                None => out.push_str(" - |"),
+            }
+        }
+        out.push('\n');
     }
     out
 }
@@ -799,6 +936,113 @@ mod tests {
         assert!(row.contains("| 25 | 0 | 25 | 50 | 0 | 4 |"), "{row}");
         // Without --eval the per-task table is absent.
         assert!(!report(&tasks).contains("| task | variant |"));
+    }
+
+    fn graded(v: &Variant, name: &str, status: TaskStatus, check: Option<i32>, cost: f64) -> Task {
+        let mut t = task(v.clone(), status, cost, &[]);
+        t.eval_set = Some("set-1".into());
+        t.eval_name = Some(name.into());
+        t.attempts = vec![attempt("implement", None, None)];
+        if let Some(code) = check {
+            t.eval_check_cmd = Some("true".into());
+            t.eval_check = Some(crate::model::EvalCheck {
+                code: Some(code),
+                tail: String::new(),
+            });
+        }
+        t
+    }
+
+    #[test]
+    fn eval_headline_gives_pass_k_and_cost_per_successful_task_per_variant() {
+        use TaskStatus::{Done, Failed};
+        let a = Variant::default();
+        let b = Variant {
+            retry_mode: RetryMode::Fresh,
+            ..Variant::default()
+        };
+        let mut tasks = vec![];
+        // A: alpha 3/3 with no check; beta: one passing check, one failing
+        // check on a done task, one failed task. $9 for 4 successes.
+        for _ in 0..3 {
+            tasks.push(graded(&a, "alpha", Done, None, 1.0));
+        }
+        tasks.push(graded(&a, "beta", Done, Some(0), 2.0));
+        tasks.push(graded(&a, "beta", Done, Some(1), 2.0));
+        tasks.push(graded(&a, "beta", Failed, None, 2.0));
+        // B: alpha 2/3, beta 3/3. $4.50 for 5 successes.
+        tasks.push(graded(&b, "alpha", Done, Some(0), 1.0));
+        tasks.push(graded(&b, "alpha", Done, Some(0), 1.0));
+        tasks.push(graded(&b, "alpha", Failed, None, 1.0));
+        for _ in 0..3 {
+            tasks.push(graded(&b, "beta", Done, Some(0), 0.5));
+        }
+        let out = report_with(&tasks, Some("set-1"), &|_, _| None);
+        let row = |needle: &str| {
+            out.lines()
+                .find(|l| l.contains(needle) && l.contains("% (k=3)"))
+                .unwrap_or_else(|| panic!("no headline row for {needle}: {out}"))
+                .to_string()
+        };
+        let ra = row("\"resume\"");
+        assert!(
+            ra.contains("| 6 | 4/6 = 67% | 1/2 = 50% (k=3) | 2.25 |"),
+            "{ra}"
+        );
+        let rb = row("\"fresh\"");
+        assert!(
+            rb.contains("| 6 | 5/6 = 83% | 1/2 = 50% (k=3) | 0.90 |"),
+            "{rb}"
+        );
+        let pair = |name: &str| {
+            out.lines()
+                .find(|l| l.starts_with(&format!("| {name} | ")) && l.contains(", $"))
+                .unwrap_or_else(|| panic!("no paired row for {name}: {out}"))
+                .to_string()
+        };
+        let alpha = pair("alpha");
+        assert!(
+            alpha.contains("3/3, $3.00") && alpha.contains("2/3, $3.00"),
+            "{alpha}"
+        );
+        let beta = pair("beta");
+        assert!(
+            beta.contains("1/3, $6.00") && beta.contains("3/3, $1.50"),
+            "{beta}"
+        );
+        assert!(!out.contains("baseline stale"), "{out}");
+    }
+
+    #[test]
+    fn a_done_task_whose_check_never_ran_is_not_a_success() {
+        let mut t = graded(&Variant::default(), "alpha", TaskStatus::Done, None, 1.0);
+        assert!(succeeded(&t));
+        t.eval_check_cmd = Some("true".into());
+        assert!(!succeeded(&t));
+    }
+
+    #[test]
+    fn a_variant_run_on_a_newer_fingerprint_marks_the_older_one_stale() {
+        let v = Variant::default();
+        let run = |model: &str, created: i64| {
+            let mut t = graded(&v, "alpha", TaskStatus::Done, None, 1.0);
+            t.created_at = created;
+            t.attempts[0].fingerprint = Some(crate::model::Fingerprint {
+                models: vec![model.into()],
+                harness: crate::model::Harness::Claude,
+                harness_version: Some("2.0".into()),
+                prompt_hash: String::new(),
+            });
+            t
+        };
+        let tasks = vec![run("old-model", 1), run("new-model", 2)];
+        let out = report_with(&tasks, Some("set-1"), &|_, _| None);
+        assert!(
+            out.contains("baseline stale: claude: old-model (2.0) -> claude: new-model (2.0)"),
+            "{out}"
+        );
+        assert_eq!(out.matches("baseline stale").count(), 1, "{out}");
+        assert!(!report_with(&tasks, None, &|_, _| None).contains("baseline stale"));
     }
 
     #[test]

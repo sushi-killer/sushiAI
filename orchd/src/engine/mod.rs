@@ -597,6 +597,7 @@ impl App {
             "task.get" => self.handle_task_get(params).await,
             "task.create" => self.handle_task_create(params).await,
             "task.start" => self.handle_task_start(params).await,
+            "task.land" => self.handle_task_land(params).await,
             "task.stop" => self.handle_task_stop(params).await,
             "task.answer" => self.handle_task_answer(params).await,
             "task.report" => self.handle_task_report(params).await,

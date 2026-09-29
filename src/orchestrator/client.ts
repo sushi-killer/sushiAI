@@ -59,9 +59,11 @@ export const orchestratorClient = {
       verify?: string[];
       base?: string;
       start?: boolean;
+      source?: string;
     },
   ) => call<Task>("task.create", { repo, ...params }),
   taskStart: (id: string) => call<Task>("task.start", { id }),
+  taskLand: (id: string) => call<Task>("task.land", { id }),
   taskStop: (id: string) => call<Task>("task.stop", { id }),
   taskAnswer: (id: string, answer: string) =>
     call<Task>("task.answer", { id, answer }),

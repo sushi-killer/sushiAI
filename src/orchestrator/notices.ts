@@ -14,6 +14,8 @@ export type TaskNotice = {
   focus: TaskNoticeFocus;
   /** Answer choices of a needs-input notice. */
   options?: string[];
+  /** A done task that is not landed: the notice offers a Land action. */
+  canLand?: boolean;
 };
 
 /** What opening a notice needs: the task, its repo and where to scroll. */

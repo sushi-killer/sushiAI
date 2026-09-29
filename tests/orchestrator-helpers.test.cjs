@@ -210,7 +210,14 @@ test("statusDetail adds only what the pill and progress don't say, never the que
     ),
     "1 question for you",
   );
-  assert.equal(statusDetail(task({ status: "done", costUsd: 0.18 })), "$0.18");
+  assert.equal(
+    statusDetail(task({ status: "done", costUsd: 0.18 })),
+    "$0.18 · not landed",
+  );
+  assert.equal(
+    statusDetail(task({ status: "done", costUsd: 0.18, landedSha: "abc" })),
+    "$0.18 · landed",
+  );
   assert.equal(
     statusDetail(
       task({
@@ -225,7 +232,7 @@ test("statusDetail adds only what the pill and progress don't say, never the que
         ],
       }),
     ),
-    "review PASS · $0.18",
+    "review PASS · $0.18 · not landed",
   );
   assert.equal(
     statusDetail(

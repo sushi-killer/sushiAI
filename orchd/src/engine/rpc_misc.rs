@@ -75,7 +75,8 @@ impl App {
 
     /// `costs.summary {repo?, taskId?, sinceDays?, groupBy: [stage|model|route|repo|task|day]}`
     /// -> `{rows: [{key, keys, costUsd, runs, tokens, cacheHitRate}], totals,
-    /// leadTouch: {touched, marked, rate, byRepo, byWeek}}`.
+    /// leadTouch: {touched, marked, rate, byRepo, byWeek},
+    /// tasksBySource: {source: {tasks, costUsd}}}`.
     pub(super) async fn handle_costs_summary(
         &self,
         params: serde_json::Value,
@@ -110,6 +111,7 @@ impl App {
             group_by: p.group_by,
         };
         let mut summary = crate::costs::summarize(&records, &query, now_ms());
+        summary["tasksBySource"] = crate::costs::source_summary(&tasks, &query, now_ms());
         summary["leadTouch"] = crate::costs::lead_touch_summary(&tasks, &query, now_ms());
         Ok(summary)
     }

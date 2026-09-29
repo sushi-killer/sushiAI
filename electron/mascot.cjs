@@ -270,6 +270,20 @@ function registerMascot({
     return "Answered";
   });
 
+  handle("mascot-land", async (taskId) => {
+    if (typeof taskId !== "string" || taskId.length > 200)
+      throw new Error("Invalid task.");
+    const notice = queue.find(
+      (item) => item.kind === "done" && item.taskId === taskId && item.canLand,
+    );
+    if (!notice) throw new Error("That notice is gone.");
+    const service = getService();
+    if (!service) throw new Error("The orchestrator is not running.");
+    await service.call("task.land", { id: taskId });
+    dispatch({ type: "dismiss", id: notice.id });
+    return "Landing";
+  });
+
   handle("mascot-open", (taskId, focus) => {
     if (typeof taskId !== "string" || !FOCUSES.has(focus))
       throw new Error("Invalid notice.");

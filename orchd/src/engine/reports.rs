@@ -335,6 +335,7 @@ impl App {
             eval_set: None,
             eval_name: None,
             eval_check_cmd: None,
+            source: Some("handoff".to_string()),
             created_at: now_ms(),
         })
         .await

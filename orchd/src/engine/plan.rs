@@ -1025,6 +1025,7 @@ async fn split_into_subtasks(
                 eval_set: None,
                 eval_name: None,
                 eval_check_cmd: None,
+                source: Some("planner".to_string()),
                 // Keeps the planner's order when children are listed by age.
                 created_at: now + i as i64,
             })

@@ -23,6 +23,7 @@ pub(super) struct NewTask {
     pub(super) eval_set: Option<String>,
     pub(super) eval_name: Option<String>,
     pub(super) eval_check_cmd: Option<String>,
+    pub(super) source: Option<String>,
     pub(super) created_at: i64,
 }
 
@@ -172,6 +173,10 @@ impl App {
             /// on that task's branch.
             #[serde(default)]
             parent: Option<String>,
+            /// Where the work started (`TASK_SOURCES`); derived from the
+            /// caller when unset.
+            #[serde(default)]
+            source: Option<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         let settings = self.settings.read().unwrap().clone();
@@ -233,6 +238,17 @@ impl App {
             (Some(parent), _) => parent.branch.clone(),
             (None, base) => base.unwrap_or_else(|| "HEAD".to_string()),
         };
+        let source = match p.source.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(s) if TASK_SOURCES.contains(&s) => s.to_string(),
+            Some(s) => {
+                return Err(format!(
+                    "unknown source {s:?} ({})",
+                    TASK_SOURCES.join(", ")
+                ))
+            }
+            None if p.eval_set.is_some() => "eval".to_string(),
+            None => "cli".to_string(),
+        };
         let in_graph = parent.is_some() || !depends_on.is_empty();
         let task = self
             .create_task_record(NewTask {
@@ -261,6 +277,7 @@ impl App {
                 eval_set: p.eval_set.clone().filter(|s| !s.trim().is_empty()),
                 eval_name: p.eval_name.clone().filter(|s| !s.trim().is_empty()),
                 eval_check_cmd: p.eval_check.clone().filter(|s| !s.trim().is_empty()),
+                source: Some(source),
                 created_at: now_ms(),
             })
             .await?;
@@ -434,6 +451,7 @@ impl App {
             eval_set: new.eval_set,
             eval_name: new.eval_name,
             eval_check_cmd: new.eval_check_cmd,
+            source: new.source,
             eval_check: None,
             brief_check: Default::default(),
             queue: QueueState {
@@ -493,6 +511,82 @@ impl App {
                 self.spawn_task_loop(p.id.clone(), true);
             }
         }
+        let latest = self
+            .store
+            .load_task(&p.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        serde_json::to_value(&latest).map_err(|e| e.to_string())
+    }
+
+    /// `task.land {id}`: lands a done, unlanded top-level task now, through
+    /// the same landing queue a `variant.land` task uses. The task goes back
+    /// to `landing` and its loop does the rest; the default branch is still
+    /// refused unless `settings.landOnDefault`.
+    pub(super) async fn handle_task_land(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            id: String,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        validate_task_id(&self.store, &p.id)?;
+        let mut task = self
+            .store
+            .load_task(&p.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        if task.status != TaskStatus::Done {
+            return Err("only a done task can be landed".to_string());
+        }
+        if task.parent.is_some() {
+            return Err("a subtask lands on its parent by itself".to_string());
+        }
+        if task.landed_sha.is_some() {
+            return Err("task is already landed".to_string());
+        }
+        if task.archived {
+            return Err("task is archived; unarchive it first".to_string());
+        }
+        if self.controls.lock().unwrap().contains_key(&p.id) {
+            return Err("task is busy".to_string());
+        }
+        let Some(branch) = task.base_ref.clone() else {
+            return Err(
+                "the task was not started from a branch, so there is nothing to land on"
+                    .to_string(),
+            );
+        };
+        let (land_on_default, repo) = (
+            self.settings.read().unwrap().land_on_default,
+            PathBuf::from(&task.repo),
+        );
+        if !land_on_default {
+            let default = tokio::task::spawn_blocking(move || git::default_branch(&repo))
+                .await
+                .map_err(|e| e.to_string())?;
+            if default.as_deref() == Some(branch.as_str()) {
+                return Err(format!(
+                    "{branch} is the default branch and settings.landOnDefault is off"
+                ));
+            }
+        }
+        let all = self.repo_tasks(&task.repo);
+        if task.attempts.is_empty() && !is_parent(&task, &all) {
+            return Err("the task has no finished attempt to land".to_string());
+        }
+        let mut variant = task.variant();
+        variant.land = true;
+        task.variant = Some(variant);
+        task.status = TaskStatus::Landing;
+        task.decisions
+            .push(format!("Land: requested, landing on {branch}"));
+        task.updated_at = now_ms();
+        self.store.save_task(&task).map_err(|e| e.to_string())?;
+        self.broadcast_task(&task);
+        self.spawn_task_loop(p.id.clone(), true);
         let latest = self
             .store
             .load_task(&p.id)

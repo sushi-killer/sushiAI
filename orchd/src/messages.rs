@@ -369,6 +369,7 @@ mod tests {
             eval_set: None,
             eval_name: None,
             eval_check_cmd: None,
+            source: None,
             eval_check: None,
             brief_check: Default::default(),
             queue: Default::default(),

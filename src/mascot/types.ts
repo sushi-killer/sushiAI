@@ -26,6 +26,7 @@ export type MascotBridge = {
   onNotices(callback: (notices: MascotNotice[]) => void): () => void;
   answer(taskId: string, text: string): Promise<string>;
   open(taskId: string, focus: TaskNotice["focus"]): Promise<void>;
+  land(taskId: string): Promise<string>;
   restart(): Promise<void>;
   dismiss(id: string): Promise<void>;
 };

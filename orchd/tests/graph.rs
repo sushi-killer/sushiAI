@@ -1387,6 +1387,13 @@ fn answering_stop_after_a_daemon_restart_stops_the_parent_and_its_subtasks() {
     let parent = settle(&daemon, &parent_id);
     assert_eq!(parent["status"], "waiting", "task JSON: {parent}");
 
+    // A subtask may already be implementing when the daemon goes down; only
+    // an attempt started after the restart is a failure.
+    let before: Vec<usize> = children_of(&daemon, &parent)
+        .iter()
+        .map(|c| implement_attempts(c).len())
+        .collect();
+
     // Restart onto the same data dir: no live loop holds the question now.
     let _ = daemon.request("shutdown", serde_json::json!({}));
     let start = Instant::now();
@@ -1409,8 +1416,9 @@ fn answering_stop_after_a_daemon_restart_stops_the_parent_and_its_subtasks() {
     assert_eq!(parent["status"], "stopped", "task JSON: {parent}");
     assert!(parent["question"].is_null(), "{parent}");
     let children = children_of(&daemon, &parent);
-    for c in &children {
-        assert!(implement_attempts(c).is_empty(), "{c}");
+    assert_eq!(children.len(), before.len(), "{parent}");
+    for (c, before) in children.iter().zip(&before) {
+        assert_eq!(implement_attempts(c).len(), *before, "{c}");
         assert!(c["status"] != "running" && c["status"] != "done", "{c}");
     }
     daemon.shutdown_and_wait();

@@ -20,6 +20,7 @@ export type TaskCreateParams = {
   verify?: string[];
   base?: string;
   start?: boolean;
+  source?: string;
 };
 
 /** Adds a trimmed `base` to a task.create params object, only when the field
@@ -297,7 +298,12 @@ export function statusDetail(task: Task): string {
     case "done": {
       const review = reviewOf(task);
       const cost = formatCost(task.costUsd);
-      return review ? `review ${review.verdict} · ${cost}` : cost;
+      const landed = task.parent
+        ? ""
+        : task.landedSha
+          ? " · landed"
+          : " · not landed";
+      return (review ? `review ${review.verdict} · ${cost}` : cost) + landed;
     }
     case "stopped":
     case "failed":

@@ -528,6 +528,7 @@ fn handle_tools_call(bridge: &Bridge, params: &Value) -> Value {
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|text| serde_json::from_str(&text).ok());
     let args = with_task_mcp(method, args, task_mcp);
+    let args = with_source(method, args, bridge.task.is_some());
     let args = message_params(&p.name, args, bridge.task.as_deref());
     match call_orchd(&bridge.socket, &bridge.token, method, args) {
         Ok(result) => tool_ok(result),
@@ -550,6 +551,19 @@ fn with_task_mcp(method: &str, mut args: Value, task_mcp: Option<Value>) -> Valu
     {
         if let (Some(obj), Some(mcp)) = (args.as_object_mut(), task_mcp.get("mcp")) {
             obj.insert("mcp".to_string(), mcp.clone());
+        }
+    }
+    args
+}
+
+/// Records where a task created through this bridge started: the
+/// orchestrator chat agent (no task id) is `chat`, a task's own agent is
+/// `handoff`. A source the caller set itself is kept.
+fn with_source(method: &str, mut args: Value, from_task: bool) -> Value {
+    if method == "task.create" && args.get("source").is_none() {
+        if let Some(obj) = args.as_object_mut() {
+            let source = if from_task { "handoff" } else { "chat" };
+            obj.insert("source".to_string(), json!(source));
         }
     }
     args

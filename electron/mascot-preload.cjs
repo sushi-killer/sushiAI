@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld("mascot", {
   },
   answer: (taskId, text) => ipcRenderer.invoke("mascot-answer", taskId, text),
   open: (taskId, focus) => ipcRenderer.invoke("mascot-open", taskId, focus),
+  land: (taskId) => ipcRenderer.invoke("mascot-land", taskId),
   restart: () => ipcRenderer.invoke("mascot-restart"),
   dismiss: (id) => ipcRenderer.invoke("mascot-dismiss", id),
 });

@@ -35,6 +35,7 @@ const ALLOWED_METHODS = new Set([
   "task.get",
   "task.create",
   "task.start",
+  "task.land",
   "task.stop",
   "task.answer",
   "task.delete",
@@ -218,6 +219,7 @@ function orchestratorNotice(task) {
   let kind = "input";
   let body = cap(task.question?.text || "Needs your input.", 300);
   let focus = "question";
+  let canLand = false;
   if (task.status === "done") {
     kind = "done";
     focus = "report";
@@ -230,6 +232,8 @@ function orchestratorNotice(task) {
       ? `landed ${String(task.landedSha).slice(0, 8)} on ${task.baseRef || "its base"}`
       : `on ${task.branch || "its branch"}, not landed`;
     body = cap(`${formatCost(task.costUsd)} · ${where}`, 300);
+    if (!task.landedSha && !task.parent && task.baseRef && !task.archived)
+      canLand = true;
   } else if (task.status === "failed") {
     kind = "failed";
     focus = "summary";
@@ -255,6 +259,7 @@ function orchestratorNotice(task) {
     body,
     focus,
   };
+  if (canLand) notice.canLand = true;
   if (kind === "input") {
     const options = (
       Array.isArray(task.question?.options) ? task.question.options : []

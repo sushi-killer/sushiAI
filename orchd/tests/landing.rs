@@ -332,3 +332,81 @@ fn an_amended_base_that_conflicts_fails_an_attempt_and_lands_after_the_next() {
     assert_eq!(task["landedSha"], git_out(root, &["rev-parse", "work"]));
     daemon.shutdown_and_wait();
 }
+
+fn create_default_land(
+    daemon: &Daemon,
+    repo: &Path,
+    name: &str,
+    land: Option<bool>,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "repo": repo.to_str().unwrap(),
+        "title": format!("Add {name}"),
+        "goal": format!("FILE_{name}: write the file"),
+        "verify": [format!("test -f {name}.txt")],
+        "start": false,
+    });
+    if let Some(land) = land {
+        params["land"] = serde_json::json!(land);
+    }
+    daemon.request("task.create", params)
+}
+
+#[test]
+fn a_task_without_an_explicit_land_lands_on_its_non_default_base() {
+    let (daemon, _scripts) = daemon();
+    let repo = repo_on_work_branch();
+    let root = repo.path();
+    let task = create_default_land(&daemon, root, "one", None);
+    assert_eq!(task["variant"]["land"], true, "{task}");
+    let id = task["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": id}));
+    let done = until_done(&daemon, &id);
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(done["landedSha"], git_out(root, &["rev-parse", "work"]));
+    assert!(root.join("one.txt").exists());
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn task_land_lands_a_done_unlanded_task_and_source_is_counted() {
+    let (daemon, _scripts) = daemon();
+    let repo = repo_on_work_branch();
+    let root = repo.path();
+    let task = create_default_land(&daemon, root, "one", Some(false));
+    assert_eq!(task["source"], "cli", "{task}");
+    let id = task["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": id}));
+    let done = until_done(&daemon, &id);
+    assert_eq!(done["status"], "done", "{done}");
+    assert!(done.get("landedSha").is_none(), "{done}");
+    assert!(!root.join("one.txt").exists());
+
+    daemon.request("task.land", serde_json::json!({"id": id}));
+    let landed = poll_until(&daemon, &id, Duration::from_secs(60), |s| s == "done");
+    assert_eq!(
+        landed["landedSha"],
+        git_out(root, &["rev-parse", "work"]),
+        "{landed}"
+    );
+    assert!(root.join("one.txt").exists());
+    let again = daemon.request_error("task.land", serde_json::json!({"id": id}));
+    assert!(again.contains("already landed"), "{again}");
+
+    let ui = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": root.to_str().unwrap(),
+            "title": "Add two",
+            "goal": "FILE_two: write the file",
+            "verify": ["test -f two.txt"],
+            "source": "ui",
+            "start": false,
+        }),
+    );
+    assert_eq!(ui["source"], "ui");
+    let summary = daemon.request("costs.summary", serde_json::json!({}));
+    assert_eq!(summary["tasksBySource"]["cli"]["tasks"], 1, "{summary}");
+    assert_eq!(summary["tasksBySource"]["ui"]["tasks"], 1, "{summary}");
+    daemon.shutdown_and_wait();
+}

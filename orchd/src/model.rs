@@ -429,6 +429,7 @@ impl Default for Settings {
 fn default_experiments() -> Variant {
     Variant {
         loop_detect: true,
+        land: true,
         ..Variant::default()
     }
 }
@@ -440,6 +441,7 @@ fn experiments_or_default<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vari
     if let Some(o) = v.as_object_mut() {
         o.entry("loopDetect")
             .or_insert(serde_json::Value::Bool(true));
+        o.entry("land").or_insert(serde_json::Value::Bool(true));
     }
     serde_json::from_value(v).map_err(serde::de::Error::custom)
 }
@@ -512,9 +514,8 @@ pub struct Variant {
     pub best_of_route: Option<String>,
     /// A finished top-level task lands on its base branch by itself: a
     /// landing queue carries it onto the branch's head, squashes it to one
-    /// commit, re-runs the checks on that tree and moves the branch. Left
-    /// out of the JSON while off.
-    #[serde(skip_serializing_if = "is_false")]
+    /// commit, re-runs the checks on that tree and moves the branch. On in the
+    /// settings defaults, so off is always written to the JSON.
     pub land: bool,
 }
 
@@ -562,6 +563,11 @@ mod price_tests {
         assert_eq!(serde_json::to_value(opus).unwrap()["cacheWrite"], 5.0);
     }
 }
+
+/// Where a task can start: the orchestrator chat, the panel, an MCP client,
+/// the CLI, the planner splitting a parent, an eval run, or another task's
+/// handoff.
+pub const TASK_SOURCES: [&str; 7] = ["chat", "ui", "mcp", "cli", "planner", "eval", "handoff"];
 
 impl Task {
     pub fn variant(&self) -> Variant {
@@ -992,6 +998,10 @@ pub struct Task {
     /// set's `check`); run from the repo root in a throwaway worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eval_check_cmd: Option<String>,
+    /// Where the work started, one of `TASK_SOURCES`; absent on tasks
+    /// created before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// What that check returned; a task counts as a success only when it is
     /// done and this is `code == 0` (or there is no check command).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1591,6 +1601,7 @@ mod tests {
             eval_set: None,
             eval_name: None,
             eval_check_cmd: None,
+            source: None,
             eval_check: None,
             brief_check: Default::default(),
             queue: Default::default(),
@@ -1658,7 +1669,7 @@ mod tests {
     fn a_variant_without_route_overrides_serializes_as_before() {
         assert_eq!(
             serde_json::to_string(&Variant::default()).unwrap(),
-            r#"{"stallTimeoutSecs":0,"reviewEvidence":false,"advisor":false,"loopDetect":false}"#
+            r#"{"stallTimeoutSecs":0,"reviewEvidence":false,"advisor":false,"loopDetect":false,"land":false}"#
         );
     }
 
@@ -1677,7 +1688,7 @@ mod tests {
         let json = serde_json::to_string(&a).unwrap();
         assert_eq!(json, serde_json::to_string(&b).unwrap());
         assert!(
-            json.ends_with(r#""plannerRoute":"claude-sonnet","tierRoutes":{"mechanical":"codex","hard":"claude-sonnet"}}"#),
+            json.ends_with(r#""plannerRoute":"claude-sonnet","tierRoutes":{"mechanical":"codex","hard":"claude-sonnet"},"land":false}"#),
             "{json}"
         );
         let back: Variant = serde_json::from_str(&json).unwrap();
@@ -1827,6 +1838,7 @@ mod tests {
             eval_set: None,
             eval_name: None,
             eval_check_cmd: None,
+            source: None,
             eval_check: None,
             brief_check: Default::default(),
             queue: Default::default(),
@@ -1883,6 +1895,7 @@ mod tests {
             eval_set: None,
             eval_name: None,
             eval_check_cmd: None,
+            source: None,
             eval_check: None,
             brief_check: Default::default(),
             queue: Default::default(),
@@ -1928,7 +1941,7 @@ mod grounded_checks_tests {
         };
         assert!(serde_json::to_string(&on)
             .unwrap()
-            .ends_with(r#""groundedChecks":true}"#));
+            .contains(r#""groundedChecks":true"#));
         assert!(Variant::OPTIONAL_KEYS.contains(&"groundedChecks"));
     }
 

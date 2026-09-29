@@ -277,6 +277,34 @@ pub fn lead_touch_summary(tasks: &[Task], q: &Query, now: i64) -> Value {
     out
 }
 
+/// Tasks counted by where they started (`Task::source`), with their cost:
+/// how much work begins through the orchestrator. Tasks created before the
+/// source was recorded count as `unknown`. Honors the query's repo, task and
+/// window (by creation time).
+pub fn source_summary(tasks: &[Task], q: &Query, now: i64) -> Value {
+    let since = q.since_days.map(|d| now - i64::from(d) * DAY_MS);
+    let mut by: BTreeMap<&str, (u64, f64)> = BTreeMap::new();
+    for t in tasks {
+        if q.repo.as_ref().is_some_and(|r| *r != t.repo)
+            || q.task_id.as_ref().is_some_and(|id| *id != t.id)
+            || since.is_some_and(|s| t.created_at < s)
+        {
+            continue;
+        }
+        let e = by
+            .entry(t.source.as_deref().unwrap_or("unknown"))
+            .or_default();
+        e.0 += 1;
+        e.1 += t.cost_usd;
+    }
+    by.into_iter()
+        .map(|(source, (tasks, cost))| {
+            (source.to_string(), json!({"tasks": tasks, "costUsd": cost}))
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
 /// Every stored task, for the lead-touch rate.
 pub fn read_tasks(data: &Path) -> Vec<Task> {
     read_dir_json(&data.join("tasks"), Some("task.json"))

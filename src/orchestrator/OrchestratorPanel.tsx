@@ -805,7 +805,7 @@ async function createTask(
   try {
     return await orchestratorClient.taskCreate(
       cwd,
-      taskCreateParams({ request: text, start: true }, base),
+      taskCreateParams({ request: text, start: true, source: "ui" }, base),
     );
   } catch (e) {
     if (!errorText(e).includes("planner is disabled")) throw e;
@@ -816,6 +816,7 @@ async function createTask(
           title: text.length > 60 ? `${text.slice(0, 59)}…` : text,
           goal: text,
           start: true,
+          source: "ui",
         },
         base,
       ),
@@ -1519,6 +1520,19 @@ export function OrchestratorPanel({
                       : "Run again"}
                   </button>
                 )}
+                {selected.status === "done" &&
+                  !selected.parent &&
+                  !selected.landedSha &&
+                  !!selected.baseRef && (
+                    <button
+                      disabled={busy}
+                      onClick={() =>
+                        act(() => orchestratorClient.taskLand(selected.id))
+                      }
+                    >
+                      Land
+                    </button>
+                  )}
                 {(selected.status === "drafting" ||
                   selected.status === "running" ||
                   selected.status === "queued" ||

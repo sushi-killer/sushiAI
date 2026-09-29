@@ -318,6 +318,8 @@ export type Task = {
   baseSha: string;
   /** Branch the task started from; its work is carried onto it when it moves. */
   baseRef?: string;
+  /** Where the work started (chat, ui, mcp, cli, planner, eval, handoff). */
+  source?: string;
   /** The commit a `variant.land` task put on its base branch. */
   landedSha?: string;
   /** Markdown report of a finished top-level task or graph. */

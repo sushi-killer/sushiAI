@@ -115,6 +115,30 @@ function Bubble({ notice }: { notice: MascotNotice }) {
           {error && <span className="bubble-error">{error}</span>}
         </>
       )}
+      {notice.kind === "done" && notice.canLand && (
+        <button
+          className="bubble-open"
+          onClick={() =>
+            void bridge
+              ?.land(notice.taskId)
+              .catch((failure) =>
+                setError(
+                  String(
+                    failure instanceof Error ? failure.message : failure,
+                  ).replace(
+                    /^Error invoking remote method '[^']*': (Error: )?/,
+                    "",
+                  ),
+                ),
+              )
+          }
+        >
+          Land
+        </button>
+      )}
+      {notice.kind === "done" && error && (
+        <span className="bubble-error">{error}</span>
+      )}
       <button
         className="bubble-open"
         onClick={() => void bridge?.open(notice.taskId, notice.focus)}

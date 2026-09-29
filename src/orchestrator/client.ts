@@ -69,6 +69,23 @@ export const orchestratorClient = {
     call<Task>("task.answer", { id, answer }),
   taskOverturn: (id: string, index: number, answer: string) =>
     call<Task>("task.overturn", { id, index, answer }),
+  /** Replaces the fields passed (at least one); a live loop applies them at
+   * its next attempt boundary (`pending: true`). The task itself arrives as a
+   * `task` event. */
+  taskAmend: (
+    id: string,
+    amend: {
+      criteria?: (string | { text: string; visual?: boolean })[];
+      verify?: string[];
+      finalVerify?: string[];
+      checks?: { criterion: number; run: string }[];
+      heldOut?: { criterion: number; run: string } | null;
+    },
+  ) =>
+    call<{ id: string; amended: string[]; pending: boolean }>("task.amend", {
+      id,
+      ...amend,
+    }),
   taskReport: (id: string) =>
     call<{ id: string; report: string }>("task.report", { id }),
   /** `touched` omitted clears the mark. */

@@ -1,11 +1,13 @@
 // Pure helpers the renderer bends the protocol into a screen with - no
 // window.bridge access here, so they're cheap to unit test directly.
-import { questionCount, questionsLabel } from "./ownerAttention.ts";
+import { needsOwner, questionCount, questionsLabel } from "./ownerAttention.ts";
 import type {
   Attempt,
+  FailureKind,
   Fingerprint,
   Message,
   OrchestratorEvent,
+  QuestionKind,
   Settings,
   Task,
   Tier,
@@ -549,4 +551,389 @@ export function resetSettingToDefault(
     default:
       return { ...saved, [field]: defaults[field] };
   }
+}
+
+/** Electron wraps a rejected IPC call as "Error invoking remote method
+ * 'orchestrator': Error: <daemon message>"; the owner only needs the last
+ * part. */
+export function errorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(
+    /^Error invoking remote method '[^']*': (Error: )?/,
+    "",
+  );
+}
+
+/** One tone per status family, shared by a row's dot and its pill badge:
+ * in flight reads blue, needs-you yellow, finished well green, went wrong
+ * red, not started yet muted. */
+export function statusTone(task: Task): string {
+  switch (task.status) {
+    case "drafting":
+    case "running":
+      return "blue";
+    case "waiting":
+    case "landing":
+      return "yellow";
+    case "done":
+      return "green";
+    case "failed":
+    case "stopped":
+      return "red";
+    default:
+      return "muted";
+  }
+}
+
+// What needs the owner first, then what's in flight, then queued, then
+// whatever already finished either way.
+const STATUS_RANK: Record<Task["status"], number> = {
+  waiting: 0,
+  drafting: 1,
+  running: 1,
+  landing: 1,
+  queued: 2,
+  done: 3,
+  failed: 3,
+  stopped: 3,
+};
+
+export function sortTasks(tasks: Task[]): Task[] {
+  return [...tasks].sort((a, b) => {
+    const byStatus = STATUS_RANK[a.status] - STATUS_RANK[b.status];
+    return byStatus !== 0 ? byStatus : b.updatedAt - a.updatedAt;
+  });
+}
+
+/** The four words the design system colours by (`--tone-*`). */
+export type Tone = "ok" | "warning" | "danger" | "info" | "neutral";
+
+/** A rail row's dot and reason colour: needs you amber, went wrong red, in
+ * flight blue, finished green. */
+export function taskTone(task: Task): Tone {
+  switch (task.status) {
+    case "waiting":
+    case "landing":
+      return "warning";
+    case "failed":
+    case "stopped":
+      return "danger";
+    case "done":
+      return "ok";
+    default:
+      return "info";
+  }
+}
+
+function startOfDay(now: number): number {
+  const day = new Date(now);
+  day.setHours(0, 0, 0, 0);
+  return day.getTime();
+}
+
+/** Landed on its base today. orchd keeps no `landedAt`, so the last update
+ * of a done task with a landed commit stands in for it. */
+export function isLandedToday(task: Task, now = Date.now()): boolean {
+  return (
+    task.status === "done" &&
+    !!task.landedSha &&
+    task.updatedAt >= startOfDay(now)
+  );
+}
+
+export type RailGroups = {
+  needsYou: Task[];
+  running: Task[];
+  landedToday: Task[];
+  /** Everything else not archived: finished earlier, done but not landed,
+   * stopped by the owner. */
+  earlier: Task[];
+};
+
+/** The rail's groups, newest update first. Only top-level tasks: a subtask
+ * is listed under its parent (`childrenOf`), unless that parent is gone. */
+export function railGroups(tasks: Task[], now = Date.now()): RailGroups {
+  const live = tasks.filter((t) => !t.archived);
+  const ids = new Set(live.map((t) => t.id));
+  const groups: RailGroups = {
+    needsYou: [],
+    running: [],
+    landedToday: [],
+    earlier: [],
+  };
+  const top = live
+    .filter((t) => !t.parent || !ids.has(t.parent))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  for (const task of top) {
+    if (needsOwner(task)) groups.needsYou.push(task);
+    else if (
+      task.status === "running" ||
+      task.status === "drafting" ||
+      task.status === "queued"
+    )
+      groups.running.push(task);
+    else if (isLandedToday(task, now)) groups.landedToday.push(task);
+    else groups.earlier.push(task);
+  }
+  return groups;
+}
+
+/** Drafts waiting to run: not started, no implement attempt, not parked
+ * behind a lease. A parent a planner split for review counts too. */
+export function planDrafts(tasks: Task[]): Task[] {
+  return tasks.filter(
+    (t) =>
+      !t.archived &&
+      (t.status === "queued" || t.status === "stopped") &&
+      !t.queueReason &&
+      !t.attempts.some((a) => a.stage === "implement"),
+  );
+}
+
+function attemptOf(task: Task, maxAttempts?: number): string {
+  return `${implementAttemptCount(task)}/${maxAttempts ?? implementAttemptCount(task)}`;
+}
+
+const FAILURE_WORDS: Partial<Record<FailureKind, string>> = {
+  no_deliverable: "no changes",
+  stall: "stalled",
+  loop: "looped",
+  budget: "over budget",
+  verify: "verify failed",
+  conflict: "conflict",
+  heldout: "held-out check failed",
+  review: "review failed",
+  evidence: "no evidence",
+  protected: "touched a protected path",
+  blocked: "blocked",
+  error: "error",
+};
+
+/** A rail row's second line: why it sits where it does, in its tone. */
+export function taskReason(
+  task: Task,
+  tasks: Task[],
+  maxAttempts?: number,
+): string {
+  const children = childrenOf(tasks, task.id);
+  if (children.length > 0 && task.status !== "waiting") {
+    const landed = children.filter((c) => c.status === "done").length;
+    return `${children.length} subtask${children.length === 1 ? "" : "s"} · ${landed} landed`;
+  }
+  switch (task.status) {
+    case "waiting":
+      return questionsLabel(questionCount(task));
+    case "landing":
+      return "waiting for a clean checkout";
+    case "drafting":
+      return "drafting the brief";
+    case "queued":
+      return task.queueReason ? task.queueReason : "queued";
+    case "running": {
+      const stage = latestAttempt(task)?.stage;
+      return `${stage === "plan" ? "brief" : (stage ?? "implement")} · attempt ${attemptOf(task, maxAttempts)}`;
+    }
+    case "failed": {
+      const failure = latestAttempt(task)?.failure;
+      const what = failure
+        ? (FAILURE_WORDS[failure.kind] ?? failure.kind)
+        : "failed";
+      return `${what} · ${attemptOf(task, maxAttempts)} attempts`;
+    }
+    case "stopped":
+      return shortReason(task) || "stopped";
+    case "done":
+      if (task.landedSha)
+        return task.baseRef ? `landed on ${task.baseRef}` : "landed";
+      return reviewOf(task)
+        ? `review ${reviewOf(task)!.verdict} · not landed`
+        : "done · not landed";
+  }
+}
+
+/** A rail row's third, muted line: "attempt 1/4 · 3m 20s · $0.04", each part
+ * only when it says something. */
+export function taskMetaLine(
+  task: Task,
+  maxAttempts?: number,
+  now = Date.now(),
+): string {
+  const parts: string[] = [];
+  if (
+    (task.status === "waiting" || task.status === "queued") &&
+    implementAttemptCount(task) > 0
+  )
+    parts.push(`attempt ${attemptOf(task, maxAttempts)}`);
+  if (task.status === "running" || task.status === "drafting") {
+    const ms = totalDurationMs(task, now);
+    if (ms >= 60_000) parts.push(`${Math.floor(ms / 60_000)}m`);
+  }
+  parts.push(formatCost(task.costUsd));
+  return parts.join(" · ");
+}
+
+/** A subtask line under its parent in the rail: dot tone and a short state. */
+export function subtaskState(
+  task: Task,
+  tasks: Task[],
+  maxAttempts?: number,
+): { tone: Tone; label: string } {
+  switch (task.status) {
+    case "done":
+      return { tone: "ok", label: task.landedSha ? "landed" : "done" };
+    case "running":
+    case "drafting": {
+      const stage = latestAttempt(task)?.stage;
+      return {
+        tone: "info",
+        label: `${stage === "plan" || !stage ? "brief" : stage} · ${attemptOf(task, maxAttempts)}`,
+      };
+    }
+    case "waiting":
+      return { tone: "warning", label: "needs you" };
+    case "landing":
+      return { tone: "warning", label: "landing" };
+    case "failed":
+      return { tone: "danger", label: "failed" };
+    case "stopped":
+      return { tone: "danger", label: "stopped" };
+    case "queued": {
+      const waits = (task.dependsOn ?? []).some((id) => {
+        const dep = tasks.find((t) => t.id === id);
+        return !!dep && dep.status !== "done";
+      });
+      return {
+        tone: "neutral",
+        label: waits || task.queueReason ? "waits" : "queued",
+      };
+    }
+  }
+}
+
+export const STAGES = [
+  "brief",
+  "implement",
+  "verify",
+  "review",
+  "land",
+] as const;
+export type Stage = (typeof STAGES)[number];
+export type StageState = "done" | "active" | "blocked" | "failed" | "pending";
+export type StageStep = { stage: Stage; state: StageState };
+
+const QUESTION_STAGE: Record<QuestionKind, Stage> = {
+  plan_question: "brief",
+  attempts_failing: "verify",
+  preexisting_failure: "verify",
+  review_no_verdict: "review",
+  review_dispute: "review",
+  dependency_ended: "implement",
+  impossible: "implement",
+  budget: "implement",
+  protected_path: "implement",
+  agent_question: "implement",
+};
+
+function failureStage(kind: FailureKind | undefined): Stage {
+  if (kind === "verify" || kind === "heldout" || kind === "evidence")
+    return "verify";
+  if (kind === "review") return "review";
+  return "implement";
+}
+
+/** Where a running attempt is: a plan run writes the brief, a review run
+ * reviews, an implement run implements until its verify has results. */
+function runningStage(task: Task): Stage {
+  const attempt = latestAttempt(task);
+  if (!attempt || attempt.stage === "plan") return "brief";
+  if (attempt.stage === "review") return "review";
+  return attempt.verify.length > 0 ? "verify" : "implement";
+}
+
+/** The brief → implement → verify → review → land track for a task, from its
+ * status and attempts: every stage before the current one is done, every one
+ * after it pending. */
+export function stageTrack(task: Task): StageStep[] {
+  let current: Stage;
+  let state: StageState;
+  switch (task.status) {
+    case "drafting":
+      current = "brief";
+      state = "active";
+      break;
+    case "queued":
+      current = task.attempts.length > 0 ? runningStage(task) : "implement";
+      state = "pending";
+      break;
+    case "running":
+      current = runningStage(task);
+      state = "active";
+      break;
+    case "waiting":
+      current = task.question
+        ? QUESTION_STAGE[task.question.kind]
+        : "implement";
+      state = "blocked";
+      break;
+    case "failed":
+      current = failureStage(latestAttempt(task)?.failure?.kind);
+      state = "failed";
+      break;
+    case "stopped": {
+      const failure = latestAttempt(task)?.failure;
+      current = failure ? failureStage(failure.kind) : runningStage(task);
+      state = "blocked";
+      break;
+    }
+    case "landing":
+      current = "land";
+      state = "active";
+      break;
+    case "done":
+      current = "land";
+      state = task.landedSha ? "done" : "pending";
+      break;
+  }
+  const at = STAGES.indexOf(current);
+  return STAGES.map((stage, index) => ({
+    stage,
+    state: index < at ? "done" : index === at ? state : "pending",
+  }));
+}
+
+/** Assistant replies newer than the last time the owner looked at the chat. */
+export function unreadChatCount(
+  messages: { role: string; ts: number }[],
+  lastSeen: number,
+): number {
+  return messages.filter((m) => m.role === "assistant" && m.ts > lastSeen)
+    .length;
+}
+
+/** "2m", "14m", "1h", "3d": how long ago, for an attention item's corner. */
+export function ageLabel(since: number, now = Date.now()): string {
+  const minutes = Math.max(0, Math.floor((now - since) / 60_000));
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+/** The last path segment of a repo, as the owner calls the project. */
+export function repoName(repo: string): string {
+  return repo.replace(/\/+$/, "").split("/").pop() || repo;
+}
+
+/** Whether an RPC error means the daemon itself is gone (not built, failed
+ * to start, the socket refused or dropped the call), as opposed to the
+ * daemon refusing one request. */
+export function daemonDown(
+  message: string,
+): "not-built" | "unavailable" | null {
+  if (message.includes("is not built")) return "not-built";
+  return /failed to start|did not respond|disconnected before responding|ECONNREFUSED|ENOENT|ECONNRESET|EPIPE/.test(
+    message,
+  )
+    ? "unavailable"
+    : null;
 }

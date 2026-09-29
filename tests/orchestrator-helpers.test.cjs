@@ -841,3 +841,288 @@ test("ownerInboxRows lists only tasks needing the owner and a row click opens it
     workspaceId: "ws",
   });
 });
+
+const NOON = new Date(2026, 8, 29, 12, 0, 0).getTime();
+const YESTERDAY = NOON - 24 * 3600 * 1000;
+
+test("railGroups sorts top-level tasks into needs you, running, landed today and earlier", async () => {
+  const { railGroups } = await library;
+  const tasks = [
+    task({ id: "w", status: "waiting", updatedAt: NOON - 1 }),
+    task({ id: "f", status: "failed", updatedAt: NOON - 2 }),
+    task({ id: "r", status: "running", updatedAt: NOON - 3 }),
+    task({ id: "q", status: "queued", updatedAt: NOON - 4 }),
+    task({ id: "today", status: "done", landedSha: "a1", updatedAt: NOON }),
+    task({ id: "old", status: "done", landedSha: "a2", updatedAt: YESTERDAY }),
+    task({ id: "unlanded", status: "done", updatedAt: NOON }),
+    task({ id: "archived", status: "waiting", archived: true }),
+    task({ id: "child", status: "running", parent: "r" }),
+    task({ id: "orphan", status: "running", parent: "gone", updatedAt: 1 }),
+  ];
+  const groups = railGroups(tasks, NOON);
+  const ids = (list) => list.map((t) => t.id);
+  assert.deepEqual(ids(groups.needsYou), ["w", "f"]);
+  assert.deepEqual(ids(groups.running), ["r", "q", "orphan"]);
+  assert.deepEqual(ids(groups.landedToday), ["today"]);
+  assert.deepEqual(ids(groups.earlier), ["unlanded", "old"]);
+});
+
+test("isLandedToday needs a landed commit and an update since midnight", async () => {
+  const { isLandedToday } = await library;
+  const midnight = new Date(2026, 8, 29).getTime();
+  const done = { status: "done", landedSha: "abc" };
+  assert.equal(
+    isLandedToday(task({ ...done, updatedAt: midnight }), NOON),
+    true,
+  );
+  assert.equal(
+    isLandedToday(task({ ...done, updatedAt: midnight - 1 }), NOON),
+    false,
+  );
+  assert.equal(
+    isLandedToday(task({ status: "done", updatedAt: NOON }), NOON),
+    false,
+  );
+});
+
+test("childrenOf nests a parent's subtasks and subtaskState names each one's state", async () => {
+  const { childrenOf, subtaskState, taskReason } = await library;
+  const parent = task({ id: "p", status: "running" });
+  const lease = task({
+    id: "a",
+    parent: "p",
+    status: "done",
+    landedSha: "x",
+    createdAt: 1,
+  });
+  const relay = task({
+    id: "b",
+    parent: "p",
+    status: "running",
+    createdAt: 2,
+    attempts: [attempt()],
+  });
+  const ui = task({
+    id: "c",
+    parent: "p",
+    status: "queued",
+    dependsOn: ["b"],
+    createdAt: 3,
+  });
+  const tasks = [parent, ui, relay, lease];
+  assert.deepEqual(
+    childrenOf(tasks, "p").map((t) => t.id),
+    ["a", "b", "c"],
+  );
+  assert.deepEqual(subtaskState(lease, tasks, 4), {
+    tone: "ok",
+    label: "landed",
+  });
+  assert.deepEqual(subtaskState(relay, tasks, 4), {
+    tone: "info",
+    label: "implement · 1/4",
+  });
+  assert.deepEqual(subtaskState(ui, tasks, 4), {
+    tone: "neutral",
+    label: "waits",
+  });
+  assert.equal(taskReason(parent, tasks, 4), "3 subtasks · 1 landed");
+});
+
+test("taskReason and taskMetaLine give a rail row its second and third lines", async () => {
+  const { taskReason, taskMetaLine } = await library;
+  const waiting = task({
+    status: "waiting",
+    question: { text: "Which theme?", options: [], kind: "agent_question" },
+    attempts: [attempt({ status: "blocked" })],
+    costUsd: 0.04,
+  });
+  assert.equal(taskReason(waiting, [waiting], 4), "1 question for you");
+  assert.equal(taskMetaLine(waiting, 4, NOON), "attempt 1/4 · $0.04");
+  const failed = task({
+    status: "failed",
+    costUsd: 0.61,
+    attempts: [1, 2, 3, 4].map((n) =>
+      attempt({
+        n,
+        status: "failed",
+        failure: { kind: "verify", detail: "npm test", signature: "s" },
+      }),
+    ),
+  });
+  assert.equal(taskReason(failed, [failed], 4), "verify failed · 4/4 attempts");
+  assert.equal(taskMetaLine(failed, 4, NOON), "$0.61");
+  const running = task({
+    status: "running",
+    costUsd: 0.22,
+    attempts: [
+      attempt({
+        n: 1,
+        status: "failed",
+        startedAt: NOON - 600_000,
+        endedAt: NOON - 360_000,
+      }),
+      attempt({ n: 2, startedAt: NOON - 120_000 }),
+    ],
+  });
+  assert.equal(taskReason(running, [running], 4), "implement · attempt 2/4");
+  assert.equal(taskMetaLine(running, 4, NOON), "6m · $0.22");
+  const queued = task({
+    status: "queued",
+    queueReason: "queued behind default-landing",
+  });
+  assert.equal(
+    taskReason(queued, [queued], 4),
+    "queued behind default-landing",
+  );
+  const landed = task({
+    status: "done",
+    landedSha: "a",
+    baseRef: "feature/x",
+    costUsd: 0.31,
+  });
+  assert.equal(taskReason(landed, [landed], 4), "landed on feature/x");
+});
+
+test("stageTrack marks every stage before the current one done and the rest pending", async () => {
+  const { stageTrack } = await library;
+  const states = (t) =>
+    stageTrack(t)
+      .map((s) => `${s.stage}:${s.state}`)
+      .join(" ");
+  assert.equal(
+    states(task({ status: "drafting" })),
+    "brief:active implement:pending verify:pending review:pending land:pending",
+  );
+  assert.equal(
+    states(task({ status: "running", attempts: [attempt()] })),
+    "brief:done implement:active verify:pending review:pending land:pending",
+  );
+  assert.equal(
+    states(
+      task({
+        status: "running",
+        attempts: [
+          attempt({
+            verify: [{ command: "npm test", code: null, tail: "", ms: 0 }],
+          }),
+        ],
+      }),
+    ),
+    "brief:done implement:done verify:active review:pending land:pending",
+  );
+  assert.equal(
+    states(
+      task({
+        status: "waiting",
+        question: { text: "?", options: [], kind: "attempts_failing" },
+        attempts: [attempt({ status: "blocked" })],
+      }),
+    ),
+    "brief:done implement:done verify:blocked review:pending land:pending",
+  );
+  assert.equal(
+    states(
+      task({
+        status: "running",
+        attempts: [attempt(), attempt({ n: 2, stage: "review" })],
+      }),
+    ),
+    "brief:done implement:done verify:done review:active land:pending",
+  );
+  assert.equal(
+    states(
+      task({
+        status: "failed",
+        attempts: [
+          attempt({
+            status: "failed",
+            failure: { kind: "review", detail: "", signature: "" },
+          }),
+        ],
+      }),
+    ),
+    "brief:done implement:done verify:done review:failed land:pending",
+  );
+  assert.equal(
+    states(task({ status: "done", attempts: [attempt({ status: "passed" })] })),
+    "brief:done implement:done verify:done review:done land:pending",
+  );
+  assert.equal(
+    states(task({ status: "done", landedSha: "abc" })),
+    "brief:done implement:done verify:done review:done land:done",
+  );
+});
+
+test("planDrafts lists unstarted tasks, never lease-queued or already implementing ones", async () => {
+  const { planDrafts } = await library;
+  const tasks = [
+    task({ id: "draft", status: "queued" }),
+    task({
+      id: "parked",
+      status: "stopped",
+      attempts: [attempt({ stage: "plan", status: "passed" })],
+    }),
+    task({ id: "lease", status: "queued", queueReason: "waits for a lease" }),
+    task({
+      id: "retry",
+      status: "queued",
+      attempts: [attempt({ status: "failed" })],
+    }),
+    task({ id: "gone", status: "queued", archived: true }),
+  ];
+  assert.deepEqual(
+    planDrafts(tasks).map((t) => t.id),
+    ["draft", "parked"],
+  );
+});
+
+test("unreadChatCount counts only assistant replies after the last look", async () => {
+  const { unreadChatCount } = await library;
+  const messages = [
+    { role: "user", ts: 5 },
+    { role: "assistant", ts: 6 },
+    { role: "assistant", ts: 9 },
+  ];
+  assert.equal(unreadChatCount(messages, 6), 1);
+  assert.equal(unreadChatCount(messages, 0), 2);
+});
+
+test("ageLabel and repoName", async () => {
+  const { ageLabel, repoName } = await library;
+  assert.equal(ageLabel(NOON - 2 * 60_000, NOON), "2m");
+  assert.equal(ageLabel(NOON - 90 * 60_000, NOON), "1h");
+  assert.equal(ageLabel(NOON - 50 * 3600_000, NOON), "2d");
+  assert.equal(repoName("/Users/sushi/sushiai/"), "sushiai");
+});
+
+test("errorText strips Electron's IPC wrapper", async () => {
+  const { errorText } = await library;
+  assert.equal(
+    errorText(
+      new Error(
+        "Error invoking remote method 'orchestrator': Error: connect ECONNREFUSED",
+      ),
+    ),
+    "connect ECONNREFUSED",
+  );
+});
+
+test("daemonDown tells a gone daemon from a refused request", async () => {
+  const { daemonDown } = await library;
+  assert.equal(
+    daemonDown(
+      "The orchestrator daemon is not built. Run npm run build:orchd.",
+    ),
+    "not-built",
+  );
+  assert.equal(
+    daemonDown("connect ECONNREFUSED /tmp/orchd.sock"),
+    "unavailable",
+  );
+  assert.equal(
+    daemonDown("The orchestrator daemon disconnected before responding."),
+    "unavailable",
+  );
+  assert.equal(daemonDown("task is running"), null);
+});

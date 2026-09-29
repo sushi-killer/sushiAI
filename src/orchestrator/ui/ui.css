@@ -1,0 +1,432 @@
+/* The orchestrator's shared primitives, one rule set per Figma component
+ * (page "Components"). Sizes are the component's own; colours are tokens. */
+
+.ui-tone-ok {
+  --ui-tone: var(--tone-ok);
+  --ui-tone-bg: var(--tone-ok-bg);
+}
+.ui-tone-warning {
+  --ui-tone: var(--tone-warning);
+  --ui-tone-bg: var(--tone-warning-bg);
+}
+.ui-tone-danger {
+  --ui-tone: var(--tone-danger);
+  --ui-tone-bg: var(--tone-danger-bg);
+}
+.ui-tone-info {
+  --ui-tone: var(--tone-info);
+  --ui-tone-bg: var(--tone-info-bg);
+}
+.ui-tone-neutral {
+  --ui-tone: var(--text-faint);
+  --ui-tone-bg: var(--bg-count);
+}
+
+/* Control/Button: primary, secondary, ghost. */
+.ui-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  font-size: var(--text-md);
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.ui-button.secondary {
+  height: 32px;
+  border-color: var(--line-strong);
+  background: var(--bg-raised);
+}
+.ui-button.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.ui-button.ghost:hover,
+.ui-button.secondary:hover {
+  background: var(--bg-hover);
+}
+
+/* Control/Count. */
+.ui-count {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: var(--bg-count);
+  color: var(--text-nav);
+  font-size: 10px;
+  line-height: 12px;
+}
+
+/* Control/Tag. */
+.ui-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--ui-tone-bg);
+  color: var(--ui-tone);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 12px;
+  white-space: nowrap;
+}
+.ui-tag.ui-tone-neutral {
+  color: var(--text-muted);
+}
+.ui-tag-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ui-tone);
+  flex-shrink: 0;
+}
+
+/* Control/Chip. */
+.ui-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 29px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-control);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.ui-chip:hover {
+  color: var(--text);
+}
+.ui-chip.selected {
+  border-color: var(--line-selected);
+  background: var(--bg-selected);
+  color: var(--text);
+}
+
+/* Control/Stepper. */
+.ui-stepper {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-app);
+  overflow: hidden;
+}
+.ui-stepper button {
+  width: 27px;
+  height: 26px;
+  color: var(--text-muted);
+  font-size: var(--text-md);
+}
+.ui-stepper-value {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 26px;
+  padding: 0 10px;
+  border-inline: 1px solid var(--line);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+/* Control/Banner. */
+.ui-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-md);
+  padding: 12px 14px;
+  border: 1px solid var(--ui-tone);
+  border-radius: var(--radius-lg);
+  background: var(--ui-tone-bg);
+}
+.ui-banner-mark {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ui-tone);
+  flex-shrink: 0;
+}
+.ui-banner-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.ui-banner-title {
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+.ui-banner-body {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+/* Orch/GroupLabel. */
+.ui-group-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 10px 4px;
+}
+.ui-group-label-text {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+  line-height: 12px;
+}
+
+/* Orch/TaskRow. */
+.ui-task-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: var(--radius-md);
+  text-align: left;
+}
+.ui-task-row:hover {
+  background: var(--bg-hover);
+}
+/* Drawn inside the row so selecting it never shifts the rows below. */
+.ui-task-row.selected {
+  background: var(--bg-selected);
+  box-shadow: inset 0 0 0 1px var(--line-selected);
+}
+.ui-dot-wrap {
+  display: flex;
+  padding-top: 5px;
+  flex-shrink: 0;
+}
+.ui-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ui-tone);
+}
+.ui-task-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+.ui-task-row-title {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 500;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-task-row-reason {
+  overflow: hidden;
+  color: var(--ui-tone);
+  font-size: 11.5px;
+  line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-task-row-meta {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  line-height: 13px;
+  white-space: nowrap;
+}
+
+/* Orch/StageStep + Orch/StageTrack. */
+.ui-stage-track {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+}
+.ui-stage-slot {
+  display: flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.ui-stage-slot + .ui-stage-slot {
+  flex: 1 1 0;
+}
+.ui-stage-connector {
+  flex: 1;
+  min-width: 8px;
+  height: 1px;
+  margin: 0 10px;
+  background: var(--line);
+}
+.ui-stage-connector.done {
+  background: var(--tone-ok);
+}
+.ui-stage-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.ui-stage-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.ui-stage-step.done .ui-stage-marker {
+  border-color: var(--tone-ok);
+  background: var(--tone-ok-bg);
+  color: var(--tone-ok);
+}
+.ui-stage-step.active .ui-stage-marker {
+  border-color: var(--tone-info);
+  background: var(--tone-info-bg);
+}
+.ui-stage-pip {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tone-info);
+}
+.ui-stage-step.blocked {
+  color: var(--tone-warning);
+}
+.ui-stage-step.blocked .ui-stage-marker {
+  border-color: var(--tone-warning);
+  background: var(--tone-warning-bg);
+}
+.ui-stage-step.failed {
+  color: var(--tone-danger);
+}
+.ui-stage-step.failed .ui-stage-marker {
+  border-color: var(--tone-danger);
+  background: var(--tone-danger-bg);
+}
+.ui-stage-step.pending {
+  color: var(--text-faint);
+  font-weight: 400;
+}
+
+/* Orch/Criterion. */
+.ui-criterion {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 3px 0;
+  color: var(--text);
+  font-size: 12.5px;
+}
+.ui-criterion svg {
+  flex-shrink: 0;
+}
+.ui-criterion.met svg {
+  color: var(--tone-ok);
+}
+.ui-criterion.pending {
+  color: var(--text-muted);
+}
+.ui-criterion.pending svg {
+  color: var(--text-faint);
+}
+.ui-criterion.failing svg {
+  color: var(--tone-danger);
+}
+
+/* Attention/Item. */
+.ui-attention {
+  display: flex;
+  gap: var(--gap-md);
+  padding: 12px 14px;
+  border: 1px solid var(--line-pane);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+}
+.ui-attention.selected {
+  border-color: var(--line-selected);
+  background: var(--bg-selected);
+}
+.ui-attention-marker {
+  display: flex;
+  padding-top: 5px;
+  flex-shrink: 0;
+}
+.ui-attention-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ui-tone);
+}
+.ui-attention-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-attention-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-attention-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 500;
+  line-height: 16px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-attention-time {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+.ui-attention-context {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 15px;
+}
+.ui-attention-context.question {
+  color: var(--text);
+  font-size: var(--text-md);
+  line-height: 16px;
+}
+.ui-attention-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.ui-attention-meta {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  line-height: 13px;
+}

@@ -21,11 +21,17 @@ export type Message = {
   /** The model that actually answered, as the CLI resolved it. */
   model?: string;
 };
-/** What the Orchestrator panel shows: its chat, one task, the archive or the
+/** What the Orchestrator panel shows: home (the default), the plan, its
+ * chat, one task, improvements, analytics, a brainstorm, the archive or the
  * agent messages. Kept on the panel so a restart reopens the same view. */
 export type OrchestratorView =
+  | { kind: "home" }
+  | { kind: "plan" }
   | { kind: "chat" }
   | { kind: "task"; id: string }
+  | { kind: "improvements" }
+  | { kind: "analytics" }
+  | { kind: "brainstorm" }
   | { kind: "archive" }
   | { kind: "messages" };
 /** Where a Files pane was browsing: its root folder, the folder listed and the

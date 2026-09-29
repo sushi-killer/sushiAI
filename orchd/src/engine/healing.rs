@@ -463,6 +463,27 @@ pub(super) async fn heal_repeated_unmet(
 // 3. Evidence
 // ---------------------------------------------------------------------------
 
+/// UI files (not tests) the task itself changed between an earlier attempt's
+/// evidence tree and the worktree now. Files that differ only because the base
+/// moved (carried-in commits, a conflict resolved onto a new base) are not the
+/// task's doing; without the earlier base every difference counts.
+pub(super) fn own_ui_changes_since(
+    wt: &Path,
+    old_tree: &str,
+    old_base: Option<&str>,
+    now_base: &str,
+) -> Result<Vec<String>, git::GitError> {
+    let now = git::worktree_tree(wt)?;
+    let paths = match old_base {
+        Some(old_base) => git::own_changes_between(wt, old_tree, old_base, &now, now_base)?,
+        None => git::diff_trees_name_only(wt, old_tree, &now)?,
+    };
+    Ok(paths
+        .into_iter()
+        .filter(|p| is_ui_path(p) && !is_test_path(p))
+        .collect())
+}
+
 /// Whether a repo-relative path is a UI file, by its extension or a UI-ish
 /// directory name.
 pub(super) fn is_ui_path(path: &str) -> bool {
@@ -818,5 +839,93 @@ mod tests {
     fn amendments_outside_the_criteria_are_dropped() {
         let text = "{\"amend\":[{\"criterion\":0,\"text\":\"a\"},{\"criterion\":5,\"text\":\"b\"},{\"criterion\":1,\"text\":\"\"}]}";
         assert_eq!(parse_amendments(text, 2), vec![(0, "a".to_string())]);
+    }
+
+    fn evidence_repo() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        impl Fn(&[&str]) -> String,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let dir = repo.clone();
+        let git = move |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "T"]);
+        std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        (tmp, repo, git)
+    }
+
+    #[test]
+    fn evidence_survives_carried_in_base_commits_but_not_the_tasks_own_ui_edit() {
+        let (_tmp, repo, git) = evidence_repo();
+        let base1 = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "-b", "task"]);
+        std::fs::write(repo.join("Button.tsx"), "v1\n").unwrap();
+        let old_tree = git::worktree_tree(&repo).unwrap();
+        git(&["checkout", "-q", "-b", "other", &base1]);
+        std::fs::create_dir_all(repo.join("orchd")).unwrap();
+        std::fs::write(repo.join("Landed.tsx"), "l\n").unwrap();
+        std::fs::write(repo.join("orchd/x.rs"), "r\n").unwrap();
+        git(&["add", "Landed.tsx", "orchd"]);
+        git(&["commit", "-q", "-m", "landed"]);
+        let base2 = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "task"]);
+        std::fs::write(repo.join("Landed.tsx"), "l\n").unwrap();
+        std::fs::create_dir_all(repo.join("orchd")).unwrap();
+        std::fs::write(repo.join("orchd/x.rs"), "r\n").unwrap();
+        // Only carried-in commits changed files: reuse.
+        assert!(own_ui_changes_since(&repo, &old_tree, Some(&base1), &base2)
+            .unwrap()
+            .is_empty());
+        // Without the earlier base the carried-in file looks like a change.
+        assert_eq!(
+            own_ui_changes_since(&repo, &old_tree, None, &base2).unwrap(),
+            vec!["Landed.tsx".to_string()]
+        );
+        // The task edits its own UI file: new evidence needed.
+        std::fs::write(repo.join("Button.tsx"), "v2\n").unwrap();
+        assert_eq!(
+            own_ui_changes_since(&repo, &old_tree, Some(&base1), &base2).unwrap(),
+            vec!["Button.tsx".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_conflict_resolution_outside_the_ui_keeps_the_evidence() {
+        let (_tmp, repo, git) = evidence_repo();
+        let base1 = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "-b", "task"]);
+        std::fs::write(repo.join("Button.tsx"), "v1\n").unwrap();
+        std::fs::write(repo.join("notes.md"), "mine\n").unwrap();
+        let old_tree = git::worktree_tree(&repo).unwrap();
+        git(&["checkout", "-q", "-b", "other", &base1]);
+        std::fs::write(repo.join("notes.md"), "theirs\n").unwrap();
+        git(&["add", "notes.md"]);
+        git(&["commit", "-q", "-m", "landed"]);
+        let base2 = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "task"]);
+        std::fs::write(repo.join("notes.md"), "merged\n").unwrap();
+        assert!(own_ui_changes_since(&repo, &old_tree, Some(&base1), &base2)
+            .unwrap()
+            .is_empty());
+        // A resolution that rewrites a UI file needs fresh evidence.
+        std::fs::write(repo.join("Button.tsx"), "resolved\n").unwrap();
+        assert_eq!(
+            own_ui_changes_since(&repo, &old_tree, Some(&base1), &base2).unwrap(),
+            vec!["Button.tsx".to_string()]
+        );
     }
 }

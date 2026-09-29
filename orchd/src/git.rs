@@ -783,6 +783,27 @@ pub fn diff_trees_name_only(cwd: &Path, old: &str, new: &str) -> Result<Vec<Stri
         .collect())
 }
 
+/// Files that differ between two worktree trees because the *task* changed
+/// them: a file counts when it differs from its own base in either tree, so
+/// one that differs only because the base moved between the two (carried-in
+/// commits) is left out.
+pub fn own_changes_between(
+    cwd: &Path,
+    old_tree: &str,
+    old_base: &str,
+    now_tree: &str,
+    now_base: &str,
+) -> Result<Vec<String>, GitError> {
+    let moved = diff_trees_name_only(cwd, old_tree, now_tree)?;
+    if moved.is_empty() {
+        return Ok(moved);
+    }
+    let mut own: std::collections::HashSet<String> = std::collections::HashSet::new();
+    own.extend(diff_trees_name_only(cwd, old_base, old_tree)?);
+    own.extend(diff_trees_name_only(cwd, now_base, now_tree)?);
+    Ok(moved.into_iter().filter(|p| own.contains(p)).collect())
+}
+
 /// `git diff --name-only <base>`.
 pub fn diff_name_only(cwd: &Path, base: &str) -> Result<Vec<String>, GitError> {
     let out = run(cwd, &["diff", "--name-only", base])?;
@@ -1118,6 +1139,52 @@ mod tests {
         std::fs::remove_dir_all(repo.join("tests")).unwrap();
         std::fs::remove_dir_all(repo.join("artifacts")).unwrap();
         assert_eq!(status_short(&repo).unwrap(), before_status);
+    }
+
+    #[test]
+    fn own_changes_between_ignores_files_that_only_the_base_moved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        let git = |args: &[&str]| {
+            let out = StdCommand::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let base1 = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "-b", "task"]);
+        std::fs::write(repo.join("own.tsx"), "one\n").unwrap();
+        let old_tree = worktree_tree(&repo).unwrap();
+        // The base moves: another task lands a UI file, the task carries it.
+        git(&["checkout", "-q", "-b", "other", &base1]);
+        std::fs::write(repo.join("landed.tsx"), "l\n").unwrap();
+        git(&["add", "landed.tsx"]);
+        git(&["commit", "-q", "-m", "landed"]);
+        let base2 = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "task"]);
+        std::fs::write(repo.join("landed.tsx"), "l\n").unwrap();
+        let now_tree = worktree_tree(&repo).unwrap();
+        assert_eq!(
+            diff_trees_name_only(&repo, &old_tree, &now_tree).unwrap(),
+            vec!["landed.tsx".to_string()]
+        );
+        assert!(
+            own_changes_between(&repo, &old_tree, &base1, &now_tree, &base2)
+                .unwrap()
+                .is_empty()
+        );
+        // The task's own edit to a UI file still counts.
+        std::fs::write(repo.join("own.tsx"), "two\n").unwrap();
+        let edited = worktree_tree(&repo).unwrap();
+        assert_eq!(
+            own_changes_between(&repo, &old_tree, &base1, &edited, &base2).unwrap(),
+            vec!["own.tsx".to_string()]
+        );
     }
 
     #[test]

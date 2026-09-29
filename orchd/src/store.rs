@@ -464,6 +464,7 @@ mod tests {
                 review_cost_usd: None,
                 evidence: vec![],
                 evidence_tree: None,
+                evidence_base: None,
                 evidence_from: None,
                 advice: None,
                 advisor_cost_usd: None,

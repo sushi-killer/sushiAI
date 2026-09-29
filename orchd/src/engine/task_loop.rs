@@ -634,6 +634,7 @@ pub(super) async fn run_task_loop(
             review_cost_usd: None,
             evidence: vec![],
             evidence_tree: None,
+            evidence_base: None,
             evidence_from: None,
             advice: None,
             advisor_cost_usd: None,
@@ -1280,6 +1281,7 @@ pub(super) async fn run_task_loop(
                     tokio::task::spawn_blocking(move || git::worktree_tree(&wt).ok())
                         .await
                         .unwrap_or(None);
+                task.attempts[idx].evidence_base = Some(task.base_sha.clone());
                 let _ = app.store.save_task(&task);
                 app.broadcast_task(&task);
             } else if !task.visual_criteria_texts().is_empty() {
@@ -1292,26 +1294,34 @@ pub(super) async fn run_task_loop(
                             && a.evidence_from.is_none()
                             && !a.evidence.is_empty()
                     })
-                    .filter_map(|a| Some((a.n, a.evidence_tree.clone()?, a.evidence.clone())))
+                    .filter_map(|a| {
+                        Some((
+                            a.n,
+                            a.evidence_tree.clone()?,
+                            a.evidence_base.clone(),
+                            a.evidence.clone(),
+                        ))
+                    })
                     .next_back();
-                if let Some((m, old_tree, old_evidence)) = source {
+                if let Some((m, old_tree, old_base, old_evidence)) = source {
                     let wt = worktree.clone();
+                    let now_base = task.base_sha.clone();
                     let diff = tokio::task::spawn_blocking(move || {
-                        let now = git::worktree_tree(&wt)?;
-                        git::diff_trees_name_only(&wt, &old_tree, &now)
+                        crate::engine::healing::own_ui_changes_since(
+                            &wt,
+                            &old_tree,
+                            old_base.as_deref(),
+                            &now_base,
+                        )
                     })
                     .await
                     .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
-                    if let Ok(paths) = diff {
-                        let other: Vec<String> = paths
-                            .into_iter()
-                            .filter(|p| crate::engine::healing::is_ui_path(p) && !is_test_path(p))
-                            .collect();
+                    if let Ok(other) = diff {
                         if other.is_empty() {
                             task.attempts[idx].evidence = old_evidence;
                             task.attempts[idx].evidence_from = Some(m);
                             task.decisions.push(format!(
-                                "Orchestrator: attempt {n} changed only artifacts/tests since attempt {m}; reused attempt {m}'s evidence"
+                                "Orchestrator: attempt {n} changed no UI file of its own since attempt {m} (artifacts, tests and carried-in base commits do not count); reused attempt {m}'s evidence"
                             ));
                             let _ = app.store.save_task(&task);
                             app.broadcast_task(&task);

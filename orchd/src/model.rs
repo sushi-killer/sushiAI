@@ -1444,6 +1444,10 @@ pub struct Attempt {
     /// against to decide whether it may reuse this attempt's evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_tree: Option<String>,
+    /// The task's base commit when `evidence_tree` was taken, so a later
+    /// attempt can tell the task's own edits from carried-in base commits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_base: Option<String>,
     /// The attempt whose `evidence` this attempt reused because it changed
     /// only `artifacts/` or test files since.
     #[serde(default, skip_serializing_if = "Option::is_none")]

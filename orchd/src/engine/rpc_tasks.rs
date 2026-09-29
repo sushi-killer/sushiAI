@@ -118,6 +118,10 @@ impl App {
             /// task only (an A/B arm).
             #[serde(default)]
             variant: Option<serde_json::Value>,
+            /// Land the finished task on its base branch by itself; the same
+            /// as `variant.land`.
+            #[serde(default)]
+            land: Option<bool>,
             /// Set by `orchd eval run`: the eval set and the task's name in it.
             #[serde(default, rename = "evalSet")]
             eval_set: Option<String>,
@@ -136,7 +140,10 @@ impl App {
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         let settings = self.settings.read().unwrap().clone();
-        let variant = resolve_variant(&settings.experiments, p.variant.as_ref())?;
+        let mut variant = resolve_variant(&settings.experiments, p.variant.as_ref())?;
+        if let Some(land) = p.land {
+            variant.land = land;
+        }
         variant.check_routes(&settings.routes)?;
         let request_text = p.request.clone().filter(|s| !s.trim().is_empty());
         if request_text.is_some() {
@@ -358,6 +365,7 @@ impl App {
             repo: new.repo_root.to_string_lossy().to_string(),
             worktree: created.path.to_string_lossy().to_string(),
             worktree_removed: false,
+            landed_sha: None,
             branch,
             base_sha: created.base_sha,
             base_ref,
@@ -425,6 +433,7 @@ impl App {
                     | TaskStatus::Stopped
                     | TaskStatus::Failed
                     | TaskStatus::Drafting
+                    | TaskStatus::Landing
             ) {
                 // A manual `task.start` on a still-drafting task (e.g. one
                 // left there by a daemon that died mid-plan) means proceed
@@ -471,6 +480,14 @@ impl App {
         let parent = is_parent(&task, &all);
         if parent {
             self.stop_children(&task.id, &task.repo);
+        }
+        if !live && task.status == TaskStatus::Landing {
+            task.status = TaskStatus::Stopped;
+            task.updated_at = now_ms();
+            self.release_worktree(&mut task, "stopped while waiting to land")
+                .await;
+            self.store.save_task(&task).map_err(|e| e.to_string())?;
+            self.broadcast_task(&task);
         }
         if !live
             && (parent || !task.depends_on.is_empty())
@@ -802,9 +819,9 @@ impl App {
             .ok_or_else(|| "task not found".to_string())?;
         if matches!(
             task.status,
-            TaskStatus::Running | TaskStatus::Drafting | TaskStatus::Waiting
+            TaskStatus::Running | TaskStatus::Drafting | TaskStatus::Waiting | TaskStatus::Landing
         ) {
-            return Err("cannot archive a running, drafting, or waiting task".to_string());
+            return Err("cannot archive a running, drafting, waiting or landing task".to_string());
         }
         if self.controls.lock().unwrap().contains_key(&p.id) {
             return Err("cannot archive a task with a live loop".to_string());

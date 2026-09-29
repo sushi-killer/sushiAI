@@ -103,6 +103,39 @@ pub(super) async fn run_task_loop(
             }
         };
 
+        // A task that passed everything and waited to land: only the landing
+        // is tried again.
+        if task.status == TaskStatus::Landing && !task.attempts.is_empty() {
+            let idx = task.attempts.len() - 1;
+            let attempt_n = task.attempts[idx].n;
+            let run_dir = app.store.run_dir(&task_id, attempt_n);
+            let _ = std::fs::create_dir_all(&run_dir);
+            let settings = app.settings.read().unwrap().clone();
+            let worktree = PathBuf::from(&task.worktree);
+            match finish_attempt(
+                &app,
+                &task_id,
+                &mut task,
+                idx,
+                attempt_n,
+                &worktree,
+                &run_dir,
+                &settings,
+                &mut attempt_budget,
+                &pending_answer,
+                &cancel,
+                &mut permit,
+            )
+            .await
+            {
+                Tail::Continue { answered } => {
+                    just_answered = answered;
+                    continue;
+                }
+                Tail::Return => return,
+            }
+        }
+
         if needs_planning(&task) {
             match run_plan_stage(
                 &app,
@@ -1550,118 +1583,28 @@ pub(super) async fn run_task_loop(
             }
         }
 
-        if let Some(parent_id) = task.parent.clone() {
-            let landing = land_on_parent(
-                &app, &mut task, idx, attempt_n, &worktree, &run_dir, &parent_id, &cancel,
-            )
-            .await;
-            match landing {
-                Landing::Landed => {
-                    git::delete_wip_ref(&worktree, &task_id);
-                    task.attempts[idx].status = AttemptStatus::Passed;
-                    task.attempts[idx].ended_at = Some(now_ms());
-                    task.status = TaskStatus::Done;
-                    app.release_worktree(&mut task, "landed on its parent")
-                        .await;
-                    task.updated_at = now_ms();
-                    let _ = app.store.save_task(&task);
-                    app.broadcast_task(&task);
-                    drop(permit);
-                    app.finish_task_loop(&task_id);
-                    return;
-                }
-                Landing::Failed { kind, detail } => {
-                    match fail_and_continue(
-                        &app,
-                        &task_id,
-                        &mut task,
-                        idx,
-                        kind,
-                        detail,
-                        &mut attempt_budget,
-                        &pending_answer,
-                        &cancel,
-                        &mut permit,
-                    )
-                    .await
-                    {
-                        LoopSignal::Continue { answered } => {
-                            just_answered = answered;
-                            drop(permit);
-                            continue;
-                        }
-                        LoopSignal::Stop => {
-                            drop(permit);
-                            app.finish_task_loop(&task_id);
-                            return;
-                        }
-                    }
-                }
-                Landing::Cancelled => {
-                    task.attempts[idx].status = AttemptStatus::Interrupted;
-                    task.attempts[idx].ended_at = Some(now_ms());
-                    task.status = app.cancelled_status(&task.status);
-                    task.updated_at = now_ms();
-                    let _ = app.store.save_task(&task);
-                    app.broadcast_task(&task);
-                    drop(permit);
-                    app.finish_task_loop(&task_id);
-                    return;
-                }
-                Landing::NoParent => {}
+        match finish_attempt(
+            &app,
+            &task_id,
+            &mut task,
+            idx,
+            attempt_n,
+            &worktree,
+            &run_dir,
+            &settings,
+            &mut attempt_budget,
+            &pending_answer,
+            &cancel,
+            &mut permit,
+        )
+        .await
+        {
+            Tail::Continue { answered } => {
+                just_answered = answered;
+                continue;
             }
+            Tail::Return => return,
         }
-
-        let wt4 = worktree.clone();
-        let title = task.title.clone();
-        let tid = task_id.clone();
-        let commit_res =
-            tokio::task::spawn_blocking(move || git::commit(&wt4, &title, &tid, attempt_n)).await;
-        match commit_res {
-            Ok(Ok(())) => {
-                git::delete_wip_ref(&worktree, &task_id);
-                task.attempts[idx].status = AttemptStatus::Passed;
-                task.attempts[idx].ended_at = Some(now_ms());
-                task.status = TaskStatus::Done;
-                if let Some(cmd) = task.eval_check_cmd.clone() {
-                    let sha = git::head_sha(&worktree).unwrap_or_default();
-                    task.eval_check = Some(
-                        run_eval_check(
-                            Path::new(&task.repo),
-                            &run_dir,
-                            &sha,
-                            &cmd,
-                            settings.sandbox,
-                            &cancel,
-                        )
-                        .await,
-                    );
-                }
-            }
-            Ok(Err(e)) => {
-                record_failure(&mut task, idx, FailureKind::Error, e.to_string());
-                task.status = TaskStatus::Failed;
-            }
-            Err(e) => {
-                record_failure(
-                    &mut task,
-                    idx,
-                    FailureKind::Error,
-                    format!("commit task panicked: {e}"),
-                );
-                task.status = TaskStatus::Failed;
-            }
-        }
-        if task.status == TaskStatus::Done {
-            app.release_worktree(&mut task, "committed on its branch")
-                .await;
-        }
-        task.updated_at = now_ms();
-        let _ = app.store.save_task(&task);
-        app.broadcast_task(&task);
-        drop(permit);
-        app.finish_task_loop(&task_id);
-        return;
     }
 }
 
@@ -1733,4 +1676,157 @@ impl App {
         }
         self.record_evolution_signals(task_id);
     }
+}
+
+pub(super) enum Tail {
+    Continue { answered: bool },
+    Return,
+}
+
+/// What follows a passed attempt: the task lands on its parent or its base
+/// branch when it has one to land on, else it commits on its own branch.
+/// Ends the loop itself (`Tail::Return`) or hands back to it.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn finish_attempt(
+    app: &Arc<App>,
+    task_id: &str,
+    task: &mut Task,
+    idx: usize,
+    attempt_n: u32,
+    worktree: &Path,
+    run_dir: &Path,
+    settings: &Settings,
+    attempt_budget: &mut u32,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    cancel: &CancelToken,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Tail {
+    let landing = if let Some(parent_id) = task.parent.clone() {
+        Some(
+            land_on_parent(
+                app, task, idx, attempt_n, worktree, run_dir, &parent_id, cancel,
+            )
+            .await,
+        )
+    } else if task.variant().land {
+        Some(land_on_base(app, task, idx, attempt_n, worktree, run_dir, cancel).await)
+    } else {
+        None
+    };
+    if let Some(landing) = landing {
+        match landing {
+            Landing::Waiting => {
+                task.attempts[idx].status = AttemptStatus::Passed;
+                task.attempts[idx].ended_at = Some(now_ms());
+                task.status = TaskStatus::Landing;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(task);
+                app.broadcast_task(task);
+                *permit = None;
+                app.finish_task_loop(task_id);
+                return Tail::Return;
+            }
+            Landing::Landed => {
+                git::delete_wip_ref(worktree, task_id);
+                task.attempts[idx].status = AttemptStatus::Passed;
+                task.attempts[idx].ended_at = Some(now_ms());
+                task.status = TaskStatus::Done;
+                app.release_worktree(task, "landed").await;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(task);
+                app.broadcast_task(task);
+                *permit = None;
+                app.finish_task_loop(task_id);
+                return Tail::Return;
+            }
+            Landing::Failed { kind, detail } => {
+                match fail_and_continue(
+                    app,
+                    task_id,
+                    task,
+                    idx,
+                    kind,
+                    detail,
+                    attempt_budget,
+                    pending_answer,
+                    cancel,
+                    permit,
+                )
+                .await
+                {
+                    LoopSignal::Continue { answered } => {
+                        *permit = None;
+                        return Tail::Continue { answered };
+                    }
+                    LoopSignal::Stop => {
+                        *permit = None;
+                        app.finish_task_loop(task_id);
+                        return Tail::Return;
+                    }
+                }
+            }
+            Landing::Cancelled => {
+                task.attempts[idx].status = AttemptStatus::Interrupted;
+                task.attempts[idx].ended_at = Some(now_ms());
+                task.status = app.cancelled_status(&task.status);
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(task);
+                app.broadcast_task(task);
+                *permit = None;
+                app.finish_task_loop(task_id);
+                return Tail::Return;
+            }
+            Landing::NoParent => {}
+        }
+    }
+
+    let wt4 = worktree.to_path_buf();
+    let title = task.title.clone();
+    let tid = task_id.to_string();
+    let commit_res =
+        tokio::task::spawn_blocking(move || git::commit(&wt4, &title, &tid, attempt_n)).await;
+    match commit_res {
+        Ok(Ok(())) => {
+            git::delete_wip_ref(worktree, task_id);
+            task.attempts[idx].status = AttemptStatus::Passed;
+            task.attempts[idx].ended_at = Some(now_ms());
+            task.status = TaskStatus::Done;
+            if let Some(cmd) = task.eval_check_cmd.clone() {
+                let sha = git::head_sha(worktree).unwrap_or_default();
+                task.eval_check = Some(
+                    run_eval_check(
+                        Path::new(&task.repo),
+                        run_dir,
+                        &sha,
+                        &cmd,
+                        settings.sandbox,
+                        cancel,
+                    )
+                    .await,
+                );
+            }
+        }
+        Ok(Err(e)) => {
+            record_failure(task, idx, FailureKind::Error, e.to_string());
+            task.status = TaskStatus::Failed;
+        }
+        Err(e) => {
+            record_failure(
+                task,
+                idx,
+                FailureKind::Error,
+                format!("commit task panicked: {e}"),
+            );
+            task.status = TaskStatus::Failed;
+        }
+    }
+    if task.status == TaskStatus::Done {
+        app.release_worktree(task, "committed on its branch").await;
+    }
+    task.updated_at = now_ms();
+    let _ = app.store.save_task(task);
+    app.broadcast_task(task);
+    *permit = None;
+    app.finish_task_loop(task_id);
+    Tail::Return
 }

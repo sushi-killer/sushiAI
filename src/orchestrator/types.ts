@@ -83,7 +83,14 @@ export type EvolutionSettings = {
 };
 
 export type TaskStatus =
-  "drafting" | "queued" | "running" | "waiting" | "done" | "stopped" | "failed";
+  | "drafting"
+  | "queued"
+  | "running"
+  | "waiting"
+  | "landing"
+  | "done"
+  | "stopped"
+  | "failed";
 
 export type Question = { text: string; options: string[] };
 
@@ -133,6 +140,9 @@ export type Variant = {
   /** Second candidate's route; default the first route on the other
    * harness. */
   bestOfRoute?: string;
+  /** A finished top-level task lands on its base branch by itself. Absent =
+   * off. */
+  land?: boolean;
 };
 
 /** A choice the planner made itself (`variant.batchQuestions`). */
@@ -261,6 +271,8 @@ export type Task = {
   baseSha: string;
   /** Branch the task started from; its work is carried onto it when it moves. */
   baseRef?: string;
+  /** The commit a `variant.land` task put on its base branch. */
+  landedSha?: string;
   /** Ids of tasks that must be done before this one starts implementing. */
   dependsOn?: string[];
   /** Repo-relative files or directories the planner said this subtask edits;

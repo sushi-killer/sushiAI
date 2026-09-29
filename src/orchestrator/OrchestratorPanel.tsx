@@ -98,6 +98,7 @@ function statusTone(task: Task): string {
     case "running":
       return "blue";
     case "waiting":
+    case "landing":
       return "yellow";
     case "done":
       return "green";
@@ -115,6 +116,7 @@ const STATUS_RANK: Record<Task["status"], number> = {
   waiting: 0,
   drafting: 1,
   running: 1,
+  landing: 1,
   queued: 2,
   done: 3,
   failed: 3,
@@ -1202,6 +1204,18 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
                       {" "}
                       <span className="orch-branch" title={selected.baseRef}>
                         from {selected.baseRef}
+                      </span>
+                    </>
+                  )}
+                  {selected.variant?.land && (
+                    <>
+                      {" · "}
+                      <span className="orch-branch" title={selected.landedSha}>
+                        {selected.landedSha
+                          ? `landed ${selected.landedSha.slice(0, 8)}`
+                          : selected.status === "landing"
+                            ? "landing: waiting for a clean checkout"
+                            : "lands on its base"}
                       </span>
                     </>
                   )}

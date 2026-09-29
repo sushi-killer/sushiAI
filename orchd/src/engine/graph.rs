@@ -360,8 +360,12 @@ pub(super) enum Landing {
         detail: String,
     },
     Cancelled,
-    /// The parent is gone: commit like a task without one.
+    /// The parent is gone, or landing on the base was refused: commit like a
+    /// task without one.
     NoParent,
+    /// The base branch's checkout has uncommitted changes: the task waits
+    /// `landing` and is retried.
+    Waiting,
 }
 
 /// Lands a finished child on its parent's branch, one child per parent at a
@@ -391,89 +395,22 @@ pub(super) async fn land_on_parent(
     let branch = parent.branch.clone();
     let failed = |kind, detail| Landing::Failed { kind, detail };
 
-    let (wt, base, tid, b) = (
-        worktree.to_path_buf(),
-        task.base_sha.clone(),
-        task.id.clone(),
-        branch.clone(),
-    );
-    let carried = tokio::task::spawn_blocking(move || {
-        // Commits the agent made itself go back to being uncommitted work,
-        // so they are carried (and later committed) like the rest.
-        if git::head_sha(&wt)? != base {
-            git::uncommit_to(&wt, &base)?;
-        }
-        git::carry_onto_moved_base(&wt, &b, &base, &tid)
-    })
+    match carry_and_check(
+        app,
+        task,
+        idx,
+        worktree,
+        run_dir,
+        &branch,
+        "Another subtask",
+        &[],
+        cancel,
+    )
     .await
-    .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
-    match carried {
-        Ok(git::Rebase::Unchanged) => {}
-        Ok(git::Rebase::Moved { new_sha }) => {
-            task.decisions.push(format!(
-                "Land: carried the work onto {branch} at {}",
-                short_sha(&new_sha)
-            ));
-            task.base_sha = new_sha.clone();
-            let (wt, b) = (worktree.to_path_buf(), new_sha.clone());
-            let changed = tokio::task::spawn_blocking(move || {
-                git::changed_files(&wt, &b).unwrap_or_default()
-            })
-            .await
-            .unwrap_or_default();
-            task.attempts[idx].changed_files = changed.clone();
-            if changed.is_empty() {
-                task.decisions
-                    .push(format!("Land: {branch} already contains this work"));
-                return Landing::Landed;
-            }
-            let results = run_verify_cached(
-                app,
-                &task.id,
-                worktree,
-                run_dir,
-                &new_sha,
-                &task.verify,
-                cancel,
-            )
-            .await;
-            if cancel.is_cancelled() {
-                return Landing::Cancelled;
-            }
-            task.attempts[idx].verify = results.clone();
-            if let Some(v) = results.iter().find(|v| v.code != Some(0)) {
-                return failed(
-                    FailureKind::Verify,
-                    format!(
-                        "Another subtask landed on {branch} first; carried onto it, {} exited {}.\n{}",
-                        v.command,
-                        v.code
-                            .map(|c| c.to_string())
-                            .unwrap_or_else(|| "null".to_string()),
-                        v.tail
-                    ),
-                );
-            }
-        }
-        Ok(git::Rebase::Conflicts { new_sha, files }) => {
-            task.base_sha = new_sha.clone();
-            return failed(
-                FailureKind::Verify,
-                conflict_detail(&branch, &new_sha, &files, &task.id),
-            );
-        }
-        Ok(git::Rebase::Skipped { reason }) => {
-            return failed(
-                FailureKind::Error,
-                format!("Could not carry the work onto {branch} ({reason})."),
-            );
-        }
-        Err(e) => {
-            return failed(
-                FailureKind::Error,
-                format!("Could not carry the work onto {branch} ({e})."),
-            );
-        }
+    {
+        Ok(true) => return Landing::Landed,
+        Ok(false) => {}
+        Err(landing) => return landing,
     }
 
     let (wt, parent_wt, title, tid, base) = (
@@ -508,8 +445,141 @@ pub(super) async fn land_on_parent(
     }
 }
 
+/// Carries the task's work onto `branch`'s current head; when the head had
+/// moved, `verify` and then `extra_final` run again on the carried tree.
+/// `Ok(true)`: the branch already holds this work. `Err` is what the caller
+/// returns: a failed attempt, or a cancel.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn carry_and_check(
+    app: &Arc<App>,
+    task: &mut Task,
+    idx: usize,
+    worktree: &Path,
+    run_dir: &Path,
+    branch: &str,
+    first: &str,
+    extra_final: &[String],
+    cancel: &CancelToken,
+) -> Result<bool, Landing> {
+    let failed = |kind, detail| Err(Landing::Failed { kind, detail });
+    let branch = branch.to_string();
+    let (wt, base, tid, b) = (
+        worktree.to_path_buf(),
+        task.base_sha.clone(),
+        task.id.clone(),
+        branch.clone(),
+    );
+    let carried = tokio::task::spawn_blocking(move || {
+        // Commits the agent made itself go back to being uncommitted work,
+        // so they are carried (and later committed) like the rest.
+        if git::head_sha(&wt)? != base {
+            git::uncommit_to(&wt, &base)?;
+        }
+        git::carry_onto_moved_base(&wt, &b, &base, &tid)
+    })
+    .await
+    .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
+    match carried {
+        Ok(git::Rebase::Unchanged) => {}
+        Ok(git::Rebase::Moved { new_sha }) => {
+            task.decisions.push(format!(
+                "Land: carried the work onto {branch} at {}",
+                short_sha(&new_sha)
+            ));
+            task.base_sha = new_sha.clone();
+            let (wt, b) = (worktree.to_path_buf(), new_sha.clone());
+            let changed = tokio::task::spawn_blocking(move || {
+                git::changed_files(&wt, &b).unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+            task.attempts[idx].changed_files = changed.clone();
+            if changed.is_empty() {
+                task.decisions
+                    .push(format!("Land: {branch} already contains this work"));
+                return Ok(true);
+            }
+            let results = run_verify_cached(
+                app,
+                &task.id,
+                worktree,
+                run_dir,
+                &new_sha,
+                &task.verify,
+                cancel,
+            )
+            .await;
+            if cancel.is_cancelled() {
+                return Err(Landing::Cancelled);
+            }
+            task.attempts[idx].verify = results.clone();
+            if let Some(v) = results.iter().find(|v| v.code != Some(0)) {
+                return failed(
+                    FailureKind::Verify,
+                    format!(
+                        "{first} landed on {branch} first; carried onto it, {} exited {}.\n{}",
+                        v.command,
+                        v.code
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| "null".to_string()),
+                        v.tail
+                    ),
+                );
+            }
+            if !extra_final.is_empty() {
+                let sandbox = app.settings.read().unwrap().sandbox;
+                let finals = run_verify_commands(
+                    worktree,
+                    &run_dir.join("final-land"),
+                    extra_final,
+                    sandbox,
+                    cancel,
+                )
+                .await;
+                if cancel.is_cancelled() {
+                    return Err(Landing::Cancelled);
+                }
+                task.attempts[idx].verify.extend(finals.iter().cloned());
+                if let Some(v) = finals.iter().find(|v| v.code != Some(0)) {
+                    return failed(
+                        FailureKind::Verify,
+                        format!(
+                            "{first} landed on {branch} first; carried onto it, final check {} exited {}.\n{}",
+                            v.command,
+                            v.code
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "null".to_string()),
+                            v.tail
+                        ),
+                    );
+                }
+            }
+        }
+        Ok(git::Rebase::Conflicts { new_sha, files }) => {
+            task.base_sha = new_sha.clone();
+            return failed(
+                FailureKind::Verify,
+                conflict_detail(&branch, &new_sha, &files, &task.id),
+            );
+        }
+        Ok(git::Rebase::Skipped { reason }) => {
+            return failed(
+                FailureKind::Error,
+                format!("Could not carry the work onto {branch} ({reason})."),
+            );
+        }
+        Err(e) => {
+            return failed(
+                FailureKind::Error,
+                format!("Could not carry the work onto {branch} ({e})."),
+            );
+        }
+    }
+    Ok(false)
+}
+
 impl App {
-    fn landing_lock(&self, parent_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    pub(super) fn landing_lock(&self, parent_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.landing_locks
             .lock()
             .unwrap()

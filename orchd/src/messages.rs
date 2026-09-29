@@ -340,6 +340,7 @@ mod tests {
             repo: repo.into(),
             worktree: "/wt".into(),
             worktree_removed: false,
+            landed_sha: None,
             branch: "b".into(),
             base_sha: "s".into(),
             base_ref: None,

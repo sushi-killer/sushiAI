@@ -137,6 +137,22 @@ pub struct Settings {
     /// repo root. Existing tasks keep the path they were created with.
     #[serde(default = "default_worktree_root")]
     pub worktree_root: String,
+    /// Land tasks may move the repo's default branch (origin/HEAD, else
+    /// main/master). Off: such a landing is refused and the task stays done
+    /// on its own branch.
+    #[serde(default)]
+    pub land_on_default: bool,
+    /// Commands run in the repo's main checkout after a task lands.
+    #[serde(default)]
+    pub after_land: Vec<AfterLand>,
+}
+
+/// One `settings.afterLand` entry: `run` (a shell command) runs in the main
+/// checkout `repo` after a landing there, e.g. to rebuild a binary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AfterLand {
+    pub repo: String,
+    pub run: String,
 }
 
 /// Thresholds for the evolution loop (`engine/evolution`): what counts as
@@ -373,6 +389,8 @@ impl Default for Settings {
             work_buckets: WorkBuckets::default(),
             evolution: EvolutionSettings::default(),
             worktree_root: default_worktree_root(),
+            land_on_default: false,
+            after_land: vec![],
         }
     }
 }
@@ -494,6 +512,12 @@ pub struct Variant {
     /// other harness than the tier route's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub best_of_route: Option<String>,
+    /// A finished top-level task lands on its base branch by itself: a
+    /// landing queue carries it onto the branch's head, squashes it to one
+    /// commit, re-runs the checks on that tree and moves the branch. Left
+    /// out of the JSON while off.
+    #[serde(skip_serializing_if = "is_false")]
+    pub land: bool,
 }
 
 fn is_zero_u32(v: &u32) -> bool {
@@ -660,7 +684,7 @@ impl Variant {
 
     /// Keys a serialized default `Variant` leaves out, but a partial
     /// override object may still name.
-    pub const OPTIONAL_KEYS: [&'static str; 8] = [
+    pub const OPTIONAL_KEYS: [&'static str; 9] = [
         "plannerRoute",
         "tierRoutes",
         "maxCostUsd",
@@ -669,6 +693,7 @@ impl Variant {
         "groundedChecks",
         "bestOf",
         "bestOfRoute",
+        "land",
     ];
 
     /// Every route override names a route in `routes`.
@@ -728,6 +753,10 @@ pub enum TaskStatus {
     Queued,
     Running,
     Waiting,
+    /// Done and checked, waiting for its base branch's checkout to be clean
+    /// so it can land (`variant.land`); retried every 2 minutes and on
+    /// `task.start`.
+    Landing,
     Done,
     Stopped,
     Failed,
@@ -830,6 +859,9 @@ pub struct Task {
     /// task runs again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub worktree_removed: bool,
+    /// The commit a `variant.land` task put on its base branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landed_sha: Option<String>,
     pub branch: String,
     pub base_sha: String,
     /// The branch the task was started from (`base`, or the repo's checked-out
@@ -1336,6 +1368,7 @@ mod tests {
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
             worktree_removed: false,
+            landed_sha: None,
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,
@@ -1555,6 +1588,7 @@ mod tests {
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
             worktree_removed: false,
+            landed_sha: None,
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,
@@ -1602,6 +1636,7 @@ mod tests {
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
             worktree_removed: false,
+            landed_sha: None,
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,

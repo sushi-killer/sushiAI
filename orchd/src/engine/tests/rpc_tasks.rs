@@ -1,10 +1,11 @@
 #[tokio::test]
-async fn task_archive_refuses_running_drafting_and_waiting_tasks() {
+async fn task_archive_refuses_running_drafting_waiting_and_landing_tasks() {
     let (app, _dir) = test_app();
     for status in [
         TaskStatus::Running,
         TaskStatus::Drafting,
         TaskStatus::Waiting,
+        TaskStatus::Landing,
     ] {
         let task = task_with_status(status);
         app.store.save_task(&task).unwrap();
@@ -13,7 +14,7 @@ async fn task_archive_refuses_running_drafting_and_waiting_tasks() {
             .await
             .unwrap_err();
         assert!(
-            err.contains("running, drafting, or waiting"),
+            err.contains("running, drafting, waiting or landing"),
             "status {status:?}: unexpected error {err}"
         );
         let reloaded = app.store.load_task(&task.id).unwrap().unwrap();

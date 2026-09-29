@@ -27,7 +27,10 @@ impl App {
             }
             if matches!(
                 t.status,
-                TaskStatus::Queued | TaskStatus::Running | TaskStatus::Drafting
+                TaskStatus::Queued
+                    | TaskStatus::Running
+                    | TaskStatus::Drafting
+                    | TaskStatus::Landing
             ) {
                 let id = t.id.clone();
                 if settle_interrupted_advisor(&mut t, |n| self.store.run_dir(&id, n), &prices) {
@@ -38,6 +41,7 @@ impl App {
                 self.start_task_loop(t.id);
             }
         }
+        self.spawn_landing_retries();
         Ok(())
     }
 }

@@ -60,6 +60,7 @@ const VARIANT_KEYS: Exclude<
   | "groundedChecks"
   | "bestOf"
   | "bestOfRoute"
+  | "land"
 >[] = [
   "retryMode",
   "stallTimeoutSecs",
@@ -263,6 +264,7 @@ const STATUS_BADGE_LABELS: Record<Task["status"], string> = {
   queued: "Queued",
   running: "Running",
   waiting: "Waiting",
+  landing: "Landing",
   done: "Done",
   stopped: "Stopped",
   failed: "Failed",
@@ -296,6 +298,8 @@ export function statusDetail(task: Task): string {
       return formatCost(task.costUsd);
     case "waiting":
       return "1 question for you";
+    case "landing":
+      return "waiting to land";
     case "done": {
       const review = reviewOf(task);
       const cost = formatCost(task.costUsd);

@@ -416,6 +416,101 @@ pub fn fast_forward(worktree: &Path, sha: &str) -> Result<(), GitError> {
     .map(|_| ())
 }
 
+/// The repo's default branch: what `origin/HEAD` points at, else `main`,
+/// else `master`, whichever exists locally.
+pub fn default_branch(repo: &Path) -> Option<String> {
+    if let Ok(out) = run(
+        repo,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    ) {
+        if let Some(name) = out.trim().strip_prefix("origin/") {
+            return Some(name.to_string());
+        }
+    }
+    ["main", "master"]
+        .into_iter()
+        .find_map(|b| branch_of(repo, b))
+}
+
+/// The worktree (usually the main checkout) that has `branch` checked out.
+pub fn checkout_of(repo: &Path, branch: &str) -> Option<PathBuf> {
+    let out = run(repo, &["worktree", "list", "--porcelain"]).ok()?;
+    let want = format!("branch refs/heads/{branch}");
+    out.split("\n\n").find_map(|block| {
+        let path = block.lines().find_map(|l| l.strip_prefix("worktree "))?;
+        block
+            .lines()
+            .any(|l| l == want)
+            .then(|| PathBuf::from(path))
+    })
+}
+
+/// Whether a checkout has uncommitted changes to tracked files.
+pub fn has_uncommitted_changes(checkout: &Path) -> Result<bool, GitError> {
+    Ok(
+        !run(checkout, &["status", "--porcelain", "--untracked-files=no"])?
+            .trim()
+            .is_empty(),
+    )
+}
+
+/// Moves `refs/heads/<branch>` to `sha` only if it still is `expected`.
+pub fn update_branch(repo: &Path, branch: &str, sha: &str, expected: &str) -> Result<(), GitError> {
+    run(
+        repo,
+        &["update-ref", &format!("refs/heads/{branch}"), sha, expected],
+    )
+    .map(|_| ())
+}
+
+/// What [`move_branch`] did.
+#[derive(Debug)]
+pub enum BranchMove {
+    /// The branch is at the commit; `checkout` is where it is checked out, or
+    /// the repo root when it is checked out nowhere.
+    Done { checkout: PathBuf },
+    /// The branch's checkout has uncommitted changes; nothing was touched.
+    Dirty { checkout: PathBuf },
+    /// The branch is no longer an ancestor of the commit.
+    Diverged,
+}
+
+/// Fast-forwards `branch` to `sha`: `git merge --ff-only` in the worktree
+/// that has it checked out (left alone when it has uncommitted changes), else
+/// `git update-ref` expecting the branch's current value. Never pushes.
+pub fn move_branch(repo: &Path, branch: &str, sha: &str) -> Result<BranchMove, GitError> {
+    let refname = format!("refs/heads/{branch}");
+    let head = run(repo, &["rev-parse", "--verify", &refname])?
+        .trim()
+        .to_string();
+    if run(repo, &["merge-base", "--is-ancestor", &head, sha]).is_err() {
+        return Ok(BranchMove::Diverged);
+    }
+    let Some(checkout) = checkout_of(repo, branch) else {
+        update_branch(repo, branch, sha, &head)?;
+        return Ok(BranchMove::Done {
+            checkout: repo.to_path_buf(),
+        });
+    };
+    if has_uncommitted_changes(&checkout)? {
+        return Ok(BranchMove::Dirty { checkout });
+    }
+    match fast_forward(&checkout, sha) {
+        Ok(()) => Ok(BranchMove::Done { checkout }),
+        // Nothing moved: an untracked file in the way, not a moved branch.
+        Err(_)
+            if run(repo, &["rev-parse", "--verify", &refname])
+                .ok()
+                .map(|s| s.trim().to_string())
+                .as_deref()
+                == Some(head.as_str()) =>
+        {
+            Ok(BranchMove::Dirty { checkout })
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Drops the saved work of a task that no longer needs it.
 pub fn delete_wip_ref(worktree: &Path, task_id: &str) {
     let _ = run(worktree, &["update-ref", "-d", &wip_ref(task_id)]);
@@ -846,6 +941,43 @@ pub fn delete_branch(repo_root: &Path, branch: &str, task_id: &str) {
 mod tests {
     use super::*;
     use std::process::Command as StdCommand;
+
+    #[test]
+    fn move_branch_updates_an_unchecked_out_branch_and_finds_the_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        let git = |args: &[&str]| {
+            let out = StdCommand::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let default = branch_of(&repo, "HEAD").unwrap();
+        assert_eq!(default_branch(&repo), Some(default.clone()));
+        git(&["branch", "side"]);
+        git(&["checkout", "-q", "-b", "next"]);
+        std::fs::write(repo.join("n.txt"), "n\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "n"]);
+        let sha = git(&["rev-parse", "HEAD"]);
+        assert_eq!(checkout_of(&repo, "side"), None);
+        assert!(checkout_of(&repo, "next").is_some());
+        assert!(matches!(
+            move_branch(&repo, "side", &sha).unwrap(),
+            BranchMove::Done { .. }
+        ));
+        assert_eq!(git(&["rev-parse", "side"]), sha);
+        // Not a fast-forward any more: `side` is ahead of the default branch.
+        assert!(matches!(
+            move_branch(&repo, "side", &git(&["rev-parse", &default])).unwrap(),
+            BranchMove::Diverged
+        ));
+    }
 
     fn init_repo(dir: &Path) {
         let run = |args: &[&str]| {

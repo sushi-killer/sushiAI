@@ -36,6 +36,7 @@ pub(super) fn task_with_status(status: TaskStatus) -> Task {
         repo: "/repo".into(),
         worktree: "/repo-task".into(),
         worktree_removed: false,
+        landed_sha: None,
         branch: "task/do-thing".into(),
         base_sha: "deadbeef".into(),
         base_ref: None,

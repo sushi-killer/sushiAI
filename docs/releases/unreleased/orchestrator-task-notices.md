@@ -8,3 +8,5 @@
 - Clicking a notice opens the Orchestrator page at that task: its question,
   its Report section (done) or its attempts (failed). Subtasks raise only
   their questions, and archived tasks raise nothing.
+- A task's new question replaces its older notice in the mascot and closes
+  the older native notification.

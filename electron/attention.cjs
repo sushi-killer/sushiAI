@@ -103,6 +103,7 @@ function registerAttentionIpc({
   const trayIcons = new Map();
   let quitting = false;
   const notifications = new Set();
+  const inputNotifications = new Map();
 
   function showWindow() {
     if (hidden) return;
@@ -248,12 +249,19 @@ function registerAttentionIpc({
     });
     if (route === "none") return;
     if (route === "mascot") return mascotWindow?.add(notice);
+    if (notice.kind === "input") inputNotifications.get(notice.taskId)?.close();
     const options = { title: notice.title, body: notice.body };
     const icon = mascotImage();
     if (icon) options.icon = icon;
     const notification = new Notification(options);
     notifications.add(notification);
-    const cleanup = () => notifications.delete(notification);
+    if (notice.kind === "input")
+      inputNotifications.set(notice.taskId, notification);
+    const cleanup = () => {
+      notifications.delete(notification);
+      if (inputNotifications.get(notice.taskId) === notification)
+        inputNotifications.delete(notice.taskId);
+    };
     notification.on("click", () => {
       cleanup();
       showWindow();

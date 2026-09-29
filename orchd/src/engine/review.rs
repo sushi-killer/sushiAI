@@ -65,6 +65,24 @@ pub(super) fn attempt_screenshots(worktree: &Path, since_ms: i64) -> Vec<PathBuf
     found
 }
 
+/// True for a path that is a test file: any directory component named `test`,
+/// `tests`, `__tests__`, `spec`, `specs` or `e2e`, or a file name with
+/// `.test.`, `.spec.` or `_test.` in it, or starting with `test_`.
+pub(super) fn is_test_path(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    let Some((name, dirs)) = parts.split_last() else {
+        return false;
+    };
+    let is_dir_name =
+        |p: &str| matches!(p, "test" | "tests" | "__tests__" | "spec" | "specs" | "e2e");
+    dirs.iter().any(|d| is_dir_name(d))
+        || is_dir_name(name)
+        || name.contains(".test.")
+        || name.contains(".spec.")
+        || name.contains("_test.")
+        || name.starts_with("test_")
+}
+
 /// Copies every image the attempt wrote under `artifacts/` into `evidence_dir`
 /// (flattened names), so it survives the worktree. Returns the copies.
 pub(super) fn save_evidence(worktree: &Path, since_ms: i64, evidence_dir: &Path) -> Vec<String> {
@@ -187,6 +205,7 @@ pub(super) async fn run_review(
     fingerprint: &mut Option<Fingerprint>,
     round: u32,
     after_no_verdict: bool,
+    dropped: &[(String, String)],
 ) -> Result<(ReviewResult, bool), ReviewFailure> {
     let wt = worktree.to_path_buf();
     let base = base_sha.to_string();
@@ -196,24 +215,24 @@ pub(super) async fn run_review(
             .unwrap_or_default();
 
     let evidence = task.variant().review_evidence;
-    let images = if evidence {
-        let since = task
-            .attempts
-            .iter()
-            .find(|a| a.n == attempt_n && a.stage == Stage::Implement)
-            .map_or(0, |a| a.started_at);
-        attempt_screenshots(worktree, since)
-    } else {
+    let this_attempt = task
+        .attempts
+        .iter()
+        .find(|a| a.n == attempt_n && a.stage == Stage::Implement);
+    let evidence_from = this_attempt.and_then(|a| a.evidence_from);
+    let images = if !evidence {
         Vec::new()
+    } else if evidence_from.is_some() {
+        // Reused evidence: the saved copies, not what the worktree holds.
+        this_attempt
+            .map(|a| a.evidence.iter().map(PathBuf::from).collect())
+            .unwrap_or_default()
+    } else {
+        attempt_screenshots(worktree, this_attempt.map_or(0, |a| a.started_at))
     };
     // The saved copies outlive the worktree, so they are what the reviewer
     // is pointed at; the worktree paths only when nothing was copied.
-    let saved = task
-        .attempts
-        .iter()
-        .find(|a| a.n == attempt_n && a.stage == Stage::Implement)
-        .map(|a| a.evidence.clone())
-        .unwrap_or_default();
+    let saved = this_attempt.map(|a| a.evidence.clone()).unwrap_or_default();
     let shown: Vec<String> = if saved.is_empty() {
         images
             .iter()
@@ -234,8 +253,10 @@ pub(super) async fn run_review(
         agent_decisions,
         verify_results,
         &shown,
+        evidence_from,
         &diff,
     );
+    brief_text.push_str(&brief::dropped_findings_block(dropped));
     if after_no_verdict {
         brief_text.push('\n');
         brief_text.push_str(&brief::review_retry_note());
@@ -378,5 +399,43 @@ mod tests {
         assert!(quote.ends_with('\u{2026}'));
         assert_eq!(quote.chars().count(), 301);
         assert_eq!(head_chars("short", 300), "short");
+    }
+}
+
+#[cfg(test)]
+mod is_test_path_tests {
+    use super::is_test_path;
+
+    #[test]
+    fn test_directories_and_file_names_count() {
+        for path in [
+            "test/a.rs",
+            "src/tests/a.rs",
+            "web/__tests__/a.ts",
+            "spec/a.rb",
+            "src/specs/a.rb",
+            "e2e/login.ts",
+            "src/panel.test.ts",
+            "src/panel.spec.ts",
+            "src/panel_test.go",
+            "tools/test_panel.py",
+        ] {
+            assert!(is_test_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn near_misses_do_not_count() {
+        for path in [
+            "src/contest.rs",
+            "testing/x.rs",
+            "src/latest.rs",
+            "src/attest_all.rs",
+            "src/testimony.rs",
+            "specification/a.md",
+            "",
+        ] {
+            assert!(!is_test_path(path), "{path}");
+        }
     }
 }

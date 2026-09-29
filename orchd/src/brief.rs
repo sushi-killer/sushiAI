@@ -4,13 +4,13 @@
 //! harness (spec step 3).
 
 use crate::model::{
-    Attempt, AttemptStatus, Baseline, Check, Message, MessageKind, ReviewResult, Stage, Task,
-    TaskStatus, Tier, Variant, VerifyOutcome,
+    Attempt, AttemptStatus, Baseline, Check, Dispute, Message, MessageKind, ReviewResult, Stage,
+    Task, TaskStatus, Tier, Variant, VerifyOutcome,
 };
 
 /// Bump when any brief template or fixed instruction block changes: it is
 /// part of every run's `promptHash`.
-pub const BRIEF_TEMPLATE_VERSION: u32 = 3;
+pub const BRIEF_TEMPLATE_VERSION: u32 = 4;
 
 const MAX_FAILURE_DETAIL: usize = 1500;
 /// The latest failure is the one the next attempt has to fix, so it gets the whole
@@ -60,6 +60,8 @@ fn attempt_outcome_label(attempt: &Attempt) -> &'static str {
         AttemptStatus::Running => "running",
     }
 }
+
+const DISPUTES_BLOCK: &str = "\nThe last attempt failed review. If you believe a review finding is wrong, add a `disputes` array to the report instead of working around a real finding: `\"disputes\":[{\"finding\":\"<the finding, quoted>\",\"rebuttal\":\"<why it is wrong>\",\"evidence\":[\"<file:line, command output or an artifacts/ path>\"]}]`. A repeated finding you dispute is judged by a reviewer on another harness; a finding that is real still has to be fixed.\n";
 
 const REPORT_FORMAT_BLOCK: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-report\n{\"outcome\":\"complete|partial|blocked\",\"summary\":\"...\",\"handoff\":\"...\",\"decisions\":[],\"question\":\"\"}\n```\n\n`handoff` is for whoever continues this task if the attempt fails verification or review: what is done, what you tried that did not work, what to do next.\n";
 
@@ -295,6 +297,15 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
     out.push_str("\n```\n\n");
 
     out.push_str(REPORT_FORMAT_BLOCK);
+    let last_failed_review = task
+        .attempts
+        .iter()
+        .rfind(|a| a.stage == Stage::Implement)
+        .and_then(|a| a.failure.as_ref())
+        .is_some_and(|f| f.kind == crate::model::FailureKind::Review);
+    if last_failed_review {
+        out.push_str(DISPUTES_BLOCK);
+    }
 
     out
 }
@@ -529,6 +540,43 @@ pub struct Report {
     pub decisions: Vec<String>,
     #[serde(default)]
     pub question: String,
+    #[serde(default, deserialize_with = "lenient_disputes")]
+    pub disputes: Vec<Dispute>,
+}
+
+/// Disputes of review findings: entries that are not objects, or lack a
+/// finding or a rebuttal, are dropped; anything but an array is empty.
+fn lenient_disputes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Dispute>, D::Error> {
+    let v: serde_json::Value = serde::Deserialize::deserialize(d)?;
+    let serde_json::Value::Array(entries) = v else {
+        return Ok(Vec::new());
+    };
+    let text = |o: &serde_json::Map<String, serde_json::Value>, key: &str| {
+        o.get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    Ok(entries
+        .iter()
+        .filter_map(|e| {
+            let o = e.as_object()?;
+            let evidence = match o.get("evidence") {
+                Some(serde_json::Value::Array(items)) => items
+                    .iter()
+                    .filter_map(|i| i.as_str())
+                    .map(str::to_string)
+                    .collect(),
+                Some(serde_json::Value::String(one)) => vec![one.clone()],
+                _ => Vec::new(),
+            };
+            Some(Dispute {
+                finding: text(o, "finding")?,
+                rebuttal: text(o, "rebuttal")?,
+                evidence,
+            })
+        })
+        .collect())
 }
 
 /// Extract the JSON body of the *last* ```sushi-report fenced block in
@@ -541,7 +589,7 @@ pub fn parse_report(text: &str) -> Option<Report> {
 /// The JSON a reply hands back: the last ```tag (or <tag>) block, else the
 /// outermost `{...}` -- Codex has been seen to drop the backticks and send
 /// the bare tag line followed by the JSON.
-fn tagged_json(text: &str, tag: &str) -> Option<String> {
+pub(crate) fn tagged_json(text: &str, tag: &str) -> Option<String> {
     last_fenced_block(text, tag).or_else(|| {
         let start = text.find('{')?;
         let end = text.rfind('}')?;
@@ -1309,6 +1357,19 @@ pub(crate) fn untrusted_block(label: &str, text: &str) -> String {
     )
 }
 
+/// The review brief's section for findings a tie-break judge dropped
+/// (finding, judge's reason): the reviewer must not raise them again.
+pub fn dropped_findings_block(dropped: &[(String, String)]) -> String {
+    if dropped.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n## Findings dropped by a tie-break judge\n\nThe implementer disputed these findings and a judge on another harness ruled them invalid. Do not report them again and do not fail a criterion on them.\n\n");
+    for (finding, why) in dropped {
+        out.push_str(&format!("- {finding} (judge: {why})\n"));
+    }
+    out
+}
+
 /// The attempt's own report decisions as `Agent: ...` lines: a leading
 /// `Owner:`/`Agent:` the agent echoed is stripped before the prefix is added.
 pub fn agent_decision_lines(decisions: &[String]) -> Vec<String> {
@@ -1337,6 +1398,7 @@ pub fn build_review_brief(
     agent_decisions: &[String],
     verify_results: &[VerifyOutcome],
     screenshots: &[String],
+    evidence_from: Option<u32>,
     diff: &str,
 ) -> String {
     let mut out = String::new();
@@ -1382,7 +1444,11 @@ pub fn build_review_brief(
         ));
     }
     if !screenshots.is_empty() {
-        out.push_str("\n## Screenshots\n\nSaved by this attempt. Open each one and check it against the criteria it is meant to prove; a screenshot that does not show what a criterion claims is a finding.\n\n");
+        let by = match evidence_from {
+            Some(m) => format!("These copies were saved by attempt {m}, not by this attempt, which changed only artifacts/ or tests since."),
+            None => "Saved by this attempt.".to_string(),
+        };
+        out.push_str(&format!("\n## Screenshots\n\n{by} Open each one and check it against the criteria it is meant to prove; a screenshot that does not show what a criterion claims is a finding.\n\n"));
         for shown in screenshots {
             out.push_str(&format!("- `{shown}`\n"));
         }
@@ -1714,6 +1780,7 @@ mod tests {
             cost_usd: 0.0,
             budget_raises: 0,
             assumptions: vec![],
+            judged_findings: vec![],
             archived: false,
             planned_tier: None,
             tier_fallback: None,
@@ -1758,6 +1825,7 @@ mod tests {
             status: AttemptStatus::Failed,
             summary: None,
             handoff: None,
+            disputes: vec![],
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
@@ -1773,6 +1841,8 @@ mod tests {
             cost_estimated: false,
             review_cost_usd: None,
             evidence: vec![],
+            evidence_tree: None,
+            evidence_from: None,
             advice: None,
             advisor_cost_usd: None,
             fingerprint: None,
@@ -1911,6 +1981,7 @@ mod tests {
             status: AttemptStatus::Passed,
             summary: Some("Drafted: Add a button".into()),
             handoff: None,
+            disputes: vec![],
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
@@ -1922,6 +1993,8 @@ mod tests {
             cost_estimated: false,
             review_cost_usd: None,
             evidence: vec![],
+            evidence_tree: None,
+            evidence_from: None,
             advice: None,
             advisor_cost_usd: None,
             fingerprint: None,
@@ -2010,11 +2083,11 @@ mod tests {
         second.n = 2;
         second.review = None;
         task.attempts = vec![first];
-        let one = build_review_brief(&task, "note", &[], &[], &[], "d");
+        let one = build_review_brief(&task, "note", &[], &[], &[], None, "d");
         assert!(!one.contains("## Previous review"), "{one}");
         assert!(!one.contains("\"repeat\""), "{one}");
         task.attempts.push(second);
-        let two = build_review_brief(&task, "note", &[], &[], &[], "d");
+        let two = build_review_brief(&task, "note", &[], &[], &[], None, "d");
         assert!(two.contains("## Previous review"), "{two}");
         assert!(
             two.contains("<untrusted-data>\nP1: a.rs:1 - null check missing"),
@@ -2150,6 +2223,7 @@ mod tests {
             status: AttemptStatus::Failed,
             summary: None,
             handoff: None,
+            disputes: vec![],
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
@@ -2165,6 +2239,8 @@ mod tests {
             cost_estimated: false,
             review_cost_usd: None,
             evidence: vec![],
+            evidence_tree: None,
+            evidence_from: None,
             advice: None,
             advisor_cost_usd: None,
             fingerprint: None,
@@ -2614,6 +2690,7 @@ mod tests {
             &["Agent: kept the old name".into()],
             &[],
             &["artifacts/a.png".into()],
+            None,
             "diff body",
         );
         assert!(text.starts_with("## Review"));
@@ -2766,11 +2843,11 @@ mod tests {
             tail: String::new(),
             ms: 1,
         };
-        let failed = build_review_brief(&task, "note", &[], &[ran(Some(1))], &[], "");
+        let failed = build_review_brief(&task, "note", &[], &[ran(Some(1))], &[], None, "");
         assert!(failed.contains("`vacuous-cmd` already passed on the base, so it is not grounded"));
         assert!(failed.contains("Held-out check for criterion 1 (Click saves settings): failed."));
         assert!(!failed.contains("SECRET-held-out-cmd"));
-        let passed = build_review_brief(&task, "note", &[], &[ran(Some(0))], &[], "");
+        let passed = build_review_brief(&task, "note", &[], &[ran(Some(0))], &[], None, "");
         assert!(passed.contains("Held-out check for criterion 1 (Click saves settings): passed."));
         // The held-out outcome is not also listed as a verify result.
         assert!(!passed.contains("-> exit"));
@@ -2786,7 +2863,7 @@ mod tests {
             tail: String::new(),
             ms: 1,
         };
-        let text = build_review_brief(&task, "note", &[], &[ran], &[], "");
+        let text = build_review_brief(&task, "note", &[], &[ran], &[], None, "");
         assert!(
             text.contains("## Verify results\n\n- `held-out check (criterion 0)` -> exit Some(0)")
         );
@@ -2925,6 +3002,7 @@ mod tests {
         dep.status = TaskStatus::Done;
         dep.decisions.clear();
         let mut attempt = Attempt {
+            disputes: vec![],
             n: 1,
             stage: Stage::Implement,
             route_id: "claude-sonnet".into(),
@@ -2949,6 +3027,8 @@ mod tests {
             cost_estimated: false,
             review_cost_usd: None,
             evidence: vec![],
+            evidence_tree: None,
+            evidence_from: None,
             advice: None,
             advisor_cost_usd: None,
             fingerprint: None,
@@ -3057,6 +3137,63 @@ mod tests {
         let block = landed_dependencies_block(&dependent_of(&["d1"]), &[dep], None);
         assert!(block.contains("Dependency d1") && block.contains("Agent: split it"));
         assert!(!block.contains("Summary:") && !block.contains("Changed files"));
+    }
+
+    #[test]
+    fn a_report_reads_well_formed_disputes() {
+        let text = "```sushi-report\n{\"outcome\":\"complete\",\"disputes\":[{\"finding\":\" f1 \",\"rebuttal\":\"r1\",\"evidence\":[\"a.rs:1\",\"artifacts/x.png\"]},{\"finding\":\"f2\",\"rebuttal\":\"r2\"}]}\n```";
+        let report = parse_report(text).unwrap();
+        assert_eq!(report.disputes.len(), 2);
+        assert_eq!(report.disputes[0].finding, "f1");
+        assert_eq!(report.disputes[0].evidence, ["a.rs:1", "artifacts/x.png"]);
+        assert!(report.disputes[1].evidence.is_empty());
+    }
+
+    #[test]
+    fn malformed_disputes_are_dropped_and_the_report_still_parses() {
+        let parse = |disputes: &str| {
+            parse_report(&format!(
+                "```sushi-report\n{{\"outcome\":\"complete\",\"summary\":\"s\",\"disputes\":{disputes}}}\n```"
+            ))
+            .unwrap()
+        };
+        for not_an_array in ["\"nope\"", "{\"finding\":\"f\"}", "null", "3"] {
+            let report = parse(not_an_array);
+            assert!(report.disputes.is_empty(), "{not_an_array}");
+            assert_eq!(report.summary, "s");
+        }
+        let report = parse(
+            "[1, \"x\", {\"finding\":\"f\"}, {\"rebuttal\":\"r\"}, {\"finding\":\"\",\"rebuttal\":\"r\"}, {\"finding\":\"ok\",\"rebuttal\":\"r\",\"evidence\":\"one\"}]",
+        );
+        assert_eq!(report.disputes.len(), 1);
+        assert_eq!(report.disputes[0].finding, "ok");
+        assert_eq!(report.disputes[0].evidence, ["one"]);
+    }
+
+    #[test]
+    fn the_disputes_field_is_explained_only_after_a_review_failure() {
+        let mut task = sample_task();
+        assert!(!build_brief(&task, "", "").contains("disputes"));
+        task.attempts.push(failed_implement_attempt("x".into()));
+        assert!(!build_brief(&task, "", "").contains("disputes"));
+        task.attempts[0].failure.as_mut().unwrap().kind = crate::model::FailureKind::Review;
+        let brief = build_brief(&task, "", "");
+        assert!(brief.contains("\"disputes\""));
+        assert!(brief.contains("instead of working around a real finding"));
+        // Only the latest implement attempt counts.
+        let mut second = task.attempts[0].clone();
+        second.n = 2;
+        second.failure.as_mut().unwrap().kind = FailureKind::Verify;
+        task.attempts.push(second);
+        assert!(!build_brief(&task, "", "").contains("disputes"));
+    }
+
+    #[test]
+    fn dropped_findings_get_a_review_section() {
+        assert_eq!(dropped_findings_block(&[]), "");
+        let block = dropped_findings_block(&[("f".into(), "wrong".into())]);
+        assert!(block.contains("## Findings dropped by a tie-break judge"));
+        assert!(block.contains("- f (judge: wrong)"));
     }
 }
 

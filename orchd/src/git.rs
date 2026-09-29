@@ -728,6 +728,61 @@ pub fn replace_work_with_patch(
     applied.map(|_| ())
 }
 
+/// Tree id of everything in the worktree that git would track: tracked and
+/// untracked non-ignored files. Built through a temporary index, so the real
+/// index and `git status` are left as they were.
+pub fn worktree_tree(worktree: &Path) -> Result<String, GitError> {
+    let real = run(
+        worktree,
+        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+    )
+    .ok()
+    .map(|p| PathBuf::from(p.trim()));
+    let tmp = std::env::temp_dir().join(format!(
+        "orchd-index-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    if let Some(real) = real.filter(|p| p.is_file()) {
+        let _ = std::fs::copy(real, &tmp);
+    }
+    let result = (|| {
+        let tmp_str = tmp.to_string_lossy().to_string();
+        let git = |args: &[&str]| -> Result<String, GitError> {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(worktree)
+                .env("GIT_INDEX_FILE", &tmp_str)
+                .output()
+                .map_err(|e| GitError(format!("git {}: {e}", args.join(" "))))?;
+            if !out.status.success() {
+                return Err(GitError(format!(
+                    "git {} failed: {}",
+                    args.join(" "),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+        git(&["add", "-A"])?;
+        git(&["write-tree"])
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
+/// `git diff --name-only <old> <new>` between two tree ids.
+pub fn diff_trees_name_only(cwd: &Path, old: &str, new: &str) -> Result<Vec<String>, GitError> {
+    let out = run(cwd, &["diff", "--name-only", old, new])?;
+    Ok(out
+        .lines()
+        .map(|l| l.to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
 /// `git diff --name-only <base>`.
 pub fn diff_name_only(cwd: &Path, base: &str) -> Result<Vec<String>, GitError> {
     let out = run(cwd, &["diff", "--name-only", base])?;
@@ -1036,6 +1091,34 @@ pub fn delete_branch(repo_root: &Path, branch: &str, task_id: &str) {
 mod tests {
     use super::*;
     use std::process::Command as StdCommand;
+
+    #[test]
+    fn worktree_tree_covers_untracked_files_but_not_ignored_and_leaves_the_index_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        std::fs::write(repo.join(".gitignore"), "artifacts/\n").unwrap();
+        let before_status = status_short(&repo).unwrap();
+        let first = worktree_tree(&repo).unwrap();
+
+        std::fs::create_dir_all(repo.join("artifacts")).unwrap();
+        std::fs::write(repo.join("artifacts/a.png"), "x").unwrap();
+        assert_eq!(worktree_tree(&repo).unwrap(), first, "ignored file");
+
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("tests/t.txt"), "t").unwrap();
+        let second = worktree_tree(&repo).unwrap();
+        assert_ne!(second, first, "untracked file");
+        assert_eq!(
+            diff_trees_name_only(&repo, &first, &second).unwrap(),
+            vec!["tests/t.txt".to_string()]
+        );
+
+        std::fs::remove_dir_all(repo.join("tests")).unwrap();
+        std::fs::remove_dir_all(repo.join("artifacts")).unwrap();
+        assert_eq!(status_short(&repo).unwrap(), before_status);
+    }
 
     #[test]
     fn move_branch_updates_an_unchecked_out_branch_and_finds_the_default() {

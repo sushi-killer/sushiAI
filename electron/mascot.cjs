@@ -13,6 +13,7 @@ const MARGIN = 12;
 
 function noticeId(notice) {
   if (notice.kind === "core-update") return "core-update";
+  if (notice.kind === "input") return `input:${notice.taskId}`;
   return `${notice.kind}:${notice.taskId}:${notice.body}`;
 }
 
@@ -25,8 +26,9 @@ function noticeLifetimeMs(notice) {
 }
 
 /** The queue the mascot shows, newest first. Actions:
- * add (deduped by kind:taskId:body, capped; the dev-only core-update notice
- * is a single entry that stays until dismissed and survives clear), dismiss (by id), clear,
+ * add (input notices dedupe per task, replacing the older one whether open
+ * or answered; done/failed dedupe by kind:taskId:body; capped; the dev-only
+ * core-update notice is a single entry that stays until dismissed and survives clear), dismiss (by id), clear,
  * task (a needs-input notice whose task left `waiting` is dropped),
  * answered (marks a task's input notices as answered and gives them a short
  * life), expire (drops every notice whose `expiresAt` has passed). */

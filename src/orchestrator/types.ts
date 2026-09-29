@@ -98,6 +98,12 @@ export type TaskStatus =
   | "stopped"
   | "failed";
 
+export type Dispute = {
+  finding: string;
+  rebuttal: string;
+  evidence: string[];
+};
+
 export type QuestionKind =
   | "attempts_failing"
   | "review_no_verdict"
@@ -106,6 +112,7 @@ export type QuestionKind =
   | "preexisting_failure"
   | "budget"
   | "protected_path"
+  | "review_dispute"
   | "plan_question"
   | "agent_question";
 
@@ -247,6 +254,8 @@ export type Attempt = {
   summary?: string;
   /** The agent's note for the next attempt: done, tried, next. */
   handoff?: string;
+  /** Review findings the agent disputed in its report. */
+  disputes?: Dispute[];
   changedFiles: string[];
   verify: VerifyResult[];
   gateBlocks: number;
@@ -362,6 +371,8 @@ export type Task = {
   decisions: string[];
   /** Questions the planner or the answer policy answered themselves. */
   assumptions?: Assumption[];
+  /** Keys of disputed review findings a judge already ruled on. */
+  judgedFindings?: string[];
   attempts: Attempt[];
   costUsd: number;
   /** Times the owner raised the `variant.maxCostUsd` budget; the budget in

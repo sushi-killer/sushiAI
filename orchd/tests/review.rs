@@ -522,6 +522,132 @@ fn a_visual_criterion_needs_a_saved_image_and_the_copies_outlive_the_worktree() 
     daemon.shutdown_and_wait();
 }
 
+/// Attempt 1 writes source and an image and its review FAILs with a plain
+/// finding; attempt 2 writes `ATTEMPT_TWO_FILE` and no image, its review
+/// PASSes. Counters in the scripts dir tell the runs apart.
+const FAKE_RETRY_SCRIPT: &str = r###"#!/bin/sh
+brief=$(cat)
+d=$(dirname "$0")
+case "$brief" in
+"## Review"*)
+  echo x >> "$d/review.count"
+  if [ "$(wc -l < "$d/review.count" | tr -d ' ')" = 1 ]; then
+    printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: the label is wrong\"]}\n```"}'
+  else
+    printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}'
+  fi ;;
+*)
+  echo x >> "$d/impl.count"
+  if [ "$(wc -l < "$d/impl.count" | tr -d ' ')" = 1 ]; then
+    mkdir -p src artifacts/ui
+    echo one > src/panel.txt
+    echo png > artifacts/ui/panel.png
+  else
+    mkdir -p ATTEMPT_TWO_DIR
+    echo two > ATTEMPT_TWO_FILE
+  fi
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}' ;;
+esac
+"###;
+
+fn run_retry_task(second_file: &str) -> (Daemon, serde_json::Value, String) {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let dir = std::path::Path::new(second_file)
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let body = FAKE_RETRY_SCRIPT
+        .replace("ATTEMPT_TWO_DIR", dir)
+        .replace("ATTEMPT_TWO_FILE", second_file);
+    let script = fake_harness_script(scripts_dir.path(), "fake-retry.sh", &body);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_by_claude(&daemon);
+    let repo = init_git_repo();
+    std::fs::write(repo.path().join(".gitignore"), "artifacts/\n").unwrap();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Visual retry",
+            "goal": "Change the panel",
+            "criteria": ["The panel shows thumbnails -- check: screenshot under artifacts/"],
+            "verify": ["true"],
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(40));
+    // The scripts dir must outlive the run.
+    drop(scripts_dir);
+    (daemon, settled, task_id)
+}
+
+#[test]
+fn a_retry_that_changed_only_tests_reuses_the_accepted_evidence() {
+    let (daemon, settled, task_id) = run_retry_task("tests/panel.test.txt");
+    assert_eq!(settled["status"], "done", "{settled}");
+    let implement: Vec<_> = settled["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["stage"] == "implement")
+        .collect();
+    assert_eq!(implement.len(), 2, "{settled}");
+    assert!(implement[1].get("failure").is_none(), "{settled}");
+    let paths: Vec<&str> = implement[1]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e.as_str())
+        .collect();
+    assert_eq!(paths.len(), 1, "{settled}");
+    assert!(paths[0].contains("/runs/1/evidence/"), "{paths:?}");
+    assert_eq!(implement[1]["evidenceFrom"], 1, "{settled}");
+    assert!(implement[0].get("evidenceFrom").is_none(), "{settled}");
+    let brief = std::fs::read_to_string(
+        daemon
+            .data_dir()
+            .join("tasks")
+            .join(&task_id)
+            .join("runs/2/review/brief.md"),
+    )
+    .unwrap();
+    assert!(brief.contains(paths[0]), "{brief}");
+    assert!(brief.contains("saved by attempt 1"), "{brief}");
+    let decisions: Vec<&str> = settled["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d.as_str())
+        .collect();
+    assert!(
+        decisions
+            .iter()
+            .any(|d| d.contains("attempt 2") && d.contains("attempt 1")),
+        "{decisions:?}"
+    );
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_retry_that_changed_source_still_needs_new_evidence() {
+    let (daemon, settled, _task_id) = run_retry_task("src/other.txt");
+    let implement: Vec<_> = settled["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["stage"] == "implement")
+        .collect();
+    assert!(implement.len() >= 2, "{settled}");
+    assert_eq!(implement[1]["failure"]["kind"], "evidence", "{settled}");
+    let detail = implement[1]["failure"]["detail"].as_str().unwrap();
+    assert!(detail.contains("src/other.txt"), "{detail}");
+    assert!(implement[1].get("evidenceFrom").is_none(), "{settled}");
+    daemon.shutdown_and_wait();
+}
+
 #[test]
 fn a_gif_or_svg_saved_for_a_visual_criterion_counts_as_evidence() {
     let scripts_dir = tempfile::tempdir().unwrap();
@@ -675,4 +801,150 @@ fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_esca
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
+}
+
+/// Implements (appending), answers the advisor, and reviews: FAIL with a
+/// plain finding first, FAIL with it marked `repeat` once the review brief
+/// carries the previous review, PASS once it names a dropped finding. An
+/// implement brief that shows a review failure gets a report disputing it.
+const FAKE_DISPUTE_SCRIPT: &str = r###"#!/bin/sh
+brief=$(cat)
+case "$brief" in
+*"An implement attempt at this task failed"*)
+  printf '%s\n' '{"type":"result","total_cost_usd":0.03,"usage":{"input_tokens":1,"output_tokens":1},"result":"Fix the null check."}' ;;
+"## Review"*)
+  case "$brief" in
+  *"## Findings dropped by a tie-break judge"*)
+    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
+  *"## Previous review"*)
+    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[{\"finding\":\"P1: a.rs:1 - null check missing\",\"repeat\":true}]}\n```"}' ;;
+  *)
+    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: a.rs:1 - null check missing\"]}\n```"}' ;;
+  esac
+  printf '%s\n' "$json" ;;
+*)
+  echo changed >> CHANGED_MARKER.txt
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  case "$brief" in
+  *"The last attempt failed review"*)
+    report='```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\",\"disputes\":[{\"finding\":\"a.rs:1 - null check missing\",\"rebuttal\":\"the check is at a.rs:1\",\"evidence\":[\"a.rs:1\"]}]}\n```' ;;
+  *)
+    report='```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```' ;;
+  esac
+  printf '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"%s"}\n' "$report" ;;
+esac
+"###;
+
+fn judge_script(finding_valid: bool) -> String {
+    format!(
+        "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo codex-cli 0.1; exit 0; }}\ncat > /dev/null\necho judge >> \"$LOG_DIR/judge.log\"\nprintf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"```sushi-judge\\n{{\\\"finding_valid\\\": {finding_valid}, \\\"why\\\": \\\"the ruling\\\"}}\\n```\"}}}}'\n"
+    )
+}
+
+/// Runs the dispute flow with a judge answering `finding_valid`; returns the
+/// settled task and the number of judge runs.
+fn run_dispute_task(finding_valid: bool, wait: Duration) -> (serde_json::Value, usize) {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let claude = fake_harness_script(scripts_dir.path(), "fake-dispute.sh", FAKE_DISPUTE_SCRIPT);
+    let codex = fake_harness_script(
+        scripts_dir.path(),
+        "fake-judge.sh",
+        &judge_script(finding_valid),
+    );
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", claude.to_str().unwrap()),
+        ("ORCHD_CODEX_BIN", codex.to_str().unwrap()),
+        ("LOG_DIR", scripts_dir.path().to_str().unwrap()),
+    ]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["maxAttempts"] = serde_json::json!(6);
+    settings["answerPolicy"] = serde_json::json!(false);
+    settings["review"] = serde_json::json!("claude-opus");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Dispute",
+            "goal": "Write the marker",
+            "verify": ["true"],
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id, wait);
+    let runs = std::fs::read_to_string(scripts_dir.path().join("judge.log"))
+        .map(|t| t.lines().count())
+        .unwrap_or(0);
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+    (settled, runs)
+}
+
+fn decision_lines(task: &serde_json::Value) -> Vec<String> {
+    task["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d.as_str().map(String::from))
+        .collect()
+}
+
+#[test]
+fn a_disputed_repeated_finding_judged_invalid_is_dropped_and_the_task_commits() {
+    let (settled, runs) = run_dispute_task(false, Duration::from_secs(30));
+    assert_eq!(settled["status"], "done", "{settled}");
+    assert_eq!(runs, 1, "{settled}");
+    let assumption = settled["assumptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["by"] == "review-judge")
+        .unwrap_or_else(|| panic!("no review-judge assumption: {settled}"));
+    assert_eq!(assumption["answer"], "finding dropped", "{settled}");
+    assert_eq!(assumption["kind"], "review_dispute", "{settled}");
+    assert_eq!(assumption["attempt"], 2, "{settled}");
+    assert_eq!(assumption["evidence"], "the ruling", "{settled}");
+    assert!(
+        decision_lines(&settled).iter().any(|d| d
+            .starts_with("Orchestrator: disputed review finding dropped by the judge (")
+            && d.contains("null check missing")),
+        "{settled}"
+    );
+}
+
+#[test]
+fn a_disputed_finding_judged_valid_goes_on_to_the_existing_escalation() {
+    let (settled, runs) = run_dispute_task(true, Duration::from_secs(30));
+    assert_eq!(settled["status"], "waiting", "{settled}");
+    assert_eq!(settled["question"]["kind"], "attempts_failing", "{settled}");
+    assert_eq!(runs, 1, "the finding is judged once: {settled}");
+    let implements: Vec<&serde_json::Value> = settled["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["stage"] == "implement")
+        .collect();
+    assert_eq!(implements.len(), 3, "{settled}");
+    assert_eq!(implements[1]["failure"]["kind"], "review", "{settled}");
+    assert_eq!(implements[2]["routeId"], "claude-opus", "{settled}");
+    let decisions = decision_lines(&settled);
+    assert!(
+        decisions
+            .iter()
+            .any(|d| d.contains("a review finding repeated -> advisor, tier hard")),
+        "{settled}"
+    );
+    assert!(
+        decisions
+            .iter()
+            .any(|d| d.starts_with("Orchestrator: disputed review finding kept by the judge (")),
+        "{settled}"
+    );
+    assert!(settled["assumptions"]
+        .as_array()
+        .map(|a| a.iter().all(|x| x["by"] != "review-judge"))
+        .unwrap_or(true));
 }

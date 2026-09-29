@@ -794,9 +794,21 @@ pub enum QuestionKind {
     PreexistingFailure,
     Budget,
     ProtectedPath,
+    /// A review finding the implementer disputed and a judge dropped.
+    ReviewDispute,
     PlanQuestion,
     #[default]
     AgentQuestion,
+}
+
+/// A review finding the implementer disputes, with its rebuttal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Dispute {
+    pub finding: String,
+    pub rebuttal: String,
+    #[serde(default)]
+    pub evidence: Vec<String>,
 }
 
 /// A choice the planner made itself instead of asking the owner
@@ -998,6 +1010,10 @@ pub struct Task {
     /// Non-blocking planner questions answered by their recommendation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assumptions: Vec<Assumption>,
+    /// Keys of the disputed review findings a judge already ruled on: each
+    /// is judged at most once per task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub judged_findings: Vec<String>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
     #[serde(default)]
@@ -1267,6 +1283,9 @@ pub struct Attempt {
     /// what was tried, what to do next.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
+    /// Review findings the agent disputed in its report.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disputes: Vec<Dispute>,
     #[serde(default)]
     pub changed_files: Vec<String>,
     #[serde(default)]
@@ -1301,6 +1320,15 @@ pub struct Attempt {
     /// `runs/<n>/evidence/` so they outlive the worktree.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
+    /// Git tree id of the worktree (tracked + untracked, non-ignored) when
+    /// this attempt saved images of its own; what a later attempt is diffed
+    /// against to decide whether it may reuse this attempt's evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_tree: Option<String>,
+    /// The attempt whose `evidence` this attempt reused because it changed
+    /// only `artifacts/` or test files since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_from: Option<u32>,
     /// The advisor's short diagnosis of this attempt's failure, shown to the
     /// next attempt. Its cost is added to the task, not to this attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1555,6 +1583,7 @@ mod tests {
             cost_usd: 0.0,
             budget_raises: 0,
             assumptions: vec![],
+            judged_findings: vec![],
             archived: false,
             planned_tier: None,
             tier_fallback: None,
@@ -1790,6 +1819,7 @@ mod tests {
             cost_usd: 0.0,
             budget_raises: 0,
             assumptions: vec![],
+            judged_findings: vec![],
             archived: false,
             planned_tier: None,
             tier_fallback: None,
@@ -1845,6 +1875,7 @@ mod tests {
             cost_usd: 0.0,
             budget_raises: 0,
             assumptions: vec![],
+            judged_findings: vec![],
             archived: true,
             planned_tier: None,
             tier_fallback: None,

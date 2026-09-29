@@ -361,6 +361,7 @@ mod tests {
             cost_usd: 0.0,
             budget_raises: 0,
             assumptions: vec![],
+            judged_findings: vec![],
             archived: false,
             planned_tier: None,
             tier_fallback: None,

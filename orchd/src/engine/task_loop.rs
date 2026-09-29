@@ -540,6 +540,7 @@ pub(super) async fn run_task_loop(
             status: AttemptStatus::Running,
             summary: None,
             handoff: None,
+            disputes: vec![],
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
@@ -551,6 +552,8 @@ pub(super) async fn run_task_loop(
             cost_estimated: false,
             review_cost_usd: None,
             evidence: vec![],
+            evidence_tree: None,
+            evidence_from: None,
             advice: None,
             advisor_cost_usd: None,
             fingerprint: None,
@@ -861,6 +864,10 @@ pub(super) async fn run_task_loop(
             _ => implementer_note,
         };
         task.attempts[idx].summary = report.as_ref().map(|r| r.summary.clone());
+        task.attempts[idx].disputes = report
+            .as_ref()
+            .map(|r| r.disputes.clone())
+            .unwrap_or_default();
         task.attempts[idx].handoff = report
             .as_ref()
             .map(|r| r.handoff.trim().to_string())
@@ -1179,13 +1186,58 @@ pub(super) async fn run_task_loop(
             }
         }
 
+        let mut stale_evidence: Option<(u32, Vec<String>)> = None;
         {
             let since = task.attempts[idx].started_at;
             let saved = save_evidence(&worktree, since, &run_dir.join("evidence"));
+            let n = task.attempts[idx].n;
             if !saved.is_empty() {
                 task.attempts[idx].evidence = saved;
+                let wt = worktree.clone();
+                task.attempts[idx].evidence_tree =
+                    tokio::task::spawn_blocking(move || git::worktree_tree(&wt).ok())
+                        .await
+                        .unwrap_or(None);
                 let _ = app.store.save_task(&task);
                 app.broadcast_task(&task);
+            } else if !task.visual_criteria_texts().is_empty() {
+                let source = task
+                    .attempts
+                    .iter()
+                    .filter(|a| {
+                        a.stage == Stage::Implement
+                            && a.n < n
+                            && a.evidence_from.is_none()
+                            && !a.evidence.is_empty()
+                    })
+                    .filter_map(|a| Some((a.n, a.evidence_tree.clone()?, a.evidence.clone())))
+                    .next_back();
+                if let Some((m, old_tree, old_evidence)) = source {
+                    let wt = worktree.clone();
+                    let diff = tokio::task::spawn_blocking(move || {
+                        let now = git::worktree_tree(&wt)?;
+                        git::diff_trees_name_only(&wt, &old_tree, &now)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
+                    if let Ok(paths) = diff {
+                        let other: Vec<String> = paths
+                            .into_iter()
+                            .filter(|p| !p.starts_with("artifacts/") && !is_test_path(p))
+                            .collect();
+                        if other.is_empty() {
+                            task.attempts[idx].evidence = old_evidence;
+                            task.attempts[idx].evidence_from = Some(m);
+                            task.decisions.push(format!(
+                                "Orchestrator: attempt {n} changed only artifacts/tests since attempt {m}; reused attempt {m}'s evidence"
+                            ));
+                            let _ = app.store.save_task(&task);
+                            app.broadcast_task(&task);
+                        } else {
+                            stale_evidence = Some((m, other.into_iter().take(5).collect()));
+                        }
+                    }
+                }
             }
         }
         apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
@@ -1334,7 +1386,7 @@ pub(super) async fn run_task_loop(
 
         let visual: Vec<&str> = task.visual_criteria_texts();
         if !visual.is_empty() && task.attempts[idx].evidence.is_empty() {
-            let detail = format!(
+            let mut detail = format!(
                 "These criteria are visual and no image was saved under artifacts/ during this attempt:\n{}\nSave one screenshot per criterion under artifacts/ (for example artifacts/<name>.png) and look at it before finishing.",
                 visual
                     .iter()
@@ -1342,6 +1394,12 @@ pub(super) async fn run_task_loop(
                     .collect::<Vec<_>>()
                     .join("\n")
             );
+            if let Some((m, paths)) = &stale_evidence {
+                detail.push_str(&format!(
+                    "\nAttempt {m}'s images were not reused because these files changed since: {}",
+                    paths.join(", ")
+                ));
+            }
             match fail_and_continue(
                 &app,
                 &task_id,
@@ -1480,6 +1538,9 @@ pub(super) async fn run_task_loop(
                 let mut round = 1u32;
                 let mut after_no_verdict = false;
                 let mut auto_rerun = true;
+                // Findings a judge dropped in this attempt, and its judge runs.
+                let mut dropped: Vec<(String, String)> = Vec::new();
+                let mut judge_runs = 0u32;
                 loop {
                     let reviewed = run_review(
                         &app,
@@ -1498,6 +1559,7 @@ pub(super) async fn run_task_loop(
                         &mut review_fingerprint,
                         round,
                         after_no_verdict,
+                        &dropped,
                     )
                     .await;
                     // The task's total, and separately the attempt's
@@ -1518,6 +1580,29 @@ pub(super) async fn run_task_loop(
                                     "Orchestrator: review FAIL recorded as PASS (only P2/P3 findings)"
                                         .to_string(),
                                 );
+                            }
+                            if r.verdict == Verdict::Fail
+                                && !r.repeated.is_empty()
+                                && !task.attempts[idx].disputes.is_empty()
+                            {
+                                let newly = judge_disputed_findings(
+                                    &app,
+                                    &mut task,
+                                    idx,
+                                    attempt_n,
+                                    &r.repeated,
+                                    &settings,
+                                    review_route,
+                                    &mut judge_runs,
+                                    &cancel,
+                                )
+                                .await;
+                                if !newly.is_empty() {
+                                    dropped.extend(newly);
+                                    round += 1;
+                                    after_no_verdict = false;
+                                    continue;
+                                }
                             }
                             review_result = Some(r);
                             break;

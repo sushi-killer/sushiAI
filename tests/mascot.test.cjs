@@ -47,6 +47,37 @@ test("a repeated notice (same kind, task and body) moves to the front once", () 
   assert.equal(state.length, 3);
 });
 
+test("a new question from a task replaces that task's older input notice", () => {
+  let state = [];
+  state = add(state, notice("input", "a", "older question"), 1000);
+  state = add(state, notice("input", "b", "other task question"), 1100);
+  state = add(state, notice("done", "a", "finished"), 1200);
+  state = add(state, notice("failed", "a", "failed"), 1300);
+  state = queueReducer(state, { type: "answered", taskId: "a", now: 1400 });
+  state = add(state, notice("input", "a", "new question"), 1500);
+
+  const inputsForA = state.filter(
+    (item) => item.kind === "input" && item.taskId === "a",
+  );
+  assert.equal(inputsForA.length, 1);
+  assert.equal(inputsForA[0].body, "new question");
+  assert.equal(inputsForA[0].answered, undefined);
+  assert.equal(inputsForA[0].expiresAt, null);
+  assert.equal(state[0], inputsForA[0]);
+  assert.ok(
+    state.some(
+      (item) =>
+        item.kind === "input" &&
+        item.taskId === "b" &&
+        item.body === "other task question",
+    ),
+  );
+  assert.ok(state.some((item) => item.kind === "done" && item.taskId === "a"));
+  assert.ok(
+    state.some((item) => item.kind === "failed" && item.taskId === "a"),
+  );
+});
+
 test("dismiss removes one notice by id and clear removes all", () => {
   let state = add(add([], notice("done", "a")), notice("failed", "b"));
   state = queueReducer(state, { type: "dismiss", id: state[0].id });

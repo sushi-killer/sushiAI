@@ -168,6 +168,7 @@ flowchart TD
   verify["Verify<br/>task.verify in the worktree<br/>cached by diff + untracked contents"]
   gated["Gated checks<br/>baseline-fail checks must now pass"]
   heldout["Held-out check<br/>hidden from the implementer; failure kind heldout,<br/>command never in a brief or detail"]
+  evidence["Evidence gate<br/>visual criterion needs a saved image, or the images of an<br/>earlier attempt when only artifacts/ or tests changed since"]
   impossible["sushi-impossible block in the reply<br/>criterion cannot be met as written"]
   protect["Protected paths<br/>owner approves"]
   review["Review<br/>hard-tier route, sees diff, verify tails,<br/>implementer report"]
@@ -184,9 +185,10 @@ flowchart TD
   plan --> split --> baseline --> basecheck --> tier --> impl --> rebase --> verify
   impl -.- stall
   stall -->|stalled| fail
-  verify -->|all exit 0| gated -->|pass| heldout -->|pass| protect --> review
+  verify -->|all exit 0| gated -->|pass| heldout -->|pass| evidence -->|saved or reused image| protect --> review
   gated -->|fails, kind verify| fail
   heldout -->|fails, kind heldout| fail
+  evidence -->|no image, kind evidence| fail
   impl -.- impossible
   impossible -->|"drop criterion / retry / stop"| ownerQ
   ownerQ -->|drop criterion or retry| impl
@@ -204,6 +206,10 @@ flowchart TD
   ownerQ -->|"review retry: same attempt"| review
   verify -->|non-zero| fail
   review -->|FAIL| fail
+  review -->|"FAIL, repeated finding the implementer disputed"| judge
+  judge["Tie-break judge<br/>read-only, on another harness, once per finding"]
+  judge -->|"invalid: drop the finding as an assumption, review the same attempt again"| review
+  judge -->|"valid / no verdict / no route"| fail
   fail -->|"review finding marked repeat: first one runs the advisor and tiers up, second waits"| triage
   fail --> budget
   budget -->|yes| impl

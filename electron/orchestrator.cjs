@@ -140,14 +140,21 @@ function orchdRequest(socketPath, method, params, token, timeout = 5000) {
   });
 }
 
+/** How long a rebuilt binary waits for running attempts to finish before
+ * it replaces the daemon anyway. */
+const STALE_DEFER_MS = 30 * 60 * 1000;
+
 /** Whether a running daemon's own binary has since been rebuilt: the binary
- * on disk is more than a second newer than the one it loaded. Running tasks
- * do not block the replacement: `shutdown` leaves them queued and the next
- * daemon resumes them exactly as it does after a crash. An in-flight chat
- * reply (`chatTurns`) still does: chat has no resume path. */
-function isStalePing(ping, actualBinaryMtimeMs) {
+ * on disk is more than a second newer than the one it loaded. Running
+ * attempts defer the replacement for up to `STALE_DEFER_MS` (`staleForMs` =
+ * how long the rebuild has been seen): a replacement interrupts them and the
+ * next daemon restarts each as a new attempt, so every landing's `afterLand`
+ * rebuild would otherwise cut every live task short. An in-flight chat reply
+ * (`chatTurns`) always blocks: chat has no resume path. */
+function isStalePing(ping, actualBinaryMtimeMs, staleForMs = 0) {
   if (!ping?.binaryMtimeMs || ping.chatTurns > 0) return false;
-  return actualBinaryMtimeMs > ping.binaryMtimeMs + 1000;
+  if (actualBinaryMtimeMs <= ping.binaryMtimeMs + 1000) return false;
+  return !(ping.running > 0) || staleForMs >= STALE_DEFER_MS;
 }
 
 /** Polls `killFn` (default: a zero-signal `kill`, which throws once the pid
@@ -332,7 +339,12 @@ class OrchestratorService {
     if (!ping?.binaryMtimeMs || ping.chatTurns > 0) return false;
     try {
       const { mtimeMs } = await fs.stat(this.binary);
-      return isStalePing(ping, mtimeMs);
+      if (mtimeMs <= ping.binaryMtimeMs + 1000) {
+        this.staleSeenAt = null;
+        return false;
+      }
+      this.staleSeenAt ??= Date.now();
+      return isStalePing(ping, mtimeMs, Date.now() - this.staleSeenAt);
     } catch {
       return false;
     }
@@ -363,9 +375,10 @@ class OrchestratorService {
         2000,
       );
       if (!(await this.#isStale(ping))) return ping;
-      // A rebuilt binary replaces the daemon even with tasks running (its
-      // shutdown leaves them resumable); wait for the old process to
-      // actually exit before spawning the new one on the same socket path.
+      // A rebuilt binary replaces the daemon once no attempt runs (or the
+      // deferral ran out); wait for the old process to actually exit before
+      // spawning the new one on the same socket path.
+      this.staleSeenAt = null;
       await orchdRequest(
         this.socketPath,
         "shutdown",

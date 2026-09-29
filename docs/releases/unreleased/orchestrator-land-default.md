@@ -11,3 +11,7 @@
 - Tasks record a `source` (chat, ui, mcp, cli, planner, eval, handoff) at
   creation, and `costs.summary` counts tasks and cost by source in
   `tasksBySource`.
+- A rebuilt orchd binary (for example the `afterLand` rebuild after a
+  landing) no longer restarts the daemon under running attempts: the app
+  waits until none run, for at most 30 minutes, so landings stop cutting
+  every live task short.

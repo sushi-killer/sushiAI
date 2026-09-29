@@ -137,10 +137,18 @@ test("orchdBinaryPath resolves dev vs packaged locations", () => {
   );
 });
 
-test("isStalePing: a daemon whose binary is newer by more than a second counts as stale, even with tasks running", () => {
+test("isStalePing: a rebuilt binary replaces an idle daemon at once and a busy one only after the deferral", () => {
   assert.equal(isStalePing({ binaryMtimeMs: 1000, running: 0 }, 3000), true);
   assert.equal(isStalePing({ binaryMtimeMs: 1000, running: 0 }, 1500), false);
-  assert.equal(isStalePing({ binaryMtimeMs: 1000, running: 2 }, 5000), true);
+  assert.equal(isStalePing({ binaryMtimeMs: 1000, running: 2 }, 5000), false);
+  assert.equal(
+    isStalePing({ binaryMtimeMs: 1000, running: 2 }, 5000, 29 * 60 * 1000),
+    false,
+  );
+  assert.equal(
+    isStalePing({ binaryMtimeMs: 1000, running: 2 }, 5000, 30 * 60 * 1000),
+    true,
+  );
   assert.equal(
     isStalePing({ binaryMtimeMs: 1000, running: 0, chatTurns: 1 }, 5000),
     false,

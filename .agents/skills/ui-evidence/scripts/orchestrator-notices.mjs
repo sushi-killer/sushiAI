@@ -289,7 +289,7 @@ try {
   await shotMascot("mascot-done");
   report.mascot.done = {
     text: await bubbleText(),
-    sushi: await mascot.locator("img.sushi").count(),
+    sushi: await mascot.locator("svg.sushi").count(),
     open: await mascot.getByRole("button", { name: "Open" }).count(),
     dismiss: await mascot.getByRole("button", { name: "Dismiss" }).count(),
   };

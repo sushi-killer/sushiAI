@@ -1,14 +1,31 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
+import { Character } from "./Character";
+import { isTyping, mascotMood, type Typing } from "./mood";
 import type { MascotNotice } from "./types";
 
 const FADE_MS = 700;
 
-function Bubble({ notice }: { notice: MascotNotice }) {
+function Bubble({
+  notice,
+  onTyping,
+}: {
+  notice: MascotNotice;
+  onTyping: (typing: Typing) => void;
+}) {
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   const [fading, setFading] = useState(false);
+  const [focused, setFocused] = useState(false);
   const bridge = window.mascot;
+
+  useEffect(() => {
+    onTyping({ id: notice.id, on: focused || text.length > 0 });
+  }, [focused, text, notice.id, onTyping]);
+  useEffect(
+    () => () => onTyping({ id: notice.id, on: false }),
+    [notice.id, onTyping],
+  );
 
   useEffect(() => {
     setFading(false);
@@ -113,6 +130,8 @@ function Bubble({ notice }: { notice: MascotNotice }) {
               placeholder="Type an answer"
               aria-label="Answer"
               onChange={(event) => setText(event.target.value)}
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
             />
             <button type="submit" disabled={!text.trim()}>
               Answer
@@ -161,6 +180,7 @@ export function Mascot() {
   const [notices, setNotices] = useState<MascotNotice[]>([]);
   const [index, setIndex] = useState(0);
   const [hops, setHops] = useState(0);
+  const [typing, setTyping] = useState<Typing>({ id: "", on: false });
   const rootRef = useRef<HTMLDivElement>(null);
   const lastHeight = useRef(0);
 
@@ -222,11 +242,15 @@ export function Mascot() {
       (Math.min(index, notices.length - 1) + delta + notices.length) %
         notices.length,
     );
-  const mood = shown.kind !== "core-update" && shown.answered ? "" : shown.kind;
+  const mood = mascotMood(shown, isTyping(typing, shown));
   return (
     <div className="mascot" ref={rootRef}>
       <div className="bubble-wrap">
-        <Bubble key={shown.id} notice={shown} />
+        <Bubble
+          key={`${shown.id}:${shown.kind !== "core-update" && shown.answered}`}
+          notice={shown}
+          onTyping={setTyping}
+        />
         {extra > 0 && (
           <div className="queue">
             <button aria-label="Previous notice" onClick={() => step(-1)}>
@@ -240,7 +264,7 @@ export function Mascot() {
         )}
       </div>
       <div className={`sushi-hop hop-${hops % 2}`}>
-        <img className={`sushi ${mood}`} src="./sushi.svg" alt="" />
+        <Character mood={mood} />
       </div>
     </div>
   );

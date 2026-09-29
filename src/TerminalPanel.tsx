@@ -5,6 +5,7 @@ import { ArrowUpRight, Command, Play } from "lucide-react";
 import type { Panel } from "./types";
 import { fitTerminal, queueTerminalFit } from "./terminal-sizing";
 import { installTerminalInteractions } from "./terminal-interactions";
+import { createTerminalLinkProvider, openTerminalLink } from "./terminal-links";
 import "@xterm/xterm/css/xterm.css";
 
 type CachedTerminal = {
@@ -85,6 +86,7 @@ export function TerminalPanel({
         fontSize: 12,
         lineHeight: 1.35,
         cursorBlink: true,
+        linkHandler: { activate: openTerminalLink },
         cursorStyle: "bar",
         scrollback: panel.herdrId ? 0 : 10000,
         scrollSensitivity: 1.3,
@@ -111,6 +113,9 @@ export function TerminalPanel({
         : "terminal-surface";
       host.current.appendChild(element);
       terminal.open(element);
+      const links = terminal.registerLinkProvider(
+        createTerminalLinkProvider(terminal),
+      );
       fitTerminal(terminal, fit);
       runtime = {
         terminal,
@@ -183,7 +188,10 @@ export function TerminalPanel({
           }
         },
       );
-      entry.disposeInteractions = interactions;
+      entry.disposeInteractions = () => {
+        links.dispose();
+        interactions();
+      };
       entry.resumeSelection = interactions.resume;
       // Paste or drop a screenshot and the terminal receives its path, which is
       // what Claude Code and the other agent CLIs read an image from.

@@ -20,6 +20,11 @@ try {
     console.error(request.url(), request.failure()),
   );
   page.on("pageerror", (error) => console.error(error.message));
+  const dialogs = [];
+  page.on("dialog", (dialog) => {
+    dialogs.push(dialog.message());
+    dialog.dismiss().catch(() => {});
+  });
   await page.route("**/terminal-test.html", (route) =>
     route.fulfill({
       contentType: "text/html",
@@ -519,6 +524,49 @@ try {
       .querySelector(".xterm-rows")
       ?.textContent.includes("ACTUAL BOTTOM FRAME"),
   );
+  // Links: plain URL and OSC 8 open on Cmd/Ctrl+click only, never a dialog.
+  await page.evaluate(() =>
+    window.terminalHarness.output(
+      "\x1b[2J\x1b[Hsee https://example.com/plain now\r\n" +
+        "\x1b]8;;https://example.com/osc\x07label\x1b]8;;\x07\r\n" +
+        "\x1b]8;;file:///etc/passwd\x07local\x1b]8;;\x07\r\n",
+    ),
+  );
+  await page.waitForFunction(() =>
+    document.querySelector(".xterm-rows")?.textContent.includes("example.com"),
+  );
+  const modifier = process.platform === "darwin" ? "Meta" : "Control";
+  const rowY = (row) => cell.y + cell.height * (row + 0.5);
+  const opened = () => page.evaluate(() => window.terminalHarness.calls.opened);
+  const clickWith = async (x, y) => {
+    await page.mouse.move(x, y);
+    await page.waitForTimeout(150);
+    await page.keyboard.down(modifier);
+    await page.mouse.click(x, y);
+    await page.keyboard.up(modifier);
+    await page.waitForTimeout(100);
+  };
+  await page.mouse.move(grid.x + 5 * 7.2, rowY(0));
+  await page.mouse.move(grid.x + 12 * 7.2, rowY(0));
+  await page.waitForFunction(() =>
+    document
+      .querySelector(".xterm-screen")
+      ?.classList.contains("xterm-cursor-pointer"),
+  );
+  await page.screenshot({ path: "artifacts/terminal-link-hover.png" });
+  await page.mouse.click(grid.x + 12 * 7.2, rowY(0));
+  await page.waitForTimeout(100);
+  assert.deepEqual(await opened(), [], "a plain click must not open a link");
+  await clickWith(grid.x + 12 * 7.2, rowY(0));
+  assert.deepEqual(await opened(), ["https://example.com/plain"]);
+  await clickWith(grid.x + 2 * 7.2, rowY(1));
+  assert.deepEqual(await opened(), [
+    "https://example.com/plain",
+    "https://example.com/osc",
+  ]);
+  await clickWith(grid.x + 2 * 7.2, rowY(2));
+  assert.equal((await opened()).length, 2, "file: links must never open");
+  assert.deepEqual(dialogs, [], "links must not show any dialog");
   await page.evaluate(() => window.terminalHarness.fail());
   await drop();
   await page.getByRole("button", { name: "Dismiss", exact: true }).click();

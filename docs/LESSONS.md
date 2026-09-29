@@ -54,6 +54,6 @@ Rule: durable state goes in `workspace-state.json`, atomically.
 - 2026-09-13 A user's ssh_config (`LocalForward`, `/dev/null` known-hosts) broke our tunnel → own `known_hosts`. `connections.cjs`.
 - 2026-09-13 One global `connected` flag colored every host's status dot → per-endpoint `statusByEndpoint`. `useHerdr.ts`.
 - 2026-09-12 Manifest duplicates/missing `surfaceId`, CI skipping test files, smoke dropping `SUSHIAI_EXTENSIONS_DIR` → `manifest.cjs`, contract-coverage test, `ci` script, extension skill.
-- 2026-09-13 Pushed 31 commits unsquashed → squash-only. AGENTS.md.
+- 2026-09-29 orchd preflights every verify/finalVerify on a fresh base checkout; `test:desktop` needed a prior build → check commands build what they need. `package.json`.
 - 2026-09-16 Lane smoke failed on another lane's contract → land it first.
 - 2026-09-18 A fixture invented a Herdr status (`running`) → check vocabularies against `herdr api snapshot`. `tests/herdr-snapshot.test.cjs`.

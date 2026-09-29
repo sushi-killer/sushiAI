@@ -1331,7 +1331,7 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
              * that only describes it. */}
             {selected.question && (
               <QuestionCard
-                key={selected.id}
+                key={`question-${selected.id}`}
                 task={selected}
                 disabled={busy}
                 onAnswer={(answer) =>
@@ -1385,7 +1385,7 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
               </div>
             )}
             <AssumptionsList
-              key={selected.id}
+              key={`assumptions-${selected.id}`}
               task={selected}
               disabled={busy}
               onOverturn={(index, answer) =>

@@ -66,6 +66,7 @@ export function ownerTarget(task: Task): TaskTarget {
   return {
     taskId: task.id,
     repo: task.repo,
+    ...(task.host ? { host: task.host } : {}),
     focus: task.status === "waiting" ? "question" : "summary",
   };
 }

@@ -333,11 +333,10 @@ fn resolve_binary(harness: Harness) -> String {
 
 fn augmented_path() -> String {
     let home = std::env::var("HOME").unwrap_or_default();
-    let extra = [
-        format!("{home}/.local/bin"),
-        "/opt/homebrew/bin".to_string(),
-        "/usr/local/bin".to_string(),
-    ];
+    let mut extra = vec![format!("{home}/.local/bin")];
+    #[cfg(target_os = "macos")]
+    extra.push("/opt/homebrew/bin".to_string());
+    extra.push("/usr/local/bin".to_string());
     let base = std::env::var("PATH").unwrap_or_default();
     let mut parts: Vec<String> = base.split(':').map(|s| s.to_string()).collect();
     for e in extra {

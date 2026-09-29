@@ -20,7 +20,10 @@ export function pendingReveal(
   repo: string,
   now = Date.now(),
 ): TaskTarget | null {
-  if (!pending || pending.target.repo !== repo) return null;
+  // A remote task's repo is a path on its host, so any panel takes it and
+  // switches to that host; a local task goes to the panel of its own repo.
+  if (!pending || (!pending.target.host && pending.target.repo !== repo))
+    return null;
   if (now - pending.at > REVEAL_TTL_MS) return null;
   return pending.target;
 }

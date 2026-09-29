@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ArrowRight, Check, FileText, Terminal, X } from "lucide-react";
-import { orchestratorClient } from "./client";
+import { useOrchestratorClient } from "./hostContext";
 import {
   formatCost,
   formatDuration,
@@ -46,6 +46,7 @@ function NarrationIcon({ kind }: { kind: NarrationKind }) {
  * time and cost. Fetched from the daemon, which derives it from the task
  * record and the runs' events. */
 export function TaskTimeline({ task }: { task: Task }) {
+  const orchestratorClient = useOrchestratorClient();
   const [segments, setSegments] = useState<TimelineSegment[]>([]);
   const [picked, setPicked] = useState<{ id: string; index: number | null }>();
 
@@ -58,7 +59,7 @@ export function TaskTimeline({ task }: { task: Task }) {
     return () => {
       cancelled = true;
     };
-  }, [task.id, task.updatedAt]);
+  }, [task.id, task.updatedAt, orchestratorClient]);
 
   if (segments.length === 0) return null;
   const index =
@@ -140,6 +141,7 @@ export function TaskCostLine({
   subtasks: number;
   legacy: { label: string; cost: number }[];
 }) {
+  const orchestratorClient = useOrchestratorClient();
   const [rows, setRows] = useState<SpendSummary["rows"]>([]);
 
   useEffect(() => {
@@ -151,7 +153,7 @@ export function TaskCostLine({
     return () => {
       cancelled = true;
     };
-  }, [task.id, task.updatedAt, task.costUsd]);
+  }, [task.id, task.updatedAt, task.costUsd, orchestratorClient]);
 
   const parts =
     rows.length > 0

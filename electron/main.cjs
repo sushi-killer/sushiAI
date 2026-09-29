@@ -261,6 +261,9 @@ orchestrator = registerOrchestratorExtension({
   getClaudeMcp: () => claudeMcp,
   getModelProviders: () => modelProviders,
   stopDaemonOnQuit: testMode.test,
+  getConnections: () => connections,
+  hostsFile: path.join(app.getPath("userData"), "orchestrator-hosts.json"),
+  hostsChanged: () => send("orchestrator-hosts-changed"),
 });
 function validWebURL(value) {
   try {
@@ -270,8 +273,14 @@ function validWebURL(value) {
   }
 }
 app.whenReady().then(async () => {
-  connections = new Connections(app.getPath("userData"));
+  // A hidden test run may hand in a fake ssh (evidence and smoke runs).
+  const fakeSsh = testMode.hidden ? process.env.SUSHIAI_TEST_SSH : "";
+  connections = new Connections(
+    app.getPath("userData"),
+    fakeSsh ? { ssh: fakeSsh } : undefined,
+  );
   await connections.init();
+  await orchestrator.init();
   // Sleep/wake can drop every SSH tunnel at once - retry them all rather than
   // waiting for each one's own backoff timer to come back around.
   powerMonitor.on("resume", () => connections.retryAutoConnect());

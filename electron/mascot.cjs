@@ -18,8 +18,9 @@ const MAX_HEIGHT_RATIO = 0.7;
 
 function noticeId(notice) {
   if (notice.kind === "core-update") return "core-update";
-  if (notice.kind === "input") return `input:${notice.taskId}`;
-  return `${notice.kind}:${notice.taskId}:${notice.body}`;
+  const at = notice.host ? `${notice.host}/` : "";
+  if (notice.kind === "input") return `input:${at}${notice.taskId}`;
+  return `${notice.kind}:${at}${notice.taskId}:${notice.body}`;
 }
 
 /** How long a notice stays: a needs-input one until the owner acts (null),
@@ -336,9 +337,11 @@ function registerMascot({
       throw new Error("Invalid task.");
     const service = getService();
     if (!service) throw new Error("The orchestrator is not running.");
-    const task = await service.call("task.get", { id: taskId });
+    // A remote task is answered on the host it runs on.
+    const host = queue.find((item) => item.taskId === taskId)?.host;
+    const task = await service.call("task.get", { id: taskId }, host);
     const answer = validateAnswer(taskId, text, task, queue);
-    await service.call("task.answer", { id: taskId, answer });
+    await service.call("task.answer", { id: taskId, answer }, host);
     dispatch({ type: "answered", taskId, now: Date.now() });
     return "Answered";
   });
@@ -352,7 +355,7 @@ function registerMascot({
     if (!notice) throw new Error("That notice is gone.");
     const service = getService();
     if (!service) throw new Error("The orchestrator is not running.");
-    await service.call("task.land", { id: taskId });
+    await service.call("task.land", { id: taskId }, notice.host);
     dispatch({ type: "dismiss", id: notice.id });
     return "Landing";
   });
@@ -364,7 +367,12 @@ function registerMascot({
     const notice = matches.find((item) => item.focus === focus) || matches[0];
     if (!notice) throw new Error("That notice is gone.");
     showMainWindow();
-    send("orchestrator-open", { taskId, repo: notice.repo, focus });
+    send("orchestrator-open", {
+      taskId,
+      repo: notice.repo,
+      focus,
+      ...(notice.host ? { host: notice.host } : {}),
+    });
     if (notice.kind !== "input") dispatch({ type: "dismiss", id: notice.id });
   });
 

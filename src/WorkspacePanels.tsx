@@ -133,22 +133,22 @@ export const PanelHost = memo(function PanelHost({
             registry={extensionRegistry}
           />
         ) : panel.kind === "orchestrator" ? (
-          // A Herdr-backed workspace can still be a local checkout (Herdr
-          // just manages its sessions); only an SSH-remote `cwd` is out of
-          // reach for the local daemon this panel talks to.
-          endpoint?.startsWith("ssh:") ? (
-            <div className="orchestrator-remote">
-              The orchestrator runs local projects only.
-            </div>
-          ) : (
-            <OrchestratorPanel
-              cwd={cwd}
-              view={panel.orchestratorView}
-              onViewChange={(orchestratorView) =>
-                onPatch(panel.id, { orchestratorView })
-              }
-            />
-          )
+          <OrchestratorPanel
+            cwd={cwd}
+            endpoint={endpoint}
+            view={panel.orchestratorView}
+            host={panel.orchestratorHost}
+            repo={panel.orchestratorRepo}
+            onViewChange={(orchestratorView) =>
+              onPatch(panel.id, { orchestratorView })
+            }
+            onHostChange={({ host, repo }) =>
+              onPatch(panel.id, {
+                orchestratorHost: host,
+                orchestratorRepo: repo,
+              })
+            }
+          />
         ) : (
           <ChatPanel
             panel={panel}

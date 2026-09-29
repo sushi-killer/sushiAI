@@ -13,14 +13,19 @@ fn verify_allow_write_paths(worktree: &Path, run_dir: &Path) -> Vec<PathBuf> {
     let mut paths = vec![
         worktree.to_path_buf(),
         run_dir.to_path_buf(),
-        PathBuf::from("/private/var/folders"),
-        PathBuf::from("/private/tmp"),
         PathBuf::from("/dev"),
-        PathBuf::from(format!("{home}/Library/Caches")),
         PathBuf::from(format!("{home}/.npm")),
         PathBuf::from(format!("{home}/.cache")),
         PathBuf::from(format!("{home}/.cargo/registry")),
     ];
+    #[cfg(target_os = "macos")]
+    paths.extend([
+        PathBuf::from("/private/var/folders"),
+        PathBuf::from("/private/tmp"),
+        PathBuf::from(format!("{home}/Library/Caches")),
+    ]);
+    #[cfg(not(target_os = "macos"))]
+    paths.extend([PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]);
     if !tmp_dir.is_empty() {
         paths.push(PathBuf::from(tmp_dir));
     }

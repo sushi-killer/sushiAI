@@ -57,6 +57,10 @@ type PanelState = {
     openToken?: number;
   };
   orchestratorView?: OrchestratorView;
+  /** The host ("local" or "ssh:<id>") and the repo path on it this Orchestrator
+   * pane was pointed at; unset follows the workspace. */
+  orchestratorHost?: string;
+  orchestratorRepo?: string;
   filesView?: FilesView;
   /** A Herdr pane that is gone from its host: the slot stays in the layout
    * with a Reopen button until the user reopens or closes it. */
@@ -351,8 +355,17 @@ export interface Bridge {
   orchestrator(
     method: string,
     params?: Record<string, unknown>,
+    /** The host whose daemon answers: "local" (the default) or "ssh:<id>". */
+    host?: string,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic RPC passthrough, callers narrow the result themselves
   ): Promise<any>;
+  orchestratorHosts(): Promise<
+    import("./orchestrator/types.ts").OrchestratorHost[]
+  >;
+  orchestratorPreflight(
+    host: string,
+  ): Promise<import("./orchestrator/types.ts").Preflight | null>;
+  onOrchestratorHosts(callback: () => void): () => void;
   onOrchestrator(
     callback: (
       event: import("./orchestrator/types.ts").OrchestratorEvent,

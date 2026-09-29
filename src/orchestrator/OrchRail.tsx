@@ -64,6 +64,7 @@ export function OrchRail({
   improvementsCount,
   archivedCount,
   offline = false,
+  hostName,
   onOpen,
 }: {
   view: OrchestratorView;
@@ -76,6 +77,8 @@ export function OrchRail({
   archivedCount: number;
   /** The daemon is down: the last known list stays, dimmed and inert. */
   offline?: boolean;
+  /** Named on each row only when several hosts are in use. */
+  hostName?: string;
   onOpen: (view: OrchestratorView) => void;
 }) {
   const groups = railGroups(tasks);
@@ -94,7 +97,9 @@ export function OrchRail({
         key={task.id}
         title={task.title}
         reason={taskReason(task, tasks, maxAttempts)}
-        meta={taskMetaLine(task, maxAttempts)}
+        meta={[hostName, taskMetaLine(task, maxAttempts)]
+          .filter(Boolean)
+          .join(" · ")}
         tone={taskTone(task)}
         selected={task.id === selectedId}
         onClick={() => onOpen({ kind: "task", id: task.id })}

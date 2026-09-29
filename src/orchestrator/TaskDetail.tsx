@@ -9,7 +9,7 @@ import {
   Trash2,
   Wrench,
 } from "lucide-react";
-import { orchestratorClient } from "./client";
+import { useOrchestratorClient } from "./hostContext";
 import {
   attemptDurationMs,
   childrenOf,
@@ -153,6 +153,7 @@ function AttemptRow({ attempt }: { attempt: Attempt }) {
  * open full size. Orchd serves them as data URLs (the renderer cannot read
  * its data directory). */
 function EvidenceGallery({ task }: { task: Task }) {
+  const orchestratorClient = useOrchestratorClient();
   const latest = [...task.attempts]
     .reverse()
     .find(
@@ -179,7 +180,7 @@ function EvidenceGallery({ task }: { task: Task }) {
     return () => {
       cancelled = true;
     };
-  }, [task.id, key]);
+  }, [task.id, key, orchestratorClient]);
   if (paths.length === 0) return null;
   const name = (path: string) => path.split("/").pop() ?? path;
   return (
@@ -454,6 +455,7 @@ export function TaskDetail({
   onOpen(id: string): void;
   onDelete(): void;
 }) {
+  const orchestratorClient = useOrchestratorClient();
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [noting, setNoting] = useState(false);
   const [note, setNote] = useState("");

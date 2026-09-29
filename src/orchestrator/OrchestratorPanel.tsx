@@ -7,14 +7,35 @@ import {
   LayoutList,
   ListTodo,
   MessageSquare,
+  RefreshCw,
+  Server,
   Sparkles,
   X,
 } from "lucide-react";
 import "./orchestrator.css";
 import type { OrchestratorView } from "../types";
 import type { TaskTarget } from "./notices";
+import type { OrchestratorHost } from "./types";
 import { pendingReveal, subscribeReveal } from "./reveal";
-import { orchestratorClient } from "./client";
+import {
+  useOrchestratorClient,
+  OrchestratorHostProvider,
+  useOrchestratorHost,
+} from "./hostContext";
+import {
+  LOCAL,
+  orchestratorClientFor,
+  type OrchestratorClient,
+} from "./client";
+import {
+  hostOf,
+  hostName as hostNameOf,
+  hostsInUse,
+  preflightProblems,
+  repoSuggestions,
+} from "./hosts";
+import { useOrchestratorHosts } from "./useHosts";
+import { useWorkspaceRepos } from "./workspaceRepos";
 import {
   applyOrchestratorEvent,
   emptyLiveState,
@@ -62,6 +83,7 @@ type View = OrchestratorView;
  * title/goal form keeps it working either way. `start: false` keeps it as a
  * draft on the Plan. */
 async function createTask(
+  orchestratorClient: OrchestratorClient,
   cwd: string,
   text: string,
   base: string,
@@ -138,17 +160,22 @@ function viewIcon(kind: View["kind"]) {
   }
 }
 
-export function OrchestratorPanel({
+function OrchestratorBody({
   cwd,
+  hostName,
   view: savedView,
   onViewChange,
 }: {
   cwd: string;
+  /** Set only when several hosts are in use: named on each task row. */
+  hostName?: string;
   /** The view the panel had when it was last open; seeds its own state. */
   view?: OrchestratorView;
   /** Reports the view after each change so it can be saved on the panel. */
   onViewChange(view: OrchestratorView | undefined): void;
 }) {
+  const orchestratorClient = useOrchestratorClient();
+  const host = useOrchestratorHost();
   const [daemonState, setDaemonState] = useState<DaemonState>("loading");
   // Set once the daemon has answered at least once: a later failure keeps
   // the last known task list on the rail instead of blanking the panel.
@@ -211,7 +238,7 @@ export function OrchestratorPanel({
     return () => {
       cancelled = true;
     };
-  }, [cwd, reload]);
+  }, [cwd, reload, orchestratorClient]);
 
   useEffect(
     () =>
@@ -219,6 +246,7 @@ export function OrchestratorPanel({
       // (electron/orchestrator.cjs), not here: this panel only needs to
       // exist for a task's live state to update.
       window.bridge?.onOrchestrator((event) => {
+        if (hostOf(event) !== host) return;
         if (event.event === "task" && event.task.repo !== cwd) return;
         if (event.event === "message") {
           if (event.message.repo === cwd)
@@ -239,7 +267,7 @@ export function OrchestratorPanel({
         }
         setLive((old) => applyOrchestratorEvent(old, event));
       }),
-    [cwd],
+    [cwd, host],
   );
 
   useEffect(() => {
@@ -268,7 +296,7 @@ export function OrchestratorPanel({
     return () => {
       cancelled = true;
     };
-  }, [cwd, reload]);
+  }, [cwd, reload, orchestratorClient]);
 
   const tasks = sortTasks(live.tasks.filter((t) => !t.archived));
   const archivedTasks = sortTasks(live.tasks.filter((t) => t.archived));
@@ -323,14 +351,15 @@ export function OrchestratorPanel({
   useEffect(() => {
     const take = () => {
       const target = pendingReveal(cwd);
-      if (!target || applied.current === target) return;
+      if (!target || applied.current === target || hostOf(target) !== host)
+        return;
       applied.current = target;
       setView({ kind: "task", id: target.taskId });
       setScrollTo(target);
     };
     take();
     return subscribeReveal(take);
-  }, [cwd, setView]);
+  }, [cwd, setView, host]);
   useEffect(() => {
     if (!scrollTo || selected?.id !== scrollTo.taskId) return;
     const root = rootRef.current;
@@ -388,7 +417,13 @@ export function OrchestratorPanel({
     setCreatingBusy(true);
     setError("");
     try {
-      const task = await createTask(cwd, text, baseBranchDraft, start);
+      const task = await createTask(
+        orchestratorClient,
+        cwd,
+        text,
+        baseBranchDraft,
+        start,
+      );
       setLive((old) => ({ ...old, tasks: upsertTask(old.tasks, task) }));
       setTaskDraft("");
       setBaseBranchDraft("");
@@ -472,6 +507,7 @@ export function OrchestratorPanel({
       improvementsCount={improvementsCount}
       archivedCount={archivedTasks.length}
       offline={offline}
+      hostName={hostName}
       onOpen={open}
     />
   );
@@ -791,6 +827,188 @@ export function OrchestratorPanel({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+const HOST_STATE_TEXT: Record<OrchestratorHost["state"], string> = {
+  idle: "",
+  connecting: "Connecting…",
+  installing: "Installing the orchestrator…",
+  building: "Building the orchestrator…",
+  starting: "Starting the orchestrator…",
+  ready: "",
+  error: "",
+};
+
+/** The Orchestrator panel: a host selector (Local + each SSH profile) above
+ * the task list, new-task form, chat and settings of the chosen host's
+ * daemon. In a workspace opened on a host the panel starts on that host and
+ * its folder; any other host asks for a repo path on it. */
+export function OrchestratorPanel({
+  cwd,
+  endpoint,
+  view,
+  host: savedHost,
+  repo: savedRepo,
+  onViewChange,
+  onHostChange,
+}: {
+  cwd: string;
+  /** The workspace's own host: "ssh:<id>" or nothing for this machine. */
+  endpoint?: string;
+  /** The view the panel had when it was last open; seeds its own state. */
+  view?: OrchestratorView;
+  /** The host and repo the owner picked in this panel; seeds its own state. */
+  host?: string;
+  repo?: string;
+  /** Reports the view after each change so it can be saved on the panel. */
+  onViewChange(view: OrchestratorView | undefined): void;
+  onHostChange(choice: { host: string; repo?: string }): void;
+}) {
+  const workspaceHost = endpoint?.startsWith("ssh:") ? endpoint : LOCAL;
+  const { hosts, refresh } = useOrchestratorHosts();
+  const workspaces = useWorkspaceRepos();
+  const host = savedHost ?? workspaceHost;
+  const info = hosts.find((item) => item.id === host);
+  const remote = host !== LOCAL;
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const ready = info?.state === "ready";
+
+  // The host's own tasks give its repo suggestions (and a default repo).
+  useEffect(() => {
+    if (host === LOCAL) return;
+    let cancelled = false;
+    setTasks([]);
+    orchestratorClientFor(host)
+      .taskList()
+      .then((list) => !cancelled && setTasks(list))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [host, ready]);
+
+  const suggestions = repoSuggestions(host, workspaces, tasks);
+  const repo =
+    savedRepo ?? (host === workspaceHost ? cwd : (suggestions[0] ?? ""));
+  // Typing a path only takes effect on Enter or blur: every commit remounts
+  // the panel body for the new repo.
+  const [repoDraft, setRepoDraft] = useState(repo);
+  useEffect(() => setRepoDraft(repo), [repo]);
+  const commitRepo = () => {
+    const next = repoDraft.trim();
+    if (next && next !== repo) onHostChange({ host, repo: next });
+  };
+  const choose = useCallback(
+    (next: { host: string; repo?: string }) => {
+      onViewChange(undefined);
+      onHostChange(next);
+    },
+    [onViewChange, onHostChange],
+  );
+
+  // A notice for a task of another host lands here first: the panel switches
+  // to that host, then the body below shows the task.
+  const applied = useRef<unknown>(null);
+  useEffect(() => {
+    const take = () => {
+      const target = pendingReveal(cwd);
+      if (!target || applied.current === target) return;
+      applied.current = target;
+      const targetHost = hostOf(target);
+      const local = targetHost === workspaceHost;
+      if (targetHost !== host || (!local && target.repo !== repo))
+        choose({ host: targetHost, repo: local ? undefined : target.repo });
+    };
+    take();
+    return subscribeReveal(take);
+  }, [cwd, host, repo, workspaceHost, choose]);
+
+  const problems = preflightProblems(info?.preflight);
+  const showHostNames = hostsInUse(hosts) > 1;
+  return (
+    <div className="orchestrator-host">
+      <div className="orch-hostbar">
+        <Server size={13} aria-hidden />
+        <select
+          aria-label="Orchestrator host"
+          value={host}
+          onChange={(event) => choose({ host: event.target.value })}
+        >
+          {hosts.map((item) => (
+            <option key={item.id} value={item.id}>
+              {item.name}
+              {item.state === "error" ? " (unreachable)" : ""}
+            </option>
+          ))}
+        </select>
+        {remote && (
+          <>
+            <input
+              className="orch-hostbar-repo"
+              aria-label={`Repo path on ${info?.name ?? host}`}
+              list="orch-repo-suggestions"
+              placeholder={`Repo path on ${info?.name ?? "the host"}`}
+              value={repoDraft}
+              onChange={(event) => setRepoDraft(event.target.value)}
+              onBlur={commitRepo}
+              onKeyDown={(event) => event.key === "Enter" && commitRepo()}
+            />
+            <datalist id="orch-repo-suggestions">
+              {suggestions.map((path) => (
+                <option key={path} value={path} />
+              ))}
+            </datalist>
+            <button
+              className="icon-button"
+              title="Check git and the harness CLIs on this host"
+              aria-label="Recheck host"
+              onClick={() => {
+                void window.bridge
+                  ?.orchestratorPreflight(host)
+                  .then(refresh)
+                  .catch(refresh);
+              }}
+            >
+              <RefreshCw size={13} />
+            </button>
+          </>
+        )}
+        {info && HOST_STATE_TEXT[info.state] && (
+          <span className="orch-hostbar-state">
+            {info.detail || HOST_STATE_TEXT[info.state]}
+          </span>
+        )}
+        {info?.state === "error" && (
+          <span className="orch-hostbar-error" role="alert">
+            {info.detail}
+          </span>
+        )}
+        {remote && problems.length > 0 && (
+          <span className="orch-hostbar-problems">{problems.join(" · ")}</span>
+        )}
+      </div>
+      <OrchestratorHostProvider value={host}>
+        {repo ? (
+          <OrchestratorBody
+            key={`${host}\n${repo}`}
+            cwd={repo}
+            hostName={
+              showHostNames
+                ? (info?.name ?? hostNameOf(hosts, host))
+                : undefined
+            }
+            view={savedHost === host || !savedHost ? view : undefined}
+            onViewChange={onViewChange}
+          />
+        ) : (
+          <div className="empty-state">
+            <h2>Which repo on {info?.name ?? host}?</h2>
+            <p>Enter the repo's path on that host above.</p>
+          </div>
+        )}
+      </OrchestratorHostProvider>
     </div>
   );
 }

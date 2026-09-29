@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { orchestratorClient } from "../orchestrator/client.ts";
+import { orchestratorClientFor } from "../orchestrator/client.ts";
+import { upsertTask } from "../orchestrator/helpers.ts";
 import type { Task } from "../orchestrator/types.ts";
 
 /** How often the list is re-read, so a daemon that was not up at launch
@@ -14,25 +15,47 @@ export function useOrchestratorTasks(): Task[] {
   useEffect(() => {
     if (!window.bridge) return;
     let cancelled = false;
-    const load = () =>
-      orchestratorClient
+    // One list per host; a host that is down keeps what it last showed.
+    const loaded = new Map<string, Task[]>();
+    const publish = () => {
+      if (!cancelled) setTasks([...loaded.values()].flat());
+    };
+    const loadHost = (host: string) =>
+      orchestratorClientFor(host)
         .taskList()
-        .then((list) => !cancelled && setTasks(list))
+        .then((list) => {
+          loaded.set(host, list);
+          publish();
+        })
         .catch(() => {});
-    void load();
-    const timer = setInterval(load, REFRESH_MS);
+    const load = async (all: boolean) => {
+      const hosts = await window.bridge!.orchestratorHosts().catch(() => []);
+      const ids = new Set([
+        "local",
+        ...hosts.filter((h) => h.enabled).map((h) => h.id),
+      ]);
+      for (const host of [...loaded.keys()])
+        if (!ids.has(host)) loaded.delete(host);
+      // A host change only loads hosts not read yet: a host that is down
+      // reports its error as a change, and re-reading it here would loop.
+      await Promise.all(
+        [...ids].filter((h) => all || !loaded.has(h)).map(loadHost),
+      );
+      publish();
+    };
+    void load(true);
+    const offHosts = window.bridge.onOrchestratorHosts(() => void load(false));
+    const timer = setInterval(() => void load(true), REFRESH_MS);
     const off = window.bridge.onOrchestrator((event) => {
       if (event.event !== "task") return;
-      const task = event.task;
-      setTasks((old) =>
-        old.some((t) => t.id === task.id)
-          ? old.map((t) => (t.id === task.id ? task : t))
-          : [...old, task],
-      );
+      const host = event.host || "local";
+      loaded.set(host, upsertTask(loaded.get(host) ?? [], event.task));
+      publish();
     });
     return () => {
       cancelled = true;
       clearInterval(timer);
+      offHosts();
       off?.();
     };
   }, []);

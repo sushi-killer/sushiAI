@@ -3,15 +3,73 @@
  * hunting for stragglers elsewhere. `.status-dot.red`/`.blue` live in
  * styles.css next to their green/yellow siblings, not here. */
 
-.orchestrator-remote {
+/* The panel: a host bar above the per-host task list and detail. */
+.orchestrator-host {
   display: flex;
-  align-items: center;
-  justify-content: center;
+  flex-direction: column;
   flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.orchestrator-host > .orchestrator-panel {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+
+.orch-hostbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap-sm);
+  padding: var(--gap-sm) var(--gap-md);
+  border-bottom: 1px solid var(--line);
   color: var(--text-muted);
   font-size: var(--text-sm);
-  padding: var(--gap-xl);
-  text-align: center;
+}
+
+.orch-hostbar select,
+.orch-hostbar input {
+  min-width: 0;
+}
+
+.orch-hostbar-repo {
+  flex: 1 1 12rem;
+}
+
+.orch-hostbar-state {
+  color: var(--text-muted);
+}
+
+.orch-hostbar-error {
+  color: var(--danger);
+  flex-basis: 100%;
+}
+
+.orch-hostbar-problems {
+  color: var(--tone-warning);
+  flex-basis: 100%;
+}
+
+.orch-host-badge {
+  padding: 0 var(--gap-xs);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.orch-settings-host {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  margin-bottom: var(--gap-md);
+}
+
+.orch-route-row.unavailable {
+  opacity: 0.55;
 }
 
 .orchestrator-panel {

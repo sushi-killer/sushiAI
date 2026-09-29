@@ -57,6 +57,16 @@ panel, picks the task by title, saves
 `artifacts/orchestrator-{window,detail,home}.png` (`home` is the Home view before a task is picked; `detail` crops the task view `.td`), plus `artifacts/orchestrator-proposals.png` (a crop of the first proposal card on the Improvements view, only when proposals were seeded; `report.screenshots.proposals`), plus `artifacts/orchestrator-improvements.png` (the whole Improvements view, when proposals or notes were seeded) and `artifacts/orchestrator-repo-notes.png` (a crop of the notes list on that view, only when notes were seeded; `report.screenshots.notes`), prints a JSON report, and
 exits non-zero with `error` set on any failure, including an unmatched title.
 
+## Orchestrator host selector
+
+`node .agents/skills/ui-evidence/scripts/orchestrator-remote-host.mjs` runs the
+app against a fake ssh (`tests/fixtures/fake-ssh.cjs`) that executes the
+"remote" commands under a throwaway HOME, so the real orchd binary is uploaded,
+started detached and reached through a forwarded socket. It saves
+`artifacts/orchestrator-host-local.png` and `artifacts/orchestrator-host-selector.png`
+(a remote task with its host on the row). `cargo build --release` in `orchd/`
+and `npm run build` come first.
+
 ## Orchestrator task notices
 
 To photograph the orchd notices on the desktop mascot (needs input, done,

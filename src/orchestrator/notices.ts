@@ -17,6 +17,7 @@ export type TaskNotice = {
   options?: string[];
   /** A done task that is not landed: the notice offers a Land action. */
   canLand?: boolean;
+  host?: string;
   /** Epoch ms the task last moved (a question: when it was asked). */
   at?: number;
   /** The repo's folder name, for the bubble header. */
@@ -33,12 +34,38 @@ export type TaskTarget = {
   taskId: string;
   repo: string;
   focus: TaskNoticeFocus;
+  host?: string;
 };
 
 export type OrchestratorTarget =
   | { kind: "panel"; workspaceId: string; panelId: string }
   | { kind: "add-panel"; workspaceId: string }
   | { kind: "create-workspace"; name: string; cwd: string };
+
+function remoteTarget(
+  workspaces: Workspace[],
+  repo: string,
+  host: string,
+): OrchestratorTarget {
+  const onHost = workspaces.filter(
+    (workspace) => workspace.connection === host,
+  );
+  const ordered = [
+    ...onHost.filter((workspace) => workspace.cwd === repo),
+    ...onHost,
+    ...workspaces,
+  ];
+  for (const workspace of ordered) {
+    const panel = workspace.panels.find(
+      (item) =>
+        item.kind === "orchestrator" && contains(workspace.layout, item.id),
+    );
+    if (panel)
+      return { kind: "panel", workspaceId: workspace.id, panelId: panel.id };
+  }
+  if (ordered.length) return { kind: "add-panel", workspaceId: ordered[0].id };
+  return { kind: "create-workspace", name: projectName(repo), cwd: repo };
+}
 
 /** The place a notice for `repo` opens: the Orchestrator panel of the
  * workspace whose cwd is the repo, else that workspace (a panel to add), else
@@ -47,7 +74,9 @@ export type OrchestratorTarget =
 export function orchestratorTarget(
   workspaces: Workspace[],
   repo: string,
+  host?: string,
 ): OrchestratorTarget {
+  if (host) return remoteTarget(workspaces, repo, host);
   const matching = workspaces.filter((workspace) => workspace.cwd === repo);
   for (const workspace of matching) {
     const panel = workspace.panels.find(

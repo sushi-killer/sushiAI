@@ -9,7 +9,7 @@ import {
   Sparkles,
   SquareTerminal,
 } from "lucide-react";
-import { orchestratorClient } from "./client";
+import { useOrchestratorClient } from "./hostContext";
 import {
   enterKind,
   isOfKind,
@@ -221,6 +221,7 @@ function Conversation({
   onSend: (text: string) => Promise<boolean>;
   onClear: () => void;
 }) {
+  const orchestratorClient = useOrchestratorClient();
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   const messages = thread?.messages ?? [];
@@ -367,6 +368,7 @@ function MessageCard({
   replies: Message[];
   tasks: Task[];
 }) {
+  const orchestratorClient = useOrchestratorClient();
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
@@ -450,6 +452,7 @@ function MessageCard({
 /** Agent-to-orchestrator (and agent-to-agent) messages the daemon keeps for
  * this repo, newest first, each reply under the message it answers. */
 function AgentMessages({ cwd, tasks }: { cwd: string; tasks: Task[] }) {
+  const orchestratorClient = useOrchestratorClient();
   const [messages, setMessages] = useState<Message[]>([]);
   const [loadError, setLoadError] = useState("");
   useEffect(() => {
@@ -466,7 +469,7 @@ function AgentMessages({ cwd, tasks }: { cwd: string; tasks: Task[] }) {
       cancelled = true;
       off?.();
     };
-  }, [cwd]);
+  }, [cwd, orchestratorClient]);
 
   const replies = new Map<string, Message[]>();
   for (const m of messages)
@@ -645,6 +648,7 @@ export function ChatView({
   onShow: (kind: "chat" | "messages") => void;
   onOpenTask?: (id: string) => void;
 }) {
+  const orchestratorClient = useOrchestratorClient();
   const [thread, setThread] = useState<ChatThread | null>(null);
   const [list, setList] = useState<KindedList | null>(null);
   const [error, setError] = useState("");

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, X } from "lucide-react";
-import { orchestratorClient } from "./client";
+import { useOrchestratorClient } from "./hostContext";
 import { errorText } from "./helpers";
 import {
   failureNoteDraft,
@@ -21,6 +21,7 @@ import "./improvements.css";
  * (it becomes a task) or rejected; a harness-track one carries the A/B eval
  * command and is marked adopted by hand. */
 function Proposals({ cwd, refresh }: { cwd: string; refresh: string }) {
+  const orchestratorClient = useOrchestratorClient();
   const [rows, setRows] = useState<Proposal[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -33,7 +34,7 @@ function Proposals({ cwd, refresh }: { cwd: string; refresh: string }) {
     return () => {
       cancelled = true;
     };
-  }, [cwd, refresh]);
+  }, [cwd, refresh, orchestratorClient]);
 
   useEffect(() => {
     const off = window.bridge?.onOrchestrator((event) => {
@@ -173,6 +174,7 @@ function RecurringFailures({
   onOpenTask: (id: string) => void;
   onAddNote: (draft: string) => void;
 }) {
+  const orchestratorClient = useOrchestratorClient();
   const [rows, setRows] = useState<FailureRow[]>([]);
 
   useEffect(() => {
@@ -237,6 +239,7 @@ function RepoNotes({
   onDraft: (text: string) => void;
   inputRef: React.RefObject<HTMLInputElement | null>;
 }) {
+  const orchestratorClient = useOrchestratorClient();
   const [notes, setNotes] = useState<Note[]>([]);
   const [error, setError] = useState("");
 
@@ -253,7 +256,7 @@ function RepoNotes({
     return () => {
       cancelled = true;
     };
-  }, [cwd, refresh]);
+  }, [cwd, refresh, orchestratorClient]);
 
   function add() {
     const text = draft.trim();

@@ -269,6 +269,7 @@ function registerAttentionIpc({
         taskId: notice.taskId,
         repo: notice.repo,
         focus: notice.focus,
+        ...(notice.host ? { host: notice.host } : {}),
       });
     });
     notification.on("close", cleanup);

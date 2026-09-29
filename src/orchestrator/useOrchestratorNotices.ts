@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { setWorkspaceRepos } from "./workspaceRepos";
 import type { PanelKind, Workspace } from "../types";
 import { orchestratorTarget, type TaskTarget } from "./notices";
 import { publishReveal } from "./reveal";
@@ -34,6 +35,7 @@ export function useOrchestratorNotices(shell: Shell) {
   const [pending, setPending] = useState<TaskTarget | null>(null);
   const kicked = useRef("");
   const worktreeTasks = useWorktreeTasks();
+  useEffect(() => setWorkspaceRepos(shell.workspaces), [shell.workspaces]);
 
   const { showWorkspace } = shell;
   const openTask = useCallback(
@@ -53,7 +55,7 @@ export function useOrchestratorNotices(shell: Shell) {
   const { addPanel, createWorkspace } = shell;
   useEffect(() => {
     if (!pending) return;
-    const target = orchestratorTarget(workspaces, pending.repo);
+    const target = orchestratorTarget(workspaces, pending.repo, pending.host);
     if (target.kind === "panel") {
       switchWorkspace(target.workspaceId);
       setSelected(target.panelId);

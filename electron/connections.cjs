@@ -74,7 +74,9 @@ function validate(profile) {
   };
 }
 class Connections {
-  constructor(dataDir) {
+  // `ssh` is the binary every connection runs; tests hand in a fake one.
+  constructor(dataDir, { ssh = "/usr/bin/ssh" } = {}) {
+    this.ssh = ssh;
     this.file = path.join(dataDir, "connections.json");
     this.knownHostsFile = path.join(dataDir, "known_hosts");
     this.profiles = [];
@@ -198,7 +200,7 @@ class Connections {
     let worker = this.inspectionWorkers.get(key);
     if (worker) return worker;
     worker = new InspectionWorker({
-      command: profile ? "/usr/bin/ssh" : "/usr/bin/python3",
+      command: profile ? this.ssh : "/usr/bin/python3",
       args: (source) =>
         profile
           ? [
@@ -214,6 +216,26 @@ class Connections {
     });
     this.inspectionWorkers.set(key, worker);
     return worker;
+  }
+  /** Runs one shell command on the host over ssh (`input` goes to its
+   * stdin) and resolves with its stdout. */
+  exec(endpoint, command, { input = "", timeout = 20000 } = {}) {
+    const profile = this.get(endpoint);
+    return run(
+      this.ssh,
+      [...this.args(profile), profile.host, command],
+      input,
+      timeout,
+    );
+  }
+  /** Forwards a local unix socket to a socket on the host; the returned
+   * handle emits `exit` when the tunnel drops and `kill()` closes it. The
+   * caller waits for `localSocket` to appear. */
+  forwardSocket(endpoint, localSocket, remoteSocket) {
+    return this.forwardProcess(
+      this.get(endpoint),
+      `${localSocket}:${remoteSocket}`,
+    );
   }
   async socket(endpoint) {
     if (!endpoint.startsWith("ssh:")) {
@@ -246,14 +268,14 @@ class Connections {
     let shared = false;
     try {
       const config = await run(
-        "/usr/bin/ssh",
+        this.ssh,
         [...this.args(profile), "-G", profile.host],
         "",
         3000,
       );
       if (!declaresForwards(config)) {
         await run(
-          "/usr/bin/ssh",
+          this.ssh,
           [...this.args(profile), "-O", "check", profile.host],
           "",
           3000,
@@ -263,7 +285,7 @@ class Connections {
     } catch {}
     if (shared) {
       try {
-        await run("/usr/bin/ssh", [
+        await run(this.ssh, [
           ...this.args(profile),
           "-O",
           "forward",
@@ -280,7 +302,7 @@ class Connections {
           if (closed) return;
           closed = true;
           await run(
-            "/usr/bin/ssh",
+            this.ssh,
             [
               ...this.args(profile),
               "-O",
@@ -303,7 +325,7 @@ class Connections {
       }
     }
     return spawn(
-      "/usr/bin/ssh",
+      this.ssh,
       [
         ...this.args(profile),
         "-o",

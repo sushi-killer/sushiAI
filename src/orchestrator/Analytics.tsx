@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, ChevronLeft, ChevronRight, GitMerge } from "lucide-react";
-import { orchestratorClient } from "./client";
+import { useOrchestratorClient } from "./hostContext";
 import { errorText, formatCost } from "./helpers";
 import { landTasks } from "./ownerAttention";
 import {
@@ -56,6 +56,9 @@ function periodRange(period: Period): string {
 }
 
 async function loadSpend(
+  orchestratorClient: ReturnType<
+    typeof import("./client").orchestratorClientFor
+  >,
   cwd: string,
   period: Period,
   offset: number,
@@ -82,6 +85,9 @@ async function loadSpend(
 }
 
 async function loadPrevious(
+  orchestratorClient: ReturnType<
+    typeof import("./client").orchestratorClientFor
+  >,
   cwd: string,
   period: Period,
 ): Promise<RangedSummary | null> {
@@ -225,6 +231,7 @@ export function AnalyticsView({
   refresh: string;
   onOpenTask?: (id: string) => void;
 }) {
+  const orchestratorClient = useOrchestratorClient();
   const [offset, setOffset] = useState(0);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [spend, setSpend] = useState<Spend | null>(null);
@@ -239,12 +246,14 @@ export function AnalyticsView({
       .taskList(cwd, true)
       .then((list) => !cancelled && setTasks(list))
       .catch(() => undefined);
-    loadSpend(cwd, period, offset)
+    loadSpend(orchestratorClient, cwd, period, offset)
       .then((result) => {
         if (cancelled) return;
         setSpend(result);
         if (!result.ranged) return setPrevious(null);
-        loadPrevious(cwd, period).then((p) => !cancelled && setPrevious(p));
+        loadPrevious(orchestratorClient, cwd, period).then(
+          (p) => !cancelled && setPrevious(p),
+        );
       })
       .catch(() => !cancelled && setSpend(null));
     return () => {

@@ -12,6 +12,9 @@ const fs = require("node:fs/promises");
 const { existsSync } = require("node:fs");
 const { spawn } = require("node:child_process");
 const { createHash, randomUUID } = require("node:crypto");
+const { RemoteOrchd, localArtifacts } = require("./orchestrator-remote.cjs");
+
+const LOCAL_HOST = "local";
 
 const ORCHESTRATOR_MANIFEST = {
   id: "builtin.orchestrator",
@@ -45,6 +48,7 @@ const ALLOWED_METHODS = new Set([
   "task.unarchive",
   "task.timeline",
   "task.evidence",
+  "task.report",
   "failures.catalogue",
   "costs.summary",
   "chat.get",
@@ -65,6 +69,39 @@ const ALLOWED_METHODS = new Set([
   "repo.notes.add",
   "repo.notes.remove",
 ]);
+
+// Results that are one task or a list of them: a remote host's are tagged
+// with the host so the renderer knows where a task lives.
+const TASK_RESULT_METHODS = new Set([
+  "task.list",
+  "task.get",
+  "task.create",
+  "task.start",
+  "task.land",
+  "task.stop",
+  "task.answer",
+  "task.archive",
+  "task.unarchive",
+  "task.overturn",
+  "task.leadTouch",
+]);
+
+function tagTasks(result, host) {
+  const isTask = (value) =>
+    value && typeof value === "object" && "id" in value && "status" in value;
+  if (Array.isArray(result))
+    return result.map((task) => (isTask(task) ? { ...task, host } : task));
+  return isTask(result) ? { ...result, host } : result;
+}
+
+/** A relayed event from a remote host, its task (if any) tagged. */
+function tagEvent(message, host) {
+  if (!message || typeof message !== "object") return message;
+  const tagged = { ...message, host };
+  if (message.task && typeof message.task === "object")
+    tagged.task = { ...message.task, host };
+  return tagged;
+}
 
 const NOT_BUILT =
   "The orchestrator daemon is not built. Run npm run build:orchd.";
@@ -274,6 +311,8 @@ function orchestratorNotice(task) {
     focus,
   };
   if (canLand) notice.canLand = true;
+  if (typeof task.host === "string" && task.host && task.host !== LOCAL_HOST)
+    notice.host = cap(task.host, 200);
   const at = Number(task.question?.askedAt) || Number(task.updatedAt) || 0;
   if (at > 0) notice.at = at;
   const repoName = String(task.repo ?? "")
@@ -317,11 +356,21 @@ class OrchestratorService {
     spawnIntervalMs = 100,
     stopDaemonOnQuit = false,
     quitTimeoutMs = 2000,
+    host = LOCAL_HOST,
+    remote = null,
   }) {
+    this.host = host;
+    // A remote service reaches its daemon through `remote` (the ssh
+    // forward and token); it never spawns, restarts or stops one itself.
+    this.remote = remote;
     this.dataDir = dataDir;
-    this.socketPath = socketPathFor(dataDir);
-    this.binary = orchdBinaryPath({ root, resourcesPath, packaged });
-    this.send = send;
+    this.socketPath = dataDir ? socketPathFor(dataDir) : null;
+    this.binary = remote
+      ? null
+      : orchdBinaryPath({ root, resourcesPath, packaged });
+    this.send = remote
+      ? (channel, message) => send(channel, tagEvent(message, host))
+      : send;
     this.notify = notify;
     this.onTask = onTask;
     this.getClaudeMcp = getClaudeMcp;
@@ -345,6 +394,7 @@ class OrchestratorService {
   }
 
   async #refreshToken() {
+    if (this.remote) return;
     try {
       this.token = (
         await fs.readFile(path.join(this.dataDir, "control.token"), "utf8")
@@ -383,6 +433,12 @@ class OrchestratorService {
 
   async #ensureRunningInner() {
     if (this.closed) throw new Error("orchestrator closed");
+    if (this.remote) {
+      const conn = await this.remote.ensure();
+      this.socketPath = conn.socketPath;
+      this.token = conn.token;
+      return { remote: true };
+    }
     if (!existsSync(this.binary)) throw new Error(NOT_BUILT);
     await this.#refreshToken();
     try {
@@ -450,7 +506,9 @@ class OrchestratorService {
   }
 
   async #withMcp(params) {
-    if (!this.getClaudeMcp || typeof params?.repo !== "string") return params;
+    // The project's .mcp.json lives on this machine; a remote repo path has none here.
+    if (this.remote || !this.getClaudeMcp || typeof params?.repo !== "string")
+      return params;
     try {
       const mcp = await this.getClaudeMcp().launchConfig(params.repo);
       return { ...params, mcp };
@@ -465,7 +523,9 @@ class OrchestratorService {
    * `profiles` is every route's resolved model-profile env + key. Nothing
    * is staged to disk - `resolveEnv` hands the env map and key back in memory. */
   async #pushSecrets() {
-    if (!this.getModelProviders) return;
+    // API keys never leave this machine: a remote daemon uses the harness
+    // logins already on its host.
+    if (this.remote || !this.getModelProviders) return;
     let settings;
     try {
       settings = await orchdRequest(
@@ -525,11 +585,14 @@ class OrchestratorService {
     // Awaited (not fire-and-forget) so a caller who follows this with another
     // settings-dependent call never races the push.
     if (method === "settings.set") await this.#pushSecrets().catch(() => {});
-    return result;
+    return this.remote && TASK_RESULT_METHODS.has(method)
+      ? tagTasks(result, this.host)
+      : result;
   }
 
   connect() {
     this.closed = false;
+    this.remote?.reopen();
     this.#subscribeLoop();
   }
 
@@ -543,7 +606,7 @@ class OrchestratorService {
       // Daemon not built / not reachable yet: retry with backoff below.
     }
     if (this.closed) return;
-    this.backoff = Math.min(this.backoff * 2, 15000);
+    this.backoff = Math.min(this.backoff * 2, this.remote ? 60000 : 15000);
     setTimeout(() => this.#subscribeLoop(), this.backoff).unref?.();
   }
 
@@ -553,7 +616,11 @@ class OrchestratorService {
    * raise nothing. */
   #notifyTransition(message) {
     if (message.event !== "task") return;
-    const task = message.task;
+    // `send` already tagged the relayed copy; the notice path needs it too.
+    const task =
+      this.remote && message.task && typeof message.task === "object"
+        ? { ...message.task, host: this.host }
+        : message.task;
     if (task && typeof task === "object") this.onTask?.(task);
     let previous;
     if (task && typeof task === "object" && task.id !== undefined) {
@@ -626,6 +693,7 @@ class OrchestratorService {
   close() {
     this.closed = true;
     this.subscribeSocket?.destroy();
+    this.remote?.close();
   }
 
   // What close() does, plus - only for a test launch (`stopDaemonOnQuit`) -
@@ -633,7 +701,8 @@ class OrchestratorService {
   // Never throws.
   async quit() {
     this.close();
-    if (!this.stopDaemonOnQuit) return;
+    // A remote daemon is never stopped by the app.
+    if (this.remote || !this.stopDaemonOnQuit) return;
     try {
       await this.running?.catch(() => {});
       await this.starting?.catch(() => {});
@@ -673,8 +742,108 @@ class OrchestratorService {
   }
 }
 
-function registerOrchestratorExtension({
-  handle,
+/** Every orchd the app talks to: the local daemon plus one per SSH profile
+ * the owner has used the Orchestrator on. A remote host, once enabled, is
+ * reconnected on every launch so its tasks reach the badge and the Inbox. */
+class OrchestratorHosts {
+  constructor({
+    local,
+    connections,
+    artifacts,
+    hostsFile,
+    createService,
+    onChange,
+  }) {
+    this.local = local;
+    this.getConnections = connections;
+    this.artifacts = artifacts;
+    this.hostsFile = hostsFile;
+    this.createService = createService;
+    this.onChange = onChange;
+    this.services = new Map();
+    this.enabled = new Set();
+  }
+
+  async #save() {
+    if (!this.hostsFile) return;
+    await fs.writeFile(this.hostsFile, JSON.stringify([...this.enabled]), {
+      mode: 0o600,
+    });
+  }
+
+  /** Reconnects the hosts the owner enabled earlier. Never throws. */
+  async init() {
+    if (!this.hostsFile) return;
+    try {
+      const saved = JSON.parse(await fs.readFile(this.hostsFile, "utf8"));
+      for (const host of Array.isArray(saved) ? saved : [])
+        if (typeof host === "string") this.#serviceFor(host, false);
+    } catch {
+      // No file yet, or unreadable: nothing was enabled.
+    }
+  }
+
+  #serviceFor(host, persist = true) {
+    if (host === LOCAL_HOST) return this.local;
+    const existing = this.services.get(host);
+    if (existing) return existing;
+    const connections = this.getConnections();
+    connections.get(host); // throws for an unknown / deleted profile
+    const service = this.createService(host);
+    this.services.set(host, service);
+    this.enabled.add(host);
+    if (persist) void this.#save().catch(() => {});
+    service.connect();
+    this.onChange?.();
+    return service;
+  }
+
+  /** Local plus every SSH profile, with what the panel shows about each. */
+  list() {
+    const profiles = this.getConnections?.()?.list() ?? [];
+    return [
+      { id: LOCAL_HOST, name: "Local", state: "ready", enabled: true },
+      ...profiles.map((profile) => {
+        const id = `ssh:${profile.id}`;
+        const remote = this.services.get(id)?.remote;
+        return {
+          id,
+          name: profile.name,
+          state: remote?.state ?? "idle",
+          detail: remote?.detail ?? "",
+          enabled: this.services.has(id),
+          preflight: remote?.preflight ?? null,
+        };
+      }),
+    ];
+  }
+
+  async call(method, params, host = LOCAL_HOST) {
+    if (typeof host !== "string") throw new Error("Invalid orchestrator host");
+    return this.#serviceFor(host).call(method, params);
+  }
+
+  /** Re-runs the host's preflight (git, claude, codex). */
+  async preflight(host) {
+    if (host === LOCAL_HOST) return null;
+    const service = this.#serviceFor(host);
+    await service.remote.ensure();
+    return service.remote.refreshPreflight();
+  }
+
+  close() {
+    this.local.close();
+    for (const service of this.services.values()) service.close();
+  }
+
+  async quit() {
+    for (const service of this.services.values()) await service.quit();
+    await this.local.quit();
+  }
+}
+
+/** The local service plus the remote-host machinery, not yet connected. */
+function createOrchestratorHosts({
   send,
   notify,
   onTask,
@@ -685,8 +854,13 @@ function registerOrchestratorExtension({
   getClaudeMcp,
   getModelProviders,
   stopDaemonOnQuit,
+  getConnections,
+  hostsFile,
+  hostsChanged,
+  spawnRetries,
+  spawnIntervalMs,
 }) {
-  const service = new OrchestratorService({
+  const local = new OrchestratorService({
     dataDir,
     root,
     resourcesPath,
@@ -698,15 +872,56 @@ function registerOrchestratorExtension({
     getModelProviders,
     stopDaemonOnQuit,
   });
-  handle("orchestrator", (method, params) => service.call(method, params));
-  service.connect();
-  return service;
+  const artifacts = localArtifacts({
+    root,
+    binary: orchdBinaryPath({ root, resourcesPath, packaged }),
+  });
+  return new OrchestratorHosts({
+    local,
+    connections: getConnections ?? (() => null),
+    artifacts,
+    hostsFile,
+    onChange: hostsChanged,
+    createService: (host) =>
+      new OrchestratorService({
+        host,
+        send,
+        notify,
+        onTask,
+        remote: new RemoteOrchd({
+          connections: getConnections(),
+          endpoint: host,
+          artifacts,
+          request: orchdRequest,
+          onChange: hostsChanged,
+          spawnRetries,
+          spawnIntervalMs,
+        }),
+      }),
+  });
+}
+
+function registerOrchestratorExtension({ handle, ...options }) {
+  const hosts = createOrchestratorHosts(options);
+  handle("orchestrator", (method, params, host) =>
+    hosts.call(method, params, host),
+  );
+  handle("orchestrator-hosts", () => hosts.list());
+  handle("orchestrator-preflight", (host) => hosts.preflight(host));
+  hosts.local.connect();
+  return hosts;
 }
 
 module.exports = {
   ORCHESTRATOR_MANIFEST,
   OrchestratorService,
+  OrchestratorHosts,
   registerOrchestratorExtension,
+  createOrchestratorHosts,
+  orchdRequest,
+  tagTasks,
+  tagEvent,
+  LOCAL_HOST,
   orchestratorNotice,
   orchdBinaryPath,
   socketPathFor,

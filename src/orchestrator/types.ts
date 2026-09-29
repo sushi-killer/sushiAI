@@ -294,6 +294,8 @@ export type Check = {
 
 export type Task = {
   id: string;
+  /** Set by the app on a task of a remote host ("ssh:<id>"); absent locally. */
+  host?: string;
   title: string;
   goal: string;
   criteria: string[];
@@ -564,8 +566,38 @@ export type Proposal = {
 /** A proposal was stored or changed - an upsert by id. */
 export type ProposalEvent = { event: "proposal"; proposal: Proposal };
 /** Pushed over `onOrchestrator` from the daemon's one `subscribe` connection. */
-export type OrchestratorEvent =
-  TaskEvent | LogEvent | ChatEvent | MessageEvent | AuditEvent | ProposalEvent;
+export type OrchestratorEvent = (
+  TaskEvent | LogEvent | ChatEvent | MessageEvent | AuditEvent | ProposalEvent
+) & {
+  /** Set on an event relayed from a remote host ("ssh:<id>"); absent locally. */
+  host?: string;
+};
+
+/** One host the Orchestrator panel can talk to: "local" or "ssh:<id>". */
+export type OrchestratorHost = {
+  id: string;
+  name: string;
+  state:
+    | "idle"
+    | "connecting"
+    | "installing"
+    | "building"
+    | "starting"
+    | "ready"
+    | "error";
+  detail?: string;
+  /** Whether the app keeps this host's daemon connected. */
+  enabled: boolean;
+  preflight?: Preflight | null;
+};
+
+/** What a host offers orchd's routes: git and each harness CLI. */
+export type Preflight = {
+  git: boolean;
+  claude: { installed: boolean; loggedIn: boolean };
+  codex: { installed: boolean; loggedIn: boolean };
+  checkedAt: number;
+};
 
 export type TimelineStage =
   "plan" | "implement" | "verify" | "review" | "advisor" | "final" | "wait";

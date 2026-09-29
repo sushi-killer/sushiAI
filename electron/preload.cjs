@@ -69,6 +69,14 @@ contextBridge.exposeInMainWorld("bridge", {
     ipcRenderer.on("orchestrator-event", listener);
     return () => ipcRenderer.removeListener("orchestrator-event", listener);
   },
+  orchestratorHosts: invoke("orchestrator-hosts"),
+  orchestratorPreflight: invoke("orchestrator-preflight"),
+  onOrchestratorHosts: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on("orchestrator-hosts-changed", listener);
+    return () =>
+      ipcRenderer.removeListener("orchestrator-hosts-changed", listener);
+  },
   onOrchestratorOpen: (callback) => {
     const listener = (_, data) => callback(data);
     ipcRenderer.on("orchestrator-open", listener);

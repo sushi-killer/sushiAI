@@ -1,7 +1,10 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Plus, Trash2, X } from "lucide-react";
 import "./orchestrator-settings.css";
-import { orchestratorClient } from "./client";
+import { OrchestratorHostProvider, useOrchestratorClient } from "./hostContext";
+import { LOCAL_HOST, routeProblem } from "./hosts";
+import type { Preflight } from "./types";
+import { useOrchestratorHosts } from "./useHosts";
 import {
   errorText,
   type DefaultableSetting,
@@ -225,10 +228,13 @@ function RouteRow({
   route,
   chatModels,
   profiles,
+  problem,
   onChange,
   onDelete,
 }: {
   route: Route;
+  /** Why the host being edited cannot run this route, if it cannot. */
+  problem?: string | null;
   chatModels: ChatModels;
   profiles: ModelProfile[];
   onChange(next: Route): void;
@@ -237,7 +243,10 @@ function RouteRow({
   const models = chatModels[route.harness]?.models || [];
   const efforts = chatModels[route.harness]?.efforts || [];
   return (
-    <div className="os-route-row">
+    <div
+      className={`os-route-row ${problem ? "unavailable" : ""}`}
+      title={problem ?? undefined}
+    >
       <input
         className="os-route-label"
         value={route.label}
@@ -357,7 +366,12 @@ const TIER_CARDS: { tier: Tier; title: string; hint: string }[] = [
   { tier: "hard", title: "Hard", hint: "architecture, tricky bugs" },
 ];
 
-export function OrchestratorSettings() {
+function OrchestratorSettingsBody({
+  preflight,
+}: {
+  preflight: Preflight | null;
+}) {
+  const orchestratorClient = useOrchestratorClient();
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saved, setSaved] = useState<Settings | null>(null);
   const [profiles, setProfiles] = useState<ModelProfile[]>([]);
@@ -393,7 +407,7 @@ export function OrchestratorSettings() {
       .catch(() => {
         // An older orchd binary: the panel works exactly as before.
       });
-  }, []);
+  }, [orchestratorClient]);
 
   if (notBuilt)
     return (
@@ -632,6 +646,7 @@ export function OrchestratorSettings() {
           <RouteRow
             key={route.id}
             route={route}
+            problem={routeProblem(preflight, route)}
             chatModels={chatModels}
             profiles={profiles}
             onChange={(next) =>
@@ -979,5 +994,37 @@ export function OrchestratorSettings() {
         </div>
       )}
     </div>
+  );
+}
+
+/** The orchestration settings of one host's daemon: Local, or a remote host
+ * whose routes are marked unavailable when its git/claude/codex says so. */
+export function OrchestratorSettings() {
+  const { hosts } = useOrchestratorHosts();
+  const [host, setHost] = useState(LOCAL_HOST);
+  const info = hosts.find((item) => item.id === host);
+  return (
+    <OrchestratorHostProvider value={host}>
+      {hosts.length > 1 && (
+        <label className="orch-settings-host">
+          <span>Host</span>
+          <select
+            aria-label="Settings host"
+            value={host}
+            onChange={(event) => setHost(event.target.value)}
+          >
+            {hosts.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      <OrchestratorSettingsBody
+        key={host}
+        preflight={info?.preflight ?? null}
+      />
+    </OrchestratorHostProvider>
   );
 }

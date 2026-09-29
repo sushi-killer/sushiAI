@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowRight, ChartColumn, RefreshCw } from "lucide-react";
 import { Character } from "../mascot/Character";
-import { orchestratorClient } from "./client";
+import { useOrchestratorClient } from "./hostContext";
 import {
   errorText,
   formatCost,
@@ -189,6 +189,7 @@ export function HomeView({
   onSendNote: (text: string) => Promise<void>;
   onTry: (text: string) => void;
 }) {
+  const orchestratorClient = useOrchestratorClient();
   const [today, setToday] = useState<number | null>(null);
   const [week, setWeek] = useState<SpendSummary | null>(null);
   const [noteFor, setNoteFor] = useState<string | null>(null);
@@ -206,7 +207,7 @@ export function HomeView({
     return () => {
       cancelled = true;
     };
-  }, [cwd, refresh]);
+  }, [cwd, refresh, orchestratorClient]);
 
   const live = tasks.filter((t) => !t.archived);
   if (live.length === 0) return <FirstRun onTry={onTry} />;

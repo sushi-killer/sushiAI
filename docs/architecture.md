@@ -28,8 +28,10 @@ flowchart TB
       orchSvc["orchestrator.cjs<br/>spawns + proxies orchd"]
       extMgr["extensions/*<br/>manifest validator"]
       herdrIpc["herdr.cjs, connections.cjs"]
+      remoteSvc["orchestrator-remote.cjs<br/>install, start, forward, preflight<br/>per SSH profile"]
     end
     orchPanel <--> preload <--> orchSvc
+    orchSvc --> remoteSvc --> herdrIpc
   end
 
   subgraph orchd["orchd daemon - Rust, outlives the app; a test-launched app stops it on quit, and it exits when its data dir is deleted"]
@@ -78,6 +80,7 @@ flowchart TB
   taskAgent -->|Stop hook| proto
   side --> repo
   herdrIpc <--> herdr
+  remoteSvc <-->|shared ssh master,<br/>forwarded orchd.sock + token| remoteOrchd[("orchd on an SSH host<br/>detached, outlives the app")]
 ```
 
 ## 2. Task lifecycle

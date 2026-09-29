@@ -17,6 +17,61 @@ impl App {
         }))
     }
 
+    /// `classify.probe {state, questions}`: asks the configured classifier
+    /// arbitrary questions about an arbitrary state, so a new judgement
+    /// point can be measured on real cases before orchd relies on it. A
+    /// question with `options` is a pick, otherwise a 0..1 probability.
+    pub(super) async fn handle_classify_probe(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct Q {
+            name: String,
+            prompt: String,
+            #[serde(default)]
+            options: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        struct P {
+            state: serde_json::Value,
+            questions: Vec<Q>,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        let questions: Vec<classify::QuestionSpec> = p
+            .questions
+            .into_iter()
+            .map(|q| match q.options.is_empty() {
+                true => classify::QuestionSpec::Noul {
+                    name: q.name,
+                    prompt: q.prompt,
+                },
+                false => classify::QuestionSpec::Choice {
+                    name: q.name,
+                    prompt: q.prompt,
+                    options: q.options,
+                },
+            })
+            .collect();
+        let settings = self.settings.read().unwrap().classifier.clone();
+        let key = self.secrets.read().unwrap().classifier_key.clone();
+        let base_url = self.secrets.read().unwrap().classifier_base_url.clone();
+        let start = std::time::Instant::now();
+        let answers = tokio::task::spawn_blocking(move || {
+            classify::decide(
+                &settings,
+                key.as_deref(),
+                base_url.as_deref(),
+                &p.state,
+                &questions,
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        Ok(json!({"answers": answers, "ms": start.elapsed().as_millis() as u64}))
+    }
+
     pub(super) async fn handle_settings_get(&self) -> Result<serde_json::Value, String> {
         let s = self.settings.read().unwrap().clone();
         serde_json::to_value(&s).map_err(|e| e.to_string())

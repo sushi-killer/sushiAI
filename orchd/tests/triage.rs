@@ -564,3 +564,31 @@ fn orchestrator_off_goes_straight_to_the_owner() {
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
 }
+
+#[test]
+fn classify_probe_asks_the_configured_classifier_arbitrary_questions() {
+    let daemon = Daemon::spawn(&[]);
+    let base_url = spawn_fake_openai_classifier(
+        r#"{"answers":{"consistent":{"noul":0.2},"pick":{"choice":"b"}}}"#,
+    );
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["classifier"] =
+        serde_json::json!({"backend": "openai", "model": "fake", "providerId": "fake"});
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    daemon.request(
+        "secrets.set",
+        serde_json::json!({"classifier": {"key": "test-key", "baseUrl": base_url}}),
+    );
+    let result = daemon.request(
+        "classify.probe",
+        serde_json::json!({
+            "state": {"criteria": ["a", "not a"]},
+            "questions": [
+                {"name": "consistent", "prompt": "Consistent?"},
+                {"name": "pick", "prompt": "Which?", "options": ["a", "b"]}
+            ]
+        }),
+    );
+    assert_eq!(result["answers"]["consistent"]["noul"], 0.2, "{result}");
+    assert_eq!(result["answers"]["pick"]["choice"], "b", "{result}");
+}

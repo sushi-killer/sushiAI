@@ -532,6 +532,7 @@ impl App {
         match method {
             "ping" => self.handle_ping().await,
             "settings.get" => self.handle_settings_get().await,
+            "classify.probe" => self.handle_classify_probe(params).await,
             "settings.set" => self.handle_settings_set(params).await,
             "settings.defaults" => self.handle_settings_defaults().await,
             "secrets.set" => self.handle_secrets_set(params).await,

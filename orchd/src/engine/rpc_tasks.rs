@@ -305,10 +305,16 @@ impl App {
         let title_for_branch = new.title.clone();
         let branch_opt = new.branch.clone();
         let base = new.base.clone();
+        let wt_root = self.settings.read().unwrap().worktree_root.clone();
         let created = tokio::task::spawn_blocking(move || {
             let branch = branch_opt
                 .unwrap_or_else(|| git::unique_branch_name(&repo_root, &title_for_branch));
-            let wt_path = git::worktree_path(&repo_root, &branch);
+            let wt_path = git::worktree_path(&repo_root, &wt_root, &branch);
+            if let Some(dir) = wt_path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| git::GitError(e.to_string()))?;
+                git::exclude_worktree_root(&repo_root, dir)
+                    .map_err(|e| git::GitError(e.to_string()))?;
+            }
             let base_ref = git::branch_of(&repo_root, &base);
             let created = git::create_worktree(&repo_root, &branch, &wt_path, &base)?;
             if let Err(e) = git::bootstrap_worktree(&repo_root, &created.path) {
@@ -339,6 +345,7 @@ impl App {
             request: new.request,
             repo: new.repo_root.to_string_lossy().to_string(),
             worktree: created.path.to_string_lossy().to_string(),
+            worktree_removed: false,
             branch,
             base_sha: created.base_sha,
             base_ref,
@@ -736,7 +743,15 @@ impl App {
             ctrl.cancel.cancel();
             let _ = ctrl.handle.await;
         }
-        let repo = self.store.load_task(&p.id).ok().flatten().map(|t| t.repo);
+        let doomed = self.store.load_task(&p.id).ok().flatten();
+        let repo = doomed.as_ref().map(|t| t.repo.clone());
+        if let Some(t) = doomed {
+            let _ = tokio::task::spawn_blocking(move || {
+                git::remove_task_worktree(Path::new(&t.repo), Path::new(&t.worktree));
+                git::delete_branch(Path::new(&t.repo), &t.branch, &t.id);
+            })
+            .await;
+        }
         let dir = self.store.task_dir(&p.id);
         if dir.exists() {
             std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -782,6 +797,7 @@ impl App {
             return Err("cannot archive a task with a live loop".to_string());
         }
         task.archived = true;
+        self.release_worktree(&mut task, "archived").await;
         task.updated_at = now_ms();
         self.store.save_task(&task).map_err(|e| e.to_string())?;
         self.broadcast_task(&task);
@@ -806,6 +822,11 @@ impl App {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
         task.archived = false;
+        if matches!(task.status, TaskStatus::Stopped | TaskStatus::Failed) {
+            if let Err(e) = self.ensure_worktree(&mut task).await {
+                task.decisions.push(format!("Worktree: {e}"));
+            }
+        }
         task.updated_at = now_ms();
         self.store.save_task(&task).map_err(|e| e.to_string())?;
         self.broadcast_task(&task);

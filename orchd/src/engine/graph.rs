@@ -322,6 +322,10 @@ pub(super) async fn run_parent(app: &Arc<App>, task_id: &str, cancel: &CancelTok
             }
         },
     }
+    if task.status == TaskStatus::Done {
+        app.release_worktree(&mut task, "every subtask landed")
+            .await;
+    }
     task.updated_at = now_ms();
     let _ = app.store.save_task(&task);
     app.broadcast_task(&task);

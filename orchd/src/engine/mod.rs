@@ -51,6 +51,7 @@ mod task_loop;
 #[cfg(test)]
 mod test_support;
 mod verify;
+mod worktrees;
 
 use advisor::*;
 use attempt_run::*;
@@ -587,6 +588,7 @@ impl App {
             "task.overturn" => self.handle_task_overturn(params).await,
             "task.amend" => self.handle_task_amend(params).await,
             "task.delete" => self.handle_task_delete(params).await,
+            "worktrees.gc" => self.handle_worktrees_gc(params).await,
             "task.archive" => self.handle_task_archive(params).await,
             "task.unarchive" => self.handle_task_unarchive(params).await,
             "task.preflight" => self.handle_task_preflight(params).await,

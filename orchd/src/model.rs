@@ -128,6 +128,10 @@ pub struct Settings {
     pub work_buckets: WorkBuckets,
     #[serde(default)]
     pub evolution: EvolutionSettings,
+    /// Where new task worktrees go; a relative value is resolved against the
+    /// repo root. Existing tasks keep the path they were created with.
+    #[serde(default = "default_worktree_root")]
+    pub worktree_root: String,
 }
 
 /// Thresholds for the evolution loop (`engine/evolution`): what counts as
@@ -251,6 +255,10 @@ pub struct Proposal {
     pub reason: Option<String>,
 }
 
+fn default_worktree_root() -> String {
+    ".sushiai/worktrees".to_string()
+}
+
 /// Tool-call inputs containing one of these count as process work (lesson
 /// files, changelogs, convention scripts) or as evidence work (screenshot
 /// helpers), on top of the generic rules in `ab.rs`. Empty by default: they
@@ -323,6 +331,7 @@ impl Default for Settings {
             prices: default_prices(),
             work_buckets: WorkBuckets::default(),
             evolution: EvolutionSettings::default(),
+            worktree_root: default_worktree_root(),
         }
     }
 }
@@ -775,6 +784,11 @@ pub struct Task {
     pub request: Option<String>,
     pub repo: String,
     pub worktree: String,
+    /// The worktree directory was removed because the task no longer needs
+    /// it (done, archived, or gc); it is recreated from the branch when the
+    /// task runs again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worktree_removed: bool,
     pub branch: String,
     pub base_sha: String,
     /// The branch the task was started from (`base`, or the repo's checked-out
@@ -1277,6 +1291,7 @@ mod tests {
             request: Some("fix the thing that's broken".into()),
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
+            worktree_removed: false,
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,
@@ -1494,6 +1509,7 @@ mod tests {
             request: None,
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
+            worktree_removed: false,
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,
@@ -1539,6 +1555,7 @@ mod tests {
             request: None,
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
+            worktree_removed: false,
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,

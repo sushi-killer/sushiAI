@@ -1329,6 +1329,7 @@ mod tests {
             request: None,
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
+            worktree_removed: false,
             branch: "task/add-a-button".into(),
             base_sha: "abc123".into(),
             base_ref: None,

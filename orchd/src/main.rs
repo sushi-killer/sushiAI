@@ -2,6 +2,7 @@
 //! subcommand), `orchd hook stop --socket <path> --token <t>`,
 //! `orchd hook rtk` (no socket or token -- it never contacts the daemon),
 //! `orchd mcp --data <dir> [--socket <path>]`, `orchd ab --data <dir> [--eval <set>]`, `orchd failures --data <dir>`, and
+//! `orchd gc --data <dir> --socket <sock> [--dry-run]`,
 //! `orchd eval run --data <dir> --socket <sock> ...` (see `eval.rs`), and
 //! `orchd evolve --data <dir> [--socket <sock>] [--adopt <id>]` (see `evolve.rs`).
 
@@ -46,6 +47,9 @@ async fn run(args: Vec<String>) -> i32 {
     if args.len() >= 2 && args[1] == "evolve" {
         return evolve::run(&args[2..]);
     }
+    if args.len() >= 2 && args[1] == "gc" {
+        return run_gc(&args[2..]);
+    }
     if args.len() >= 2 && args[1] == "mcp" {
         return mcp::run(&args[2..]);
     }
@@ -55,6 +59,53 @@ async fn run(args: Vec<String>) -> i32 {
         &args[1..]
     };
     run_serve(sub_args).await
+}
+
+/// `orchd gc --data <dir> --socket <sock> [--dry-run]`: asks the running
+/// daemon to remove the worktrees its tasks no longer need and prints what
+/// it did (`worktrees.gc`).
+fn run_gc(args: &[String]) -> i32 {
+    let (mut data, mut socket, mut dry_run) = (None, None, false);
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--data" if i + 1 < args.len() => {
+                data = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--socket" if i + 1 < args.len() => {
+                socket = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--dry-run" => {
+                dry_run = true;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    let (Some(data), Some(socket)) = (data, socket) else {
+        eprintln!("orchd gc: usage: orchd gc --data <dir> --socket <sock> [--dry-run]");
+        return 2;
+    };
+    let result = mcp::read_control_token(&data).and_then(|token| {
+        mcp::call_orchd(
+            &socket,
+            &token,
+            "worktrees.gc",
+            serde_json::json!({"dryRun": dry_run}),
+        )
+    });
+    match result {
+        Ok(v) => {
+            println!("{v}");
+            0
+        }
+        Err(e) => {
+            eprintln!("orchd gc: {e}");
+            1
+        }
+    }
 }
 
 async fn run_hook(args: &[String]) -> i32 {

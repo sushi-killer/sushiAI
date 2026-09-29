@@ -422,7 +422,7 @@ fn a_done_eval_task_counts_as_a_success_only_when_its_check_passes() {
         }
         worktrees.push(settled["worktree"].as_str().unwrap().to_string());
         let leftover = Path::new(&settled["worktree"].as_str().unwrap()).exists();
-        assert!(leftover, "the task's own worktree is left alone");
+        assert!(!leftover, "a done task's worktree is removed");
     }
 
     // The daemon's data dir feeds the report exactly as `orchd ab` reads it.

@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 fn review_off(daemon: &Daemon) {
@@ -151,8 +151,13 @@ fn a_plan_with_two_dependent_subtasks_lands_both_on_the_parent_in_order() {
     let branch = parent["branch"].as_str().unwrap();
     let subjects = git_out(repo.path(), &["log", "--format=%s", "-3", branch]);
     assert_eq!(subjects, "Part B\nPart A\ninit", "log of {branch}");
-    let parent_wt = PathBuf::from(parent["worktree"].as_str().unwrap());
-    assert!(parent_wt.join("a.txt").is_file() && parent_wt.join("b.txt").is_file());
+    assert!(!Path::new(parent["worktree"].as_str().unwrap()).exists());
+    for file in ["a.txt", "b.txt"] {
+        git_out(
+            repo.path(),
+            &["cat-file", "-e", &format!("{branch}:{file}")],
+        );
+    }
     assert!(b["decisions"].to_string().contains("started from"), "{b}");
     let total = a["costUsd"].as_f64().unwrap() + b["costUsd"].as_f64().unwrap();
     assert!(
@@ -223,12 +228,11 @@ fn a_split_that_cannot_create_every_part_creates_none_and_runs_as_one_task() {
     let repo = init_git_repo();
     // Part B's worktree path is already taken, so creating Part B fails
     // after Part A was created.
-    let basename = repo.path().file_name().unwrap().to_str().unwrap();
-    let parent_dir = repo.path().parent().unwrap();
-    let blocked = parent_dir.join(format!("{basename}-task-part-b"));
+    let parent_dir = repo.path().join(".sushiai/worktrees");
+    let blocked = parent_dir.join("task-part-b");
     std::fs::create_dir_all(&blocked).unwrap();
     std::fs::write(blocked.join("occupied.txt"), "x\n").unwrap();
-    let part_a_wt = parent_dir.join(format!("{basename}-task-part-a"));
+    let part_a_wt = parent_dir.join("task-part-a");
 
     let parent = daemon.request(
         "task.create",
@@ -420,10 +424,10 @@ fn a_child_whose_rebase_conflicts_is_retried_by_the_agent_not_dropped() {
             .contains("These files conflict: shared.txt"),
         "{first}"
     );
-    let parent_wt = PathBuf::from(parent["worktree"].as_str().unwrap());
+    let branch = parent["branch"].as_str().unwrap();
     assert_eq!(
-        std::fs::read_to_string(parent_wt.join("shared.txt")).unwrap(),
-        "one\ntwo\n"
+        git_out(repo.path(), &["show", &format!("{branch}:shared.txt")]),
+        "one\ntwo"
     );
 
     daemon.shutdown_and_wait();

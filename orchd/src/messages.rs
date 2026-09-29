@@ -339,6 +339,7 @@ mod tests {
             request: None,
             repo: repo.into(),
             worktree: "/wt".into(),
+            worktree_removed: false,
             branch: "b".into(),
             base_sha: "s".into(),
             base_ref: None,

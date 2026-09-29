@@ -35,6 +35,26 @@ pub(super) async fn run_task_loop(
             }
         };
 
+        // A worktree removed while the task was archived comes back before
+        // anything touches it.
+        match app.ensure_worktree(&mut task).await {
+            Ok(true) => {
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                task.decisions.push(format!("Worktree: {e}"));
+                task.status = TaskStatus::Failed;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+                app.finish_task_loop(&task_id);
+                return;
+            }
+        }
+
         // The task graph: a parent never implements, and a task whose
         // dependencies are not all done waits `queued` with no loop until
         // `advance_graph` starts it again. Drafting runs meanwhile.
@@ -936,6 +956,7 @@ pub(super) async fn run_task_loop(
                         task.attempts[idx].status = AttemptStatus::Passed;
                         task.attempts[idx].ended_at = Some(now_ms());
                         task.status = TaskStatus::Done;
+                        app.release_worktree(&mut task, "task done").await;
                         task.updated_at = now_ms();
                         let _ = app.store.save_task(&task);
                         app.broadcast_task(&task);
@@ -1513,6 +1534,8 @@ pub(super) async fn run_task_loop(
                     task.attempts[idx].status = AttemptStatus::Passed;
                     task.attempts[idx].ended_at = Some(now_ms());
                     task.status = TaskStatus::Done;
+                    app.release_worktree(&mut task, "landed on its parent")
+                        .await;
                     task.updated_at = now_ms();
                     let _ = app.store.save_task(&task);
                     app.broadcast_task(&task);
@@ -1601,6 +1624,10 @@ pub(super) async fn run_task_loop(
                 );
                 task.status = TaskStatus::Failed;
             }
+        }
+        if task.status == TaskStatus::Done {
+            app.release_worktree(&mut task, "committed on its branch")
+                .await;
         }
         task.updated_at = now_ms();
         let _ = app.store.save_task(&task);

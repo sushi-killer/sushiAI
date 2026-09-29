@@ -380,6 +380,7 @@ mod tests {
             request: None,
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
+            worktree_removed: false,
             branch: "task/do-thing".into(),
             base_sha: "deadbeef".into(),
             base_ref: None,

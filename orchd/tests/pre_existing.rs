@@ -148,15 +148,13 @@ fn drop_this_check_removes_it_and_the_same_attempt_lands() {
         ),
         "{decisions:?}"
     );
-    let worktree = done["worktree"].as_str().unwrap();
-    let subject = git_out(Path::new(worktree), &["log", "-1", "--format=%s"]);
+    let branch = done["branch"].as_str().unwrap();
+    let subject = git_out(repo.path(), &["log", "-1", "--format=%s", branch]);
     assert!(subject.contains("Pre-existing"), "{subject}");
     let listed = git_out(repo.path(), &["worktree", "list"]);
-    assert_eq!(listed.lines().count(), 2, "{listed}");
+    assert_eq!(listed.lines().count(), 1, "{listed}");
 
-    let worktree = worktree.to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
 }
 
 #[test]

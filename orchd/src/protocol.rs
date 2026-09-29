@@ -265,6 +265,7 @@ mod tests {
             request: None,
             repo: "/r".into(),
             worktree: "/r-t".into(),
+            worktree_removed: false,
             branch: "task/t".into(),
             base_sha: "abc".into(),
             base_ref: None,

@@ -96,15 +96,49 @@ pub fn unique_branch_name(repo_root: &Path, title: &str) -> String {
     }
 }
 
-/// Sibling worktree path: `<parent>/<root-basename>-<branch with / -> ->`.
-pub fn worktree_path(repo_root: &Path, branch: &str) -> PathBuf {
-    let parent = repo_root.parent().unwrap_or_else(|| Path::new("."));
-    let root_basename = repo_root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("repo");
-    let branch_part = branch.replace('/', "-");
-    parent.join(format!("{root_basename}-{branch_part}"))
+/// Where a task's worktree goes: `<root>/<branch with / -> ->`, with `root`
+/// (the `worktreeRoot` setting) resolved against the repo root when relative.
+pub fn worktree_path(repo_root: &Path, root: &str, branch: &str) -> PathBuf {
+    let root = if root.trim().is_empty() {
+        ".sushiai/worktrees"
+    } else {
+        root.trim()
+    };
+    repo_root.join(root).join(branch.replace('/', "-"))
+}
+
+/// Makes the repo ignore the top-level directory holding `worktree_root`
+/// (`/.sushiai/` by default) through `.git/info/exclude`, never a tracked
+/// file. A root outside the repo needs nothing.
+pub fn exclude_worktree_root(repo_root: &Path, worktree_root: &Path) -> std::io::Result<()> {
+    let Ok(rel) = worktree_root.strip_prefix(repo_root) else {
+        return Ok(());
+    };
+    let Some(first) = rel.components().next() else {
+        return Ok(());
+    };
+    let entry = format!("/{}/", first.as_os_str().to_string_lossy());
+    let out = match run(repo_root, &["rev-parse", "--git-path", "info/exclude"]) {
+        Ok(out) => out,
+        Err(_) => return Ok(()),
+    };
+    let exclude_path = repo_root.join(out.trim());
+    let existing = std::fs::read_to_string(&exclude_path).unwrap_or_default();
+    if existing.lines().any(|l| l.trim() == entry) {
+        return Ok(());
+    }
+    if let Some(parent) = exclude_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&exclude_path)?;
+    use std::io::Write;
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        writeln!(f)?;
+    }
+    writeln!(f, "{entry}")
 }
 
 /// `git rev-parse --show-toplevel` -- `task.create`'s `repo` param can be
@@ -663,6 +697,151 @@ pub fn commit(cwd: &Path, title: &str, task_id: &str, attempt_n: u32) -> Result<
     Ok(())
 }
 
+// -- worktree cleanup and restore ------------------------------------------
+
+/// Bytes under `path`, counting symlinks as themselves (never followed).
+pub fn dir_size(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if !meta.is_dir() {
+        return meta.len();
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries.flatten().map(|e| dir_size(&e.path())).sum()
+}
+
+fn quiet_git() -> [&'static str; 8] {
+    [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "user.name=orchd",
+        "-c",
+        "user.email=orchd@localhost",
+        "-c",
+        "commit.gpgsign=false",
+    ]
+}
+
+/// Saves the worktree's uncommitted work (tracked and untracked, not
+/// ignored) as a commit at [`wip_ref`] without moving the branch. `true`
+/// when there was anything to save.
+pub fn save_wip(worktree: &Path, task_id: &str) -> Result<bool, GitError> {
+    if run(worktree, &["status", "--porcelain"])?.trim().is_empty() {
+        return Ok(false);
+    }
+    let head = run(worktree, &["rev-parse", "HEAD"])?.trim().to_string();
+    let quiet = quiet_git();
+    run(worktree, &[&quiet[..], &["add", "-A"]].concat())?;
+    let saved = (|| {
+        run(
+            worktree,
+            &[
+                &quiet[..],
+                &["commit", "-q", "--no-verify", "-m", "orchd wip"],
+            ]
+            .concat(),
+        )?;
+        let wip = run(worktree, &["rev-parse", "HEAD"])?.trim().to_string();
+        run(worktree, &["update-ref", &wip_ref(task_id), &wip])
+    })();
+    let _ = run(worktree, &["reset", "-q", "--soft", &head]);
+    saved.map(|_| true)
+}
+
+/// Removes a task's worktree directory (its branch stays) and prunes the
+/// repo's worktree list.
+pub fn remove_task_worktree(repo_root: &Path, path: &Path) {
+    if let Some(p) = path.to_str() {
+        let _ = run(repo_root, &["worktree", "remove", "--force", p]);
+    }
+    if path.exists() {
+        let _ = std::fs::remove_dir_all(path);
+    }
+    let _ = run(repo_root, &["worktree", "prune"]);
+}
+
+pub fn prune_worktrees(repo_root: &Path) {
+    let _ = run(repo_root, &["worktree", "prune"]);
+}
+
+/// Recreates a removed worktree at `path` from `branch`, bootstraps it, and
+/// puts back the work kept at [`wip_ref`] when that was saved on top of the
+/// branch's current head. `true` when saved work was restored.
+pub fn restore_worktree(
+    repo_root: &Path,
+    path: &Path,
+    branch: &str,
+    task_id: &str,
+) -> Result<bool, GitError> {
+    let _ = run(repo_root, &["worktree", "prune"]);
+    if path.join(".git").exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| GitError(e.to_string()))?;
+        let _ = exclude_worktree_root(repo_root, parent);
+    }
+    let p = path
+        .to_str()
+        .ok_or_else(|| GitError("non-utf8 path".into()))?;
+    run(repo_root, &["worktree", "add", p, branch])?;
+    let _ = bootstrap_worktree(repo_root, path);
+    let wip_name = wip_ref(task_id);
+    let Ok(wip) = run(
+        path,
+        &[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("{wip_name}^{{commit}}"),
+        ],
+    ) else {
+        return Ok(false);
+    };
+    let wip = wip.trim().to_string();
+    let parent = run(path, &["rev-parse", &format!("{wip}^")]).map(|s| s.trim().to_string());
+    let head = run(path, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
+    if parent.is_err() || parent.ok() != head.ok() {
+        return Ok(false);
+    }
+    let quiet = quiet_git();
+    if run(
+        path,
+        &[&quiet[..], &["cherry-pick", "--no-commit", &wip]].concat(),
+    )
+    .is_err()
+    {
+        let _ = run(path, &["cherry-pick", "--quit"]);
+        let _ = run(path, &["reset", "-q", "--hard"]);
+        return Ok(false);
+    }
+    let _ = run(path, &["cherry-pick", "--quit"]);
+    run(path, &["reset", "-q"])?;
+    let _ = run(path, &["update-ref", "-d", &wip_name]);
+    Ok(true)
+}
+
+/// Every linked worktree of the repo (not the main checkout), from
+/// `git worktree list --porcelain`.
+pub fn linked_worktrees(repo_root: &Path) -> Vec<PathBuf> {
+    let out = run(repo_root, &["worktree", "list", "--porcelain"]).unwrap_or_default();
+    out.lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .skip(1)
+        .collect()
+}
+
+/// Removes a task's branch and saved work (best effort).
+pub fn delete_branch(repo_root: &Path, branch: &str, task_id: &str) {
+    let _ = run(repo_root, &["update-ref", "-d", &wip_ref(task_id)]);
+    let _ = run(repo_root, &["branch", "-D", branch]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,10 +874,16 @@ mod tests {
     }
 
     #[test]
-    fn worktree_path_is_sibling_with_dashed_branch() {
+    fn worktree_path_lives_under_the_root_setting_with_dashed_branch() {
         let repo = Path::new("/Users/me/Desktop/Test");
-        let path = worktree_path(repo, "task/add-a-button");
-        assert_eq!(path, Path::new("/Users/me/Desktop/Test-task-add-a-button"));
+        assert_eq!(
+            worktree_path(repo, ".sushiai/worktrees", "task/add-a-button"),
+            Path::new("/Users/me/Desktop/Test/.sushiai/worktrees/task-add-a-button")
+        );
+        assert_eq!(
+            worktree_path(repo, "/tmp/wt", "task/x"),
+            Path::new("/tmp/wt/task-x")
+        );
     }
 
     #[test]
@@ -722,7 +907,7 @@ mod tests {
         let feature_sha = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-q", "-"]);
 
-        let wt_path = worktree_path(&repo_root, "task/on-feature");
+        let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", "task/on-feature");
         let created = create_worktree(&repo_root, "task/on-feature", &wt_path, "feature").unwrap();
         assert_eq!(created.base_sha, feature_sha);
         assert!(wt_path.join("feature.txt").exists());
@@ -748,7 +933,7 @@ mod tests {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         let base = branch_of(&repo_root, "HEAD").unwrap();
-        let wt = worktree_path(&repo_root, "task/carry");
+        let wt = worktree_path(&repo_root, ".sushiai/worktrees", "task/carry");
         let created = create_worktree(&repo_root, "task/carry", &wt, "HEAD").unwrap();
 
         // The agent edits README and adds a file; meanwhile the base gains
@@ -815,7 +1000,7 @@ mod tests {
         };
         let base = branch_of(&repo_root, "HEAD").unwrap();
         let first = git(&repo_root, &["rev-parse", "HEAD"]);
-        let wt = worktree_path(&repo_root, "task/skip");
+        let wt = worktree_path(&repo_root, ".sushiai/worktrees", "task/skip");
         let created = create_worktree(&repo_root, "task/skip", &wt, "HEAD").unwrap();
         std::fs::write(repo_root.join("b.txt"), "b\n").unwrap();
         git(&repo_root, &["add", "."]);
@@ -882,7 +1067,7 @@ mod tests {
 
         let branch = unique_branch_name(&repo_root, "Add a button");
         assert_eq!(branch, "task/add-a-button");
-        let wt_path = worktree_path(&repo_root, &branch);
+        let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", &branch);
         let created = create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
         assert!(created.path.exists());
         assert!(!created.base_sha.is_empty());
@@ -912,7 +1097,7 @@ mod tests {
         init_repo(&repo_root);
 
         let branch = unique_branch_name(&repo_root, "Hook test");
-        let wt_path = worktree_path(&repo_root, &branch);
+        let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", &branch);
         let created = create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
 
         // An agent-writable pre-commit hook that would prove it ran by
@@ -968,7 +1153,7 @@ mod tests {
         std::fs::write(repo_root.join("node_modules/pkg/index.js"), "").unwrap();
 
         let branch = unique_branch_name(&repo_root, "Bootstrap test");
-        let wt_path = worktree_path(&repo_root, &branch);
+        let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", &branch);
         let created = create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
 
         bootstrap_worktree(&repo_root, &wt_path).unwrap();
@@ -997,7 +1182,7 @@ mod tests {
         std::fs::write(repo_root.join(".env"), "SECRET=1\n").unwrap();
 
         let branch = unique_branch_name(&repo_root, "No bootstrap test");
-        let wt_path = worktree_path(&repo_root, &branch);
+        let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", &branch);
         create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
 
         bootstrap_worktree(&repo_root, &wt_path).unwrap();

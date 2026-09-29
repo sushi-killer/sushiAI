@@ -464,6 +464,7 @@ impl App {
             attempts: vec![],
             cost_usd: 0.0,
             budget_raises: 0,
+            daily_budget_ok_day: None,
             assumptions: vec![],
             judged_findings: vec![],
             archived: false,
@@ -830,6 +831,13 @@ impl App {
                 .is_some_and(|q| is_budget_raise(q, &p.answer))
             {
                 task.budget_raises += 1;
+            }
+            if task
+                .question
+                .as_ref()
+                .is_some_and(|q| is_daily_budget_run_anyway(q, &p.answer))
+            {
+                task.daily_budget_ok_day = Some(crate::costs::today(now_ms()));
             }
             task.question = None;
             task.status = TaskStatus::Queued;

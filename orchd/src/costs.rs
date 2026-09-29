@@ -99,7 +99,69 @@ pub struct Query {
     pub repo: Option<String>,
     pub task_id: Option<String>,
     pub since_days: Option<u32>,
+    /// Inclusive UTC day numbers (days since the epoch, see [`parse_day`]);
+    /// either end open. Never combined with `since_days`.
+    pub from_day: Option<i64>,
+    pub to_day: Option<i64>,
     pub group_by: Vec<String>,
+}
+
+impl Query {
+    /// Whether a record, task or run stamped `ts` falls in the query's
+    /// window: `since_days` back from `now`, or the `from_day..=to_day`
+    /// range by the same UTC day boundary as [`day_of`].
+    fn in_window(&self, ts: i64, now: i64) -> bool {
+        let day = ts.div_euclid(DAY_MS);
+        self.since_days
+            .is_none_or(|d| ts >= now - i64::from(d) * DAY_MS)
+            && self.from_day.is_none_or(|f| day >= f)
+            && self.to_day.is_none_or(|t| day <= t)
+    }
+}
+
+/// The `from`/`to` params of `costs.summary` as day numbers, refusing a
+/// window that mixes `sinceDays` with a range, a malformed date, or a range
+/// that ends before it starts.
+pub fn check_window(
+    since_days: Option<u32>,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> Result<(Option<i64>, Option<i64>), String> {
+    if since_days.is_some() && (from.is_some() || to.is_some()) {
+        return Err("sinceDays cannot be combined with from/to".into());
+    }
+    let parse = |name: &str, v: Option<&str>| {
+        v.map(|v| parse_day(v).map_err(|e| format!("{name}: {e}")))
+            .transpose()
+    };
+    let (from_day, to_day) = (parse("from", from)?, parse("to", to)?);
+    if let (Some(f), Some(t)) = (from_day, to_day) {
+        if f > t {
+            return Err(format!(
+                "from {} is later than to {}",
+                from.unwrap_or_default(),
+                to.unwrap_or_default()
+            ));
+        }
+    }
+    Ok((from_day, to_day))
+}
+
+/// Total spend of the records whose UTC day is the one `now` falls in, and
+/// that day as `YYYY-MM-DD`.
+pub fn spend_today(records: &[CostRecord], now: i64) -> (String, f64) {
+    let today = now.div_euclid(DAY_MS);
+    let spent = records
+        .iter()
+        .filter(|r| r.ts.div_euclid(DAY_MS) == today)
+        .map(|r| r.cost_usd)
+        .sum();
+    (day_of(now), spent)
+}
+
+/// The UTC date `now` falls in, as `YYYY-MM-DD`.
+pub fn today(now: i64) -> String {
+    day_of(now)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -154,6 +216,40 @@ fn day_of(ts: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// Days since the epoch of a `YYYY-MM-DD` calendar date (the inverse of
+/// [`day_of`]); an impossible date such as 2026-02-30 is an error.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = y - i64::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn parse_day(text: &str) -> Result<i64, String> {
+    let bad = || format!("{text:?} is not a UTC date YYYY-MM-DD");
+    let b = text.as_bytes();
+    if b.len() != 10
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || !b
+            .iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+    {
+        return Err(bad());
+    }
+    let num = |r: std::ops::Range<usize>| text[r].parse::<i64>().map_err(|_| bad());
+    let days = days_from_civil(num(0..4)?, num(5..7)?, num(8..10)?);
+    // Out-of-range months and days do not survive the round trip.
+    if day_of(days * DAY_MS) != text {
+        return Err(bad());
+    }
+    Ok(days)
+}
+
 fn key_part(r: &CostRecord, by: &str) -> String {
     match by {
         "stage" => r.stage.clone(),
@@ -180,13 +276,12 @@ pub fn check_group_by(group_by: &[String]) -> Result<(), String> {
 /// `{rows: [{key, keys, costUsd, runs, tokens, cacheHitRate}], totals}`,
 /// rows by cost, highest first (by key for `day`, oldest first).
 pub fn summarize(records: &[CostRecord], q: &Query, now: i64) -> Value {
-    let since = q.since_days.map(|d| now - i64::from(d) * DAY_MS);
     let mut total = Acc::default();
     let mut groups: BTreeMap<Vec<String>, Acc> = BTreeMap::new();
     for r in records {
         if q.repo.as_ref().is_some_and(|repo| *repo != r.repo)
             || q.task_id.is_some() && q.task_id != r.task_id
-            || since.is_some_and(|s| r.ts < s)
+            || !q.in_window(r.ts, now)
         {
             continue;
         }
@@ -238,7 +333,6 @@ impl Touch {
 /// done, over done tasks carrying a mark, overall, per repo and per week
 /// (the week the task finished). Honors the query's repo, task and window.
 pub fn lead_touch_summary(tasks: &[Task], q: &Query, now: i64) -> Value {
-    let since = q.since_days.map(|d| now - i64::from(d) * DAY_MS);
     let mut total = Touch::default();
     let mut repos: BTreeMap<&str, Touch> = BTreeMap::new();
     let mut weeks: BTreeMap<String, Touch> = BTreeMap::new();
@@ -252,7 +346,7 @@ pub fn lead_touch_summary(tasks: &[Task], q: &Query, now: i64) -> Value {
         };
         if q.repo.as_ref().is_some_and(|r| *r != t.repo)
             || q.task_id.as_ref().is_some_and(|id| *id != t.id)
-            || since.is_some_and(|s| t.updated_at < s)
+            || !q.in_window(t.updated_at, now)
         {
             continue;
         }
@@ -282,12 +376,11 @@ pub fn lead_touch_summary(tasks: &[Task], q: &Query, now: i64) -> Value {
 /// source was recorded count as `unknown`. Honors the query's repo, task and
 /// window (by creation time).
 pub fn source_summary(tasks: &[Task], q: &Query, now: i64) -> Value {
-    let since = q.since_days.map(|d| now - i64::from(d) * DAY_MS);
     let mut by: BTreeMap<&str, (u64, f64)> = BTreeMap::new();
     for t in tasks {
         if q.repo.as_ref().is_some_and(|r| *r != t.repo)
             || q.task_id.as_ref().is_some_and(|id| *id != t.id)
-            || since.is_some_and(|s| t.created_at < s)
+            || !q.in_window(t.created_at, now)
         {
             continue;
         }
@@ -576,6 +669,7 @@ pub fn run(args: &[String]) -> i32 {
         task_id: None,
         since_days: since,
         group_by: by,
+        ..Default::default()
     };
     let mut summary = summarize(&read_all(&data), &q, now_ms());
     summary["leadTouch"] = lead_touch_summary(&read_tasks(&data), &q, now_ms());
@@ -632,6 +726,7 @@ mod tests {
             task_id: None,
             since_days: since,
             group_by: g.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
         };
         let s = summarize(&records, &by(&["stage"], Some(7)), now);
         assert_eq!(s["rows"][0]["key"], "review");
@@ -734,5 +829,78 @@ mod tests {
         // 2023-11-14 was a Tuesday.
         assert_eq!(week_of(1_700_000_000_000), "2023-11-13");
         assert_eq!(week_of(0), "1969-12-29");
+    }
+
+    #[test]
+    fn parse_day_inverts_day_of_and_rejects_bad_dates() {
+        for ts in [0, DAY_MS * 365 + 5, 1_790_000_000_000, -DAY_MS * 800] {
+            assert_eq!(day_of(parse_day(&day_of(ts)).unwrap() * DAY_MS), day_of(ts));
+        }
+        assert_eq!(parse_day("1970-01-02"), Ok(1));
+        for bad in [
+            "2026-02-30",
+            "2026-13-01",
+            "2026-1-01",
+            "20260101",
+            "",
+            "2026-01-0x",
+        ] {
+            assert!(parse_day(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn check_window_refuses_mixed_malformed_and_reversed() {
+        assert!(check_window(Some(7), Some("2026-01-01"), None).is_err());
+        assert!(check_window(None, Some("nope"), None).is_err());
+        assert!(check_window(None, Some("2026-01-02"), Some("2026-01-01")).is_err());
+        assert_eq!(check_window(Some(7), None, None), Ok((None, None)));
+        assert_eq!(
+            check_window(None, Some("1970-01-02"), Some("1970-01-02")),
+            Ok((Some(1), Some(1)))
+        );
+    }
+
+    #[test]
+    fn range_windows_leads_touch_and_sources_by_their_own_timestamps() {
+        let q = Query {
+            from_day: Some(2),
+            to_day: Some(2),
+            ..Default::default()
+        };
+        let now = 10 * DAY_MS;
+        let day = |n: i64| n * DAY_MS + 5;
+        let tasks = vec![
+            done_task("a", "/r", day(1), Some(true)),
+            done_task("b", "/r", day(2), Some(true)),
+            done_task("c", "/r", day(2) + DAY_MS - 10, Some(false)),
+            done_task("d", "/r", day(3), Some(true)),
+        ];
+        let touch = lead_touch_summary(&tasks, &q, now);
+        assert_eq!(touch["marked"], 2);
+        assert_eq!(touch["touched"], 1);
+        let mut created = tasks.clone();
+        for (t, at) in created.iter_mut().zip([1, 2, 3, 2]) {
+            t.created_at = day(at);
+        }
+        let sources = source_summary(&created, &q, now);
+        assert_eq!(sources["unknown"]["tasks"], 2);
+        let open = Query {
+            from_day: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(lead_touch_summary(&tasks, &open, now)["marked"], 1);
+    }
+
+    #[test]
+    fn spend_today_sums_the_utc_day_only() {
+        let now = 5 * DAY_MS + 100;
+        let records = [
+            rec("plan", "m", 1.0, 5 * DAY_MS),
+            rec("implement", "m", 2.0, now),
+            rec("implement", "m", 4.0, 5 * DAY_MS - 1),
+            rec("implement", "m", 8.0, 6 * DAY_MS),
+        ];
+        assert_eq!(spend_today(&records, now), ("1970-01-06".into(), 3.0));
     }
 }

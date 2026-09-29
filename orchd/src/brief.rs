@@ -1876,6 +1876,7 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             budget_raises: 0,
+            daily_budget_ok_day: None,
             assumptions: vec![],
             judged_findings: vec![],
             archived: false,

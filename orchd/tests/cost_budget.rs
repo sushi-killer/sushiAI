@@ -608,3 +608,169 @@ fn an_attempt_streaming_past_its_cap_is_stopped_as_budget_and_retried() {
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
 }
+
+/// A fake harness that costs $0.01 per run. The first review FAILs (so a
+/// second implement attempt follows) and every later one PASSes; each run
+/// appends its kind to `$LOG_DIR/runs.log`.
+const DAILY_FAKE: &str = r###"#!/bin/sh
+brief=$(cat)
+case "$brief" in
+"## Review"*)
+  echo review >> "$LOG_DIR/runs.log"
+  if [ -f "$LOG_DIR/reviewed" ]; then
+    printf '%s\n' '{"type":"result","total_cost_usd":0.01,"result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}'
+  else
+    touch "$LOG_DIR/reviewed"
+    printf '%s\n' '{"type":"result","total_cost_usd":0.01,"result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: a.rs:1 - wrong\"]}\n```"}'
+  fi ;;
+*)
+  echo implement >> "$LOG_DIR/runs.log"
+  echo x > PASS.txt
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}' ;;
+esac
+"###;
+
+fn daily_daemon(budget: f64, review: &str) -> (Daemon, tempfile::TempDir, std::path::PathBuf) {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-daily.sh", DAILY_FAKE);
+    let log_dir = scripts_dir.path().to_str().unwrap().to_string();
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("LOG_DIR", &log_dir),
+    ]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!(review);
+    settings["answerPolicy"] = serde_json::json!(false);
+    settings["dailyBudgetUsd"] = serde_json::json!(budget);
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    let log = scripts_dir.path().join("runs.log");
+    (daemon, scripts_dir, log)
+}
+
+fn daily_task(daemon: &Daemon, repo: &std::path::Path) -> serde_json::Value {
+    daemon.request(
+        "task.create",
+        serde_json::json!({"repo": repo.to_str().unwrap(), "title": "Daily", "goal": "g",
+            "criteria": [], "verify": ["test -f PASS.txt"], "start": true}),
+    )
+}
+
+fn seed_today_spend(data: &std::path::Path, cost: f64) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let line = serde_json::json!({"ts": ts, "repo": "/elsewhere", "stage": "implement",
+        "routeId": "r", "harness": "claude", "model": "m", "costUsd": cost});
+    std::fs::write(data.join("costs.jsonl"), format!("{line}\n")).unwrap();
+}
+
+#[test]
+fn daily_budget_defaults_to_off_and_a_negative_value_is_rejected() {
+    let daemon = Daemon::spawn(&[]);
+    assert_eq!(
+        daemon.request("settings.get", serde_json::json!({}))["dailyBudgetUsd"],
+        0.0
+    );
+    assert_eq!(
+        daemon.request("settings.defaults", serde_json::json!({}))["dailyBudgetUsd"],
+        0.0
+    );
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["dailyBudgetUsd"] = serde_json::json!(-1);
+    let err = daemon.request_error("settings.set", serde_json::json!({"settings": settings}));
+    assert!(err.contains("dailyBudgetUsd"), "{err}");
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_task_started_over_the_daily_budget_waits_and_run_anyway_or_stop_settle_it() {
+    let (daemon, _scripts, log) = daily_daemon(0.5, "");
+    seed_today_spend(daemon.data_dir(), 1.0);
+    let repo = init_git_repo();
+    let task = daily_task(&daemon, repo.path());
+    let id = task["id"].as_str().unwrap().to_string();
+    let waiting = poll_until(&daemon, &id, Duration::from_secs(15), |s| {
+        s == "waiting" || s == "done" || s == "failed" || s == "stopped"
+    });
+    assert_eq!(waiting["status"], "waiting", "{waiting}");
+    assert!(
+        waiting["attempts"].as_array().unwrap().is_empty(),
+        "{waiting}"
+    );
+    assert!(!log.exists(), "a run started");
+    let q = &waiting["question"];
+    assert_eq!(q["kind"], "daily_budget");
+    assert_eq!(q["options"], serde_json::json!(["run anyway", "stop"]));
+    let text = q["text"].as_str().unwrap();
+    assert!(text.contains("$1.00") && text.contains("$0.50"), "{text}");
+    assert!(
+        waiting["decisions"]
+            .to_string()
+            .contains("Orchestrator: daily budget"),
+        "{waiting}"
+    );
+
+    daemon.request(
+        "task.answer",
+        serde_json::json!({"id": id, "answer": "run anyway"}),
+    );
+    let done = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
+        s == "done" || s == "failed" || s == "stopped"
+    });
+    assert_eq!(done["status"], "done", "{done}");
+    let asked = done["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| {
+            d.as_str()
+                .unwrap()
+                .starts_with("Orchestrator: daily budget")
+        })
+        .count();
+    assert_eq!(asked, 1, "{done}");
+
+    let second = daily_task(&daemon, repo.path());
+    let id2 = second["id"].as_str().unwrap().to_string();
+    poll_until(&daemon, &id2, Duration::from_secs(15), |s| s == "waiting");
+    daemon.request(
+        "task.answer",
+        serde_json::json!({"id": id2, "answer": "stop"}),
+    );
+    let stopped = poll_until(&daemon, &id2, Duration::from_secs(10), |s| s == "stopped");
+    assert!(stopped["attempts"].as_array().unwrap().is_empty());
+
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn an_attempt_that_crosses_the_daily_budget_finishes_with_its_review_then_waits() {
+    // $0.01 implement + $0.01 failing review = $0.02 >= $0.015.
+    let (daemon, _scripts, log) = daily_daemon(0.015, "claude-opus");
+    let repo = init_git_repo();
+    let task = daily_task(&daemon, repo.path());
+    let id = task["id"].as_str().unwrap().to_string();
+    let waiting = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
+        s == "waiting" || s == "done" || s == "failed" || s == "stopped"
+    });
+    assert_eq!(waiting["status"], "waiting", "{waiting}");
+    assert_eq!(waiting["question"]["kind"], "daily_budget");
+    let attempts = waiting["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1, "{waiting}");
+    assert_eq!(attempts[0]["review"]["verdict"], "FAIL", "{waiting}");
+    let runs = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(runs.lines().collect::<Vec<_>>(), ["implement", "review"]);
+
+    daemon.request(
+        "task.answer",
+        serde_json::json!({"id": id, "answer": "run anyway"}),
+    );
+    let done = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
+        s == "done" || s == "failed" || s == "stopped"
+    });
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(done["attempts"].as_array().unwrap().len(), 2);
+    daemon.shutdown_and_wait();
+}

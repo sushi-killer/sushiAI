@@ -127,6 +127,46 @@ pub(super) fn is_budget_raise(question: &Question, answer: &str) -> bool {
     question.text.starts_with(BUDGET_QUESTION_PREFIX) && answer.trim().eq_ignore_ascii_case("raise")
 }
 
+/// The option of the daily budget question that lets the task go on.
+const DAILY_RUN_ANYWAY: &str = "run anyway";
+
+pub(super) fn is_daily_budget_run_anyway(question: &Question, answer: &str) -> bool {
+    question.kind == QuestionKind::DailyBudget
+        && answer.trim().eq_ignore_ascii_case(DAILY_RUN_ANYWAY)
+}
+
+/// The daily budget question to ask before `run`, when `dailyBudgetUsd` is
+/// on, today's spend (every record of the UTC day) has reached it and the
+/// owner has not already said "run anyway" today. Plan and implement runs
+/// only: an attempt's review and advisor are never held.
+async fn daily_budget_question(app: &Arc<App>, task: &mut Task, run: &str) -> Option<Question> {
+    let budget = app.settings.read().unwrap().daily_budget_usd;
+    if !matches!(run, "plan" | "implement")
+        || budget.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+    {
+        return None;
+    }
+    let data = app.data_dir.clone();
+    let now = now_ms();
+    let records = tokio::task::spawn_blocking(move || crate::costs::read_all(&data))
+        .await
+        .ok()?;
+    let (day, spent) = crate::costs::spend_today(&records, now);
+    if spent < budget || task.daily_budget_ok_day.as_deref() == Some(day.as_str()) {
+        return None;
+    }
+    task.decisions.push(format!(
+        "Orchestrator: daily budget ${budget:.2} reached (${spent:.2} spent on {day} UTC); the {run} run waits for the owner"
+    ));
+    Some(Question {
+        text: format!(
+            "Today's spend is ${spent:.2}, reaching the ${budget:.2} daily budget (UTC {day}); the {run} run was not started. Run anyway for the rest of {day}, or stop?"
+        ),
+        options: vec![DAILY_RUN_ANYWAY.into(), "stop".into()],
+        kind: QuestionKind::DailyBudget,
+    })
+}
+
 /// The gate before every stage run (plan, advisor, implement attempt,
 /// review): while the task's spend meets its `variant.max_cost_usd` budget,
 /// it waits for the owner -- "raise" adds the budget once more, "stop"
@@ -145,19 +185,25 @@ pub(super) async fn wait_while_over_budget(
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> bool {
     let mut waited = false;
-    while let Some(budget) = task.cost_budget().filter(|b| task.cost_usd >= *b) {
-        let step = task.variant().max_cost_usd;
-        task.decisions.push(format!(
-            "Orchestrator: budget ${budget:.2} reached (${:.2} spent); the {run} run waits for the owner",
-            task.cost_usd
-        ));
-        let question = Question {
-            text: format!(
-                "{BUDGET_QUESTION_PREFIX} ${:.2}, reaching its ${budget:.2} budget, before the {run} run. Raise the budget by ${step:.2}, or stop?",
+    loop {
+        let question = if let Some(budget) = task.cost_budget().filter(|b| task.cost_usd >= *b) {
+            let step = task.variant().max_cost_usd;
+            task.decisions.push(format!(
+                "Orchestrator: budget ${budget:.2} reached (${:.2} spent); the {run} run waits for the owner",
                 task.cost_usd
-            ),
-            options: vec!["raise".into(), "stop".into()],
-            kind: QuestionKind::Budget,
+            ));
+            Question {
+                text: format!(
+                    "{BUDGET_QUESTION_PREFIX} ${:.2}, reaching its ${budget:.2} budget, before the {run} run. Raise the budget by ${step:.2}, or stop?",
+                    task.cost_usd
+                ),
+                options: vec!["raise".into(), "stop".into()],
+                kind: QuestionKind::Budget,
+            }
+        } else if let Some(q) = daily_budget_question(app, task, run).await {
+            q
+        } else {
+            break;
         };
         task.question = Some(question.clone());
         task.status = TaskStatus::Waiting;
@@ -168,6 +214,9 @@ pub(super) async fn wait_while_over_budget(
             Some(answer) => {
                 if is_budget_raise(&question, &answer) {
                     task.budget_raises += 1;
+                }
+                if is_daily_budget_run_anyway(&question, &answer) {
+                    task.daily_budget_ok_day = Some(crate::costs::today(now_ms()));
                 }
             }
         }

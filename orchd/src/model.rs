@@ -121,6 +121,11 @@ pub struct Settings {
     pub protected_paths: Vec<String>,
     pub max_attempts: u32,
     pub parallel: u32,
+    /// Dollars a UTC day may spend across every repo and stage before orchd
+    /// asks (a `daily_budget` question) instead of starting a plan run or
+    /// implement attempt; 0 = off.
+    #[serde(default)]
+    pub daily_budget_usd: f64,
     /// At most this many subtasks of one parent run at once (`parallel`
     /// stays the global cap).
     #[serde(default = "default_child_parallel")]
@@ -493,6 +498,7 @@ impl Default for Settings {
             protected_paths: vec![],
             max_attempts: 4,
             parallel: 2,
+            daily_budget_usd: 0.0,
             child_parallel: default_child_parallel(),
             planner: default_planner(),
             brief_check_route: default_brief_check_route(),
@@ -889,6 +895,8 @@ pub enum QuestionKind {
     /// A review finding the implementer disputed and a judge dropped.
     ReviewDispute,
     PlanQuestion,
+    /// Today's spend reached `dailyBudgetUsd`; never answered by policy.
+    DailyBudget,
     #[default]
     AgentQuestion,
 }
@@ -1116,6 +1124,10 @@ pub struct Task {
     /// the budget in force is that amount times `1 + budget_raises`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub budget_raises: u32,
+    /// The UTC day (`YYYY-MM-DD`) the owner answered "run anyway" to the
+    /// daily budget question: no more asking that day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_budget_ok_day: Option<String>,
     /// Hides the task from the default `task.list` without deleting it.
     /// `#[serde(default)]` so a `task.json` written before this field
     /// existed still loads, with `archived: false`.
@@ -1739,6 +1751,7 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             budget_raises: 0,
+            daily_budget_ok_day: None,
             assumptions: vec![],
             judged_findings: vec![],
             archived: false,
@@ -1976,6 +1989,7 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             budget_raises: 0,
+            daily_budget_ok_day: None,
             assumptions: vec![],
             judged_findings: vec![],
             archived: false,
@@ -2032,6 +2046,7 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             budget_raises: 0,
+            daily_budget_ok_day: None,
             assumptions: vec![],
             archived: false,
             planned_tier: None,
@@ -2114,6 +2129,7 @@ mod tests {
             attempts: vec![],
             cost_usd: 0.0,
             budget_raises: 0,
+            daily_budget_ok_day: None,
             assumptions: vec![],
             judged_findings: vec![],
             archived: true,

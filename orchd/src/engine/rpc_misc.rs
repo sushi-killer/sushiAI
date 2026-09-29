@@ -18,7 +18,7 @@ impl App {
         }))
     }
 
-    /// `costs.summary {repo?, taskId?, sinceDays?, groupBy: [stage|model|route|repo|task|day]}`
+    /// `costs.summary {repo?, taskId?, sinceDays? | from? / to? (UTC YYYY-MM-DD, inclusive), groupBy: [stage|model|route|repo|task|day]}`
     /// -> `{rows: [{key, keys, costUsd, runs, tokens, cacheHitRate}], totals,
     /// leadTouch: {touched, marked, rate, byRepo, byWeek},
     /// tasksBySource: {source: {tasks, costUsd}}}`.
@@ -36,10 +36,16 @@ impl App {
             #[serde(default)]
             since_days: Option<u32>,
             #[serde(default)]
+            from: Option<String>,
+            #[serde(default)]
+            to: Option<String>,
+            #[serde(default)]
             group_by: Vec<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         crate::costs::check_group_by(&p.group_by)?;
+        let (from_day, to_day) =
+            crate::costs::check_window(p.since_days, p.from.as_deref(), p.to.as_deref())?;
         let data = self.data_dir.clone();
         let (records, tasks) = tokio::task::spawn_blocking(move || {
             (
@@ -53,6 +59,8 @@ impl App {
             repo: p.repo,
             task_id: p.task_id,
             since_days: p.since_days,
+            from_day,
+            to_day,
             group_by: p.group_by,
         };
         let mut summary = crate::costs::summarize(&records, &query, now_ms());
@@ -81,6 +89,9 @@ impl App {
             settings: Settings,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        if !p.settings.daily_budget_usd.is_finite() || p.settings.daily_budget_usd < 0.0 {
+            return Err("dailyBudgetUsd must be a finite number, 0 or more".to_string());
+        }
         p.settings.experiments.check()?;
         p.settings.experiments.check_routes(&p.settings.routes)?;
         self.store

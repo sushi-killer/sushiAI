@@ -30,7 +30,10 @@ fn answered_before(task: &Task, kind: QuestionKind, attempt_n: Option<u32>) -> b
 /// Whether the policy may answer a `kind` question of `task` at all.
 pub(super) fn policy_open(app: &App, task: &Task, kind: QuestionKind) -> bool {
     policy_on(app)
-        && !matches!(kind, QuestionKind::Budget | QuestionKind::ProtectedPath)
+        && !matches!(
+            kind,
+            QuestionKind::Budget | QuestionKind::DailyBudget | QuestionKind::ProtectedPath
+        )
         && policy_answers(task) < MAX_POLICY_ANSWERS
 }
 

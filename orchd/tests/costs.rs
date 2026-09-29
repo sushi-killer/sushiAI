@@ -115,3 +115,81 @@ fn a_full_task_leaves_one_cost_record_per_run_and_summaries_add_up() {
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
 }
+
+fn write_records(data: &std::path::Path, rows: &[(i64, &str, f64)]) {
+    let text: String = rows
+        .iter()
+        .map(|(ts, repo, cost)| {
+            format!(
+                "{}\n",
+                serde_json::json!({"ts": ts, "repo": repo, "stage": "implement",
+                    "routeId": "r", "harness": "claude", "model": "m", "costUsd": cost})
+            )
+        })
+        .collect();
+    std::fs::write(data.join("costs.jsonl"), text).unwrap();
+}
+
+#[test]
+fn from_and_to_window_rows_totals_and_adjacent_ranges_add_up() {
+    let daemon = Daemon::spawn(&[]);
+    // 2026-03-01 .. 2026-03-03 UTC, including both edges of the middle day.
+    let d1 = 1_772_323_200_000_i64;
+    let day = 86_400_000_i64;
+    write_records(
+        daemon.data_dir(),
+        &[
+            (d1 + 5, "/a", 1.0),
+            (d1 + day - 1, "/a", 2.0),
+            (d1 + day, "/b", 4.0),
+            (d1 + 2 * day + 7, "/b", 8.0),
+        ],
+    );
+    let total = |params: serde_json::Value| {
+        let s = daemon.request("costs.summary", params);
+        (
+            s["totals"]["costUsd"].as_f64().unwrap(),
+            s["totals"]["runs"].as_u64().unwrap(),
+            s,
+        )
+    };
+    let (first, ..) = total(serde_json::json!({"from": "2026-03-01", "to": "2026-03-01"}));
+    assert_eq!(first, 3.0);
+    let (second, runs, s) =
+        total(serde_json::json!({"from": "2026-03-02", "to": "2026-03-03", "groupBy": ["day"]}));
+    assert_eq!((second, runs), (12.0, 2));
+    assert_eq!(s["rows"].as_array().unwrap().len(), 2);
+    let (both, ..) = total(serde_json::json!({"from": "2026-03-01", "to": "2026-03-03"}));
+    assert_eq!(both, first + second);
+    let (open_end, ..) = total(serde_json::json!({"from": "2026-03-03"}));
+    assert_eq!(open_end, 8.0);
+    let (open_start, ..) = total(serde_json::json!({"to": "2026-03-02"}));
+    assert_eq!(open_start, 7.0);
+    let (none, runs, _) = total(serde_json::json!({}));
+    assert_eq!((none, runs), (15.0, 4));
+    // The old window still works: everything here is months old.
+    let (recent, runs, _) = total(serde_json::json!({"sinceDays": 7}));
+    assert_eq!((recent, runs), (0.0, 0));
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_bad_costs_window_is_an_error() {
+    let daemon = Daemon::spawn(&[]);
+    for (params, needle) in [
+        (
+            serde_json::json!({"sinceDays": 3, "from": "2026-03-01"}),
+            "sinceDays",
+        ),
+        (serde_json::json!({"to": "2026-02-30"}), "YYYY-MM-DD"),
+        (serde_json::json!({"from": "yesterday"}), "YYYY-MM-DD"),
+        (
+            serde_json::json!({"from": "2026-03-02", "to": "2026-03-01"}),
+            "later than",
+        ),
+    ] {
+        let err = daemon.request_error("costs.summary", params.clone());
+        assert!(err.contains(needle), "{params}: {err}");
+    }
+    daemon.shutdown_and_wait();
+}

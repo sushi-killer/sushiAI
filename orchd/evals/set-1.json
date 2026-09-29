@@ -1,11 +1,11 @@
 {
-  "about": "Replayable orchd tasks: each starts at the parent of a commit that already solved it; `reference` is that commit, for comparison only. Mixed sizes: mechanical, standard, UI and daemon. Kept small: run it before a flag becomes a default or after a big harness change; day-to-day A/B runs on real backlog requests. `check` grades a finished task: orchd runs it from the root of a throwaway worktree at the task's final commit and the task counts as a success only when it exits 0. Each check overlays the reference commit's own test on the result and runs it by exact name, so a run that matches no test fails.",
+  "about": "Replayable orchd tasks: each starts at the parent of a commit that already solved it; `reference` is that commit, for comparison only. Mixed sizes: mechanical, standard, UI and daemon. Kept small: run it before a flag becomes a default or after a big harness change; day-to-day A/B runs on real backlog requests. `check` grades a finished task: orchd runs it from the root of a throwaway worktree at the task's final commit and the task counts as a success only when it exits 0. Each check overlays the reference commit's own test on the result and runs it by exact name, so a run that matches no test fails. A task whose `check` calls a function names that function in its request, so the grade measures behaviour, not a guessed name.",
   "tasks": [
     {
       "name": "attempt-counter",
       "base": "0ed5678^",
       "reference": "0ed5678",
-      "request": "The orchestrator task detail header shows 'attempt N/M' where N is the daemon's global attempt number across plan, implement and review stages, so a task on its first implementation attempt can read 'attempt 3/4'. Make it count implementation attempts only, in the header and wherever the panel counts attempts toward the limit; cover it in tests/orchestrator-helpers.test.cjs.",
+      "request": "The orchestrator task detail header shows 'attempt N/M' where N is the daemon's global attempt number across plan, implement and review stages, so a task on its first implementation attempt can read 'attempt 3/4'. Make it count implementation attempts only, in the header and wherever the panel counts attempts toward the limit; cover it in tests/orchestrator-helpers.test.cjs. The graded interface: the exported helper `attemptProgress(task, maxAttempts?)` in src/orchestrator/helpers.ts stays the one place that builds the 'N/M' text (e.g. \"1/4\"; null when the task is not running or queued), and tests call it directly.",
       "check": "git show 0ed5678:tests/orchestrator-helpers.test.cjs > tests/zz-ref-check.test.cjs && node --test --test-reporter=tap --test-name-pattern='^(attemptProgress counts the implement attempt while running or queued, null otherwise)$' tests/zz-ref-check.test.cjs | grep -qx '# pass 1'"
     },
     {
@@ -19,7 +19,7 @@
       "name": "base-branch-field",
       "base": "7110044^",
       "reference": "7110044",
-      "request": "In the orchestrator panel's '+ New task' form (src/orchestrator/OrchestratorPanel.tsx), add an optional base branch field so a task can start from another branch; it is passed as `base` to task.create (orchd already accepts it) and defaults to the repo's current branch. Show the branch a task started from (task.baseRef) in the task detail header. Prove the form and the header with screenshots saved under artifacts/.",
+      "request": "In the orchestrator panel's '+ New task' form (src/orchestrator/OrchestratorPanel.tsx), add an optional base branch field so a task can start from another branch; it is passed as `base` to task.create (orchd already accepts it) and defaults to the repo's current branch. Show the branch a task started from (task.baseRef) in the task detail header. Prove the form and the header with screenshots saved under artifacts/. The graded interface: an exported helper `taskCreateParams(params, base)` in src/orchestrator/helpers.ts returns the task.create params plus a trimmed `base` only when the base is not blank (no `base` key at all otherwise), and tests call it directly.",
       "check": "git show 7110044:tests/orchestrator-helpers.test.cjs > tests/zz-ref-check.test.cjs && node --test --test-reporter=tap --test-name-pattern='^(taskCreateParams adds a trimmed base on the request path, omits the key when blank|taskCreateParams adds a trimmed base on the title/goal fallback path too)$' tests/zz-ref-check.test.cjs | grep -qx '# pass 2'"
     },
     {

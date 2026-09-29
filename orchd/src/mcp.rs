@@ -201,7 +201,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
         (
             "task_lead_touch",
             "task.leadTouch",
-            "Mark whether a done task's work needed a fix from a person or the lead session after orchd said done (touched true) or was clean (touched false); omit touched to clear the mark. The autonomy metric behind costs.summary's leadTouch rate.",
+            "Mark whether a done task's work needed a fix from a person or the lead session after orchd said done (touched true) or was clean (touched false); omit touched to clear the mark. An owner's touched mark with a non-empty note also creates one follow-up task from that note (the same note never creates a second one). The autonomy metric behind costs.summary's leadTouch rate.",
             json!({
                 "type": "object",
                 "properties": {

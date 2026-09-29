@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import {
   Archive,
   ArchiveRestore,
@@ -379,11 +379,15 @@ function QuestionCard({
  * toggle: whether the work needed a fix after orchd said done. */
 function TaskReport({
   task,
+  tasks,
   disabled,
+  onOpen,
   onLeadTouch,
 }: {
   task: Task;
+  tasks: Task[];
   disabled: boolean;
+  onOpen(id: string): void;
   onLeadTouch(touched: boolean | undefined, note?: string): void;
 }) {
   const mark = task.leadTouch;
@@ -433,7 +437,7 @@ function TaskReport({
           <input
             value={note}
             onChange={(event) => setNote(event.target.value)}
-            placeholder="What had to be fixed? (optional)"
+            placeholder="What is missing or wrong? A follow-up task will be created."
             aria-label="What had to be fixed"
             autoFocus
           />
@@ -448,6 +452,19 @@ function TaskReport({
             Cancel
           </button>
         </form>
+      )}
+      {(task.followUps ?? []).length > 0 && (
+        <p className="orch-detail-meta">
+          {(task.followUps ?? []).map((id, i) => (
+            <Fragment key={id}>
+              {i > 0 && " · "}
+              <button className="orch-parent-link" onClick={() => onOpen(id)}>
+                Follow-up:{" "}
+                {tasks.find((t) => t.id === id)?.title ?? id.slice(0, 8)}
+              </button>
+            </Fragment>
+          ))}
+        </p>
       )}
       {task.report && (
         <div className="orch-report-body">
@@ -1553,7 +1570,9 @@ export function OrchestratorPanel({ cwd }: { cwd: string }) {
               <TaskReport
                 key={`report-${selected.id}`}
                 task={selected}
+                tasks={live.tasks}
                 disabled={busy}
+                onOpen={(id) => open({ kind: "task", id })}
                 onLeadTouch={(touched, note) =>
                   act(() =>
                     orchestratorClient.taskLeadTouch(

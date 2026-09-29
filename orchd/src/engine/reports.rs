@@ -2,6 +2,51 @@ use super::*;
 use crate::report::{self, Facts};
 
 const DAY_MS: i64 = 86_400_000;
+const EXCERPT_MAX: usize = 3000;
+
+/// Held across the check-and-create of a follow-up so two identical
+/// concurrent marks cannot create two tasks.
+static FOLLOW_UP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The `## What changed`, `## Criteria` and `## Follow-ups` sections of a
+/// report, trimmed to a bounded length.
+fn report_excerpt(report: &str) -> String {
+    let mut out = String::new();
+    let mut keep = false;
+    for line in report.lines() {
+        if let Some(h) = line.strip_prefix("## ") {
+            let h = h.trim();
+            keep = h == "What changed" || h == "Criteria" || h == "Follow-ups";
+        }
+        if keep {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    truncate_chars(out.trim(), EXCERPT_MAX)
+}
+
+/// The request of a follow-up task: the owner's note first, then the
+/// original's title, goal and criteria, then an excerpt of its report.
+fn follow_up_request(task: &Task, note: &str) -> String {
+    let mut text = format!("{note}\n\nFollow-up to task \"{}\".\n", task.title);
+    if !task.goal.trim().is_empty() {
+        text.push_str(&format!("\nOriginal goal: {}\n", task.goal.trim()));
+    }
+    if !task.criteria.is_empty() {
+        text.push_str("\nOriginal criteria:\n");
+        for c in &task.criteria {
+            text.push_str(&format!("- {c}\n"));
+        }
+    }
+    if let Some(report) = &task.report {
+        let excerpt = report_excerpt(report);
+        if !excerpt.is_empty() {
+            text.push_str(&format!("\nExcerpt of its report:\n\n{excerpt}\n"));
+        }
+    }
+    text
+}
 
 /// Git facts about the work of a finished task: its landing commit, else the
 /// commits its branch holds over the base it started from.
@@ -171,9 +216,10 @@ impl App {
         if task.status != TaskStatus::Done {
             return Err("the task is not done".to_string());
         }
+        let owner_note = p.note.unwrap_or_default().trim().to_string();
         task.lead_touch = p.touched.map(|touched| LeadTouch {
             touched,
-            note: p.note.unwrap_or_default().trim().to_string(),
+            note: owner_note.clone(),
             at: now_ms(),
             by: "owner".to_string(),
         });
@@ -183,7 +229,114 @@ impl App {
         task.updated_at = now_ms();
         self.store.save_task(&task).map_err(|e| e.to_string())?;
         self.broadcast_task(&task);
+        // Only the owner's own mark counts: clearing it lets the report
+        // re-apply an automatic one, which never creates a follow-up.
+        if p.touched == Some(true) && !owner_note.is_empty() {
+            task = self
+                .create_follow_up(&task.id, &owner_note)
+                .await
+                .unwrap_or(task);
+        }
         serde_json::to_value(&task).map_err(|e| e.to_string())
+    }
+
+    /// Creates the follow-up task for an owner's mark with `note` and links
+    /// both tasks; a note already behind a listed follow-up creates nothing.
+    /// A failure is recorded as a decision on the original. Returns the
+    /// original as saved.
+    async fn create_follow_up(&self, id: &str, note: &str) -> Result<Task, String> {
+        let _guard = FOLLOW_UP_LOCK.lock().await;
+        let mut task = self
+            .store
+            .load_task(id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        let prefix = format!("{note}\n\n");
+        let exists = task.follow_ups.iter().any(|f| {
+            self.store
+                .load_task(f)
+                .ok()
+                .flatten()
+                .and_then(|t| t.request)
+                .is_some_and(|r| r.starts_with(&prefix))
+        });
+        if exists {
+            return Ok(task);
+        }
+        match self.spawn_follow_up(&task, note).await {
+            Ok(new) => {
+                let mut new = new;
+                new.decisions.push(format!(
+                    "Follow-up of task {}: the owner marked it as needing a fix: {note}",
+                    task.id
+                ));
+                new.follow_up_of = Some(task.id.clone());
+                self.store.save_task(&new).map_err(|e| e.to_string())?;
+                self.broadcast_task(&new);
+                task.follow_ups.push(new.id.clone());
+                task.decisions.push(format!(
+                    "Created follow-up task {} from the owner's note: {note}",
+                    new.id
+                ));
+                self.spawn_task_loop(new.id.clone(), true);
+            }
+            Err(e) => task.decisions.push(format!(
+                "No follow-up task was created for the owner's note: {e}"
+            )),
+        }
+        task.updated_at = now_ms();
+        self.store.save_task(&task).map_err(|e| e.to_string())?;
+        self.broadcast_task(&task);
+        Ok(task)
+    }
+
+    async fn spawn_follow_up(&self, task: &Task, note: &str) -> Result<Task, String> {
+        let settings = self.settings.read().unwrap().clone();
+        let variant = task.variant.clone().unwrap_or_default();
+        let planner = variant.plan_route_id(&settings);
+        if planner.is_empty() {
+            return Err("the planner is disabled".to_string());
+        }
+        if !settings.routes.iter().any(|r| r.id == planner) {
+            return Err(format!("planner route \"{planner}\" is not configured"));
+        }
+        let request = follow_up_request(task, note);
+        let repo = task.repo.clone();
+        let (sha, base_ref) = (task.landed_sha.clone(), task.base_ref.clone());
+        let branch = task.branch.clone();
+        let base = tokio::task::spawn_blocking(move || match (sha, base_ref) {
+            (Some(sha), Some(base))
+                if git::is_ancestor(Path::new(&repo), &sha, &base) == Some(true) =>
+            {
+                base
+            }
+            _ => branch,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        self.create_task_record(NewTask {
+            id: uuid::Uuid::new_v4().to_string(),
+            repo_root: PathBuf::from(&task.repo),
+            title: truncate_chars(&request, 60),
+            goal: String::new(),
+            criteria: vec![],
+            verify: vec![],
+            final_verify: vec![],
+            checks: vec![],
+            held_out: None,
+            request: Some(request),
+            branch: None,
+            base,
+            variant,
+            depends_on: vec![],
+            parent: None,
+            paths: vec![],
+            eval_set: None,
+            eval_name: None,
+            eval_check_cmd: None,
+            created_at: now_ms(),
+        })
+        .await
     }
 
     /// On daemon start: every landed done task not yet marked touched gets

@@ -271,6 +271,8 @@ mod tests {
             report: None,
             report_at: None,
             lead_touch: None,
+            follow_up_of: None,
+            follow_ups: vec![],
             branch: "task/t".into(),
             base_sha: "abc".into(),
             base_ref: None,

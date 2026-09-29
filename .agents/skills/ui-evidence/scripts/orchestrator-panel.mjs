@@ -28,8 +28,8 @@ function escapeRegExp(text) {
 const FIXTURE_STATUSES = new Set(["done", "failed", "stopped", "waiting"]);
 
 /** A seed object completed to the task.json shape orchd's store loads.
- * `ids` maps each seed's `key` to its generated id, so `parent` and
- * `dependsOn` can name other seeds by key. */
+ * `ids` maps each seed's `key` to its generated id, so `parent`,
+ * `dependsOn`, `followUps` and `followUpOf` can name other seeds by key. */
 function taskJson(seed, repo, now, id, ids) {
   const status = seed.status ?? "done";
   if (!FIXTURE_STATUSES.has(status))
@@ -55,7 +55,15 @@ function taskJson(seed, repo, now, id, ids) {
       (sum, a) => sum + (a.costUsd ?? 0) + (a.reviewCostUsd ?? 0),
       0,
     );
-  const { key: _key, parent, dependsOn, evidence: _evidence, ...rest } = seed;
+  const {
+    key: _key,
+    parent,
+    dependsOn,
+    followUps,
+    followUpOf,
+    evidence: _evidence,
+    ...rest
+  } = seed;
   return {
     goal: seed.title,
     criteria: [],
@@ -71,6 +79,8 @@ function taskJson(seed, repo, now, id, ids) {
     ...rest,
     ...(parent ? { parent: byKey(parent) } : {}),
     ...(dependsOn ? { dependsOn: dependsOn.map(byKey) } : {}),
+    ...(followUps ? { followUps: followUps.map(byKey) } : {}),
+    ...(followUpOf ? { followUpOf: byKey(followUpOf) } : {}),
     id,
     repo,
     status,

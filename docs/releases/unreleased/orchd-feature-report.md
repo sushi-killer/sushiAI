@@ -13,3 +13,8 @@
   toggle in the panel). A landing that was rewritten, or a non-orchd commit on
   its files within 24h, marks it touched automatically. `orchd costs` and
   `costs.summary` report the rate per repo and per week.
+- An owner's "Needed a fix" mark with a note creates one follow-up task from
+  that note (plus the original's goal, criteria and a report excerpt), in the
+  same repo, starting from the landed base branch when the landing is still on
+  it. The same note never creates a second one; the report lists the
+  follow-ups as links.

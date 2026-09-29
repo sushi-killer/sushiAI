@@ -906,6 +906,12 @@ pub struct Task {
     /// Whether the work needed a fix after orchd said done; absent = unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead_touch: Option<LeadTouch>,
+    /// The task whose owner mark ("needed a fix") created this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up_of: Option<String>,
+    /// The follow-up tasks the owner's marks on this task created.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follow_ups: Vec<String>,
     pub branch: String,
     pub base_sha: String,
     /// The branch the task was started from (`base`, or the repo's checked-out
@@ -1482,6 +1488,8 @@ mod tests {
             report: None,
             report_at: None,
             lead_touch: None,
+            follow_up_of: None,
+            follow_ups: vec![],
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,
@@ -1714,6 +1722,8 @@ mod tests {
             report: None,
             report_at: None,
             lead_touch: None,
+            follow_up_of: None,
+            follow_ups: vec![],
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,
@@ -1766,6 +1776,8 @@ mod tests {
             report: None,
             report_at: None,
             lead_touch: None,
+            follow_up_of: None,
+            follow_ups: vec![],
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,

@@ -401,6 +401,8 @@ mod tests {
             report: None,
             report_at: None,
             lead_touch: None,
+            follow_up_of: None,
+            follow_ups: vec![],
             branch: "task/do-thing".into(),
             base_sha: "deadbeef".into(),
             base_ref: None,

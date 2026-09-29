@@ -399,6 +399,8 @@ impl App {
             report: None,
             report_at: None,
             lead_touch: None,
+            follow_up_of: None,
+            follow_ups: vec![],
             branch,
             base_sha: created.base_sha,
             base_ref,

@@ -255,3 +255,205 @@ fn a_foreign_commit_on_a_landed_file_marks_the_task_touched_on_report() {
         .contains("not made by orchd"));
     daemon.shutdown_and_wait();
 }
+
+fn listed(daemon: &Daemon, done: &serde_json::Value) -> usize {
+    daemon
+        .request("task.list", json!({"repo": done["repo"]}))
+        .as_array()
+        .unwrap()
+        .len()
+}
+
+fn follow_ups_of(task: &serde_json::Value) -> Vec<String> {
+    task["followUps"]
+        .as_array()
+        .map(|a| a.iter().map(|v| v.as_str().unwrap().to_string()).collect())
+        .unwrap_or_default()
+}
+
+fn decisions_mention(task: &serde_json::Value, id: &str) -> bool {
+    task["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d.as_str().unwrap().contains(id))
+}
+
+#[test]
+fn an_owner_mark_with_a_note_creates_one_follow_up_from_the_landed_branch() {
+    let (daemon, _scripts) = landing_daemon();
+    let repo = init_git_repo();
+    git_out(repo.path(), &["checkout", "-q", "-b", "work"]);
+    let done = land_one(&daemon, repo.path());
+    let id = done["id"].as_str().unwrap().to_string();
+    let landed = done["landedSha"].as_str().unwrap().to_string();
+    let before = listed(&daemon, &done);
+
+    let set = daemon.request(
+        "task.leadTouch",
+        json!({"id": id, "touched": true, "note": "  the docs page is missing  "}),
+    );
+    assert_eq!(set["leadTouch"]["touched"], true, "{set}");
+    assert_eq!(set["leadTouch"]["by"], "owner", "{set}");
+    assert_eq!(
+        set["leadTouch"]["note"], "the docs page is missing",
+        "{set}"
+    );
+    let ups = follow_ups_of(&set);
+    assert_eq!(ups.len(), 1, "{set}");
+    assert_eq!(listed(&daemon, &done), before + 1);
+    let up = daemon.request("task.get", json!({"id": ups[0]}));
+    assert_eq!(up["followUpOf"], id.as_str());
+    assert_eq!(up["repo"], done["repo"]);
+    assert!(up["parent"].is_null(), "{up}");
+    assert_eq!(up["variant"]["land"], true, "{up}");
+    assert_eq!(up["variant"], done["variant"]);
+    let request = up["request"].as_str().unwrap();
+    assert!(
+        request.starts_with("the docs page is missing\n\n"),
+        "{request}"
+    );
+    for needle in [
+        "Add landed",
+        "write landed.txt",
+        "landed.txt exists",
+        "## Criteria",
+        "- landed.txt exists - ",
+        "## What changed",
+        "`landed.txt`",
+        "## Follow-ups",
+    ] {
+        assert!(
+            request.contains(needle),
+            "missing {needle:?} in:\n{request}"
+        );
+    }
+    let at = |s: &str| request.find(s).unwrap();
+    assert!(
+        at("Add landed") > "the docs page is missing".len(),
+        "{request}"
+    );
+    assert!(at("## What changed") > at("Add landed"), "{request}");
+    assert!(at("## Criteria") > at("## What changed"), "{request}");
+    assert!(at("## Follow-ups") > at("## Criteria"), "{request}");
+    assert_eq!(up["baseRef"], "work", "{up}");
+    let base_sha = up["baseSha"].as_str().unwrap();
+    assert_eq!(
+        git_out(
+            repo.path(),
+            &["merge-base", "--is-ancestor", &landed, base_sha]
+        ),
+        ""
+    );
+    let original = daemon.request("task.get", json!({"id": id}));
+    assert!(decisions_mention(&original, &ups[0]), "{original}");
+    assert!(decisions_mention(&up, &id), "{up}");
+    assert!(decisions_mention(&original, "docs page is missing"));
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_landing_reset_away_gives_a_follow_up_started_from_the_original_branch() {
+    let (daemon, _scripts) = landing_daemon();
+    let repo = init_git_repo();
+    git_out(repo.path(), &["checkout", "-q", "-b", "work"]);
+    let base = git_out(repo.path(), &["rev-parse", "HEAD"]);
+    let done = land_one(&daemon, repo.path());
+    let id = done["id"].as_str().unwrap().to_string();
+    let landed = done["landedSha"].as_str().unwrap().to_string();
+    git_out(repo.path(), &["reset", "-q", "--hard", &base]);
+
+    let set = daemon.request(
+        "task.leadTouch",
+        json!({"id": id, "touched": true, "note": "redo it"}),
+    );
+    let ups = follow_ups_of(&set);
+    assert_eq!(ups.len(), 1, "{set}");
+    let up = daemon.request("task.get", json!({"id": ups[0]}));
+    assert_eq!(up["baseRef"], done["branch"], "{up}");
+    let base_sha = up["baseSha"].as_str().unwrap();
+    assert_eq!(
+        git_out(
+            repo.path(),
+            &["rev-parse", done["branch"].as_str().unwrap()]
+        ),
+        base_sha
+    );
+    let on_work = std::process::Command::new("git")
+        .current_dir(repo.path())
+        .args(["merge-base", "--is-ancestor", &landed, "work"])
+        .status()
+        .unwrap();
+    assert!(!on_work.success());
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn follow_ups_are_idempotent_per_note_and_survive_clearing_the_mark() {
+    let (daemon, _scripts) = landing_daemon();
+    let repo = init_git_repo();
+    git_out(repo.path(), &["checkout", "-q", "-b", "work"]);
+    let done = land_one(&daemon, repo.path());
+    let id = done["id"].as_str().unwrap().to_string();
+    let base = git_out(repo.path(), &["rev-parse", "HEAD~1"]);
+    let count = || listed(&daemon, &done);
+    let start = count();
+
+    // Nothing that is not an owner's touched mark with a note creates a task.
+    for params in [
+        json!({"id": id, "touched": false, "note": "looks wrong"}),
+        json!({"id": id, "touched": true}),
+        json!({"id": id, "touched": true, "note": "   "}),
+        json!({"id": id, "note": "looks wrong"}),
+    ] {
+        let got = daemon.request("task.leadTouch", params);
+        assert!(follow_ups_of(&got).is_empty(), "{got}");
+        assert_eq!(count(), start);
+    }
+    git_out(repo.path(), &["reset", "-q", "--hard", &base]);
+    daemon.request("task.report", json!({"id": id}));
+    let got = daemon.request("task.get", json!({"id": id}));
+    assert_eq!(got["leadTouch"]["by"], "auto");
+    assert!(follow_ups_of(&got).is_empty(), "{got}");
+    assert_eq!(count(), start);
+
+    let first = daemon.request(
+        "task.leadTouch",
+        json!({"id": id, "touched": true, "note": "fix A"}),
+    );
+    assert_eq!(follow_ups_of(&first).len(), 1);
+    assert_eq!(count(), start + 1);
+    let again = daemon.request(
+        "task.leadTouch",
+        json!({"id": id, "touched": true, "note": " fix A "}),
+    );
+    assert_eq!(follow_ups_of(&again), follow_ups_of(&first));
+    assert_eq!(count(), start + 1);
+
+    let cleared = daemon.request("task.leadTouch", json!({"id": id}));
+    assert_eq!(follow_ups_of(&cleared).len(), 1, "{cleared}");
+    let clean = daemon.request("task.leadTouch", json!({"id": id, "touched": false}));
+    assert_eq!(follow_ups_of(&clean).len(), 1);
+    assert_eq!(count(), start + 1);
+    let remark = daemon.request(
+        "task.leadTouch",
+        json!({"id": id, "touched": true, "note": "fix A"}),
+    );
+    assert_eq!(follow_ups_of(&remark).len(), 1);
+    assert_eq!(count(), start + 1);
+
+    let other = daemon.request(
+        "task.leadTouch",
+        json!({"id": id, "touched": true, "note": "fix B"}),
+    );
+    let ups = follow_ups_of(&other);
+    assert_eq!(ups.len(), 2, "{other}");
+    assert_eq!(count(), start + 2);
+    for up in &ups {
+        assert_eq!(
+            daemon.request("task.get", json!({"id": up}))["followUpOf"],
+            id.as_str()
+        );
+    }
+    daemon.shutdown_and_wait();
+}

@@ -313,6 +313,10 @@ export type Task = {
   reportAt?: number;
   /** Whether the work needed a fix after orchd said done; absent = unknown. */
   leadTouch?: LeadTouch;
+  /** The task whose owner mark ("Needed a fix") created this one. */
+  followUpOf?: string;
+  /** Follow-up tasks the owner's marks on this task created. */
+  followUps?: string[];
   /** Ids of tasks that must be done before this one starts implementing. */
   dependsOn?: string[];
   /** Repo-relative files or directories the planner said this subtask edits;

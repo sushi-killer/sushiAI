@@ -26,6 +26,10 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 
 ## Open
 
+## 2026-09-30 — Parallel lane worktrees filled the disk
+Root cause: each `.claude/worktrees/agent-*` lane built its own `orchd/target`; ten lanes left 262 MB free.
+Rule: delete a lane's `orchd/target` once it is merged; check `df` before more lanes.
+
 ## Promoted
 
 - 2026-09-30 orchd defaults carried this repo's desktop smoke and one owner's MCP servers to every repo → defaults stay empty; repo specifics live in settings. `scoped_checks_and_chat_tools_default_to_none`.
@@ -34,7 +38,6 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 - 2026-09-29 A kill lost the whole workspace snapshot (Chromium had not committed localStorage) → durable state goes in `workspace-state.json`, atomically.
 - 2026-09-30 A preselected answer plus global Enter sent answers the owner never picked → Enter needs an explicit pick or typed text. `enterAnswer` in `ownerAttention.ts`.
 - 2026-09-29 Contradicting criteria cost three attempts → cross-check criteria before launch.
-- 2026-09-24 `task.create` failed on an existing branch (`worktree add -b`) → new branch per task or omit `branch`.
 - 2026-09-28 Trusted `rtk rewrite` (`rtk read` drops code) → allowlist. `rtk_rewrite_output_*`.
 - 2026-09-25 A changed orchd default never reached earlier-saved settings (`settings.set` stores the whole struct) → mark settings differing from `settings.defaults`. `settings_defaults_reports_the_built_in_defaults_not_the_saved_settings`.
 - 2026-09-25 Disabled `select!` branch still built `Instant + Duration::MAX`, panicking the loop → bounded deadline. `run_harness`.

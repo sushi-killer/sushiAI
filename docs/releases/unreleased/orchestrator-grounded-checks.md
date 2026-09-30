@@ -1,9 +1,0 @@
-## Orchestrator: grounded checks
-
-- The `groundedChecks` variant flag makes the planner (and `task.create`, via `checks` and `heldOut`) write an executable check per criterion. Before the first attempt every check runs on the base: the ones that fail there gate each attempt after verify, one that already passes proves nothing and one that cannot run is left out, each with a decision line.
-- One hidden held-out check runs after verify; the implementer never sees it and its command never appears in a brief, a failure or a decision.
-- An implementer that finds a criterion cannot be met as written can say so with a `sushi-impossible` block; the owner is asked to drop the criterion, retry or stop instead of the task burning attempts.
-- A parent task's own checks are baselined before its first child starts and run once its children have landed.
-- A review FAIL that only has P2/P3 findings is recorded as a PASS, and a failing script's verify tail leads with the failing tests instead of the bundler noise.
-- A final check that fails is run once on the base commit in a throwaway worktree. If it fails there too, the task waits with `<command> already fails on base <sha>: <tail>` and the options `retry after the base is fixed`, `drop this check` and `stop`, instead of retrying an attempt that cannot fix it. Retry carries the work onto the newest base and grants one more attempt; drop removes the check and lets the same attempt finish. A check that passes on base retries as before, and per-attempt verify is unchanged.
-- `task.amend` (MCP tool `task_amend`) replaces the criteria, verify, finalVerify, checks or heldOut of a running, waiting, queued or stopped task. A live loop applies it at its next attempt boundary, never mid-run, and the task gains an `Amended: <field names>` decision line that never carries a command. With `groundedChecks`, amended checks are baselined on the base commit.

@@ -168,6 +168,7 @@ impl App {
         if task.parent.is_some() || task.status != TaskStatus::Done {
             return;
         }
+        self.collect_deliverables(task).await;
         let all = self.repo_tasks(&task.repo);
         let data = self.data_dir.clone();
         let snapshot = task.clone();

@@ -26,6 +26,7 @@ impl App {
         ) {
             return None;
         }
+        self.collect_deliverables(task).await;
         let (repo, wt, id, save) = (
             task.repo.clone(),
             task.worktree.clone(),

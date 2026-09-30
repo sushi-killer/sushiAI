@@ -1106,6 +1106,18 @@ pub struct LeadTouch {
     pub by: String,
 }
 
+/// A named file that was not committed with the task. `path` is relative to
+/// the worktree, `saved` is the copy in the task's data dir, `placed` the
+/// path it was copied to in the repo's main working copy after landing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Deliverable {
+    pub path: String,
+    pub saved: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placed: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
@@ -1141,6 +1153,10 @@ pub struct Task {
     /// task runs again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub worktree_removed: bool,
+    /// Files the goal, criteria or verify name that were gitignored or
+    /// untracked in the worktree, kept under `tasks/<id>/deliverables/`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deliverables: Vec<Deliverable>,
     /// The commit a `variant.land` task put on its base branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landed_sha: Option<String>,
@@ -1978,6 +1994,7 @@ mod tests {
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
             worktree_removed: false,
+            deliverables: vec![],
             visual_criteria: vec![],
             landed_sha: None,
             landed_at: None,
@@ -2219,6 +2236,7 @@ mod tests {
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
             worktree_removed: false,
+            deliverables: vec![],
             visual_criteria: vec![],
             landed_sha: None,
             landed_at: None,
@@ -2279,6 +2297,7 @@ mod tests {
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
             worktree_removed: false,
+            deliverables: vec![],
             visual_criteria: flagged.iter().map(|c| c.to_string()).collect(),
             landed_sha: None,
             landed_at: None,
@@ -2365,6 +2384,7 @@ mod tests {
             repo: "/repo".into(),
             worktree: "/repo-task".into(),
             worktree_removed: false,
+            deliverables: vec![],
             visual_criteria: vec![],
             landed_sha: None,
             landed_at: None,

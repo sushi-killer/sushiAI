@@ -296,6 +296,18 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
         out.push('\n');
     }
 
+    if !top.deliverables.is_empty() {
+        out.push_str("## Deliverables\n\n");
+        for d in &top.deliverables {
+            out.push_str(&format!("- `{}`: kept at `{}`", d.path, d.saved));
+            if let Some(p) = &d.placed {
+                out.push_str(&format!(", placed at `{p}`"));
+            }
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+
     let many = graph.len() > 1;
     out.push_str("## Assumptions and automatic answers\n\n");
     let mut any = false;

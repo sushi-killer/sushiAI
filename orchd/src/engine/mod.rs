@@ -41,6 +41,7 @@ mod chat_tools;
 mod cost;
 mod criteria;
 mod decision;
+mod deliverables;
 mod finding_judge;
 mod graph;
 mod healing;
@@ -616,6 +617,7 @@ impl App {
                 crate::timeline::timeline_json(&self.store, id)
             }
             "task.evidence" => self.handle_task_evidence(params).await,
+            "task.openDeliverable" => self.handle_task_open_deliverable(params).await,
             "task.log" => self.handle_task_log(params).await,
             "failures.catalogue" => crate::timeline::catalogue_json(&self.store, &params),
             "chat.get" => chat::handle_get(self, params).await,

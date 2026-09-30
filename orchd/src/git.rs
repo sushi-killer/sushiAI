@@ -533,7 +533,7 @@ pub fn discard_worktree(repo_root: &Path, path: &Path, branch: &str) {
 /// ignores the path (its own `.gitignore`, global excludes, ...) -- being
 /// merely untracked isn't enough, or an ordinary WIP file someone forgot to
 /// `git add` would get bootstrap-copied into every worktree too.
-fn is_git_ignored(repo_root: &Path, rel_path: &str) -> bool {
+pub(crate) fn is_git_ignored(repo_root: &Path, rel_path: &str) -> bool {
     Command::new("git")
         .args(["check-ignore", "--quiet", rel_path])
         .current_dir(repo_root)
@@ -1052,6 +1052,21 @@ pub fn remove_task_worktree(repo_root: &Path, path: &Path) {
         let _ = std::fs::remove_dir_all(path);
     }
     let _ = run(repo_root, &["worktree", "prune"]);
+}
+
+/// True when `rel` is a tracked file with unchanged content at HEAD of the
+/// checkout at `dir`.
+pub fn is_committed_clean(dir: &Path, rel: &str) -> bool {
+    let tracked = run(dir, &["ls-files", "--error-unmatch", "--", rel]).is_ok();
+    tracked
+        && run(dir, &["status", "--porcelain", "--", rel])
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(false)
+}
+
+/// True when `rel` is tracked by the checkout at `dir`.
+pub fn is_tracked(dir: &Path, rel: &str) -> bool {
+    run(dir, &["ls-files", "--error-unmatch", "--", rel]).is_ok()
 }
 
 pub fn prune_worktrees(repo_root: &Path) {

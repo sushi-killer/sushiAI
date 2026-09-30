@@ -363,6 +363,15 @@ export type Check = {
   baseline?: "pass" | "fail" | "env";
 };
 
+/** A file the task named that lives outside git: `path` is relative to the
+ * worktree, `saved` its copy in the task's data dir, `placed` where it was put
+ * in the main working copy after landing. */
+export type Deliverable = {
+  path: string;
+  saved: string;
+  placed?: string;
+};
+
 export type Task = {
   id: string;
   /** Set by the app on a task of a remote host ("ssh:<id>"); absent locally. */
@@ -390,6 +399,8 @@ export type Task = {
   source?: string;
   /** The commit a `variant.land` task put on its base branch. */
   landedSha?: string;
+  /** Named files that were not committed, kept outside the worktree. */
+  deliverables?: Deliverable[];
   /** Markdown report of a finished top-level task or graph. */
   report?: string;
   /** When the report was first written, ms epoch. */

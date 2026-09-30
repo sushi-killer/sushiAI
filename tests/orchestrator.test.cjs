@@ -206,6 +206,7 @@ test("call() rejects a method outside the protocol allowlist before touching the
     "task.archive",
     "task.unarchive",
     "task.timeline",
+    "task.openDeliverable",
     "failures.catalogue",
     "costs.summary",
     "chat.get",

@@ -225,6 +225,43 @@ function EvidenceGallery({ task }: { task: Task }) {
   );
 }
 
+/** Files the task named that are not in its commit, each with where it was
+ * kept and an Open action. */
+function Deliverables({ task }: { task: Task }) {
+  const orchestratorClient = useOrchestratorClient();
+  const [failed, setFailed] = useState<string | null>(null);
+  const list = task.deliverables ?? [];
+  if (list.length === 0) return null;
+  return (
+    <div className="td-evidence">
+      <span className="td-eyebrow">DELIVERABLES</span>
+      {list.map((d) => (
+        <div key={d.path} className="td-deliverable">
+          <span className="td-deliverable-path" title={d.placed ?? d.saved}>
+            {d.path}
+          </span>
+          <span className="td-deliverable-where">
+            {d.placed ? "in the repo and the task data" : "in the task data"}
+          </span>
+          <button
+            className="td-link"
+            aria-label={`Open ${d.path}`}
+            onClick={() =>
+              orchestratorClient
+                .taskOpenDeliverable(task.id, d.path)
+                .then(() => setFailed(null))
+                .catch(() => setFailed(d.path))
+            }
+          >
+            Open
+          </button>
+          {failed === d.path && <span>Could not open it</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** An upcoming stage that hasn't run yet - review, most often - shown dimmed
  * so the list reads as "what will happen", not just history. */
 function PendingStageRow({ label }: { label: string }) {
@@ -772,6 +809,7 @@ export function TaskDetail({
         )}
         {!done && <TaskTimeline task={selected} />}
         <EvidenceGallery task={selected} />
+        <Deliverables task={selected} />
         {hasDetails && (
           <section className="td-details">
             <button

@@ -58,6 +58,7 @@ const ALLOWED_METHODS = new Set([
   "task.unarchive",
   "task.timeline",
   "task.evidence",
+  "task.openDeliverable",
   "task.report",
   "task.backlog",
   "failures.catalogue",

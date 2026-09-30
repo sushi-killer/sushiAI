@@ -533,6 +533,7 @@ impl App {
             repo: new.repo_root.to_string_lossy().to_string(),
             worktree: created.path.to_string_lossy().to_string(),
             worktree_removed: false,
+            deliverables: vec![],
             visual_criteria: vec![],
             landed_sha: None,
             landed_at: None,

@@ -467,7 +467,15 @@ fn task_land_lands_a_done_unlanded_task_and_source_is_counted() {
     assert!(done.get("landedSha").is_none(), "{done}");
     assert!(!root.join("one.txt").exists());
 
-    daemon.request("task.land", serde_json::json!({"id": id}));
+    // The task's control is dropped a moment after `done` shows.
+    let start = std::time::Instant::now();
+    while daemon
+        .request_error("task.land", serde_json::json!({"id": id}))
+        .contains("busy")
+        && start.elapsed() < Duration::from_secs(10)
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let landed = poll_until(&daemon, &id, Duration::from_secs(60), |s| s == "done");
     assert_eq!(
         landed["landedSha"],

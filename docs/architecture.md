@@ -20,8 +20,14 @@ flowchart TB
       panels["Panels<br/>terminal, chat, browser, files, git"]
       orchPanel["Orchestrator panel<br/>src/orchestrator"]
       slots["Extension slots<br/>src/extensions"]
+      inbox["Inbox page - src/app/InboxPage.tsx<br/>inboxModel.ts, attention.ts, useAttention.ts<br/>queue, badge count, reminders"]
+      wsState["src/workspaceState.ts<br/>layout, panes, mode"]
+    end
+    subgraph mascotWin["Mascot window - second BrowserWindow, sandboxed"]
+      mascotPage["src/mascot<br/>notice bubbles, pill, character"]
     end
     preload["preload.cjs<br/>window.bridge"]
+    mascotPreload["mascot-preload.cjs<br/>window.mascot"]
     subgraph main["Main process - electron/"]
       direction TB
       ipc["ipc/* - app, chat,<br/>terminals, projects"]
@@ -29,10 +35,28 @@ flowchart TB
       extMgr["extensions/*<br/>manifest validator"]
       herdrIpc["herdr.cjs, connections.cjs"]
       remoteSvc["orchestrator-remote.cjs<br/>install, start, forward, preflight<br/>per SSH profile"]
+      attention["attention.cjs<br/>tray, Dock badge, notifications,<br/>close-to-menu-bar, app preferences"]
+      mascotSvc["mascot.cjs<br/>mascot window, notice queue,<br/>mascot-* IPC, presenting watch"]
+      winState["window-state.cjs<br/>bounds, display, maximized"]
+      wsSnap["workspace-snapshot.cjs<br/>sync read/flush + async write"]
+      devRestart["dev-restart.cjs<br/>watches electron/ in npm run dev"]
     end
     orchPanel <--> preload <--> orchSvc
     orchSvc --> remoteSvc --> herdrIpc
+    inbox -->|attention-badge, attention-notify| preload --> attention
+    wsState <-->|workspace-state-read / -flush sendSync,<br/>-write invoke| preload <--> wsSnap
+    orchSvc -->|task notice| attention
+    attention -->|desktop mascot on| mascotSvc
+    mascotPage <-->|mascot-* IPC| mascotPreload <--> mascotSvc
+    mascotSvc -->|task.answer, land, rerun| orchSvc
+    mascotSvc & attention -->|orchestrator-open, open-inbox,<br/>attention-open| preload
+    devRestart -->|Core updated notice| mascotSvc
+    shortcut(["global Alt+Space"]) -->|fold / unfold| mascotSvc
   end
+  macos[("macOS tray, Dock,<br/>Notification Center")]
+  profile[("userData<br/>workspace-state.json,<br/>window-state.json")]
+  attention --> macos
+  wsSnap & winState --> profile
 
   subgraph orchd["orchd daemon - Rust, outlives the app; a test-launched app stops it on quit, and it exits when its data dir is deleted"]
     direction LR
@@ -49,9 +73,9 @@ flowchart TB
     store[("data dir<br/>tasks/, runs/, settings.json,<br/>costs.jsonl, chats/, audits/,<br/>evolution/ (signals.jsonl, detected.jsonl,<br/>proposals/)")]
     mcp["orchd mcp<br/>task_* tools, stdio"]
     chatTools["engine/chat_tools.rs<br/>connected MCP servers, OK-card writes"]
-    owner[("owner's MCP config<br/>~/.claude.json, plugins")]
+    mcpConfig[("owner's MCP config<br/>~/.claude.json, plugins")]
     chat --> chatTools
-    chatTools -->|read at turn time| owner
+    chatTools -->|read at turn time| mcpConfig
     proto --> engine & chat & audit & insights & evolution & costs
     engine --> side
     engine -->|task done or failed| evolution
@@ -270,9 +294,9 @@ flowchart LR
   orch -->|task_create / task_answer via MCP| planner
 ```
 
-Task agents run with `sandbox: host` today: macOS Seatbelt blocked Electron,
-`/tmp` and socket tests, so agents could not screenshot or run the suite. The
-worktree is the boundary, stated in the brief.
+Task agents run with `sandbox: native` by default (`orchd/src/model.rs`): the
+sandbox keeps writes inside the task's worktree and the network is open
+(`allowedDomains: ["*"]`). `sandbox: host` turns it off.
 
 ## 5. What we took from references
 
@@ -302,8 +326,5 @@ flowchart LR
 
 ## 6. Planned next
 
-```mermaid
-flowchart LR
-  d["Base-branch field in the new-task form"]:::planned
-  classDef planned stroke-dasharray: 5 5
-```
+Nothing is drawn as planned right now; the base-branch field in the new-task
+form has shipped.

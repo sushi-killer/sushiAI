@@ -961,7 +961,7 @@ async fn create_proposal(
     }
     // Whatever was created is recorded, even when a later row failed.
     let chats = {
-        let turns = app.chat_turns.lock().unwrap();
+        let _turns = app.chat_turns.lock().unwrap();
         let mut chats = read_store(app, repo);
         if let Some(message) = chats
             .sessions
@@ -971,7 +971,9 @@ async fn create_proposal(
         {
             message.proposal = Some(proposal);
         }
-        chats.mark_busy(repo, &turns);
+        // The turn slot is only a placeholder that serialises writers; no
+        // turn runs, so nothing stored or broadcast may say busy.
+        chats.mark_busy(repo, &HashMap::new());
         store::write_json_atomic(&store_path(app, repo), &chats).map_err(|e| e.to_string())?;
         chats
     };
@@ -1687,6 +1689,84 @@ mod tests {
         push(&mut session, "assistant", "ok", ChatMode::Chat);
         session.session_id = Some(harness_session.to_string());
         save(app, repo, &session);
+    }
+
+    fn proposal_session(app: &App, repo: &str) -> String {
+        let mut session = load(app, repo).current().clone();
+        push(&mut session, "user", "plan it", ChatMode::Plan);
+        push(&mut session, "assistant", "here", ChatMode::Plan);
+        let task = |title: &str| ProposedTask {
+            title: title.to_string(),
+            goal: title.to_string(),
+            ..Default::default()
+        };
+        let message = session.messages.last_mut().unwrap();
+        message.proposal = Some(ChatProposal {
+            tasks: vec![task("One"), task("Two"), task("Three")],
+        });
+        let id = message.id.clone();
+        save(app, repo, &session);
+        id
+    }
+
+    #[tokio::test]
+    async fn creating_from_a_proposal_never_leaves_the_chat_busy() {
+        let (app, _dir, repo) = test_app();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ] {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap();
+        }
+        let message = proposal_session(&app, &repo);
+        let mut events = app.subscribe();
+        let calls = [
+            json!({"indices": [1], "skip": []}),
+            json!({"indices": [2], "backlog": true, "skip": []}),
+            json!({"indices": [3]}),
+        ];
+        for call in calls {
+            let mut params = call;
+            params["repo"] = json!(repo);
+            params["messageId"] = json!(message);
+            handle_create_proposal(&app, params).await.unwrap();
+            let stored = load(&app, &repo);
+            assert!(stored.sessions.iter().all(|s| !s.busy));
+            let on_disk: ChatStore =
+                serde_json::from_str(&std::fs::read_to_string(store_path(&app, &repo)).unwrap())
+                    .unwrap();
+            assert!(on_disk.sessions.iter().all(|s| !s.busy));
+        }
+        let mut seen = 0;
+        while let Ok(event) = events.try_recv() {
+            if let Event::Chat {
+                thread, sessions, ..
+            } = event
+            {
+                seen += 1;
+                assert_eq!(thread["busy"], json!(false), "{thread}");
+                assert!(sessions
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|s| s["busy"] == json!(false)));
+            }
+        }
+        assert!(seen >= 3);
     }
 
     #[tokio::test]

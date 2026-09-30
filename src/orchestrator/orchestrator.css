@@ -596,8 +596,9 @@
   align-items: center;
   gap: 2px;
   padding: 2px;
+  border: 1px solid var(--line);
   border-radius: 7px;
-  background: var(--bg-control);
+  background: var(--bg-sunken);
 }
 .orch-modeswitch button {
   height: 22px;
@@ -611,7 +612,7 @@
   color: var(--text);
 }
 .orch-modeswitch button.selected {
-  background: var(--bg-selected);
+  background: var(--bg-control);
   color: var(--text);
   font-weight: 500;
 }

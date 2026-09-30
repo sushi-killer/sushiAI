@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   CornerDownRight,
+  Lightbulb,
+  ListChecks,
   MessageSquare,
   MoreHorizontal,
   Plus,
@@ -56,8 +58,8 @@ const STARTERS = [
 
 /** Under the starters of an empty chat: what the other two modes are for. */
 const MODE_HINTS = [
-  ["Brainstorm", "talk an idea through, one question at a time"],
-  ["Plan", "split a goal into small tasks you can create in one click"],
+  ["Brainstorm", "turns an idea into tasks, one question at a time"],
+  ["Plan", "splits a goal into ordered tasks you confirm"],
 ] as const;
 
 /** "Orchestrator · claude-sonnet": the route the chat runs on, by model. */
@@ -161,7 +163,16 @@ function OrchestratorTurn({
     <div className="ochat-orch">
       <Avatar />
       <div className="ochat-orch-col">
-        {label && <span className="ochat-mode-label">{label}</span>}
+        {label && (
+          <span className="ochat-mode-label">
+            {message.mode === "plan" ? (
+              <ListChecks size={12} />
+            ) : (
+              <Lightbulb size={12} />
+            )}
+            {label}
+          </span>
+        )}
         <div className="ochat-orch-text">
           <RichText text={message.text} />
         </div>

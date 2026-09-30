@@ -302,3 +302,18 @@ test("several questions are answered as one message and read back from it", asyn
     undefined,
   ]);
 });
+
+test("the empty chat hints read as the Figma concept", () => {
+  const source = require("node:fs").readFileSync(
+    `${__dirname}/../src/orchestrator/ChatView.tsx`,
+    "utf8",
+  );
+  assert.ok(
+    source.includes(
+      '["Brainstorm", "turns an idea into tasks, one question at a time"]',
+    ),
+  );
+  assert.ok(
+    source.includes('["Plan", "splits a goal into ordered tasks you confirm"]'),
+  );
+});

@@ -179,7 +179,11 @@ export function OrchestratorRouteChip({
   return (
     <ChipPicker
       icon={<Sparkles size={14} className="orch-composer-route-icon" />}
-      label={routeId ? (route?.label ?? routeId) : standardLabel}
+      label={
+        routeId
+          ? `${standardLabel} · ${route?.label ?? routeId}`
+          : standardLabel
+      }
       ariaLabel="Orchestrator route"
       value={routeId}
       onChange={onRouteChange}

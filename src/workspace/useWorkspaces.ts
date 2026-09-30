@@ -327,6 +327,7 @@ export function useWorkspaces({
     agent = "claude",
     filesTarget?: Panel["filesTarget"],
     modelProfile?: ModelProfile,
+    claudeAccountId?: string,
     backend?: "herdr" | "local",
     targetWorkspaceId?: string,
     worktree?: { branch: string },
@@ -344,6 +345,10 @@ export function useWorkspaces({
       // A Herdr workspace runs its sessions in Herdr unless this panel was
       // asked to be local. Nothing else can start a process.
       const viaHerdr = current.herdrId && (backend ?? "herdr") === "herdr";
+      if (claudeAccountId && viaHerdr)
+        throw new Error(
+          "Claude accounts are available for Local sessions only.",
+        );
       if (viaHerdr && launchesInWorktree(kind)) {
         if (!window.bridge) throw new Error("Open the desktop app first.");
         const endpoint = current.connection || socket;
@@ -419,6 +424,7 @@ export function useWorkspaces({
           agent: kind === "agent" ? agent : undefined,
           started: kind === "agent",
           modelProfileId: kind === "agent" ? modelProfileId : undefined,
+          claudeAccountId: kind === "agent" ? claudeAccountId : undefined,
         };
         w.panels = [panel];
         w.layout = leaf(panel.id);
@@ -446,6 +452,7 @@ export function useWorkspaces({
           messages: kind === "chat" ? [] : undefined,
           filesTarget: kind === "files" ? filesTarget : undefined,
           modelProfileId: kind === "agent" ? modelProfileId : undefined,
+          claudeAccountId: kind === "agent" ? claudeAccountId : undefined,
         };
         updateWorkspace(current.id, (w) => appendPanel(w, panel));
         setSelected(panel.id);

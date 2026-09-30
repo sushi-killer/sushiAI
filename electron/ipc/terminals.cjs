@@ -5,6 +5,19 @@ const { openHerdrStream, detectAgent } = require("../terminal-stream.cjs");
 const { terminalEnvironment } = require("../terminal-text.cjs");
 const { storeTerminalAttachment } = require("../terminal-attachments.cjs");
 
+function claudeFdLaunch(binary, tokenPath) {
+  return {
+    binary: "/bin/sh",
+    args: [
+      "-c",
+      'exec 3<"$1"; rm -f "$1"; export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; shift; exec "$@"',
+      "sushiai",
+      tokenPath,
+      binary,
+    ],
+  };
+}
+
 function registerTerminalIpc({
   handle,
   send,
@@ -17,6 +30,7 @@ function registerTerminalIpc({
   terminals,
   terminalPending,
   stageModelSettings,
+  stageClaudeAccount,
 }) {
   const detectionTimer = setInterval(() => {
     for (const [panelId, entry] of terminals) {
@@ -47,6 +61,7 @@ function registerTerminalIpc({
       endpoint,
       herdrId,
       modelProfileId,
+      claudeAccountId,
     }) => {
       id(panelId);
       if (terminals.has(panelId))
@@ -120,6 +135,22 @@ function registerTerminalIpc({
           `${command} is not installed. Install it and sign in from a terminal first.`,
         );
       let modelSettingsPath;
+      let accountSettingsPath;
+      let accountKeyPath;
+      let accountTokenPath;
+      if (claudeAccountId && command === "claude" && !remote) {
+        const staged = await stageClaudeAccount(claudeAccountId);
+        accountSettingsPath = staged.settingsPath;
+        accountKeyPath = staged.keyPath;
+        accountTokenPath = staged.tokenPath;
+        if (staged.kind === "subscription") {
+          const launch = claudeFdLaunch(binary, accountTokenPath);
+          binary = launch.binary;
+          args = launch.args;
+        } else {
+          args = [...args, "--settings", accountSettingsPath];
+        }
+      }
       if (modelProfileId && command === "claude" && !remote) {
         modelSettingsPath = await stageModelSettings(modelProfileId);
         args = [...args, "--settings", modelSettingsPath];
@@ -142,6 +173,9 @@ function registerTerminalIpc({
         command,
         endpoint,
         modelSettingsPath,
+        accountSettingsPath,
+        accountKeyPath,
+        accountTokenPath,
       };
       terminals.set(panelId, entry);
       proc.onData((data) => {
@@ -154,11 +188,19 @@ function registerTerminalIpc({
       });
       proc.onExit(({ exitCode }) => {
         entry.exited = true;
-        if (entry.modelSettingsPath)
+        if (
+          entry.modelSettingsPath ||
+          entry.accountSettingsPath ||
+          entry.accountKeyPath ||
+          entry.accountTokenPath
+        )
           for (const file of [
             entry.modelSettingsPath,
-            entry.modelSettingsPath.replace(/\.json$/, ".key"),
-          ])
+            entry.modelSettingsPath?.replace(/\.json$/, ".key"),
+            entry.accountSettingsPath,
+            entry.accountKeyPath,
+            entry.accountTokenPath,
+          ].filter(Boolean))
             fs.unlink(file).catch(() => {});
         send("terminal-data", {
           panelId,
@@ -236,4 +278,4 @@ function registerTerminalIpc({
   };
 }
 
-module.exports = { registerTerminalIpc };
+module.exports = { registerTerminalIpc, claudeFdLaunch };

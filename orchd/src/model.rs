@@ -27,6 +27,9 @@ pub struct Route {
     /// run's `settings.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
+    /// Claude only: named subscription or API-key account used for this route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
     /// 1 (cheap, mechanical) to 3 (hard). Review routing never picks a route
     /// weaker than the implementer's; unset uses `route_strength`'s default
     /// for the model.
@@ -531,6 +534,7 @@ impl Default for Settings {
                     model: Some("sonnet".to_string()),
                     effort: None,
                     profile_id: None,
+                    account_id: None,
                     strength: None,
                 },
                 Route {
@@ -540,6 +544,7 @@ impl Default for Settings {
                     model: Some("opus".to_string()),
                     effort: Some("high".to_string()),
                     profile_id: None,
+                    account_id: None,
                     strength: None,
                 },
                 Route {
@@ -549,6 +554,7 @@ impl Default for Settings {
                     model: None,
                     effort: None,
                     profile_id: None,
+                    account_id: None,
                     strength: None,
                 },
             ],

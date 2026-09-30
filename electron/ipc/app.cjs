@@ -184,6 +184,16 @@ function registerAppIpc({
   });
 
   handle("providers-list", () => modelProviders.listProviders());
+  handle("claude-accounts-list", () => modelProviders.listClaudeAccounts());
+  handle("claude-accounts-upsert", (input) =>
+    modelProviders.upsertClaudeAccount(input),
+  );
+  handle("claude-accounts-value-set", (id, value) =>
+    modelProviders.setClaudeAccountValue(id, value),
+  );
+  handle("claude-accounts-delete", (id) =>
+    modelProviders.deleteClaudeAccount(id),
+  );
   handle("providers-upsert", (input) => modelProviders.upsertProvider(input));
   handle("providers-delete", (providerId) =>
     modelProviders.deleteProvider(providerId),

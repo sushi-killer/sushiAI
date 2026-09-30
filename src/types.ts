@@ -75,6 +75,7 @@ type PanelState = {
   permission?: string;
   /** Set when this agent panel was launched against a custom model provider. */
   modelProfileId?: string;
+  claudeAccountId?: string;
 };
 export type CorePanel = PanelState & { kind: PanelKind };
 export type ExtensionPanel = PanelState & {
@@ -88,6 +89,13 @@ export type ExtensionPanel = PanelState & {
 };
 export type Panel = CorePanel | ExtensionPanel;
 export type ModelProviderKind = "openrouter" | "opencode-go" | "custom";
+export type ClaudeAccount = {
+  id: string;
+  label: string;
+  kind: "subscription" | "apiKey";
+  hint: string;
+  hasValue: boolean;
+};
 export type ModelProvider = {
   id: string;
   kind: ModelProviderKind;
@@ -353,6 +361,7 @@ export interface Bridge {
     endpoint?: string;
     herdrId?: string;
     modelProfileId?: string;
+    claudeAccountId?: string;
   }): Promise<{ history: string; exited?: boolean }>;
   terminalWrite(panelId: string, data: string): Promise<void>;
   terminalAttach(input: {
@@ -502,6 +511,17 @@ export interface Bridge {
   }): Promise<ModelProfile>;
   modelProfilesDelete(id: string): Promise<void>;
   modelSettingsStage(modelProfileId: string): Promise<string>;
+  claudeAccountsList(): Promise<ClaudeAccount[]>;
+  claudeAccountsUpsert(input: {
+    id?: string;
+    label?: string;
+    kind: ClaudeAccount["kind"];
+  }): Promise<ClaudeAccount>;
+  claudeAccountValueSet(
+    id: string,
+    value: string,
+  ): Promise<{ hasValue: boolean; hint: string }>;
+  claudeAccountDelete(id: string): Promise<void>;
   extensionsList(): Promise<import("./extensions/types.ts").ExtensionSnapshot>;
   extensionsRefresh(): Promise<
     import("./extensions/types.ts").ExtensionSnapshot

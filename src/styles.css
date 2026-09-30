@@ -3283,6 +3283,36 @@ iframe {
   flex-direction: column;
   gap: 10px;
 }
+.claude-accounts {
+  margin: 16px 0;
+  padding: 12px;
+  border: 1px solid #333;
+  border-radius: 9px;
+  background: #1c1c1c;
+}
+.claude-accounts > .muted {
+  font-size: 11px;
+}
+.claude-account-row {
+  display: grid;
+  grid-template-columns:
+    minmax(100px, 1fr) minmax(90px, auto) minmax(150px, 2fr)
+    auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid #333;
+}
+.claude-account-row > strong {
+  font-size: 11px;
+}
+.claude-account-row > span {
+  font-size: 10px;
+  color: #aaa;
+}
+.claude-account-row input {
+  min-width: 0;
+}
 .provider-card-head {
   display: flex;
   align-items: center;

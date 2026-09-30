@@ -191,11 +191,18 @@ struct ProfileSecret {
     key: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+struct AccountSecret {
+    kind: String,
+    value: String,
+}
+
 /// In-memory only (spec: "travel from Electron to the daemon in memory
 /// only"); `secrets.set` is a full replace, never a merge.
 #[derive(Default)]
 struct Secrets {
     profiles: HashMap<String, ProfileSecret>,
+    accounts: HashMap<String, AccountSecret>,
 }
 
 struct TaskControl {

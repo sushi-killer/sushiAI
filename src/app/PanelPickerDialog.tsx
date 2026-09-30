@@ -17,7 +17,13 @@ import {
   suggestWorktreeBranch,
   worktreeBranchError,
 } from "../workspace/worktree.ts";
-import type { ModelProfile, PanelKind, System, Workspace } from "../types";
+import type {
+  ClaudeAccount,
+  ModelProfile,
+  PanelKind,
+  System,
+  Workspace,
+} from "../types";
 
 /** Model profiles are this dialog's business only, so they load when it opens
  * and the picked profile resets with it. Same for the session-host pick
@@ -42,6 +48,7 @@ export function PanelPickerDialog({
     agent?: string,
     filesTarget?: undefined,
     modelProfile?: ModelProfile,
+    claudeAccountId?: string,
     backend?: "herdr" | "local",
     targetWorkspaceId?: string,
     worktree?: { branch: string },
@@ -57,12 +64,15 @@ export function PanelPickerDialog({
 }) {
   const orchestrator = useOrchestratorEnabled();
   const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([]);
+  const [claudeAccounts, setClaudeAccounts] = useState<ClaudeAccount[]>([]);
   // Only a Herdr-backed workspace has a choice to offer.
   const herdrWorkspace = Boolean(active.herdrId) && connected;
   const [backend, setBackend] = useState<"herdr" | "local">("herdr");
   const [selectedModelProfileId, setSelectedModelProfileId] = useState("");
+  const [selectedClaudeAccountId, setSelectedClaudeAccountId] = useState("");
   useEffect(() => {
     window.bridge?.modelProfilesList().then(setModelProfiles);
+    window.bridge?.claudeAccountsList().then(setClaudeAccounts);
   }, []);
   // Empty outside a merge group (D3): the picker then targets `active` alone,
   // exactly as it always has.
@@ -238,6 +248,7 @@ export function PanelPickerDialog({
                   undefined,
                   undefined,
                   undefined,
+                  undefined,
                   backend,
                   targetWorkspaceId,
                   launchesInWorktree(item.kind) ? worktreeArg : undefined,
@@ -275,6 +286,9 @@ export function PanelPickerDialog({
                       (profile) => profile.id === selectedModelProfileId,
                     )
                   : undefined,
+                agent === "claude"
+                  ? selectedClaudeAccountId || undefined
+                  : undefined,
                 backend,
                 targetWorkspaceId,
                 worktreeArg,
@@ -304,7 +318,10 @@ export function PanelPickerDialog({
           Claude Code · Custom model
           <select
             value={selectedModelProfileId}
-            onChange={(event) => setSelectedModelProfileId(event.target.value)}
+            onChange={(event) => {
+              setSelectedModelProfileId(event.target.value);
+              if (event.target.value) setSelectedClaudeAccountId("");
+            }}
           >
             <option value="">Automatic (Anthropic)</option>
             {modelProfiles.map((profile) => (
@@ -314,6 +331,29 @@ export function PanelPickerDialog({
             ))}
           </select>
           <small>Pick a model, then click Claude Code above.</small>
+        </label>
+      )}
+      {claudeAccounts.length > 0 && (
+        <label className="agent-model-picker">
+          Claude account
+          <select
+            value={selectedClaudeAccountId}
+            onChange={(event) => {
+              setSelectedClaudeAccountId(event.target.value);
+              if (event.target.value) setSelectedModelProfileId("");
+            }}
+          >
+            <option value="">Use signed-in account</option>
+            {claudeAccounts
+              .filter((account) => account.hasValue)
+              .map((account) => (
+                <option key={account.id} value={account.id}>
+                  {account.label}
+                  {account.hint ? ` · ${account.hint}` : ""}
+                </option>
+              ))}
+          </select>
+          <small>Applies to the next Claude Code session.</small>
         </label>
       )}
       <div className="dialog-footer">

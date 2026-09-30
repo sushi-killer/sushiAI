@@ -142,6 +142,10 @@ async function stageModelSettings(modelProfileId) {
   id(modelProfileId);
   return modelProviders.stageSettings(modelProfileId, os.tmpdir());
 }
+async function stageClaudeAccount(accountId) {
+  id(accountId);
+  return modelProviders.stageClaudeAccount(accountId, os.tmpdir());
+}
 function send(channel, value) {
   if (mainWindow && !mainWindow.isDestroyed())
     mainWindow.webContents.send(channel, value);
@@ -189,6 +193,7 @@ const terminalIpc = registerTerminalIpc({
   terminals,
   terminalPending,
   stageModelSettings,
+  stageClaudeAccount,
 });
 const chatIpc = registerChatIpc({
   handle,

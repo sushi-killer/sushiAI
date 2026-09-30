@@ -67,8 +67,27 @@ pub(super) async fn run_harness(
     mut detector: Option<LoopDetector>,
 ) -> Result<harness::RunOutcome, RunError> {
     let started_at = now_ms();
-    let argv = harness::build_argv(req);
-    let bin = resolve_binary(req.harness);
+    let mut argv = harness::build_argv(req);
+    let mut bin = resolve_binary(req.harness);
+    #[cfg(unix)]
+    if req.harness == Harness::Claude {
+        if let Some(settings_path) = req.settings_path {
+            let token_path = settings_path.with_file_name("oauth-token");
+            if token_path.is_file() {
+                let claude = bin;
+                let args = argv;
+                bin = "/bin/sh".to_string();
+                argv = vec![
+                    "-c".into(),
+                    "exec 3<\"$1\"; rm -f \"$1\"; export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; shift; exec \"$@\"".into(),
+                    "sushiai".into(),
+                    token_path.to_string_lossy().into_owned(),
+                    claude,
+                ];
+                argv.extend(args);
+            }
+        }
+    }
     // Asked before the run, not after, so a stand-in binary that logs its
     // argv per invocation ends with the run's own.
     let codex_version = match req.harness {

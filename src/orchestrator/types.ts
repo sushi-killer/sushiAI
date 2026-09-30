@@ -13,6 +13,8 @@ export type Route = {
   /** Claude only: routes through a custom model provider instead of the
    * Anthropic API. */
   profileId?: string;
+  /** Claude only: account selected for this route. */
+  accountId?: string;
   /** 1-3. Auto review never uses a route weaker than the implementer's;
    * unset uses a default from the model (haiku/luna/mini 1, opus 3, else 2). */
   strength?: number;

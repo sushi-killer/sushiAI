@@ -636,6 +636,7 @@ class OrchestratorService {
       ),
     ];
     const profiles = {};
+    const accounts = {};
     for (const id of profileIds) {
       try {
         const { settings: env, key } = await providers.resolveEnv(id);
@@ -645,10 +646,21 @@ class OrchestratorService {
         // to the tier's plain route, per the profile-fallback contract.
       }
     }
+    for (const id of new Set(
+      (settings?.routes || [])
+        .map((route) => route.accountId)
+        .filter((id) => typeof id === "string" && id),
+    )) {
+      try {
+        accounts[id] = await providers.resolveClaudeAccount(id);
+      } catch {
+        // An account without a saved value is omitted and uses the host login.
+      }
+    }
     await orchdRequest(
       this.socketPath,
       "secrets.set",
-      { profiles },
+      { profiles, accounts },
       this.token,
       5000,
     ).catch(() => {});

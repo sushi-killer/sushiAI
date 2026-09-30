@@ -126,11 +126,14 @@ impl App {
         struct P {
             #[serde(default)]
             profiles: HashMap<String, ProfileSecret>,
+            #[serde(default)]
+            accounts: HashMap<String, AccountSecret>,
         }
         let p: P = serde_json::from_value(params).unwrap_or_default();
         let mut secrets = self.secrets.write().unwrap();
         *secrets = Secrets {
             profiles: p.profiles,
+            accounts: p.accounts,
         };
         Ok(json!({}))
     }

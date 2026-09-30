@@ -98,6 +98,113 @@ class ModelProviders {
     });
   }
 
+  async listClaudeAccounts() {
+    const accounts = await this.#readJson(this.accountsFileFor());
+    const secrets = await this.#readJson(this.secretsFile);
+    return Object.values(accounts).map((account) => ({
+      ...account,
+      hasValue: Boolean(secrets[`claude-account:${account.id}`]),
+      hint: secrets[`claude-account:${account.id}`]?.hint || "",
+    }));
+  }
+
+  accountsFileFor() {
+    return path.join(path.dirname(this.providersFile), "claude-accounts.json");
+  }
+
+  async upsertClaudeAccount({ id, label, kind }) {
+    if (!["subscription", "apiKey"].includes(kind))
+      throw new Error("Unknown Claude account kind.");
+    const accounts = await this.#readJson(this.accountsFileFor());
+    const accountId = id && accounts[id] ? id : randomUUID();
+    const existing = accounts[accountId];
+    accounts[accountId] = {
+      id: accountId,
+      label: String(label || "Claude account").slice(0, 80),
+      kind,
+    };
+    await this.#writeJson(this.accountsFileFor(), accounts);
+    return { ...accounts[accountId], hint: existing?.hint || "" };
+  }
+
+  async setClaudeAccountValue(id, value) {
+    if (typeof value !== "string" || !value.trim())
+      throw new Error("Paste a Claude token or API key.");
+    if (!this.#encryptedBackend())
+      throw new Error("Secure storage is unavailable.");
+    const accounts = await this.#readJson(this.accountsFileFor());
+    if (!accounts[id]) throw new Error("Unknown Claude account.");
+    const secrets = await this.#readJson(this.secretsFile);
+    const trimmed = value.trim();
+    const backend = this.#encryptedBackend();
+    const key = `claude-account:${id}`;
+    secrets[key] = {
+      v: 1,
+      backend,
+      ct: this.safeStorage.encryptString(trimmed).toString("base64"),
+      hint: keyHint(trimmed),
+    };
+    accounts[id].hint = keyHint(trimmed);
+    await this.#writeJson(this.secretsFile, secrets);
+    await this.#writeJson(this.accountsFileFor(), accounts);
+    return { hasValue: true, hint: keyHint(trimmed) };
+  }
+
+  async deleteClaudeAccount(id) {
+    const accounts = await this.#readJson(this.accountsFileFor());
+    delete accounts[id];
+    await this.#writeJson(this.accountsFileFor(), accounts);
+    const secrets = await this.#readJson(this.secretsFile);
+    delete secrets[`claude-account:${id}`];
+    await this.#writeJson(this.secretsFile, secrets);
+  }
+
+  async stageClaudeAccount(id, dir) {
+    const accounts = await this.#readJson(this.accountsFileFor());
+    const account = accounts[id];
+    if (!account) throw new Error("Unknown Claude account.");
+    const secrets = await this.#readJson(this.secretsFile);
+    const secret = secrets[`claude-account:${id}`];
+    if (!secret) throw new Error(`Add a value for ${account.label} first.`);
+    const bytes = Buffer.from(secret.ct, "base64");
+    const value =
+      secret.backend === "plain"
+        ? bytes.toString("utf8")
+        : this.safeStorage.decryptString(bytes);
+    const base = path.join(dir, `sushiai-claude-${randomUUID()}`);
+    if (account.kind === "subscription") {
+      await fs.writeFile(`${base}.token`, value, { mode: 0o600 });
+      return { kind: account.kind, tokenPath: `${base}.token` };
+    }
+    await fs.writeFile(`${base}.key`, value, { mode: 0o600 });
+    await fs.writeFile(
+      `${base}.json`,
+      JSON.stringify({ apiKeyHelper: `cat '${base}.key'` }),
+      { mode: 0o600 },
+    );
+    return {
+      kind: account.kind,
+      settingsPath: `${base}.json`,
+      keyPath: `${base}.key`,
+    };
+  }
+
+  async resolveClaudeAccount(id) {
+    const accounts = await this.#readJson(this.accountsFileFor());
+    const account = accounts[id];
+    if (!account) throw new Error("Unknown Claude account.");
+    const secret = (await this.#readJson(this.secretsFile))[
+      `claude-account:${id}`
+    ];
+    if (!secret) throw new Error(`Add a value for ${account.label} first.`);
+    const bytes = Buffer.from(secret.ct, "base64");
+    const value =
+      secret.backend === "plain"
+        ? bytes.toString("utf8")
+        : this.safeStorage.decryptString(bytes);
+    return { kind: account.kind, value };
+  }
+
   async upsertProvider({ id, kind, label, baseUrl }) {
     if (!PRESETS[kind] && kind !== "custom")
       throw new Error("Unknown provider kind.");

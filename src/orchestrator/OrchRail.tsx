@@ -187,15 +187,13 @@ export function OrchRail({
           selected={is("home")}
           onClick={() => onOpen({ kind: "home" })}
         />
-        {(planCount > 0 || is("plan") || is("brainstorm")) && (
-          <NavRow
-            icon={<ListTodo size={14} />}
-            label="Plan"
-            selected={is("plan") || is("brainstorm")}
-            trailing={planCount || ""}
-            onClick={() => onOpen({ kind: "plan" })}
-          />
-        )}
+        <NavRow
+          icon={<ListTodo size={14} />}
+          label="Plan"
+          selected={is("plan") || is("brainstorm")}
+          trailing={planCount || ""}
+          onClick={() => onOpen({ kind: "plan" })}
+        />
         <NavRow
           icon={<MessageSquare size={14} />}
           label="Chat"

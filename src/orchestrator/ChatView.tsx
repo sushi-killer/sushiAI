@@ -15,7 +15,9 @@ import {
   groupSessions,
   matchesQuery,
   isUnread,
+  composeAnswers,
   composerPlaceholder,
+  pickedAnswers,
   lastMessageText,
   modeLabel,
   sessionTime,
@@ -142,6 +144,19 @@ function OrchestratorTurn({
   const questions = (message.questions ?? []).filter(
     (q) => q.text !== message.text || q.options.length > 0,
   );
+  // Two or more questions are answered together: chips only choose, the
+  // button sends. A single question sends on its chip.
+  const together = questions.length > 1;
+  const [picks, setPicks] = useState<(string | undefined)[]>([]);
+  const sentPicks = pickedAnswers(questions, nextUser);
+  const shown = nextUser !== undefined ? sentPicks : picks;
+  const answers = composeAnswers(questions, picks);
+  const choose = (index: number, option: string) =>
+    setPicks((current) =>
+      questions.map((_, i) =>
+        i !== index ? current[i] : current[i] === option ? undefined : option,
+      ),
+    );
   return (
     <div className="ochat-orch">
       <Avatar />
@@ -150,7 +165,7 @@ function OrchestratorTurn({
         <div className="ochat-orch-text">
           <RichText text={message.text} />
         </div>
-        {questions.map((question) => (
+        {questions.map((question, index) => (
           <div key={question.text} className="ochat-question">
             {question.text !== message.text && (
               <p className="ochat-question-text">{question.text}</p>
@@ -160,9 +175,15 @@ function OrchestratorTurn({
                 {question.options.map((option) => (
                   <Chip
                     key={option}
-                    selected={nextUser === option}
-                    disabled={busy}
-                    onClick={() => onPick(option, message.mode ?? "chat")}
+                    selected={
+                      together ? shown[index] === option : nextUser === option
+                    }
+                    disabled={busy || (together && nextUser !== undefined)}
+                    onClick={() =>
+                      together
+                        ? choose(index, option)
+                        : onPick(option, message.mode ?? "chat")
+                    }
                   >
                     {option}
                   </Chip>
@@ -171,6 +192,18 @@ function OrchestratorTurn({
             )}
           </div>
         ))}
+        {together && nextUser === undefined && (
+          <div>
+            <button
+              type="button"
+              className="ui-button primary"
+              disabled={busy || answers === null}
+              onClick={() => answers && onPick(answers, message.mode ?? "chat")}
+            >
+              Send answers
+            </button>
+          </div>
+        )}
         {message.proposal && (
           <ProposalCard
             cwd={cwd}

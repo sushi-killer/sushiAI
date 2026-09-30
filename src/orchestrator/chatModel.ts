@@ -4,6 +4,7 @@ import type {
   ChatMessage,
   ChatMode,
   ChatProposal,
+  ChatQuestion,
   ProposedTask,
   Task,
 } from "./types";
@@ -232,4 +233,31 @@ export function proposalRequest(
     skip: skip.filter((n) => !indices.includes(n)),
     backlog,
   };
+}
+
+/** The one message that answers several questions: `<question>: <answer>` per
+ * line, unanswered questions left out. `null` when nothing is answered. */
+export function composeAnswers(
+  questions: ChatQuestion[],
+  picks: (string | undefined)[],
+): string | null {
+  const lines = questions.flatMap((q, i) =>
+    picks[i] ? [`${q.text}: ${picks[i]}`] : [],
+  );
+  return lines.length ? lines.join("\n") : null;
+}
+
+/** What a sent answers message picked, per question, read back from its text
+ * so the chips stay selected after a reload. */
+export function pickedAnswers(
+  questions: ChatQuestion[],
+  sent: string | undefined,
+): (string | undefined)[] {
+  const lines = (sent ?? "").split("\n");
+  return questions.map((q) => {
+    const prefix = `${q.text}: `;
+    const line = lines.find((l) => l.startsWith(prefix));
+    const answer = line?.slice(prefix.length);
+    return answer && q.options.includes(answer) ? answer : undefined;
+  });
 }

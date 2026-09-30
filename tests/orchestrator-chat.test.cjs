@@ -279,3 +279,26 @@ test("session previews and unread marks", async () => {
   assert.equal(isUnread({ updatedAt: 150 }, 200, 100), false);
   assert.equal(isUnread({}, undefined, 0), false);
 });
+
+test("several questions are answered as one message and read back from it", async () => {
+  const { composeAnswers, pickedAnswers } = await model;
+  const qs = [
+    { text: "Which db?", options: ["pg", "sqlite"] },
+    { text: "Which host?", options: ["local", "ssh"] },
+    { text: "Docs?", options: ["yes", "no"] },
+  ];
+  assert.equal(composeAnswers(qs, []), null);
+  const sent = composeAnswers(qs, ["sqlite", undefined, "no"]);
+  assert.equal(sent, "Which db?: sqlite\nDocs?: no");
+  assert.deepEqual(pickedAnswers(qs, sent), ["sqlite", undefined, "no"]);
+  assert.deepEqual(pickedAnswers(qs, undefined), [
+    undefined,
+    undefined,
+    undefined,
+  ]);
+  assert.deepEqual(pickedAnswers(qs, "Which db?: mysql"), [
+    undefined,
+    undefined,
+    undefined,
+  ]);
+});

@@ -388,9 +388,55 @@ fn earlier_images(impl_rest: &str, review: &str) -> (Setup, String) {
         json!({
             "criteria": ["The panel is open -- check: screenshot under artifacts/"],
             "verify": ["test -f SECOND"],
+            "screenshot": "true",
         }),
     );
     (s, id)
+}
+
+#[test]
+fn a_screenshot_command_that_leaves_the_named_images_missing_still_fails_the_attempt() {
+    let s = setup(&[], "");
+    let id = create(
+        &s,
+        json!({
+            "criteria": ["The panel is open -- check: screenshot artifacts/panel.png"],
+            "screenshot": "mkdir -p artifacts && echo png > artifacts/other.png",
+        }),
+    );
+    let task = finished(&s, &id);
+    assert_eq!(task["status"], "waiting", "{task}");
+    let first = implements(&task)[0];
+    assert_eq!(first["failure"]["kind"], "evidence", "{task}");
+    let detail = first["failure"]["detail"].as_str().unwrap();
+    assert!(detail.contains("artifacts/panel.png"), "{detail}");
+    assert!(detail.contains("screenshot command"), "{detail}");
+    cleanup(s, &task);
+}
+
+#[test]
+fn a_visual_criterion_without_any_screenshot_command_does_not_fail_the_attempt() {
+    let s = setup(&[], "");
+    let id = create(
+        &s,
+        json!({"criteria": ["The panel is open -- check: screenshot under artifacts/"]}),
+    );
+    let task = finished(&s, &id);
+    assert_eq!(task["status"], "done", "{task}");
+    let attempts = implements(&task);
+    assert_eq!(attempts.len(), 1, "{task}");
+    assert!(attempts[0]["failure"].is_null(), "{task}");
+    assert!(
+        decisions(&task).contains("no screenshot command is set"),
+        "{task}"
+    );
+    let ups = task["briefCheck"]["followUps"].as_array().unwrap();
+    assert!(
+        ups.iter()
+            .any(|u| u.as_str().unwrap().contains("The panel is open")),
+        "{task}"
+    );
+    cleanup(s, &task);
 }
 
 #[test]

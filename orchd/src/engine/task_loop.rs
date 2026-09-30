@@ -1625,18 +1625,38 @@ pub(super) async fn run_task_loop(
             _ => task.attempts[idx].evidence.is_empty(),
         };
         if !visual.is_empty() && evidence_missing && task.brief_check.screenshot.is_none() {
+            // Nothing in the repo can take the picture: failing the attempt
+            // would only burn it on a gate it cannot pass. Say so once, hand
+            // the criteria to the report as follow-ups, and let review rule
+            // on what it can.
+            let note = format!(
+                "Orchestrator: no screenshot command is set and no image was saved, so the visual criteria are judged without images: {}",
+                visual.join("; ")
+            );
+            let follow: Vec<String> = visual
+                .iter()
+                .map(|c| format!("Check by eye, no image evidence was captured: {c}"))
+                .collect();
+            if !task.decisions.contains(&note) {
+                task.decisions.push(note);
+                add_follow_ups(&mut task, follow);
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+            }
+        } else if !visual.is_empty() && evidence_missing {
             let criteria = visual
                 .iter()
                 .map(|c| format!("- {c}"))
                 .collect::<Vec<_>>()
                 .join("\n");
+            let command = task.brief_check.screenshot.clone().unwrap_or_default();
             let mut detail = if missing_named.is_empty() {
                 format!(
-                    "These criteria are visual and no image was saved under artifacts/ during this attempt:\n{criteria}\nSave one screenshot per criterion under artifacts/ (for example artifacts/<name>.png) and look at it before finishing."
+                    "The screenshot command `{command}` ran, but these criteria are visual and no image was saved under artifacts/ during this attempt:\n{criteria}\nSave one screenshot per criterion under artifacts/ (for example artifacts/<name>.png) and look at it before finishing."
                 )
             } else {
                 format!(
-                    "These criteria are visual and the images they name were not saved during this attempt: {}\n{criteria}\nSave each named file and look at it before finishing; other images under artifacts/ are not evidence.",
+                    "The screenshot command `{command}` ran, but these criteria are visual and the images they name were not saved during this attempt: {}\n{criteria}\nSave each named file and look at it before finishing; other images under artifacts/ are not evidence.",
                     missing_named.join(", ")
                 )
             };

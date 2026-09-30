@@ -219,6 +219,17 @@ fn initialize_tools_list_and_tools_call_over_stdio() {
         );
     }
     assert_eq!(names.len(), 22, "unexpected extra tools: {names:?}");
+    for (tool, key) in [
+        ("task_create", "screenshot"),
+        ("task_create", "paths"),
+        ("task_amend", "screenshot"),
+    ] {
+        let schema = tools.iter().find(|t| t["name"] == tool).unwrap();
+        assert!(
+            !schema["inputSchema"]["properties"][key].is_null(),
+            "{tool} does not expose {key}"
+        );
+    }
     for tool in tools {
         assert!(
             !tool["inputSchema"]["properties"].is_null(),

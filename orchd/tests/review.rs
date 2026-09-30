@@ -478,6 +478,8 @@ fn a_visual_criterion_needs_a_saved_image_and_the_copies_outlive_the_worktree() 
             "repo": repo.path().to_str().unwrap(),
             "title": "Visual",
             "goal": "Change the panel",
+            // A command that runs but leaves no image: the gate still holds.
+            "screenshot": "true",
             "criteria": ["The panel shows thumbnails -- check: screenshot under artifacts/"],
             "verify": ["true"],
             "start": true,
@@ -495,7 +497,9 @@ fn a_visual_criterion_needs_a_saved_image_and_the_copies_outlive_the_worktree() 
     assert_eq!(implement[0]["failure"]["kind"], "evidence", "{settled}");
     let feedback = implement[0]["failure"]["detail"].as_str().unwrap();
     assert!(
-        feedback.contains("The panel shows thumbnails") && feedback.contains("under artifacts/"),
+        feedback.contains("The panel shows thumbnails")
+            && feedback.contains("under artifacts/")
+            && feedback.contains("screenshot command `true` ran"),
         "{feedback}"
     );
     assert!(implement[0].get("evidence").is_none(), "{settled}");
@@ -579,6 +583,7 @@ fn run_retry_task(second_file: &str) -> (Daemon, serde_json::Value, String) {
             "repo": repo.path().to_str().unwrap(),
             "title": "Visual retry",
             "goal": "Change the panel",
+            "screenshot": "true",
             "criteria": ["The panel shows thumbnails -- check: screenshot under artifacts/"],
             "verify": ["true"],
             "start": true,
@@ -691,6 +696,7 @@ fn a_gif_or_svg_saved_for_a_visual_criterion_counts_as_evidence() {
             "repo": repo.path().to_str().unwrap(),
             "title": "Visual svg",
             "goal": "Change the panel",
+            "screenshot": "true",
             "criteria": ["Shows a chart -- check: svg image under artifacts/"],
             "verify": ["true"],
             "start": true,

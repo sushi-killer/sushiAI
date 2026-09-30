@@ -295,6 +295,8 @@ pub(super) struct Amendment {
     pub visual_criteria: Vec<String>,
     pub verify: Option<Vec<String>>,
     pub final_verify: Option<Vec<String>>,
+    /// The screenshot command; an empty string removes it.
+    pub screenshot: Option<String>,
     pub checks: Option<Vec<Check>>,
     pub held_out: Option<Option<Check>>,
 }
@@ -316,6 +318,9 @@ impl Amendment {
         if self.final_verify.is_some() {
             names.push("finalVerify");
         }
+        if self.screenshot.is_some() {
+            names.push("screenshot");
+        }
         if self.checks.is_some() {
             names.push("checks");
         }
@@ -333,6 +338,7 @@ impl Amendment {
         }
         self.verify = later.verify.or(self.verify.take());
         self.final_verify = later.final_verify.or(self.final_verify.take());
+        self.screenshot = later.screenshot.or(self.screenshot.take());
         self.checks = later.checks.or(self.checks.take());
         self.held_out = later.held_out.or(self.held_out.take());
     }
@@ -350,6 +356,10 @@ impl Amendment {
         }
         if let Some(v) = self.final_verify {
             task.final_verify = v;
+        }
+        if let Some(v) = self.screenshot {
+            let v = v.trim();
+            task.brief_check.screenshot = (!v.is_empty()).then(|| v.to_string());
         }
         let len = task.criteria.len();
         if let Some(v) = self.checks {

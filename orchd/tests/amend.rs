@@ -179,3 +179,37 @@ fn amending_criteria_replaces_the_visual_flags_with_the_amended_ones() {
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
 }
+
+#[test]
+fn amending_the_screenshot_command_sets_and_clears_it() {
+    let daemon = Daemon::spawn(&[]);
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Shot amend",
+            "goal": "Something",
+            "criteria": ["old"],
+            "verify": ["true"],
+            "start": false,
+        }),
+    );
+    let id = task["id"].as_str().unwrap().to_string();
+
+    let amended = daemon.request(
+        "task.amend",
+        json!({"id": id, "screenshot": " npm run shot "}),
+    );
+    assert_eq!(amended["amended"], json!(["screenshot"]), "{amended}");
+    let saved = daemon.request("task.get", json!({"id": id}));
+    assert_eq!(saved["briefCheck"]["screenshot"], "npm run shot", "{saved}");
+
+    daemon.request("task.amend", json!({"id": id, "screenshot": ""}));
+    let saved = daemon.request("task.get", json!({"id": id}));
+    assert!(saved["briefCheck"].get("screenshot").is_none(), "{saved}");
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}

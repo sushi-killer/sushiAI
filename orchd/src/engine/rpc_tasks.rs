@@ -1020,12 +1020,13 @@ impl App {
             visual_criteria,
             verify: field(&params, "verify", "an array of strings")?,
             final_verify: field(&params, "finalVerify", "an array of strings")?,
+            screenshot: field(&params, "screenshot", "a string")?,
             checks: field(&params, "checks", "an array of {criterion, run} objects")?,
             held_out,
         };
         if amendment.is_empty() {
             return Err(
-                "task.amend needs at least one of criteria, verify, finalVerify, checks, heldOut"
+                "task.amend needs at least one of criteria, verify, finalVerify, screenshot, checks, heldOut"
                     .to_string(),
             );
         }

@@ -178,6 +178,8 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "criteria": {"type": "array", "items": {"type": "string"}},
                     "verify": {"type": "array", "items": {"type": "string"}},
                     "finalVerify": {"type": "array", "items": {"type": "string"}, "description": "Slow checks (full CI, desktop smoke) run once, after review passes."},
+                    "screenshot": {"type": "string", "description": "Repo command that captures the screenshot evidence for a UI task; orchd runs it after verify passes and saves the images. The attempt still fails its evidence gate when the images the visual criteria name are missing after it ran. Leave out when the repo has no such command."},
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "Repo-relative files or directories the task edits; it waits while another live task on the same base holds any of them."},
                     "branch": {"type": "string"},
                     "base": {"type": "string", "description": "Branch or commit to start from; defaults to the repo's current HEAD."},
                     "variant": {"type": "object", "description": "Experiment flags for this task only, over the settings defaults: stallTimeoutSecs (0 = off), reviewEvidence, advisor (bool), loopDetect (bool; on by default: stops an attempt that repeats itself), groundedChecks (bool; the planner writes an executable check per criterion, the ones that fail on the base gate every attempt, and one hidden held-out check is run after verify); bestOf (2 = on: on the hard tier the first implement attempt runs twice at once in two worktrees, on the tier route and on bestOfRoute, default the first route of the other harness; verify and the checks pick, the other-family reviewer picks when both pass, the loser is removed and both costs count; 0/1 = off); bestOfRoute (route id of the second candidate); plannerRoute (route id the plan stage runs on instead of the settings' planner) and tierRoutes (object tier -> route id, e.g. {\"hard\": \"claude-sonnet\"}, replacing the settings' tier route for implementing; must name configured routes); maxCostUsd (dollar budget; the task waits for the owner before its next run once spent, 0 = none); maxAttemptCostUsd (dollar cap on one implement attempt, stopped mid-run once its streamed usage passes it and retried, 0 = none). Create the same task twice with different variants to A/B them."},
@@ -248,7 +250,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
         (
             "task_amend",
             "task.amend",
-            "Replace a running, waiting, queued or stopped task's criteria, verify, finalVerify, checks or heldOut (each field you pass replaces the task's; at least one is required). A live loop applies it at its next attempt boundary, never mid-run. The task gains an `Amended: <field names>` decision line. With variant.groundedChecks, amended checks and heldOut are re-run on the base commit and only those failing there gate.",
+            "Replace a running, waiting, queued or stopped task's criteria, verify, finalVerify, screenshot, checks or heldOut (each field you pass replaces the task's; at least one is required). A live loop applies it at its next attempt boundary, never mid-run. The task gains an `Amended: <field names>` decision line. With variant.groundedChecks, amended checks and heldOut are re-run on the base commit and only those failing there gate.",
             json!({
                 "type": "object",
                 "properties": {
@@ -256,6 +258,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "criteria": {"type": "array", "items": {"oneOf": [{"type": "string"}, {"type": "object", "properties": {"text": {"type": "string"}, "visual": {"type": "boolean", "description": "True only when the criterion is proven by looking at a saved image; never for a criterion checked by a command."}}, "required": ["text"]}]}},
                     "verify": {"type": "array", "items": {"type": "string"}},
                     "finalVerify": {"type": "array", "items": {"type": "string"}, "description": "Slow checks run once, after review passes."},
+                    "screenshot": {"type": "string", "description": "Replaces the repo command that captures the screenshot evidence; an empty string removes it."},
                     "checks": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "integer", "description": "0-based index into criteria."}, "run": {"type": "string"}}, "required": ["criterion", "run"]}, "description": "Replaces the task's checks; a criterion index out of range is rejected."},
                     "heldOut": {"type": ["object", "null"], "properties": {"criterion": {"type": "integer"}, "run": {"type": "string"}}, "required": ["criterion", "run"], "description": "Replaces the held-out check; null removes it."},
                 },

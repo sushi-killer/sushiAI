@@ -886,7 +886,7 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
     Some((result, recorded_as_pass))
 }
 
-const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise.\n\nWhen the work changes what a screen shows, the goal must name the exact repo command that produces its screenshot evidence -- look for one before assuming none exists, so the implementer never has to rediscover it. Also put that command in the plan's `screenshot` field: orchd then runs it itself after verify passes and saves the images.\n\nEvery `-- check:` must be something this repository can actually run today (its test runner, harness or script exists); do not ask for a kind of test the repo has no harness for.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
+const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise.\n\nWhen the work changes what a screen shows, the goal must name the exact repo command that produces its screenshot evidence -- look for one before assuming none exists, so the implementer never has to rediscover it. Also put that command in the plan's `screenshot` field: orchd then runs it itself after verify passes and saves the images. Take it only from what the repository already has (package.json scripts, a Makefile, a scripts directory, its own docs); when it has none, leave `screenshot` empty rather than inventing one.\n\nEvery `-- check:` must be something this repository can actually run today (its test runner, harness or script exists); do not ask for a kind of test the repo has no harness for.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
 
 const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"tier\":\"mechanical|standard|hard\",\"criteria\":[],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"]}]}\n```\n";
 
@@ -925,6 +925,7 @@ fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) ->
     format = format.replace("\"verify\":[],", "\"verify\":[],\"paths\":[\"src/...\"],");
     extra.push_str(&format!("\n\n{PLAN_FINAL_VERIFY}"));
     format = format.replace("\"verify\":[],", "\"verify\":[],\"finalVerify\":[],");
+    format = format.replace("\"verify\":[],", "\"verify\":[],\"screenshot\":\"\",");
     if variant.grounded_checks {
         extra.push_str(&format!("\n\n{PLAN_CHECKS}"));
         format = format.replace(
@@ -2082,6 +2083,16 @@ mod tests {
     fn the_plan_brief_asks_for_the_exact_screenshot_command_on_a_screen_change() {
         let brief = build_plan_brief("r", &Variant::default(), "");
         assert!(brief.contains("name the exact repo command that produces its screenshot evidence"));
+    }
+
+    #[test]
+    fn the_plan_format_has_a_screenshot_key_the_parser_reads() {
+        let brief = build_plan_brief("r", &Variant::default(), "");
+        assert!(brief.contains("\"screenshot\":\"\""), "{brief}");
+        assert!(brief.contains("leave `screenshot` empty rather than inventing one"));
+        let text = "```sushi-plan\n{\"title\":\"t\",\"screenshot\":\"npm run shot\"}\n```";
+        let draft = parse_plan(text).expect("parses");
+        assert_eq!(draft.screenshot.as_deref(), Some("npm run shot"));
     }
 
     #[test]

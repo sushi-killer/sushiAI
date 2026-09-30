@@ -244,6 +244,11 @@ function isStalePing(ping, actualBinaryMtimeMs, staleForMs = 0) {
 /** Polls `killFn` (default: a zero-signal `kill`, which throws once the pid
  * is gone) until the process exits or `timeoutMs` passes. Best-effort: never
  * rejects, since a stuck old process just means the next call retries. */
+// Task statuses (orchd/src/model.rs TaskStatus) that need no daemon; every
+// other one (drafting, queued, running, waiting, landing) does. An archived
+// task never needs one.
+const FINISHED_STATUSES = new Set(["done", "failed", "stopped"]);
+
 async function waitForExit(
   pid,
   {
@@ -401,7 +406,8 @@ class OrchestratorService {
     spawnRetries = 50,
     spawnIntervalMs = 100,
     stopDaemonOnQuit = false,
-    quitTimeoutMs = 2000,
+    // orchd stops its agents on SIGTERM (5 s escalation) before it exits.
+    quitTimeoutMs = 7000,
     host = LOCAL_HOST,
     remote = null,
   }) {
@@ -685,6 +691,46 @@ class OrchestratorService {
       return;
     }
     if (!this.closed && epoch === this.epoch && !this.looping) this.connect();
+  }
+
+  /** True when a task on disk is not finished: such a task needs the daemon
+   * (landing retries, autopilot, the badge), so launch starts it. Reads only
+   * each small task.json; a remote host never scans. */
+  async hasPendingTasks() {
+    if (this.remote || !this.dataDir) return false;
+    const root = path.join(this.dataDir, "tasks");
+    let names;
+    try {
+      names = await fs.readdir(root);
+    } catch {
+      return false;
+    }
+    for (const name of names) {
+      try {
+        const file = path.join(root, name, "task.json");
+        if ((await fs.stat(file)).size > 1_000_000) continue;
+        const { status, archived } = JSON.parse(
+          await fs.readFile(file, "utf8"),
+        );
+        if (
+          typeof status === "string" &&
+          !archived &&
+          !FINISHED_STATUSES.has(status)
+        )
+          return true;
+      } catch {
+        // No task.json or unreadable: not a pending task.
+      }
+    }
+    return false;
+  }
+
+  /** Treats launch as the first use: starts the daemon (or attaches) and the
+   * event relay. */
+  async resume() {
+    await this.#ensureRunning();
+    this.used = true;
+    if (!this.looping && !this.closed) this.connect();
   }
 
   async #pingRunning() {
@@ -1105,6 +1151,8 @@ function registerOrchestratorExtension({ handle, extensions, ...options }) {
     await extensions.ready;
     started = true;
     await apply();
+    if (hosts.on && (await hosts.local.hasPendingTasks()))
+      await hosts.local.resume().catch(() => {});
   };
   return hosts;
 }

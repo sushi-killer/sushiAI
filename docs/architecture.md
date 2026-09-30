@@ -31,7 +31,7 @@ flowchart TB
     subgraph main["Main process - electron/"]
       direction TB
       ipc["ipc/* - app, chat,<br/>terminals, projects"]
-      orchSvc["orchestrator.cjs<br/>spawns + proxies orchd"]
+      orchSvc["orchestrator.cjs<br/>spawns + proxies orchd; the Extensions switch<br/>(builtin.orchestrator, the only disableable built-in)<br/>calls OrchestratorHosts.setEnabled, and while off<br/>every IPC rejects with ORCHESTRATOR_OFF"]
       extMgr["extensions/*<br/>manifest validator"]
       herdrIpc["herdr.cjs, connections.cjs"]
       remoteSvc["orchestrator-remote.cjs<br/>install, start, forward, preflight<br/>per SSH profile"]
@@ -58,7 +58,7 @@ flowchart TB
   attention --> macos
   wsSnap & winState --> profile
 
-  subgraph orchd["orchd daemon - Rust, started on first use (or attached if already running), stopped when the app quits, and it exits when its data dir is deleted"]
+  subgraph orchd["orchd daemon - Rust, started on first use (or at launch when tasks are still pending on disk; attached if already running), stopped on quit only when this app spawned it (an attached one keeps running), and it exits when its data dir is deleted"]
     direction LR
     proto["protocol.rs<br/>NDJSON socket + token"]
     engine["engine/<br/>task loop, gates, routing"]

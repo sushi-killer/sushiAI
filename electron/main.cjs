@@ -511,6 +511,10 @@ app.on("before-quit", (event) => {
   updates?.close();
   attention.close();
   mascot.destroy();
+  // The daemon may take several seconds to stop its agents; the app should
+  // look closed meanwhile, not frozen.
+  for (const window of BrowserWindow.getAllWindows())
+    if (!window.isDestroyed()) window.hide();
   preview?.close();
   terminalIpc.close();
   for (const pending of terminalPending.values()) pending.cancelled = true;

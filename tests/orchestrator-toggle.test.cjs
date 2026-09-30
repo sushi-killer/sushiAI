@@ -227,3 +227,63 @@ test("turning it off stops the local daemon and quits every remote host; turning
   await hosts.setEnabled(true);
   assert.deepEqual(events.slice(4), ["local.attach", "ssh:box.create"]);
 });
+
+async function writeTask(data, id, task) {
+  const dir = path.join(data, "tasks", id);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, "task.json"), JSON.stringify(task));
+}
+
+test("launch spawns orchd when a task on disk is still pending", async (t) => {
+  const s = await setup(t, { on: true });
+  await writeTask(s.data, "t1", { id: "t1", status: "done" });
+  await writeTask(s.data, "t2", { id: "t2", status: "landing" });
+  await s.hosts.start();
+  const pid = await s.readPid();
+  assert.ok(pid);
+  assert.equal(alive(pid), true);
+  await waitUntil(() =>
+    s.events.some(([channel]) => channel === "orchestrator-event"),
+  );
+});
+
+test("launch spawns nothing when every task on disk is finished or archived", async (t) => {
+  const s = await setup(t, { on: true });
+  await writeTask(s.data, "t1", { id: "t1", status: "done" });
+  await writeTask(s.data, "t2", { id: "t2", status: "failed" });
+  await writeTask(s.data, "t3", { id: "t3", status: "stopped" });
+  await writeTask(s.data, "t4", { id: "t4", status: "queued", archived: true });
+  await fs.mkdir(path.join(s.data, "tasks", "broken"), { recursive: true });
+  await s.hosts.start();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(await s.readPid(), 0);
+});
+
+test("launch spawns nothing for pending tasks while the orchestrator is off", async (t) => {
+  const s = await setup(t, { on: false });
+  await writeTask(s.data, "t1", { id: "t1", status: "running" });
+  await s.hosts.start();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(await s.readPid(), 0);
+});
+
+test("quit waits for a daemon that needs seconds to stop, without SIGKILL", async (t) => {
+  const s = await setup(t, { on: true });
+  await fs.mkdir(s.data, { recursive: true });
+  await fs.writeFile(path.join(s.data, "exit-delay"), "3000");
+  await s.hosts.start();
+  await s.handlers.orchestrator("task.list", {});
+  const pid = await s.readPid();
+  assert.equal(alive(pid), true);
+  const kill = process.kill;
+  const signals = [];
+  process.kill = (target, signal) => {
+    if (signal === "SIGKILL") signals.push(target);
+    return kill(target, signal);
+  };
+  t.after(() => (process.kill = kill));
+  await s.hosts.quit();
+  process.kill = kill;
+  assert.equal(alive(pid), false);
+  assert.deepEqual(signals, []);
+});

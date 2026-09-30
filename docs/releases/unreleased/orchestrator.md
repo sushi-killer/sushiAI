@@ -28,7 +28,7 @@
 
 ## Remote SSH hosts
 
-- Pick Local or any Connections profile at the top of the panel. The app installs orchd into `~/.sushiai/bin` on the host and drives it over the existing SSH connection, with no new open ports. The packaged app uploads its own macOS arm64 build, so the host must be an Apple silicon Mac; a source checkout can also build orchd on any host with cargo.
+- Pick Local or any Connections profile at the top of the panel. The app installs orchd into `~/.sushiai/bin` on the host and drives it over the existing SSH connection, with no new open ports. The host can be any macOS or Linux machine: the app uploads its own build when the OS and CPU match, otherwise builds orchd there from the source it ships with, using cargo (or tells you the one command that installs Rust). On an upgrade it waits for the old daemon to stop before installing the new one.
 - A setup checklist checks git and the claude and codex CLIs and marks routes that cannot run there. The remote daemon keeps running when you quit; reopening reconnects. Tasks from every host count in the Dock badge, tray, Inbox and notices.
 
 ## Settings > Orchestration

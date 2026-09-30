@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Check, RefreshCw, X } from "lucide-react";
 import {
+  buildToolsHint,
+  hostPlatform,
   preflightItems,
   routesFallbackNote,
   setupSteps,
@@ -100,6 +102,7 @@ export function RemoteSetup({
   seen,
   address,
   onRetry,
+  onInstallRust,
   onCancel,
 }: {
   host: OrchestratorHost;
@@ -107,6 +110,8 @@ export function RemoteSetup({
   seen: { states: OrchestratorHost["state"][]; since: number };
   address?: string;
   onRetry(): void;
+  /** The one button: install Rust on the host, build and start orchd. */
+  onInstallRust(): void;
   onCancel(): void;
 }) {
   const failed = host.state === "error";
@@ -115,6 +120,9 @@ export function RemoteSetup({
   const steps = setupSteps(host, setup);
   const preflight = host.preflight;
   const off = preflight ? routesFallbackNote(preflight, host.name) : "";
+  const needsRust = steps.some(
+    (step) => step.action || step.title === "Installing Rust…",
+  );
   return (
     <div className="orch-view-scroll orch-setup">
       <div className="orch-setup-head">
@@ -136,7 +144,28 @@ export function RemoteSetup({
             <div className="orch-setup-text">
               <span className="orch-setup-title">{step.title}</span>
               <span className="orch-setup-detail">{step.detail}</span>
-              {step.command && <CopyCommand command={step.command} />}
+              {step.action && (
+                <div className="orch-setup-action">
+                  <button
+                    type="button"
+                    className="ui-button primary"
+                    onClick={onInstallRust}
+                  >
+                    {step.action.label}
+                  </button>
+                  <span className="orch-setup-detail">{step.action.hint}</span>
+                </div>
+              )}
+              {step.command && (
+                <>
+                  {step.action && (
+                    <span className="orch-setup-detail">
+                      Or run this on the host yourself:
+                    </span>
+                  )}
+                  <CopyCommand command={step.command} />
+                </>
+              )}
             </div>
           </li>
         ))}
@@ -147,6 +176,11 @@ export function RemoteSetup({
           <div className="orch-setup-preflight-row">
             <PreflightRow preflight={preflight} />
           </div>
+          {preflight.cc === false && needsRust && (
+            <p className="orch-setup-preflight-note">
+              {buildToolsHint(host.platform || hostPlatform(host.detail))}
+            </p>
+          )}
           {off && <p className="orch-setup-preflight-note">{off}</p>}
         </div>
       )}

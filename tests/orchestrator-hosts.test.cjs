@@ -377,3 +377,57 @@ test("the setup errors main builds parse back into the platform and the rustup c
   assert.equal(hostPlatform(needsRustMessage("Box", "")), null);
   assert.equal(rustupCommand(needsRustMessage("Box", "")), RUSTUP_COMMAND);
 });
+
+test("a host that needs Rust gets one button, its progress, and a Retry after a failure", () => {
+  const {
+    setupSteps,
+    buildToolsHint,
+  } = require("../src/orchestrator/hosts.ts");
+  const { rustFailedMessage } = require("../electron/orchestrator-remote.cjs");
+  const seen = (states) => ({ states, elapsedMs: 5000 });
+
+  const needs = setupSteps(
+    { state: "error", detail: RUST_ERROR, name: "Devbox" },
+    seen(["connecting", "error"]),
+  );
+  assert.equal(needs[2].action.label, "Install Rust and set up");
+  assert.equal(
+    needs[2].action.hint,
+    "Installs a minimal Rust toolchain in ~/.cargo on Devbox (no sudo), then builds and starts the orchestrator.",
+  );
+  assert.equal(needs[2].command, RUSTUP_COMMAND);
+
+  const installing = setupSteps(
+    { state: "building", detail: "Installing Rust on Devbox" },
+    seen(["connecting", "error", "building"]),
+  );
+  assert.equal(installing[2].title, "Installing Rust…");
+  assert.equal(installing[2].state, "active");
+  assert.equal(installing[2].action, undefined);
+
+  const failed = setupSteps(
+    {
+      state: "error",
+      detail: rustFailedMessage("Devbox", "curl: (6) Could not resolve host"),
+      name: "Devbox",
+    },
+    seen(["connecting", "building", "error"]),
+  );
+  assert.equal(failed[2].state, "failed");
+  assert.equal(failed[2].title, "Couldn’t install Rust");
+  assert.equal(failed[2].detail, "curl: (6) Could not resolve host");
+  assert.equal(failed[2].action.label, "Retry");
+
+  // An upload host never sees it.
+  const upload = setupSteps(
+    { state: "installing", detail: "Uploading orchd to Devbox" },
+    seen(["connecting", "installing"]),
+  );
+  assert.equal(
+    upload.some((step) => step.action),
+    false,
+  );
+
+  assert.match(buildToolsHint("Darwin arm64"), /xcode-select --install/);
+  assert.match(buildToolsHint("Linux x86_64"), /build-essential/);
+});

@@ -995,6 +995,16 @@ class OrchestratorHosts {
     return service.remote.refreshPreflight();
   }
 
+  /** The owner's "Install Rust and set up": provisions the host, installing
+   * Rust there first when orchd has to be built and cargo is missing. */
+  async setup(host) {
+    if (typeof host !== "string" || host === LOCAL_HOST)
+      throw new Error("Invalid orchestrator host");
+    const service = this.#serviceFor(host);
+    await service.remote.setup();
+    return service.remote.refreshPreflight();
+  }
+
   close() {
     this.local.close();
     for (const service of this.services.values()) service.close();
@@ -1081,6 +1091,7 @@ function registerOrchestratorExtension({ handle, extensions, ...options }) {
   );
   handle("orchestrator-hosts", () => hosts.list());
   handle("orchestrator-preflight", (host) => hosts.preflight(host));
+  handle("orchestrator-host-setup", (host) => hosts.setup(host));
   handle("orchestrator-probe", (host) => hosts.probe(host));
   const apply = () =>
     hosts

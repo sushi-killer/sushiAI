@@ -28,6 +28,7 @@ const TOOLS = [
   "sleep",
   "dirname",
   "setsid",
+  "sh",
 ];
 
 async function waitUntil(check, { timeout = 8000, interval = 25 } = {}) {
@@ -53,7 +54,14 @@ function realTool(name) {
  * scenario adds), a fake ssh and a local repo whose `orchd/` the app ships. */
 async function fixture(
   t,
-  { platform = "same", cargo = false, git = true } = {},
+  {
+    platform = "same",
+    cargo = false,
+    git = true,
+    // A downloader that serves a fake rustup-init: "curl", "wget" or none.
+    downloader = null,
+    cc = false,
+  } = {},
 ) {
   const dir = await fs.mkdtemp("/tmp/orch-");
   const home = path.join(dir, "home");
@@ -93,6 +101,25 @@ async function fixture(
       `#!/bin/sh\necho "cargo $@" >> "$HOME/cargo.log"\nmkdir -p target/release && cp "${binary}" target/release/orchd\n`,
       { mode: 0o755 },
     );
+  if (cc)
+    await fs.writeFile(path.join(bin, "cc"), "#!/bin/sh\nexit 0\n", {
+      mode: 0o755,
+    });
+  if (downloader) {
+    // The installer puts a cargo under $HOME/.cargo/bin, off the PATH.
+    const template = path.join(dir, "cargo-template");
+    await fs.writeFile(
+      template,
+      `#!/bin/sh\necho "cargo-home $@" >> "$HOME/cargo.log"\nmkdir -p target/release && cp "${binary}" target/release/orchd\n`,
+      { mode: 0o755 },
+    );
+    const installer = `echo "rustup $*" >> "$HOME/rustup.log"; mkdir -p "$HOME/.cargo/bin"; cp "${template}" "$HOME/.cargo/bin/cargo"`;
+    await fs.writeFile(
+      path.join(bin, downloader),
+      `#!/bin/sh\necho "${downloader} $@" >> "$HOME/fetch.log"\ncat <<'INSTALLER'\n${installer}\nINSTALLER\n`,
+      { mode: 0o755 },
+    );
+  }
   const log = path.join(dir, "ssh.log");
   await fs.writeFile(log, "");
   const configFile = path.join(dir, "ssh.json");
@@ -304,6 +331,137 @@ test("a packaged app without cargo on a Linux host still says how to install Rus
   );
 });
 
+const exists = (file) =>
+  fs.access(file).then(
+    () => true,
+    () => false,
+  );
+
+async function rejectedNeedsRust(fx) {
+  const opened = await fx.open();
+  await assert.rejects(
+    opened.hosts.call("task.list", {}, opened.id),
+    /Rust is not installed/,
+  );
+  return opened;
+}
+
+test("one button installs Rust with curl, builds with ~/.cargo/bin/cargo and starts orchd", async (t) => {
+  const fx = await fixture(t, {
+    platform: "Linux x86_64",
+    downloader: "curl",
+    cc: true,
+  });
+  const { hosts, id, changes } = await rejectedNeedsRust(fx);
+  // Nothing is installed until the owner asks.
+  assert.equal(await exists(path.join(fx.home, "rustup.log")), false);
+  const preflight = await hosts.setup(id);
+  assert.equal(preflight.cc, true);
+  assert.match(
+    await fs.readFile(path.join(fx.home, "fetch.log"), "utf8"),
+    /curl --proto =https --tlsv1\.2 -sSf https:\/\/sh\.rustup\.rs/,
+  );
+  assert.match(
+    await fs.readFile(path.join(fx.home, "rustup.log"), "utf8"),
+    /rustup -y --profile minimal --no-modify-path/,
+  );
+  // cargo is not on the ssh PATH: the build used the one rustup installed.
+  assert.match(
+    await fs.readFile(path.join(fx.home, "cargo.log"), "utf8"),
+    /cargo-home build --release/,
+  );
+  await fs.access(path.join(fx.home, ".sushiai", "bin", "orchd"));
+  const host = hosts.list().find((h) => h.id === id);
+  assert.equal(host.state, "ready");
+  assert.ok(changes.includes("building"));
+  assert.equal((await hosts.call("task.list", {}, id))[0].id, "remote-task-1");
+});
+
+test("one button falls back to wget when the host has no curl", async (t) => {
+  const fx = await fixture(t, {
+    platform: "Linux x86_64",
+    downloader: "wget",
+  });
+  const { hosts, id } = await rejectedNeedsRust(fx);
+  await hosts.setup(id);
+  assert.match(
+    await fs.readFile(path.join(fx.home, "fetch.log"), "utf8"),
+    /wget -qO- https:\/\/sh\.rustup\.rs/,
+  );
+  assert.equal(hosts.list().find((h) => h.id === id).state, "ready");
+});
+
+test("one button says so when the host has neither curl nor wget, and Retry runs it again", async (t) => {
+  const fx = await fixture(t, { platform: "Linux x86_64" });
+  const { hosts, id } = await rejectedNeedsRust(fx);
+  await assert.rejects(
+    hosts.setup(id),
+    /Installing Rust on Box failed: Neither curl nor wget is installed/,
+  );
+  const failed = hosts.list().find((h) => h.id === id);
+  assert.equal(failed.state, "error");
+  assert.match(failed.detail, /^Installing Rust on Box failed:/);
+  assert.equal(
+    await exists(path.join(fx.home, ".cargo", "bin", "cargo")),
+    false,
+  );
+  // A downloader appears; the same button now succeeds.
+  const cargo = path.join(fx.dir, "bin", "wget");
+  const orchd = path.join(fx.root, "orchd", "target", "release", "orchd");
+  const installer = `mkdir -p "$HOME/.cargo/bin"; printf '#!/bin/sh\\nmkdir -p target/release && cp ${orchd} target/release/orchd\\n' > "$HOME/.cargo/bin/cargo"; chmod 755 "$HOME/.cargo/bin/cargo"`;
+  await fs.writeFile(
+    cargo,
+    `#!/bin/sh\ncat <<'INSTALLER'\n${installer}\nINSTALLER\n`,
+    { mode: 0o755 },
+  );
+  await hosts.setup(id);
+  assert.equal(hosts.list().find((h) => h.id === id).state, "ready");
+});
+
+test("the upload plan never shows or runs the Rust install", async (t) => {
+  const fx = await fixture(t, { downloader: "curl" });
+  const { hosts, id } = await fx.open();
+  await hosts.setup(id);
+  assert.equal(hosts.list().find((h) => h.id === id).state, "ready");
+  assert.equal(await exists(path.join(fx.home, "rustup.log")), false);
+  assert.equal(await exists(path.join(fx.home, "fetch.log")), false);
+  assert.equal(await exists(path.join(fx.home, ".cargo")), false);
+});
+
+test("one button leaves an existing cargo alone", async (t) => {
+  const fx = await fixture(t, {
+    platform: "Linux x86_64",
+    cargo: true,
+    downloader: "curl",
+  });
+  const { hosts, id } = await fx.open();
+  await hosts.setup(id);
+  assert.equal(await exists(path.join(fx.home, "rustup.log")), false);
+  assert.match(
+    await fs.readFile(path.join(fx.home, "cargo.log"), "utf8"),
+    /cargo build --release/,
+  );
+});
+
+test("the one-button setup rejects local and unknown hosts", async (t) => {
+  const fx = await fixture(t, { platform: "Linux x86_64" });
+  const { hosts } = await fx.open();
+  await assert.rejects(hosts.setup("local"), /Invalid orchestrator host/);
+  await assert.rejects(hosts.setup("ssh:nope"));
+  await assert.rejects(hosts.setup(7), /Invalid orchestrator host/);
+});
+
+test("preflight reports whether the host has a C linker", async (t) => {
+  const withCc = await fixture(t, { cc: true });
+  const a = await withCc.open();
+  await a.hosts.call("task.list", {}, a.id);
+  assert.equal((await a.hosts.preflight(a.id)).cc, true);
+  const without = await fixture(t);
+  const b = await without.open();
+  await b.hosts.call("task.list", {}, b.id);
+  assert.equal((await b.hosts.preflight(b.id)).cc, false);
+});
+
 test("an upgrade waits for the old daemon to exit before starting the new one", async (t) => {
   const fx = await fixture(t);
   const first = await fx.open();
@@ -461,6 +619,7 @@ test("preflight reports git, claude and codex per host", async (t) => {
 test("parsePreflight and installPlan read the probe output", () => {
   assert.deepEqual(parsePreflight("git=1\nclaude=1\nclaude_login=1\n", 5), {
     git: true,
+    cc: false,
     claude: { installed: true, loggedIn: true },
     codex: { installed: false, loggedIn: false },
     checkedAt: 5,

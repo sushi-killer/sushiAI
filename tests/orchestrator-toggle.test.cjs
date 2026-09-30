@@ -116,6 +116,7 @@ test("nothing starts at launch or on enable; the first request spawns orchd, tur
     () => s.handlers.orchestrator("task.list", {}),
     () => s.handlers["orchestrator-hosts"](),
     () => s.handlers["orchestrator-preflight"]("ssh:box"),
+    () => s.handlers["orchestrator-host-setup"]("ssh:box"),
     () => s.handlers["orchestrator-probe"]("local"),
   ])
     await assert.rejects(async () => call(), { message: OFF_MESSAGE });

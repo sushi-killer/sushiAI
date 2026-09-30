@@ -779,6 +779,8 @@ export type OrchestratorHost = {
 /** What a host offers orchd's routes: git and each harness CLI. */
 export type Preflight = {
   git: boolean;
+  /** A C linker (cc or gcc), which a Rust build needs; absent on old hosts' data. */
+  cc?: boolean;
   claude: { installed: boolean; loggedIn: boolean };
   codex: { installed: boolean; loggedIn: boolean };
   checkedAt: number;

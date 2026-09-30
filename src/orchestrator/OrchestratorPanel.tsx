@@ -1152,6 +1152,11 @@ function OrchestratorPanelBody({
             void window.bridge?.orchestratorPreflight(host).catch(() => {});
             setAttempt((n) => n + 1);
           }}
+          onInstallRust={() => {
+            retry();
+            void window.bridge?.orchestratorHostSetup(host).catch(() => {});
+            setAttempt((n) => n + 1);
+          }}
           onCancel={() =>
             choose({ host: workspaceHost === host ? LOCAL : workspaceHost })
           }

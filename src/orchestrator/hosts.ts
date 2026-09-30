@@ -157,6 +157,9 @@ export type SetupStep = {
   state: SetupStepState;
   /** A command the owner runs on the host to get past a failed step. */
   command?: string;
+  /** A button that gets past the failed step without the owner touching the
+   * host: it runs the one-button setup. */
+  action?: { label: string; hint: string };
 };
 
 /** What the setup card knows beyond the host record: the states this panel
@@ -170,6 +173,19 @@ export type SetupSeen = {
   address?: string;
 };
 
+/** Whether a failure is the one-button Rust install failing (its message
+ * carries the tail of the host's output). */
+function rustInstallFailed(detail: string): boolean {
+  return /^Installing Rust on .+ failed:/.test(detail);
+}
+
+/** What the host still lacks for a Rust build: the C linker's package. */
+export function buildToolsHint(platform: string | null | undefined): string {
+  return /^Darwin/.test(platform ?? "")
+    ? "Rust needs a C linker: run xcode-select --install on the host."
+    : "Rust needs a C linker: install build-essential (Debian, Ubuntu) or gcc (Fedora, Arch) on the host.";
+}
+
 function elapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
   if (s < 60) return `${s}s`;
@@ -182,7 +198,11 @@ function failedStep(
   detail: string,
   before: OrchestratorHost["state"] | undefined,
 ): number {
-  if (rustupCommand(detail) || /no orchd source to build/.test(detail))
+  if (
+    rustupCommand(detail) ||
+    rustInstallFailed(detail) ||
+    /no orchd source to build/.test(detail)
+  )
     return 2;
   if (/did not answer/.test(detail)) return 4;
   if (before === "installing" || before === "building") return 2;
@@ -197,7 +217,8 @@ export function setupSteps(
   host: Pick<
     OrchestratorHost,
     "state" | "detail" | "platform" | "orchdInstalled"
-  >,
+  > &
+    Partial<Pick<OrchestratorHost, "name">>,
   seen: SetupSeen,
 ): SetupStep[] {
   const detail = host.detail ?? "";
@@ -248,45 +269,67 @@ export function setupSteps(
             detail: `no matching build for ${platform ?? "this host"}, and cargo isn’t installed`,
             state: "failed",
             command: rustupCommand(detail) ?? undefined,
+            action: {
+              label: "Install Rust and set up",
+              hint: `Installs a minimal Rust toolchain in ~/.cargo on ${host.name ?? "the host"} (no sudo), then builds and starts the orchestrator.`,
+            },
           }
-        : { title: "Can’t install orchd here", detail, state: "failed" }
-      : host.state === "building" || (built && current > 2)
+        : rustInstallFailed(detail)
+          ? {
+              title: "Couldn’t install Rust",
+              detail: detail.replace(/^Installing Rust on .+? failed: /, ""),
+              state: "failed",
+              action: {
+                label: "Retry",
+                hint: `Installs a minimal Rust toolchain in ~/.cargo on ${host.name ?? "the host"} (no sudo), then builds and starts the orchestrator.`,
+              },
+            }
+          : { title: "Can’t install orchd here", detail, state: "failed" }
+      : host.state === "building" && /^Installing Rust/.test(detail)
         ? {
-            title:
-              host.state === "building"
-                ? "Building orchd from source"
-                : "Built orchd from source",
-            detail: [
-              `no matching build for ${platform ?? "this host"}`,
-              "cargo build --release",
-              host.state === "building" ? time : "",
-            ]
+            title: "Installing Rust…",
+            detail: ["minimal toolchain in ~/.cargo", time]
               .filter(Boolean)
               .join(" · "),
             state: state(2),
           }
-        : host.state === "installing" || (uploaded && current > 2)
+        : host.state === "building" || (built && current > 2)
           ? {
               title:
-                host.state === "installing"
-                  ? "Uploading orchd"
-                  : "Uploaded orchd",
+                host.state === "building"
+                  ? "Building orchd from source"
+                  : "Built orchd from source",
               detail: [
-                "the build from this Mac",
-                host.state === "installing" ? time : "",
+                `no matching build for ${platform ?? "this host"}`,
+                "cargo build --release",
+                host.state === "building" ? time : "",
               ]
                 .filter(Boolean)
                 .join(" · "),
               state: state(2),
             }
-          : {
-              title: "Upload or build orchd",
-              detail:
-                current > 2
-                  ? "already up to date"
-                  : "this Mac’s build, or from source on the host",
-              state: state(2),
-            };
+          : host.state === "installing" || (uploaded && current > 2)
+            ? {
+                title:
+                  host.state === "installing"
+                    ? "Uploading orchd"
+                    : "Uploaded orchd",
+                detail: [
+                  "the build from this Mac",
+                  host.state === "installing" ? time : "",
+                ]
+                  .filter(Boolean)
+                  .join(" · "),
+                state: state(2),
+              }
+            : {
+                title: "Upload or build orchd",
+                detail:
+                  current > 2
+                    ? "already up to date"
+                    : "this Mac’s build, or from source on the host",
+                state: state(2),
+              };
 
   const failure = (index: number) =>
     failed && current === index ? detail : "";

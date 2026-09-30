@@ -10,6 +10,10 @@ const { createHash } = require("node:crypto");
 
 const RUSTUP_COMMAND =
   "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y";
+// What the one-button setup runs: a minimal toolchain in ~/.cargo, no shell
+// profile edits, no sudo.
+const RUSTUP_ARGS = "-y --profile minimal --no-modify-path";
+const RUSTUP_TIMEOUT_MS = 10 * 60 * 1000;
 const REMOTE_DATA = "$HOME/.sushiai/orchestrator";
 const REMOTE_BIN = "$HOME/.sushiai/bin";
 // A non-interactive ssh shell often lacks the user's tool directories.
@@ -34,6 +38,12 @@ function noSourceMessage(name, platform, wanted) {
   return `This build of sushiAI has no orchd source to build on ${name} (${platform || "unknown platform"}); it can only upload its own binary to a ${wanted} host.`;
 }
 
+// The setup card reads "Installing Rust on" back out of this (hosts.ts).
+function rustFailedMessage(name, reason) {
+  const tail = String(reason).trim().split("\n").slice(-8).join("\n");
+  return `Installing Rust on ${name} failed: ${tail}`;
+}
+
 function stillRunningMessage(name, seconds) {
   return `The old orchestrator on ${name} did not stop within ${seconds} s, so the update was not installed. Check ~/.sushiai/orchestrator/orchd.log on the host, then connect again.`;
 }
@@ -56,12 +66,28 @@ echo "platform=$(uname -sm)"
 command -v cargo >/dev/null 2>&1 && echo "cargo=1"
 exit 0`;
 
+// Installs rustup's minimal toolchain into ~/.cargo without asking anything.
+// A pipe hides a failed download from sh, so success is the cargo binary.
+const RUSTUP_SCRIPT = `${REMOTE_PATH}
+if [ -x "$HOME/.cargo/bin/cargo" ]; then exit 0; fi
+if command -v curl >/dev/null 2>&1; then
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- ${RUSTUP_ARGS}
+elif command -v wget >/dev/null 2>&1; then
+  wget -qO- https://sh.rustup.rs | sh -s -- ${RUSTUP_ARGS}
+else
+  echo "Neither curl nor wget is installed on the host, so Rust cannot be downloaded. Install one of them and try again." >&2
+  exit 3
+fi
+if [ ! -x "$HOME/.cargo/bin/cargo" ]; then echo "rustup finished without installing cargo." >&2; exit 4; fi
+exit 0`;
+
 // `claude auth status` / `codex login status` exit non-zero when logged out.
 // Bounded with `timeout` when the host has it: a CLI waiting on a prompt must
 // not hang the probe.
 const PREFLIGHT_SCRIPT = `${REMOTE_PATH}
 t() { if command -v timeout >/dev/null 2>&1; then timeout 10 "$@"; else "$@"; fi; }
 command -v git >/dev/null 2>&1 && echo "git=1"
+if command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; then echo "cc=1"; fi
 if command -v claude >/dev/null 2>&1; then echo "claude=1"; t claude auth status >/dev/null 2>&1 && echo "claude_login=1"; fi
 if command -v codex >/dev/null 2>&1; then echo "codex=1"; t codex login status >/dev/null 2>&1 && echo "codex_login=1"; fi
 exit 0`;
@@ -76,6 +102,7 @@ function parsePreflight(output, now = Date.now()) {
   });
   return {
     git: values.git === "1",
+    cc: values.cc === "1",
     claude: harness("claude"),
     codex: harness("codex"),
     checkedAt: now,
@@ -135,7 +162,10 @@ rm -rf "$s"
 mkdir -p "$s" "$b"
 tar -xzf - -C "$s"
 cd "$s/orchd"
-cargo build --release
+# Rust the app installed lives in ~/.cargo/bin, which a non-login shell may not have on PATH.
+cargo="$HOME/.cargo/bin/cargo"
+[ -x "$cargo" ] || cargo=cargo
+"$cargo" build --release
 cp target/release/orchd "$b/orchd.new"
 chmod 755 "$b/orchd.new"
 mv "$b/orchd.new" "$b/orchd"
@@ -273,7 +303,23 @@ class RemoteOrchd {
     // RETRY_AFTER_MS pass or the owner retries, so a host that is down is not
     // re-provisioned over SSH on every request.
     this.failure = null;
+    // Set by `setup()`: the owner pressed "Install Rust and set up", so a
+    // build plan on a host without cargo installs it instead of failing.
+    this.installRust = false;
     this.closed = false;
+  }
+
+  /** The one-button setup: like `ensure()`, but a host that needs Rust to
+   * build orchd gets it installed first. */
+  async setup() {
+    if (this.inflight) await this.inflight.catch(() => {});
+    this.failure = null;
+    this.installRust = true;
+    try {
+      return await this.ensure();
+    } finally {
+      this.installRust = false;
+    }
   }
 
   /** Forgets the last failed setup: the owner's Try again or recheck. */
@@ -404,10 +450,20 @@ class RemoteOrchd {
       });
       return;
     }
-    if (info.cargo !== "1")
-      throw new Error(needsRustMessage(name, info.platform));
     if (!want.source)
       throw new Error(noSourceMessage(name, info.platform, want.platform));
+    if (info.cargo !== "1") {
+      if (!this.installRust)
+        throw new Error(needsRustMessage(name, info.platform));
+      this.#set("building", `Installing Rust on ${name}`);
+      try {
+        await this.connections.exec(this.endpoint, RUSTUP_SCRIPT, {
+          timeout: RUSTUP_TIMEOUT_MS,
+        });
+      } catch (error) {
+        throw new Error(rustFailedMessage(name, error.message));
+      }
+    }
     this.#set("building", `Building orchd on ${name} (a few minutes)`);
     await this.connections.exec(this.endpoint, buildScript(want.hash), {
       input: await this.artifacts.archive(),
@@ -499,4 +555,5 @@ module.exports = {
   RUSTUP_COMMAND,
   needsRustMessage,
   noSourceMessage,
+  rustFailedMessage,
 };

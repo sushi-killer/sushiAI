@@ -72,6 +72,7 @@ contextBridge.exposeInMainWorld("bridge", {
   },
   orchestratorHosts: invoke("orchestrator-hosts"),
   orchestratorPreflight: invoke("orchestrator-preflight"),
+  orchestratorHostSetup: invoke("orchestrator-host-setup"),
   orchestratorProbe: invoke("orchestrator-probe"),
   onOrchestratorHosts: (callback) => {
     const listener = () => callback();

@@ -373,6 +373,11 @@ export interface Bridge {
   orchestratorPreflight(
     host: string,
   ): Promise<import("./orchestrator/types.ts").Preflight | null>;
+  /** The owner's one button: provisions the host, installing Rust there first
+   * when orchd has to be built and cargo is missing. */
+  orchestratorHostSetup(
+    host: string,
+  ): Promise<import("./orchestrator/types.ts").Preflight | null>;
   /** A ping of the host's current connection that never starts or
    * provisions its daemon. */
   orchestratorProbe(host: string): Promise<{ pid: number }>;

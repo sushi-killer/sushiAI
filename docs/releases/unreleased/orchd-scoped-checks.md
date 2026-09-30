@@ -7,8 +7,7 @@
   skipped everywhere it would run (attempt verify and finalVerify, the Stop
   hook, landing, a parent's own checks, best-of) and the task gets one line,
   `Orchestrator: skipped <command>: no change under <paths>`. The base
-  preflight has no diff, so it uses the task's planned `paths`. The default
-  entry runs `npm run test:desktop` only for `src/app/**`, `src/extensions/**`,
-  `electron/**`, `src/styles/**` and `*.html`. The plan brief lists the
+  preflight has no diff, so it uses the task's planned `paths`. The list is
+  empty by default. The plan brief lists the
   applicable entries and tells the planner not to add such a command to
   `verify`/`finalVerify` when the task's paths fall outside its globs.

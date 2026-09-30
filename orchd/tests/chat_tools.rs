@@ -179,15 +179,10 @@ impl Env {
 }
 
 #[test]
-fn settings_carry_the_four_defaults_by_reference_and_offer_only_servers_not_added() {
+fn settings_start_with_no_tools_store_them_by_reference_and_offer_only_servers_not_added() {
     let env = spawn();
     let settings = env.daemon.request("settings.get", json!({}));
-    let tools = settings["chatTools"].as_array().unwrap();
-    let ids: Vec<&str> = tools.iter().map(|t| t["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["google-sheets", "openviking", "slack", "asana"]);
-    assert!(tools.iter().all(|t| t["enabled"] == json!(true)));
-    let text = settings["chatTools"].to_string();
-    assert!(text.contains("claude-json:google-sheets-main") && !text.contains("SECRET"));
+    assert_eq!(settings["chatTools"], json!([]));
 
     let offered = env.daemon.request("chat.toolServers", json!({}));
     let refs: Vec<&str> = offered["servers"]
@@ -198,9 +193,15 @@ fn settings_carry_the_four_defaults_by_reference_and_offer_only_servers_not_adde
         .collect();
     assert_eq!(refs, ["claude-json:fake", "claude-json:other"]);
 
-    let mut added = tools.clone();
-    added.push(env.fake_tool(true));
-    env.set_tools(json!(added));
+    env.set_tools(json!([
+        env.fake_tool(true),
+        {"id": "slack", "label": "Slack", "enabled": true,
+         "server": {"ref": "plugin:slack/slack"}},
+        {"id": "asana", "label": "Asana", "enabled": true,
+         "server": {"type": "http", "url": "https://mcp.asana.com/v2/mcp"}},
+    ]));
+    let text = env.daemon.request("settings.get", json!({}))["chatTools"].to_string();
+    assert!(text.contains("claude-json:fake") && !text.contains("SECRET"));
     let offered = env.daemon.request("chat.toolServers", json!({}));
     assert_eq!(offered["servers"].as_array().unwrap().len(), 1);
     assert_eq!(offered["servers"][0]["ref"], "claude-json:other");
@@ -228,10 +229,10 @@ fn settings_carry_the_four_defaults_by_reference_and_offer_only_servers_not_adde
         .iter()
         .find(|t| t["id"] == "asana")
         .unwrap();
-    // Enabled by default, so the probe runs; with no sign-in it is never "ok".
+    // Enabled, so the probe runs; with no sign-in it is never "ok".
     assert_ne!(missing["status"], "ok");
     assert!(missing["reason"].as_str().is_some());
-    let slack = shown["tools"][2].clone();
+    let slack = shown["tools"][1].clone();
     assert_eq!(slack["status"], "unavailable");
     assert!(slack["reason"].as_str().unwrap().contains("not installed"));
     let _ = env.home;

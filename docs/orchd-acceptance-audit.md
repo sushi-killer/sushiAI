@@ -360,7 +360,7 @@ criteria 0.68, verification 0.20` (plan preflight), then `Jev: tier hard
 
 How this was checked (2026-09-24):
 
-- In the requested sibling checkout, `/Users/sushi_killer/Desktop/PGDC-Team/Test`,
+- In the requested sibling checkout, the main checkout,
   `git rev-parse fix/orchd-stronger-review` returns
   `61e52b09c86f3262118a1b30bfe3e8dbe6e7e077`, the same commit as this branch's
   base. `git diff 61e52b0..fix/orchd-stronger-review -- orchd/src orchd/tests`

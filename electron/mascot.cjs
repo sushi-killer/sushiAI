@@ -381,7 +381,7 @@ function registerMascot({
     if (!notice) throw new Error("That notice is gone.");
     const service = getService();
     if (!service) throw new Error("The orchestrator is not running.");
-    await service.call("task.start", { id: notice.taskId });
+    await service.call("task.start", { id: notice.taskId }, notice.host);
     dispatch({ type: "dismiss", id: notice.id });
     return "Running";
   });

@@ -188,7 +188,13 @@ fn verify_tail_highlights_fail_lines_and_eslint_errors_only() {
 }
 
 fn desktop_scope() -> Vec<ScopedCheck> {
-    Settings::default().scoped_checks
+    vec![ScopedCheck {
+        repo: None,
+        command: "npm run test:desktop".into(),
+        paths: ["src/app/**", "src/extensions/**", "electron/**", "src/styles/**", "*.html"]
+            .map(String::from)
+            .to_vec(),
+    }]
 }
 
 #[test]

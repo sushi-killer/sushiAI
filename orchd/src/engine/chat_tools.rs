@@ -899,7 +899,13 @@ mod tests {
 
     #[test]
     fn a_plugin_server_keeps_claude_codes_name() {
-        let cfg = &Settings::default().chat_tools[2];
+        let cfg = &ChatToolConfig {
+            id: "slack".into(),
+            label: "Slack".into(),
+            enabled: true,
+            server: serde_json::json!({"ref": "plugin:slack/slack"}),
+            overrides: Default::default(),
+        };
         assert_eq!(server_key(cfg), "plugin:slack:slack");
         assert_eq!(
             claude_tool_name(&server_key(cfg), "search"),

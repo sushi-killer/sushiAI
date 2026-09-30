@@ -73,8 +73,8 @@ function setup(policy = "visible") {
     root: "/app",
     policy,
     getService: () => ({
-      call: async (method, params) => {
-        calls.push([method, params]);
+      call: async (method, params, host) => {
+        calls.push(host ? [method, params, host] : [method, params]);
         return {};
       },
     }),
@@ -106,6 +106,14 @@ test("Run again starts a queued failed or stopped task and drops its notice", as
     assert.equal(mascot.snapshot().length, 0);
     mascot.destroy();
   }
+});
+
+test("Run again starts a remote task on the host it runs on", async () => {
+  const { mascot, calls, invoke, add } = setup();
+  add({ kind: "failed", taskId: TASK, focus: "summary", host: "ssh:box" });
+  assert.equal(await invoke("mascot-rerun", TASK), "Running");
+  assert.deepEqual(calls, [["task.start", { id: TASK }, "ssh:box"]]);
+  mascot.destroy();
 });
 
 test("Run again refuses anything but a queued failed/stopped task id", async () => {

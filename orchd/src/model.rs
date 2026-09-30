@@ -190,10 +190,10 @@ pub struct Settings {
     #[serde(default)]
     pub autopilot: bool,
     /// Commands that only run when the task's diff touches their `paths`.
-    #[serde(default = "default_scoped_checks")]
+    #[serde(default)]
     pub scoped_checks: Vec<ScopedCheck>,
     /// MCP servers the orchestrator chat may use, each toggled in Settings.
-    #[serde(default = "default_chat_tools")]
+    #[serde(default)]
     pub chat_tools: Vec<ChatToolConfig>,
 }
 
@@ -216,41 +216,6 @@ pub struct ChatToolConfig {
     pub overrides: std::collections::BTreeMap<String, String>,
 }
 
-fn default_chat_tools() -> Vec<ChatToolConfig> {
-    let tool = |id: &str, label: &str, server: serde_json::Value| ChatToolConfig {
-        id: id.to_string(),
-        label: label.to_string(),
-        enabled: true,
-        server,
-        overrides: Default::default(),
-    };
-    vec![
-        tool(
-            "google-sheets",
-            "Google Sheets",
-            serde_json::json!({"ref": "claude-json:google-sheets-main"}),
-        ),
-        tool(
-            "openviking",
-            "OpenViking",
-            serde_json::json!({"ref": "plugin:openviking-memory/openviking"}),
-        ),
-        tool(
-            "slack",
-            "Slack",
-            serde_json::json!({"ref": "plugin:slack/slack"}),
-        ),
-        // The claude.ai Asana connector is not loadable next to
-        // `--strict-mcp-config`; this is the vendor's own server, signed in
-        // with its own OAuth.
-        tool(
-            "asana",
-            "Asana",
-            serde_json::json!({"type": "http", "url": "https://mcp.asana.com/v2/mcp"}),
-        ),
-    ]
-}
-
 /// One `settings.scopedChecks` entry: a command that is skipped unless a
 /// changed file matches one of `paths`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -263,23 +228,6 @@ pub struct ScopedCheck {
     pub command: String,
     /// Globs over repo-relative changed files.
     pub paths: Vec<String>,
-}
-
-fn default_scoped_checks() -> Vec<ScopedCheck> {
-    vec![ScopedCheck {
-        repo: None,
-        command: "npm run test:desktop".to_string(),
-        paths: [
-            "src/app/**",
-            "src/extensions/**",
-            "electron/**",
-            "src/styles/**",
-            "*.html",
-        ]
-        .iter()
-        .map(|p| p.to_string())
-        .collect(),
-    }]
 }
 
 /// One `settings.afterLand` entry: `run` (a shell command) runs in the main
@@ -594,9 +542,9 @@ impl Default for Settings {
             land_on_default: false,
             land_on_default_repos: Default::default(),
             after_land: vec![],
-            scoped_checks: default_scoped_checks(),
+            scoped_checks: vec![],
             autopilot: false,
-            chat_tools: default_chat_tools(),
+            chat_tools: vec![],
         }
     }
 }
@@ -2505,26 +2453,14 @@ mod grounded_checks_tests {
     }
 
     #[test]
-    fn the_default_scoped_check_gates_the_desktop_smoke_on_ui_paths() {
-        let expected = ScopedCheck {
-            repo: None,
-            command: "npm run test:desktop".into(),
-            paths: [
-                "src/app/**",
-                "src/extensions/**",
-                "electron/**",
-                "src/styles/**",
-                "*.html",
-            ]
-            .map(String::from)
-            .to_vec(),
-        };
-        assert_eq!(Settings::default().scoped_checks, vec![expected.clone()]);
-        // A settings.json written before the key existed picks it up.
+    fn scoped_checks_and_chat_tools_default_to_none() {
+        assert!(Settings::default().scoped_checks.is_empty());
+        assert!(Settings::default().chat_tools.is_empty());
         let mut json = serde_json::to_value(Settings::default()).unwrap();
         json.as_object_mut().unwrap().remove("scopedChecks");
+        json.as_object_mut().unwrap().remove("chatTools");
         let loaded: Settings = serde_json::from_value(json).unwrap();
-        assert_eq!(loaded.scoped_checks, vec![expected]);
+        assert!(loaded.scoped_checks.is_empty() && loaded.chat_tools.is_empty());
     }
 
     #[test]

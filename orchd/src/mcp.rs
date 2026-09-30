@@ -30,8 +30,13 @@ const INSTRUCTIONS: &str = "\
 You are the owner's task orchestrator. Turn a request into tasks tracked by \
 orchd -- don't write the code yourself.
 
-- If the request is unclear, ask the owner one precise question at a time \
-in chat before creating anything.
+- Ask the owner only what only the owner can decide (scope, money, \
+destructive or outward-facing actions, a choice between designs that changes \
+what gets built), one precise question at a time. Settle everything else \
+with a sensible default and say in one line which you chose.
+- A task must change files. Work that only moves git history or only checks \
+something (cherry-picking, creating a branch, running CI) fails as \"No \
+files changed\": give the owner the exact command instead of a task.
 - Prefer task_create with {repo, request, start: true}: the planner drafts \
 title/goal/criteria/verify for you. Use the full {repo, title, goal, \
 criteria, verify} form only when the owner already specified it.
@@ -43,7 +48,12 @@ parts with `parent` set to its id: each part branches from the parent's \
 branch and lands there once done, and the parent is done when every part \
 has landed. Give a part `dependsOn` (task ids) when it builds on another \
 part; it starts only after those are done. Keep parts that edit the same \
-file in one task.
+file in one task. Several tasks for one feature belong under one parent, so \
+the feature ships as one branch.
+- To plan without starting, create a top-level task with `backlog` \
+{bucket: \"next\" | \"later\"}; task_backlog {id, bucket} moves an unstarted \
+one between the buckets or out of the backlog (null). The autopilot starts \
+`next` tasks in order; the parts of a backlogged parent wait with it.
 - Use task_list / task_get to check on progress instead of guessing.
 - When a task is `waiting`, answer it yourself with task_answer if the repo \
 or the task's own context already answers the question. Otherwise bring \
@@ -102,10 +112,11 @@ pub const TASK_TOOLS: [&str; 4] = [
 pub const READ_ONLY_TOOLS: [&str; 4] = ["task_list", "task_get", "settings_get", "repo_notes_list"];
 
 /// What the orchestrator agent gets: every tool below.
-pub const ORCHESTRATOR_TOOLS: [&str; 22] = [
+pub const ORCHESTRATOR_TOOLS: [&str; 23] = [
     "task_list",
     "task_get",
     "task_create",
+    "task_backlog",
     "task_start",
     "task_report",
     "task_lead_touch",
@@ -189,8 +200,23 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "dependsOn": {"type": "array", "items": {"type": "string"}, "description": "Ids of tasks in this repo that must be done before this one starts; it starts on its own once they are. A cycle is rejected."},
                     "parent": {"type": "string", "description": "Id of the task this one is a part of: it branches from the parent's branch and lands there when done. The parent runs no implement attempt of its own; a task that already has a running loop is rejected as a parent."},
                     "start": {"type": "boolean", "description": "Start right away (default true); false leaves the task stopped for review."},
+                    "backlog": {"type": "object", "properties": {"bucket": {"type": "string", "enum": ["next", "later"]}, "order": {"type": "integer"}}, "required": ["bucket"], "description": "Park the task in the plan backlog instead of starting it. Not for a subtask: its parent's place decides."},
                 },
                 "required": ["repo"],
+            }),
+        ),
+        (
+            "task_backlog",
+            "task.backlog",
+            "Move an unstarted top-level task into the plan backlog's next or later bucket, or out of the backlog with bucket null. order places it within the bucket (ascending); omitted, it goes last.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "bucket": {"type": ["string", "null"], "enum": ["next", "later", null]},
+                    "order": {"type": "integer"},
+                },
+                "required": ["id", "bucket"],
             }),
         ),
         (
@@ -816,6 +842,7 @@ mod tests {
                 "task_list",
                 "task_get",
                 "task_create",
+                "task_backlog",
                 "task_start",
                 "task_report",
                 "task_lead_touch",

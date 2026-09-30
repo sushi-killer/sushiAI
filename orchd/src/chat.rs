@@ -1656,8 +1656,9 @@ const MAX_TOOLS: usize = 8;
 const MAX_SUMMARY: usize = 120;
 
 /// Tools whose input names a task by `id`.
-const TASK_ID_TOOLS: [&str; 9] = [
+const TASK_ID_TOOLS: [&str; 10] = [
     "task_get",
+    "task_backlog",
     "task_start",
     "task_stop",
     "task_report",
@@ -2140,7 +2141,10 @@ mod tests {
         assert_eq!(at("--tools"), "Read,Grep,Glob");
         assert_eq!(at("--mcp-config"), "/d/mcp.json");
         assert_eq!(at("--resume"), "sess");
-        assert_eq!(at("--allowedTools").split(',').count(), 22);
+        assert_eq!(
+            at("--allowedTools").split(',').count(),
+            crate::mcp::ORCHESTRATOR_TOOLS.len()
+        );
         assert!(at("--allowedTools").contains("mcp__sushiai-orchestrator__orchestrator_reply"));
         assert!(!at("--allowedTools").contains("task_delete"));
         assert_eq!(at("--append-system-prompt"), ROLE);

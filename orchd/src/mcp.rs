@@ -572,6 +572,14 @@ fn with_task_mcp(method: &str, mut args: Value, task_mcp: Option<Value>) -> Valu
 /// orchestrator chat agent (no task id) is `chat`, a task's own agent is
 /// `handoff`. A source the caller set itself is kept.
 fn with_source(method: &str, mut args: Value, from_task: bool) -> Value {
+    if method == "task.answer" {
+        // Never trusted from the caller: it marks the answer as not the
+        // owner's, so orchd refuses an allow on an owner-only question.
+        if let Some(obj) = args.as_object_mut() {
+            let source = if from_task { "mcp" } else { "chat" };
+            obj.insert("source".to_string(), json!(source));
+        }
+    }
     if method == "task.create" && args.get("source").is_none() {
         if let Some(obj) = args.as_object_mut() {
             let source = if from_task { "handoff" } else { "chat" };
@@ -1062,5 +1070,20 @@ mod tests {
         assert_eq!(own["mcp"], json!({"mcpServers": {}}));
         let start = with_task_mcp("task.start", json!({"repo": "/r"}), Some(file));
         assert!(start.get("mcp").is_none());
+    }
+}
+
+#[cfg(test)]
+mod answer_source_tests {
+    use super::*;
+
+    #[test]
+    fn a_task_answer_always_carries_the_bridges_source_whatever_the_caller_sent() {
+        let chat = with_source("task.answer", json!({"id": "t", "source": ""}), false);
+        assert_eq!(chat["source"], "chat");
+        let task = with_source("task.answer", json!({"id": "t"}), true);
+        assert_eq!(task["source"], "mcp");
+        let other = with_source("task.start", json!({"id": "t"}), true);
+        assert!(other.get("source").is_none());
     }
 }

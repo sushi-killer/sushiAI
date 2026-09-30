@@ -107,17 +107,21 @@ pub fn worktree_path(repo_root: &Path, root: &str, branch: &str) -> PathBuf {
     repo_root.join(root).join(branch.replace('/', "-"))
 }
 
-/// Makes the repo ignore the top-level directory holding `worktree_root`
-/// (`/.sushiai/` by default) through `.git/info/exclude`, never a tracked
+/// Makes the repo ignore the whole relative `worktree_root` (`/.sushiai/worktrees/`
+/// by default, `/src/.wt/` for `src/.wt`, never all of `src/`) through `.git/info/exclude`, never a tracked
 /// file. A root outside the repo needs nothing.
 pub fn exclude_worktree_root(repo_root: &Path, worktree_root: &Path) -> std::io::Result<()> {
     let Ok(rel) = worktree_root.strip_prefix(repo_root) else {
         return Ok(());
     };
-    let Some(first) = rel.components().next() else {
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if parts.is_empty() {
         return Ok(());
-    };
-    let entry = format!("/{}/", first.as_os_str().to_string_lossy());
+    }
+    let entry = format!("/{}/", parts.join("/"));
     let out = match run(repo_root, &["rev-parse", "--git-path", "info/exclude"]) {
         Ok(out) => out,
         Err(_) => return Ok(()),
@@ -1279,6 +1283,33 @@ mod tests {
             move_branch(&repo, "side", &git(&["rev-parse", &default])).unwrap(),
             BranchMove::Diverged
         ));
+    }
+
+    // Lines an older build wrote (only the first component, e.g. `/src/` for
+    // `src/.wt`) are deliberately left alone: which of them the owner also
+    // wrote by hand cannot be told, so nothing is cleaned up.
+    #[test]
+    fn a_nested_worktree_root_is_excluded_in_full_and_leaves_its_parent_visible() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        init_repo(&repo);
+
+        exclude_worktree_root(&repo, &repo.join("src/.wt")).unwrap();
+        let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        assert!(exclude.lines().any(|l| l == "/src/.wt/"), "{exclude}");
+        assert!(!exclude.lines().any(|l| l == "/src/"), "{exclude}");
+        // Twice adds nothing.
+        exclude_worktree_root(&repo, &repo.join("src/.wt")).unwrap();
+        let again = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        assert_eq!(again.matches("/src/.wt/").count(), 1);
+
+        std::fs::create_dir_all(repo.join("src/.wt/task")).unwrap();
+        std::fs::write(repo.join("src/.wt/task/f.txt"), "x").unwrap();
+        std::fs::write(repo.join("src/new.rs"), "fn main() {}\n").unwrap();
+        let status = run(&repo, &["status", "--short", "--untracked-files=all"]).unwrap();
+        assert!(status.contains("src/new.rs"), "{status}");
+        assert!(!status.contains(".wt"), "{status}");
     }
 
     fn init_repo(dir: &Path) {

@@ -823,6 +823,9 @@ impl App {
         struct P {
             id: String,
             answer: String,
+            /// Set by the MCP bridge (`chat`, `mcp`); the app sends none.
+            #[serde(default)]
+            source: Option<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         validate_task_id(&self.store, &p.id)?;
@@ -833,6 +836,16 @@ impl App {
             .ok_or_else(|| "task not found".to_string())?;
         if task.status != TaskStatus::Waiting || task.question.is_none() {
             return Err("task is not waiting for an answer".to_string());
+        }
+        if p.source.as_deref().is_some_and(|s| !s.is_empty()) {
+            if let Some(q) = task.question.as_ref().filter(|q| owner_only(q.kind)) {
+                if !is_refusal(q, &p.answer) {
+                    return Err(format!(
+                        "this {:?} question is the owner's to allow: an agent can only stop or deny it",
+                        q.kind
+                    ));
+                }
+            }
         }
 
         if p.answer.trim().eq_ignore_ascii_case("stop") {
@@ -1231,4 +1244,122 @@ fn base64(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod answer_source_tests {
+    use super::test_support::*;
+    use super::*;
+
+    fn waiting(app: &App, kind: QuestionKind, options: &[&str]) -> String {
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.question = Some(Question::new(
+            "Allow it?",
+            options.iter().map(|o| o.to_string()).collect(),
+            kind,
+            AskedBy::Implement,
+        ));
+        app.store.save_task(&task).unwrap();
+        task.id
+    }
+
+    fn park_permission(app: &App, id: &str) -> oneshot::Receiver<String> {
+        let (tx, rx) = oneshot::channel();
+        app.permission_waits
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), tx);
+        rx
+    }
+
+    async fn answer(app: &App, id: &str, text: &str, source: Option<&str>) -> Result<(), String> {
+        let mut params = json!({"id": id, "answer": text});
+        if let Some(s) = source {
+            params["source"] = json!(s);
+        }
+        app.handle_task_answer(params).await.map(|_| ())
+    }
+
+    #[tokio::test]
+    async fn an_mcp_allow_on_an_owner_only_question_is_refused_and_it_stays_pending() {
+        let (app, _dir) = test_app();
+        for (kind, options, allow) in [
+            (
+                QuestionKind::Permission,
+                &["Allow once", "Always for this repo", "Deny"][..],
+                "Always for this repo",
+            ),
+            (
+                QuestionKind::ProtectedPath,
+                &["approve", "reject"][..],
+                "approve",
+            ),
+            (QuestionKind::Budget, &["raise", "stop"][..], "raise"),
+            (
+                QuestionKind::DailyBudget,
+                &["run anyway", "stop"][..],
+                "run anyway",
+            ),
+            (QuestionKind::HarnessMissing, &["retry"][..], "retry"),
+        ] {
+            let id = waiting(&app, kind, options);
+            let mut rx = park_permission(&app, &id);
+            for source in ["mcp", "chat"] {
+                let err = answer(&app, &id, allow, Some(source)).await.unwrap_err();
+                assert!(err.contains("owner's to allow"), "{kind:?}: {err}");
+            }
+            let task = app.store.load_task(&id).unwrap().unwrap();
+            assert_eq!(task.status, TaskStatus::Waiting, "{kind:?}");
+            assert!(task.question.is_some(), "{kind:?} is still pending");
+            assert!(rx.try_recv().is_err(), "{kind:?}: nothing was delivered");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_mcp_deny_or_stop_is_accepted() {
+        let (app, _dir) = test_app();
+        let id = waiting(&app, QuestionKind::Permission, &["Allow once", "Deny"]);
+        let rx = park_permission(&app, &id);
+        answer(&app, &id, "Deny", Some("mcp")).await.unwrap();
+        assert_eq!(rx.await.unwrap(), "Deny");
+
+        let id = waiting(&app, QuestionKind::ProtectedPath, &["approve", "reject"]);
+        let rx = park_permission(&app, &id);
+        answer(&app, &id, "reject", Some("chat")).await.unwrap();
+        assert_eq!(rx.await.unwrap(), "reject");
+
+        let id = waiting(&app, QuestionKind::Budget, &["raise", "stop"]);
+        answer(&app, &id, "stop", Some("mcp")).await.unwrap();
+        let task = app.store.load_task(&id).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn an_app_allow_with_no_source_is_accepted() {
+        let (app, _dir) = test_app();
+        let id = waiting(&app, QuestionKind::Permission, &["Allow once", "Deny"]);
+        let rx = park_permission(&app, &id);
+        answer(&app, &id, "Allow once", None).await.unwrap();
+        assert_eq!(rx.await.unwrap(), "Allow once");
+    }
+
+    #[tokio::test]
+    async fn a_normal_question_is_still_answerable_through_mcp() {
+        let (app, _dir) = test_app();
+        let id = waiting(&app, QuestionKind::AgentQuestion, &[]);
+        let (tx, rx) = oneshot::channel();
+        app.controls.lock().unwrap().insert(
+            id.clone(),
+            TaskControl {
+                cancel: CancelToken::new(),
+                pending_answer: Arc::new(StdMutex::new(Some(tx))),
+                pending_amend: Arc::new(StdMutex::new(None)),
+                handle: tokio::spawn(async {}),
+            },
+        );
+        answer(&app, &id, "use the second design", Some("mcp"))
+            .await
+            .unwrap();
+        assert_eq!(rx.await.unwrap(), "use the second design");
+    }
 }

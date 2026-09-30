@@ -118,9 +118,55 @@ impl App {
     }
 }
 
+/// File types that are documents, safe to hand to the system's default
+/// handler. Anything else (scripts, apps, archives) is only revealed.
+const OPENABLE_EXTENSIONS: [&str; 18] = [
+    "md", "markdown", "txt", "log", "pdf", "csv", "tsv", "json", "yaml", "yml", "html", "htm",
+    "png", "jpg", "jpeg", "gif", "svg", "webp",
+];
+
+fn is_openable(file: &str) -> bool {
+    Path::new(file)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| {
+            OPENABLE_EXTENSIONS
+                .iter()
+                .any(|k| e.eq_ignore_ascii_case(k))
+        })
+}
+
+/// Runs `opener` on `file` when it is a document type, or reveals it (`-R` on
+/// macOS, its parent folder elsewhere). `Ok(true)` when opened, `Ok(false)`
+/// when only revealed.
+fn launch(opener: &str, mac: bool, file: &str) -> Result<bool, String> {
+    let openable = is_openable(file);
+    let target = if openable || mac {
+        file.to_string()
+    } else {
+        Path::new(file)
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .display()
+            .to_string()
+    };
+    let mut cmd = std::process::Command::new(opener);
+    if !openable && mac {
+        cmd.arg("-R");
+    }
+    cmd.arg(&target)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{opener}: {e}"))?;
+    Ok(openable)
+}
+
 impl App {
     /// `task.openDeliverable {id, path}`: opens the kept copy of one of the
-    /// task's deliverables with the system's default application.
+    /// task's deliverables with the system's default application when it is a
+    /// known document type; any other file (an agent wrote it) is revealed.
     pub(super) async fn handle_task_open_deliverable(
         &self,
         params: serde_json::Value,
@@ -151,18 +197,69 @@ impl App {
         if !Path::new(&file).is_file() {
             return Err("the deliverable file is gone".to_string());
         }
-        let opener = if cfg!(target_os = "macos") {
-            "open"
+        let mac = cfg!(target_os = "macos");
+        let opener = if mac { "open" } else { "xdg-open" };
+        Ok(if launch(opener, mac, &file)? {
+            json!({"opened": file})
         } else {
-            "xdg-open"
-        };
-        std::process::Command::new(opener)
-            .arg(&file)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| format!("{opener}: {e}"))?;
-        Ok(json!({"opened": file}))
+            json!({"revealed": file})
+        })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A stand-in opener that records its arguments instead of launching.
+    fn recorder(dir: &Path) -> (String, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let out = dir.join("args.txt");
+        let script = dir.join("opener.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", out.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (script.display().to_string(), out)
+    }
+
+    fn recorded(out: &Path) -> Vec<String> {
+        for _ in 0..200 {
+            if let Ok(text) = std::fs::read_to_string(out) {
+                if text.ends_with('\n') {
+                    return text.lines().map(String::from).collect();
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("the opener never ran");
+    }
+
+    #[test]
+    fn a_document_type_is_opened_and_anything_else_is_revealed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (opener, out) = recorder(dir.path());
+
+        assert!(launch(&opener, true, "/x/report.PDF").unwrap());
+        assert_eq!(recorded(&out), vec!["/x/report.PDF"]);
+        std::fs::remove_file(&out).unwrap();
+
+        // macOS: a file that could run is revealed with -R, never opened.
+        assert!(!launch(&opener, true, "/x/run.command").unwrap());
+        assert_eq!(recorded(&out), vec!["-R", "/x/run.command"]);
+        std::fs::remove_file(&out).unwrap();
+
+        // Elsewhere: the parent folder is opened, never the file.
+        assert!(!launch(&opener, false, "/x/tool.sh").unwrap());
+        assert_eq!(recorded(&out), vec!["/x"]);
+        std::fs::remove_file(&out).unwrap();
+        assert!(launch(&opener, false, "/x/notes.md").unwrap());
+        assert_eq!(recorded(&out), vec!["/x/notes.md"]);
+
+        assert!(!is_openable("/x/noext"));
+        assert!(!is_openable("/x/app.dmg"));
+        assert!(is_openable("/x/a.webp"));
     }
 }

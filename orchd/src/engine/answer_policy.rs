@@ -29,16 +29,37 @@ fn answered_before(task: &Task, kind: QuestionKind, attempt_n: Option<u32>) -> b
 
 /// Whether the policy may answer a `kind` question of `task` at all.
 pub(super) fn policy_open(app: &App, task: &Task, kind: QuestionKind) -> bool {
-    policy_on(app)
-        && !matches!(
-            kind,
-            QuestionKind::Budget
-                | QuestionKind::DailyBudget
-                | QuestionKind::HarnessMissing
-                | QuestionKind::ProtectedPath
-                | QuestionKind::Permission
-        )
-        && policy_answers(task) < MAX_POLICY_ANSWERS
+    policy_on(app) && !owner_only(kind) && policy_answers(task) < MAX_POLICY_ANSWERS
+}
+
+/// Kinds only the owner may allow: never the policy, the chat agent or an
+/// MCP client (see [`is_refusal`] for what those may still answer).
+pub(super) fn owner_only(kind: QuestionKind) -> bool {
+    matches!(
+        kind,
+        QuestionKind::Budget
+            | QuestionKind::DailyBudget
+            | QuestionKind::HarnessMissing
+            | QuestionKind::ProtectedPath
+            | QuestionKind::Permission
+    )
+}
+
+/// Whether `answer` only denies or stops, so a non-owner may give it.
+pub(super) fn is_refusal(question: &Question, answer: &str) -> bool {
+    if answer.trim().eq_ignore_ascii_case("stop") {
+        return true;
+    }
+    match question.kind {
+        QuestionKind::Permission => {
+            matches!(
+                permissions::parse_choice(answer),
+                permissions::Choice::Deny(_)
+            )
+        }
+        QuestionKind::ProtectedPath => is_option(answer, "reject"),
+        _ => false,
+    }
 }
 
 /// The fixed rule for `question`: its answer and why. Each rule fires once

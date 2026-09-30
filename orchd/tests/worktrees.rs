@@ -84,7 +84,10 @@ fn new_worktree_lives_under_sushiai_and_done_removes_it_but_keeps_the_commit() {
         "{worktree}"
     );
     let exclude = std::fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
-    assert!(exclude.lines().any(|l| l == "/.sushiai/"), "{exclude}");
+    assert!(
+        exclude.lines().any(|l| l == "/.sushiai/worktrees/"),
+        "{exclude}"
+    );
     assert_eq!(git_out(repo.path(), &["status", "--porcelain"]), "");
 
     let settled = poll_task_status(&daemon, &id, Duration::from_secs(30));

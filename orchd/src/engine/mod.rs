@@ -622,6 +622,7 @@ impl App {
             "failures.catalogue" => crate::timeline::catalogue_json(&self.store, &params),
             "chat.get" => chat::handle_get(self, params).await,
             "chat.send" => chat::handle_send(self, params).await,
+            "chat.edit" => chat::handle_edit(self, params).await,
             "chat.cancel" => chat::handle_cancel(self, params).await,
             "chat.list" => chat::handle_list(self, params).await,
             "chat.new" => chat::handle_new(self, params).await,

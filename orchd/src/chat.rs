@@ -1133,6 +1133,107 @@ pub async fn handle_send(
     Ok(json!({}))
 }
 
+const HISTORY_INTRO: &str = "This conversation was edited: the owner changed an earlier message, so the replies that followed it are gone. Here is what was said before it, for context only (do not answer it again):";
+const MAX_HISTORY_TEXT: usize = 1500;
+
+/// The kept part of an edited conversation, compact, for a fresh harness
+/// session that has no memory of it.
+fn history_prompt(kept: &[ChatMessage]) -> String {
+    if kept.is_empty() {
+        return String::new();
+    }
+    let lines = kept
+        .iter()
+        .map(|m| {
+            let who = if m.role == "user" {
+                "Owner"
+            } else {
+                "Orchestrator"
+            };
+            format!("{who}: {}", truncate_chars(m.text.trim(), MAX_HISTORY_TEXT))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    format!("{HISTORY_INTRO}\n\n{lines}\n\n---\n\nThe owner's edited message:\n\n")
+}
+
+/// Replaces one of the owner's messages, drops everything after it (with its
+/// proposals, pending actions, draft and questions) and runs a new turn from
+/// there on a fresh harness session that is given the kept history. Tasks
+/// already created from a dropped proposal stay. Refused while a turn runs.
+pub async fn handle_edit(
+    app: &App,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let repo = repo_param(&params)?;
+    let message_id = message_id_param(&params)?;
+    let text = params
+        .get("text")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .ok_or("text is required")?
+        .to_string();
+    let requested_mode = match params.get("mode") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(_) => Some(ChatMode::param(&params)?),
+    };
+    let (mut session, route, cancel) = begin_turn(app, &repo)?;
+    let Some(index) = session
+        .messages
+        .iter()
+        .position(|m| m.id == message_id && m.role == "user")
+    else {
+        app.chat_turns.lock().unwrap().remove(&repo);
+        return Err("that message is not one of the owner's messages in this chat".to_string());
+    };
+    let mode = requested_mode.unwrap_or(session.messages[index].mode);
+    if let Some(mcp) = params.get("mcp") {
+        session.task_mcp = Some(mcp.clone());
+    }
+    session.messages.truncate(index + 1);
+    {
+        let message = &mut session.messages[index];
+        message.text = truncate_chars(&text, MAX_TEXT);
+        message.mode = mode;
+        message.ts = now_ms();
+    }
+    if index == 0 {
+        session.title = Some(title_for(&text));
+    }
+    let history = history_prompt(&session.messages[..index]);
+    // The old harness session remembers the dropped part: start a new one.
+    session.session_id = None;
+    let notes = take_action_notes(&mut session);
+    session.mode = mode;
+    session.error = None;
+    session.note = None;
+    save(app, &repo, &session);
+    let waiting = match mode {
+        ChatMode::Chat => messages::take_for_orchestrator(app, &repo),
+        _ => None,
+    };
+    let prompt = match waiting {
+        Some((_, questions)) => format!("{text}\n\n---\n\n{QUESTIONS_INTRO}\n\n{questions}"),
+        None => text,
+    };
+    let prompt = format!("{notes}{history}{prompt}");
+    let app = app.arc();
+    tokio::spawn(async move {
+        run_turn(
+            &app,
+            repo,
+            session,
+            route,
+            prompt,
+            cancel,
+            Turn::Owner(mode),
+        )
+        .await;
+    });
+    Ok(json!({}))
+}
+
 /// What became of the write calls the orchestrator proposed, for its next
 /// turn: it cannot see the owner's OK card. Each call is reported once.
 fn take_action_notes(session: &mut ChatSession) -> String {

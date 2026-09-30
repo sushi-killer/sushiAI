@@ -317,3 +317,50 @@ test("the empty chat hints read as the Figma concept", () => {
     source.includes('["Plan", "splits a goal into ordered tasks you confirm"]'),
   );
 });
+
+test("editing an own message: Enter sends, Shift+Enter is a newline, Esc cancels, later messages dim", async () => {
+  const { editKeyAction, canSendEdit, isAfterEdit } = await model;
+  const key = (k, shiftKey = false, isComposing = false) =>
+    editKeyAction({ key: k, shiftKey, isComposing });
+  assert.equal(key("Enter"), "send");
+  assert.equal(key("Enter", true), null);
+  assert.equal(key("Escape"), "cancel");
+  assert.equal(key("Enter", false, true), null);
+  assert.equal(key("a"), null);
+  assert.equal(canSendEdit("  ", false), false);
+  assert.equal(canSendEdit("fix", true), false);
+  assert.equal(canSendEdit("fix", false), true);
+  const messages = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  assert.deepEqual(
+    messages.map((_, i) => isAfterEdit(messages, "b", i)),
+    [false, false, true],
+  );
+  assert.equal(isAfterEdit(messages, null, 2), false);
+});
+
+test("the chat client edits a message by id, sending the mode only when given", async () => {
+  const { orchestratorClientFor } = await client;
+  const calls = [];
+  globalThis.window = {
+    bridge: {
+      orchestrator: async (method, params) => {
+        calls.push([method, params]);
+        return {};
+      },
+    },
+  };
+  try {
+    const c = orchestratorClientFor("local");
+    await c.chatEdit(REPO, "m1", "fixed");
+    await c.chatEdit(REPO, "m1", "fixed", "plan");
+    assert.deepEqual(calls, [
+      ["chat.edit", { repo: REPO, messageId: "m1", text: "fixed" }],
+      [
+        "chat.edit",
+        { repo: REPO, messageId: "m1", text: "fixed", mode: "plan" },
+      ],
+    ]);
+  } finally {
+    delete globalThis.window;
+  }
+});

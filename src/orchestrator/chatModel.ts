@@ -261,3 +261,34 @@ export function pickedAnswers(
     return answer && q.options.includes(answer) ? answer : undefined;
   });
 }
+
+/** What a key does in the inline editor of an own message: Enter sends,
+ * Shift+Enter is a newline, Esc cancels. */
+export function editKeyAction(key: {
+  key: string;
+  shiftKey: boolean;
+  isComposing?: boolean;
+}): "send" | "cancel" | null {
+  if (key.isComposing) return null;
+  if (key.key === "Escape") return "cancel";
+  if (key.key === "Enter" && !key.shiftKey) return "send";
+  return null;
+}
+
+/** An edit sends when the text is not empty; it only changes the thread
+ * when it differs from the message (either way Send is allowed to resend). */
+export function canSendEdit(text: string, busy: boolean): boolean {
+  return !busy && text.trim().length > 0;
+}
+
+/** True for the messages that follow the one being edited: they are dimmed
+ * until Send or Cancel. */
+export function isAfterEdit(
+  messages: { id: string }[],
+  editingId: string | null,
+  index: number,
+): boolean {
+  if (!editingId) return false;
+  const at = messages.findIndex((m) => m.id === editingId);
+  return at >= 0 && index > at;
+}

@@ -748,3 +748,88 @@
 .ochat-confirm-outcome.failed {
   color: var(--tone-danger);
 }
+
+/* Editing an own message. */
+.ochat-you {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+.ochat-you-actions {
+  display: flex;
+  gap: 10px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.ochat-you:hover .ochat-you-actions,
+.ochat-you-actions:focus-within {
+  opacity: 1;
+}
+.ochat-you-actions button {
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+.ochat-you-actions button:hover {
+  color: var(--text);
+}
+.dimmed {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.ochat-editor {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--focus);
+  border-radius: 12px;
+  background: var(--bg-raised);
+}
+.ochat-editor textarea {
+  width: 100%;
+  min-height: 20px;
+  max-height: 240px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-md);
+  line-height: 16px;
+}
+.ochat-editor-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ochat-editor-bar span {
+  flex: 1;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+.ochat-editor-cancel {
+  padding: 4px 10px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+.ochat-editor-cancel:hover {
+  background: var(--bg-hover);
+}
+.ochat-editor-send {
+  padding: 4px 12px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.ochat-editor-send:disabled {
+  opacity: 0.5;
+}
+.ochat-you:has(.ochat-editor) {
+  padding-left: 0;
+}

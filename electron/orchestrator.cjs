@@ -65,6 +65,7 @@ const ALLOWED_METHODS = new Set([
   "costs.summary",
   "chat.get",
   "chat.send",
+  "chat.edit",
   "chat.cancel",
   "chat.list",
   "chat.new",
@@ -620,7 +621,9 @@ class OrchestratorService {
     const sendParams =
       // A task the owner or the orchestrator agent creates gets the
       // project's own MCP servers, resolved here where the config lives.
-      method === "task.create" || method === "chat.send"
+      method === "task.create" ||
+      method === "chat.send" ||
+      method === "chat.edit"
         ? await this.#withMcp(params)
         : params;
     const result = await orchdRequest(

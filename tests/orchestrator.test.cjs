@@ -211,6 +211,7 @@ test("call() rejects a method outside the protocol allowlist before touching the
     "costs.summary",
     "chat.get",
     "chat.send",
+    "chat.edit",
     "chat.cancel",
     "chat.list",
     "chat.new",

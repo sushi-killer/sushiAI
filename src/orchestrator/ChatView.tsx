@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   CornerDownRight,
@@ -17,8 +17,11 @@ import {
   groupSessions,
   matchesQuery,
   isUnread,
+  canSendEdit,
   composeAnswers,
   composerPlaceholder,
+  editKeyAction,
+  isAfterEdit,
   pickedAnswers,
   lastMessageText,
   modeLabel,
@@ -317,6 +320,7 @@ function Conversation({
   onRouteChange,
   onOpenTask,
   onSend,
+  onEdit,
   onClear,
 }: {
   cwd: string;
@@ -329,14 +333,24 @@ function Conversation({
   onRouteChange: (routeId: string) => void;
   onOpenTask?: (id: string) => void;
   onSend: (text: string, mode: ChatMode) => Promise<boolean>;
+  onEdit: (messageId: string, text: string, mode: ChatMode) => Promise<boolean>;
   onClear: () => void;
 }) {
   const orchestratorClient = useOrchestratorClient();
   const [draft, setDraft] = useState("");
+  const [editing, setEditing] = useState<{ id: string; text: string } | null>(
+    null,
+  );
   const endRef = useRef<HTMLDivElement>(null);
   const messages = thread?.messages ?? [];
   const busy = Boolean(thread?.busy);
   const last = messages.length ? messages[messages.length - 1].id : "";
+  // A different session or a running turn closes the editor.
+  const threadId = thread?.id;
+  useEffect(() => setEditing(null), [threadId]);
+  useEffect(() => {
+    if (busy) setEditing(null);
+  }, [busy]);
   useEffect(() => {
     endRef.current?.scrollIntoView?.({ block: "end" });
   }, [last, busy]);
@@ -345,6 +359,12 @@ function Conversation({
     const text = draft.trim();
     if (!text || busy) return;
     void onSend(text, mode).then((sent) => sent && setDraft(""));
+  }
+  function sendEdit(message: ChatMessage) {
+    if (!editing || !canSendEdit(editing.text, busy)) return;
+    void onEdit(message.id, editing.text.trim(), message.mode ?? "chat").then(
+      (sent) => sent && setEditing(null),
+    );
   }
   const shownError = error || thread?.error;
   const empty = messages.length === 0 && !busy;
@@ -385,27 +405,66 @@ function Conversation({
             </ul>
           </div>
         ) : (
-          messages.map((message, i) =>
-            message.role === "user" ? (
-              <div key={message.id} className="ochat-you">
-                <div className="ochat-bubble">{message.text}</div>
+          messages.map((message, i) => {
+            const dimmed = isAfterEdit(messages, editing?.id ?? null, i);
+            if (message.role === "user")
+              return (
+                <div
+                  key={message.id}
+                  className={`ochat-you ${dimmed ? "dimmed" : ""}`}
+                >
+                  {editing?.id === message.id ? (
+                    <MessageEditor
+                      text={editing.text}
+                      onChange={(text) => setEditing({ id: message.id, text })}
+                      onCancel={() => setEditing(null)}
+                      onSend={() => sendEdit(message)}
+                    />
+                  ) : (
+                    <>
+                      <div className="ochat-bubble">{message.text}</div>
+                      <div className="ochat-you-actions">
+                        {!busy && !editing && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setEditing({ id: message.id, text: message.text })
+                            }
+                          >
+                            Edit
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void navigator.clipboard?.writeText(message.text)
+                          }
+                        >
+                          Copy
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            return (
+              <div key={message.id} className={dimmed ? "dimmed" : undefined}>
+                <OrchestratorTurn
+                  key={message.id}
+                  cwd={cwd}
+                  message={message}
+                  nextUser={
+                    messages.slice(i + 1).find((m) => m.role === "user")?.text
+                  }
+                  tasks={tasks}
+                  maxAttempts={settings?.maxAttempts}
+                  busy={busy}
+                  onOpenTask={onOpenTask}
+                  onPick={(option, replyMode) => void onSend(option, replyMode)}
+                />
               </div>
-            ) : (
-              <OrchestratorTurn
-                key={message.id}
-                cwd={cwd}
-                message={message}
-                nextUser={
-                  messages.slice(i + 1).find((m) => m.role === "user")?.text
-                }
-                tasks={tasks}
-                maxAttempts={settings?.maxAttempts}
-                busy={busy}
-                onOpenTask={onOpenTask}
-                onPick={(option, replyMode) => void onSend(option, replyMode)}
-              />
-            ),
-          )
+            );
+          })
         )}
         {busy && (
           <div className="ochat-orch">
@@ -450,6 +509,74 @@ function Conversation({
         />
       </div>
     </>
+  );
+}
+
+/** The own message turned into an editor: Enter sends, Shift+Enter is a
+ * newline, Esc cancels. */
+function MessageEditor({
+  text,
+  onChange,
+  onCancel,
+  onSend,
+}: {
+  text: string;
+  onChange: (text: string) => void;
+  onCancel: () => void;
+  onSend: () => void;
+}) {
+  const areaRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const el = areaRef.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, []);
+  useLayoutEffect(() => {
+    const el = areaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [text]);
+  return (
+    <div className="ochat-editor">
+      <textarea
+        ref={areaRef}
+        aria-label="Edit message"
+        value={text}
+        rows={1}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          const action = editKeyAction({
+            key: event.key,
+            shiftKey: event.shiftKey,
+            isComposing: event.nativeEvent.isComposing,
+          });
+          if (!action) return;
+          event.preventDefault();
+          if (action === "cancel") onCancel();
+          else onSend();
+        }}
+      />
+      <div className="ochat-editor-bar">
+        <span>Replies below will be replaced</span>
+        <button
+          type="button"
+          className="ochat-editor-cancel"
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="ochat-editor-send"
+          disabled={!canSendEdit(text, false)}
+          onClick={onSend}
+        >
+          Send
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -881,6 +1008,16 @@ export function ChatView({
         return false;
       });
   }
+  function edit(messageId: string, text: string, editMode: ChatMode) {
+    setError("");
+    return orchestratorClient
+      .chatEdit(cwd, messageId, text, editMode)
+      .then(() => true)
+      .catch((e) => {
+        setError(errorText(e));
+        return false;
+      });
+  }
   const busy = Boolean(list?.sessions.some((s) => s.busy) || thread?.busy);
   return (
     <div className="orch-chat-view ochat" hidden={!visible}>
@@ -896,6 +1033,7 @@ export function ChatView({
           onRouteChange={onRouteChange}
           onOpenTask={onOpenTask}
           onSend={send}
+          onEdit={edit}
           onClear={() => change(orchestratorClient.chatClear(cwd))}
         />
       </section>

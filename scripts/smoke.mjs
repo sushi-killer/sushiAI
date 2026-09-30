@@ -715,6 +715,13 @@ try {
   await page.waitForSelector(".panel-agent");
   assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);
   await assertHiddenWindow(page);
+  // orchd starts lazily on the first real orchestrator request; make one so
+  // the teardown below has a daemon to prove it stops with the app.
+  if (orchdBuilt) {
+    await page.evaluate(() =>
+      window.bridge.orchestrator("chat.list", {}).catch(() => null),
+    );
+  }
   assert.deepEqual(errors, [], "No uncaught renderer errors");
   console.log(
     JSON.stringify(

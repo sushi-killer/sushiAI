@@ -119,6 +119,19 @@ export function orchestratorClientFor(host: string = LOCAL) {
     chatGet: (repo: string) => call<ChatThread>("chat.get", { repo }),
     chatSend: (repo: string, text: string, mode: ChatMode = "chat") =>
       call<Record<string, never>>("chat.send", { repo, text, mode }),
+    /** Replaces one of the owner's messages, drops the rest and re-runs from it. */
+    chatEdit: (
+      repo: string,
+      messageId: string,
+      text: string,
+      mode?: ChatMode,
+    ) =>
+      call<Record<string, never>>("chat.edit", {
+        repo,
+        messageId,
+        text,
+        ...(mode ? { mode } : {}),
+      }),
     chatCancel: (repo: string) =>
       call<Record<string, never>>("chat.cancel", { repo }),
     chatList: (repo: string) => call<ChatSessionList>("chat.list", { repo }),

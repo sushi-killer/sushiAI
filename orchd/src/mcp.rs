@@ -832,6 +832,13 @@ mod tests {
     }
 
     #[test]
+    fn no_tool_maps_to_task_pr() {
+        assert!(tool_specs()
+            .iter()
+            .all(|(_, method, ..)| *method != "task.pr"));
+    }
+
+    #[test]
     fn tools_list_has_exactly_the_orchestrator_tools_and_no_delete_or_settings_set() {
         let result = dispatch(&orchestrator(), "tools/list", &json!({})).unwrap();
         let tools = result["tools"].as_array().unwrap();

@@ -101,6 +101,13 @@ export function orchestratorClientFor(host: string = LOCAL) {
         ...(order === undefined ? {} : { order }),
       }),
     taskLand: (id: string) => call<Task>("task.land", { id }),
+    /** Pushes the task branch as `branch` and opens a pull request. */
+    taskPr: (id: string, title?: string, branch?: string) =>
+      call<Task>("task.pr", {
+        id,
+        ...(title ? { title } : {}),
+        ...(branch ? { branch } : {}),
+      }),
     taskStop: (id: string) => call<Task>("task.stop", { id }),
     taskAnswer: (id: string, answer: string) =>
       call<Task>("task.answer", { id, answer }),

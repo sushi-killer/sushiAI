@@ -418,6 +418,8 @@ export type Task = {
   source?: string;
   /** The commit a `variant.land` task put on its base branch. */
   landedSha?: string;
+  /** The pull request opened for the task's branch. */
+  prUrl?: string;
   /** Named files that were not committed, kept outside the worktree. */
   deliverables?: Deliverable[];
   /** Markdown report of a finished top-level task or graph. */

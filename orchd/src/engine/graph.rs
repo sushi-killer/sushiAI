@@ -1008,13 +1008,14 @@ impl App {
                 continue;
             }
             // A subtask never starts while its parent still waits for the
-            // parent's own dependencies.
+            // parent's own dependencies or sits in the backlog.
             if let Some(p) = task
                 .parent
                 .as_deref()
                 .and_then(|pid| all.iter().find(|t| t.id == pid))
             {
                 if !matches!(own_waits_state(p, &all), Waits::Ready | Waits::Nothing)
+                    || p.queue.backlog.is_some()
                     || (p.status == TaskStatus::Waiting && implement_attempt_count(task) == 0)
                 {
                     continue;

@@ -1428,3 +1428,49 @@ fn answering_stop_after_a_daemon_restart_stops_the_parent_and_its_subtasks() {
     daemon.shutdown_and_wait();
     remove_worktrees(&children.iter().chain([&parent]).collect::<Vec<_>>());
 }
+
+#[test]
+fn a_parent_in_the_backlog_starts_no_child_until_it_leaves() {
+    let (daemon, _scripts, log) = sleep_once_daemon();
+    let repo = init_git_repo();
+    let parent = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Feature",
+            "goal": "Both parts",
+            "start": false,
+            "backlog": {"bucket": "later"},
+        }),
+    );
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let child = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Only part",
+            "goal": "Make a change",
+            "verify": ["true"],
+            "parent": parent_id,
+        }),
+    );
+    let child_id = child["id"].as_str().unwrap().to_string();
+
+    std::thread::sleep(Duration::from_millis(1500));
+    let child_now = daemon.request("task.get", serde_json::json!({"id": child_id}));
+    assert_eq!(child_now["status"], "queued", "{child_now}");
+    assert_eq!(child_now["attempts"], serde_json::json!([]), "{child_now}");
+    assert!(!log.path().join("slept").exists());
+
+    daemon.request("task.start", serde_json::json!({"id": parent_id}));
+    let start = Instant::now();
+    while !log.path().join("slept").exists() {
+        assert!(start.elapsed() < Duration::from_secs(10), "child never ran");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    daemon.shutdown_and_wait();
+    for t in [&parent, &child] {
+        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+    }
+}

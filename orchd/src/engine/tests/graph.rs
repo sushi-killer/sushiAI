@@ -109,3 +109,23 @@ async fn an_amendment_pending_before_the_base_preflight_replaces_the_checked_com
         saved.decisions
     );
 }
+
+#[tokio::test]
+async fn advance_graph_starts_no_part_of_a_parent_in_the_backlog() {
+    let (app, dir) = test_app();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let mut parent = graph_task("p", TaskStatus::Queued, &[], None);
+    parent.repo = repo.to_string_lossy().into();
+    parent.queue.backlog = Some(Backlog {
+        bucket: BacklogBucket::Later,
+        order: 0,
+    });
+    let mut child = graph_task("c", TaskStatus::Queued, &[], Some("p"));
+    child.repo = parent.repo.clone();
+    app.store.save_task(&parent).unwrap();
+    app.store.save_task(&child).unwrap();
+
+    app.advance_graph(&parent.repo);
+    assert!(!app.controls.lock().unwrap().contains_key("c"));
+}

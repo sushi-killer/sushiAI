@@ -84,6 +84,7 @@ pub(super) async fn run_task_loop(
                 .and_then(|pid| all.iter().find(|t| t.id == pid))
                 .is_some_and(|p| {
                     !matches!(own_waits_state(p, &all), Waits::Ready | Waits::Nothing)
+                        || p.queue.backlog.is_some()
                         // A parent parked on a question (its base check) starts
                         // no subtask until it is answered.
                         || (p.status == TaskStatus::Waiting

@@ -558,12 +558,21 @@ export type ProposedTask = {
   taskId?: string;
   skipped?: boolean;
 };
-export type ChatProposal = { tasks: ProposedTask[] };
+/** Two or more rows are one feature: `featureTaskId` is the parent task every
+ * created row is a part of. */
+export type ChatProposal = {
+  feature?: string;
+  featureTaskId?: string;
+  tasks: ProposedTask[];
+};
 /** What `chat.createProposal` returns: the proposal as recorded and the
- * tasks this call made, by 1-based row. */
+ * tasks this call made, by 1-based row, plus the feature's parent when this
+ * call created it. */
 export type ChatProposalResult = {
   proposal: ChatProposal;
-  created: { index: number; taskId: string }[];
+  created: (
+    { index: number; taskId: string } | { feature: true; taskId: string }
+  )[];
 };
 export type ChatThread = {
   repo: string;

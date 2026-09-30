@@ -461,8 +461,14 @@ impl App {
                 // A live loop may already be queued for a slot to implement
                 // the whole request; only a drafting one re-checks after
                 // planning.
+                if parent.status == TaskStatus::Landing {
+                    return Err("the parent task is already landing".to_string());
+                }
+                // A parent with parts already runs no implement attempt of its
+                // own, so a live loop may take one more part.
                 if parent.status != TaskStatus::Drafting
                     && self.controls.lock().unwrap().contains_key(&parent.id)
+                    && !is_parent(&parent, &self.repo_tasks(repo))
                 {
                     return Err(
                         "the parent task is already running; create it with start: false, add its subtasks, then start it"

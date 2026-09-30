@@ -281,6 +281,10 @@ pub fn request_on(
         .read_line(&mut response_line)
         .expect("read response line from orchd");
     if response_line.trim().is_empty() {
+        // `shutdown` may exit before its reply is written: that is the answer.
+        if method == "shutdown" {
+            return serde_json::Value::Null;
+        }
         panic!("{}", no_answer(socket, method));
     }
     let v: serde_json::Value =
@@ -329,6 +333,9 @@ pub fn raw_request_with_params(
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
     if line.trim().is_empty() {
+        if method == "shutdown" {
+            return serde_json::Value::Null;
+        }
         panic!("{}", no_answer(socket, method));
     }
     serde_json::from_str(line.trim()).unwrap()

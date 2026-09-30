@@ -735,7 +735,7 @@ try {
           "settings connection",
           "routine execution",
           "layout persistence",
-          "orchd for this data dir exits with the app",
+          "orchd starts on first use and exits with the app",
           "no renderer errors",
           ...(skipped.length ? [] : ["Herdr ping + workspace sync"]),
         ],
@@ -753,8 +753,15 @@ try {
   throw error;
 } finally {
   await new Promise((resolve) => preview.close(resolve));
-  // A test-launched app stops its own daemon on quit. Prove one ran (so the
-  // check below cannot pass trivially), then that none outlives the app.
+  // orchd starts on first use, so make one call. A test-launched app stops
+  // its own daemon on quit: prove one ran (so the check below cannot pass
+  // trivially), then that none outlives the app.
+  if (orchdBuilt)
+    await (
+      await desktop.firstWindow()
+    )
+      .evaluate(() => window.bridge.orchestrator("task.list", {}))
+      .catch(() => {});
   const orchdRan = orchdBuilt && (await pollOrchd(true, 10000));
   await desktop.close();
   const orchdGone = !orchdBuilt || (await pollOrchd(false, 3000));

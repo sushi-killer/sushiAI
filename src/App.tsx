@@ -4,7 +4,7 @@ import type { Panel, Workspace } from "./types";
 import { uid } from "./layout";
 import { ChatView } from "./ChatView";
 import { AgentsView } from "./agents/AgentsView";
-import { ClaudeMcpSettings } from "./ClaudeMcpSettings";
+import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
 import { WorkspaceDialog } from "./WorkspaceDialog";
 import { errorText } from "./app/errors";
 import { useAppPersistence } from "./app/useAppPersistence";
@@ -518,7 +518,7 @@ export function App() {
               }}
             />
           ) : dialog.kind === "workspace-actions" && target ? (
-            <ClaudeMcpSettings
+            <ProjectSettingsDialog
               cwd={target!.workspace.cwd}
               endpoint={target!.workspace.connection}
               remote={target!.workspace.connection?.startsWith("ssh:") || false}

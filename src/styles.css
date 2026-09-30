@@ -3776,12 +3776,183 @@ iframe {
 .workspace-actions-modal form > .primary {
   align-self: stretch;
 }
-.claude-controls-modal {
-  width: min(960px, calc(100vw - 48px));
-}
 .workspace-controls-settings {
   display: grid;
   gap: 12px;
+}
+.claude-controls-modal {
+  width: min(1000px, calc(100vw - 48px));
+  padding: 0;
+  overflow: hidden;
+}
+.project-settings-shell {
+  min-height: 590px;
+  display: grid;
+  grid-template-columns: 228px minmax(0, 1fr);
+  background: #111;
+}
+.project-settings-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding: 24px 14px 16px;
+  border-right: 1px solid #292929;
+  background: #0d0d0d;
+}
+.project-settings-identity {
+  display: grid;
+  gap: 8px;
+  padding: 0 8px;
+  min-width: 0;
+}
+.project-settings-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.project-settings-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1rem;
+}
+.project-settings-identity small {
+  color: #888;
+  font-size: 0.75rem;
+}
+.project-settings-rename {
+  display: grid;
+  gap: 7px;
+}
+.project-settings-nav {
+  display: grid;
+  gap: 4px;
+}
+.project-settings-nav button {
+  padding: 9px 10px;
+  border-radius: 7px;
+  text-align: left;
+  color: #aaa;
+  font-size: 0.86rem;
+}
+.project-settings-nav button:hover {
+  background: #1b1b1b;
+  color: #eee;
+}
+.project-settings-nav button.selected {
+  background: #252525;
+  color: #fff;
+}
+.project-settings-close {
+  margin-top: auto;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 7px;
+}
+.project-settings-content {
+  min-width: 0;
+  padding: 25px 28px;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 20px;
+}
+.project-settings-content-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+.project-settings-content-header h2 {
+  margin: 0 0 6px;
+  font-size: 1.2rem;
+}
+.project-settings-content-header span {
+  display: block;
+  color: #777;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+.project-general {
+  display: grid;
+  gap: 12px;
+  max-width: 680px;
+}
+.project-general-card {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.65fr) minmax(220px, 1.35fr);
+  gap: 12px 18px;
+  padding: 17px;
+  border: 1px solid #292929;
+  border-radius: 10px;
+  background: #151515;
+}
+.project-general-card h3 {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.88rem;
+}
+.project-general-card > label {
+  display: grid;
+  gap: 7px;
+  color: #a0a0a0;
+  font-size: 0.75rem;
+}
+.project-general-card input,
+.project-general-card select {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
+  font-size: 0.8rem;
+}
+.project-general-card > p {
+  grid-column: 1 / -1;
+  margin: -7px 0 0;
+  color: #858585;
+  font-size: 0.77rem;
+}
+.project-domain-chips,
+.project-general-card form {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.project-domain-chips button {
+  padding: 6px 9px;
+  border: 1px solid #353535;
+  border-radius: 20px;
+  color: #ccc;
+  font-size: 0.75rem;
+}
+.project-domain-chips button span {
+  margin-left: 5px;
+  color: #888;
+}
+.project-general-card form input {
+  flex: 1;
+  width: auto;
+}
+.project-settings-placeholder {
+  padding: 18px;
+  border: 1px solid #292929;
+  border-radius: 10px;
+  background: #151515;
+  color: #999;
+}
+.project-settings-placeholder h3 {
+  margin: 0 0 7px;
+  color: #ddd;
+  font-size: 0.9rem;
+}
+.project-settings-placeholder p {
+  margin: 0 0 8px;
+  font-size: 0.8rem;
 }
 .project-mcp-tab {
   display: grid;

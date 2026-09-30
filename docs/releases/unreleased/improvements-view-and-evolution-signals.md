@@ -1,8 +1,0 @@
-## Improvements shows live problems and can look for proposals
-
-- Recurring failures skip archived tasks and eval runs and cover the last 14 days; the section label shows the real total ("21 - last 14 days, showing 10"). "Open tasks" expands the row into every task that hit the failure, and the rail's Improvements badge counts recurring failures next to proposals waiting on you.
-- A "Look for improvements" button runs the proposer (nothing runs by itself) and reports how many runs started, or that nothing has enough evidence yet.
-- A failure's signature now names the failing test or the first real error instead of tool boilerplate such as `error: test failed, to rerun pass ...`, an ESLint "0 errors, N warnings" summary, or a passing test whose name contains "Error".
-- Evolution signals carry a timestamp, ignore tasks that were deleted or archived, and no longer count the "Another attempt was asked for" answer as a review finding. Owner answers cluster by their first word ("continue", "retry", "drop"), so a repeated pattern can qualify.
-- The discovery baseline compares an attempt with earlier attempts of the same number, so first attempts are not measured against retries. The throwaway-script detector only looks at the operands of an `rm` command and skips files the attempt kept.
-- `process_read` needs `evolution.processMinCalls` calls (default 3) and reads its file patterns from `evolution.processFiles`, a map from repo path to substrings (default empty). The global `workBuckets.process` list no longer feeds it: move each repo's entries into `evolution.processFiles["<repo path>"]`.

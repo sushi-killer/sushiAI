@@ -289,7 +289,10 @@ test("several questions are answered as one message and read back from it", asyn
   ];
   assert.equal(composeAnswers(qs, []), null);
   const sent = composeAnswers(qs, ["sqlite", undefined, "no"]);
-  assert.equal(sent, "Which db?: sqlite\nDocs?: no");
+  assert.equal(
+    sent,
+    "Which db?: sqlite\nWhich host?: no preference\nDocs?: no",
+  );
   assert.deepEqual(pickedAnswers(qs, sent), ["sqlite", undefined, "no"]);
   assert.deepEqual(pickedAnswers(qs, undefined), [
     undefined,

@@ -31,6 +31,7 @@ import {
 import {
   errorText,
   formatCost,
+  orchestratorRouteLabel,
   participantLabel,
   taskReason,
   taskTone,
@@ -65,14 +66,6 @@ const MODE_HINTS = [
   ["Brainstorm", "turns an idea into tasks, one question at a time"],
   ["Plan", "splits a goal into ordered tasks you confirm"],
 ] as const;
-
-/** "Orchestrator · claude-sonnet": the route the chat runs on, by model. */
-function routeLabel(settings: Settings): string {
-  const id = settings.orchestrator || settings.tiers.standard;
-  const route = settings.routes.find((r) => r.id === id);
-  const name = route?.label || id;
-  return name ? `Orchestrator · ${name}` : "Orchestrator";
-}
 
 /** A known task the orchestrator named, as a card that opens it. */
 function TaskRefCard({
@@ -272,7 +265,7 @@ function ChatHead({
       {settings && (
         <span className="ochat-route" title="Change it in the composer">
           <Sparkles size={12} />
-          {routeLabel(settings)}
+          {orchestratorRouteLabel(settings)}
         </span>
       )}
       <div className="ochat-menu-wrap">
@@ -502,7 +495,6 @@ function Conversation({
               <OrchestratorRouteChip
                 settings={settings}
                 onRouteChange={onRouteChange}
-                standardLabel="Orchestrator"
               />
             )
           }

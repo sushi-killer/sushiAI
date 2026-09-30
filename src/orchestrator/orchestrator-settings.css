@@ -508,3 +508,14 @@
 .orchestrator-settings .os-tool-add {
   margin: 12px 0 8px;
 }
+.orchestrator-settings .os-tool-spin {
+  display: inline-block;
+  vertical-align: -1px;
+  margin-right: 5px;
+  animation: os-tool-spin 0.9s linear infinite;
+}
+@keyframes os-tool-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

@@ -3,6 +3,7 @@ import type { ReactNode, Ref } from "react";
 import { ArrowUp, Sparkles, Square } from "lucide-react";
 import { ChipPicker } from "../ChipPicker";
 import { CHAT_MODES } from "./chatModel";
+import { orchestratorRouteLabel } from "./helpers";
 import type { ChatMode, Settings } from "./types";
 
 const MAX_HEIGHT = 220;
@@ -167,23 +168,20 @@ function ModeSwitch({
 export function OrchestratorRouteChip({
   settings,
   onRouteChange,
-  standardLabel = "Standard route",
 }: {
   settings: Settings;
   onRouteChange: (routeId: string) => void;
-  /** What the unset route reads as; the Chat view calls it "Orchestrator". */
-  standardLabel?: string;
 }) {
   const routeId = settings.orchestrator || "";
-  const route = settings.routes.find((r) => r.id === routeId);
+  const standard = settings.routes.find(
+    (r) => r.id === settings.tiers.standard,
+  );
+  const standardLabel =
+    standard?.label || settings.tiers.standard || "Orchestrator";
   return (
     <ChipPicker
       icon={<Sparkles size={14} className="orch-composer-route-icon" />}
-      label={
-        routeId
-          ? `${standardLabel} · ${route?.label ?? routeId}`
-          : standardLabel
-      }
+      label={orchestratorRouteLabel(settings)}
       ariaLabel="Orchestrator route"
       value={routeId}
       onChange={onRouteChange}

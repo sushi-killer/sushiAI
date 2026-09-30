@@ -12,6 +12,11 @@ const os = require("node:os");
 const fs = require("node:fs/promises");
 const { existsSync } = require("node:fs");
 const { spawn } = require("node:child_process");
+const TEST_MCP_HOME = require("node:path").join(
+  __dirname,
+  "test-fixtures",
+  "mcp-home",
+);
 const { createHash, randomUUID } = require("node:crypto");
 const { RemoteOrchd, localArtifacts } = require("./orchestrator-remote.cjs");
 
@@ -526,7 +531,15 @@ class OrchestratorService {
     const child = spawn(
       this.binary,
       ["--data", this.dataDir, "--socket", this.socketPath],
-      { detached: true, stdio: "ignore" },
+      {
+        detached: true,
+        stdio: "ignore",
+        // A test launch reads MCP servers from a fixture, never the owner's
+        // own ~/.claude.json, so screenshots show no real server names.
+        env: this.stopDaemonOnQuit
+          ? { ...process.env, SUSHIAI_MCP_HOME: TEST_MCP_HOME }
+          : process.env,
+      },
     );
     // Detached and unref'd on purpose: this process must outlive the app.
     child.unref();

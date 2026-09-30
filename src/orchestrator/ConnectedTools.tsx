@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, LoaderCircle, Trash2 } from "lucide-react";
 import { useOrchestratorClient } from "./hostContext";
 import { errorText } from "./helpers";
 import { toolFromServer, toolStatusLine, withOverride } from "./toolsModel";
@@ -21,16 +21,39 @@ export function ConnectedTools({
   const client = useOrchestratorClient();
   const [rows, setRows] = useState<ChatToolRow[]>([]);
   const [servers, setServers] = useState<ChatToolServer[]>([]);
+  const [checking, setChecking] = useState<string[]>([]);
   const [open, setOpen] = useState("");
   const [error, setError] = useState("");
   const savedKey = JSON.stringify(savedTools);
 
   useEffect(() => {
     let live = true;
+    // What orchd already knows shows at once; each enabled tool is then
+    // looked at on its own, so a slow server never holds the others back.
     client
-      .chatTools()
+      .chatTools({ cached: true })
       .then((result) => live && setRows(result.tools))
       .catch((e) => live && setError(errorText(e)));
+    const ids = JSON.parse(savedKey).flatMap((t: ChatToolConfig) =>
+      t.enabled ? [t.id] : [],
+    ) as string[];
+    setChecking(ids);
+    for (const id of ids) {
+      client
+        .chatTools({ id })
+        .then(
+          (result) =>
+            live &&
+            setRows((old) => [
+              ...old.filter((r) => r.id !== id),
+              ...result.tools,
+            ]),
+        )
+        .catch((e) => live && setError(errorText(e)))
+        .finally(
+          () => live && setChecking((old) => old.filter((i) => i !== id)),
+        );
+    }
     client
       .chatToolServers()
       .then((result) => live && setServers(result.servers))
@@ -66,6 +89,7 @@ export function ConnectedTools({
         const row = rows.find((r) => r.id === tool.id);
         const expanded = open === tool.id;
         const saved = savedTools.some((s) => s.id === tool.id);
+        const busy = saved && tool.enabled && checking.includes(tool.id);
         return (
           <div key={tool.id} className="os-tool">
             <div className="os-tool-row">
@@ -91,11 +115,20 @@ export function ConnectedTools({
                         : ""
                     }`}
                   >
-                    {saved
-                      ? toolStatusLine(tool, row)
-                      : tool.enabled
-                        ? "Save to connect"
-                        : "Off"}
+                    {busy && (
+                      <LoaderCircle
+                        className="spin os-tool-spin"
+                        size={11}
+                        aria-hidden
+                      />
+                    )}
+                    {busy
+                      ? "Checking…"
+                      : saved
+                        ? toolStatusLine(tool, row)
+                        : tool.enabled
+                          ? "Save to connect"
+                          : "Off"}
                   </span>
                 </span>
               </button>

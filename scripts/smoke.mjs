@@ -697,6 +697,9 @@ try {
     (history) => history.includes("\r\nROUTINE_OK"),
   );
   assert.ok(routineOutput.includes("\r\nROUTINE_OK"));
+  // The daemon starts lazily on the first request; send one so the exit check
+  // in `finally` has a daemon to look for.
+  if (orchdBuilt) await page.evaluate(() => window.bridge.orchestrator("ping"));
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Close Smoke routine" }).click();
   // The reload must find the close already persisted, not race its write.

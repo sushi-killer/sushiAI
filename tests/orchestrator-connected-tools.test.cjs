@@ -119,7 +119,7 @@ test("the client sends the OK card's calls and the tools lookups", async () => {
   await c.chatActionSend("/repo", "m1", { text: "x" });
   await c.chatActionSend("/repo", "m2");
   await c.chatActionDecline("/repo", "m3");
-  await c.chatTools(true);
+  await c.chatTools({ refresh: true });
   await c.chatTools();
   await c.chatToolServers();
   assert.deepEqual(calls, [

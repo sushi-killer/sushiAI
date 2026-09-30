@@ -235,16 +235,20 @@ export function proposalRequest(
   };
 }
 
+/** What a question left unanswered reads as in the sent answers. */
+const NO_PREFERENCE = "no preference";
+
 /** The one message that answers several questions: `<question>: <answer>` per
- * line, unanswered questions left out. `null` when nothing is answered. */
+ * line, an unanswered question sent as "no preference". `null` when nothing is
+ * answered. */
 export function composeAnswers(
   questions: ChatQuestion[],
   picks: (string | undefined)[],
 ): string | null {
-  const lines = questions.flatMap((q, i) =>
-    picks[i] ? [`${q.text}: ${picks[i]}`] : [],
-  );
-  return lines.length ? lines.join("\n") : null;
+  if (!questions.some((_, i) => picks[i])) return null;
+  return questions
+    .map((q, i) => `${q.text}: ${picks[i] ?? NO_PREFERENCE}`)
+    .join("\n");
 }
 
 /** What a sent answers message picked, per question, read back from its text

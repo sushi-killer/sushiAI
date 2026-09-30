@@ -152,10 +152,13 @@ export function orchestratorClientFor(host: string = LOCAL) {
         messageId,
         ...params,
       }),
-    /** The connected tools' status and tools; `refresh` looks at each enabled
-     * server again instead of trusting the last look. */
-    chatTools: (refresh = false) =>
-      call<{ tools: ChatToolRow[] }>("chat.tools", refresh ? { refresh } : {}),
+    /** The connected tools' status and tools. `refresh` looks at each enabled
+     * server again instead of trusting the last look; `cached` only reads the
+     * last look (fast); `id` limits it to one tool so checks can run side by
+     * side. */
+    chatTools: (
+      options: { refresh?: boolean; cached?: boolean; id?: string } = {},
+    ) => call<{ tools: ChatToolRow[] }>("chat.tools", { ...options }),
     /** Servers of the owner's MCP config that are not connected tools yet. */
     chatToolServers: () =>
       call<{ servers: ChatToolServer[] }>("chat.toolServers"),

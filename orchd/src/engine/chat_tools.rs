@@ -35,8 +35,13 @@ pub fn transport(server: &serde_json::Value) -> Transport {
     }
 }
 
+/// Where the owner's MCP config lives: `$HOME`, or `$SUSHIAI_MCP_HOME` in a
+/// test profile so nothing of the owner's own config shows up.
 fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+    match std::env::var("SUSHIAI_MCP_HOME") {
+        Ok(fixture) if !fixture.is_empty() => PathBuf::from(fixture),
+        _ => PathBuf::from(std::env::var("HOME").unwrap_or_default()),
+    }
 }
 
 fn read_json(path: &Path) -> Option<serde_json::Value> {
@@ -709,12 +714,19 @@ pub async fn status_json(
     app: &App,
     settings: &Settings,
     refresh: bool,
+    cached_only: bool,
+    only: Option<&str>,
 ) -> Result<serde_json::Value, String> {
+    let cache = load_cache(app);
     let mut rows = Vec::new();
-    for cfg in &settings.chat_tools {
+    for cfg in settings
+        .chat_tools
+        .iter()
+        .filter(|cfg| only.is_none_or(|id| cfg.id == id))
+    {
         let resolved = resolve(cfg, &home());
-        let mut found = load_cache(app).remove(&cfg.id);
-        if cfg.enabled && (refresh || found.is_none()) {
+        let mut found = cache.get(&cfg.id).cloned();
+        if cfg.enabled && !cached_only && (refresh || found.is_none()) {
             found = Some(discover(app, cfg).await);
         }
         let (kind, codex) = match &resolved {
@@ -801,7 +813,9 @@ pub async fn handle_tools(
 ) -> Result<serde_json::Value, String> {
     let settings = app.settings.read().unwrap().clone();
     let refresh = params.get("refresh").and_then(|r| r.as_bool()) == Some(true);
-    status_json(app, &settings, refresh).await
+    let cached_only = params.get("cached").and_then(|r| r.as_bool()) == Some(true);
+    let only = params.get("id").and_then(|r| r.as_str());
+    status_json(app, &settings, refresh, cached_only, only).await
 }
 
 pub async fn handle_tool_servers(
@@ -897,6 +911,23 @@ fn send_argv(mcp_config: &Path, tool: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_test_profile_fixture_lists_only_example_servers() {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../electron/test-fixtures/mcp-home");
+        let listed = available_json(&Settings::default(), &fixture);
+        let refs: Vec<&str> = listed["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["ref"].as_str())
+            .collect();
+        assert_eq!(
+            refs,
+            ["claude-json:example-notes", "claude-json:example-tracker"]
+        );
+    }
 
     #[test]
     fn names_decide_read_or_write_when_nothing_else_does() {

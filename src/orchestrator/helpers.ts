@@ -840,3 +840,11 @@ export function daemonDown(
     ? "unavailable"
     : null;
 }
+
+/** The route the orchestrator chat runs on, named by its model: the one text
+ * the composer chip and the conversation header both show. */
+export function orchestratorRouteLabel(settings: Settings): string {
+  const id = settings.orchestrator || settings.tiers.standard;
+  const route = settings.routes.find((r) => r.id === id);
+  return route?.label || id || "Orchestrator";
+}

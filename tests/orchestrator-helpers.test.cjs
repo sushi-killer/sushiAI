@@ -930,3 +930,16 @@ test("daemonDown tells a gone daemon from a refused request", async () => {
   );
   assert.equal(daemonDown("task is running"), null);
 });
+
+test("the composer chip and the header name the route the same way", async () => {
+  const { orchestratorRouteLabel } = await library;
+  assert.equal(orchestratorRouteLabel(settings()), "Claude Sonnet");
+  assert.equal(
+    orchestratorRouteLabel(settings({ orchestrator: "codex" })),
+    "Codex",
+  );
+  assert.equal(
+    orchestratorRouteLabel(settings({ orchestrator: "gone" })),
+    "gone",
+  );
+});

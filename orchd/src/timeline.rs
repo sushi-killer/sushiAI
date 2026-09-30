@@ -295,10 +295,14 @@ pub fn failure_catalogue(
     let cutoff = since_days.map(|d| now - i64::from(d) * DAY_MS);
     let mut rows: Vec<FailureRow> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
-    for t in tasks
+    // The store lists tasks in directory order, which differs between file
+    // systems; oldest first keeps each row's task list stable everywhere.
+    let mut tasks: Vec<&Task> = tasks
         .iter()
         .filter(|t| repo.is_none_or(|r| t.repo == r) && !t.archived && t.eval_set.is_none())
-    {
+        .collect();
+    tasks.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+    for t in tasks {
         for a in &t.attempts {
             let Some(f) = &a.failure else { continue };
             let seen = a.ended_at.unwrap_or(a.started_at);

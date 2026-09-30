@@ -637,7 +637,7 @@ impl App {
     /// `task.land {id}`: lands a done, unlanded top-level task now, through
     /// the same landing queue a `variant.land` task uses. The task goes back
     /// to `landing` and its loop does the rest; the default branch is still
-    /// refused unless `settings.landOnDefault`.
+    /// refused unless the repo is allowed in `settings.landOnDefaultRepos` (or `settings.landOnDefault`).
     pub(super) async fn handle_task_land(
         &self,
         params: serde_json::Value,
@@ -675,7 +675,10 @@ impl App {
             );
         };
         let (land_on_default, repo) = (
-            self.settings.read().unwrap().land_on_default,
+            self.settings
+                .read()
+                .unwrap()
+                .may_land_on_default(&task.repo),
             PathBuf::from(&task.repo),
         );
         if !land_on_default {
@@ -683,9 +686,7 @@ impl App {
                 .await
                 .map_err(|e| e.to_string())?;
             if default.as_deref() == Some(branch.as_str()) {
-                return Err(format!(
-                    "{branch} is the default branch and settings.landOnDefault is off"
-                ));
+                return Err(crate::model::land_on_default_refusal(&branch, &task.repo));
             }
         }
         let all = self.repo_tasks(&task.repo);

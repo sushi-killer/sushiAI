@@ -227,6 +227,91 @@ fn landing_on_the_default_branch_is_refused_unless_land_on_default_is_on() {
     daemon.shutdown_and_wait();
 }
 
+fn create_on(daemon: &Daemon, repo: &Path, name: &str, base: &str) -> serde_json::Value {
+    daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.to_str().unwrap(),
+            "title": format!("Add {name}"),
+            "goal": format!("FILE_{name}: write the file"),
+            "verify": [format!("test -f {name}.txt")],
+            "land": true,
+            "base": base,
+            "start": false,
+        }),
+    )
+}
+
+#[test]
+fn a_repo_allowed_per_repo_lands_on_its_default_branch_others_are_refused_with_the_way_to_allow_it()
+{
+    let (daemon, _scripts) = daemon();
+    let repo = init_git_repo();
+    let root = repo.path();
+    let other = init_git_repo();
+    let default = git_out(root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["landOnDefaultRepos"] = serde_json::json!({ root.to_str().unwrap(): true });
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let task = create(&daemon, root, "one", "test -f one.txt", true);
+    let id = task["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": id}));
+    let done = until_done(&daemon, &id);
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(done["landedSha"], git_out(root, &["rev-parse", &default]));
+
+    let task = create(&daemon, other.path(), "two", "test -f two.txt", true);
+    let id = task["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": id}));
+    let done = until_done(&daemon, &id);
+    assert!(done.get("landedSha").is_none(), "{done}");
+    let lines = decisions(&done);
+    assert!(lines.contains("Land: refused"), "{lines}");
+    assert!(lines.contains("Settings > Orchestration"), "{lines}");
+    assert!(!lines.contains("settings.landOnDefault"), "{lines}");
+    // The explicit Land action gives the same readable reason.
+    let err = daemon.request_error("task.land", serde_json::json!({"id": id}));
+    assert!(err.contains("Settings > Orchestration"), "{err}");
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn landing_on_a_default_branch_that_is_not_checked_out_leaves_the_working_copy_alone() {
+    let (daemon, _scripts) = daemon();
+    let repo = init_git_repo();
+    let root = repo.path();
+    let default = git_out(root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["landOnDefaultRepos"] = serde_json::json!({ root.to_str().unwrap(): true });
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    // The owner's working copy sits on another branch with a dirty file.
+    git_out(root, &["checkout", "-q", "-b", "other"]);
+    std::fs::write(root.join("README.md"), "hello\nmy edit\n").unwrap();
+    let other_head = git_out(root, &["rev-parse", "other"]);
+
+    let one = create_on(&daemon, root, "one", &default);
+    let one_id = one["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": one_id}));
+    let one = until_done(&daemon, &one_id);
+    assert_eq!(one["status"], "done", "{one}");
+    assert_eq!(one["landedSha"], git_out(root, &["rev-parse", &default]));
+    // The default branch moved (fast-forward of the task's commit) ...
+    assert_eq!(commits(root, &default)[0], "Add one");
+    // ... and the working copy did not: same branch, same head, same edit.
+    assert_eq!(
+        git_out(root, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "other"
+    );
+    assert_eq!(git_out(root, &["rev-parse", "other"]), other_head);
+    assert!(!root.join("one.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("README.md")).unwrap(),
+        "hello\nmy edit\n"
+    );
+    daemon.shutdown_and_wait();
+}
+
 #[test]
 fn after_land_commands_run_in_the_main_checkout_and_a_failure_never_unlands() {
     let (daemon, _scripts) = daemon();

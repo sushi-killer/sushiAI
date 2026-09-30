@@ -7,6 +7,8 @@ import type { Preflight } from "./types";
 import { useOrchestratorHosts } from "./useHosts";
 import {
   errorText,
+  landRepos,
+  withLandRepos,
   type DefaultableSetting,
   resetSettingToDefault,
   settingValue,
@@ -665,6 +667,30 @@ function OrchestratorSettingsBody({
         />,
         experimentMarker("Land finished work", "land"),
       )}
+      <div className="os-block">
+        <div className="os-row-head">
+          <span className="os-row-title">
+            Repos where landing on the default branch is allowed
+          </span>
+        </div>
+        <span className="os-row-desc">
+          Every other repo refuses to land on its default branch. Use the full
+          repo path.
+        </span>
+        <ChipList
+          values={landRepos(settings.landOnDefaultRepos)}
+          label="Add a repo path"
+          placeholder="Add a repo path…"
+          onChange={(repos) =>
+            update({
+              landOnDefaultRepos: withLandRepos(
+                settings.landOnDefaultRepos,
+                repos,
+              ),
+            })
+          }
+        />
+      </div>
       {row(
         "Max attempts",
         "How many times a task is retried before it comes to you.",

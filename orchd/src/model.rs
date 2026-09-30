@@ -178,6 +178,10 @@ pub struct Settings {
     /// on its own branch.
     #[serde(default)]
     pub land_on_default: bool,
+    /// Per repo path: whether landing on that repo's default branch is
+    /// allowed. `land_on_default` decides for repos not in the map.
+    #[serde(default)]
+    pub land_on_default_repos: std::collections::BTreeMap<String, bool>,
     /// Commands run in the repo's main checkout after a task lands.
     #[serde(default)]
     pub after_land: Vec<AfterLand>,
@@ -501,6 +505,34 @@ fn default_planner() -> String {
     "claude-opus".to_string()
 }
 
+impl Settings {
+    /// Whether a task may land on `repo`'s default branch: the per-repo entry
+    /// when there is one, else the global switch.
+    pub fn may_land_on_default(&self, repo: &str) -> bool {
+        // Symlinked paths (macOS /var -> /private/var) name the same repo.
+        let same = |a: &str, b: &str| {
+            let (a, b) = (a.trim_end_matches('/'), b.trim_end_matches('/'));
+            a == b
+                || matches!(
+                    (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+                    (Ok(x), Ok(y)) if x == y
+                )
+        };
+        self.land_on_default_repos
+            .iter()
+            .find(|(k, _)| same(k, repo))
+            .map(|(_, allowed)| *allowed)
+            .unwrap_or(self.land_on_default)
+    }
+}
+
+/// Why landing on a default branch was refused, with the one-line way to allow it.
+pub fn land_on_default_refusal(branch: &str, repo: &str) -> String {
+    format!(
+        "{branch} is the default branch and landing there is not allowed for {repo}. To allow it, add {repo} under Settings > Orchestration > Repos where landing on the default branch is allowed."
+    )
+}
+
 impl Default for Settings {
     fn default() -> Self {
         let mut tiers = HashMap::new();
@@ -560,6 +592,7 @@ impl Default for Settings {
             evolution: EvolutionSettings::default(),
             worktree_root: default_worktree_root(),
             land_on_default: false,
+            land_on_default_repos: Default::default(),
             after_land: vec![],
             scoped_checks: default_scoped_checks(),
             autopilot: false,

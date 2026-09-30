@@ -108,6 +108,9 @@ export type Settings = {
     }
   >; /** Repository-specific path fragments for `orchd ab`'s work breakdown. */
   workBuckets?: { process: string[]; evidence: string[] };
+  /** Repo path -> landing on its default branch is allowed; repos not listed
+   * follow the daemon's global `landOnDefault`. */
+  landOnDefaultRepos?: Record<string, boolean>;
   /** Thresholds for the evolution loop; absent in older settings. */
   evolution?: EvolutionSettings;
 };

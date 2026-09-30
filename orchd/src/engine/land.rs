@@ -21,7 +21,7 @@ pub(super) async fn land_on_base(
 ) -> Landing {
     let (land_on_default, after_land) = {
         let s = app.settings.read().unwrap();
-        (s.land_on_default, s.after_land.clone())
+        (s.may_land_on_default(&task.repo), s.after_land.clone())
     };
     let Some(branch) = task.base_ref.clone() else {
         task.decisions.push(
@@ -38,7 +38,8 @@ pub(super) async fn land_on_base(
             .unwrap_or(None);
         if default.as_deref() == Some(branch.as_str()) {
             task.decisions.push(format!(
-                "Land: refused, {branch} is the default branch and settings.landOnDefault is off; the work stays on {}",
+                "Land: refused, {} The work stays on {}",
+                crate::model::land_on_default_refusal(&branch, &task.repo),
                 task.branch
             ));
             return Landing::NoParent;

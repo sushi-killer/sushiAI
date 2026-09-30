@@ -455,6 +455,26 @@ export function errorText(error: unknown): string {
   );
 }
 
+/** Repos where landing on the default branch is allowed, for the Settings list. */
+export function landRepos(map: Record<string, boolean> | undefined): string[] {
+  return Object.entries(map ?? {})
+    .filter(([, allowed]) => allowed)
+    .map(([repo]) => repo);
+}
+
+/** The map for an edited list: listed repos are allowed, removed ones fall
+ * back to the global switch, and explicit `false` entries stay untouched. */
+export function withLandRepos(
+  map: Record<string, boolean> | undefined,
+  repos: string[],
+): Record<string, boolean> {
+  const next: Record<string, boolean> = {};
+  for (const [repo, allowed] of Object.entries(map ?? {}))
+    if (!allowed) next[repo] = false;
+  for (const repo of repos) next[repo] = true;
+  return next;
+}
+
 /** One tone per status family, shared by a row's dot and its pill badge:
  * in flight reads blue, needs-you yellow, finished well green, went wrong
  * red, not started yet muted. */

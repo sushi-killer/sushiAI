@@ -901,6 +901,17 @@ test("errorText strips Electron's IPC wrapper", async () => {
   );
 });
 
+test("landRepos and withLandRepos edit the per-repo landing list", async () => {
+  const { landRepos, withLandRepos } = await library;
+  assert.deepEqual(landRepos(undefined), []);
+  assert.deepEqual(landRepos({ "/a": true, "/b": false }), ["/a"]);
+  assert.deepEqual(withLandRepos({ "/a": true, "/b": false }, ["/c"]), {
+    "/b": false,
+    "/c": true,
+  });
+  assert.deepEqual(withLandRepos(undefined, []), {});
+});
+
 test("daemonDown tells a gone daemon from a refused request", async () => {
   const { daemonDown } = await library;
   assert.equal(

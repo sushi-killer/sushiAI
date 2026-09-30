@@ -1272,6 +1272,7 @@ pub(super) async fn run_task_loop(
         // task merged, the owner committed): carry the work onto it so verify
         // and review judge the tree that would actually land. Conflicts go
         // back to the agent as a failure; it resolves them, not this code.
+        let attempt_start_base = base_sha.clone();
         let mut base_sha = base_sha;
         let mut changed = changed;
         if let Some(base_ref) = task.base_ref.clone() {
@@ -1474,7 +1475,55 @@ pub(super) async fn run_task_loop(
             return;
         }
         task.attempts[idx].verify = verify_results.clone();
-        if let Some(failed) = verify_results.iter().find(|v| v.code != Some(0)) {
+        while let Some(failed) = verify_results.iter().find(|v| v.code != Some(0)).cloned() {
+            // The work was carried onto a base that moved during this
+            // attempt: a command that passed on the old base and fails on
+            // the new one alone is the base's failure, not the attempt's.
+            if attempt_start_base != task.base_sha
+                && !owner_answered_base_check(&task, &failed.command, &task.base_sha)
+            {
+                let base_dir = run_dir.join("verify-base");
+                if let Some(base_run) = broken_by_the_new_base(
+                    &app,
+                    &task,
+                    &failed,
+                    &attempt_start_base,
+                    &base_dir,
+                    &cancel,
+                )
+                .await
+                {
+                    match wait_on_broken_base(
+                        &app,
+                        &task_id,
+                        &mut task,
+                        idx,
+                        &failed,
+                        &base_run,
+                        &mut attempt_budget,
+                        &pending_answer,
+                        &cancel,
+                        &mut permit,
+                    )
+                    .await
+                    {
+                        BaseBreak::Stopped => {
+                            drop(permit);
+                            app.finish_task_loop(&task_id);
+                            return;
+                        }
+                        BaseBreak::Retry => {
+                            drop(permit);
+                            continue 'attempts;
+                        }
+                        BaseBreak::Dropped => {
+                            verify_results.retain(|v| v.command != failed.command);
+                            task.attempts[idx].verify = verify_results.clone();
+                            continue;
+                        }
+                    }
+                }
+            }
             let detail = format!(
                 "{} exited {}.\n{}",
                 failed.command,
@@ -1500,7 +1549,7 @@ pub(super) async fn run_task_loop(
             {
                 LoopSignal::Continue => {
                     drop(permit);
-                    continue;
+                    continue 'attempts;
                 }
                 LoopSignal::Stop => {
                     drop(permit);

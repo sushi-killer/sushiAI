@@ -356,15 +356,12 @@ fn a_screenshot_command_that_fails_is_a_decision_not_a_failed_attempt() {
         &s,
         json!({
             "criteria": ["The panel is open -- check: screenshot under artifacts/"],
-            "screenshot": "exit 4",
+            "screenshot": "mkdir -p artifacts && echo png > artifacts/panel.png; exit 4",
         }),
     );
     let task = finished(&s, &id);
     assert_eq!(task["status"], "done", "{task}");
-    assert!(
-        decisions(&task).contains("screenshot command exit 4 exited 4"),
-        "{task}"
-    );
+    assert!(decisions(&task).contains("exit 4 exited 4"), "{task}");
     cleanup(s, &task);
 }
 

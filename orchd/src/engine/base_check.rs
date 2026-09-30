@@ -191,6 +191,122 @@ pub(super) async fn failing_on_base(
     base.code.is_some_and(|c| c != 0).then_some(base)
 }
 
+/// A `verify` command that failed after the work was carried onto a moved
+/// base: `Some` with the base's own result when the command fails on the new
+/// base alone yet passed on the base the attempt started from, so the base
+/// broke it and the attempt did not. A command that already failed on the
+/// old base is a check the work is meant to turn green, never blamed on the
+/// base. Cached per base commit like every base run.
+pub(super) async fn broken_by_the_new_base(
+    app: &Arc<App>,
+    task: &Task,
+    failed: &VerifyOutcome,
+    old_base: &str,
+    run_dir: &Path,
+    cancel: &CancelToken,
+) -> Option<VerifyOutcome> {
+    let on_new = failing_on_base(app, task, failed, &run_dir.join("new"), cancel).await?;
+    let on_old = run_on_base(
+        app,
+        &task.repo,
+        old_base,
+        std::slice::from_ref(&failed.command),
+        &run_dir.join("old"),
+        cancel,
+    )
+    .await
+    .ok()?
+    .into_iter()
+    .next()?;
+    (on_old.code == Some(0)).then_some(on_new)
+}
+
+/// What the owner decided about a `verify` command the new base broke.
+pub(super) enum BaseBreak {
+    /// The loop was cancelled or stopped while waiting.
+    Stopped,
+    /// Try again on the newest base: the attempt is not counted.
+    Retry,
+    /// The check is gone from `verify`; the attempt goes on without it.
+    Dropped,
+}
+
+/// A `verify` command fails on the new base alone, so the attempt is not to
+/// blame: the failure is recorded with a signature of its own and does not
+/// count against `attempt_budget`, and the task waits for the owner (the
+/// same question a final check that fails on the base gets). The detail
+/// tells the next attempt not to fix what is out of its scope.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn wait_on_broken_base(
+    app: &Arc<App>,
+    task_id: &str,
+    task: &mut Task,
+    idx: usize,
+    failed: &VerifyOutcome,
+    base_run: &VerifyOutcome,
+    attempt_budget: &mut u32,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    cancel: &CancelToken,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> BaseBreak {
+    let command = failed.command.clone();
+    let base_sha = task.base_sha.clone();
+    task.decisions.push(format!(
+        "Orchestrator: {command} fails on the base {} too",
+        short_sha(&base_sha)
+    ));
+    let code = failed
+        .code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    record_failure(
+        task,
+        idx,
+        FailureKind::Verify,
+        format!(
+            "{command} exited {code}, and it fails on the base {} without this task's work: the base broke it, not this attempt. Do not fix it as part of this task.\n{}",
+            short_sha(&base_sha),
+            failed.tail
+        ),
+    );
+    if let Some(f) = task.attempts[idx].failure.as_mut() {
+        f.signature = format!("base:{command}");
+    }
+    *attempt_budget += 1;
+    task.question = Some(pre_existing_question(&command, &base_sha, &base_run.tail));
+    task.status = TaskStatus::Waiting;
+    task.updated_at = now_ms();
+    let assumed = task.assumptions.len();
+    let Some(answer) = wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await
+    else {
+        return BaseBreak::Stopped;
+    };
+    let policy_answered = task.assumptions.len() > assumed;
+    record_owner_base_check(task, &command, &base_sha, &answer, policy_answered);
+    if is_option(&answer, PRE_EXISTING_DROP) {
+        task.verify.retain(|c| c != &command);
+        task.decisions
+            .push(format!("Orchestrator: dropped check {command}"));
+        app.verify_cache.lock().unwrap().remove(task_id);
+        *attempt_budget -= 1;
+        let a = &mut task.attempts[idx];
+        a.status = AttemptStatus::Running;
+        a.ended_at = None;
+        a.failure = None;
+        task.status = TaskStatus::Running;
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(task);
+        app.broadcast_task(task);
+        return BaseBreak::Dropped;
+    }
+    let wt = PathBuf::from(&task.worktree);
+    carry_onto_newest_base(task, &wt).await;
+    task.updated_at = now_ms();
+    let _ = app.store.save_task(task);
+    app.broadcast_task(task);
+    BaseBreak::Retry
+}
+
 /// Runs `checks` on the task's base before its first implement attempt. A
 /// command that exits non-zero is run once more on the base, past the cache,
 /// so a load-flaky test does not count; the first one that fails both times

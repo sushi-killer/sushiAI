@@ -1131,6 +1131,8 @@ export function OrchestratorPanel({
           address={addresses[host]}
           onRetry={() => {
             retry();
+            // Clears the main process's failure pause before asking again.
+            void window.bridge?.orchestratorPreflight(host).catch(() => {});
             setAttempt((n) => n + 1);
           }}
           onCancel={() =>

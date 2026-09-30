@@ -17,6 +17,7 @@ const REMOTE_PATH =
   'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"';
 const BUILD_TIMEOUT_MS = 20 * 60 * 1000;
 const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
+const RETRY_AFTER_MS = 30 * 1000;
 
 // The setup errors the renderer reads the platform and the rustup command
 // back out of (`hostPlatform`/`rustupCommand` in src/orchestrator/hosts.ts);
@@ -241,7 +242,16 @@ class RemoteOrchd {
     this.orchdInstalled = null;
     this.conn = null;
     this.inflight = null;
+    // The last failed setup: requests fail fast with it until
+    // RETRY_AFTER_MS pass or the owner retries, so a host that is down is not
+    // re-provisioned over SSH on every request.
+    this.failure = null;
     this.closed = false;
+  }
+
+  /** Forgets the last failed setup: the owner's Try again or recheck. */
+  forget() {
+    this.failure = null;
   }
 
   #set(state, detail = "") {
@@ -264,13 +274,21 @@ class RemoteOrchd {
         this.#drop();
       }
     }
+    if (
+      !this.inflight &&
+      this.failure &&
+      Date.now() - this.failure.at < RETRY_AFTER_MS
+    )
+      throw this.failure.error;
     if (!this.inflight)
       this.inflight = this.#provision()
         .then((conn) => {
+          this.failure = null;
           this.#set("ready");
           return conn;
         })
         .catch((error) => {
+          this.failure = { at: Date.now(), error };
           this.#set("error", error.message);
           throw error;
         })

@@ -267,6 +267,19 @@ test("a different platform without cargo says how to install Rust", async (t) =>
   )
     await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(hosts.list().find((h) => h.id === id).preflight.git, true);
+  // Asking again right away fails fast with the same error and no ssh; an
+  // explicit recheck (Try again) probes the host once more.
+  const probes = async () =>
+    (await fx.sshCommands()).filter((c) => JSON.stringify(c).includes("uname"))
+      .length;
+  const before = await probes();
+  await assert.rejects(
+    hosts.call("task.list", {}, id),
+    /Rust is not installed/,
+  );
+  assert.equal(await probes(), before);
+  await assert.rejects(hosts.preflight(id), /Rust is not installed/);
+  assert.equal(await probes(), before + 1);
   // Nothing was left half-installed.
   await assert.rejects(
     fs.access(path.join(fx.home, ".sushiai", "bin", "orchd")),

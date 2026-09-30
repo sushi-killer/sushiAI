@@ -27,7 +27,10 @@ export function useOrchestratorTasks(): Task[] {
           loaded.set(host, list);
           publish();
         })
-        .catch(() => {});
+        .catch(() => {
+          // Counts as read, so only the timer retries a down host.
+          if (!loaded.has(host)) loaded.set(host, []);
+        });
     const load = async (all: boolean) => {
       const hosts = await window.bridge!.orchestratorHosts().catch(() => []);
       const ids = new Set([

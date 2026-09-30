@@ -868,6 +868,7 @@ class OrchestratorHosts {
   async preflight(host) {
     if (host === LOCAL_HOST) return null;
     const service = this.#serviceFor(host);
+    service.remote.forget();
     await service.remote.ensure();
     return service.remote.refreshPreflight();
   }

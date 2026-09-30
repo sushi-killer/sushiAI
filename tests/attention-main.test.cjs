@@ -23,43 +23,55 @@ test("normalizePreferences keeps valid booleans and falls back to defaults other
       runInMenuBar: false,
       notifications: false,
       desktopMascot: false,
+      mascotShortcut: false,
     },
   );
   assert.deepEqual(normalizePreferences({}), {
     runInMenuBar: true,
     notifications: true,
     desktopMascot: true,
+    mascotShortcut: false,
   });
   assert.deepEqual(normalizePreferences(null), {
     runInMenuBar: true,
     notifications: true,
     desktopMascot: true,
+    mascotShortcut: false,
   });
   assert.deepEqual(normalizePreferences(undefined), {
     runInMenuBar: true,
     notifications: true,
     desktopMascot: true,
+    mascotShortcut: false,
   });
   assert.deepEqual(normalizePreferences("not an object"), {
     runInMenuBar: true,
     notifications: true,
     desktopMascot: true,
+    mascotShortcut: false,
   });
   assert.deepEqual(normalizePreferences([true, false]), {
     runInMenuBar: true,
     notifications: true,
     desktopMascot: true,
+    mascotShortcut: false,
   });
   // Non-boolean values for a known key fall back to the default for that key.
   assert.deepEqual(
     normalizePreferences({ runInMenuBar: "yes", notifications: false }),
-    { runInMenuBar: true, notifications: false, desktopMascot: true },
+    {
+      runInMenuBar: true,
+      notifications: false,
+      desktopMascot: true,
+      mascotShortcut: false,
+    },
   );
   // Unknown keys are ignored rather than adopted.
   assert.deepEqual(normalizePreferences({ somethingElse: true }), {
     runInMenuBar: true,
     notifications: true,
     desktopMascot: true,
+    mascotShortcut: false,
   });
 });
 

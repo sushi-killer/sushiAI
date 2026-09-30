@@ -278,6 +278,14 @@ export type AppPreferences = {
   /** Shows orchd task notices in a desktop mascot instead of a native
    * notification (needs notifications on). */
   desktopMascot: boolean;
+  /** Opt-in global shortcut that toggles the mascot. */
+  mascotShortcut: boolean;
+};
+export type MascotShortcutStatus = {
+  accelerator: string;
+  registered: boolean;
+  /** The OS refused the accelerator, usually because another app holds it. */
+  failed: boolean;
 };
 export interface Bridge {
   /** The workspace snapshot text from <userData>/workspace-state.json, or
@@ -298,6 +306,7 @@ export interface Bridge {
   worktreeCreate(cwd: string, branch: string): Promise<{ path: string }>;
   appPreferences(): Promise<AppPreferences>;
   appPreferencesSet(patch: Partial<AppPreferences>): Promise<AppPreferences>;
+  mascotShortcutStatus(): Promise<MascotShortcutStatus>;
   agentProviders(): Promise<import("./agents/types").AgentProvider[]>;
   agentCall: import("./agents/types").AgentCall;
   agentOpenExternal(url: string): Promise<void>;

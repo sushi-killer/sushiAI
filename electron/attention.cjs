@@ -7,6 +7,7 @@ const DEFAULT_PREFERENCES = {
   runInMenuBar: true,
   notifications: true,
   desktopMascot: true,
+  mascotShortcut: false,
 };
 
 /** Falls back to a default for anything missing, non-boolean or unknown -
@@ -94,6 +95,7 @@ function registerAttentionIpc({
   trayIconPath,
   mascot: mascotWindow,
   hidden = false,
+  onPreferences = () => {},
 }) {
   const preferencesFile = path.join(userDataDir, "app-preferences.json");
   let preferences = { ...DEFAULT_PREFERENCES };
@@ -180,6 +182,7 @@ function registerAttentionIpc({
       preferences = { ...DEFAULT_PREFERENCES };
     }
     syncTray();
+    onPreferences(preferences);
     return preferences;
   }
 
@@ -193,6 +196,7 @@ function registerAttentionIpc({
     await save();
     syncTray();
     syncMascot();
+    onPreferences(preferences);
     return preferences;
   }
 

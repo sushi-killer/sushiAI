@@ -1,0 +1,1 @@
+The global shortcut that opens the mascot (Option+Space) is now a setting in Settings > General and is off by default, so it no longer clashes with Alfred or the ChatGPT desktop app. If another app already holds the shortcut, the setting says so.

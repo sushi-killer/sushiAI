@@ -23,6 +23,7 @@ import {
 } from "../dialogs/lazy-settings.ts";
 import type {
   AppPreferences,
+  MascotShortcutStatus,
   ConnectionProfile,
   System,
   UpdateState,
@@ -71,10 +72,15 @@ const SETTINGS_NAV: {
   },
 ];
 
+function shortcutLabel(accelerator: string) {
+  return accelerator.replace("Alt+", "\u2325");
+}
+
 const DEFAULT_APP_PREFERENCES: AppPreferences = {
   runInMenuBar: true,
   notifications: true,
   desktopMascot: true,
+  mascotShortcut: false,
 };
 
 export function SettingsDialog({
@@ -124,8 +130,17 @@ export function SettingsDialog({
     DEFAULT_APP_PREFERENCES,
   );
 
+  const [shortcutStatus, setShortcutStatus] =
+    useState<MascotShortcutStatus | null>(null);
+
   useEffect(() => {
     let cancelled = false;
+    window.bridge
+      ?.mascotShortcutStatus()
+      .then((value) => {
+        if (!cancelled) setShortcutStatus(value);
+      })
+      .catch(() => {});
     window.bridge
       ?.appPreferences()
       .then((value) => {
@@ -137,10 +152,18 @@ export function SettingsDialog({
     };
   }, []);
 
+  function refreshShortcutStatus() {
+    return window.bridge
+      ?.mascotShortcutStatus()
+      .then(setShortcutStatus)
+      .catch(() => {});
+  }
+
   function setAppPreference(key: keyof AppPreferences, value: boolean) {
     setAppPreferences((prev) => ({ ...prev, [key]: value }));
     window.bridge
       ?.appPreferencesSet({ [key]: value })
+      .then(() => refreshShortcutStatus())
       .catch((error) => notify(errorText(error)));
   }
 
@@ -332,6 +355,23 @@ export function SettingsDialog({
                         Shows orchestrator task notices as a mascot in the
                         corner of your screen. Off sends a native notification
                         instead.
+                      </em>
+                    </span>
+                  </label>
+                  <label className="setting-check">
+                    <input
+                      type="checkbox"
+                      checked={appPreferences.mascotShortcut}
+                      onChange={(event) =>
+                        setAppPreference("mascotShortcut", event.target.checked)
+                      }
+                    />
+                    <span>
+                      Global shortcut to open the mascot
+                      <em>
+                        {appPreferences.mascotShortcut && shortcutStatus?.failed
+                          ? `${shortcutLabel(shortcutStatus.accelerator)} is already taken by another app, so the shortcut is not active.`
+                          : `Press ${shortcutLabel(shortcutStatus?.accelerator ?? "Alt+Space")} from any app. Off by default so it does not clash with launchers.`}
                       </em>
                     </span>
                   </label>

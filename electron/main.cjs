@@ -40,6 +40,7 @@ const {
   clampBounds,
 } = require("./window-state.cjs");
 const { registerMascot, watchPresenting } = require("./mascot.cjs");
+const { createMascotShortcut } = require("./mascot-shortcut.cjs");
 const { DEV_RESTART_EXIT_CODE, watchCore } = require("./dev-restart.cjs");
 const { testWindow } = require("./test-window.cjs");
 
@@ -239,6 +240,12 @@ function coreUpdated(file) {
 }
 if (process.env.BRIDGE_DEV_URL)
   closeCoreWatch = watchCore({ dir: __dirname, onChange: coreUpdated });
+// A test run owns neither the owner's keyboard nor their screen state.
+const mascotShortcut = createMascotShortcut({
+  globalShortcut,
+  toggle: () => mascot.toggle(),
+});
+handle("mascot-shortcut-status", () => mascotShortcut.status());
 const attention = registerAttentionIpc({
   handle,
   send,
@@ -248,6 +255,9 @@ const attention = registerAttentionIpc({
   trayIconPath: path.join(root, "dist/trayTemplate.png"),
   mascot,
   hidden: testMode.hidden,
+  onPreferences: (preferences) => {
+    if (!testMode.test) mascotShortcut.sync(preferences.mascotShortcut);
+  },
 });
 orchestrator = registerOrchestratorExtension({
   handle,
@@ -357,12 +367,6 @@ app.whenReady().then(async () => {
     };
   // A test run owns neither the owner's keyboard nor their screen state.
   if (!testMode.test) {
-    try {
-      // Returns false when another app already holds the shortcut.
-      globalShortcut.register("Alt+Space", () => mascot.toggle());
-    } catch {
-      // The OS refused the accelerator: the sushi click still toggles.
-    }
     closePresentingWatch = watchPresenting({
       screen,
       onChange: (presenting) => mascot.setPresenting(presenting),
@@ -487,6 +491,7 @@ app.on("window-all-closed", () => app.quit());
 app.on("activate", () => attention.showWindow());
 let quitReady = false;
 app.on("will-quit", (event) => {
+  mascotShortcut.close();
   globalShortcut.unregisterAll();
   closePresentingWatch?.();
   if (!devRestart) return;

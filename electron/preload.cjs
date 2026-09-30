@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld("bridge", {
   attentionBadge: invoke("attention-badge"),
   appPreferences: invoke("app-preferences"),
   appPreferencesSet: invoke("app-preferences-set"),
+  mascotShortcutStatus: invoke("mascot-shortcut-status"),
   onAttentionOpen: (callback) => {
     const listener = (_, data) => callback(data);
     ipcRenderer.on("attention-open", listener);

@@ -189,6 +189,108 @@
   border-radius: var(--radius-md);
   background: var(--bg-raised);
 }
+.orch-run-on-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--line-pane);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.orch-run-on-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.orch-run-on-menu {
+  top: auto;
+  bottom: 32px;
+  left: 0;
+}
+.orch-run-on-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 42%);
+}
+.orch-run-on-dialog {
+  width: min(480px, 100%);
+  max-height: min(640px, 90vh);
+  overflow: auto;
+  padding: 22px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-popover);
+  color: var(--text);
+}
+.orch-run-on-dialog h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+.orch-run-on-dialog h3 {
+  margin: 18px 0 6px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.orch-run-on-dialog p,
+.orch-run-on-dialog li {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.orch-run-on-dialog code {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.orch-run-on-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+.orch-run-on-actions button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-control);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.orch-run-on-actions button:disabled {
+  opacity: 0.5;
+}
+.orch-run-on-failure {
+  margin-top: 14px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.orch-run-on-token {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.orch-run-on-token input {
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--text);
+}
 .orch-host-toggle:hover {
   border-color: var(--line);
 }

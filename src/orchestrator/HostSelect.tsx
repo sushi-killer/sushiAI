@@ -9,6 +9,102 @@ import {
 } from "lucide-react";
 import { hostStatus, LOCAL_HOST, type DaemonReach } from "./hosts";
 import type { OrchestratorHost } from "./types";
+import type { ProjectHostReadiness } from "../types";
+
+export function RunOnSelect({
+  hosts,
+  currentHost,
+  value,
+  readiness,
+  onChange,
+}: {
+  hosts: OrchestratorHost[];
+  currentHost: string;
+  value: string;
+  readiness: Record<string, ProjectHostReadiness>;
+  onChange(host: string): void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const selected = hosts.find((host) => host.id === value);
+  const label =
+    value === "local" ? "This Mac" : selected?.name || "Choose host";
+  return (
+    <div className="orch-host-select orch-run-on" ref={rootRef}>
+      <button
+        type="button"
+        className="orch-run-on-toggle"
+        aria-label={`Run on: ${label}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        Run on · {label} <ChevronDown size={12} aria-hidden />
+      </button>
+      {open && (
+        <div
+          className="orch-host-menu orch-run-on-menu"
+          role="menu"
+          aria-label="Run on"
+        >
+          <button
+            type="button"
+            role="menuitemradio"
+            aria-checked={value === "local"}
+            className={`orch-host-option${value === "local" ? " selected" : ""}`}
+            disabled={currentHost !== "local"}
+            onClick={() => {
+              onChange("local");
+              setOpen(false);
+            }}
+          >
+            <HostIcon id="local" /> <span>This Mac</span>
+          </button>
+          {hosts
+            .filter((host) => host.id.startsWith("ssh:"))
+            .map((host) => (
+              <button
+                key={host.id}
+                type="button"
+                role="menuitemradio"
+                aria-checked={value === host.id}
+                className={`orch-host-option${value === host.id ? " selected" : ""}`}
+                onClick={() => {
+                  onChange(host.id);
+                  setOpen(false);
+                }}
+              >
+                <HostIcon id={host.id} />
+                <span className="orch-host-text">
+                  <span className="orch-host-name">{host.name}</span>
+                  <span className="orch-host-detail">
+                    {host.state === "ready"
+                      ? "Connected"
+                      : "Connect to prepare"}
+                    {readiness[host.id]
+                      ? ` · ${readiness[host.id].checkout.ok ? "Project ready" : "Not cloned"} · ${readiness[host.id].trusted ? "Trusted" : "Trust required"}`
+                      : " · Checking project"}
+                  </span>
+                </span>
+                <span
+                  className={`ui-dot ui-tone-${host.state === "ready" ? "ok" : "muted"}`}
+                  aria-hidden
+                />
+              </button>
+            ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function HostIcon({ id }: { id: string }) {
   return id === LOCAL_HOST ? (

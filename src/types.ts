@@ -614,6 +614,19 @@ export interface Bridge {
     host: string,
     cwd?: string,
   ): Promise<ProjectHostReadiness>;
+  projectHostPrepare(
+    id: string,
+    host: string,
+    useHostLogin?: boolean,
+  ): Promise<
+    | { ok: true; path: string; output: string }
+    | {
+        ok: false;
+        stage: "clone" | "setup";
+        status?: number;
+        message: string;
+      }
+  >;
   projectEnvImportReview(
     id: string,
     entries: { name: string; value: string }[],

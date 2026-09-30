@@ -145,6 +145,7 @@ contextBridge.exposeInMainWorld("bridge", {
   projectHostTrust: invoke("projects:host:trust"),
   projectHostOverrides: invoke("projects:host:overrides"),
   projectHostCheck: invoke("projects:host:check"),
+  projectHostPrepare: invoke("projects:host:prepare"),
   projectEnvImportReview: invoke("projects:env:import-review"),
   projectsResolve: invoke("projects:resolve"),
   projectPreview: invoke("project-preview"),

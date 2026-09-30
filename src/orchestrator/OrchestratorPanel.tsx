@@ -41,7 +41,7 @@ import {
   shownHost,
   type DaemonReach,
 } from "./hosts";
-import { HostSelect } from "./HostSelect";
+import { HostSelect, RunOnSelect } from "./HostSelect";
 import { PreflightStrip, RemoteSetup, RepoPrompt } from "./RemoteHostViews";
 import { useOrchestratorHosts } from "./useHosts";
 import { useWorkspaceRepos } from "./workspaceRepos";
@@ -71,6 +71,7 @@ import type {
   Settings,
   Task,
 } from "./types";
+import type { Project, ProjectHostReadiness } from "../types";
 import { Banner, Tag } from "./ui";
 import { OrchRail } from "./OrchRail";
 import { Composer, OrchestratorRouteChip, TaskRouteLabel } from "./Composer";
@@ -177,6 +178,7 @@ function viewIcon(kind: View["kind"]) {
 
 function OrchestratorBody({
   cwd,
+  hosts,
   header,
   remote,
   onDaemon,
@@ -184,6 +186,7 @@ function OrchestratorBody({
   onViewChange,
 }: {
   cwd: string;
+  hosts: OrchestratorHost[];
   /** The host selector, pinned at the top of the rail. */
   header: ReactNode;
   /** Set on a remote host: its name (the composer's "on <host>") and what
@@ -198,6 +201,21 @@ function OrchestratorBody({
 }) {
   const orchestratorClient = useOrchestratorClient();
   const host = useOrchestratorHost();
+  const [runHost, setRunHost] = useState(host);
+  const [project, setProject] = useState<Project | null>(null);
+  const [runReadiness, setRunReadiness] = useState<
+    Record<string, ProjectHostReadiness>
+  >({});
+  const [consentOpen, setConsentOpen] = useState(false);
+  const [prepareBusy, setPrepareBusy] = useState(false);
+  const [prepareStart, setPrepareStart] = useState(true);
+  const [prepareFailure, setPrepareFailure] = useState<{
+    stage: string;
+    status?: number;
+    message: string;
+  } | null>(null);
+  const [editGitToken, setEditGitToken] = useState(false);
+  const [gitTokenDraft, setGitTokenDraft] = useState("");
   const [daemonState, setDaemonState] = useState<DaemonState>("loading");
   // Set once the daemon has answered at least once: a later failure keeps
   // the last known task list on the rail instead of blanking the panel.
@@ -232,6 +250,61 @@ function OrchestratorBody({
     readChatSeen(cwd),
   );
   const [proposals, setProposals] = useState<Proposal[]>([]);
+
+  useEffect(() => setRunHost(host), [host]);
+  useEffect(() => {
+    let cancelled = false;
+    const endpoint = host === LOCAL ? undefined : host;
+    window.bridge
+      ?.projectInspect(endpoint, { operation: "git_remote", root: cwd })
+      .then((result) =>
+        result?.remote
+          ? window.bridge?.projectsResolve({
+              remote: result.remote,
+              endpoint: endpoint || "local",
+            })
+          : null,
+      )
+      .then((resolved) => {
+        if (!cancelled) setProject(resolved || null);
+      })
+      .catch(() => {
+        if (!cancelled) setProject(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, host]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!project) {
+      setRunReadiness({});
+      return;
+    }
+    Promise.all(
+      hosts
+        .filter((item) => item.id.startsWith("ssh:"))
+        .map(async (item) => {
+          try {
+            const result = await window.bridge?.projectHostCheck(
+              project.id,
+              item.id,
+            );
+            return result ? ([item.id, result] as const) : null;
+          } catch {
+            return null;
+          }
+        }),
+    ).then((results) => {
+      if (!cancelled)
+        setRunReadiness(
+          Object.fromEntries(results.flatMap((item) => (item ? [item] : []))),
+        );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [project, hosts]);
 
   const reportDaemon = useRef(onDaemon);
   reportDaemon.current = onDaemon;
@@ -491,19 +564,60 @@ function OrchestratorBody({
       });
   }
 
-  async function submitNewTask(start: boolean) {
+  async function submitNewTask(
+    start: boolean,
+    confirmed = false,
+    useHostLogin = false,
+  ) {
     const text = taskDraft.trim();
     if (!text || creatingBusy) return;
+    if (runHost.startsWith("ssh:") && !confirmed) {
+      setPrepareStart(start);
+      const key = `sushiai.project.prepare-consent:${project?.id}:${runHost}`;
+      if (!window.localStorage.getItem(key)) {
+        setConsentOpen(true);
+        return;
+      }
+    }
+    if (runHost.startsWith("ssh:") && project) setConsentOpen(true);
     setCreatingBusy(true);
     setError("");
+    setPrepareFailure(null);
     try {
+      let targetClient = orchestratorClient;
+      let targetCwd = cwd;
+      if (runHost.startsWith("ssh:")) {
+        if (!project)
+          throw new Error(
+            "This folder is not linked to a project with a Git remote.",
+          );
+        if (!project.hosts?.[runHost]?.trusted)
+          throw new Error(
+            "Trust this host in Project settings before sending project values.",
+          );
+        setPrepareBusy(true);
+        const prepared = await window.bridge!.projectHostPrepare(
+          project.id,
+          runHost,
+          useHostLogin,
+        );
+        setPrepareBusy(false);
+        if (!prepared.ok) {
+          setPrepareFailure(prepared);
+          setCreatingBusy(false);
+          return;
+        }
+        targetClient = orchestratorClientFor(runHost);
+        targetCwd = prepared.path;
+      }
       const task = await createTask(
-        orchestratorClient,
-        cwd,
+        targetClient,
+        targetCwd,
         text,
         baseBranchDraft,
         start,
       );
+      setConsentOpen(false);
       setLive((old) => ({ ...old, tasks: upsertTask(old.tasks, task) }));
       setTaskDraft("");
       setBaseBranchDraft("");
@@ -512,8 +626,22 @@ function OrchestratorBody({
     } catch (e) {
       fail(e);
     } finally {
+      setPrepareBusy(false);
       setCreatingBusy(false);
     }
+  }
+
+  async function saveGitTokenAndRetry() {
+    if (!project || !gitTokenDraft.trim()) return;
+    await window.bridge?.projectSecretSet(
+      project.id,
+      "GIT_TOKEN",
+      gitTokenDraft,
+    );
+    setGitTokenDraft("");
+    setEditGitToken(false);
+    setPrepareFailure(null);
+    void submitNewTask(prepareStart, true);
   }
 
   /** The task view's composer talks to the orchestrator; the reply is read
@@ -885,10 +1013,21 @@ function OrchestratorBody({
                     onRouteChange={setOrchestratorRoute}
                   />
                 ) : (
-                  <TaskRouteLabel
-                    disabled={offline}
-                    onBaseBranch={() => setBaseOpen(true)}
-                  />
+                  <>
+                    <TaskRouteLabel
+                      disabled={offline}
+                      onBaseBranch={() => setBaseOpen(true)}
+                    />
+                    {composerMode !== "ask" && (
+                      <RunOnSelect
+                        hosts={hosts}
+                        currentHost={host}
+                        value={runHost}
+                        readiness={runReadiness}
+                        onChange={setRunHost}
+                      />
+                    )}
+                  </>
                 )
               }
               extra={
@@ -907,6 +1046,202 @@ function OrchestratorBody({
                 )
               }
             />
+            {consentOpen && project && (
+              <div className="orch-run-on-backdrop" role="presentation">
+                <section
+                  className="orch-run-on-dialog"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="orch-run-on-title"
+                >
+                  <h2 id="orch-run-on-title">
+                    Prepare{" "}
+                    {hosts.find((item) => item.id === runHost)?.name || "host"}?
+                  </h2>
+                  <p>
+                    The first run will prepare this project at{" "}
+                    <code>
+                      ~/sushiai/
+                      {project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}
+                    </code>
+                    .
+                  </p>
+                  <ol>
+                    <li>
+                      Clone the project using its Git token or the host’s own
+                      Git login.
+                    </li>
+                    {project.setup.install && (
+                      <li>Install dependencies when the lock file changes.</li>
+                    )}
+                    {project.setup.check && (
+                      <li>
+                        Run the project check:{" "}
+                        <code>{project.setup.check}</code>.
+                      </li>
+                    )}
+                    <li>
+                      Start the task on this host after preparation succeeds.
+                    </li>
+                  </ol>
+                  <h3>Secrets sent to this trusted host</h3>
+                  <ul>
+                    {project.env
+                      .filter((entry) => entry.secret && entry.hasValue)
+                      .map((entry) => (
+                        <li key={entry.name}>{entry.name}</li>
+                      ))}
+                  </ul>
+                  {runReadiness[runHost] && (
+                    <p className="orch-host-detail">
+                      Checkout:{" "}
+                      {runReadiness[runHost].checkout.ok
+                        ? "already cloned"
+                        : "not cloned"}
+                    </p>
+                  )}
+                  {!project.hosts?.[runHost]?.trusted && (
+                    <p role="alert">
+                      Trust this host in Project settings before preparation can
+                      send its Git token or other project values.
+                    </p>
+                  )}
+                  {prepareFailure && (
+                    <div role="alert" className="orch-run-on-failure">
+                      <strong>
+                        {prepareFailure.status === 403
+                          ? "Git access was denied (403)."
+                          : "Host preparation failed."}
+                      </strong>
+                      <p>{prepareFailure.message}</p>
+                    </div>
+                  )}
+                  {editGitToken && (
+                    <label className="orch-run-on-token">
+                      Git token
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        value={gitTokenDraft}
+                        onChange={(event) =>
+                          setGitTokenDraft(event.target.value)
+                        }
+                      />
+                    </label>
+                  )}
+                  <div className="orch-run-on-actions">
+                    {prepareFailure ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void submitNewTask(prepareStart, true)}
+                        >
+                          Try again
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void submitNewTask(prepareStart, true, true)
+                          }
+                        >
+                          Use the host’s Git login
+                        </button>
+                        {!editGitToken ? (
+                          <button
+                            type="button"
+                            onClick={() => setEditGitToken(true)}
+                          >
+                            Edit token
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => void saveGitTokenAndRetry()}
+                          >
+                            Save token and try again
+                          </button>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          disabled={creatingBusy}
+                          onClick={() => setConsentOpen(false)}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          disabled={
+                            creatingBusy || !project.hosts?.[runHost]?.trusted
+                          }
+                          onClick={() => {
+                            window.localStorage.setItem(
+                              `sushiai.project.prepare-consent:${project.id}:${runHost}`,
+                              "1",
+                            );
+                            void submitNewTask(prepareStart, true);
+                          }}
+                        >
+                          {prepareBusy ? "Preparing…" : "Prepare and run"}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </section>
+              </div>
+            )}
+            {prepareFailure && !consentOpen && (
+              <div className="orch-run-on-backdrop" role="presentation">
+                <section
+                  className="orch-run-on-dialog"
+                  role="alertdialog"
+                  aria-modal="true"
+                  aria-labelledby="orch-run-on-failed-title"
+                >
+                  <h2 id="orch-run-on-failed-title">
+                    Couldn’t prepare the host
+                  </h2>
+                  <p>
+                    {prepareFailure.status === 403
+                      ? "Git access was denied (403). No task was sent."
+                      : prepareFailure.message}
+                  </p>
+                  <div className="orch-run-on-actions">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPrepareFailure(null);
+                        setConsentOpen(true);
+                      }}
+                    >
+                      Try again
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPrepareFailure(null);
+                        setConsentOpen(true);
+                        void submitNewTask(prepareStart, true, true);
+                      }}
+                    >
+                      Use the host’s Git login
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPrepareFailure(null);
+                        setConsentOpen(true);
+                        setEditGitToken(true);
+                      }}
+                    >
+                      Edit token
+                    </button>
+                  </div>
+                </section>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1197,6 +1532,7 @@ function OrchestratorPanelBody({
         <OrchestratorBody
           key={`${host}\n${repo}`}
           cwd={repo}
+          hosts={hosts}
           header={hostSelect}
           remote={remote ? { name, preflight: info?.preflight } : undefined}
           onDaemon={onDaemon}

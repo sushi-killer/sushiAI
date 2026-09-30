@@ -1,6 +1,10 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { readiness, hostProbeScript } = require("../electron/project-hosts.cjs");
+const {
+  readiness,
+  hostProbeScript,
+  prepareScript,
+} = require("../electron/project-hosts.cjs");
 const { Projects } = require("../electron/projects.cjs");
 const fs = require("node:fs/promises");
 const os = require("node:os");
@@ -112,6 +116,27 @@ test("missing checkout, setup, CLIs, MCP, secrets, and trust report missing stat
   assert.equal(matrix.mcp.ok, false);
   assert.equal(matrix.secrets.ok, false);
   assert.equal(matrix.trusted, false);
+});
+
+test("prepare clones to the standard path and installs only when the lock hash changes", () => {
+  const prepared = prepareScript(
+    {
+      name: "Demo Project",
+      git: {
+        url: "https://example.invalid/team/demo.git",
+        defaultBranch: "main",
+      },
+      setup: { install: "npm ci", check: "npm test" },
+    },
+    "invented-git-token",
+  );
+  assert.equal(prepared.path, "~/sushiai/demo-project");
+  assert.match(prepared.script, /git clone --branch 'main'/);
+  assert.match(prepared.script, /\.sushiai-lock-hash/);
+  assert.match(prepared.script, /npm ci/);
+  assert.match(prepared.script, /npm test/);
+  assert.doesNotMatch(prepared.script, /invented-git-token/);
+  assert.equal(prepared.input, "invented-git-token\n");
 });
 
 test("revoking project host trust blocks stored secrets on the next read", async (t) => {

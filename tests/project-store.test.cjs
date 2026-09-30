@@ -108,6 +108,43 @@ test("unavailable secure storage fails without writing a value", async (t) => {
   await assert.rejects(fs.access(path.join(dir, "project-secrets.json")));
 });
 
+test("a denied remote clone returns a structured 403 failure", async (t) => {
+  const { projects } = await fixture(t);
+  const host = "ssh:user@devbox";
+  const project = await projects.upsert({
+    name: "Demo",
+    git: { url: "https://example.invalid/team/demo.git" },
+    env: [{ name: "GIT_TOKEN", secret: true }],
+  });
+  await projects.setSecret(project.id, "GIT_TOKEN", "invented-git-token");
+  await projects.setHostTrust(project.id, host, true);
+  const handlers = new Map();
+  let execCalls = 0;
+  registerProjectIpc({
+    handle: (channel, callback) => handlers.set(channel, callback),
+    projects,
+    getConnections: () => ({
+      exec: async (_host, script, options) => {
+        execCalls += 1;
+        assert.match(script, /git clone/);
+        assert.equal(options.input, "invented-git-token\n");
+        throw new Error("SUSHIAI_PREPARE_STAGE=clone\\nfatal: 403 forbidden");
+      },
+    }),
+    getPreview: () => ({}),
+    terminals: new Map(),
+    terminalPending: new Map(),
+  });
+  const result = await handlers.get("projects:host:prepare")(project.id, host);
+  assert.deepEqual(result, {
+    ok: false,
+    stage: "clone",
+    status: 403,
+    message: "SUSHIAI_PREPARE_STAGE=clone\\nfatal: 403 forbidden",
+  });
+  assert.equal(execCalls, 1);
+});
+
 test("stage environments keep setup-only and MCP-only values out of agents", async (t) => {
   const { projects } = await fixture(t);
   const project = await projects.upsert({

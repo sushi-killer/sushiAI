@@ -177,8 +177,13 @@ pub struct StopHook<'a> {
     pub token: &'a str,
 }
 
-/// The tools whose calls go through the `hook.edit` file lease check.
-pub const EDIT_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit";
+/// The tools `hook.edit` decides for: file edits (lease check, protected
+/// paths), every MCP tool (a write asks the owner) and the web tools a
+/// headless run is not allowed to use on its own.
+pub const HOOKED_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit|mcp__.*|WebFetch|WebSearch";
+
+/// How long a hooked call may be held for an owner answer (seconds).
+pub const HOOK_HOLD_SECS: u32 = 4 * 3600;
 
 /// `Bash` prefixes an agent may never run directly (`permissions.deny`
 /// below).
@@ -262,14 +267,14 @@ pub fn build_claude_settings(
                     ]
                 }
             ],
-            // Asks the daemon whether another live task holds the file
-            // (`hook.edit`); a denial names the holder so the agent goes on
-            // with other files.
+            // Asks the daemon (`hook.edit`) whether another live task holds
+            // the file, and holds a call the run may not make until the owner
+            // answers; a denial names why so the agent goes on.
             "PreToolUse": [
                 {
-                    "matcher": EDIT_TOOLS,
+                    "matcher": HOOKED_TOOLS,
                     "hooks": [
-                        {"type": "command", "command": command("edit"), "timeout": 30}
+                        {"type": "command", "command": command("edit"), "timeout": HOOK_HOLD_SECS}
                     ]
                 }
             ]
@@ -412,6 +417,15 @@ pub struct RunOutcome {
     pub usage_models: Vec<String>,
     /// Set by the engine once the run ends.
     pub fingerprint: Option<Fingerprint>,
+    /// Claude only: the calls the run was not allowed to make
+    /// (`permission_denials` of its result).
+    pub permission_denials: Vec<PermissionDenial>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PermissionDenial {
+    pub tool: String,
+    pub input: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -538,6 +552,20 @@ fn feed_claude_line(v: &serde_json::Value, outcome: &mut RunOutcome) -> Option<S
                 }
             }
             outcome.cost_usd = v.get("total_cost_usd").and_then(|x| x.as_f64());
+            outcome.permission_denials = v
+                .get("permission_denials")
+                .and_then(|x| x.as_array())
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|d| {
+                            Some(PermissionDenial {
+                                tool: d.get("tool_name")?.as_str()?.to_string(),
+                                input: d.get("tool_input").cloned().unwrap_or_default(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             if let Some(usage) = v.get("usage") {
                 outcome.usage_input = usage
                     .get("input_tokens")
@@ -937,7 +965,7 @@ mod tests {
             .is_none());
         assert_eq!(native["sandbox"]["filesystem"]["denyRead"][0], "/data");
         assert_eq!(native["hooks"]["Stop"][0]["hooks"][0]["timeout"], 600);
-        assert_eq!(native["hooks"]["PreToolUse"][0]["matcher"], EDIT_TOOLS);
+        assert_eq!(native["hooks"]["PreToolUse"][0]["matcher"], HOOKED_TOOLS);
         assert!(native["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
@@ -1238,5 +1266,22 @@ mod tests {
 
         let host = build_claude_settings(None, SandboxMode::Host, &[], &[], None);
         assert_eq!(host["permissions"]["allow"], serde_json::json!(["Bash"]));
+    }
+
+    #[test]
+    fn a_result_lists_the_calls_the_run_was_refused() {
+        let mut outcome = RunOutcome::default();
+        feed_stream_line(
+            Harness::Claude,
+            r#"{"type":"result","result":"x","permission_denials":[{"tool_name":"WebFetch","tool_use_id":"t1","tool_input":{"url":"https://example.com"}},{"tool_use_id":"t2"}]}"#,
+            &mut outcome,
+        );
+        assert_eq!(
+            outcome.permission_denials,
+            vec![PermissionDenial {
+                tool: "WebFetch".to_string(),
+                input: serde_json::json!({"url": "https://example.com"}),
+            }]
+        );
     }
 }

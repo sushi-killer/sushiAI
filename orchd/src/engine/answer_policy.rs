@@ -32,7 +32,10 @@ pub(super) fn policy_open(app: &App, task: &Task, kind: QuestionKind) -> bool {
     policy_on(app)
         && !matches!(
             kind,
-            QuestionKind::Budget | QuestionKind::DailyBudget | QuestionKind::ProtectedPath
+            QuestionKind::Budget
+                | QuestionKind::DailyBudget
+                | QuestionKind::ProtectedPath
+                | QuestionKind::Permission
         )
         && policy_answers(task) < MAX_POLICY_ANSWERS
 }

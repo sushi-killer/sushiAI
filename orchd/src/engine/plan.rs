@@ -595,6 +595,16 @@ pub(super) async fn run_plan_stage(
                 &brief_text,
                 &brief::landed_dependencies_block(&task, &app.repo_tasks(&task.repo), None),
             );
+            let tools = permissions::task_tools(
+                app,
+                &app.settings.read().unwrap().clone(),
+                &task,
+                Path::new(&task.worktree),
+            );
+            let brief_text = brief::with_block_before_report(
+                &brief_text,
+                &permissions::tools_block(&tools, true),
+            );
             let brief_text = brief::with_block_before_report(
                 &brief_text,
                 &brief::scoped_checks_block(

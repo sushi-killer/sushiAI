@@ -19,6 +19,9 @@ impl App {
         let _hook_done = ClearOnDrop(&ctx.hook_running);
         let worktree = ctx.worktree.clone();
         let base_sha = ctx.base_sha.clone();
+        // What the owner let the agent stage at a protected path is in place
+        // before the diff is read and verified.
+        permissions::apply_staged(&ctx);
         let wt = worktree.clone();
         let base = base_sha.clone();
         let changed =

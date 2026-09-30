@@ -23,19 +23,13 @@ pub(super) fn prepare_run(
     attempt_n: u32,
     run_dir: &Path,
     deny_read: &[String],
+    tools: &permissions::TaskTools,
 ) -> PreparedRun {
     let mcp_path = run_dir.join("mcp.json");
-    let task_mcp_path = app.store.task_dir(task_id).join("mcp.json");
-    // The project's own servers, plus orchd's messaging bridge scoped to
-    // this task.
+    // The repo's project servers, the connected tools and the task's own,
+    // plus orchd's messaging bridge scoped to this task.
     let messages_server = messages::task_server(app, task_id);
-    let mut mcp_config = std::fs::read_to_string(&task_mcp_path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .filter(|v| v.get("mcpServers").is_some_and(|s| s.is_object()))
-        .unwrap_or_else(|| json!({"mcpServers": {}}));
-    mcp_config["mcpServers"][messages::SERVER] = messages_server.clone();
-    let _ = store::write_json_atomic(&mcp_path, &mcp_config);
+    let _ = store::write_json_atomic(&mcp_path, &tools.mcp_config(&messages_server));
 
     let token = uuid::Uuid::new_v4().to_string();
     let settings_path = run_dir.join("settings.json");
@@ -88,12 +82,14 @@ pub(super) fn prepare_run(
             deny_read,
             Some(stop_hook),
         );
-        // A headless run answers no prompts, so the messaging tools must
-        // be allowed up front to be usable at all.
+        // A headless run answers no prompts, so the messaging tools and the
+        // read tools of the connected tools must be allowed up front to be
+        // usable at all. A write tool never is: the hook asks the owner.
         if let Some(allow) = claude_settings["permissions"]["allow"].as_array_mut() {
             for tool in crate::mcp::TASK_TOOLS {
                 allow.push(json!(format!("mcp__{}__{tool}", messages::SERVER)));
             }
+            allow.extend(tools.allowed().into_iter().map(serde_json::Value::String));
         }
         let _ = store::write_json_atomic(&settings_path, &claude_settings);
         let ctx = Arc::new(HookContext {
@@ -106,6 +102,11 @@ pub(super) fn prepare_run(
             blocks: AtomicU32::new(0),
             cancel: CancelToken::new(),
             hook_running: Arc::new(AtomicBool::new(false)),
+            run_grants: Default::default(),
+            run_denied: Default::default(),
+            handled: Default::default(),
+            staged: Default::default(),
+            ask_lock: tokio::sync::Mutex::new(()),
         });
         app.hook_tokens
             .write()
@@ -317,8 +318,10 @@ where
 
     let run_dir_b = run_dir.join("b");
     let _ = std::fs::create_dir_all(&run_dir_b);
+    let tools_b = permissions::task_tools(app, settings, task, &wt_b);
     let prep = prepare_run(
         app, task, task_id, b_route, settings, &wt_b, base_sha, attempt_n, &run_dir_b, deny_read,
+        &tools_b,
     );
     let _ = std::fs::write(run_dir_b.join("brief.md"), brief_text);
     let events_a = run_dir.join("events.jsonl");
@@ -365,6 +368,7 @@ where
     if let Some((token, ctx)) = &prep.registered {
         app.hook_tokens.write().unwrap().remove(token);
         ctx.cancel.cancel();
+        permissions::finish_staging(ctx);
     }
     let _ = std::fs::remove_file(&prep.key_path);
 

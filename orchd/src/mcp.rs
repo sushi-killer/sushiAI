@@ -48,6 +48,9 @@ file in one task.
 - When a task is `waiting`, answer it yourself with task_answer if the repo \
 or the task's own context already answers the question. Otherwise bring \
 the owner one precise question with concrete options.
+- Never answer a permission question (\"Allow ... for this task?\") with Allow \
+once or Always for this repo: which tools and paths a task may use is the \
+owner's call, as is every write to an outside service.
 - Never answer \"approve\" for a protected-path decision or for committing \
 an attempt the review gave no verdict on, and never call task_stop, on the \
 owner's behalf -- these are the owner's call to make.

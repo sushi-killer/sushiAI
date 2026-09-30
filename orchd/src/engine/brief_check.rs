@@ -1,6 +1,6 @@
 use super::*;
 
-const CHECK_PROMPT: &str = "You check a coding task brief before an agent works on it. Decide whether any two requirements below (the goal and the acceptance criteria) contradict each other, so that satisfying one makes another impossible. Ordinary tension or extra work is not a contradiction. Reply with only JSON: {\"contradiction\": true|false, \"conflict\": \"<which two requirements, quoted briefly, or empty>\"}";
+const CHECK_PROMPT: &str = "You check a coding task brief before an agent works on it. Two checks.\n1. Decide whether any two requirements below (the goal and the acceptance criteria) contradict each other, so that satisfying one makes another impossible. Ordinary tension or extra work is not a contradiction.\n2. The agent will have only the capabilities listed under `tools`. Decide whether a criterion can only be met with a capability none of them provides, such as moving an Asana task when no Asana tool is listed. Work on files, shell commands and the repository needs no extra tool, and neither does a criterion that only asks the agent to report something.\nReply with only JSON: {\"contradiction\": true|false, \"conflict\": \"<which two requirements, quoted briefly, or empty>\", \"missingTool\": null or {\"criterion\": <0-based index of the criterion>, \"capability\": \"<what is missing, in a few words>\", \"toolId\": \"<id of a listed connected tool that is off for this task and would provide it, or empty>\"}}";
 
 const MAX_CONFLICT_CHARS: usize = 400;
 
@@ -19,11 +19,47 @@ enum Verdict {
     Unusable(String),
 }
 
-pub(super) fn build_check_brief(goal: &str, criteria: &[String]) -> String {
+pub(super) fn build_check_brief(
+    goal: &str,
+    criteria: &[String],
+    tools: &serde_json::Value,
+) -> String {
     format!(
         "{CHECK_PROMPT}\n\n{}\n",
-        json!({"goal": goal, "criteria": criteria})
+        json!({"goal": goal, "criteria": criteria, "tools": tools})
     )
+}
+
+/// The criterion the reply says needs a tool the task will not have; a
+/// criterion index outside the list, or a blank capability, is no claim.
+fn parse_missing_tool(
+    text: &str,
+    criteria: usize,
+    off: &[(String, String)],
+) -> Option<MissingTool> {
+    let (start, end) = (text.find('{')?, text.rfind('}')?);
+    let v: serde_json::Value = serde_json::from_str(&text[start..=end]).ok()?;
+    let m = v.get("missingTool").filter(|m| m.is_object())?;
+    let criterion = m.get("criterion")?.as_u64()? as usize;
+    let capability = m
+        .get("capability")?
+        .as_str()?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if criterion >= criteria || capability.is_empty() {
+        return None;
+    }
+    let tool_id = m
+        .get("toolId")
+        .and_then(|t| t.as_str())
+        .filter(|id| off.iter().any(|(known, _)| known == id))
+        .map(str::to_string);
+    Some(MissingTool {
+        criterion,
+        capability: truncate_chars(&capability, MAX_CONFLICT_CHARS),
+        tool_id,
+    })
 }
 
 /// The reply's JSON object, whatever prose or fence surrounds it. A
@@ -59,8 +95,10 @@ async fn run_check(
     route: &Route,
     attempt_n: u32,
     cancel: &CancelToken,
-) -> Result<Verdict, RunError> {
-    let brief_text = build_check_brief(&task.goal, &task.criteria);
+) -> Result<(Verdict, Option<MissingTool>), RunError> {
+    let settings = app.settings.read().unwrap().clone();
+    let tools = permissions::task_tools(app, &settings, task, Path::new(&task.worktree));
+    let brief_text = build_check_brief(&task.goal, &task.criteria, &tools.capabilities());
     let (reply, cost) = run_judge(
         app,
         task,
@@ -74,8 +112,11 @@ async fn run_check(
     .await?;
     add_task_cost(app, &task.id, cost);
     Ok(match reply {
-        Ok(text) => parse_verdict(&text),
-        Err(why) => Verdict::Unusable(why),
+        Ok(text) => {
+            let missing = parse_missing_tool(&text, task.criteria.len(), &tools.off);
+            (parse_verdict(&text), missing)
+        }
+        Err(why) => (Verdict::Unusable(why), None),
     })
 }
 
@@ -226,13 +267,16 @@ pub(super) async fn check_brief(
     let Some((route_id, route, fallback)) = check_route(app) else {
         return BriefAction::Proceed;
     };
-    let verdict = match &route {
+    let (verdict, missing) = match &route {
         Some(route) => match run_check(app, &task, route, attempt_n, cancel).await {
             Ok(v) => v,
             Err(RunError::Cancelled) => return BriefAction::Cancelled,
-            Err(RunError::Io(msg)) => Verdict::Unusable(msg),
+            Err(RunError::Io(msg)) => (Verdict::Unusable(msg), None),
         },
-        None => Verdict::Unusable(format!("route {route_id} is not configured")),
+        None => (
+            Verdict::Unusable(format!("route {route_id} is not configured")),
+            None,
+        ),
     };
     let Ok(Some(mut task)) = app.store.load_task(task_id) else {
         return BriefAction::Proceed;
@@ -266,7 +310,17 @@ pub(super) async fn check_brief(
             }
         }
     }
-    // A redraft is checked again; anything else is settled for good.
+    // A redraft is checked again; anything else is settled for good. A tool
+    // the task lacks is asked about before the first attempt, once.
+    if !matches!(action, BriefAction::Redraft) && !task.brief_check.missing_tool_asked {
+        if let Some(missing) = missing {
+            task.decisions.push(format!(
+                "Brief check: criterion {} needs {}, which the task will not have",
+                missing.criterion, missing.capability
+            ));
+            task.brief_check.missing_tool = Some(missing);
+        }
+    }
     task.brief_check.done = !matches!(action, BriefAction::Redraft);
     task.updated_at = now_ms();
     let _ = app.store.save_task(&task);
@@ -307,8 +361,30 @@ mod tests {
 
     #[test]
     fn the_check_brief_carries_goal_and_criteria_as_json() {
-        let b = build_check_brief("g", &["a".to_string()]);
+        let b = build_check_brief("g", &["a".to_string()], &json!({"mcp": []}));
         assert!(b.starts_with("You check a coding task brief"));
-        assert!(b.contains(r#"{"criteria":["a"],"goal":"g"}"#));
+        assert!(b.contains(r#"{"criteria":["a"],"goal":"g","tools":{"mcp":[]}}"#));
+    }
+
+    #[test]
+    fn a_missing_tool_is_read_from_the_reply_and_checked_against_the_brief() {
+        let off = vec![("asana".to_string(), "Asana".to_string())];
+        let reply = r#"{"contradiction": false, "conflict": "", "missingTool": {"criterion": 1, "capability": " move an  Asana task ", "toolId": "asana"}}"#;
+        let m = parse_missing_tool(reply, 2, &off).unwrap();
+        assert_eq!(m.criterion, 1);
+        assert_eq!(m.capability, "move an Asana task");
+        assert_eq!(m.tool_id.as_deref(), Some("asana"));
+        // An id that is not an off tool of this task is dropped, the claim kept.
+        let other = reply.replace("\"asana\"}", "\"jira\"}");
+        assert_eq!(parse_missing_tool(&other, 2, &off).unwrap().tool_id, None);
+        // A criterion that does not exist, null and blank claims are nothing.
+        assert!(parse_missing_tool(reply, 1, &off).is_none());
+        assert!(parse_missing_tool(r#"{"missingTool": null}"#, 2, &off).is_none());
+        assert!(parse_missing_tool(
+            r#"{"missingTool": {"criterion": 0, "capability": " "}}"#,
+            2,
+            &off
+        )
+        .is_none());
     }
 }

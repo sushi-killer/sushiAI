@@ -235,7 +235,7 @@ fn hook_token(daemon: &Daemon, task_id: &str) -> String {
         .unwrap();
     assert_eq!(
         settings["hooks"]["PreToolUse"][0]["matcher"],
-        "Edit|Write|MultiEdit|NotebookEdit"
+        "Edit|Write|MultiEdit|NotebookEdit|mcp__.*|WebFetch|WebSearch"
     );
     command
         .split("--token '")

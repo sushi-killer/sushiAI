@@ -207,15 +207,18 @@ impl App {
             return Ok(json!({}));
         };
         let input = p.payload.get("tool_input");
+        // Only a file edit claims a path: an MCP tool's `path` argument is
+        // not a file of this worktree.
+        let edits = matches!(
+            p.payload.get("tool_name").and_then(|t| t.as_str()),
+            Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit")
+        );
         let file = ["file_path", "notebook_path", "path"]
             .iter()
-            .find_map(|k| input.and_then(|i| i.get(k)).and_then(|v| v.as_str()));
-        let Some(rel) = file.and_then(|f| relative_to_worktree(&ctx.worktree, f)) else {
-            return Ok(json!({}));
-        };
-        match self.lease_file(&ctx.task_id, &rel) {
-            None => Ok(json!({})),
-            Some(held) => {
+            .find_map(|k| input.and_then(|i| i.get(k)).and_then(|v| v.as_str()))
+            .filter(|_| edits);
+        if let Some(rel) = file.and_then(|f| relative_to_worktree(&ctx.worktree, f)) {
+            if let Some(held) = self.lease_file(&ctx.task_id, &rel) {
                 let reason = format!(
                     "{rel} is being edited by another task, \"{}\" ({}). Continue with other files; you get {rel} after that task lands.",
                     held.title, held.task_id
@@ -225,15 +228,16 @@ impl App {
                     held.title, held.path
                 );
                 self.append_lease_line(&ctx.task_id, line);
-                Ok(json!({
+                return Ok(json!({
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
                         "permissionDecisionReason": reason,
                     }
-                }))
+                }));
             }
         }
+        Ok(permissions::decide_call(&self.arc(), &ctx, &p.payload).await)
     }
 
     /// One decision line per distinct refusal.

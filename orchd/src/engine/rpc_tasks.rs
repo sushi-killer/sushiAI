@@ -859,6 +859,13 @@ impl App {
             return self.answer_dependency_question(task, &p.answer, true);
         }
 
+        // A tool call held for this question: the run goes on with the answer.
+        if let Some(tx) = self.permission_waits.lock().unwrap().remove(&p.id) {
+            if tx.send(p.answer.clone()).is_ok() {
+                return serde_json::to_value(&task).map_err(|e| e.to_string());
+            }
+        }
+
         let delivered = {
             let controls = self.controls.lock().unwrap();
             controls

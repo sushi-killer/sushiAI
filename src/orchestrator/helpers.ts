@@ -747,6 +747,7 @@ const QUESTION_STAGE: Record<QuestionKind, Stage> = {
   budget: "implement",
   daily_budget: "implement",
   protected_path: "implement",
+  permission: "implement",
   agent_question: "implement",
 };
 

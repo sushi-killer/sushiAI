@@ -76,7 +76,13 @@ fn a_message_reaches_a_running_task_with_its_next_attempt_only() {
     let running = daemon.request("task.get", serde_json::json!({"id": to}));
     assert_eq!(running["status"], "running", "{running}");
     assert_eq!(running["attempts"].as_array().unwrap().len(), 1);
-    let first_brief = std::fs::read_to_string(&first).unwrap();
+    // The script creates the file before `cat` has written the whole brief.
+    let mut first_brief = std::fs::read_to_string(&first).unwrap();
+    while !first_brief.contains("## Report format") {
+        assert!(start.elapsed() < Duration::from_secs(15), "{first_brief}");
+        std::thread::sleep(Duration::from_millis(20));
+        first_brief = std::fs::read_to_string(&first).unwrap();
+    }
     assert!(first_brief.contains("Your task id is"));
     assert!(!first_brief.contains("PEER-NOTE-42"));
 

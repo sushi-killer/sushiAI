@@ -49,6 +49,7 @@ mod land;
 mod leases;
 mod lines;
 mod past_work;
+mod permissions;
 mod plan;
 mod questions;
 mod recovery;
@@ -221,6 +222,18 @@ struct HookContext {
     /// Set while `hook.stop` runs verify for this attempt: the harness is
     /// silent then by design, so the stall clock waits.
     hook_running: Arc<AtomicBool>,
+    /// Rules the owner allowed for this run only (`permissions.rs`).
+    run_grants: StdMutex<std::collections::HashSet<String>>,
+    /// Rules the owner denied during this run.
+    run_denied: StdMutex<std::collections::HashSet<String>>,
+    /// Tools and paths the hook decided with the owner, so a refusal of the
+    /// same one after the run is not asked about again.
+    handled: StdMutex<std::collections::BTreeSet<String>>,
+    /// Protected paths the owner allowed: what the agent staged there is
+    /// copied to the real path.
+    staged: StdMutex<std::collections::BTreeSet<String>>,
+    /// One permission question at a time per run.
+    ask_lock: tokio::sync::Mutex<()>,
 }
 
 /// An implement attempt's stall watchdog: the silence limit, paused while
@@ -255,6 +268,8 @@ pub struct App {
     /// Every agent-to-agent message, mirrored to `<data>/messages.json`.
     messages: StdMutex<Vec<Message>>,
     hook_tokens: RwLock<HashMap<String, Arc<HookContext>>>,
+    /// Keyed by task id: the held tool call a `task.answer` resolves.
+    permission_waits: StdMutex<HashMap<String, oneshot::Sender<String>>>,
     /// Keyed by task id: the files each live task holds (`leases.rs`).
     leases: StdMutex<HashMap<String, Lease>>,
     /// Held while a graph start counts a parent's running children and
@@ -432,6 +447,7 @@ impl App {
             audits: std::sync::Mutex::new(HashMap::new()),
             messages: StdMutex::new(messages),
             hook_tokens: RwLock::new(HashMap::new()),
+            permission_waits: StdMutex::new(HashMap::new()),
             leases: StdMutex::new(HashMap::new()),
             child_admission: StdMutex::new(()),
             autopilot_admission: StdMutex::new(()),

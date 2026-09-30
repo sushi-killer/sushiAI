@@ -398,6 +398,17 @@ fn default_brief_check_route() -> String {
     "codex".to_string()
 }
 
+/// A criterion the task's tools cannot meet: `tool_id` names the connected
+/// tool that would, when one is configured but off for this task.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingTool {
+    pub criterion: usize,
+    pub capability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+}
+
 /// State of a task's brief consistency check (a cheap read-only model run
 /// asking whether the goal and criteria contradict each other).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -412,6 +423,13 @@ pub struct BriefCheck {
     /// The conflict the implement and review briefs must name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<String>,
+    /// A criterion that needs a capability the task will not have; the owner
+    /// is asked about it once, before the first attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_tool: Option<MissingTool>,
+    /// The owner answered the `missing_tool` question.
+    #[serde(default)]
+    pub missing_tool_asked: bool,
     /// The command the planner named that captures the screenshot evidence;
     /// orchd runs it itself once verify has passed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -987,6 +1005,9 @@ pub enum QuestionKind {
     PreexistingFailure,
     Budget,
     ProtectedPath,
+    /// A tool call or path write the run is not allowed to make; answered by
+    /// the owner only.
+    Permission,
     /// A review finding the implementer disputed and a judge dropped.
     ReviewDispute,
     PlanQuestion,

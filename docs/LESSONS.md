@@ -26,13 +26,10 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 
 ## Open
 
-## 2026-09-30 — A connected MCP server that works in `claude` failed under `--strict-mcp-config`
-
-Real `claude -p --strict-mcp-config --mcp-config` runs: stdio servers from `~/.claude.json` (Sheets) and a plugin (OpenViking) connect. Slack's http server is `needs-auth` as `slack` but connects as `plugin:slack:slack` (OAuth is keyed by server name). The claude.ai Asana connector cannot load, so Asana is `https://mcp.asana.com/v2/mcp`, signed in once via `/mcp`.
-Rule: a plugin server keeps its Claude Code name; probe with a real run.
-
 ## Promoted
 
+- 2026-09-30 A hook `allow` did not open `.claude/**` to a headless `claude -p` (also not a `Write(.claude/**)` rule or `updatedInput`; checked on 2.1.285) → an allowed write goes to `.orchd-staging/` and is copied in before verify. `an_allowed_write_under_claude_goes_through_staging_and_lands_before_verify`.
+- 2026-09-30 A connected MCP server that worked in `claude` failed under `--strict-mcp-config` (Slack's OAuth is keyed by the plugin name) → keep a plugin server's Claude Code name and probe with a real run. `chat_tools::server_key`.
 - 2026-09-29 A kill lost the whole workspace snapshot (Chromium had not committed localStorage) → durable state goes in `workspace-state.json`, atomically.
 - 2026-09-30 A preselected answer plus global Enter sent answers the owner never picked → Enter needs an explicit pick or typed text. `enterAnswer` in `ownerAttention.ts`.
 - 2026-09-29 Contradicting criteria cost three attempts → cross-check criteria before launch.

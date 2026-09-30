@@ -140,7 +140,7 @@ pub fn server_key(cfg: &ChatToolConfig) -> String {
 }
 
 /// Claude Code's tool-name form of a server key or tool name.
-fn sanitize(name: &str) -> String {
+pub(super) fn sanitize(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
@@ -227,7 +227,7 @@ fn cache_path(app: &App) -> PathBuf {
     app.data_dir.join("chat-tools.json")
 }
 
-fn load_cache(app: &App) -> BTreeMap<String, Discovery> {
+pub(super) fn load_cache(app: &App) -> BTreeMap<String, Discovery> {
     read_json(&cache_path(app))
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default()
@@ -542,6 +542,8 @@ pub struct TurnTools {
     pub codex: Vec<(String, serde_json::Value, Vec<String>)>,
     /// Appended to the mode's prompt; empty without connected tools.
     pub prompt: String,
+    /// `(id, read tools, write tools)` of each server in `servers`.
+    pub listed: Vec<(String, Vec<String>, Vec<String>)>,
 }
 
 /// The `sushi-action` instructions and the tools each server offers.
@@ -613,6 +615,37 @@ pub async fn for_turn(app: &App, settings: &Settings) -> TurnTools {
     }
     if !listed.is_empty() {
         turn.prompt = tools_prompt(&listed);
+    }
+    turn.listed = listed;
+    turn
+}
+
+/// The connected tools a task run gets: every enabled one that an earlier
+/// look found reachable. Only the stored discovery is read -- a run never
+/// starts a probe -- so a tool nobody has opened in Settings or used in a
+/// chat turn yet is left out until it has been seen once.
+pub fn for_task(app: &App, settings: &Settings) -> TurnTools {
+    let mut turn = TurnTools::default();
+    let cache = load_cache(app);
+    for cfg in settings.chat_tools.iter().filter(|c| c.enabled) {
+        let Some(known) = cache.get(&cfg.id).filter(|d| d.status == "ok") else {
+            continue;
+        };
+        let Ok(server) = resolve(cfg, &home()) else {
+            continue;
+        };
+        let key = server_key(cfg);
+        let (mut reads, mut writes) = (Vec::new(), Vec::new());
+        for tool in &known.tools {
+            match classify(&tool.name, tool.read_only, &cfg.overrides) {
+                Kind::Read => reads.push(tool.name.clone()),
+                Kind::Write => writes.push(tool.name.clone()),
+            }
+        }
+        turn.allowed
+            .extend(reads.iter().map(|t| claude_tool_name(&key, t)));
+        turn.servers.insert(key, server);
+        turn.listed.push((cfg.id.clone(), reads, writes));
     }
     turn
 }

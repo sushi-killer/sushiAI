@@ -152,6 +152,7 @@ export type QuestionKind =
   | "preexisting_failure"
   | "budget"
   | "protected_path"
+  | "permission"
   | "review_dispute"
   | "plan_question"
   | "daily_budget"

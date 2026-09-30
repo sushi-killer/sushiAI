@@ -264,6 +264,41 @@ pub(super) async fn run_task_loop(
             }
         }
 
+        // A criterion the task has no tool for is put to the owner before an
+        // attempt is spent on it.
+        if implement_attempt_count(&task) == 0
+            && parent_failure.is_none()
+            && !task.brief_check.missing_tool_asked
+        {
+            if let Some(missing) = task.brief_check.missing_tool.clone() {
+                task.question = Some(permissions::missing_tool_question(&task, &missing));
+                task.status = TaskStatus::Waiting;
+                task.updated_at = now_ms();
+                let Some(answer) = wait_for_answer(
+                    &app,
+                    &task_id,
+                    &mut task,
+                    &pending_answer,
+                    &cancel,
+                    &mut permit,
+                )
+                .await
+                else {
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                };
+                permissions::apply_missing_answer(&app, &mut task, &missing, &answer);
+                task.brief_check.missing_tool_asked = true;
+                task.brief_check.missing_tool = None;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+                drop(permit);
+                continue 'attempts;
+            }
+        }
+
         // Every check command runs on the base once: one the repository
         // cannot run is rewritten, one broken for an unrelated reason stops
         // gating, before an attempt is spent on either.
@@ -590,6 +625,10 @@ pub(super) async fn run_task_loop(
             _ => brief_text,
         };
 
+        let tools = permissions::task_tools(&app, &settings, &task, &worktree);
+        let brief_text =
+            brief::with_block_before_report(&brief_text, &permissions::tools_block(&tools, false));
+
         let reason = if conflict_only {
             format!("conflict only -> route {}", route.id)
         } else {
@@ -652,7 +691,7 @@ pub(super) async fn run_task_loop(
             mut registered,
         } = prepare_run(
             &app, &task, &task_id, &route, &settings, &worktree, &base_sha, attempt_n, &run_dir,
-            &deny_read,
+            &deny_read, &tools,
         );
 
         let network_allowed = settings.codex_network;
@@ -726,12 +765,17 @@ pub(super) async fn run_task_loop(
             None => (a_run.await, no_second),
         };
 
-        let gate_blocks = if let Some((tok, ctx)) = registered.take() {
+        let (gate_blocks, handled, staged_lines) = if let Some((tok, ctx)) = registered.take() {
             app.hook_tokens.write().unwrap().remove(&tok);
             ctx.cancel.cancel();
-            ctx.blocks.load(Ordering::SeqCst)
+            let applied = permissions::finish_staging(&ctx);
+            (
+                ctx.blocks.load(Ordering::SeqCst),
+                ctx.handled.lock().unwrap().clone(),
+                permissions::staging_lines(&applied),
+            )
         } else {
-            0
+            (0, Default::default(), Vec::new())
         };
         // Delete the per-run key file the moment the run ends (spec item
         // B); recovery also deletes it for an attempt interrupted by an
@@ -746,6 +790,7 @@ pub(super) async fn run_task_loop(
             task = reloaded;
         }
         task.attempts[idx].gate_blocks = gate_blocks;
+        task.decisions.extend(staged_lines);
         // Both candidates' spend counts, the loser's and the pick run's on
         // top of the winner's (added below with the attempt's own).
         task.cost_usd += best_of.cost;
@@ -881,6 +926,41 @@ pub(super) async fn run_task_loop(
                 FailureKind::Loop,
                 detail,
                 &mut attempt_budget,
+                &pending_answer,
+                &cancel,
+                &mut permit,
+            )
+            .await
+            {
+                LoopSignal::Continue => {
+                    drop(permit);
+                    continue;
+                }
+                LoopSignal::Stop => {
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
+            }
+        }
+
+        // A call the run was refused and orchd never decided: one owner
+        // question, not another attempt that would be refused the same way.
+        let refused = permissions::unhandled_denials(&handled, &worktree, &outcome);
+        if !refused.is_empty() {
+            let (wt, base) = (worktree.clone(), base_sha.clone());
+            task.attempts[idx].changed_files = tokio::task::spawn_blocking(move || {
+                git::changed_files(&wt, &base).unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+            record_diff_stat(&mut task, idx, &worktree, &base_sha).await;
+            match permissions::stop_for_denials(
+                &app,
+                &task_id,
+                &mut task,
+                idx,
+                &refused,
                 &pending_answer,
                 &cancel,
                 &mut permit,
@@ -1049,6 +1129,33 @@ pub(super) async fn run_task_loop(
                 }
             }
 
+            // `No tool: <capability>`: a retry cannot give the agent a tool,
+            // so the owner decides, and only the owner.
+            if let Some(capability) = permissions::missing_tool_claim(&question_text) {
+                task.question = Some(permissions::no_tool_question(&app, &task, &capability));
+                task.status = TaskStatus::Waiting;
+                task.updated_at = now_ms();
+                let Some(answer) = wait_for_answer(
+                    &app,
+                    &task_id,
+                    &mut task,
+                    &pending_answer,
+                    &cancel,
+                    &mut permit,
+                )
+                .await
+                else {
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                };
+                permissions::apply_no_tool_answer(&app, &mut task, &capability, &answer);
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+                drop(permit);
+                continue;
+            }
             task.question = Some(Question::new(
                 question_text,
                 vec![],

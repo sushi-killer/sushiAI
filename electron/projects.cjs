@@ -137,6 +137,7 @@ class Projects {
         backend: input.sessions?.backend,
       },
       targets: Array.isArray(input.targets) ? input.targets.map(String) : [],
+      hosts: projects[id]?.hosts ?? {},
     };
     const previousNames = new Set(
       (projects[id]?.env || []).map((entry) => entry.name),
@@ -203,6 +204,45 @@ class Projects {
     } catch {
       return null;
     }
+  }
+
+  async secretForHost(id, name, host) {
+    const project = await this.get(id);
+    if (!project?.hosts?.[host]?.trusted) return null;
+    return this.secretFor(id, name);
+  }
+
+  async setHostTrust(id, host, trusted) {
+    if (typeof host !== "string" || !host.startsWith("ssh:"))
+      throw new Error("Invalid project host.");
+    const projects = await this.#read(this.projectsFile);
+    const project = projects[id];
+    if (!project) throw new Error("Unknown project.");
+    project.hosts ||= {};
+    project.hosts[host] = {
+      ...project.hosts[host],
+      trusted: !!trusted,
+    };
+    await this.#write(this.projectsFile, projects);
+    return { trusted: !!trusted };
+  }
+
+  async setHostOverrides(id, host, overrides) {
+    if (typeof host !== "string" || !host.startsWith("ssh:"))
+      throw new Error("Invalid project host.");
+    if (!overrides || typeof overrides !== "object" || Array.isArray(overrides))
+      throw new Error("Host overrides must be an object.");
+    const projects = await this.#read(this.projectsFile);
+    const project = projects[id];
+    if (!project) throw new Error("Unknown project.");
+    project.hosts ||= {};
+    project.hosts[host] = {
+      ...project.hosts[host],
+      overrides,
+      trusted: !!project.hosts[host]?.trusted,
+    };
+    await this.#write(this.projectsFile, projects);
+    return project.hosts[host].overrides;
   }
 
   async resolve(remote) {

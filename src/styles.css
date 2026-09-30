@@ -3755,6 +3755,84 @@ iframe {
   background: #2b2b2b;
   color: #e0e0e0;
 }
+.project-hosts-settings {
+  display: grid;
+  gap: 10px;
+}
+.project-host-row {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #303030;
+  border-radius: 7px;
+  background: #171717;
+}
+.project-host-heading,
+.project-host-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.project-host-heading strong {
+  color: #e0e0e0;
+}
+.project-host-trusted,
+.project-host-untrusted {
+  font-size: 11px;
+}
+.project-host-trusted {
+  color: #a9c58b;
+}
+.project-host-untrusted {
+  color: #d9ae75;
+}
+.project-host-matrix {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 16px;
+}
+.project-host-matrix > div {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 8px;
+  color: #858585;
+  font-size: 11px;
+}
+.project-host-matrix > div strong {
+  color: #d0d0d0;
+  font-weight: 500;
+  text-align: right;
+}
+.project-host-matrix > div small {
+  grid-column: 1 / -1;
+  color: #858585;
+}
+.project-host-matrix > .project-host-ready > strong {
+  color: #a9c58b;
+}
+.project-host-matrix > .project-host-missing > strong {
+  color: #d9ae75;
+}
+.project-host-overrides {
+  display: grid;
+  gap: 6px;
+  color: #a8a8a8;
+  font-size: 11px;
+}
+.project-host-overrides textarea {
+  min-height: 56px;
+  resize: vertical;
+  font:
+    11px ui-monospace,
+    SFMono-Regular,
+    monospace;
+}
+.project-host-matrix > p {
+  grid-column: 1 / -1;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
 .workspace-controls-columns {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, Pencil, RefreshCw, ShieldOff, Trash2 } from "lucide-react";
-import type { ClaudeMcpServer, ClaudePlugin, SkillCatalogItem } from "./types";
+import type {
+  ClaudeMcpServer,
+  ClaudePlugin,
+  ConnectionProfile,
+  Project,
+  ProjectHostReadiness,
+  SkillCatalogItem,
+} from "./types";
 
 type Usage = { here: number; total: number; skills: number };
 
@@ -78,6 +85,16 @@ export function ClaudeMcpSettings({
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [error, setError] = useState("");
   const [confirmClose, setConfirmClose] = useState(false);
+  const [tab, setTab] = useState<"integrations" | "hosts">("integrations");
+  const [project, setProject] = useState<Project | null>(null);
+  const [hostRows, setHostRows] = useState<ConnectionProfile[]>([]);
+  const [hostMatrix, setHostMatrix] = useState<
+    Record<string, ProjectHostReadiness>
+  >({});
+  const [hostBusy, setHostBusy] = useState("");
+  const [overrideDrafts, setOverrideDrafts] = useState<Record<string, string>>(
+    {},
+  );
 
   useEffect(() => {
     setName(workspaceName);
@@ -129,7 +146,82 @@ export function ClaudeMcpSettings({
   useEffect(() => {
     void load();
     void loadAnalytics();
-  }, [cwd, endpoint, remote]);
+    void (async () => {
+      if (!window.bridge) return;
+      try {
+        const [remote, profiles] = await Promise.all([
+          window.bridge.projectInspect(endpoint, {
+            operation: "git_remote",
+            root: cwd,
+          }),
+          window.bridge.connectionsList(),
+        ]);
+        setProject(
+          remote?.remote
+            ? await window.bridge.projectsResolve({
+                remote: remote.remote,
+                endpoint: endpoint || "local",
+              })
+            : null,
+        );
+        setHostRows(profiles);
+      } catch {
+        setProject(null);
+        setHostRows([]);
+      }
+    })();
+  }, [cwd, endpoint, remote, workspaceName]);
+
+  async function checkHost(host: string) {
+    if (!window.bridge || !project) return;
+    setHostBusy(host);
+    try {
+      const matrix = await window.bridge.projectHostCheck(
+        project.id,
+        host,
+        host === endpoint ? cwd : undefined,
+      );
+      setHostMatrix((current) => ({ ...current, [host]: matrix }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setHostBusy("");
+    }
+  }
+
+  async function changeTrust(host: string, trusted: boolean) {
+    if (!window.bridge || !project) return;
+    setHostBusy(host);
+    try {
+      await window.bridge.projectHostTrust(project.id, host, trusted);
+      setProject(await window.bridge.projectsGet(project.id));
+      const current = hostMatrix[host];
+      if (current)
+        setHostMatrix({ ...hostMatrix, [host]: { ...current, trusted } });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setHostBusy("");
+    }
+  }
+
+  async function saveHostOverrides(host: string) {
+    if (!window.bridge || !project) return;
+    try {
+      const overrides = JSON.parse(overrideDrafts[host] || "{}");
+      if (
+        !overrides ||
+        typeof overrides !== "object" ||
+        Array.isArray(overrides)
+      )
+        throw new Error("Overrides must be a JSON object.");
+      await window.bridge.projectHostOverrides(project.id, host, overrides);
+      setProject(await window.bridge.projectsGet(project.id));
+      setError("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
 
   async function reload() {
     await Promise.all([load(), loadAnalytics()]);
@@ -294,7 +386,177 @@ export function ClaudeMcpSettings({
         </span>
       </p>
 
-      {loading ? (
+      <div
+        className="workspace-control-tabs"
+        role="tablist"
+        aria-label="Project settings"
+      >
+        <button
+          className={tab === "integrations" ? "selected" : ""}
+          role="tab"
+          aria-selected={tab === "integrations"}
+          onClick={() => setTab("integrations")}
+        >
+          Integrations
+        </button>
+        <button
+          className={tab === "hosts" ? "selected" : ""}
+          role="tab"
+          aria-selected={tab === "hosts"}
+          onClick={() => setTab("hosts")}
+        >
+          Hosts
+        </button>
+      </div>
+
+      {tab === "hosts" ? (
+        <div className="project-hosts-settings">
+          {!project ? (
+            <p className="settings-muted">
+              Open a configured project to manage host trust.
+            </p>
+          ) : (
+            <>
+              <p className="settings-muted">
+                Hosts run this project over SSH. Secret values are sent only
+                while trust is enabled.
+              </p>
+              {hostRows.length === 0 ? (
+                <p className="settings-muted">No SSH hosts are configured.</p>
+              ) : (
+                hostRows.map((host) => {
+                  const key = `ssh:${host.id}`;
+                  const matrix = hostMatrix[key];
+                  const trusted = !!project.hosts?.[key]?.trusted;
+                  return (
+                    <section className="project-host-row" key={host.id}>
+                      <div className="project-host-heading">
+                        <strong>{host.name}</strong>
+                        <span
+                          className={
+                            trusted
+                              ? "project-host-trusted"
+                              : "project-host-untrusted"
+                          }
+                        >
+                          {trusted ? "Trusted" : "Not trusted"}
+                        </span>
+                      </div>
+                      {matrix ? (
+                        <div className="project-host-matrix">
+                          {[
+                            [
+                              "Checkout",
+                              matrix.checkout.ok
+                                ? "Matches project remote"
+                                : "Remote does not match",
+                              matrix.checkout.ok,
+                            ],
+                            [
+                              "Setup",
+                              matrix.setup.ok ? "Configured" : "Not configured",
+                              matrix.setup.ok,
+                            ],
+                            [
+                              "CLIs",
+                              `${matrix.clis.claude.installed ? "Claude" : "No Claude"} · ${matrix.clis.codex.installed ? "Codex" : "No Codex"}`,
+                              matrix.clis.claude.installed ||
+                                matrix.clis.codex.installed,
+                            ],
+                            [
+                              "MCP",
+                              `${matrix.mcp.count} configured`,
+                              matrix.mcp.ok,
+                            ],
+                            [
+                              "Secrets",
+                              `${matrix.secrets.count} ready`,
+                              matrix.secrets.ok,
+                            ],
+                          ].map(([label, value, ok]) => (
+                            <div
+                              className={
+                                ok
+                                  ? "project-host-ready"
+                                  : "project-host-missing"
+                              }
+                              key={String(label)}
+                            >
+                              <span>{label}</span>
+                              <strong>
+                                {ok ? "Ready" : "Needs attention"}
+                              </strong>
+                              <small>{value}</small>
+                            </div>
+                          ))}
+                          {matrix.checkout.nonStandard && (
+                            <p className="settings-error">
+                              Checkout uses a non-standard path:{" "}
+                              {matrix.checkout.path}
+                            </p>
+                          )}
+                        </div>
+                      ) : null}
+                      <label className="project-host-overrides">
+                        Per-host overrides (JSON)
+                        <textarea
+                          value={
+                            overrideDrafts[key] ??
+                            JSON.stringify(
+                              project.hosts?.[key]?.overrides ?? {},
+                              null,
+                              2,
+                            )
+                          }
+                          onChange={(event) =>
+                            setOverrideDrafts((current) => ({
+                              ...current,
+                              [key]: event.target.value,
+                            }))
+                          }
+                          spellCheck={false}
+                        />
+                      </label>
+                      <button
+                        className="secondary"
+                        onClick={() => void saveHostOverrides(key)}
+                      >
+                        Save overrides
+                      </button>
+                      <div className="project-host-actions">
+                        <button
+                          className="secondary"
+                          disabled={!!hostBusy}
+                          onClick={() => void checkHost(key)}
+                        >
+                          {hostBusy === key ? "Checking…" : "Check readiness"}
+                        </button>
+                        {trusted ? (
+                          <button
+                            className="danger"
+                            disabled={!!hostBusy}
+                            onClick={() => void changeTrust(key, false)}
+                          >
+                            Revoke trust
+                          </button>
+                        ) : (
+                          <button
+                            className="primary"
+                            disabled={!!hostBusy}
+                            onClick={() => void changeTrust(key, true)}
+                          >
+                            Trust host
+                          </button>
+                        )}
+                      </div>
+                    </section>
+                  );
+                })
+              )}
+            </>
+          )}
+        </div>
+      ) : loading ? (
         <p className="settings-muted">
           Looking for workspace controls{remote ? " over SSH" : ""}…
         </p>

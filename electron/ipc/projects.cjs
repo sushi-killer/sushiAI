@@ -1,4 +1,5 @@
 const { createWorktree } = require("../worktree.cjs");
+const { hostProbeScript, readiness } = require("../project-hosts.cjs");
 
 function registerProjectIpc({
   handle,
@@ -25,6 +26,26 @@ function registerProjectIpc({
     handle("projects:secret:clear", (id, name) =>
       projects.clearSecret(id, name),
     );
+    handle("projects:host:trust", (id, host, trusted) =>
+      projects.setHostTrust(id, host, trusted),
+    );
+    handle("projects:host:overrides", (id, host, overrides) =>
+      projects.setHostOverrides(id, host, overrides),
+    );
+    handle("projects:host:check", async (id, host, cwd) => {
+      if (typeof host !== "string" || !host.startsWith("ssh:"))
+        throw new Error("Invalid project host.");
+      const project = await projects.get(id);
+      if (!project) throw new Error("Unknown project.");
+      const output = await connections().exec(
+        host,
+        hostProbeScript(cwd, project.name),
+        {
+          timeout: 40000,
+        },
+      );
+      return readiness({ output, project: { ...project, host }, cwd });
+    });
     handle("projects:resolve", (remote) => projects.resolve(remote));
   }
 
@@ -52,8 +73,10 @@ function registerProjectIpc({
   });
   handle("connections-connect", async (endpoint) => {
     await connections().socket(endpoint);
-    if (endpoint?.startsWith("ssh:"))
+    if (endpoint?.startsWith("ssh:")) {
+      await connections().exec(endpoint, 'mkdir -p "$HOME/sushiai"\n');
       await connections().setAutoConnect(endpoint, true);
+    }
     return { connected: true };
   });
   handle("connections-disconnect", disconnectEndpoint);

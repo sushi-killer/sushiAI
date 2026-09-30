@@ -153,6 +153,18 @@ export type Project = {
   network: { allowedDomains: string[] };
   sessions: { claudeAccount?: string; backend?: "herdr" | "local" };
   targets: string[];
+  hosts?: Record<
+    string,
+    { trusted?: boolean; overrides?: Record<string, unknown> }
+  >;
+};
+export type ProjectHostReadiness = {
+  checkout: { ok: boolean; path: string; nonStandard: boolean };
+  setup: { ok: boolean; configured: boolean };
+  clis: import("./orchestrator/types.ts").Preflight;
+  mcp: { ok: boolean; count: number };
+  secrets: { ok: boolean; count: number };
+  trusted: boolean;
 };
 export type Snapshot = {
   version: string;
@@ -579,6 +591,21 @@ export interface Bridge {
     value: string,
   ): Promise<{ hasValue: boolean; hint: string }>;
   projectSecretClear(id: string, name: string): Promise<void>;
+  projectHostTrust(
+    id: string,
+    host: string,
+    trusted: boolean,
+  ): Promise<{ trusted: boolean }>;
+  projectHostOverrides(
+    id: string,
+    host: string,
+    overrides: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  projectHostCheck(
+    id: string,
+    host: string,
+    cwd?: string,
+  ): Promise<ProjectHostReadiness>;
   projectsResolve(
     remote: string | { remote: string; endpoint?: string },
   ): Promise<Project | null>;

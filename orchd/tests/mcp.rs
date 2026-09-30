@@ -193,6 +193,7 @@ fn initialize_tools_list_and_tools_call_over_stdio() {
         "task_list",
         "task_get",
         "task_create",
+        "task_backlog",
         "task_start",
         "task_stop",
         "task_answer",
@@ -218,8 +219,9 @@ fn initialize_tools_list_and_tools_call_over_stdio() {
             "missing tool {expected}: {names:?}"
         );
     }
-    assert_eq!(names.len(), 22, "unexpected extra tools: {names:?}");
+    assert_eq!(names.len(), 23, "unexpected extra tools: {names:?}");
     for (tool, key) in [
+        ("task_create", "backlog"),
         ("task_create", "screenshot"),
         ("task_create", "paths"),
         ("task_amend", "screenshot"),

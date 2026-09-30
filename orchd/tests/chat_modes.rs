@@ -177,20 +177,30 @@ fn creating_a_proposal_maps_index_dependencies_and_never_creates_a_row_twice() {
         "chat.createProposal",
         json!({"repo": env.path(), "messageId": message, "indices": [2, 1], "backlog": true}),
     );
+    // Rows created together are the parts of one parent: the parent waits in
+    // the next backlog, its parts branch from its branch.
     let created = done["created"].as_array().unwrap();
-    assert_eq!(created.len(), 2);
-    assert_eq!(created[0]["index"], 1);
-    assert_eq!(created[1]["index"], 2);
-    let first = created[0]["taskId"].as_str().unwrap();
-    let second = created[1]["taskId"].as_str().unwrap();
+    assert_eq!(created.len(), 3);
+    assert_eq!(created[0]["feature"], true);
+    assert_eq!(created[1]["index"], 1);
+    assert_eq!(created[2]["index"], 2);
+    let feature = created[0]["taskId"].as_str().unwrap();
+    let first = created[1]["taskId"].as_str().unwrap();
+    let second = created[2]["taskId"].as_str().unwrap();
     let tasks = env.tasks();
-    assert_eq!(tasks.len(), 2);
+    assert_eq!(tasks.len(), 3);
     let by_id = |id: &str| tasks.iter().find(|t| t["id"] == id).unwrap();
+    assert_eq!(by_id(feature)["backlog"]["bucket"], "next");
+    assert!(by_id(feature).get("parent").is_none());
     assert_eq!(by_id(second)["dependsOn"], json!([first]));
     assert_eq!(by_id(first)["title"], "First");
     assert_eq!(by_id(first)["criteria"], json!(["c1"]));
     assert_eq!(by_id(first)["source"], "chat");
-    assert_eq!(by_id(first)["backlog"]["bucket"], "next");
+    for part in [first, second] {
+        assert_eq!(by_id(part)["parent"], feature);
+        assert_eq!(by_id(part)["baseRef"], by_id(feature)["branch"]);
+        assert!(by_id(part).get("backlog").is_none());
+    }
 
     // Row 3 was left out: recorded as skipped. The state survives a reload.
     let thread = env.daemon.request("chat.get", json!({"repo": env.path()}));
@@ -209,7 +219,7 @@ fn creating_a_proposal_maps_index_dependencies_and_never_creates_a_row_twice() {
         json!({"repo": env.path(), "messageId": message, "indices": [1, 2], "backlog": true}),
     );
     assert_eq!(again["created"], json!([]));
-    assert_eq!(env.tasks().len(), 2);
+    assert_eq!(env.tasks().len(), 3);
 
     // The skipped row can still be created later; its dependency is the task
     // created earlier.
@@ -222,8 +232,11 @@ fn creating_a_proposal_maps_index_dependencies_and_never_creates_a_row_twice() {
     assert!(late["proposal"]["tasks"][2].get("skipped").is_none());
     let task = env.daemon.request("task.get", json!({"id": third}));
     assert_eq!(task["dependsOn"], json!([second]));
-    // A goal-less row falls back to its title.
+    // A goal-less row falls back to its title; a row created later joins
+    // the same feature.
     assert_eq!(task["goal"], "Third");
+    assert_eq!(task["parent"], feature);
+    assert_eq!(late["proposal"]["featureTaskId"], feature);
 }
 
 #[test]

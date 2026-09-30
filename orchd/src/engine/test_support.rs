@@ -65,6 +65,7 @@ pub(super) fn task_with_status(status: TaskStatus) -> Task {
         question_history: vec![],
         judged_findings: vec![],
         archived: false,
+        pr_url: None,
         planned_tier: None,
         tier_fallback: None,
         variant: Default::default(),

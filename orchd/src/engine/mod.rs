@@ -53,6 +53,7 @@ mod lines;
 mod past_work;
 mod permissions;
 mod plan;
+mod pr;
 mod questions;
 mod recovery;
 mod repo_notes;
@@ -607,6 +608,7 @@ impl App {
             "task.start" => self.handle_task_start(params).await,
             "task.backlog" => self.handle_task_backlog(params).await,
             "task.land" => self.handle_task_land(params).await,
+            "task.pr" => self.handle_task_pr(params).await,
             "task.stop" => self.handle_task_stop(params).await,
             "task.answer" => self.handle_task_answer(params).await,
             "task.report" => self.handle_task_report(params).await,

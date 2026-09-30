@@ -13,17 +13,17 @@ use serde::Serialize;
 /// prompt and to Codex as developer instructions. The tools it gets (read
 /// only, plus the orchd MCP bridge) are what actually keep it from doing the
 /// work itself; this text explains why.
-const ROLE: &str = "You are the owner's task orchestrator in sushiAI. You never change files or run commands yourself: every piece of work becomes an orchd task through the sushiai-orchestrator tools, which run it in an isolated worktree, verify it and report back. Follow that server's instructions. You are not woken up between turns, so never promise to watch or report later: say the task is in the Orchestrator panel. Reply in the owner's language, briefly. In text meant for the owner, refer to a task by its title, never by its id, a bare id prefix such as '8ec68f8c', or a run id.\n\nWhen you propose a task for the owner to confirm, or need the owner to choose between options, end your reply with one ```sushi-draft block holding JSON: {\"title\": \"...\", \"goal\": \"...\", \"criteria\": [\"...\"], \"dependsOn\": [\"task ids\"], \"tier\": \"mechanical|standard|hard\", \"questions\": [{\"text\": \"...\", \"options\": [\"...\"]}]}. A block may carry only questions (leave out the title) when you just need an answer. Keep the prose above the block short: the app shows the draft and the questions as cards.";
+const ROLE: &str = "You are the owner's task orchestrator in sushiAI. You never change files or run commands yourself: every piece of work becomes an orchd task through the sushiai-orchestrator tools, which run it in an isolated worktree, verify it and report back. Follow that server's instructions. Ask the owner only what only the owner can decide: scope, money, destructive or outward-facing actions, or a choice between designs that changes what gets built. Settle everything else with a sensible default, say in one line which you chose, and go on. You are not woken up between turns, so never promise to watch or report later: say the task is in the Orchestrator panel. Reply briefly, in the language of the owner's latest message, never another one. In text meant for the owner, refer to a task by its title, never by its id, a bare id prefix such as '8ec68f8c', or a run id.\n\nWhen you propose a task for the owner to confirm, or need the owner to choose between options, end your reply with one ```sushi-draft block holding JSON: {\"title\": \"...\", \"goal\": \"...\", \"criteria\": [\"...\"], \"dependsOn\": [\"task ids\"], \"tier\": \"mechanical|standard|hard\", \"questions\": [{\"text\": \"...\", \"options\": [\"...\"]}]}. A block may carry only questions (leave out the title) when you just need an answer. Keep the prose above the block short: the app shows the draft and the questions as cards.";
 
 /// The Brainstorm mode's prompt, in place of [`ROLE`]: it adapts obra/superpowers
 /// `skills/brainstorming` (MIT, see THIRD_PARTY_NOTICES.md). Its tools are
 /// read-only, so it could not create tasks even if it tried; this text says
 /// what it is for.
-const BRAINSTORM: &str = "You are the owner's thinking partner in sushiAI, in brainstorm mode: turn a rough idea into an agreed design before any task exists. First look at what is already there (the repository and existing tasks, through the read-only tools). Then discover the intent: ask exactly one focused question per reply, with 2-4 answer options, never a list of questions. When the picture is clear, write your understanding back in a few lines and, when the choice matters, weigh 2-3 approaches with a recommendation. Once the owner agrees on the design, propose the tasks that build it. You never create, start, stop, amend or answer tasks and never change files or run commands: the owner creates tasks from your proposal. Reply in the owner's language, briefly. In text meant for the owner, refer to a task by its title, never by its id, a bare id prefix such as '8ec68f8c', or a run id.\n\nEnd a reply that asks or proposes with one ```sushi-draft block holding JSON. While you are asking: {\"questions\": [{\"text\": \"the one question\", \"options\": [\"2-4 answers\"]}]}. Once the design is agreed: {\"tasks\": [{\"title\": \"...\", \"goal\": \"...\", \"criteria\": [\"acceptance criterion\"], \"dependsOn\": [1, \"existing task id\"], \"tier\": \"mechanical|standard|hard\"}]}; a dependsOn entry is the 1-based number of another task in the same list or the id of an existing task. Keep the prose above the block short: the app shows the questions as chips and the tasks as a card.";
+const BRAINSTORM: &str = "You are the owner's thinking partner in sushiAI, in brainstorm mode: turn a rough idea into an agreed design before any task exists. First look at what is already there (the repository and existing tasks, through the read-only tools). Then settle what the idea leaves open: whatever the repository, the existing tasks or a sensible default already answers, decide yourself and state the assumption in one line so the owner can overrule it. Ask only what only the owner can decide and what changes the design, exactly one focused question per reply, with 2-4 answer options, never a list of questions; once nothing like that is left, stop asking. When the picture is clear, write your understanding back in a few lines and, when the choice matters, weigh 2-3 approaches with a recommendation. Once the owner agrees on the design, propose the tasks that build it. You never create, start, stop, amend or answer tasks and never change files or run commands: the owner creates tasks from your proposal. Reply briefly, in the language of the owner's latest message, never another one. In text meant for the owner, refer to a task by its title, never by its id, a bare id prefix such as '8ec68f8c', or a run id.\n\nEnd a reply that asks or proposes with one ```sushi-draft block holding JSON. While you are asking: {\"questions\": [{\"text\": \"the one question\", \"options\": [\"2-4 answers\"]}]}. Once the design is agreed: {\"feature\": \"short name of what the tasks build together\", \"tasks\": [{\"title\": \"...\", \"goal\": \"...\", \"criteria\": [\"acceptance criterion\"], \"dependsOn\": [1, \"existing task id\"], \"tier\": \"mechanical|standard|hard\"}]}; a dependsOn entry is the 1-based number of another task in the same list or the id of an existing task. Tasks created together from one list become parts of one feature on one branch. Keep the prose above the block short: the app shows the questions as chips and the tasks as a card.";
 
 /// The Plan mode's prompt: it adapts obra/superpowers `skills/writing-plans`
 /// (MIT, see THIRD_PARTY_NOTICES.md). Read-only tools, like [`BRAINSTORM`].
-const PLAN: &str = "You are the owner's planner in sushiAI, in plan mode: split the owner's goal into small, ordered tasks that can each be verified on its own. Look at the repository and existing tasks first (read-only tools). Every task has a goal, acceptance criteria that name how each is checked (a command, a test, a screenshot), its dependencies and a guess of its tier; order them so each builds on the ones before it and keep them independent where you can. Ask a single focused question only when the goal is ambiguous; otherwise plan straight away. You never create, start, stop, amend or answer tasks and never change files or run commands: the owner creates tasks from your plan. Reply in the owner's language, briefly. In text meant for the owner, refer to a task by its title, never by its id, a bare id prefix such as '8ec68f8c', or a run id.\n\nEnd the reply with one ```sushi-draft block holding JSON: {\"tasks\": [{\"title\": \"...\", \"goal\": \"...\", \"criteria\": [\"acceptance criterion and how it is checked\"], \"dependsOn\": [1, \"existing task id\"], \"tier\": \"mechanical|standard|hard\"}]}; a dependsOn entry is the 1-based number of another task in the same list or the id of an existing task. When you must ask instead, the block is {\"questions\": [{\"text\": \"...\", \"options\": [\"2-4 answers\"]}]}. Keep the prose above the block short: the app shows the tasks as a card.";
+const PLAN: &str = "You are the owner's planner in sushiAI, in plan mode: split the owner's goal into small, ordered tasks that can each be verified on its own. Look at the repository and existing tasks first (read-only tools). Every task has a goal, acceptance criteria that name how each is checked (a command, a test, a screenshot), its dependencies and a guess of its tier; order them so each builds on the ones before it and keep them independent where you can. Ask a single focused question only when the goal is ambiguous; otherwise plan straight away. You never create, start, stop, amend or answer tasks and never change files or run commands: the owner creates tasks from your plan. Reply briefly, in the language of the owner's latest message, never another one. In text meant for the owner, refer to a task by its title, never by its id, a bare id prefix such as '8ec68f8c', or a run id.\n\nEnd the reply with one ```sushi-draft block holding JSON: {\"feature\": \"short name of what the tasks build together\", \"tasks\": [{\"title\": \"...\", \"goal\": \"...\", \"criteria\": [\"acceptance criterion and how it is checked\"], \"dependsOn\": [1, \"existing task id\"], \"tier\": \"mechanical|standard|hard\"}]}; a dependsOn entry is the 1-based number of another task in the same list or the id of an existing task. Tasks created together from one list become parts of one feature on one branch. When you must ask instead, the block is {\"questions\": [{\"text\": \"...\", \"options\": [\"2-4 answers\"]}]}. Keep the prose above the block short: the app shows the tasks as a card.";
 
 const SERVER: &str = "sushiai-orchestrator";
 const MAX_MESSAGES: usize = 200;
@@ -191,6 +191,16 @@ pub struct ProposedTask {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ChatProposal {
+    /// Names the parent task of a proposal of two or more rows.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub feature: String,
+    /// That parent, once the first rows were created.
+    #[serde(
+        default,
+        rename = "featureTaskId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub feature_task_id: Option<String>,
     pub tasks: Vec<ProposedTask>,
 }
 
@@ -235,7 +245,7 @@ impl ChatProposal {
     /// The `tasks` list of a `sushi-draft` block. Any row that is not a task
     /// with a title, an index dependency that points outside the list or at
     /// itself, or a dependency cycle drops the whole list.
-    fn parse(value: &serde_json::Value) -> Option<ChatProposal> {
+    fn parse(value: &serde_json::Value, feature: Option<&str>) -> Option<ChatProposal> {
         let rows = value.as_array().filter(|rows| !rows.is_empty())?;
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {
@@ -249,7 +259,11 @@ impl ChatProposal {
             task.skipped = false;
             tasks.push(task);
         }
-        let proposal = ChatProposal { tasks };
+        let proposal = ChatProposal {
+            feature: feature.unwrap_or_default().trim().to_string(),
+            feature_task_id: None,
+            tasks,
+        };
         proposal.acyclic().then_some(proposal)
     }
 
@@ -304,6 +318,8 @@ struct DraftBlock {
     questions: Vec<ChatQuestion>,
     #[serde(default)]
     tasks: Option<serde_json::Value>,
+    #[serde(default)]
+    feature: Option<serde_json::Value>,
 }
 
 fn lenient_questions<'de, D: serde::Deserializer<'de>>(
@@ -374,7 +390,9 @@ fn parse_reply(reply: &str) -> ParsedReply {
     };
     let mut draft = block.draft;
     draft.title = draft.title.trim().to_string();
-    let proposal = block.tasks.as_ref().and_then(ChatProposal::parse);
+    let proposal = block.tasks.as_ref().and_then(|tasks| {
+        ChatProposal::parse(tasks, block.feature.as_ref().and_then(|f| f.as_str()))
+    });
     if draft.title.is_empty() && block.questions.is_empty() && proposal.is_none() {
         return verbatim();
     }
@@ -866,13 +884,114 @@ fn find_proposal(chats: &ChatStore, message_id: &str) -> Result<(String, ChatPro
 }
 
 /// Creates `rows` (0-based, dependencies first) as tasks, recording each new
-/// task's id on its row as soon as it exists.
+/// task's id on its row as soon as it exists. A proposal of two or more rows
+/// is one feature: the first rows created make its parent task, recorded on
+/// the proposal, and every row created from it, now or later, is a part that
+/// branches from and lands on that parent's branch. A one-row proposal stays a
+/// task of its own.
 async fn create_rows(
     app: &App,
     repo: &str,
     proposal: &mut ChatProposal,
     rows: &[usize],
     backlog: bool,
+    task_mcp: Option<&serde_json::Value>,
+    created: &mut Vec<serde_json::Value>,
+) -> Result<(), String> {
+    let mut fresh = None;
+    let parent = if proposal.tasks.len() < 2 {
+        None
+    } else if let Some(id) = live_feature(app, proposal) {
+        Some(id)
+    } else {
+        let id = create_feature(app, repo, proposal, backlog, task_mcp).await?;
+        created.push(json!({"feature": true, "taskId": id}));
+        proposal.feature_task_id = Some(id.clone());
+        fresh = Some(id.clone());
+        Some(id)
+    };
+    let made = create_parts(
+        app,
+        repo,
+        proposal,
+        rows,
+        backlog,
+        parent.as_deref(),
+        task_mcp,
+        created,
+    )
+    .await;
+    if let Some(id) = fresh {
+        if made.is_err() && !created.iter().any(|c| c.get("index").is_some()) {
+            // No part exists: a childless parent would implement its own
+            // placeholder goal.
+            let _ = app.handle_task_delete(json!({"id": id})).await;
+            proposal.feature_task_id = None;
+            created.retain(|c| c["taskId"] != json!(id));
+        } else if backlog {
+            // Out of `later` even when a part failed, so the parts created
+            // are not stranded.
+            app.handle_task_backlog(json!({"id": id, "bucket": "next"}))
+                .await?;
+        } else {
+            app.handle_task_start(json!({"id": id})).await?;
+        }
+    }
+    made
+}
+
+/// The proposal's parent while new parts can still join it.
+fn live_feature(app: &App, proposal: &ChatProposal) -> Option<String> {
+    let id = proposal.feature_task_id.as_deref()?;
+    let task = app.store.load_task(id).ok().flatten()?;
+    (!task.archived && !matches!(task.status, TaskStatus::Done | TaskStatus::Landing))
+        .then_some(task.id)
+}
+
+/// The parent of a proposal's rows. Backlogged, it waits in `later` until its
+/// parts exist, so the autopilot cannot start it half-built.
+async fn create_feature(
+    app: &App,
+    repo: &str,
+    proposal: &ChatProposal,
+    backlog: bool,
+    task_mcp: Option<&serde_json::Value>,
+) -> Result<String, String> {
+    let titles: Vec<&str> = proposal.tasks.iter().map(|t| t.title.as_str()).collect();
+    let title = if proposal.feature.is_empty() {
+        format!("{} and {} more", titles[0], titles.len() - 1)
+    } else {
+        proposal.feature.clone()
+    };
+    let mut params = json!({
+        "repo": repo,
+        "title": title,
+        "goal": format!("Every part lands on this task's branch: {}", titles.join("; ")),
+        "criteria": titles.iter().map(|t| format!("\"{t}\" landed")).collect::<Vec<_>>(),
+        "source": "chat",
+        "start": false,
+    });
+    if backlog {
+        params["backlog"] = json!({"bucket": "later"});
+    }
+    if let Some(mcp) = task_mcp {
+        params["mcp"] = mcp.clone();
+    }
+    let made = app.handle_task_create(params).await?;
+    made["id"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| "task.create returned no id".to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_parts(
+    app: &App,
+    repo: &str,
+    proposal: &mut ChatProposal,
+    rows: &[usize],
+    backlog: bool,
+    parent: Option<&str>,
     task_mcp: Option<&serde_json::Value>,
     created: &mut Vec<serde_json::Value>,
 ) -> Result<(), String> {
@@ -895,7 +1014,9 @@ async fn create_rows(
             "source": "chat",
             "start": !backlog,
         });
-        if backlog {
+        if let Some(parent) = parent {
+            params["parent"] = json!(parent);
+        } else if backlog {
             params["backlog"] = json!({"bucket": "next"});
         }
         if let Some(mcp) = task_mcp {
@@ -1535,8 +1656,9 @@ const MAX_TOOLS: usize = 8;
 const MAX_SUMMARY: usize = 120;
 
 /// Tools whose input names a task by `id`.
-const TASK_ID_TOOLS: [&str; 9] = [
+const TASK_ID_TOOLS: [&str; 10] = [
     "task_get",
+    "task_backlog",
     "task_start",
     "task_stop",
     "task_report",
@@ -2019,7 +2141,10 @@ mod tests {
         assert_eq!(at("--tools"), "Read,Grep,Glob");
         assert_eq!(at("--mcp-config"), "/d/mcp.json");
         assert_eq!(at("--resume"), "sess");
-        assert_eq!(at("--allowedTools").split(',').count(), 22);
+        assert_eq!(
+            at("--allowedTools").split(',').count(),
+            crate::mcp::ORCHESTRATOR_TOOLS.len()
+        );
         assert!(at("--allowedTools").contains("mcp__sushiai-orchestrator__orchestrator_reply"));
         assert!(!at("--allowedTools").contains("task_delete"));
         assert_eq!(at("--append-system-prompt"), ROLE);
@@ -2105,11 +2230,128 @@ mod tests {
         };
         let message = session.messages.last_mut().unwrap();
         message.proposal = Some(ChatProposal {
+            feature: "Numbers".into(),
             tasks: vec![task("One"), task("Two"), task("Three")],
+            ..Default::default()
         });
         let id = message.id.clone();
         save(app, repo, &session);
         id
+    }
+
+    fn git_repo(repo: &str) {
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ] {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .status()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn rows_created_together_are_parts_of_one_feature() {
+        for backlog in [false, true] {
+            let (app, _dir, repo) = test_app();
+            git_repo(&repo);
+            let message = proposal_session(&app, &repo);
+            let made = handle_create_proposal(
+                &app,
+                json!({"repo": repo, "messageId": message, "indices": [1, 2], "backlog": backlog}),
+            )
+            .await
+            .unwrap();
+            let created = made["created"].as_array().unwrap();
+            let feature = created
+                .iter()
+                .find(|c| c["feature"] == json!(true))
+                .unwrap()["taskId"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let parent = app.store.load_task(&feature).unwrap().unwrap();
+            assert_eq!(parent.title, "Numbers");
+            assert_eq!(
+                parent.queue.backlog.map(|b| b.bucket),
+                backlog.then_some(crate::model::BacklogBucket::Next)
+            );
+            for row in made["proposal"]["tasks"].as_array().unwrap().iter().take(2) {
+                let part = app
+                    .store
+                    .load_task(row["taskId"].as_str().unwrap())
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(part.parent.as_deref(), Some(feature.as_str()));
+                assert_eq!(part.base_ref.as_deref(), Some(parent.branch.as_str()));
+                assert!(part.queue.backlog.is_none());
+                if backlog {
+                    assert_eq!(part.status, crate::model::TaskStatus::Queued);
+                }
+            }
+            // A row created later joins the same feature.
+            let made = handle_create_proposal(
+                &app,
+                json!({"repo": repo, "messageId": message, "indices": [3]}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(made["created"].as_array().unwrap().len(), 1);
+            let late = made["created"][0]["taskId"].as_str().unwrap();
+            let late = app.store.load_task(late).unwrap().unwrap();
+            assert_eq!(late.parent.as_deref(), Some(feature.as_str()));
+            app.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_feature_whose_first_part_fails_is_removed() {
+        let (app, _dir, repo) = test_app();
+        git_repo(&repo);
+        let mut session = load(&app, &repo).current().clone();
+        push(&mut session, "user", "plan it", ChatMode::Plan);
+        push(&mut session, "assistant", "here", ChatMode::Plan);
+        let message = session.messages.last_mut().unwrap();
+        message.proposal = Some(ChatProposal {
+            tasks: vec![
+                ProposedTask {
+                    title: "One".into(),
+                    depends_on: vec![ProposalDep::Id("gone".into())],
+                    ..Default::default()
+                },
+                ProposedTask {
+                    title: "Two".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        let id = message.id.clone();
+        save(&app, &repo, &session);
+
+        let error = handle_create_proposal(
+            &app,
+            json!({"repo": repo, "messageId": id, "indices": [1, 2]}),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("unknown dependency"), "{error}");
+        assert!(app.repo_tasks(&repo).is_empty());
+        let (_, proposal) = find_proposal(&load(&app, &repo), &id).unwrap();
+        assert!(proposal.feature_task_id.is_none());
+        app.shutdown();
     }
 
     #[tokio::test]
@@ -2537,6 +2779,7 @@ mod tests {
             question_history: vec![],
             judged_findings: vec![],
             archived: false,
+            pr_url: None,
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),
@@ -2727,6 +2970,8 @@ mod tests {
             assert!(prompt.contains("'8ec68f8c'"));
         }
         assert!(ROLE.contains("dependsOn"));
+        assert!(ROLE.contains("only the owner can decide"));
+        assert!(PLAN.contains("language of the owner's latest message"));
         assert!(ROLE.contains("\"dependsOn\": [\"task ids\"]"));
     }
 
@@ -2789,6 +3034,8 @@ mod tests {
     fn the_mode_prompts_say_what_they_are_for() {
         for needle in [
             "exactly one focused question",
+            "only the owner can decide",
+            "language of the owner's latest message",
             "2-4 answer options",
             "weigh 2-3 approaches",
             "never create, start, stop, amend or answer tasks",
@@ -2844,11 +3091,14 @@ mod tests {
 
     #[test]
     fn proposals_order_dependencies_first() {
-        let proposal = ChatProposal::parse(&json!([
-            {"title": "A", "dependsOn": [2]},
-            {"title": "B", "dependsOn": [3]},
-            {"title": "C"},
-        ]))
+        let proposal = ChatProposal::parse(
+            &json!([
+                {"title": "A", "dependsOn": [2]},
+                {"title": "B", "dependsOn": [3]},
+                {"title": "C"},
+            ]),
+            None,
+        )
         .unwrap();
         assert_eq!(proposal.order(&[0, 1, 2]), Some(vec![2, 1, 0]));
         assert_eq!(proposal.order(&[0, 1]), Some(vec![1, 0]));

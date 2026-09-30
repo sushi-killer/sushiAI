@@ -54,6 +54,7 @@ const ALLOWED_METHODS = new Set([
   "task.create",
   "task.start",
   "task.land",
+  "task.pr",
   "task.stop",
   "task.answer",
   "task.overturn",
@@ -101,6 +102,7 @@ const TASK_RESULT_METHODS = new Set([
   "task.create",
   "task.start",
   "task.land",
+  "task.pr",
   "task.stop",
   "task.answer",
   "task.archive",
@@ -665,7 +667,8 @@ class OrchestratorService {
       method,
       sendParams,
       this.token,
-      20000,
+      // Pushing and opening a pull request can take minutes.
+      method === "task.pr" ? 600000 : 20000,
     );
     // Awaited (not fire-and-forget) so a caller who follows this with another
     // settings-dependent call never races the push.

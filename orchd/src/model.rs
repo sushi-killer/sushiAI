@@ -1295,6 +1295,9 @@ pub struct Task {
     /// existed still loads, with `archived: false`.
     #[serde(default)]
     pub archived: bool,
+    /// The pull request `task.pr` opened for this task's branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -2041,6 +2044,7 @@ mod tests {
             question_history: vec![],
             judged_findings: vec![],
             archived: false,
+            pr_url: None,
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),
@@ -2283,6 +2287,7 @@ mod tests {
             question_history: vec![],
             judged_findings: vec![],
             archived: false,
+            pr_url: None,
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),
@@ -2343,6 +2348,7 @@ mod tests {
             assumptions: vec![],
             question_history: vec![],
             archived: false,
+            pr_url: None,
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),
@@ -2431,6 +2437,7 @@ mod tests {
             question_history: vec![],
             judged_findings: vec![],
             archived: true,
+            pr_url: None,
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),

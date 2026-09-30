@@ -235,6 +235,28 @@ fn a_verify_command_failing_on_the_base_for_an_unrelated_reason_is_non_gating() 
 }
 
 #[test]
+fn a_check_whose_program_is_missing_on_the_host_keeps_gating_and_says_so() {
+    // Even a judge that would call it unrelated is never asked: exit 127 is
+    // the host's PATH or toolchain, and a check must not quietly stop gating.
+    let feasibility = js("{\"verdict\":\"unrelated\",\"reason\":\"no cargo here\"}");
+    let s = setup(&[("JUDGE_FEASIBILITY", &feasibility)], "");
+    let id = create(&s, json!({"verify": ["no-such-toolchain-xyz --check"]}));
+    let task = finished(&s, &id);
+    assert_eq!(
+        task["verify"],
+        json!(["no-such-toolchain-xyz --check"]),
+        "{task}"
+    );
+    assert!(task["briefCheck"]["nonGating"].is_null(), "{task}");
+    assert!(
+        decisions(&task).contains("cannot find a program on this host (exit 127)"),
+        "{task}"
+    );
+    assert_ne!(task["status"], "done", "{task}");
+    cleanup(s, &task);
+}
+
+#[test]
 fn a_check_that_fails_on_the_base_as_it_should_stays_as_written() {
     let feasibility =
         js("{\"verdict\":\"feasible\",\"reason\":\"the work is meant to make it pass\"}");

@@ -361,20 +361,79 @@ fn resolve_binary(harness: Harness) -> String {
     }
 }
 
+/// The PATH every command orchd runs gets: its own, then the owner's login
+/// shell's (a GUI app or an ssh-started daemon never sees `~/.zshrc`, where
+/// toolchains like cargo put themselves), then the usual install dirs.
+/// Worked out once per process.
 fn augmented_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut extra = vec![format!("{home}/.local/bin")];
+    static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let shell = std::env::var("SHELL").unwrap_or_default();
+        let login = login_shell_path(&shell, std::time::Duration::from_secs(5));
+        merge_paths(
+            &std::env::var("PATH").unwrap_or_default(),
+            login.as_deref().unwrap_or(""),
+            &home,
+        )
+    })
+    .clone()
+}
+
+fn merge_paths(own: &str, login: &str, home: &str) -> String {
+    let mut extra = vec![format!("{home}/.local/bin"), format!("{home}/.cargo/bin")];
     #[cfg(target_os = "macos")]
     extra.push("/opt/homebrew/bin".to_string());
     extra.push("/usr/local/bin".to_string());
-    let base = std::env::var("PATH").unwrap_or_default();
-    let mut parts: Vec<String> = base.split(':').map(|s| s.to_string()).collect();
-    for e in extra {
-        if !parts.contains(&e) {
-            parts.push(e);
+    let mut parts: Vec<String> = Vec::new();
+    for dir in own
+        .split(':')
+        .chain(login.split(':'))
+        .map(str::to_string)
+        .chain(extra)
+    {
+        if !dir.is_empty() && !parts.contains(&dir) {
+            parts.push(dir);
         }
     }
     parts.join(":")
+}
+
+/// `$SHELL -ilc` printing its PATH after a marker (rc files may print
+/// banners). `None` when there is no shell, it fails, or it takes longer
+/// than `limit` (a prompt waiting for input). ponytail: stdout is read after
+/// the shell exits, so an rc file printing more than a pipe buffer would
+/// hit the time limit instead.
+fn login_shell_path(shell: &str, limit: std::time::Duration) -> Option<String> {
+    use std::io::Read;
+    if shell.is_empty() {
+        return None;
+    }
+    let mut child = std::process::Command::new(shell)
+        .args(["-ilc", "printf '\\n__ORCHD_PATH__%s\\n' \"$PATH\""])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait().ok()? {
+            Some(_) => break,
+            None if started.elapsed() > limit => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    out.lines()
+        .find_map(|l| l.strip_prefix("__ORCHD_PATH__"))
+        .map(str::to_string)
+        .filter(|p| !p.is_empty())
 }
 
 fn append_line(path: &Path, line: &str) {
@@ -685,4 +744,44 @@ mod tests {
     include!("tests/rpc_tasks.rs");
     include!("tests/verify.rs");
     include!("tests/worktrees.rs");
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn the_login_shell_path_is_read_after_its_marker_and_merged_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = dir.path().join("fake-shell");
+        std::fs::write(
+            &shell,
+            "#!/bin/sh\necho 'welcome banner'\nPATH=/login/bin:/usr/bin\neval \"$2\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let login = login_shell_path(shell.to_str().unwrap(), std::time::Duration::from_secs(5));
+        assert_eq!(login.as_deref(), Some("/login/bin:/usr/bin"));
+        let merged = merge_paths("/usr/bin:/bin", login.as_deref().unwrap(), "/h");
+        assert!(merged.starts_with("/usr/bin:/bin:/login/bin:"), "{merged}");
+        assert!(merged.contains("/h/.cargo/bin"));
+        assert_eq!(merged.matches("/usr/bin").count(), 1);
+    }
+
+    #[test]
+    fn a_shell_that_hangs_or_is_missing_gives_no_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = dir.path().join("slow-shell");
+        std::fs::write(&shell, "#!/bin/sh\nsleep 5\n").unwrap();
+        std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let slow = login_shell_path(
+            shell.to_str().unwrap(),
+            std::time::Duration::from_millis(200),
+        );
+        assert!(slow.is_none());
+        assert!(login_shell_path("/nope/shell", std::time::Duration::from_secs(1)).is_none());
+        assert!(login_shell_path("", std::time::Duration::from_secs(1)).is_none());
+    }
 }

@@ -187,7 +187,12 @@ impl App {
             return;
         };
         for s in &signals {
-            let Ok(line) = serde_json::to_string(s) else {
+            let Ok(mut value) = serde_json::to_value(s) else {
+                continue;
+            };
+            // Every stored signal carries its time, so "latest" and age mean something.
+            value["ts"] = serde_json::json!(now_ms());
+            let Ok(line) = serde_json::to_string(&value) else {
                 continue;
             };
             if append_line(&dir.join("signals.jsonl"), &line).is_err() {
@@ -229,6 +234,19 @@ mod tests {
         app.detect_evolution_signals(&t.id).await;
         assert_eq!(lines(&app, "signals.jsonl"), first);
         assert_eq!(lines(&app, "detected.jsonl").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn evolution_every_recorded_signal_carries_a_timestamp() {
+        let (app, _dir) = test_app();
+        let mut t = task_with_status(TaskStatus::Done);
+        t.decisions = vec!["Owner: which one? -> first".into()];
+        app.store.save_task(&t).unwrap();
+        let before = now_ms();
+        app.detect_evolution_signals(&t.id).await;
+        let line = &lines(&app, "signals.jsonl")[0];
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(v["ts"].as_i64().unwrap() >= before);
     }
 
     #[tokio::test]

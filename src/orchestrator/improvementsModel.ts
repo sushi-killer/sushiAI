@@ -3,6 +3,8 @@ import type { FailureRow, Proposal } from "./types";
 /** A failure needs to repeat before it counts as recurring. */
 export const MIN_RECURRENCE = 2;
 export const TOP_FAILURES = 10;
+/** Older failures are history, not something to fix now. */
+export const RECENT_DAYS = 14;
 
 const CLOSED: Proposal["status"][] = ["adopted", "rejected"];
 
@@ -32,6 +34,38 @@ export function recurringFailures(rows: FailureRow[]) {
     .filter((row) => row.count >= MIN_RECURRENCE)
     .sort((a, b) => b.count - a.count)
     .slice(0, TOP_FAILURES);
+}
+
+/** How many failures repeat in all, not only the ones shown. */
+export function recurringTotal(rows: FailureRow[]) {
+  return rows.filter((row) => row.count >= MIN_RECURRENCE).length;
+}
+
+/** "last 14 days, showing 10" next to the real total. */
+export function failuresHint(total: number) {
+  const window = `last ${RECENT_DAYS} days`;
+  return total > TOP_FAILURES ? `${window}, showing ${TOP_FAILURES}` : window;
+}
+
+/** What the owner reads after "Look for improvements": how many proposer
+ * runs started, or that nothing has enough evidence yet. */
+export function runSummary(result: unknown) {
+  const started =
+    result && typeof result === "object" && "started" in result
+      ? (result as { started: unknown }).started
+      : null;
+  const count = Array.isArray(started) ? started.length : 0;
+  if (count === 0) return "Nothing has enough evidence for a proposal yet.";
+  return `Started ${count} proposer ${count === 1 ? "run" : "runs"}; proposals appear here as they finish.`;
+}
+
+/** The rail's Improvements badge: proposals waiting on the owner plus the
+ * failures that keep repeating. */
+export function improvementsBadge(proposals: Proposal[], failures: number) {
+  const waiting = proposals.filter(
+    (p) => p.status === "proposed" || p.status === "revert_suggested",
+  );
+  return waiting.length + failures;
 }
 
 /** The signature has its digits stripped for grouping; the example's first

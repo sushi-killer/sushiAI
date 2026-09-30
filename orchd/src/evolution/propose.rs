@@ -84,6 +84,24 @@ fn read_signals(data_dir: &Path) -> Vec<Stored> {
         .collect()
 }
 
+/// Signals of tasks that still exist and are not archived: what a proposer
+/// may still learn from. Measuring adopted proposals reads every signal.
+fn read_live_signals(data_dir: &Path) -> Vec<Stored> {
+    let mut live: HashMap<String, bool> = HashMap::new();
+    let mut is_live = |task_id: &str| {
+        *live.entry(task_id.to_string()).or_insert_with(|| {
+            std::fs::read_to_string(data_dir.join("tasks").join(task_id).join("task.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .is_some_and(|task| task.get("archived").and_then(|a| a.as_bool()) != Some(true))
+        })
+    };
+    read_signals(data_dir)
+        .into_iter()
+        .filter(|s| is_live(&s.signal.task_id))
+        .collect()
+}
+
 fn kind_name(kind: SignalKind) -> String {
     serde_json::to_value(kind)
         .ok()
@@ -91,12 +109,25 @@ fn kind_name(kind: SignalKind) -> String {
         .unwrap_or_default()
 }
 
+/// The first word of an owner's answer, lower-cased ("continue", "retry",
+/// "drop"): the kind of decision, so a pattern of answers can add up where
+/// the free text after it never repeats.
+fn owner_answer_kind(detail: &str) -> String {
+    let answer = detail.strip_prefix("Owner:").unwrap_or(detail);
+    answer
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase()
+}
+
 fn cluster_key(signal: &Signal) -> String {
-    format!(
-        "{}:{}",
-        kind_name(signal.kind),
-        simple_hash(&normalize_signature_line(&signal.detail))
-    )
+    let normalised = match signal.kind {
+        SignalKind::OwnerQuestion => owner_answer_kind(&signal.detail),
+        _ => normalize_signature_line(&signal.detail),
+    };
+    format!("{}:{}", kind_name(signal.kind), simple_hash(&normalised))
 }
 
 /// Signals of one kind and normalised detail.
@@ -471,7 +502,7 @@ impl App {
             .into_iter()
             .map(|p| p.cluster_key)
             .collect();
-        let signals = read_signals(&self.data_dir);
+        let signals = read_live_signals(&self.data_dir);
         let mut started = Vec::new();
         let mut jobs = Vec::new();
         let limit = settings.evolution.max_proposals as usize;
@@ -785,6 +816,57 @@ mod tests {
             signal(SignalKind::Loop, "a", "/r", "reads foo 3 times", 4, 0.2),
             signal(SignalKind::Loop, "b", "/r", "reads foo 7 times", 6, 0.3),
         ]
+    }
+
+    #[test]
+    fn evolution_owner_answers_cluster_by_their_first_word() {
+        let answers = [
+            (
+                "a",
+                "Owner: continue: attempt 7 failed only because of a restart",
+            ),
+            ("b", "Owner: Continue once more, with a new brief"),
+            ("c", "Owner: continue - change no code"),
+            ("d", "Owner: drop this check (the parent runs it)"),
+        ];
+        let signals: Vec<Stored> = answers
+            .iter()
+            .map(|(t, d)| signal(SignalKind::OwnerQuestion, t, "/r", d, 0, 0.0))
+            .collect();
+        let all = clusters(&signals);
+        assert_eq!(all.len(), 2);
+        let cont = all.iter().find(|c| c.occurrences.len() == 3).unwrap();
+        assert!(cont.qualifies(&thresholds(3, 999, 99.0)));
+        assert!(!all
+            .iter()
+            .find(|c| c.occurrences.len() == 1)
+            .unwrap()
+            .qualifies(&thresholds(3, 999, 99.0)));
+    }
+
+    #[test]
+    fn evolution_live_signals_drop_deleted_and_archived_tasks() {
+        let (app, _dir) = test_app();
+        let live = task_with_status(TaskStatus::Done);
+        let mut archived = task_with_status(TaskStatus::Done);
+        archived.archived = true;
+        app.store.save_task(&live).unwrap();
+        app.store.save_task(&archived).unwrap();
+        let dir = evolution_dir(&app.data_dir);
+        for id in [live.id.as_str(), archived.id.as_str(), "deleted-task"] {
+            let s = signal(SignalKind::Loop, id, "/r", "x", 1, 0.0).signal;
+            append_line(
+                &dir.join("signals.jsonl"),
+                &serde_json::to_string(&s).unwrap(),
+            )
+            .unwrap();
+        }
+        let ids: Vec<String> = read_live_signals(&app.data_dir)
+            .into_iter()
+            .map(|s| s.signal.task_id)
+            .collect();
+        assert_eq!(ids, vec![live.id.clone()]);
+        assert_eq!(read_signals(&app.data_dir).len(), 3);
     }
 
     #[test]

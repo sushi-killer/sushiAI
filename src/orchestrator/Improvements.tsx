@@ -7,8 +7,12 @@ import {
   failureNoteDraft,
   failureTasksLine,
   failureTitle,
+  failuresHint,
   openProposalCount,
+  RECENT_DAYS,
   recurringFailures,
+  recurringTotal,
+  runSummary,
   sectionLabel,
   seenIn,
   upsertProposal,
@@ -26,6 +30,9 @@ function Proposals({ cwd, refresh }: { cwd: string; refresh: string }) {
   const host = useOrchestratorHost();
   const [rows, setRows] = useState<Proposal[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [looking, setLooking] = useState(false);
+  const [lookNote, setLookNote] = useState("");
+  const [lookError, setLookError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -58,12 +65,41 @@ function Proposals({ cwd, refresh }: { cwd: string; refresh: string }) {
       );
   }
 
-  if (rows.length === 0) return null;
+  function lookForImprovements() {
+    setLooking(true);
+    setLookNote("");
+    setLookError("");
+    orchestratorClient
+      .evolutionRun()
+      .then((result) => setLookNote(runSummary(result)))
+      .catch((error: unknown) => setLookError(errorText(error)))
+      .finally(() => setLooking(false));
+  }
+
   return (
     <>
       <span className="orch-eyebrow">
         {sectionLabel("PROPOSALS", openProposalCount(rows))}
       </span>
+      <div className="imp-run">
+        <button
+          type="button"
+          className="ui-button secondary"
+          disabled={looking}
+          onClick={lookForImprovements}
+        >
+          {looking ? "Looking…" : "Look for improvements"}
+        </button>
+        {lookNote && <span className="imp-faint">{lookNote}</span>}
+        {!lookNote && !lookError && rows.length === 0 && (
+          <span className="imp-faint">No proposals yet.</span>
+        )}
+      </div>
+      {lookError && (
+        <div className="imp-error" role="alert">
+          {lookError}
+        </div>
+      )}
       {rows.map((row) => {
         const open = row.status === "proposed";
         const seen = seenIn(row);
@@ -177,11 +213,12 @@ function RecurringFailures({
 }) {
   const orchestratorClient = useOrchestratorClient();
   const [rows, setRows] = useState<FailureRow[]>([]);
+  const [expanded, setExpanded] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     orchestratorClient
-      .failuresCatalogue(cwd)
+      .failuresCatalogue(cwd, RECENT_DAYS)
       .then((loaded) => !cancelled && setRows(loaded))
       .catch(() => !cancelled && setRows([]));
     return () => {
@@ -194,33 +231,55 @@ function RecurringFailures({
   return (
     <>
       <span className="orch-eyebrow">
-        {sectionLabel("RECURRING FAILURES", top.length)}
+        {sectionLabel(
+          "RECURRING FAILURES",
+          recurringTotal(rows),
+          failuresHint(recurringTotal(rows)),
+        )}
       </span>
-      {top.map((row) => (
-        <div key={row.signature} className="imp-failure">
-          <span className="imp-failure-count">{row.count}×</span>
-          <div className="imp-failure-body">
-            <span className="imp-failure-title" title={row.exampleDetail}>
-              {failureTitle(row)}
-            </span>
-            <span className="imp-failure-tasks">{failureTasksLine(row)}</span>
+      {top.map((row) => {
+        const open = expanded === row.signature;
+        return (
+          <div key={row.signature} className="imp-failure">
+            <span className="imp-failure-count">{row.count}×</span>
+            <div className="imp-failure-body">
+              <span className="imp-failure-title" title={row.exampleDetail}>
+                {failureTitle(row)}
+              </span>
+              <span className="imp-failure-tasks">{failureTasksLine(row)}</span>
+            </div>
+            <button
+              type="button"
+              className="ui-button ghost"
+              aria-expanded={open}
+              onClick={() => setExpanded(open ? null : row.signature)}
+            >
+              Open tasks
+            </button>
+            <button
+              type="button"
+              className="ui-button secondary"
+              onClick={() => onAddNote(failureNoteDraft(row))}
+            >
+              Add a note
+            </button>
+            {open && (
+              <div className="imp-failure-list">
+                {row.tasks.map((task) => (
+                  <button
+                    key={task.id}
+                    type="button"
+                    className="imp-failure-task"
+                    onClick={() => onOpenTask(task.id)}
+                  >
+                    {task.title}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
-          <button
-            type="button"
-            className="ui-button ghost"
-            onClick={() => onOpenTask(row.exampleTaskId)}
-          >
-            Open tasks
-          </button>
-          <button
-            type="button"
-            className="ui-button secondary"
-            onClick={() => onAddNote(failureNoteDraft(row))}
-          >
-            Add a note
-          </button>
-        </div>
-      ))}
+        );
+      })}
     </>
   );
 }

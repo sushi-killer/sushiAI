@@ -292,3 +292,61 @@ fn the_exhausted_question_reads_the_signature_as_words() {
         "Attempts keep failing with a no deliverable failure: continue, change approach, or stop?"
     );
 }
+
+#[test]
+fn failure_signature_picks_the_real_failure_from_real_verify_tails() {
+    let cargo = |name: &str| {
+        format!(
+            "--- stderr (tail) ---\nerror: test failed, to rerun pass `--bin orchd`\n\
+             --- stdout (tail) ---\nrunning 2 tests\ntest engine::a::ok_one ... ok\n\
+             test {name} ... FAILED\n\nfailures:\n\n---- {name} stdout ----\npanicked"
+        )
+    };
+    let eslint_then_prettier = "--- stdout (tail) ---\n\u{2716} 42 problems (0 errors, 42 warnings)\n\
+         [warn] src/orchestrator/helpers.ts\n[warn] Code style issues found in 2 files. Run Prettier with --write to fix.";
+    let node = "\u{2714} worktreeBranchError accepts a valid branch table (0.4ms)\n\
+         \u{2716} App.tsx stays a composition layer (1.2ms)\n\u{2139} fail 1";
+    let table: Vec<(String, &str)> = vec![
+        (
+            cargo("engine::healing::tests::evidence_survives"),
+            "engine::healing::tests::evidence_survives ... FAILED",
+        ),
+        (
+            cargo("engine::chat::tests::claude_chat_reads"),
+            "engine::chat::tests::claude_chat_reads ... FAILED",
+        ),
+        (
+            eslint_then_prettier.to_string(),
+            "Code style issues found in files",
+        ),
+        (node.to_string(), "App.tsx stays a composition layer"),
+        (
+            "error: could not compile `orchd`\nerror[E0432]: unresolved import `x`".to_string(),
+            "error[E]: unresolved import `x`",
+        ),
+    ];
+    for (detail, expect) in table {
+        let sig = failure_signature(FailureKind::Verify, &detail);
+        assert!(sig.contains(expect), "{sig} should contain {expect}");
+        assert!(!sig.contains("to rerun pass"), "{sig}");
+        assert!(!sig.contains("worktreeBranchError"), "{sig}");
+        assert!(!sig.contains("problems"), "{sig}");
+    }
+    // Two different failing tests must not collapse into one signature.
+    assert_ne!(
+        failure_signature(FailureKind::Verify, &cargo("a::one")),
+        failure_signature(FailureKind::Verify, &cargo("a::two"))
+    );
+}
+
+#[test]
+fn failure_signature_without_a_named_failure_skips_boilerplate_and_clean_summaries() {
+    let sig = failure_signature(
+        FailureKind::Verify,
+        "to rerun pass `--bin orchd`\n\u{2714} handles Error cases\nerror: something broke",
+    );
+    assert!(sig.contains("something broke"), "{sig}");
+    // Nothing usable falls back to the first non-empty line.
+    let sig = failure_signature(FailureKind::Verify, "\n\nplain output");
+    assert!(sig.contains("plain output"), "{sig}");
+}

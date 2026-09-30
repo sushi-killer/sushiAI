@@ -85,3 +85,49 @@ test("section labels carry the count and an optional hint", async () => {
     "REPO NOTES · 3 — standing guidance for the planner",
   );
 });
+
+test("the recurring count is the real total, not the shown top ten", async () => {
+  const { recurringFailures, recurringTotal, failuresHint, sectionLabel } =
+    await model;
+  const rows = Array.from({ length: 21 }, (_, i) =>
+    failure({ signature: `s${i}`, count: 2 + (i % 3) }),
+  );
+  rows.push(failure({ signature: "once", count: 1 }));
+  assert.equal(recurringFailures(rows).length, 10);
+  assert.equal(recurringTotal(rows), 21);
+  assert.equal(
+    sectionLabel("RECURRING FAILURES", 21, failuresHint(21)),
+    "RECURRING FAILURES · 21 — last 14 days, showing 10",
+  );
+  assert.equal(failuresHint(4), "last 14 days");
+});
+
+test("the run summary says how many proposer runs started or that nothing qualified", async () => {
+  const { runSummary } = await model;
+  assert.equal(
+    runSummary({ started: [{ id: "a" }, { id: "b" }], updated: [] }),
+    "Started 2 proposer runs; proposals appear here as they finish.",
+  );
+  assert.match(
+    runSummary({ started: [{ id: "a" }] }),
+    /^Started 1 proposer run;/,
+  );
+  for (const empty of [{ started: [] }, {}, null, undefined, "x"]) {
+    assert.equal(
+      runSummary(empty),
+      "Nothing has enough evidence for a proposal yet.",
+    );
+  }
+});
+
+test("the rail badge adds recurring failures to proposals waiting on the owner", async () => {
+  const { improvementsBadge } = await model;
+  const proposals = [
+    { id: "a", status: "proposed" },
+    { id: "b", status: "revert_suggested" },
+    { id: "c", status: "adopted" },
+    { id: "d", status: "approved" },
+  ];
+  assert.equal(improvementsBadge(proposals, 5), 7);
+  assert.equal(improvementsBadge([], 0), 0);
+});

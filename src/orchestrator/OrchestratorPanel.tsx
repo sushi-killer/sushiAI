@@ -77,6 +77,8 @@ import { TaskDetail } from "./TaskDetail";
 import { HomeView } from "./HomeView";
 import { ChatView } from "./ChatView";
 import { ImprovementsView } from "./Improvements";
+import { improvementsBadge } from "./improvementsModel";
+import { useRecurringFailures } from "./useRecurringFailures";
 import { AnalyticsView } from "./Analytics";
 import { PlanView } from "./PlanView";
 
@@ -563,9 +565,10 @@ function OrchestratorBody({
   const refresh = live.tasks.map((t) => `${t.id}:${t.updatedAt}`).join();
   const needYou = tasks.filter(needsOwner).length;
   const running = runningCount(tasks);
-  const improvementsCount = proposals.filter(
-    (p) => p.status === "proposed" || p.status === "revert_suggested",
-  ).length;
+  const improvementsCount = improvementsBadge(
+    proposals,
+    useRecurringFailures(cwd, refresh),
+  );
 
   const rail = (
     <OrchRail

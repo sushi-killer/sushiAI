@@ -2,13 +2,68 @@ use super::*;
 
 const ERROR_KEYWORDS: &[&str] = &["error", "fail", "assert", "panic", "exception"];
 
-/// The first line that looks like it's reporting a failure (contains one of
-/// `ERROR_KEYWORDS`, case-insensitive); `None` when nothing in `text` does.
+/// Boilerplate a tool prints around a failure without saying what failed.
+fn is_boilerplate(lower: &str) -> bool {
+    lower.starts_with("to rerun pass")
+        || lower.starts_with("error: test failed")
+        || lower.starts_with("error: could not compile")
+        || lower.starts_with("error: process didn't exit successfully")
+        || lower.starts_with("for more information about this error")
+        || lower.starts_with("---")
+            && (lower.contains("(tail)") || lower.contains("stderr") || lower.contains("stdout"))
+            && !lower.ends_with(" stdout ----")
+}
+
+/// A line that reports success or a clean summary even though it contains a
+/// failure word: a passing test named `... Error ...`, `0 errors`.
+fn is_passing(lower: &str) -> bool {
+    lower.starts_with('\u{2714}')
+        || lower.starts_with('\u{2713}')
+        || lower.starts_with("ok ")
+        || lower.starts_with("test result: ok")
+        || lower.ends_with("... ok")
+        || lower.contains("(0 errors")
+        || lower.contains(" 0 errors")
+        || lower.contains(" 0 failed")
+        || lower.contains("(0 fail")
+}
+
+/// A line naming the one thing that failed: a cargo test, a node test, a TAP
+/// line or the prettier verdict.
+fn is_named_failure(line: &str) -> bool {
+    let l = line.trim();
+    let lower = l.to_ascii_lowercase();
+    (l.starts_with("test ") && l.contains(" ... ") && l.ends_with("FAILED"))
+        || (l.starts_with('\u{2716}')
+            && !lower.contains(" problem")
+            && !lower.contains("failing tests"))
+        || lower.starts_with("not ok ")
+        || lower.contains("code style issues found")
+}
+
+/// The line that names the failure. Named failures win over keyword lines,
+/// so a tool's stderr boilerplate or a lint summary printed first does not
+/// hide the failing test; boilerplate and passing lines never count.
 fn find_error_line(text: &str) -> Option<&str> {
-    text.lines().find(|l| {
-        let lower = l.to_ascii_lowercase();
-        ERROR_KEYWORDS.iter().any(|k| lower.contains(k))
-    })
+    let usable = |l: &&str| {
+        let lower = l.trim().to_ascii_lowercase();
+        !lower.is_empty() && !is_boilerplate(&lower) && !is_passing(&lower)
+    };
+    text.lines()
+        .filter(usable)
+        .find(|l| is_named_failure(l))
+        .or_else(|| {
+            text.lines().filter(usable).find(|l| {
+                let t = l.trim();
+                t.starts_with("---- ") && t.ends_with(" stdout ----")
+            })
+        })
+        .or_else(|| {
+            text.lines().filter(usable).find(|l| {
+                let lower = l.to_ascii_lowercase();
+                ERROR_KEYWORDS.iter().any(|k| lower.contains(k))
+            })
+        })
 }
 
 /// Strips digits and absolute-path-looking tokens (so `/tmp/xyz123/a.ts:42`
@@ -40,7 +95,8 @@ pub(crate) fn normalize_signature_line(line: &str) -> String {
 /// error|fail|assert|panic|exception, case-insensitive; strip digits and
 /// absolute paths), fallback to first tail line."
 pub fn failure_signature(kind: FailureKind, detail: &str) -> String {
-    let line = find_error_line(detail).unwrap_or_else(|| detail.lines().next().unwrap_or(""));
+    let line = find_error_line(detail)
+        .unwrap_or_else(|| detail.lines().find(|l| !l.trim().is_empty()).unwrap_or(""));
     let normalized = normalize_signature_line(line.trim());
     format!("{}:{}", kind.as_str(), truncate_chars(&normalized, 120))
 }

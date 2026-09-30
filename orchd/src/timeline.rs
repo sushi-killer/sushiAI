@@ -284,7 +284,8 @@ pub struct FailureRow {
 
 /// Failures grouped by signature across `tasks`, most frequent first. A
 /// failure is one failed attempt; `since_days` keeps those that ended within
-/// that many days of `now`.
+/// that many days of `now`. Archived tasks and eval runs are not problems the
+/// owner still has, so they never count.
 pub fn failure_catalogue(
     tasks: &[Task],
     repo: Option<&str>,
@@ -294,7 +295,10 @@ pub fn failure_catalogue(
     let cutoff = since_days.map(|d| now - i64::from(d) * DAY_MS);
     let mut rows: Vec<FailureRow> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
-    for t in tasks.iter().filter(|t| repo.is_none_or(|r| t.repo == r)) {
+    for t in tasks
+        .iter()
+        .filter(|t| repo.is_none_or(|r| t.repo == r) && !t.archived && t.eval_set.is_none())
+    {
         for a in &t.attempts {
             let Some(f) = &a.failure else { continue };
             let seen = a.ended_at.unwrap_or(a.started_at);

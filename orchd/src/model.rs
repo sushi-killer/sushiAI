@@ -257,6 +257,13 @@ pub struct EvolutionSettings {
     pub proposer_route: String,
     /// Tasks after which an accepted change is judged and possibly reverted.
     pub revert_after_tasks: u32,
+    /// Process-file calls in one attempt before `process_read` fires.
+    pub process_min_calls: u32,
+    /// Per repo path: substrings that mark a tool call as reading process
+    /// files (lessons, changelogs, convention scripts) for `process_read`.
+    /// Empty by default: those files describe one repository, so they live
+    /// with that repository's entry, never in a global list.
+    pub process_files: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl Default for EvolutionSettings {
@@ -268,6 +275,8 @@ impl Default for EvolutionSettings {
             max_proposals: 3,
             proposer_route: String::new(),
             revert_after_tasks: 10,
+            process_min_calls: 3,
+            process_files: Default::default(),
         }
     }
 }

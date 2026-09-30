@@ -85,6 +85,19 @@ fn seed_events(daemon: &Daemon, lines: usize) {
     std::fs::write(path, text).unwrap();
 }
 
+/// A minimal finished task, so its signals count as live.
+fn seed_task(daemon: &Daemon, id: &str, repo: &str, archived: bool) {
+    let dir = daemon.data_dir().join("tasks").join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    let task = json!({
+        "id": id, "title": id, "goal": "g", "criteria": [], "verify": ["true"],
+        "repo": repo, "worktree": "/nowhere", "branch": "b", "baseSha": "0",
+        "status": "done", "tier": "standard", "attempts": [], "archived": archived,
+        "createdAt": 1_000, "updatedAt": 2_000,
+    });
+    std::fs::write(dir.join("task.json"), task.to_string()).unwrap();
+}
+
 /// One signal per task id, all the same kind and detail.
 fn seed_signals(daemon: &Daemon, repo: &str, detail: &str, tasks: &[&str], calls: u32) {
     let dir = daemon.data_dir().join("evolution");
@@ -92,6 +105,7 @@ fn seed_signals(daemon: &Daemon, repo: &str, detail: &str, tasks: &[&str], calls
     let path = dir.join("signals.jsonl");
     let mut text = std::fs::read_to_string(&path).unwrap_or_default();
     for task in tasks {
+        seed_task(daemon, task, repo, false);
         let line = json!({
             "kind": "loop",
             "taskId": task,
@@ -591,5 +605,22 @@ fn evolution_cli_runs_and_adopts_over_the_default_socket() {
         .output()
         .unwrap();
     assert_eq!(missing.status.code(), Some(1));
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn evolution_run_ignores_signals_of_archived_and_deleted_tasks() {
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_proposer(scripts.path(), &proposal_reply(json!({})));
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let repo = init_git_repo();
+    let repo = repo.path().to_str().unwrap();
+    set_evolution(&daemon, thresholds(3, 3));
+    // Three tasks would qualify, but one is archived and one was deleted.
+    seed_signals(&daemon, repo, "reads foo", &["t1", "t2", "t3"], 1);
+    seed_task(&daemon, "t2", repo, true);
+    std::fs::remove_dir_all(daemon.data_dir().join("tasks").join("t3")).unwrap();
+    let run = daemon.request("evolution.run", json!({}));
+    assert_eq!(run["started"].as_array().unwrap().len(), 0, "{run}");
     daemon.shutdown_and_wait();
 }

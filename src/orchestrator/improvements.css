@@ -131,6 +131,32 @@
   white-space: nowrap;
 }
 
+.imp-run {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.imp-failure-list {
+  display: flex;
+  flex: 1 0 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.imp-failure-task {
+  max-width: 100%;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 16px;
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .imp-notes {
   border: 1px solid var(--line-pane);
   border-radius: var(--radius-lg);

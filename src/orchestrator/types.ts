@@ -126,6 +126,10 @@ export type EvolutionSettings = {
   proposerRoute: string;
   /** Tasks after which an accepted change is judged and possibly reverted. */
   revertAfterTasks: number;
+  /** Process-file calls in one attempt before `process_read` fires. */
+  processMinCalls?: number;
+  /** Per repo path: substrings that mark a call as reading process files. */
+  processFiles?: Record<string, string[]>;
 };
 
 export type TaskStatus =

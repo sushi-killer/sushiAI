@@ -172,3 +172,44 @@ fn failures_catalogue_groups_two_tasks_with_one_signature_into_one_row() {
     assert_eq!(scoped.as_array().unwrap().len(), 2, "{scoped}");
     daemon.shutdown_and_wait();
 }
+
+#[test]
+fn failures_catalogue_ignores_archived_and_eval_tasks() {
+    let daemon = Daemon::spawn(&[]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let mut fail = attempt(1, "implement", now - 2_000, now - 1_000);
+    fail["status"] = json!("failed");
+    fail["failure"] = failed("verify", "boom", "verify:boom");
+    let ids = [
+        ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "Live", json!({})),
+        (
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "Archived",
+            json!({"archived": true}),
+        ),
+        (
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "Eval",
+            json!({"evalSet": "set-1"}),
+        ),
+    ];
+    for (id, title, extra) in &ids {
+        write_task(daemon.data_dir(), id, "/repo", title, vec![fail.clone()]);
+        let path = daemon.data_dir().join("tasks").join(id).join("task.json");
+        let mut task: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for (k, v) in extra.as_object().unwrap() {
+            task[k] = v.clone();
+        }
+        std::fs::write(&path, task.to_string()).unwrap();
+    }
+    let rows = daemon.request("failures.catalogue", json!({}));
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["count"], 1);
+    assert_eq!(rows[0]["tasks"][0]["title"], "Live");
+    daemon.shutdown_and_wait();
+}

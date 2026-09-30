@@ -81,7 +81,7 @@ impl<'a> Ctx<'a> {
             self.task,
             a,
             self.attempt_events(a.n),
-            &self.settings.work_buckets,
+            &bucket_rules(self.settings, &self.task.repo),
         )
     }
 
@@ -203,7 +203,8 @@ impl<'a> Ctx<'a> {
                 .iter()
                 .filter(|c| c.bucket == Bucket::Process)
                 .collect();
-            if let (Some(first), Some(last)) = (process.first(), process.last()) {
+            let enough = process.len() as u32 >= self.settings.evolution.process_min_calls.max(1);
+            if let (true, Some(first), Some(last)) = (enough, process.first(), process.last()) {
                 self.push(
                     SignalKind::ProcessRead,
                     a.n,
@@ -212,7 +213,7 @@ impl<'a> Ctx<'a> {
                     Some((first.line, last.line)),
                 );
             }
-            for (path, matching) in throwaways(&calls) {
+            for (path, matching) in throwaways(&calls, &a.changed_files) {
                 self.push(
                     SignalKind::ThrowawayScript,
                     a.n,
@@ -224,35 +225,44 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Compares each implement attempt with earlier tasks' implement attempts
+    /// of the same ordinal, so a first attempt (which explores) is never
+    /// measured against retries (which barely do).
     fn discovery(&mut self, earlier: &[&Task]) {
-        let mut sample: Vec<f64> = Vec::new();
-        let mut tasks_with_implement = 0u32;
+        let rules = bucket_rules(self.settings, &self.task.repo);
+        let mut samples: Vec<Vec<f64>> = Vec::new();
         for t in earlier {
-            let mut any = false;
-            for a in t.attempts.iter().filter(|a| a.stage == Stage::Implement) {
-                any = true;
-                if let Some(evs) = self.events.get(&(t.id.clone(), a.n)) {
-                    let calls = calls_of(t, a, evs, &self.settings.work_buckets);
-                    if !calls.is_empty() {
-                        sample.push(explore_of(&calls).len() as f64);
-                    }
+            let implement = t.attempts.iter().filter(|a| a.stage == Stage::Implement);
+            for (ordinal, a) in implement.enumerate() {
+                let Some(evs) = self.events.get(&(t.id.clone(), a.n)) else {
+                    continue;
+                };
+                let calls = calls_of(t, a, evs, &rules);
+                if calls.is_empty() {
+                    continue;
                 }
+                if samples.len() <= ordinal {
+                    samples.resize(ordinal + 1, Vec::new());
+                }
+                samples[ordinal].push(explore_of(&calls).len() as f64);
             }
-            tasks_with_implement += any as u32;
         }
-        if tasks_with_implement < self.settings.evolution.min_tasks {
-            return;
-        }
-        sample.sort_by(|a, b| a.total_cmp(b));
-        let Some(median) = median_sorted(&sample) else {
-            return;
-        };
-        for a in self
+        let implement = self
             .task
             .attempts
             .iter()
-            .filter(|a| a.stage == Stage::Implement)
-        {
+            .filter(|a| a.stage == Stage::Implement);
+        for (ordinal, a) in implement.enumerate() {
+            let Some(sample) = samples.get_mut(ordinal) else {
+                continue;
+            };
+            if (sample.len() as u32) < self.settings.evolution.min_tasks {
+                continue;
+            }
+            sample.sort_by(|a, b| a.total_cmp(b));
+            let Some(median) = median_sorted(sample) else {
+                continue;
+            };
             let calls = self.calls(a);
             let explore = explore_of(&calls);
             if (explore.len() as f64) > 2.0 * median {
@@ -415,11 +425,27 @@ fn findings(a: &Attempt) -> Vec<String> {
         .review
         .iter()
         .flat_map(|r| &r.findings)
+        // Synthetic: the owner's answer, not something the reviewer found.
+        .filter(|f| !f.starts_with("Another attempt was asked for:"))
         .map(|f| normalize_signature_line(f.trim()))
         .filter(|f| !f.is_empty())
         .collect();
     out.dedup();
     out
+}
+
+/// The work-bucket rules for one repo: the global evidence patterns and the
+/// process files configured for that repo alone.
+fn bucket_rules(settings: &Settings, repo: &str) -> WorkBuckets {
+    WorkBuckets {
+        process: settings
+            .evolution
+            .process_files
+            .get(repo)
+            .cloned()
+            .unwrap_or_default(),
+        evidence: settings.work_buckets.evidence.clone(),
+    }
 }
 
 fn calls_of<'a>(
@@ -453,8 +479,9 @@ fn explore_of<'a, 'b>(calls: &'b [Call<'a>]) -> Vec<usize> {
 }
 
 /// Files a Write/Edit made that a later Bash `rm` removed, each with the
-/// event lines of every call whose input names it.
-fn throwaways(calls: &[Call]) -> Vec<(String, Vec<usize>)> {
+/// event lines of every call whose input names it. A file the attempt kept
+/// in its diff (`changed`) is source, not a throwaway.
+fn throwaways(calls: &[Call], changed: &[String]) -> Vec<(String, Vec<usize>)> {
     let mut out: Vec<(String, Vec<usize>)> = Vec::new();
     for (i, c) in calls.iter().enumerate() {
         if !matches!(c.name, "Write" | "Edit") {
@@ -468,7 +495,11 @@ fn throwaways(calls: &[Call]) -> Vec<(String, Vec<usize>)> {
         else {
             continue;
         };
-        if out.iter().any(|(p, _)| p == path) {
+        if out.iter().any(|(p, _)| p == path)
+            || changed
+                .iter()
+                .any(|f| !f.is_empty() && (path == f || path.ends_with(&format!("/{f}"))))
+        {
             continue;
         }
         let base = path.rsplit('/').next().unwrap_or(path);
@@ -495,19 +526,54 @@ fn throwaways(calls: &[Call]) -> Vec<(String, Vec<usize>)> {
     out
 }
 
+/// Whether `cmd` runs `rm` on the file: only the operands of an `rm`
+/// command count, not other words of the command line and not heredoc text.
 fn removes(cmd: &str, path: &str, base: &str) -> bool {
-    let tokens: Vec<&str> = cmd
-        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|'))
-        .map(|t| t.trim_matches(|c| c == '"' || c == '\''))
-        .collect();
-    tokens.contains(&"rm")
-        && tokens.iter().any(|t| {
-            !t.is_empty()
-                && (*t == path
-                    || *t == base
-                    || t.ends_with(&format!("/{base}"))
-                    || path.ends_with(&format!("/{t}")) && t.contains('/'))
-        })
+    let mut heredoc_end: Option<String> = None;
+    for line in cmd.lines() {
+        if let Some(end) = &heredoc_end {
+            if line.trim() == end {
+                heredoc_end = None;
+            }
+            continue;
+        }
+        if let Some((_, rest)) = line.split_once("<<") {
+            let word = rest.trim_start_matches('-').trim();
+            let word = word.split_whitespace().next().unwrap_or("");
+            let word = word.trim_matches(|c| c == '"' || c == '\'');
+            if !word.is_empty() {
+                heredoc_end = Some(word.to_string());
+            }
+        }
+        for segment in line.split([';', '&', '|']) {
+            let words: Vec<&str> = segment
+                .split_whitespace()
+                .map(|t| t.trim_matches(|c| c == '"' || c == '\''))
+                .collect();
+            let start = words
+                .iter()
+                .position(|w| !matches!(*w, "sudo" | "command" | "time"))
+                .unwrap_or(words.len());
+            let is_rm = words
+                .get(start)
+                .is_some_and(|w| *w == "rm" || w.ends_with("/rm"));
+            if !is_rm {
+                continue;
+            }
+            let named = words[start + 1..].iter().any(|t| {
+                let t = t.strip_prefix("./").unwrap_or(t);
+                !t.is_empty()
+                    && !t.starts_with('-')
+                    && (t == path
+                        || t == base
+                        || path.ends_with(&format!("/{t}")) && t.contains('/'))
+            });
+            if named {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -722,12 +788,21 @@ mod tests {
         assert_eq!(o[0].wasted_calls, 0);
     }
 
+    fn process_settings(repo: &str, min_calls: u32) -> Settings {
+        let mut settings = Settings::default();
+        settings.evolution.process_min_calls = min_calls;
+        settings
+            .evolution
+            .process_files
+            .insert(repo.into(), vec!["docs/LESSONS.md".into()]);
+        settings
+    }
+
     #[test]
-    fn evolution_process_read_counts_matching_calls() {
+    fn evolution_process_read_counts_matching_calls_of_the_repos_own_files() {
         let mut t = task("t", 10);
         t.attempts = vec![attempt_with_failure(1, "s")];
-        let mut settings = Settings::default();
-        settings.work_buckets.process = vec!["docs/LESSONS.md".into()];
+        let settings = process_settings(&t.repo, 2);
         let evs = vec![
             read("/wt/docs/LESSONS.md"),
             read("/wt/src/a.rs"),
@@ -742,6 +817,148 @@ mod tests {
             (p[0].excerpt_ref.from_line, p[0].excerpt_ref.to_line),
             (1, 3)
         );
+    }
+
+    #[test]
+    fn evolution_process_read_needs_the_threshold_and_a_per_repo_list() {
+        let mut t = task("t", 10);
+        t.attempts = vec![attempt_with_failure(1, "s")];
+        let one = vec![read("/wt/docs/LESSONS.md"), read("/wt/src/a.rs")];
+        let events: AttemptEvents = [(("t".to_string(), 1), one)].into();
+        let go = |settings: &Settings, events: &AttemptEvents| {
+            of_kind(
+                &detect(&t, std::slice::from_ref(&t), events, &[], settings, &[]),
+                SignalKind::ProcessRead,
+            )
+            .len()
+        };
+        // One call is below the default threshold of three.
+        assert_eq!(go(&process_settings(&t.repo, 3), &events), 0);
+        assert_eq!(go(&process_settings(&t.repo, 1), &events), 1);
+        // The list belongs to one repo: another repo's entry does not apply,
+        // and the global work buckets no longer feed this signal.
+        assert_eq!(go(&process_settings("/elsewhere", 1), &events), 0);
+        let mut global = Settings::default();
+        global.evolution.process_min_calls = 1;
+        global.work_buckets.process = vec!["docs/LESSONS.md".into()];
+        assert_eq!(go(&global, &events), 0);
+    }
+
+    #[test]
+    fn evolution_discovery_compares_first_attempts_with_first_attempts() {
+        // Earlier tasks: a first attempt explores 10 files, a retry only 1.
+        let mut earlier = Vec::new();
+        let mut evs: Vec<(&str, u32, Vec<Value>)> = Vec::new();
+        for id in ["e1", "e2", "e3"] {
+            let mut t = task(id, 1);
+            t.attempts = vec![attempt_with_failure(1, "s"), attempt_with_failure(2, "s")];
+            earlier.push(t);
+            evs.push((id, 1, (0..10).map(|i| read(&format!("/x{i}"))).collect()));
+            evs.push((id, 2, vec![read("/y")]));
+        }
+        let mut t = task("t", 10);
+        t.attempts = vec![attempt_with_failure(1, "s")];
+        evs.push(("t", 1, (0..12).map(|i| read(&format!("/f{i}"))).collect()));
+        // 12 explore calls against a first-attempt median of 10: normal.
+        // (Pooled with the retries the median would be 1 and this would fire.)
+        assert!(of_kind(&run(&t, &earlier, &evs), SignalKind::Discovery).is_empty());
+        // A retry that explores 12 is compared with retries and does fire.
+        let mut t2 = task("t2", 10);
+        t2.attempts = vec![attempt_with_failure(1, "s"), attempt_with_failure(2, "s")];
+        let mut evs2: Vec<(&str, u32, Vec<Value>)> = evs.clone();
+        evs2.push(("t2", 1, vec![read("/a")]));
+        evs2.push(("t2", 2, (0..12).map(|i| read(&format!("/g{i}"))).collect()));
+        let s = run(&t2, &earlier, &evs2);
+        let d = of_kind(&s, SignalKind::Discovery);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].attempt, 2);
+    }
+
+    #[test]
+    fn evolution_throwaway_only_counts_rm_operands_of_files_the_attempt_dropped() {
+        let write = |p: &str| call("Write", json!({"file_path": p, "content": "x"}));
+        let bash = |c: &str| call("Bash", json!({"command": c}));
+        let cases: Vec<(&str, Vec<Value>, Vec<&str>, usize)> = vec![
+            // Real throwaway.
+            (
+                "rm the file",
+                vec![write("/wt/artifacts/.driver.mjs"), bash("rm -f artifacts/.driver.mjs")],
+                vec![],
+                1,
+            ),
+            // `rm` of something else while the command line names the file.
+            (
+                "rm of another file",
+                vec![
+                    write("/wt/tests/answer_policy.rs"),
+                    bash("rm -f /tmp/judge-brief.txt; cargo test --test answer_policy tests/answer_policy.rs"),
+                ],
+                vec![],
+                0,
+            ),
+            // A sibling with a longer name is not the file.
+            (
+                "rm of a longer name",
+                vec![
+                    write("/wt/orchd/src/chat_tools.rs"),
+                    bash("rm orchd/src/chat_tools.rs.add"),
+                ],
+                vec![],
+                0,
+            ),
+            // The attempt kept the file in its diff.
+            (
+                "kept source",
+                vec![write("/wt/tests/past_work.rs"), bash("rm tests/past_work.rs")],
+                vec!["tests/past_work.rs"],
+                0,
+            ),
+            // `rm` inside a heredoc body is text, not a command.
+            (
+                "heredoc text",
+                vec![
+                    write("/wt/scratch.py"),
+                    bash("cat <<'EOF' > notes.txt\nrm scratch.py\nEOF"),
+                ],
+                vec![],
+                0,
+            ),
+        ];
+        for (name, evs, changed, want) in cases {
+            let mut t = task("t", 10);
+            let mut a = attempt_with_failure(1, "s");
+            a.changed_files = changed.iter().map(|c| c.to_string()).collect();
+            t.attempts = vec![a];
+            let s = run(&t, &[], &[("t", 1, evs)]);
+            assert_eq!(
+                of_kind(&s, SignalKind::ThrowawayScript).len(),
+                want,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn evolution_the_owners_retry_answer_is_not_a_review_finding() {
+        let mut old = task("old", 1);
+        old.attempts = vec![reviewed(
+            attempt_with_failure(1, "s"),
+            &["Another attempt was asked for: retry"],
+        )];
+        let mut newer = task("new", 20);
+        newer.attempts = vec![
+            reviewed(
+                attempt_with_failure(1, "t"),
+                &["Another attempt was asked for: retry"],
+            ),
+            reviewed(
+                attempt_with_failure(2, "u"),
+                &["Another attempt was asked for: retry"],
+            ),
+        ];
+        let s = run(&newer, &[old], &[]);
+        assert!(of_kind(&s, SignalKind::ReviewFinding).is_empty());
+        assert!(of_kind(&s, SignalKind::RepeatedReview).is_empty());
     }
 
     #[test]

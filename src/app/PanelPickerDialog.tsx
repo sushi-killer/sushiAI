@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   FolderOpen,
   Globe,
@@ -24,6 +24,45 @@ import type {
   System,
   Workspace,
 } from "../types";
+
+const AGENTS = ["claude", "codex", "gemini", "cursor-agent"];
+const TOOLS = [
+  {
+    key: "a",
+    kind: "terminal",
+    title: "Terminal",
+    detail: "A real shell in your project",
+    icon: TerminalSquare,
+  },
+  {
+    key: "s",
+    kind: "files",
+    title: "Files & Git",
+    detail: "Explore code, images and changes",
+    icon: FolderOpen,
+  },
+  {
+    key: "d",
+    kind: "browser",
+    title: "Browser",
+    detail: "Your local app or any website",
+    icon: Globe,
+  },
+  {
+    key: "f",
+    kind: "chat",
+    title: "Thread",
+    detail: "Talk to Claude Code or Codex",
+    icon: Sparkles,
+  },
+  {
+    key: "g",
+    kind: "orchestrator",
+    title: "Orchestrator",
+    detail: "Tasks carried to done",
+    icon: ListChecks,
+  },
+] as const;
 
 /** Model profiles are this dialog's business only, so they load when it opens
  * and the picked profile resets with it. Same for the session-host pick
@@ -70,10 +109,48 @@ export function PanelPickerDialog({
   const [backend, setBackend] = useState<"herdr" | "local">("herdr");
   const [selectedModelProfileId, setSelectedModelProfileId] = useState("");
   const [selectedClaudeAccountId, setSelectedClaudeAccountId] = useState("");
+  const [projectName, setProjectName] = useState(active.name);
+  const [environmentCount, setEnvironmentCount] = useState(0);
+  const [projectId, setProjectId] = useState("");
+  const [hostReadiness, setHostReadiness] = useState<Record<string, string>>(
+    {},
+  );
+  const agentButtons = useRef<(HTMLButtonElement | null)[]>([]);
+  const [focusedAgent, setFocusedAgent] = useState(0);
   useEffect(() => {
     window.bridge?.modelProfilesList().then(setModelProfiles);
     window.bridge?.claudeAccountsList().then(setClaudeAccounts);
   }, []);
+  useEffect(() => {
+    let live = true;
+    const remote = hostContext.projectGit[active.id]?.remote;
+    if (!remote || !window.bridge) {
+      setProjectId("");
+      setProjectName(active.name);
+      setEnvironmentCount(0);
+      return;
+    }
+    window.bridge
+      .projectsResolve({
+        remote,
+        endpoint: active.connection || "local",
+      })
+      .then((project) => {
+        if (!live) return;
+        setProjectId(project?.id || "");
+        setProjectName(project?.name || active.name);
+        setEnvironmentCount(project?.env.length || 0);
+      })
+      .catch(() => {
+        if (!live) return;
+        setProjectId("");
+        setProjectName(active.name);
+        setEnvironmentCount(0);
+      });
+    return () => {
+      live = false;
+    };
+  }, [active.connection, active.id, active.name, hostContext.projectGit]);
   // Empty outside a merge group (D3): the picker then targets `active` alone,
   // exactly as it always has.
   const hostOptions = useMemo(
@@ -92,6 +169,52 @@ export function PanelPickerDialog({
     (targetWorkspaceId &&
       hostContext.workspaces.find((w) => w.id === targetWorkspaceId)) ||
     active;
+  useEffect(() => {
+    let live = true;
+    const sshHosts = (
+      hostOptions.length
+        ? hostOptions
+        : [{ workspaceId: active.id, label: active.name }]
+    )
+      .map((option) =>
+        hostContext.workspaces.find((w) => w.id === option.workspaceId),
+      )
+      .filter((workspace): workspace is Workspace =>
+        Boolean(workspace?.connection?.startsWith("ssh:")),
+      );
+    for (const workspace of sshHosts) {
+      setHostReadiness((current) => ({
+        ...current,
+        [workspace.id]: "Checking…",
+      }));
+      if (!window.bridge || !projectId) {
+        setHostReadiness((current) => ({
+          ...current,
+          [workspace.id]: "Unreachable",
+        }));
+        continue;
+      }
+      window.bridge
+        .projectHostCheck(projectId, workspace.connection!, workspace.cwd)
+        .then(() => {
+          if (live)
+            setHostReadiness((current) => ({
+              ...current,
+              [workspace.id]: "Ready",
+            }));
+        })
+        .catch(() => {
+          if (live)
+            setHostReadiness((current) => ({
+              ...current,
+              [workspace.id]: "Unreachable",
+            }));
+        });
+    }
+    return () => {
+      live = false;
+    };
+  }, [active.id, active.name, hostOptions, hostContext.workspaces, projectId]);
   const targetIsSsh = Boolean(targetWorkspace.connection?.startsWith("ssh:"));
   const canHerdrWorktree =
     Boolean(targetWorkspace.herdrId) && connected && backend === "herdr";
@@ -107,22 +230,123 @@ export function PanelPickerDialog({
   // remote path reaches the local git.
   const wantsWorktree = canWorktree && checkout === "worktree";
   const branchError = wantsWorktree ? worktreeBranchError(branch) : "";
-  const worktreeArg = wantsWorktree ? { branch } : undefined;
+  const worktreeArg = useMemo(
+    () => (wantsWorktree ? { branch } : undefined),
+    [branch, wantsWorktree],
+  );
   const worktreeInvalid = wantsWorktree && Boolean(branchError);
+  useEffect(() => {
+    if (!canWorktree && checkout !== "current") setCheckout("current");
+  }, [canWorktree, checkout]);
+  const launchAgent = useCallback(
+    (agent: string) => {
+      if (adding || worktreeInvalid) return;
+      addPanel(
+        "agent",
+        agent,
+        undefined,
+        agent === "claude"
+          ? modelProfiles.find(
+              (profile) => profile.id === selectedModelProfileId,
+            )
+          : undefined,
+        agent === "claude" ? selectedClaudeAccountId || undefined : undefined,
+        backend,
+        targetWorkspaceId,
+        worktreeArg,
+      );
+    },
+    [
+      addPanel,
+      backend,
+      modelProfiles,
+      selectedClaudeAccountId,
+      selectedModelProfileId,
+      targetWorkspaceId,
+      worktreeArg,
+      worktreeInvalid,
+      adding,
+    ],
+  );
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        event.shiftKey ||
+        event.repeat ||
+        adding
+      )
+        return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable='true']"))
+        return;
+      if (/^[1-4]$/.test(event.key)) {
+        event.preventDefault();
+        const index = Number(event.key) - 1;
+        setFocusedAgent(index);
+        agentButtons.current[index]?.focus();
+      } else if (event.key === "Enter") {
+        if (target !== document.body && !target?.closest(".picker-agent-list"))
+          return;
+        event.preventDefault();
+        launchAgent(AGENTS[focusedAgent]);
+      } else {
+        const tool = TOOLS.find((item) => item.key === event.key.toLowerCase());
+        if (tool && (orchestrator || tool.kind !== "orchestrator")) {
+          if (launchesInWorktree(tool.kind) && worktreeInvalid) return;
+          event.preventDefault();
+          addPanel(
+            tool.kind,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            backend,
+            targetWorkspaceId,
+            launchesInWorktree(tool.kind) ? worktreeArg : undefined,
+          );
+        }
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    focusedAgent,
+    orchestrator,
+    backend,
+    targetWorkspaceId,
+    worktreeArg,
+    worktreeInvalid,
+    addPanel,
+    launchAgent,
+    adding,
+  ]);
   return (
-    <>
-      <div className="dialog-eyebrow">MAKE IT YOUR SPACE</div>
-      <h2>Add a panel</h2>
-      <p>Everything you need, side by side.</p>
-      {hostOptions.length > 0 && (
-        <>
-          <div className="dialog-eyebrow">LAUNCH ON</div>
+    <div className="panel-picker-v4">
+      <div className="picker-project-head">
+        <div>
+          <span className="dialog-eyebrow">NEW SESSION</span>
+          <h2>{projectName}</h2>
+        </div>
+        <span className="picker-environment-pill">
+          <span /> Environment · {environmentCount}
+        </span>
+      </div>
+      <p>Choose where to start, then pick an agent or tool.</p>
+      {(hostOptions.length > 0 || herdrWorkspace) && (
+        <section className="picker-host-row">
+          <div className="picker-section-label">HOST</div>
           <div
             className="panel-backend"
             role="radiogroup"
             aria-label="Launch on"
           >
-            {hostOptions.map((option) => (
+            {(hostOptions.length
+              ? hostOptions
+              : [{ workspaceId: active.id, label: active.name }]
+            ).map((option) => (
               <button
                 key={option.workspaceId}
                 role="radio"
@@ -131,39 +355,66 @@ export function PanelPickerDialog({
                 onClick={() => setHostId(option.workspaceId)}
               >
                 {option.label}
+                <small className="host-readiness">
+                  <span
+                    className={
+                      hostContext.workspaces
+                        .find((w) => w.id === option.workspaceId)
+                        ?.connection?.startsWith("ssh:") &&
+                      hostReadiness[option.workspaceId] !== "Ready"
+                        ? "is-pending"
+                        : ""
+                    }
+                  />
+                  {hostContext.workspaces
+                    .find((w) => w.id === option.workspaceId)
+                    ?.connection?.startsWith("ssh:")
+                    ? hostReadiness[option.workspaceId] || "Checking…"
+                    : "Ready"}
+                </small>
               </button>
             ))}
           </div>
-        </>
+          {herdrWorkspace && (
+            <div
+              className="panel-backend picker-backend"
+              role="group"
+              aria-label="Session backend"
+            >
+              {(
+                [
+                  ["herdr", "Herdr"],
+                  ["local", "Local"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  className={backend === value ? "selected" : ""}
+                  aria-pressed={backend === value}
+                  onClick={() => setBackend(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
       )}
       {canWorktree && (
-        <>
-          <div className="dialog-eyebrow">CHECKOUT</div>
-          <div
-            className="panel-backend"
-            role="radiogroup"
-            aria-label="Checkout"
-          >
-            {(
-              [
-                ["current", "This checkout"],
-                ["worktree", "New worktree"],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                role="radio"
-                aria-checked={checkout === value}
-                className={checkout === value ? "selected" : ""}
-                onClick={() => setCheckout(value)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+        <div className="picker-checkout-line">
+          <label className="picker-worktree-check">
+            <input
+              type="checkbox"
+              checked={wantsWorktree}
+              onChange={(event) =>
+                setCheckout(event.target.checked ? "worktree" : "current")
+              }
+            />{" "}
+            New worktree
+          </label>
           {wantsWorktree && (
-            <>
-              <div className="dialog-eyebrow">BRANCH</div>
+            <div className="picker-branch-field">
+              <span>{targetWorkspace.cwd}</span>
               <input
                 className="worktree-branch"
                 aria-label="Branch"
@@ -171,147 +422,100 @@ export function PanelPickerDialog({
                 onChange={(event) => setBranch(event.target.value)}
                 placeholder="feature/my-change"
               />
-              {branchError && (
-                <small className="inline-error">{branchError}</small>
-              )}
-            </>
+            </div>
           )}
-        </>
-      )}
-      {herdrWorkspace && (
-        <div
-          className="panel-backend"
-          role="group"
-          aria-label="Session backend"
-        >
-          {(
-            [
-              ["herdr", "Herdr", "Keeps running when the app closes"],
-              ["local", "Local", "A plain shell in this window"],
-            ] as const
-          ).map(([value, label, detail]) => (
-            <button
-              key={value}
-              className={backend === value ? "selected" : ""}
-              aria-pressed={backend === value}
-              title={detail}
-              onClick={() => setBackend(value)}
-            >
-              {label}
-            </button>
-          ))}
+          {branchError && <small className="inline-error">{branchError}</small>}
         </div>
       )}
-      <div className={`panel-options ${adding ? "is-busy" : ""}`}>
-        {(
-          [
-            {
-              kind: "terminal",
-              title: "Terminal",
-              detail: "A real shell in your project",
-              icon: TerminalSquare,
-            },
-            {
-              kind: "files",
-              title: "Files & Git",
-              detail: "Explore code, images and changes",
-              icon: FolderOpen,
-            },
-            {
-              kind: "browser",
-              title: "Browser",
-              detail: "Your local app or any website",
-              icon: Globe,
-            },
-            {
-              kind: "chat",
-              title: "Thread",
-              detail: "Talk to Claude Code or Codex",
-              icon: Sparkles,
-            },
-            {
-              kind: "orchestrator",
-              title: "Orchestrator",
-              detail: "Tasks carried to done",
-              icon: ListChecks,
-            },
-          ] as const
-        )
-          .filter((item) => orchestrator || item.kind !== "orchestrator")
-          .map((item) => (
-            <button
-              key={item.kind}
-              disabled={launchesInWorktree(item.kind) && worktreeInvalid}
-              onClick={() =>
-                addPanel(
-                  item.kind,
-                  undefined,
-                  undefined,
-                  undefined,
-                  undefined,
-                  backend,
+      <div className={`picker-lists ${adding ? "is-busy" : ""}`}>
+        <section className="picker-agent-list">
+          <div className="picker-list-heading">
+            <span>AGENTS</span>
+            <small>Choose one to start</small>
+          </div>
+          <div className="agent-options">
+            {AGENTS.map((agent, index) => (
+              <button
+                key={agent}
+                ref={(element) => {
+                  agentButtons.current[index] = element;
+                }}
+                className={focusedAgent === index ? "is-focused" : ""}
+                disabled={adding || worktreeInvalid}
+                onFocus={() => setFocusedAgent(index)}
+                onClick={() => launchAgent(agent)}
+              >
+                <kbd>{index + 1}</kbd>
+                <span
+                  className={agent === "claude" ? "agent-star" : "agent-logo"}
+                >
+                  {agent === "claude"
+                    ? "✳"
+                    : agent === "codex"
+                      ? "✺"
+                      : agent === "gemini"
+                        ? "✦"
+                        : "⌘"}
+                </span>
+                <span>{agentTitle(agent)}</span>
+                <small>
+                  {system?.agents.find((a) => a.name === agent)?.path
+                    ? "Installed"
+                    : "CLI required"}
+                </small>
+              </button>
+            ))}
+          </div>
+        </section>
+        <section className="picker-tool-list">
+          <div className="picker-list-heading">
+            <span>TOOLS</span>
+            <small>Open alongside your work</small>
+          </div>
+          <div className="panel-options">
+            {TOOLS.filter(
+              (item) => orchestrator || item.kind !== "orchestrator",
+            ).map((item) => (
+              <button
+                key={item.kind}
+                disabled={
+                  adding || (launchesInWorktree(item.kind) && worktreeInvalid)
+                }
+                onClick={() =>
+                  addPanel(
+                    item.kind,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    backend,
+                    targetWorkspaceId,
+                    launchesInWorktree(item.kind) ? worktreeArg : undefined,
+                  )
+                }
+              >
+                <kbd>{item.key}</kbd>
+                <item.icon size={18} />
+                <div>
+                  <strong>{item.title}</strong>
+                  <small>{item.detail}</small>
+                </div>
+                <Plus size={15} />
+              </button>
+            ))}
+            <ExtensionPanelOptions
+              registry={extensionRegistry}
+              onAdd={(extensionId, contributionId) =>
+                !adding &&
+                addExtensionPanel(
+                  extensionId,
+                  contributionId,
                   targetWorkspaceId,
-                  launchesInWorktree(item.kind) ? worktreeArg : undefined,
                 )
               }
-            >
-              <item.icon size={19} />
-              <div>
-                <strong>{item.title}</strong>
-                <small>{item.detail}</small>
-              </div>
-              <Plus size={15} />
-            </button>
-          ))}
-        <ExtensionPanelOptions
-          registry={extensionRegistry}
-          onAdd={(extensionId, contributionId) =>
-            addExtensionPanel(extensionId, contributionId, targetWorkspaceId)
-          }
-        />
-      </div>
-      <div className="dialog-eyebrow agent-options-label">CODING AGENTS</div>
-      <div className="agent-options">
-        {["claude", "codex", "gemini", "cursor-agent"].map((agent) => (
-          <button
-            key={agent}
-            disabled={worktreeInvalid}
-            onClick={() =>
-              addPanel(
-                "agent",
-                agent,
-                undefined,
-                agent === "claude"
-                  ? modelProfiles.find(
-                      (profile) => profile.id === selectedModelProfileId,
-                    )
-                  : undefined,
-                agent === "claude"
-                  ? selectedClaudeAccountId || undefined
-                  : undefined,
-                backend,
-                targetWorkspaceId,
-                worktreeArg,
-              )
-            }
-          >
-            <span className={agent === "claude" ? "agent-star" : "agent-logo"}>
-              {agent === "claude"
-                ? "✳"
-                : agent === "codex"
-                  ? "✺"
-                  : agent === "gemini"
-                    ? "✦"
-                    : "⌘"}
-            </span>
-            <span>{agentTitle(agent)}</span>
-            <small>
-              {system?.agents.find((a) => a.name === agent)?.path
-                ? "Installed"
-                : "CLI required"}
-            </small>
-          </button>
-        ))}
+            />
+          </div>
+        </section>
       </div>
       {modelProfiles.length > 0 && (
         <label className="agent-model-picker">
@@ -371,8 +575,11 @@ export function PanelPickerDialog({
             </>
           )}
         </span>
-        <kbd>esc</kbd>
+        <span className="picker-shortcuts">
+          <kbd>1–4</kbd> agents <kbd>a/s/d/f/g</kbd> tools <kbd>↵</kbd> start{" "}
+          <kbd>esc</kbd> close
+        </span>
       </div>
-    </>
+    </div>
   );
 }

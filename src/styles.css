@@ -2781,6 +2781,194 @@ iframe {
   font-size: 11px;
   color: #777;
 }
+.panel-picker-v4 > p {
+  margin-bottom: 18px;
+}
+.picker-project-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.picker-project-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 7px 0 8px;
+}
+.picker-project-switch {
+  color: #858585;
+  font-size: 15px;
+  padding: 3px 7px;
+  border: 1px solid #353535;
+  border-radius: 6px;
+}
+.picker-environment-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border: 1px solid #343b32;
+  border-radius: 999px;
+  background: #20251f;
+  color: #a7b4a0;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.picker-environment-pill > span,
+.host-readiness > span {
+  width: 6px;
+  height: 6px;
+  display: inline-block;
+  border-radius: 50%;
+  background: #87b77a;
+}
+.picker-host-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-bottom: 9px;
+}
+.picker-section-label,
+.picker-list-heading > span {
+  color: #777;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+}
+.picker-host-row .panel-backend {
+  margin: 0;
+}
+.picker-host-row .panel-backend button {
+  padding: 6px 9px;
+}
+.host-readiness {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #8da88a;
+  font-size: 9px;
+}
+.picker-backend {
+  margin-left: auto !important;
+}
+.picker-checkout-line {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 34px;
+  padding: 7px 10px;
+  margin-bottom: 15px;
+  border: 1px solid #2b2b2b;
+  border-radius: 8px;
+  background: #191919;
+}
+.picker-worktree-check {
+  display: flex;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 7px;
+  color: #aaa;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.modal .picker-worktree-check input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+}
+.picker-branch-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  color: #707070;
+  font-size: 10px;
+}
+.modal .picker-branch-field .worktree-branch {
+  width: 45%;
+  height: 25px;
+  padding: 4px 7px;
+  font-size: 10px;
+}
+.picker-lists {
+  display: grid;
+  grid-template-columns: 1.08fr 0.92fr;
+  gap: 13px;
+}
+.picker-list-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+.picker-list-heading small {
+  color: #666;
+  font-size: 9px;
+}
+.picker-agent-list .agent-options {
+  grid-template-columns: 1fr 1fr;
+}
+.picker-agent-list .agent-options button {
+  position: relative;
+  min-height: 54px;
+  padding: 8px 8px;
+  border-color: #2d2d2d;
+  background: #1b1b1b;
+}
+.picker-agent-list .agent-options button.is-focused {
+  border-color: #667b5f;
+  background: #222820;
+}
+.picker-agent-list .agent-options button > kbd,
+.picker-tool-list .panel-options > button > kbd {
+  margin-right: 1px;
+  color: #777;
+  background: #242424;
+  border: 1px solid #363636;
+  border-radius: 4px;
+  padding: 2px 5px;
+  font-size: 9px;
+}
+.picker-tool-list .panel-options {
+  gap: 5px;
+}
+.picker-tool-list .panel-options > button {
+  padding: 8px;
+  gap: 8px;
+  border-radius: 7px;
+}
+.picker-tool-list .panel-options > button > div {
+  gap: 3px;
+  min-width: 0;
+}
+.picker-tool-list .panel-options strong {
+  font-size: 11px;
+}
+.picker-tool-list .panel-options small {
+  font-size: 9px;
+}
+.picker-tool-list .panel-options > button > svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+.panel-picker-v4 .dialog-footer {
+  align-items: flex-start;
+  gap: 12px;
+}
+.picker-shortcuts {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  color: #666;
+}
+.picker-shortcuts kbd {
+  margin-left: 4px;
+}
 .agent-options-label {
   margin-top: 25px;
   margin-bottom: 9px;

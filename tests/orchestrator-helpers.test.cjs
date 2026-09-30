@@ -95,12 +95,14 @@ test("taskCreateParams adds a trimmed base on the title/goal fallback path too",
   );
 });
 
-test("formatDuration renders the coarsest unit that fits, zero for anything non-positive", async () => {
+test("formatDuration reads in whole minutes and never prints a zero unit", async () => {
   const { formatDuration } = await library;
-  assert.equal(formatDuration(0), "0s");
-  assert.equal(formatDuration(-500), "0s");
-  assert.equal(formatDuration(45_000), "45s");
-  assert.equal(formatDuration(125_000), "2m 5s");
+  assert.equal(formatDuration(0), "<1m");
+  assert.equal(formatDuration(-500), "<1m");
+  assert.equal(formatDuration(45_000), "<1m");
+  assert.equal(formatDuration(125_000), "2m");
+  assert.equal(formatDuration(20 * 60_000), "20m");
+  assert.equal(formatDuration(2 * 3_600_000), "2h");
   assert.equal(formatDuration(3 * 3_600_000 + 61_000), "3h 1m");
 });
 

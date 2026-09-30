@@ -49,6 +49,7 @@ const ALLOWED_METHODS = new Set([
   "task.timeline",
   "task.evidence",
   "task.report",
+  "task.backlog",
   "failures.catalogue",
   "costs.summary",
   "chat.get",
@@ -58,6 +59,7 @@ const ALLOWED_METHODS = new Set([
   "chat.new",
   "chat.switch",
   "chat.clear",
+  "chat.clearDraft",
   "message.list",
   "message.send",
   "evolution.run",
@@ -84,6 +86,7 @@ const TASK_RESULT_METHODS = new Set([
   "task.unarchive",
   "task.overturn",
   "task.leadTouch",
+  "task.backlog",
 ]);
 
 function tagTasks(result, host) {
@@ -102,6 +105,18 @@ function tagEvent(message, host) {
     tagged.task = { ...message.task, host };
   return tagged;
 }
+
+// The stages that can ask the owner (`AskedBy` in src/orchestrator/types.ts);
+// anything else a daemon sends is dropped from the notice.
+const ASKED_BY = new Set([
+  "brief",
+  "plan",
+  "implement",
+  "verify",
+  "review",
+  "advisor",
+  "land",
+]);
 
 const NOT_BUILT =
   "The orchestrator daemon is not built. Run npm run build:orchd.";
@@ -315,6 +330,8 @@ function orchestratorNotice(task) {
     notice.host = cap(task.host, 200);
   const at = Number(task.question?.askedAt) || Number(task.updatedAt) || 0;
   if (at > 0) notice.at = at;
+  if (kind === "input" && ASKED_BY.has(task.question?.askedBy))
+    notice.askedBy = task.question.askedBy;
   const repoName = String(task.repo ?? "")
     .split(/[\\/]+/)
     .filter(Boolean)
@@ -590,6 +607,15 @@ class OrchestratorService {
       : result;
   }
 
+  /** A liveness check with no side effects: a ping on the socket already in
+   * use. It never spawns, restarts or provisions a daemon, so a panel polling
+   * it cannot bypass the reconnect backoff; a call or Retry does that. */
+  async probe() {
+    if (this.closed) throw new Error("orchestrator closed");
+    if (!this.socketPath) throw new Error("The orchestrator is not connected.");
+    return orchdRequest(this.socketPath, "ping", {}, this.token, 2000);
+  }
+
   connect() {
     this.closed = false;
     this.remote?.reopen();
@@ -823,6 +849,15 @@ class OrchestratorHosts {
     return this.#serviceFor(host).call(method, params);
   }
 
+  /** A side-effect-free ping of a host already connected; never enables or
+   * provisions one. */
+  async probe(host = LOCAL_HOST) {
+    if (typeof host !== "string") throw new Error("Invalid orchestrator host");
+    const service = host === LOCAL_HOST ? this.local : this.services.get(host);
+    if (!service) throw new Error("The orchestrator host is not connected.");
+    return service.probe();
+  }
+
   /** Re-runs the host's preflight (git, claude, codex). */
   async preflight(host) {
     if (host === LOCAL_HOST) return null;
@@ -908,6 +943,7 @@ function registerOrchestratorExtension({ handle, ...options }) {
   );
   handle("orchestrator-hosts", () => hosts.list());
   handle("orchestrator-preflight", (host) => hosts.preflight(host));
+  handle("orchestrator-probe", (host) => hosts.probe(host));
   hosts.local.connect();
   return hosts;
 }

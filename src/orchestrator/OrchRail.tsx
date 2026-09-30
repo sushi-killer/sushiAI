@@ -1,7 +1,9 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
   Archive,
   ChartColumn,
+  ChevronDown,
+  ChevronRight,
   LayoutList,
   ListTodo,
   MessageSquare,
@@ -16,6 +18,7 @@ import {
   taskReason,
   taskTone,
 } from "./helpers";
+import { planOnly } from "./planModel";
 import type { Task } from "./types";
 import { GroupLabel, TaskRow } from "./ui";
 
@@ -52,9 +55,10 @@ function NavRow({
   );
 }
 
-/** The orchestrator's left rail (Figma "rail"): the views, then the tasks
- * grouped by what they need, a parent's subtasks nested under it, and the
- * archive pinned to the bottom. */
+/** The orchestrator's left rail (Figma "rail"): the host selector, the
+ * views, then the tasks grouped by what they need (a parent's subtasks
+ * nested under it, EARLIER folded into one row), and the archive pinned to
+ * the bottom. Unstarted drafts live on the Plan, not here. */
 export function OrchRail({
   view,
   tasks,
@@ -65,6 +69,8 @@ export function OrchRail({
   archivedCount,
   offline = false,
   hostName,
+  header,
+  bare = false,
   onOpen,
 }: {
   view: OrchestratorView;
@@ -79,9 +85,15 @@ export function OrchRail({
   offline?: boolean;
   /** Named on each row only when several hosts are in use. */
   hostName?: string;
+  /** Pinned above the views: the host selector. */
+  header?: ReactNode;
+  /** Views only, no task groups: the host has no daemon to list yet. */
+  bare?: boolean;
   onOpen: (view: OrchestratorView) => void;
 }) {
-  const groups = railGroups(tasks);
+  const [earlierOpen, setEarlierOpen] = useState(false);
+  const drafts = planOnly(tasks);
+  const groups = railGroups(tasks.filter((task) => !drafts.has(task)));
   const selectedId = view.kind === "task" ? view.id : undefined;
   const empty =
     groups.needsYou.length +
@@ -141,77 +153,104 @@ export function OrchRail({
     );
   }
 
+  /** EARLIER stays one row until opened: the rail keeps what needs you and
+   * what runs in view, with the archive pinned under it. */
+  function earlier(list: Task[]) {
+    if (list.length === 0) return null;
+    return (
+      <section className="orch-rail-section" aria-label="Earlier">
+        <button
+          type="button"
+          className="orch-rail-earlier"
+          aria-expanded={earlierOpen}
+          onClick={() => setEarlierOpen((open) => !open)}
+        >
+          <span className="orch-rail-nav-label">Earlier</span>
+          <span className="orch-rail-nav-trailing">{list.length}</span>
+          {earlierOpen ? (
+            <ChevronDown size={12} aria-hidden />
+          ) : (
+            <ChevronRight size={12} aria-hidden />
+          )}
+        </button>
+        {earlierOpen && list.map(row)}
+      </section>
+    );
+  }
+
   const is = (kind: OrchestratorView["kind"]) => view.kind === kind;
   return (
     <nav
       className={`orch-rail${offline ? " offline" : ""}`}
       aria-label="Orchestrator"
-      inert={offline || undefined}
     >
-      <NavRow
-        icon={<LayoutList size={14} />}
-        label="Home"
-        selected={is("home")}
-        onClick={() => onOpen({ kind: "home" })}
-      />
-      {(planCount > 0 || is("plan") || is("brainstorm")) && (
+      {header}
+      <div className="orch-rail-scroll" inert={offline || undefined}>
         <NavRow
-          icon={<ListTodo size={14} />}
-          label="Plan"
-          selected={is("plan") || is("brainstorm")}
-          trailing={planCount || ""}
-          onClick={() => onOpen({ kind: "plan" })}
+          icon={<LayoutList size={14} />}
+          label="Home"
+          selected={is("home")}
+          onClick={() => onOpen({ kind: "home" })}
         />
-      )}
-      <NavRow
-        icon={<MessageSquare size={14} />}
-        label="Chat"
-        selected={is("chat") || is("messages")}
-        trailing={chatNew > 0 ? `${chatNew} new` : ""}
-        onClick={() => onOpen({ kind: "chat" })}
-      />
-      <NavRow
-        icon={<Sparkles size={14} />}
-        label="Improvements"
-        selected={is("improvements")}
-        trailing={improvementsCount || ""}
-        trailingClass="accent"
-        onClick={() => onOpen({ kind: "improvements" })}
-      />
-      <NavRow
-        icon={<ChartColumn size={14} />}
-        label="Analytics"
-        selected={is("analytics")}
-        onClick={() => onOpen({ kind: "analytics" })}
-      />
-      {empty ? (
-        <div className="orch-rail-empty">
-          <span>No tasks yet</span>
-          <span className="orch-rail-empty-hint">
-            Tasks you start appear here.
-          </span>
-        </div>
-      ) : (
-        <>
-          {group("Needs you", groups.needsYou)}
-          {group("Running", groups.running)}
-          {group("Landed today", groups.landedToday)}
-          {group("Earlier", groups.earlier)}
-        </>
-      )}
-      <span className="orch-rail-spacer" />
-      <button
-        type="button"
-        className={`orch-rail-archive${is("archive") ? " selected" : ""}`}
-        aria-current={is("archive") || undefined}
-        onClick={() => onOpen({ kind: "archive" })}
-      >
-        <Archive size={14} />
-        <span className="orch-rail-nav-label">Archive</span>
-        {archivedCount > 0 && (
-          <span className="orch-rail-nav-trailing">{archivedCount}</span>
+        {(planCount > 0 || is("plan") || is("brainstorm")) && (
+          <NavRow
+            icon={<ListTodo size={14} />}
+            label="Plan"
+            selected={is("plan") || is("brainstorm")}
+            trailing={planCount || ""}
+            onClick={() => onOpen({ kind: "plan" })}
+          />
         )}
-      </button>
+        <NavRow
+          icon={<MessageSquare size={14} />}
+          label="Chat"
+          selected={is("chat") || is("messages")}
+          trailing={chatNew > 0 ? `${chatNew} new` : ""}
+          onClick={() => onOpen({ kind: "chat" })}
+        />
+        <NavRow
+          icon={<Sparkles size={14} />}
+          label="Improvements"
+          selected={is("improvements")}
+          trailing={improvementsCount || ""}
+          trailingClass="accent"
+          onClick={() => onOpen({ kind: "improvements" })}
+        />
+        <NavRow
+          icon={<ChartColumn size={14} />}
+          label="Analytics"
+          selected={is("analytics")}
+          onClick={() => onOpen({ kind: "analytics" })}
+        />
+        {bare ? null : empty ? (
+          <div className="orch-rail-empty">
+            <span>No tasks yet</span>
+            <span className="orch-rail-empty-hint">
+              Tasks you start appear here.
+            </span>
+          </div>
+        ) : (
+          <>
+            {group("Needs you", groups.needsYou)}
+            {group("Running", groups.running)}
+            {group("Landed today", groups.landedToday)}
+            {earlier(groups.earlier)}
+          </>
+        )}
+      </div>
+      {(archivedCount > 0 || is("archive")) && (
+        <button
+          type="button"
+          className={`orch-rail-archive${is("archive") ? " selected" : ""}`}
+          aria-current={is("archive") || undefined}
+          inert={offline || undefined}
+          onClick={() => onOpen({ kind: "archive" })}
+        >
+          <Archive size={14} />
+          <span className="orch-rail-nav-label">Archive</span>
+          <span className="orch-rail-nav-trailing">{archivedCount}</span>
+        </button>
+      )}
     </nav>
   );
 }

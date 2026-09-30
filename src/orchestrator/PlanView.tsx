@@ -1,15 +1,16 @@
 import { useState } from "react";
-import { Play, Sparkles } from "lucide-react";
-import { orchestratorClient } from "./client";
+import { ArrowDown, ArrowUp, Play, Sparkles } from "lucide-react";
+import { useOrchestratorClient } from "./hostContext";
 import { errorText } from "./helpers";
 import {
-  autopilotOf,
+  autopilotNext,
+  backlogMoves,
   draftMeta,
   planModel,
   readyDrafts,
   type PlanItem,
 } from "./planModel";
-import type { Settings, Task } from "./types";
+import type { BacklogBucket, Settings, Task } from "./types";
 import { Tag } from "./ui";
 import "./plan.css";
 
@@ -39,13 +40,88 @@ function Dot({ on }: { on: boolean }) {
   return <span className={`plan-dot${on ? " ready" : ""}`} aria-hidden />;
 }
 
+/** Where a draft can go in the backlog: up, down, and to the other bucket. */
+type Moves = {
+  up?: () => void;
+  down?: () => void;
+  bucket: () => void;
+};
+
+function MoveControls({
+  title,
+  later,
+  moves,
+  disabled,
+}: {
+  title: string;
+  later: boolean;
+  moves: Moves;
+  disabled: boolean;
+}) {
+  return (
+    <span className="plan-moves">
+      <button
+        type="button"
+        className="icon-button"
+        aria-label={`Move ${title} up`}
+        disabled={disabled || !moves.up}
+        onClick={moves.up}
+      >
+        <ArrowUp size={13} />
+      </button>
+      <button
+        type="button"
+        className="icon-button"
+        aria-label={`Move ${title} down`}
+        disabled={disabled || !moves.down}
+        onClick={moves.down}
+      >
+        <ArrowDown size={13} />
+      </button>
+      <button
+        type="button"
+        className="ui-button ghost plan-bucket-btn"
+        aria-label={`Move ${title} to ${later ? "Next" : "Later"}`}
+        disabled={disabled}
+        onClick={moves.bucket}
+      >
+        {later ? "Next" : "Later"}
+      </button>
+    </span>
+  );
+}
+
+/** Start for a ready draft; "waits" for one whose dependencies are not
+ * done. */
+function StartOrWaits({
+  item,
+  disabled,
+  onStart,
+}: {
+  item: PlanItem;
+  disabled: boolean;
+  onStart: (task: Task) => void;
+}) {
+  return item.ready ? (
+    <StartButton
+      label="Start"
+      disabled={disabled}
+      onClick={() => onStart(item.task)}
+    />
+  ) : (
+    <span className="plan-meta">waits</span>
+  );
+}
+
 function DraftGroup({
   item,
+  moves,
   disabled,
   onStart,
   onOpen,
 }: {
   item: PlanItem;
+  moves: Moves;
   disabled: boolean;
   onStart: (task: Task) => void;
   onOpen: (id: string) => void;
@@ -70,11 +146,13 @@ function DraftGroup({
           <span className="plan-sub">{sub}</span>
         </div>
         <span className="plan-meta">{draftMeta(task)}</span>
-        <StartButton
-          label="Start"
-          disabled={disabled || !item.ready}
-          onClick={() => onStart(task)}
+        <MoveControls
+          title={task.title}
+          later={false}
+          moves={moves}
+          disabled={disabled}
         />
+        <StartOrWaits item={item} disabled={disabled} onStart={onStart} />
       </div>
       <div className="plan-children">
         {children.map((child) => (
@@ -106,12 +184,14 @@ function DraftGroup({
 function DraftRow({
   item,
   later,
+  moves,
   disabled,
   onStart,
   onOpen,
 }: {
   item: PlanItem;
   later: boolean;
+  moves: Moves;
   disabled: boolean;
   onStart: (task: Task) => void;
   onOpen: (id: string) => void;
@@ -134,22 +214,23 @@ function DraftRow({
         )}
       </div>
       <span className="plan-meta">{draftMeta(task)}</span>
+      <MoveControls
+        title={task.title}
+        later={later}
+        moves={moves}
+        disabled={disabled}
+      />
       {!later && (
-        <StartButton
-          label="Start"
-          disabled={disabled || !item.ready}
-          onClick={() => onStart(task)}
-        />
+        <StartOrWaits item={item} disabled={disabled} onStart={onStart} />
       )}
     </div>
   );
 }
 
-/** The Plan view: drafts waiting to run. NEXT/LATER and Autopilot follow the
- * daemon's `bucket`/`order` fields and `autopilot` setting when they exist;
- * until then everything is NEXT, oldest first, and Autopilot shows disabled.
- * `tasks`, `settings`, `busy`, `act` and `onOpen` are the panel's
- * wiring. */
+/** The Plan view: drafts waiting to run, in orchd's backlog buckets (NEXT,
+ * LATER) and order, with the Autopilot setting that starts ready NEXT
+ * drafts by itself. `tasks`, `settings`, `busy`, `act` and `onOpen` are the
+ * panel's wiring. */
 export function PlanView({
   tasks = [],
   settings = null,
@@ -168,12 +249,13 @@ export function PlanView({
   onOpen?: (id: string) => void;
   onBrainstorm: () => void;
 }) {
+  const orchestratorClient = useOrchestratorClient();
   const [autopilotError, setAutopilotError] = useState("");
   const model = planModel(tasks);
   const ready = readyDrafts(model);
-  const autopilot = autopilotOf(settings);
+  const autopilot = settings?.autopilot ?? false;
   const disabled = busy || !act;
-  const nextUp = ready[0]?.title;
+  const nextUp = autopilotNext(model)?.title;
 
   function start(task: Task) {
     act?.(() => orchestratorClient.taskStart(task.id));
@@ -187,18 +269,44 @@ export function PlanView({
     });
   }
   function toggleAutopilot() {
-    if (!settings || autopilot === null || !onSettings) return;
-    const value = !autopilot;
+    if (!settings || !onSettings) return;
     setAutopilotError("");
-    const current = (settings as { autopilot?: unknown }).autopilot;
-    const next =
-      current && typeof current === "object"
-        ? { ...current, enabled: value }
-        : value;
-    onSettings?.({ autopilot: next } as Partial<Settings>).catch((e) =>
+    onSettings({ autopilot: !autopilot }).catch((e) =>
       setAutopilotError(errorText(e)),
     );
   }
+  /** Reorder and bucket moves for one list of the plan. */
+  function movesFor(
+    items: PlanItem[],
+    bucket: BacklogBucket,
+  ): (index: number) => Moves {
+    const reorder = (index: number, step: -1 | 1) => {
+      const calls = backlogMoves(items, index, step, bucket);
+      if (!calls.length) return undefined;
+      return () =>
+        act?.(async () => {
+          let last: Task | undefined;
+          for (const call of calls)
+            last = await orchestratorClient.taskBacklog(
+              call.id,
+              bucket,
+              call.order,
+            );
+          return last as Task;
+        });
+    };
+    const other: BacklogBucket = bucket === "next" ? "later" : "next";
+    return (index) => ({
+      up: reorder(index, -1),
+      down: reorder(index, 1),
+      bucket: () =>
+        act?.(() =>
+          orchestratorClient.taskBacklog(items[index].task.id, other),
+        ),
+    });
+  }
+  const nextMoves = movesFor(model.next, "next");
+  const laterMoves = movesFor(model.later, "later");
 
   return (
     <div className="orch-view-scroll plan-view">
@@ -227,9 +335,9 @@ export function PlanView({
           type="button"
           role="switch"
           aria-label="Autopilot"
-          aria-checked={autopilot === true}
+          aria-checked={autopilot}
           className={`plan-toggle${autopilot ? " on" : ""}`}
-          disabled={autopilot === null}
+          disabled={!settings || !onSettings}
           onClick={toggleAutopilot}
         >
           <span className="plan-toggle-knob" />
@@ -237,15 +345,12 @@ export function PlanView({
         <div className="plan-autopilot-text">
           <span className="plan-title static">Autopilot</span>
           <span className="plan-desc">
-            Runs ready drafts one after another in the background, respecting
-            dependencies. Stops only for your questions.
+            Starts ready NEXT drafts in order whenever a task slot is free,
+            respecting dependencies. Stops only for your questions.
           </span>
         </div>
-        {autopilot === null ? (
-          <span className="plan-meta">coming soon</span>
-        ) : (
-          autopilot &&
-          nextUp && <span className="plan-meta">next: {nextUp}</span>
+        {autopilot && nextUp && (
+          <span className="plan-meta">next: {nextUp}</span>
         )}
       </div>
       {autopilotError && (
@@ -261,11 +366,12 @@ export function PlanView({
       ) : (
         <>
           <span className="plan-label">NEXT · {model.next.length}</span>
-          {model.next.map((item) =>
+          {model.next.map((item, index) =>
             item.children.length > 0 ? (
               <DraftGroup
                 key={item.task.id}
                 item={item}
+                moves={nextMoves(index)}
                 disabled={disabled}
                 onStart={start}
                 onOpen={onOpen}
@@ -275,6 +381,7 @@ export function PlanView({
                 key={item.task.id}
                 item={item}
                 later={false}
+                moves={nextMoves(index)}
                 disabled={disabled}
                 onStart={start}
                 onOpen={onOpen}
@@ -284,11 +391,12 @@ export function PlanView({
           {model.later.length > 0 && (
             <>
               <span className="plan-label">LATER · {model.later.length}</span>
-              {model.later.map((item) => (
+              {model.later.map((item, index) => (
                 <DraftRow
                   key={item.task.id}
                   item={item}
                   later
+                  moves={laterMoves(index)}
                   disabled={disabled}
                   onStart={start}
                   onOpen={onOpen}

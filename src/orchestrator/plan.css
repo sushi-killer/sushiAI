@@ -252,8 +252,10 @@
   color: var(--text-muted);
   font-size: var(--text-sm);
 }
-.brainstorm-draft-btn {
-  align-self: flex-start;
+.brainstorm-question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 .draft-panel {
   display: flex;
@@ -350,4 +352,14 @@
   margin: 0;
   color: var(--danger);
   font-size: var(--text-sm);
+}
+.plan-moves {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.plan-bucket-btn {
+  height: 26px;
+  padding: 0 8px;
 }

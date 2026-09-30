@@ -242,12 +242,6 @@
   color: var(--danger);
   font-size: var(--text-sm);
 }
-.ochat-wait {
-  margin: 0;
-  color: var(--text-faint);
-  font-size: var(--text-sm);
-  text-align: center;
-}
 .ochat-composer {
   padding: 0 16px 16px;
   flex-shrink: 0;
@@ -513,16 +507,6 @@
   white-space: nowrap;
   flex-shrink: 0;
 }
-.ochat-session-preview {
-  display: -webkit-box;
-  overflow: hidden;
-  color: var(--text-faint);
-  font-size: 11.5px;
-  line-height: 14px;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
 /* Brainstorm: [conversation + composer] | draft panel (236px, full height). */
 .ochat-bs-main {
   display: flex;

@@ -7,7 +7,6 @@ import {
   GitBranch,
   Square,
   Trash2,
-  Wrench,
 } from "lucide-react";
 import { useOrchestratorClient } from "./hostContext";
 import {
@@ -34,6 +33,7 @@ import {
   headerFacts,
   questionSource,
   reportLine,
+  shortBranch,
 } from "./taskDetailModel";
 import { Chip, Criterion, StageTrack, Tag } from "./ui";
 import "./task-detail.css";
@@ -246,22 +246,31 @@ function QuestionCard({
   disabled: boolean;
   onAnswer(answer: string): void;
 }) {
+  const options = task.question?.options ?? [];
+  // The first option is picked up front: one click on Answer sends it.
+  const [picked, setPicked] = useState(options[0] ?? "");
   const [freeText, setFreeText] = useState("");
   if (!task.question) return null;
+  const answer = freeText.trim() || (options.includes(picked) ? picked : "");
+  const source = questionSource(task.question);
   return (
     <div className="td-question">
       <div className="td-question-head">
         <Tag tone="warning">Needs you</Tag>
-        <span className="td-question-source">{questionSource(task)}</span>
+        {source && <span className="td-question-source">{source}</span>}
       </div>
       <p className="td-question-text">{task.question.text}</p>
-      {task.question.options.length > 0 && (
+      {options.length > 0 && (
         <div className="td-question-options">
-          {task.question.options.map((option) => (
+          {options.map((option) => (
             <Chip
               key={option}
+              selected={!freeText.trim() && option === picked}
               disabled={disabled}
-              onClick={() => onAnswer(option)}
+              onClick={() => {
+                setPicked(option);
+                setFreeText("");
+              }}
             >
               {option}
             </Chip>
@@ -272,10 +281,9 @@ function QuestionCard({
         className="td-inline-form"
         onSubmit={(event) => {
           event.preventDefault();
-          if (freeText.trim()) {
-            onAnswer(freeText.trim());
-            setFreeText("");
-          }
+          if (!answer) return;
+          onAnswer(answer);
+          setFreeText("");
         }}
       >
         <input
@@ -287,9 +295,9 @@ function QuestionCard({
         <button
           className="ui-button primary"
           type="submit"
-          disabled={disabled || !freeText.trim()}
+          disabled={disabled || !answer}
         >
-          <Check size={14} /> Answer
+          Answer
         </button>
       </form>
     </div>
@@ -506,11 +514,13 @@ export function TaskDetail({
             <p className="td-meta">
               <GitBranch size={12} aria-hidden />
               <span className="td-branch" title={selected.branch}>
-                {selected.branch}
+                {shortBranch(selected.branch)}
               </span>
-              <span className="td-faint">
-                {headerFacts(selected, settings?.maxAttempts)}
-              </span>
+              {headerFacts(selected, settings?.maxAttempts).map((fact) => (
+                <span key={fact} className="td-faint td-fact">
+                  {fact}
+                </span>
+              ))}
             </p>
           </div>
           <div className="td-actions">
@@ -567,7 +577,6 @@ export function TaskDetail({
                     else setNoting(true);
                   }}
                 >
-                  <Wrench size={14} />
                   Needed a fix
                 </button>
                 <button
@@ -691,7 +700,7 @@ export function TaskDetail({
          * that only describes it. */}
         {selected.question && (
           <QuestionCard
-            key={`question-${selected.id}`}
+            key={`question-${selected.id}-${selected.question.text}`}
             task={selected}
             disabled={busy}
             onAnswer={(answer) =>

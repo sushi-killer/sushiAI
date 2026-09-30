@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUpRight,
-  Check,
   ChevronDown,
   ChevronRight,
   GitBranch,
@@ -23,6 +22,7 @@ import {
   inboxItems,
   landTargets,
   needsYou,
+  plural,
   type Item,
   type Kind,
   type SessionItem,
@@ -35,7 +35,8 @@ import {
 } from "./sessionPrompt.ts";
 import { Icon } from "../PanelIcon.tsx";
 import { Character } from "../mascot/Character.tsx";
-import { orchestratorClient } from "../orchestrator/client.ts";
+import { orchestratorClientFor } from "../orchestrator/client.ts";
+import { hostOf } from "../orchestrator/hosts.ts";
 import {
   criteriaMet,
   errorText,
@@ -47,12 +48,16 @@ import {
   taskReason,
 } from "../orchestrator/helpers.ts";
 import {
-  composeAnswer,
+  clickAnswer,
   elapsedLabel,
+  enterAnswer,
   inboxHeadline,
   inboxZeroSummary,
   ownerTarget,
+  shownPick,
   stepSelection,
+  togglePick,
+  type AnswerChoice,
 } from "../orchestrator/ownerAttention.ts";
 import type { TaskTarget } from "../orchestrator/notices.ts";
 import type { Task } from "../orchestrator/types.ts";
@@ -197,9 +202,7 @@ export function InboxPage({
     [cleanup, setCleanup] = useState<Set<string> | null>(null),
     [fixing, setFixing] = useState<string | null>(null),
     [fixNote, setFixNote] = useState(""),
-    [collapsed, setCollapsed] = useState<Partial<Record<Kind, boolean>>>({
-      idle: true,
-    });
+    [idleOpen, setIdleOpen] = useState(false);
   const inFlight = useRef(false);
 
   const items = useMemo(
@@ -257,7 +260,7 @@ export function InboxPage({
     (item) => filter === "all" || item.kind === filter,
   );
   const keys = visible
-    .filter((item) => !collapsed[item.kind])
+    .filter((item) => item.kind !== "idle" || idleOpen)
     .map((item) => item.key);
   const keysSignature = keys.join("\n");
   // The selection is pinned: a newly arrived item never takes it over; only
@@ -271,6 +274,14 @@ export function InboxPage({
     visible.find((item) => item.key === selectedKey) ??
     visible.find((item) => item.key === keys[0]) ??
     null;
+  // When the selected item last changed (or the page opened): Enter is
+  // ignored for a moment after, so a held or doubled Enter never answers the
+  // item the selection moved to.
+  const selectedAt = useRef(0);
+  const shownKey = selected?.key ?? null;
+  useEffect(() => {
+    selectedAt.current = Date.now();
+  }, [shownKey]);
 
   const needs = items.filter(needsYou);
   const oldest = needs.reduce<number | null>(
@@ -304,18 +315,36 @@ export function InboxPage({
     }
   }
   const openTask = (task: Task) => openOrchestratorTask(ownerTarget(task));
+  /** A task is acted on through the daemon of the host it runs on. */
+  const clientOf = (task: Task) => orchestratorClientFor(hostOf(task));
   const noteOf = (item: Item) => notes[item.key] ?? "";
   const setNote = (item: Item, text: string) =>
     setNotes((old) => ({ ...old, [item.key]: text }));
-  const answerTask = (item: TaskItem) => {
-    const text = composeAnswer(picks[item.key] ?? "", noteOf(item));
+  /** The first option shows picked until the owner picks or unpicks one;
+   * only a click on Answer takes that preselection, Enter never does. */
+  const choiceOf = (item: TaskItem): AnswerChoice => ({
+    pick: picks[item.key],
+    preselected: item.task.question?.options[0] ?? "",
+    note: noteOf(item),
+  });
+  const answerTask = (item: TaskItem, text: string) => {
     if (!text) return;
     void act(async () => {
-      await orchestratorClient.taskAnswer(item.task.id, text);
-      setNote(item, "");
-      setPicks((old) => ({ ...old, [item.key]: "" }));
+      await clientOf(item.task).taskAnswer(item.task.id, text);
+      const drop = (old: Record<string, string>) => {
+        const next = { ...old };
+        delete next[item.key];
+        return next;
+      };
+      setNotes(drop);
+      setPicks(drop);
     });
   };
+  const answerByKey = (item: TaskItem) =>
+    answerTask(
+      item,
+      enterAnswer(choiceOf(item), selectedAt.current, Date.now()),
+    );
   /** Types into the session, one step at a time, then re-reads its screen. */
   const send = (item: SessionItem, steps: string[], clearNote = false) =>
     void act(async () => {
@@ -341,11 +370,10 @@ export function InboxPage({
     if (steps) send(item, steps, true);
   };
   const runAgain = (task: Task) =>
-    void act(() => orchestratorClient.taskStart(task.id));
+    void act(() => clientOf(task).taskStart(task.id));
   const archive = (task: Task) =>
-    void act(() => orchestratorClient.taskArchive(task.id));
-  const land = (task: Task) =>
-    void act(() => orchestratorClient.taskLand(task.id));
+    void act(() => clientOf(task).taskArchive(task.id));
+  const land = (task: Task) => void act(() => clientOf(task).taskLand(task.id));
   const jump = (row: InboxRow) => {
     switchWorkspace(row.workspace.id);
     ws.setSelected(row.panel.id);
@@ -355,7 +383,7 @@ export function InboxPage({
     if (!landAll) return setLandAll(true);
     setLandAll(false);
     void act(async () => {
-      for (const task of targets) await orchestratorClient.taskLand(task.id);
+      for (const task of targets) await clientOf(task).taskLand(task.id);
     });
   };
 
@@ -385,7 +413,7 @@ export function InboxPage({
     if (item.kind === "answer" && /^[1-9]$/.test(key)) {
       const option = task.question?.options[Number(key) - 1];
       if (option) setPicks((old) => ({ ...old, [item.key]: option }));
-    } else if (key === "enter" && item.kind === "answer") answerTask(item);
+    } else if (key === "enter" && item.kind === "answer") answerByKey(item);
     else if (key === "l" && item.kind === "land") land(task);
     else if (key === "r" && item.kind === "decide" && task.status !== "landing")
       runAgain(task);
@@ -421,11 +449,7 @@ export function InboxPage({
           onSubmit={(event) => {
             event.preventDefault();
             void act(async () => {
-              await orchestratorClient.taskLeadTouch(
-                task.id,
-                true,
-                fixNote.trim(),
-              );
+              await clientOf(task).taskLeadTouch(task.id, true, fixNote.trim());
               setFixing(null);
               setFixNote("");
             });
@@ -458,7 +482,7 @@ export function InboxPage({
           aria-pressed={mark?.touched === true}
           onClick={() => {
             if (mark?.touched === true)
-              void act(() => orchestratorClient.taskLeadTouch(task.id));
+              void act(() => clientOf(task).taskLeadTouch(task.id));
             else {
               setFixNote("");
               setFixing(task.id);
@@ -473,7 +497,7 @@ export function InboxPage({
           aria-pressed={mark?.touched === false}
           onClick={() =>
             void act(() =>
-              orchestratorClient.taskLeadTouch(
+              clientOf(task).taskLeadTouch(
                 task.id,
                 mark?.touched === false ? undefined : false,
               ),
@@ -536,7 +560,7 @@ export function InboxPage({
 
   function taskView(item: TaskItem) {
     const { task } = item;
-    const pick = picks[item.key] ?? "";
+    const choice = choiceOf(item);
     const attempts = implementAttemptCount(task);
     const meta =
       item.kind === "land"
@@ -550,7 +574,7 @@ export function InboxPage({
       const review = reviewOf(task);
       context = [
         review ? `review ${review.verdict}` : "done",
-        files ? `${files} files` : "",
+        files ? plural(files, "file") : "",
         formatCost(task.costUsd),
         "not landed",
       ]
@@ -564,13 +588,14 @@ export function InboxPage({
       actions = (task.question?.options ?? []).map((option) => (
         <Chip
           key={option}
-          selected={pick === option}
-          onClick={() =>
+          selected={shownPick(choice) === option}
+          onClick={() => {
             setPicks((old) => ({
               ...old,
-              [item.key]: old[item.key] === option ? "" : option,
-            }))
-          }
+              [item.key]: togglePick(choice, option),
+            }));
+            setNote(item, "");
+          }}
         >
           {option}
         </Chip>
@@ -644,6 +669,7 @@ export function InboxPage({
     );
   }
 
+  /** A working or idle session: one bordered row (Figma "working-row"). */
   function compactRow(item: SessionItem) {
     const { row } = item;
     return (
@@ -651,53 +677,43 @@ export function InboxPage({
         key={item.key}
         className={`inbox-session-row${selected?.key === item.key ? " selected" : ""}`}
         onClick={() => setSelectedKey(item.key)}
+        onDoubleClick={() => jump(row)}
       >
-        <Icon kind={row.panel.kind} agent={row.panel.agent} />
+        <span
+          className={`ui-dot ui-tone-${item.kind === "working" ? "info" : "neutral"}`}
+          aria-hidden
+        />
         <span className="inbox-session-name" title={item.title}>
           {item.title}
         </span>
-        <span className="inbox-session-meta">{hostName(item)}</span>
+        <span className="inbox-session-activity">{hostName(item)}</span>
         {item.at != null && (
           <span className="inbox-session-meta">
             {elapsedLabel(Date.now() - item.at)}
           </span>
         )}
         <button
-          className="inbox-link"
+          className="inbox-link inbox-session-jump"
           aria-label={`Jump to ${row.panel.title} in ${row.workspace.name}`}
           onClick={(event) => {
             event.stopPropagation();
             jump(row);
           }}
         >
-          Jump <ArrowUpRight size={12} />
+          <ArrowUpRight size={12} />
         </button>
       </div>
     );
   }
 
   function group(kind: Kind, rows: Item[]) {
+    if (kind === "idle") return idleSection(rows as SessionItem[]);
     if (rows.length === 0) return null;
-    const compact = kind === "working" || kind === "idle";
-    const closed = compact && collapsed[kind];
     const targets = kind === "land" ? landTargets(rows) : [];
     return (
       <section key={kind} className="inbox-group">
         <div className="inbox-group-head">
-          {compact ? (
-            <button
-              className="inbox-group-toggle"
-              aria-expanded={!closed}
-              onClick={() =>
-                setCollapsed((old) => ({ ...old, [kind]: !old[kind] }))
-              }
-            >
-              {closed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-              <GroupLabel label={LABELS[kind]} count={rows.length} />
-            </button>
-          ) : (
-            <GroupLabel label={LABELS[kind]} count={rows.length} />
-          )}
+          <GroupLabel label={LABELS[kind]} count={rows.length} />
           {targets.length > 1 && (
             <button
               className="inbox-link"
@@ -711,7 +727,7 @@ export function InboxPage({
             </button>
           )}
         </div>
-        {!closed && rows.map(itemView)}
+        {rows.map(itemView)}
       </section>
     );
   }
@@ -839,7 +855,7 @@ export function InboxPage({
           )}
           <span className="inbox-diff-rest">
             {[
-              files ? `${files} files` : "",
+              files ? plural(files, "file") : "",
               attempts > 0 ? `attempt ${attempts}` : "",
               formatCost(task.costUsd),
             ]
@@ -853,8 +869,9 @@ export function InboxPage({
           <form
             className="inbox-reply"
             onSubmit={(event) => {
+              // Enter in the field: typed text or an explicit pick only.
               event.preventDefault();
-              answerTask(item);
+              answerByKey(item);
             }}
           >
             <input
@@ -864,11 +881,10 @@ export function InboxPage({
               onChange={(event) => setNote(item, event.target.value)}
             />
             <button
-              type="submit"
+              type="button"
               className="ui-button primary"
-              disabled={
-                busy || !composeAnswer(picks[item.key] ?? "", noteOf(item))
-              }
+              disabled={busy || !clickAnswer(choiceOf(item))}
+              onClick={() => answerTask(item, clickAnswer(choiceOf(item)))}
             >
               Answer
             </button>
@@ -898,20 +914,18 @@ export function InboxPage({
           <h2>Inbox zero</h2>
           <p>{inboxZeroSummary(allTasks)}</p>
           <div className="inbox-zero-actions">
-            {latest && (
-              <button
-                className="ui-button secondary"
-                onClick={() =>
-                  openOrchestratorTask({
-                    taskId: latest.id,
-                    repo: latest.repo,
-                    focus: "summary",
-                  })
-                }
-              >
-                <ListChecks size={14} /> Open orchestrator
-              </button>
-            )}
+            <button
+              className="ui-button secondary"
+              onClick={() =>
+                openOrchestratorTask(
+                  latest
+                    ? { taskId: latest.id, repo: latest.repo, focus: "summary" }
+                    : { taskId: "", repo: cwd, focus: "summary" },
+                )
+              }
+            >
+              <ListChecks size={14} /> Open orchestrator
+            </button>
             {landed && (
               <button
                 className="ui-button ghost"
@@ -923,14 +937,14 @@ export function InboxPage({
                   })
                 }
               >
-                <Check size={14} /> See what landed
+                See what landed
               </button>
             )}
           </div>
-          {cleanupView()}
           {errorLine}
         </div>
-        {running.length > 0 && (
+        {(running.length > 0 ||
+          candidates.agents.length + candidates.shells.length > 0) && (
           <div className="inbox-zero-sessions">
             {(["working", "idle"] as const).map((kind) =>
               group(
@@ -980,31 +994,51 @@ export function InboxPage({
     );
   }
 
+  /** Idle sessions and shells: one "› N idle sessions   Clean up" row
+   * (Figma "idle") that opens into the idle rows, or into the cleanup list. */
+  function idleSection(rows: SessionItem[]) {
+    const { agents, shells } = candidates;
+    if (cleanup) return cleanupView();
+    if (rows.length + agents.length + shells.length === 0) return null;
+    const idleCount = Math.max(rows.length, agents.length);
+    return (
+      <section key="idle" className="inbox-group" aria-label="Idle">
+        <div className="inbox-idle">
+          <button
+            className="inbox-idle-toggle"
+            aria-expanded={idleOpen}
+            disabled={rows.length === 0}
+            onClick={() => setIdleOpen((open) => !open)}
+          >
+            {idleOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            <span>
+              {[
+                idleCount ? plural(idleCount, "idle session") : "",
+                shells.length ? plural(shells.length, "shell") : "",
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </span>
+          </button>
+          {agents.length + shells.length > 0 && (
+            <button
+              className="inbox-link"
+              onClick={() =>
+                setCleanup(new Set(agents.map((row) => row.panel.id)))
+              }
+            >
+              Clean up
+            </button>
+          )}
+        </div>
+        {idleOpen && rows.map(compactRow)}
+      </section>
+    );
+  }
+
   function cleanupView() {
     const { agents, shells } = candidates;
-    if (agents.length + shells.length === 0) return null;
-    if (!cleanup)
-      return (
-        <div className="inbox-idle">
-          <ListChecks size={12} />
-          <span>
-            {[
-              agents.length ? `${agents.length} idle sessions` : "",
-              shells.length ? `${shells.length} shells` : "",
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </span>
-          <button
-            className="inbox-link"
-            onClick={() =>
-              setCleanup(new Set(agents.map((row) => row.panel.id)))
-            }
-          >
-            Clean up
-          </button>
-        </div>
-      );
+    if (!cleanup || agents.length + shells.length === 0) return null;
     const chosen = [...agents, ...shells].filter((row) =>
       cleanup.has(row.panel.id),
     );
@@ -1012,13 +1046,17 @@ export function InboxPage({
       <div className="inbox-cleanup" aria-label="Sessions to end">
         {agents.length > 0 && (
           <>
-            <span className="inbox-eyebrow">IDLE SESSIONS</span>
+            <span className="inbox-eyebrow">
+              IDLE SESSIONS · {agents.length}
+            </span>
             {agents.map(cleanupRow)}
           </>
         )}
         {shells.length > 0 && (
           <>
-            <span className="inbox-eyebrow">SHELLS · may be running</span>
+            <span className="inbox-eyebrow">
+              SHELLS · {shells.length} · may be running
+            </span>
             {shells.map(cleanupRow)}
           </>
         )}
@@ -1053,7 +1091,7 @@ export function InboxPage({
       <div className="inbox-head">
         <div className="inbox-head-title">
           <h1>Inbox</h1>
-          <p>{headline}</p>
+          {needs.length > 0 && <p>{headline}</p>}
         </div>
         <label className="inbox-search">
           <input
@@ -1063,30 +1101,36 @@ export function InboxPage({
             onChange={(event) => setQuery(event.target.value)}
           />
         </label>
-        <select
-          aria-label="Inbox project"
-          value={project}
-          onChange={(event) => setProject(event.target.value)}
-        >
-          <option value="">All projects</option>
-          {projects.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="Inbox host"
-          value={hostFilter}
-          onChange={(event) => setHostFilter(event.target.value)}
-        >
-          <option value="">All hosts</option>
-          {hosts.map(([key, label]) => (
-            <option key={key} value={key}>
-              {label}
-            </option>
-          ))}
-        </select>
+        <span className="inbox-select">
+          <select
+            aria-label="Inbox project"
+            value={project}
+            onChange={(event) => setProject(event.target.value)}
+          >
+            <option value="">All projects</option>
+            {projects.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+          <ChevronDown size={12} aria-hidden />
+        </span>
+        <span className="inbox-select">
+          <select
+            aria-label="Inbox host"
+            value={hostFilter}
+            onChange={(event) => setHostFilter(event.target.value)}
+          >
+            <option value="">All hosts</option>
+            {hosts.map(([key, label]) => (
+              <option key={key} value={key}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <ChevronDown size={12} aria-hidden />
+        </span>
         <ExtensionNavSlot
           registry={registry}
           placement="sessions.navigation"
@@ -1127,7 +1171,6 @@ export function InboxPage({
               {visible.length === 0 && (
                 <p className="inbox-none">Nothing matches.</p>
               )}
-              {cleanupView()}
               {errorLine}
             </div>
             <div className="inbox-preview">

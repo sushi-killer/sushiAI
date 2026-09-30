@@ -35,6 +35,13 @@ export type Settings = {
   protectedPaths: string[];
   maxAttempts: number;
   parallel: number;
+  /** Dollars a UTC day may spend across every repo before orchd asks (a
+   * `daily_budget` question) instead of starting a plan run or implement
+   * attempt; 0 = off. */
+  dailyBudgetUsd: number;
+  /** Start ready `next`-bucket backlog tasks by themselves while fewer than
+   * `parallel` task loops are live. */
+  autopilot: boolean;
   /** At most this many subtasks of one parent run at once (`parallel` stays
    * the global cap). */
   childParallel: number;
@@ -109,14 +116,39 @@ export type QuestionKind =
   | "protected_path"
   | "review_dispute"
   | "plan_question"
+  | "daily_budget"
   | "agent_question";
+
+/** The stage that asked a question. */
+export type AskedBy =
+  "brief" | "plan" | "implement" | "verify" | "review" | "advisor" | "land";
 
 export type Question = {
   text: string;
   options: string[];
   /** What the question is about; the answer policy picks its rule by it. */
   kind: QuestionKind;
+  /** Absent on a question asked before orchd recorded it. */
+  askedBy?: AskedBy;
+  /** When it was asked, ms epoch; absent like `askedBy`. */
+  askedAt?: number;
 };
+
+/** One answered question in `Task.questionHistory`. */
+export type AnsweredQuestion = {
+  question: string;
+  options: string[];
+  kind: QuestionKind;
+  askedBy?: AskedBy;
+  askedAt?: number;
+  answer: string;
+  answeredAt: number;
+  answeredBy: "owner" | "policy" | "judge" | "orchestrator";
+};
+
+export type BacklogBucket = "next" | "later";
+/** A task's place in the planning backlog, ascending `order` per bucket. */
+export type Backlog = { bucket: BacklogBucket; order: number };
 
 export type VerifyResult = {
   command: string;
@@ -365,6 +397,11 @@ export type Task = {
   evalSet?: string;
   evalName?: string;
   question?: Question;
+  /** Every answered question, oldest first; absent when none was answered. */
+  questionHistory?: AnsweredQuestion[];
+  /** Set while the task sits in the planning backlog; `task.start` or the
+   * autopilot clears it. */
+  backlog?: Backlog;
   /** Owner and orchestrator decisions, newest last - includes "Owner: ..."
    * answers to a question. */
   decisions: string[];
@@ -377,6 +414,9 @@ export type Task = {
   /** Times the owner raised the `variant.maxCostUsd` budget; the budget in
    * force is that amount times `1 + budgetRaises`. */
   budgetRaises?: number;
+  /** The UTC day (YYYY-MM-DD) the owner said "run anyway" to the daily
+   * budget question. */
+  dailyBudgetOkDay?: string;
   /** Hides the task from the default task list without deleting it. */
   archived: boolean;
   createdAt: number;
@@ -390,33 +430,70 @@ export type LogEvent = {
   attempt: number;
   line: string;
 };
+/** What a chat session is for: the orchestrator chat, or a brainstorm that
+ * refines a feature idea into a task draft. Every `chat.*` method takes an
+ * optional `kind`; without it it means `chat`. */
+export type ChatKind = "chat" | "brainstorm";
+/** A task the orchestrator proposed, read from its reply's `sushi-draft`
+ * block. */
+export type ChatDraft = {
+  title: string;
+  goal: string;
+  criteria: string[];
+  dependsOn: string[];
+  tier?: Tier;
+};
+export type ChatQuestion = { text: string; options: string[] };
 /** One of the orchestrator agent's chat sessions for a repo, kept by the
- * daemon. `chat.get`/`chat.send` act on the repo's current session. */
+ * daemon. `chat.get`/`chat.send` act on the kind's current session. */
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
+  /** The reply's prose; its draft block is taken out. */
   text: string;
   ts: number;
+  draft?: ChatDraft;
+  questions?: ChatQuestion[];
 };
 export type ChatThread = {
   repo: string;
   id: string;
+  kind: ChatKind;
+  createdAt: number;
   /** Set from the session's first owner message; absent until then. */
   title?: string;
   messages: ChatMessage[];
   busy: boolean;
   note?: string;
   error?: string;
+  /** The latest task the orchestrator proposed, until the owner acts on it
+   * (`chat.clearDraft`). */
+  draft?: ChatDraft;
 };
 /** A session as the session list shows it - no message bodies. */
-export type ChatSessionSummary = { id: string; title?: string; busy: boolean };
+export type ChatSessionSummary = {
+  id: string;
+  kind: ChatKind;
+  title?: string;
+  busy: boolean;
+  /** The last message's time, or the session's creation; absent from a
+   * daemon older than session kinds. */
+  updatedAt?: number;
+  messageCount: number;
+};
+/** One kind's sessions and that kind's current one. */
 export type ChatSessionList = {
   current: string;
   sessions: ChatSessionSummary[];
 };
-/** `thread` is the current session, whole; `current`/`sessions` are what
- * `chat.list` would return at the same moment. */
-export type ChatEvent = { event: "chat"; thread: ChatThread } & ChatSessionList;
+/** `thread` is the kind's current session, whole; `current`/`sessions` are
+ * what `chat.list {kind}` would return at the same moment. */
+export type ChatEvent = {
+  event: "chat";
+  /** Absent from a daemon older than session kinds: its only kind is chat. */
+  kind?: ChatKind;
+  thread: ChatThread;
+} & ChatSessionList;
 
 /** One agent-to-agent (or agent-to-orchestrator) message, kept by the daemon
  * per repo. `from`/`to` are either a task id or the literal `"orchestrator"`.
@@ -645,7 +722,7 @@ export type SpendRow = {
   cacheHitRate: number;
 };
 
-/** `costs.summary {repo?, taskId?, sinceDays?, groupBy}`. */
+/** `costs.summary {repo?, taskId?, sinceDays? | from?/to?, groupBy}`. */
 export type SpendSummary = {
   rows: SpendRow[];
   totals: Omit<SpendRow, "key" | "keys">;

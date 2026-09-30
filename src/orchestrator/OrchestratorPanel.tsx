@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   ArchiveRestore,
   ChartColumn,
@@ -7,15 +13,13 @@ import {
   LayoutList,
   ListTodo,
   MessageSquare,
-  RefreshCw,
-  Server,
   Sparkles,
   X,
 } from "lucide-react";
 import "./orchestrator.css";
 import type { OrchestratorView } from "../types";
 import type { TaskTarget } from "./notices";
-import type { OrchestratorHost } from "./types";
+import type { OrchestratorHost, Preflight } from "./types";
 import { pendingReveal, subscribeReveal } from "./reveal";
 import {
   useOrchestratorClient,
@@ -31,9 +35,14 @@ import {
   hostOf,
   hostName as hostNameOf,
   hostsInUse,
-  preflightProblems,
+  needsSetup,
   repoSuggestions,
+  runningCount,
+  shownHost,
+  type DaemonReach,
 } from "./hosts";
+import { HostSelect } from "./HostSelect";
+import { PreflightStrip, RemoteSetup, RepoPrompt } from "./RemoteHostViews";
 import { useOrchestratorHosts } from "./useHosts";
 import { useWorkspaceRepos } from "./workspaceRepos";
 import {
@@ -57,7 +66,7 @@ import type { ChatMessage, Message, Proposal, Settings, Task } from "./types";
 import { Banner, Tag } from "./ui";
 import { OrchRail } from "./OrchRail";
 import {
-  enterKind,
+  eventKind,
   isOfKind,
   listSessions,
   type KindedList,
@@ -71,7 +80,12 @@ import { AnalyticsView } from "./Analytics";
 import { PlanView } from "./PlanView";
 import { BrainstormView } from "./BrainstormView";
 
-type DaemonState = "loading" | "ready" | "not-built" | "unavailable";
+type DaemonState = DaemonReach;
+
+/** How often an open panel checks its daemon still answers, and how long
+ * one check may take before the daemon counts as gone. */
+const PING_EVERY_MS = 4000;
+const PING_TIMEOUT_MS = 3000;
 
 /** What the main pane beside the rail shows: see `OrchestratorView`. */
 type View = OrchestratorView;
@@ -163,12 +177,22 @@ function viewIcon(kind: View["kind"]) {
 function OrchestratorBody({
   cwd,
   hostName,
+  header,
+  remote,
+  onDaemon,
   view: savedView,
   onViewChange,
 }: {
   cwd: string;
   /** Set only when several hosts are in use: named on each task row. */
   hostName?: string;
+  /** The host selector, pinned at the top of the rail. */
+  header: ReactNode;
+  /** Set on a remote host: its name (the composer's "on <host>") and what
+   * it offers (Home's preflight strip). */
+  remote?: { name: string; preflight?: Preflight | null };
+  /** Reports each change of the daemon's reachability to the selector. */
+  onDaemon(state: DaemonState): void;
   /** The view the panel had when it was last open; seeds its own state. */
   view?: OrchestratorView;
   /** Reports the view after each change so it can be saved on the panel. */
@@ -212,6 +236,59 @@ function OrchestratorBody({
   );
   const [proposals, setProposals] = useState<Proposal[]>([]);
 
+  const reportDaemon = useRef(onDaemon);
+  reportDaemon.current = onDaemon;
+  useEffect(() => reportDaemon.current(daemonState), [daemonState]);
+
+  // The subscribe relay doesn't tell the renderer when the daemon goes away,
+  // so an open panel pings it: one that stops answering flips the panel to
+  // the unreachable state within a few seconds, and one that answers again -
+  // or answers as a new process, restarted in between - reloads the task
+  // list, whose events the old subscription missed.
+  const daemonRef = useRef(daemonState);
+  daemonRef.current = daemonState;
+  useEffect(() => {
+    let inFlight = false;
+    let pid: number | null = null;
+    let cancelled = false;
+    const check = () => {
+      if (inFlight || daemonRef.current === "not-built") return;
+      inFlight = true;
+      let timer = 0;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = window.setTimeout(
+          () => reject(new Error("orchd did not respond")),
+          PING_TIMEOUT_MS,
+        );
+      });
+      Promise.race([orchestratorClient.probe(), timeout])
+        .then((answer) => {
+          if (cancelled) return;
+          const restarted = pid !== null && answer.pid !== pid;
+          pid = answer.pid;
+          if (daemonRef.current === "unavailable") {
+            setDaemonState("loading");
+            setReload((n) => n + 1);
+          } else if (restarted) setReload((n) => n + 1);
+        })
+        .catch((e) => {
+          if (cancelled || daemonRef.current !== "ready") return;
+          const message = errorText(e);
+          setError(message);
+          setDaemonState(daemonDown(message) ?? "unavailable");
+        })
+        .finally(() => {
+          window.clearTimeout(timer);
+          inFlight = false;
+        });
+    };
+    const interval = window.setInterval(check, PING_EVERY_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [orchestratorClient]);
+
   useEffect(() => {
     let cancelled = false;
     // Settings rides along with the task list only for its display value
@@ -254,7 +331,9 @@ function OrchestratorBody({
           return;
         }
         if (event.event === "chat") {
-          if (event.thread.repo === cwd) {
+          // A brainstorm's replies are its own; only the plain chat feeds
+          // the rail's "new" count.
+          if (eventKind(event) === "chat" && event.thread.repo === cwd) {
             setChatMessages(event.thread.messages);
             setChatThreadId(event.thread.id);
           }
@@ -286,7 +365,7 @@ function OrchestratorBody({
         setChatThreadId(thread.id);
       })
       .catch(() => {});
-    listSessions(cwd, "chat")
+    listSessions(cwd, "chat", orchestratorClient)
       .then((list) => !cancelled && setChatSessions(list))
       .catch(() => {});
     orchestratorClient
@@ -320,7 +399,7 @@ function OrchestratorBody({
     }
   }, [cwd, chatMessages.length, chatSeen, chatOpen, latestChat]);
   const chatIsChat =
-    !chatThreadId || isOfKind(cwd, chatSessions, chatThreadId, "chat");
+    !chatThreadId || isOfKind(chatSessions, chatThreadId, "chat");
   const chatNew =
     chatSeen === null || chatOpen || !chatIsChat
       ? 0
@@ -443,8 +522,8 @@ function OrchestratorBody({
     if (!text || creatingBusy) return;
     setCreatingBusy(true);
     setError("");
-    enterKind(cwd, "chat")
-      .then(() => orchestratorClient.chatSend(cwd, text))
+    orchestratorClient
+      .chatSend(cwd, text)
       .then(() => {
         setTaskDraft("");
         open({ kind: "chat" });
@@ -481,18 +560,11 @@ function OrchestratorBody({
     setReload((n) => n + 1);
   }
 
-  if (daemonState === "loading" && lastSeenAt === null && !error)
-    return <div className="loading">Connecting to the orchestrator…</div>;
-
+  const connecting = daemonState === "loading" && lastSeenAt === null && !error;
   const offline = daemonState !== "ready";
   const refresh = live.tasks.map((t) => `${t.id}:${t.updatedAt}`).join();
   const needYou = tasks.filter(needsOwner).length;
-  const running = tasks.filter(
-    (t) =>
-      t.status === "running" ||
-      t.status === "drafting" ||
-      t.status === "queued",
-  ).length;
+  const running = runningCount(tasks);
   const improvementsCount = proposals.filter(
     (p) => p.status === "proposed" || p.status === "revert_suggested",
   ).length;
@@ -506,8 +578,10 @@ function OrchestratorBody({
       chatNew={chatNew}
       improvementsCount={improvementsCount}
       archivedCount={archivedTasks.length}
-      offline={offline}
+      offline={offline && !connecting}
       hostName={hostName}
+      header={header}
+      bare={connecting}
       onOpen={open}
     />
   );
@@ -516,8 +590,12 @@ function OrchestratorBody({
     !offline && (current.kind === "chat" || current.kind === "messages")
       ? current.kind
       : null;
+  // Figma has no composer on Improvements or Analytics.
   const composerMode: "task" | "plan" | "ask" | null =
-    chatKind || current.kind === "brainstorm"
+    chatKind ||
+    current.kind === "brainstorm" ||
+    current.kind === "improvements" ||
+    current.kind === "analytics"
       ? null
       : current.kind === "task"
         ? "ask"
@@ -555,7 +633,7 @@ function OrchestratorBody({
     const seen =
       lastSeenAt === null
         ? ""
-        : ` · last seen ${formatDuration(Date.now() - lastSeenAt).replace(/ \d+s$/, "")} ago`;
+        : ` · last seen ${formatDuration(Date.now() - lastSeenAt)} ago`;
     return (
       <>
         <Banner
@@ -577,6 +655,8 @@ function OrchestratorBody({
   }
 
   function mainView() {
+    if (connecting)
+      return <div className="loading">Connecting to the orchestrator…</div>;
     if (offline)
       return <div className="orch-view-scroll offline">{offlineBody()}</div>;
     switch (current.kind) {
@@ -677,13 +757,21 @@ function OrchestratorBody({
             onOpen={(id) => open({ kind: "task", id })}
             onOpenAnalytics={() => open({ kind: "analytics" })}
             onSendNote={async (text) => {
-              await enterKind(cwd, "chat");
               await orchestratorClient.chatSend(cwd, text);
             }}
             onTry={(text) => {
               setTaskDraft(text);
               setFocusComposer((n) => n + 1);
             }}
+            remoteHost={remote?.name}
+            hostStrip={
+              remote?.preflight && (
+                <PreflightStrip
+                  hostName={remote.name}
+                  preflight={remote.preflight}
+                />
+              )
+            }
           />
         );
     }
@@ -788,6 +876,7 @@ function OrchestratorBody({
               }
               disabled={offline}
               sending={creatingBusy}
+              host={remote ? `on ${remote.name}` : undefined}
               route={
                 composerMode === "ask" && settings ? (
                   <OrchestratorRouteChip
@@ -831,20 +920,91 @@ function OrchestratorBody({
   );
 }
 
-const HOST_STATE_TEXT: Record<OrchestratorHost["state"], string> = {
-  idle: "",
-  connecting: "Connecting…",
-  installing: "Installing the orchestrator…",
-  building: "Building the orchestrator…",
-  starting: "Starting the orchestrator…",
-  ready: "",
-  error: "",
+/** The states a host passed through while this panel watched it, when it
+ * entered the last one, and its last failure: the setup card's step
+ * details, its timer, and what to keep showing while the main process
+ * retries on its own. `retry` forgets the failure (the owner's Try again). */
+function useHostTrail(host: string, info: OrchestratorHost | undefined) {
+  const state = info?.state;
+  const detail = info?.detail ?? "";
+  const fresh = (): HostTrail => ({
+    host,
+    states: state ? [state] : [],
+    since: Date.now(),
+    lastError: state === "error" ? detail : "",
+  });
+  const [trail, setTrail] = useState<HostTrail>(fresh);
+  useEffect(() => {
+    setTrail((old) => {
+      if (old.host !== host)
+        return {
+          host,
+          states: state ? [state] : [],
+          since: Date.now(),
+          lastError: state === "error" ? detail : "",
+        };
+      const lastError =
+        state === "error"
+          ? detail
+          : state === "connecting" || state === "idle"
+            ? old.lastError
+            : "";
+      if (
+        !state ||
+        (old.states.at(-1) === state && old.lastError === lastError)
+      )
+        return old;
+      return {
+        host,
+        states:
+          old.states.at(-1) === state ? old.states : [...old.states, state],
+        since: old.states.at(-1) === state ? old.since : Date.now(),
+        lastError,
+      };
+    });
+  }, [host, state, detail]);
+  const current = trail.host === host ? trail : fresh();
+  const retry = () => setTrail((old) => ({ ...old, lastError: "" }));
+  return { trail: current, retry };
+}
+
+type HostTrail = {
+  host: string;
+  states: OrchestratorHost["state"][];
+  since: number;
+  lastError: string;
 };
 
-/** The Orchestrator panel: a host selector (Local + each SSH profile) above
- * the task list, new-task form, chat and settings of the chosen host's
- * daemon. In a workspace opened on a host the panel starts on that host and
- * its folder; any other host asks for a repo path on it. */
+/** The SSH address ("user@host") of each Connections profile, by host id. */
+function useHostAddresses(hosts: OrchestratorHost[]): Record<string, string> {
+  const [addresses, setAddresses] = useState<Record<string, string>>({});
+  const ids = hosts.map((host) => host.id).join();
+  useEffect(() => {
+    let cancelled = false;
+    window.bridge
+      ?.connectionsList()
+      .then((profiles) => {
+        if (cancelled) return;
+        setAddresses(
+          Object.fromEntries(
+            profiles.map((profile) => [`ssh:${profile.id}`, profile.host]),
+          ),
+        );
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [ids]);
+  return addresses;
+}
+
+/** The Orchestrator panel: the host selector (Local + each SSH profile) at
+ * the top of the rail, above the task list, new-task form, chat and
+ * settings of the chosen host's daemon. A remote host that is still being
+ * set up shows its setup steps instead. In a workspace opened on a host the
+ * panel starts on that host and its folder; any other host asks for a repo
+ * path on it. */
 export function OrchestratorPanel({
   cwd,
   endpoint,
@@ -853,6 +1013,7 @@ export function OrchestratorPanel({
   repo: savedRepo,
   onViewChange,
   onHostChange,
+  onAddHost,
 }: {
   cwd: string;
   /** The workspace's own host: "ssh:<id>" or nothing for this machine. */
@@ -865,44 +1026,57 @@ export function OrchestratorPanel({
   /** Reports the view after each change so it can be saved on the panel. */
   onViewChange(view: OrchestratorView | undefined): void;
   onHostChange(choice: { host: string; repo?: string }): void;
+  /** Opens Settings -> Connections, where SSH hosts are added. */
+  onAddHost?: () => void;
 }) {
   const workspaceHost = endpoint?.startsWith("ssh:") ? endpoint : LOCAL;
   const { hosts, refresh } = useOrchestratorHosts();
   const workspaces = useWorkspaceRepos();
   const host = savedHost ?? workspaceHost;
-  const info = hosts.find((item) => item.id === host);
   const remote = host !== LOCAL;
-  const [tasks, setTasks] = useState<Task[]>([]);
+  // The host's tasks, kept per host: a failed reload (the daemon went away)
+  // keeps the last list, and with it the repo picked from it.
+  const [hostTasks, setHostTasks] = useState<{ host: string; list: Task[] }>({
+    host,
+    list: [],
+  });
+  const tasks = hostTasks.host === host ? hostTasks.list : [];
+  // Bumped by Try again: asks the host's daemon once more, which re-runs
+  // the main process's setup when it failed.
+  const [attempt, setAttempt] = useState(0);
+  const [daemon, setDaemon] = useState<DaemonState | undefined>();
+  // Hosts whose daemon answered this panel at least once: losing one later
+  // keeps its tasks on screen behind the offline banner, not the setup card.
+  const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
+  const [running, setRunning] = useState<Record<string, number>>({});
+  const rawInfo = hosts.find((item) => item.id === host);
+  const { trail, retry } = useHostTrail(host, rawInfo);
+  const info = rawInfo && shownHost(rawInfo, trail.lastError);
   const ready = info?.state === "ready";
+  const addresses = useHostAddresses(hosts);
 
-  // The host's own tasks give its repo suggestions (and a default repo).
+  // The host's own tasks give its repo suggestions (and a default repo);
+  // asking for them is also what starts a remote host's setup.
   useEffect(() => {
     if (host === LOCAL) return;
     let cancelled = false;
-    setTasks([]);
     orchestratorClientFor(host)
       .taskList()
-      .then((list) => !cancelled && setTasks(list))
-      .catch(() => {});
+      .then((list) => !cancelled && setHostTasks({ host, list }))
+      .catch(() => {})
+      .finally(() => !cancelled && refresh());
     return () => {
       cancelled = true;
     };
-  }, [host, ready]);
+  }, [host, ready, attempt, refresh]);
 
   const suggestions = repoSuggestions(host, workspaces, tasks);
   const repo =
     savedRepo ?? (host === workspaceHost ? cwd : (suggestions[0] ?? ""));
-  // Typing a path only takes effect on Enter or blur: every commit remounts
-  // the panel body for the new repo.
-  const [repoDraft, setRepoDraft] = useState(repo);
-  useEffect(() => setRepoDraft(repo), [repo]);
-  const commitRepo = () => {
-    const next = repoDraft.trim();
-    if (next && next !== repo) onHostChange({ host, repo: next });
-  };
   const choose = useCallback(
     (next: { host: string; repo?: string }) => {
       onViewChange(undefined);
+      setDaemon(undefined);
       onHostChange(next);
     },
     [onViewChange, onHostChange],
@@ -925,89 +1099,111 @@ export function OrchestratorPanel({
     return subscribeReveal(take);
   }, [cwd, host, repo, workspaceHost, choose]);
 
-  const problems = preflightProblems(info?.preflight);
+  const onDaemon = useCallback(
+    (state: DaemonState) => {
+      setDaemon(state);
+      if (state === "ready")
+        setAnswered((old) => (old.has(host) ? old : new Set(old).add(host)));
+    },
+    [host],
+  );
+
+  /** The running count of every host that can answer, for the menu. */
+  function loadRunning() {
+    for (const item of hosts) {
+      if (item.id !== LOCAL && item.state !== "ready") continue;
+      orchestratorClientFor(item.id)
+        .taskList()
+        .then((list) =>
+          setRunning((old) => ({ ...old, [item.id]: runningCount(list) })),
+        )
+        .catch(() => {});
+    }
+  }
+
+  const name = info?.name ?? hostNameOf(hosts, host);
+  const hostSelect = (
+    <HostSelect
+      hosts={hosts.map((item) => (item.id === host && info ? info : item))}
+      current={host}
+      daemon={daemon}
+      running={running}
+      repo={repo}
+      suggestions={suggestions}
+      onChoose={(next) => choose({ host: next })}
+      onRepo={(next) => onHostChange({ host, repo: next })}
+      onRecheck={() => {
+        void window.bridge
+          ?.orchestratorPreflight(host)
+          .then(refresh)
+          .catch(refresh);
+      }}
+      onAddHost={onAddHost}
+      onOpen={loadRunning}
+    />
+  );
+
+  const settingUp =
+    remote && info !== undefined && needsSetup(info, answered.has(host));
+  if (settingUp || (remote && !repo)) {
+    const content =
+      settingUp && info ? (
+        <RemoteSetup
+          host={info}
+          seen={trail}
+          address={addresses[host]}
+          onRetry={() => {
+            retry();
+            setAttempt((n) => n + 1);
+          }}
+          onCancel={() =>
+            choose({ host: workspaceHost === host ? LOCAL : workspaceHost })
+          }
+        />
+      ) : (
+        <RepoPrompt
+          hostName={name}
+          suggestions={suggestions}
+          onRepo={(next) => onHostChange({ host, repo: next })}
+        />
+      );
+    return (
+      <div className="orchestrator-host">
+        <div className="orchestrator-panel">
+          <OrchRail
+            view={{ kind: "home" }}
+            tasks={[]}
+            planCount={0}
+            chatNew={0}
+            improvementsCount={0}
+            archivedCount={0}
+            header={hostSelect}
+            bare
+            onOpen={() => {}}
+          />
+          <div className="orch-main">
+            <div className="orch-switcher">{hostSelect}</div>
+            {content}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const showHostNames = hostsInUse(hosts) > 1;
   return (
     <div className="orchestrator-host">
-      <div className="orch-hostbar">
-        <Server size={13} aria-hidden />
-        <select
-          aria-label="Orchestrator host"
-          value={host}
-          onChange={(event) => choose({ host: event.target.value })}
-        >
-          {hosts.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.name}
-              {item.state === "error" ? " (unreachable)" : ""}
-            </option>
-          ))}
-        </select>
-        {remote && (
-          <>
-            <input
-              className="orch-hostbar-repo"
-              aria-label={`Repo path on ${info?.name ?? host}`}
-              list="orch-repo-suggestions"
-              placeholder={`Repo path on ${info?.name ?? "the host"}`}
-              value={repoDraft}
-              onChange={(event) => setRepoDraft(event.target.value)}
-              onBlur={commitRepo}
-              onKeyDown={(event) => event.key === "Enter" && commitRepo()}
-            />
-            <datalist id="orch-repo-suggestions">
-              {suggestions.map((path) => (
-                <option key={path} value={path} />
-              ))}
-            </datalist>
-            <button
-              className="icon-button"
-              title="Check git and the harness CLIs on this host"
-              aria-label="Recheck host"
-              onClick={() => {
-                void window.bridge
-                  ?.orchestratorPreflight(host)
-                  .then(refresh)
-                  .catch(refresh);
-              }}
-            >
-              <RefreshCw size={13} />
-            </button>
-          </>
-        )}
-        {info && HOST_STATE_TEXT[info.state] && (
-          <span className="orch-hostbar-state">
-            {info.detail || HOST_STATE_TEXT[info.state]}
-          </span>
-        )}
-        {info?.state === "error" && (
-          <span className="orch-hostbar-error" role="alert">
-            {info.detail}
-          </span>
-        )}
-        {remote && problems.length > 0 && (
-          <span className="orch-hostbar-problems">{problems.join(" · ")}</span>
-        )}
-      </div>
       <OrchestratorHostProvider value={host}>
-        {repo ? (
-          <OrchestratorBody
-            key={`${host}\n${repo}`}
-            cwd={repo}
-            hostName={
-              showHostNames
-                ? (info?.name ?? hostNameOf(hosts, host))
-                : undefined
-            }
-            view={savedHost === host || !savedHost ? view : undefined}
-            onViewChange={onViewChange}
-          />
-        ) : (
-          <div className="empty-state">
-            <h2>Which repo on {info?.name ?? host}?</h2>
-            <p>Enter the repo's path on that host above.</p>
-          </div>
-        )}
+        <OrchestratorBody
+          key={`${host}\n${repo}`}
+          cwd={repo}
+          hostName={showHostNames ? name : undefined}
+          header={hostSelect}
+          remote={remote ? { name, preflight: info?.preflight } : undefined}
+          onDaemon={onDaemon}
+          view={savedHost === host || !savedHost ? view : undefined}
+          onViewChange={onViewChange}
+        />
       </OrchestratorHostProvider>
     </div>
   );

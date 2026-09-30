@@ -252,22 +252,20 @@
 }
 
 /* Orch/StageStep + Orch/StageTrack. */
+/* The frame is the query container: the track inside tightens, then drops
+ * labels as the frame narrows, so labels never run into each other. */
+.ui-stage-frame {
+  container-type: inline-size;
+  width: 100%;
+  min-width: 0;
+}
 .ui-stage-track {
   display: flex;
   align-items: center;
   min-height: 24px;
 }
-.ui-stage-slot {
-  display: flex;
-  align-items: center;
-  flex: 0 1 auto;
-  min-width: 0;
-}
-.ui-stage-slot + .ui-stage-slot {
-  flex: 1 1 0;
-}
 .ui-stage-connector {
-  flex: 1;
+  flex: 1 1 0;
   min-width: 8px;
   height: 1px;
   margin: 0 10px;
@@ -329,6 +327,46 @@
 .ui-stage-step.pending {
   color: var(--text-faint);
   font-weight: 400;
+}
+.ui-stage-step {
+  flex: none;
+}
+@container (max-width: 440px) {
+  .ui-stage-step {
+    gap: 5px;
+  }
+  .ui-stage-connector {
+    min-width: 6px;
+    margin: 0 4px;
+  }
+}
+/* Too narrow for every label: only the step that needs attention keeps it;
+ * the others stay in the accessibility tree. */
+@container (max-width: 380px) {
+  .ui-stage-step:not(.active, .blocked, .failed) .ui-stage-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .ui-stage-step:not(.active, .blocked, .failed) {
+    gap: 0;
+  }
+}
+@container (max-width: 220px) {
+  .ui-stage-step .ui-stage-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .ui-stage-step {
+    gap: 0;
+  }
 }
 
 /* Orch/Criterion. */

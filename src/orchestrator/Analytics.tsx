@@ -1,42 +1,32 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, ChevronLeft, ChevronRight, GitMerge } from "lucide-react";
+import { ArrowRight, ChevronLeft, ChevronRight } from "lucide-react";
 import { useOrchestratorClient } from "./hostContext";
-import { errorText, formatCost } from "./helpers";
+import type { OrchestratorClient } from "./client";
+import { errorText, formatCost, formatDuration } from "./helpers";
 import { landTasks } from "./ownerAttention";
 import {
   cohort,
+  landInsight,
+  landingTasks,
   periodAt,
   periodStats,
   signed,
   spendBars,
+  spendRange,
   type Period,
   type PeriodStats,
 } from "./stats";
 import type { SpendGroup, SpendSummary, Task } from "./types";
 import "./analytics.css";
 
-/** A cost summary that echoes the range it was asked for, once orchd
- * supports `from`/`to`. */
-type RangedSummary = SpendSummary & { from?: number; to?: number };
-
 type Spend = {
-  day: RangedSummary;
-  stage: RangedSummary;
-  task: RangedSummary;
-  /** The daemon honoured `from`/`to`: previous periods can be asked for. */
-  ranged: boolean;
+  day: SpendSummary;
+  stage: SpendSummary;
+  task: SpendSummary;
 };
 
 type Tone = "ok" | "warning";
 type Note = { text: string; tone?: Tone };
-
-function shortDuration(ms: number): string {
-  const minutes = Math.round(ms / 60000);
-  if (minutes < 1) return "<1m";
-  if (minutes < 60) return `${minutes}m`;
-  const rest = minutes % 60;
-  return rest ? `${Math.floor(minutes / 60)}h ${rest}m` : `${minutes / 60}h`;
-}
 
 function dayLabel(ms: number): string {
   return new Date(ms).toLocaleDateString("en-US", {
@@ -55,57 +45,24 @@ function periodRange(period: Period): string {
   return `${dayLabel(period.from)}–${end}`;
 }
 
+/** The period's spend by day, stage and task, windowed by its UTC dates. */
 async function loadSpend(
-  orchestratorClient: ReturnType<
-    typeof import("./client").orchestratorClientFor
-  >,
+  client: OrchestratorClient,
   cwd: string,
   period: Period,
-  offset: number,
 ): Promise<Spend> {
-  const query = (groupBy: SpendGroup) => {
-    // Sent with `sinceDays` too: a daemon that ignores the range answers for
-    // the last week, which is the period being shown until the pager exists.
-    const params = {
+  const query = (groupBy: SpendGroup) =>
+    client.costsSummary({
       repo: cwd,
-      sinceDays: 7,
-      from: period.from,
-      to: period.to,
+      ...spendRange(period),
       groupBy: [groupBy],
-    };
-    return orchestratorClient.costsSummary(params) as Promise<RangedSummary>;
-  };
+    });
   const [day, stage, task] = await Promise.all([
     query("day"),
     query("stage"),
     query("task"),
   ]);
-  const ranged = day.from !== undefined || offset > 0;
-  return { day, stage, task, ranged };
-}
-
-async function loadPrevious(
-  orchestratorClient: ReturnType<
-    typeof import("./client").orchestratorClientFor
-  >,
-  cwd: string,
-  period: Period,
-): Promise<RangedSummary | null> {
-  const previous = periodAt(period.to - 1, 1);
-  const params = {
-    repo: cwd,
-    from: previous.from,
-    to: previous.to,
-    groupBy: ["day"] as SpendGroup[],
-  };
-  try {
-    const summary = (await orchestratorClient.costsSummary(
-      params,
-    )) as RangedSummary;
-    return summary.from === undefined ? null : summary;
-  } catch {
-    return null;
-  }
+  return { day, stage, task };
 }
 
 /** Lower is better for every delta on this page except "landed". */
@@ -235,7 +192,8 @@ export function AnalyticsView({
   const [offset, setOffset] = useState(0);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [spend, setSpend] = useState<Spend | null>(null);
-  const [previous, setPrevious] = useState<RangedSummary | null>(null);
+  const [previous, setPrevious] = useState<SpendSummary | null>(null);
+  const [spendError, setSpendError] = useState("");
   const [landing, setLanding] = useState(false);
   const [landError, setLandError] = useState("");
   const period = useMemo(() => periodAt(Date.now(), offset), [offset]);
@@ -246,28 +204,38 @@ export function AnalyticsView({
       .taskList(cwd, true)
       .then((list) => !cancelled && setTasks(list))
       .catch(() => undefined);
-    loadSpend(orchestratorClient, cwd, period, offset)
+    loadSpend(orchestratorClient, cwd, period)
       .then((result) => {
         if (cancelled) return;
         setSpend(result);
-        if (!result.ranged) return setPrevious(null);
-        loadPrevious(orchestratorClient, cwd, period).then(
-          (p) => !cancelled && setPrevious(p),
-        );
+        setSpendError("");
       })
-      .catch(() => !cancelled && setSpend(null));
+      .catch((e) => {
+        if (cancelled) return;
+        setSpend(null);
+        setSpendError(errorText(e));
+      });
+    orchestratorClient
+      .costsSummary({
+        repo: cwd,
+        ...spendRange(periodAt(period.to - 1, 1)),
+        groupBy: ["day"],
+      })
+      .then((summary) => !cancelled && setPrevious(summary))
+      .catch(() => !cancelled && setPrevious(null));
     return () => {
       cancelled = true;
     };
-  }, [cwd, period, offset, refresh]);
+  }, [cwd, period, refresh, orchestratorClient]);
 
   const now = useMemo(() => periodStats(tasks, period), [tasks, period]);
-  const before = useMemo<PeriodStats | null>(
-    () => (previous ? periodStats(tasks, periodAt(period.to - 1, 1)) : null),
-    [tasks, period, previous],
+  const before = useMemo<PeriodStats>(
+    () => periodStats(tasks, periodAt(period.to - 1, 1)),
+    [tasks, period],
   );
   const inPeriod = useMemo(() => cohort(tasks, period), [tasks, period]);
   const waiting = landTasks(tasks);
+  const insight = landInsight(waiting.length, landingTasks(tasks));
 
   const total = spend?.day.totals.costUsd ?? null;
   const previousTotal = previous?.totals.costUsd ?? null;
@@ -277,7 +245,7 @@ export function AnalyticsView({
       : undefined;
   const perTask = total !== null && now.started ? total / now.started : null;
   const previousPerTask =
-    previousTotal !== null && before?.started
+    previousTotal !== null && before.started
       ? previousTotal / before.started
       : null;
 
@@ -320,9 +288,7 @@ export function AnalyticsView({
     {
       label: "Started",
       value: String(now.started),
-      note: before
-        ? delta(now.started - before.started, String, true)
-        : undefined,
+      note: delta(now.started - before.started, String, true),
     },
     {
       label: "Landed",
@@ -350,15 +316,17 @@ export function AnalyticsView({
       : [
           {
             label: "Median start → landed",
-            value: shortDuration(now.medianToLandMs),
+            value: formatDuration(now.medianToLandMs),
           },
         ]),
   ];
 
   const attentionRows: RowData[] = [
-    ...(now.hasQuestionHistory
-      ? [{ label: "Questions asked", value: String(now.questions) }]
-      : []),
+    {
+      label: "Questions asked",
+      value: String(now.questions),
+      note: delta(now.questions - before.questions, String),
+    },
     {
       label: "Answered for you by the orchestrator",
       value: String(now.answeredForYou),
@@ -371,10 +339,10 @@ export function AnalyticsView({
       : [
           {
             label: "Median wait for your answer",
-            value: shortDuration(now.medianWaitMs),
+            value: formatDuration(now.medianWaitMs),
             note:
-              before?.medianWaitMs != null
-                ? delta(now.medianWaitMs - before.medianWaitMs, shortDuration)
+              before.medianWaitMs !== null
+                ? delta(now.medianWaitMs - before.medianWaitMs, formatDuration)
                 : undefined,
           },
         ]),
@@ -419,7 +387,6 @@ export function AnalyticsView({
       ];
 
   const bars = spend ? spendBars(spend.day, period, endsToday) : [];
-  const canPage = spend?.ranged ?? false;
 
   return (
     <div className="orch-view-scroll an-view">
@@ -432,27 +399,23 @@ export function AnalyticsView({
           </p>
         </div>
         <div className="an-period" role="group" aria-label="Period">
-          {canPage && (
-            <button
-              aria-label="Previous period"
-              onClick={() => setOffset(offset + 1)}
-            >
-              <ChevronLeft size={14} />
-            </button>
-          )}
+          <button
+            aria-label="Previous period"
+            onClick={() => setOffset(offset + 1)}
+          >
+            <ChevronLeft size={14} />
+          </button>
           <span>
             {endsToday ? "This week · " : ""}
             {periodRange(period)}
           </span>
-          {canPage && (
-            <button
-              aria-label="Next period"
-              disabled={offset === 0}
-              onClick={() => setOffset(offset - 1)}
-            >
-              <ChevronRight size={14} />
-            </button>
-          )}
+          <button
+            aria-label="Next period"
+            disabled={offset === 0}
+            onClick={() => setOffset(offset - 1)}
+          >
+            <ChevronRight size={14} />
+          </button>
         </div>
       </div>
 
@@ -466,7 +429,7 @@ export function AnalyticsView({
               : {
                   text: [
                     `${now.landedPercent}%`,
-                    before?.landedPercent != null
+                    before.landedPercent !== null
                       ? signed(
                           now.landedPercent - before.landedPercent,
                           (n) => `${n} pts`,
@@ -478,20 +441,22 @@ export function AnalyticsView({
                 }
           }
         />
-        {now.medianToLandMs !== null && (
-          <Cell
-            label="Median to land"
-            value={shortDuration(now.medianToLandMs)}
-            note={
-              before?.medianToLandMs != null
-                ? delta(
-                    now.medianToLandMs - before.medianToLandMs,
-                    shortDuration,
-                  )
-                : undefined
-            }
-          />
-        )}
+        <Cell
+          label="Median to land"
+          value={
+            now.medianToLandMs === null
+              ? "—"
+              : formatDuration(now.medianToLandMs)
+          }
+          note={
+            now.medianToLandMs !== null && before.medianToLandMs !== null
+              ? delta(
+                  now.medianToLandMs - before.medianToLandMs,
+                  formatDuration,
+                )
+              : undefined
+          }
+        />
         <Cell
           label="Questions to you"
           value={String(now.questions)}
@@ -501,28 +466,32 @@ export function AnalyticsView({
               : undefined
           }
         />
-        {total !== null && (
-          <Cell label="Spend" value={formatCost(total)} note={spendDelta} />
-        )}
+        <Cell
+          label="Spend"
+          value={total === null ? "—" : formatCost(total)}
+          note={spendDelta}
+        />
       </div>
 
-      {waiting.length > 0 && (
+      {insight && (
         <div className="an-insight">
           <ArrowRight size={14} />
-          <span>
-            {waiting.length} finished{" "}
-            {waiting.length === 1 ? "task waits" : "tasks wait"} for a clean
-            checkout
-          </span>
-          <button
-            className="ui-button secondary"
-            disabled={landing}
-            onClick={landAll}
-          >
-            <GitMerge size={14} />
-            Land {waiting.length}
-          </button>
+          <span>{insight}</span>
+          {waiting.length > 0 && (
+            <button
+              className="ui-button secondary"
+              disabled={landing}
+              onClick={landAll}
+            >
+              Land {waiting.length}
+            </button>
+          )}
         </div>
+      )}
+      {spendError && (
+        <p className="an-error" role="alert">
+          Spend: {spendError}
+        </p>
       )}
       {landError && (
         <p className="an-error" role="alert">

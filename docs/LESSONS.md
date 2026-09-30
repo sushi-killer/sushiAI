@@ -33,6 +33,7 @@ Rule: durable state goes in `workspace-state.json`, atomically.
 
 ## Promoted
 
+- 2026-09-30 A preselected answer plus global Enter sent answers the owner never picked → Enter needs an explicit pick or typed text. `enterAnswer` in `ownerAttention.ts`.
 - 2026-09-29 Contradicting criteria cost three attempts → cross-check criteria before launch.
 - 2026-09-28 A/B cause guessed from averages → read `events.jsonl` before explaining a result.
 - 2026-09-24 `task.create` failed on an existing branch (`worktree add -b`) → new branch per task or omit `branch`.
@@ -53,6 +54,5 @@ Rule: durable state goes in `workspace-state.json`, atomically.
 - 2026-09-13 A wrapper printed success for a run that exited 1 → exit code is the verdict, never `npx`. `sushiai-testing` skill.
 - 2026-09-13 A user's ssh_config (`LocalForward`, `/dev/null` known-hosts) broke our tunnel → own `known_hosts`. `connections.cjs`.
 - 2026-09-13 One global `connected` flag colored every host's status dot → per-endpoint `statusByEndpoint`. `useHerdr.ts`.
-- 2026-09-12 Manifest duplicates/missing `surfaceId`, CI skipping test files, smoke dropping `SUSHIAI_EXTENSIONS_DIR` → `manifest.cjs`, contract-coverage test, `ci` script, extension skill.
 - 2026-09-29 orchd preflights checks on a fresh checkout → check commands build what they need. `package.json`.
 - 2026-09-18 A fixture invented a Herdr status (`running`) → check vocabularies against `herdr api snapshot`. `tests/herdr-snapshot.test.cjs`.

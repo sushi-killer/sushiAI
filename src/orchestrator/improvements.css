@@ -87,8 +87,11 @@
   background: var(--bg-raised);
 }
 
+/* The kind and signature keep at least 240px; the buttons wrap under them
+ * on a narrow pane instead of squeezing the title to nothing. */
 .imp-failure {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 10px 14px;
@@ -103,19 +106,21 @@
 }
 .imp-failure-body {
   display: flex;
-  flex: 1;
+  flex: 1 1 240px;
   flex-direction: column;
   gap: 3px;
   min-width: 0;
 }
 .imp-failure-title {
+  display: -webkit-box;
   color: var(--text);
   font-size: 12.5px;
   font-weight: 500;
   line-height: 15px;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 .imp-failure-tasks {
   color: var(--text-muted);

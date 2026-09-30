@@ -1,10 +1,9 @@
 // Pure model behind the Plan and Brainstorm views: which drafts sit where,
-// and how a brainstorm chat turns into a draft task. No React, no I/O.
+// how the backlog reorders, and how a brainstorm draft becomes a task. No
+// React, no I/O.
 import { dependencyTitles, planDrafts } from "./helpers.ts";
-import type { Task } from "./types.ts";
-
-/** Fields orchd may add to a draft task later; read defensively. */
-type Ordered = { bucket?: unknown; order?: unknown };
+import { needsOwner } from "./ownerAttention.ts";
+import type { BacklogBucket, ChatDraft, Task } from "./types.ts";
 
 export type PlanItem = {
   task: Task;
@@ -22,8 +21,6 @@ export type PlanChild = {
 export type PlanModel = {
   next: PlanItem[];
   later: PlanItem[];
-  /** True when the daemon supplied NEXT/LATER buckets. */
-  bucketed: boolean;
 };
 
 export function criteriaLabel(count: number): string {
@@ -41,29 +38,39 @@ function depsDone(task: Task, tasks: Task[]): boolean {
   );
 }
 
-function orderOf(task: Task): number | null {
-  const order = (task as Ordered).order;
-  return typeof order === "number" && Number.isFinite(order) ? order : null;
+/** A draft that never ran: in the backlog (orchd only lets an unstarted
+ * task in), or queued/stopped with no attempt of any stage yet. A task that
+ * is planning or waits for a slot has started and is not a draft. */
+export function unstartedDraft(task: Task): boolean {
+  return !!task.backlog || task.attempts.length === 0;
 }
 
-function bucketOf(task: Task): "next" | "later" | null {
-  const bucket = (task as Ordered).bucket;
-  return bucket === "next" || bucket === "later" ? bucket : null;
+/** The tasks only the Plan lists, never the rail: unstarted drafts - but not
+ * one that needs the owner, such as a task the engine stopped before its
+ * first attempt. */
+export function planOnly(tasks: Task[]): Set<Task> {
+  return new Set(
+    planDrafts(tasks).filter(
+      (task) => unstartedDraft(task) && !needsOwner(task),
+    ),
+  );
 }
 
+/** Backlog tasks by their order first, then the rest oldest first. */
 function byPlanOrder(a: Task, b: Task): number {
-  const ao = orderOf(a);
-  const bo = orderOf(b);
-  if (ao !== null && bo !== null && ao !== bo) return ao - bo;
-  if (ao !== null && bo === null) return -1;
-  if (ao === null && bo !== null) return 1;
+  const ao = a.backlog?.order;
+  const bo = b.backlog?.order;
+  if (ao !== undefined && bo !== undefined && ao !== bo) return ao - bo;
+  if (ao !== undefined && bo === undefined) return -1;
+  if (ao === undefined && bo !== undefined) return 1;
   return a.createdAt - b.createdAt;
 }
 
 /** The Plan's lists. A draft whose planner-split children are drafts too
- * becomes a group; without daemon buckets everything is NEXT, oldest first. */
+ * becomes a group. LATER holds the `later` backlog bucket; NEXT holds the
+ * `next` bucket and every draft outside the backlog after it. */
 export function planModel(tasks: Task[]): PlanModel {
-  const drafts = planDrafts(tasks);
+  const drafts = planDrafts(tasks).filter(unstartedDraft);
   const ids = new Set(drafts.map((t) => t.id));
   const top = drafts
     .filter((t) => !t.parent || !ids.has(t.parent))
@@ -80,13 +87,39 @@ export function planModel(tasks: Task[]): PlanModel {
       })),
     ready: depsDone(task, tasks),
   }));
-  const bucketed = top.some((t) => bucketOf(t) !== null);
-  if (!bucketed) return { next: items, later: [], bucketed };
   return {
-    next: items.filter((i) => bucketOf(i.task) !== "later"),
-    later: items.filter((i) => bucketOf(i.task) === "later"),
-    bucketed,
+    next: items.filter((i) => i.task.backlog?.bucket !== "later"),
+    later: items.filter((i) => i.task.backlog?.bucket === "later"),
   };
+}
+
+/** The `task.backlog` calls that move `items[index]` one place up (-1) or
+ * down (+1) in its bucket: the list renumbered 0..n in its new order down to
+ * the moved pair (a draft outside the backlog below them stays out), only
+ * the tasks whose order changes. Nothing when it cannot move. */
+export function backlogMoves(
+  items: PlanItem[],
+  index: number,
+  step: -1 | 1,
+  bucket: BacklogBucket,
+): { id: string; order: number }[] {
+  const to = index + step;
+  if (index < 0 || to < 0 || to >= items.length) return [];
+  const order = items.map((i) => i.task);
+  [order[index], order[to]] = [order[to], order[index]];
+  return order
+    .slice(0, Math.max(index, to) + 1)
+    .flatMap((task, at) =>
+      task.backlog?.bucket === bucket && task.backlog.order === at
+        ? []
+        : [{ id: task.id, order: at }],
+    );
+}
+
+/** The draft the autopilot starts next: the first ready NEXT draft in the
+ * backlog (the autopilot never starts a draft outside it). */
+export function autopilotNext(model: PlanModel): Task | undefined {
+  return model.next.find((i) => i.ready && i.task.backlog)?.task;
 }
 
 /** Drafts "Start n ready" starts: every NEXT top-level draft that is not
@@ -95,122 +128,11 @@ export function readyDrafts(model: PlanModel): Task[] {
   return model.next.filter((i) => i.ready).map((i) => i.task);
 }
 
-/** The Autopilot setting when the daemon has one; `null` = not available. */
-export function autopilotOf(settings: unknown): boolean | null {
-  const value = (settings as { autopilot?: unknown } | null)?.autopilot;
-  if (typeof value === "boolean") return value;
-  if (value && typeof value === "object") {
-    const enabled = (value as { enabled?: unknown }).enabled;
-    if (typeof enabled === "boolean") return enabled;
-  }
-  return null;
-}
-
 // ---- Brainstorm ----------------------------------------------------------
 
-export type DraftCriterion = { text: string; met: boolean };
-export type DraftTask = {
-  title: string;
-  goal: string;
-  criteria: DraftCriterion[];
-  /** Titles or ids of the tasks it waits for. */
-  dependsOn: string[];
-  tier?: string;
-  base?: string;
-};
-
-const FENCE = /```(?:sushi-plan|sushi-draft)[^\n]*\n([\s\S]*?)```/g;
-
-function strings(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((v): v is string => typeof v === "string" && v.trim() !== "")
-    : [];
-}
-
-/** Reads a draft from an unknown object (a daemon `draft`, or a parsed
- * block); `null` when it has no title. */
-export function readDraft(value: unknown): DraftTask | null {
-  if (!value || typeof value !== "object") return null;
-  const raw = value as Record<string, unknown>;
-  const title = typeof raw.title === "string" ? raw.title.trim() : "";
-  if (!title) return null;
-  const criteria: DraftCriterion[] = [];
-  if (Array.isArray(raw.criteria)) {
-    for (const item of raw.criteria) {
-      if (typeof item === "string" && item.trim())
-        criteria.push({ text: item.trim(), met: false });
-      else if (item && typeof item === "object") {
-        const c = item as { text?: unknown; met?: unknown };
-        if (typeof c.text === "string" && c.text.trim())
-          criteria.push({ text: c.text.trim(), met: c.met === true });
-      }
-    }
-  }
-  return {
-    title,
-    goal: typeof raw.goal === "string" ? raw.goal.trim() : "",
-    criteria,
-    dependsOn: strings(raw.dependsOn),
-    ...(typeof raw.tier === "string" && raw.tier ? { tier: raw.tier } : {}),
-    ...(typeof raw.base === "string" && raw.base ? { base: raw.base } : {}),
-  };
-}
-
-/** The last fenced `sushi-plan` block in `text`, parsed; `null` when there is
- * none or it is not valid JSON with a title. */
-export function parseDraftBlock(text: string): DraftTask | null {
-  let found: DraftTask | null = null;
-  for (const match of text.matchAll(FENCE)) {
-    try {
-      found = readDraft(JSON.parse(match[1])) ?? found;
-    } catch {
-      // A half-written block is skipped.
-    }
-  }
-  return found;
-}
-
-/** `text` without its draft blocks, for showing in a chat bubble. */
-export function stripDraftBlock(text: string): string {
-  return text.replace(FENCE, "").trim();
-}
-
-/** The chat message that asks the orchestrator for a draft block. */
-export const DRAFT_REQUEST =
-  "Summarise what we settled in this brainstorm as one draft task. Reply with a short sentence and one fenced ```sushi-plan block holding JSON: " +
-  '{"title": string, "goal": string, "criteria": string[], "dependsOn": string[], "tier": "mechanical"|"standard"|"hard", "base": string}. ' +
-  "Use an empty array or omit a field you do not know yet.";
-
-export type ChatLike = {
-  role: string;
-  text: string;
-  options?: unknown;
-};
-
-/** The draft the panel shows: a structured `draft` on the thread when orchd
- * sends one, else the newest block an orchestrator reply carries. */
-export function draftOfThread(thread: {
-  draft?: unknown;
-  messages: ChatLike[];
-}): DraftTask | null {
-  const structured = readDraft(thread.draft);
-  if (structured) return structured;
-  for (let i = thread.messages.length - 1; i >= 0; i--) {
-    const message = thread.messages[i];
-    if (message.role !== "assistant") continue;
-    const parsed = parseDraftBlock(message.text);
-    if (parsed) return parsed;
-  }
-  return null;
-}
-
-/** Option chips a turn carries (`options: string[]` from orchd). */
-export function optionsOf(message: ChatLike): string[] {
-  return strings(message.options);
-}
-
-/** Resolves dependency titles to ids of listed tasks; unknown ones drop. */
-export function dependencyIds(draft: DraftTask, tasks: Task[]): string[] {
+/** Resolves a draft's dependencies (task ids, or titles) to ids of listed
+ * tasks; unknown ones drop. */
+export function dependencyIds(draft: ChatDraft, tasks: Task[]): string[] {
   const ids: string[] = [];
   for (const ref of draft.dependsOn) {
     const found = tasks.find(
@@ -221,21 +143,21 @@ export function dependencyIds(draft: DraftTask, tasks: Task[]): string[] {
   return ids;
 }
 
-/** `task.create` params for a draft: `start` false adds it to the plan. */
+/** `task.create` params for a brainstorm draft: `start` false parks it at
+ * the end of the NEXT backlog, where the autopilot can pick it up. */
 export function draftCreateParams(
-  draft: DraftTask,
+  draft: ChatDraft,
   tasks: Task[],
   start: boolean,
-): Record<string, unknown> {
+) {
   const dependsOn = dependencyIds(draft, tasks);
   return {
     title: draft.title,
     goal: draft.goal || draft.title,
-    ...(draft.criteria.length
-      ? { criteria: draft.criteria.map((c) => c.text) }
-      : {}),
-    ...(draft.base ? { base: draft.base } : {}),
+    ...(draft.criteria.length ? { criteria: draft.criteria } : {}),
     ...(dependsOn.length ? { dependsOn } : {}),
+    source: "brainstorm",
     start,
+    ...(start ? {} : { backlog: { bucket: "next" as const } }),
   };
 }

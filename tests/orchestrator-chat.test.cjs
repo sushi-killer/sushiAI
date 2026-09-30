@@ -1,4 +1,4 @@
-const { test, beforeEach } = require("node:test");
+const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const kinds = import("../src/orchestrator/chatKinds.ts");
@@ -6,236 +6,96 @@ const model = import("../src/orchestrator/chatModel.ts");
 
 const REPO = "/repo";
 
-/** A daemon that keeps chat sessions the way orchd's chat.rs does today:
- * no kinds, one current session, switching refused while a turn is live. */
-function fakeDaemon({ withKinds = false } = {}) {
-  let n = 0;
-  const fresh = () => ({ id: `s${++n}`, messages: [], busy: false });
-  const state = { sessions: [fresh()], current: "s1", calls: [] };
-  const current = () => state.sessions.find((s) => s.id === state.current);
-  const thread = () => ({ ...current(), repo: REPO });
-  const list = () => ({
-    current: state.current,
-    sessions: state.sessions.map((s) => ({
-      id: s.id,
-      busy: s.busy,
-      ...(s.title ? { title: s.title } : {}),
-      ...(withKinds ? { kind: s.kind ?? "chat" } : {}),
-    })),
-  });
-  const idle = () => {
-    if (current().busy) throw new Error("the orchestrator is still answering");
-  };
-  state.orchestrator = async (method, params) => {
-    state.calls.push({ method, params });
-    switch (method) {
-      case "chat.list":
-        return list();
-      case "chat.get":
-        return thread();
-      case "chat.new": {
-        idle();
-        const s = fresh();
-        if (withKinds) s.kind = params.kind;
-        state.sessions.push(s);
-        state.current = s.id;
-        return thread();
-      }
-      case "chat.switch":
-        idle();
-        if (!state.sessions.some((s) => s.id === params.id))
-          throw new Error("no such chat session");
-        state.current = params.id;
-        return thread();
-      case "chat.send": {
-        const s = current();
-        if (!s.title) s.title = params.text.slice(0, 59);
-        s.messages.push({
-          id: `m${s.messages.length}`,
-          role: "user",
-          text: params.text,
-          ts: 1,
-        });
-        return {};
-      }
-      default:
-        throw new Error(`unexpected ${method}`);
-    }
-  };
-  return state;
-}
-
-function install(daemon) {
-  const store = new Map();
-  globalThis.window = {
-    localStorage: {
-      getItem: (k) => (store.has(k) ? store.get(k) : null),
-      setItem: (k, v) => store.set(k, String(v)),
-    },
-    bridge: { orchestrator: daemon.orchestrator },
-  };
-  return store;
-}
-
-let daemon;
-beforeEach(() => {
-  daemon = fakeDaemon();
-  install(daemon);
-});
-
-test("entering Brainstorm starts a fresh session instead of showing the chat", async () => {
-  const k = await kinds;
-  daemon.sessions[0].messages.push({
-    id: "old",
-    role: "user",
-    text: "old chat",
-    ts: 1,
-  });
-  daemon.sessions[0].title = "old chat";
-  const { thread, list } = await k.enterKind(REPO, "brainstorm");
-  assert.notEqual(thread.id, "s1");
-  assert.deepEqual(thread.messages, []);
-  assert.deepEqual(
-    k.sessionsOfKind(REPO, list, "brainstorm").map((s) => s.id),
-    [thread.id],
-  );
-  assert.deepEqual(
-    k.sessionsOfKind(REPO, list, "chat").map((s) => s.id),
-    ["s1"],
-  );
-});
-
-test("each view returns to its own last session", async () => {
-  const k = await kinds;
-  const brainstorm = (await k.enterKind(REPO, "brainstorm")).thread.id;
-  const chat = (await k.enterKind(REPO, "chat")).thread;
-  assert.equal(chat.id, "s1");
-  assert.equal(daemon.current, "s1");
-  const again = (await k.enterKind(REPO, "brainstorm")).thread;
-  assert.equal(again.id, brainstorm);
-  const newer = await k.newSession(REPO, "chat");
-  await k.enterKind(REPO, "brainstorm");
-  assert.equal((await k.enterKind(REPO, "chat")).thread.id, newer.id);
-});
-
-test("a second brainstorm is listed only under Brainstorm", async () => {
-  const k = await kinds;
-  await k.enterKind(REPO, "brainstorm");
-  await k.newSession(REPO, "brainstorm");
-  const list = await k.listSessions(REPO, "chat");
-  assert.equal(k.sessionsOfKind(REPO, list, "brainstorm").length, 2);
-  assert.equal(k.sessionsOfKind(REPO, list, "chat").length, 1);
-});
-
-test("the brainstorm role rides only on the first message and stays hidden", async () => {
-  const k = await kinds;
-  const { thread, list } = await k.enterKind(REPO, "brainstorm");
-  await k.sendInKind(REPO, "brainstorm", "Remote hosts over SSH", thread, list);
-  const sent = daemon.calls.filter((c) => c.method === "chat.send");
-  assert.ok(sent[0].params.text.startsWith("Remote hosts over SSH\n\n"));
-  assert.ok(sent[0].params.text.includes(k.BRAINSTORM_MARKER));
-  assert.equal(k.visibleText(sent[0].params.text), "Remote hosts over SSH");
-  const title = daemon.sessions.find((s) => s.id === thread.id).title;
-  assert.equal(k.visibleTitle(title), "Remote hosts over SSH");
-
-  const later = await (await kinds).enterKind(REPO, "brainstorm");
-  await k.sendInKind(
-    REPO,
-    "brainstorm",
-    "Any SSH host",
-    later.thread,
-    later.list,
-  );
-  const second = daemon.calls.filter((c) => c.method === "chat.send")[1];
-  assert.equal(second.params.text, "Any SSH host");
-});
-
-test("a chat's first message carries no brainstorm role", async () => {
-  const k = await kinds;
-  const { thread, list } = await k.enterKind(REPO, "chat");
-  await k.sendInKind(REPO, "chat", "What is running?", thread, list);
-  const sent = daemon.calls.find((c) => c.method === "chat.send");
-  assert.equal(sent.params.text, "What is running?");
-});
-
-test("switching is refused while another session answers", async () => {
-  const k = await kinds;
-  await k.enterKind(REPO, "brainstorm");
-  daemon.sessions.find((s) => s.id === daemon.current).busy = true;
-  await assert.rejects(k.enterKind(REPO, "chat"), /still answering/);
-});
-
-test("when orchd reports kinds they win and no role is prepended", async () => {
-  daemon = fakeDaemon({ withKinds: true });
-  const store = install(daemon);
-  const k = await kinds;
-  const { thread, list } = await k.enterKind(REPO, "brainstorm");
-  assert.equal(
-    daemon.calls.find((c) => c.method === "chat.new").params.kind,
-    "brainstorm",
-  );
-  assert.equal(k.kindOf(REPO, { id: "s1", busy: false, kind: "chat" }), "chat");
-  await k.sendInKind(REPO, "brainstorm", "Idea", thread, list);
-  assert.equal(
-    daemon.calls.find((c) => c.method === "chat.send").params.text,
-    "Idea",
-  );
-  assert.ok(store.size >= 1);
-});
-
-test("storage that throws leaves kinds working in memory-free mode", async () => {
-  const k = await kinds;
-  globalThis.window.localStorage = {
-    getItem() {
-      throw new Error("blocked");
-    },
-    setItem() {
-      throw new Error("blocked");
-    },
-  };
-  const { thread } = await k.enterKind(REPO, "chat");
-  assert.equal(thread.id, "s1");
-});
-
-test("session meta prefers orchd's fields, then what the app saw", async () => {
-  const k = await kinds;
-  k.noteThread(REPO, {
-    repo: REPO,
-    id: "s1",
-    busy: false,
-    messages: [
-      { id: "a", role: "assistant", text: "It  failed\nverify", ts: 5 },
+/** A client whose chat calls answer like orchd's chat.rs: one current
+ * session per kind, summaries carrying their kind. */
+function fakeClient() {
+  const calls = [];
+  const sessions = {
+    chat: [
+      { id: "c1", kind: "chat", busy: false, updatedAt: 1, messageCount: 2 },
     ],
+    brainstorm: [
+      {
+        id: "b1",
+        kind: "brainstorm",
+        busy: false,
+        updatedAt: 1,
+        messageCount: 0,
+      },
+    ],
+  };
+  const thread = (kind) => ({
+    repo: REPO,
+    id: sessions[kind][0].id,
+    kind,
+    createdAt: 1,
+    messages: [],
+    busy: false,
   });
-  assert.deepEqual(k.sessionMeta(REPO, { id: "s1", busy: false }), {
-    time: 5,
-    preview: "It failed verify",
-  });
+  return {
+    calls,
+    chatGet: async (repo, kind) => {
+      calls.push(["chat.get", repo, kind]);
+      return thread(kind);
+    },
+    chatList: async (repo, kind) => {
+      calls.push(["chat.list", repo, kind]);
+      return { current: sessions[kind][0].id, sessions: sessions[kind] };
+    },
+  };
+}
+
+test("entering a kind asks orchd for that kind's current session and list", async () => {
+  const k = await kinds;
+  const client = fakeClient();
+  const { thread, list } = await k.enterKind(REPO, "brainstorm", client);
+  assert.equal(thread.id, "b1");
+  assert.equal(thread.kind, "brainstorm");
   assert.deepEqual(
-    k.sessionMeta(REPO, { id: "s1", busy: false, updatedAt: 9, preview: "p" }),
-    { time: 9, preview: "p" },
+    list.sessions.map((s) => s.id),
+    ["b1"],
   );
-  assert.deepEqual(k.sessionMeta(REPO, { id: "s9", busy: false }), {
-    time: undefined,
-    preview: undefined,
-  });
+  assert.deepEqual(client.calls.map((c) => c[2]).sort(), [
+    "brainstorm",
+    "brainstorm",
+  ]);
 });
 
-test("sessions group newest first into TODAY and EARLIER", async () => {
+test("isOfKind reads the kind orchd put on the summary", async () => {
+  const k = await kinds;
+  const list = {
+    current: "b1",
+    sessions: [
+      {
+        id: "b1",
+        kind: "brainstorm",
+        busy: false,
+        updatedAt: 1,
+        messageCount: 0,
+      },
+    ],
+  };
+  assert.equal(k.isOfKind(list, "b1", "brainstorm"), true);
+  assert.equal(k.isOfKind(list, "b1", "chat"), false);
+  assert.equal(k.isOfKind(list, "unknown", "chat"), true);
+  assert.equal(k.isOfKind(null, "unknown", "brainstorm"), false);
+});
+
+test("sessions group newest first by updatedAt into TODAY and EARLIER", async () => {
   const { groupSessions } = await model;
   const now = new Date(2026, 8, 29, 12).getTime();
-  const rows = [
-    { session: { id: "old", title: "Weekly" }, time: now - 3 * 86_400_000 },
-    { session: { id: "unknown", title: "Seen long ago" } },
-    { session: { id: "a", title: "A" }, time: now - 3_600_000 },
-    { session: { id: "fresh" } },
+  const sessions = [
+    { id: "old", updatedAt: now - 3 * 86_400_000 },
+    { id: "a", updatedAt: now - 3_600_000 },
+    { id: "yesterday", updatedAt: now - 20 * 3_600_000 },
+    { id: "fresh", updatedAt: now - 60_000 },
   ];
-  const groups = groupSessions(rows, now);
+  const groups = groupSessions(sessions, now);
   assert.deepEqual(
-    groups.map((g) => [g.label, g.rows.map((r) => r.session.id)]),
+    groups.map((g) => [g.label, g.sessions.map((s) => s.id)]),
     [
       ["TODAY", ["fresh", "a"]],
-      ["EARLIER", ["unknown", "old"]],
+      ["EARLIER", ["yesterday", "old"]],
     ],
   );
 });
@@ -266,18 +126,44 @@ test("task references match known ids and long titles only", async () => {
   assert.deepEqual(taskRefs("nothing here", tasks), []);
 });
 
-test("options come from the last sushi-options block and are stripped", async () => {
-  const { optionsInText, stripOptions } = await model;
-  const text =
-    'Which hosts?\n```sushi-options\n["Only lab", "Any SSH host", 3]\n```';
-  assert.deepEqual(optionsInText(text), ["Only lab", "Any SSH host"]);
-  assert.equal(stripOptions(text), "Which hosts?");
-  assert.deepEqual(optionsInText("```sushi-options\n[oops\n```"), []);
-});
-
-test("search matches title or preview, case-insensitively", async () => {
+test("search matches any given field, case-insensitively", async () => {
   const { matchesQuery } = await model;
   assert.ok(matchesQuery("", "x"));
   assert.ok(matchesQuery("EXPORT", "Why did export fail?", undefined));
   assert.ok(!matchesQuery("spend", "Why did export fail?", "It failed"));
+});
+
+test("an older daemon's chat event without a kind is a chat event", async () => {
+  const { eventKind } = await kinds;
+  assert.equal(eventKind({ event: "chat" }), "chat");
+  assert.equal(eventKind({ event: "chat", kind: "brainstorm" }), "brainstorm");
+});
+
+test("sessions without updatedAt sort last and never produce NaN", async () => {
+  const { groupSessions, newestFirst, sessionTime } = await model;
+  const now = new Date(2026, 8, 29, 12).getTime();
+  const sessions = [
+    { id: "untimed" },
+    { id: "fresh", updatedAt: now - 60_000 },
+    { id: "untimed2" },
+    { id: "old", updatedAt: now - 3 * 86_400_000 },
+  ];
+  assert.deepEqual(
+    [...sessions].sort(newestFirst).map((s) => s.id),
+    ["fresh", "old", "untimed", "untimed2"],
+  );
+  for (const a of sessions)
+    for (const b of sessions)
+      assert.equal(Number.isNaN(newestFirst(a, b)), false);
+  assert.deepEqual(
+    groupSessions(sessions, now).map((g) => [
+      g.label,
+      g.sessions.map((s) => s.id),
+    ]),
+    [
+      ["TODAY", ["fresh"]],
+      ["EARLIER", ["old", "untimed", "untimed2"]],
+    ],
+  );
+  assert.equal(sessionTime(undefined, now), "");
 });

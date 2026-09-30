@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import {
   Check,
   Globe,
@@ -366,4 +366,18 @@ export function SettingsDialog({
       </div>
     </div>
   );
+}
+
+/** The Settings dialog's tab, plus an opener that lands on Connections -
+ * the same function every render (as long as `setDialog` is), so a memoized
+ * panel that receives it does not re-render. */
+export function useSettingsTab(
+  setDialog: (dialog: { kind: "settings" }) => void,
+) {
+  const [tab, setTab] = useState<SettingsTab>("general");
+  const openConnections = useCallback(() => {
+    setTab("connections");
+    setDialog({ kind: "settings" });
+  }, [setDialog]);
+  return [tab, setTab, openConnections] as const;
 }

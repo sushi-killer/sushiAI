@@ -92,6 +92,14 @@
   color: var(--text-faint);
   flex-shrink: 0;
 }
+/* Each fact is one unit; its separator trails it, so a wrapped line may end
+ * on "·" but never starts with one. */
+.td-fact {
+  white-space: nowrap;
+}
+.td-fact:not(:last-child)::after {
+  content: " ·";
+}
 .td-branch {
   min-width: 0;
   max-width: 100%;

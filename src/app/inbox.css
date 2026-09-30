@@ -33,7 +33,7 @@
   line-height: 15px;
 }
 .inbox-search input,
-.inbox-head select,
+.inbox-select select,
 .inbox-reply input {
   height: 31px;
   padding: 0 10px;
@@ -46,9 +46,24 @@
 .inbox-search input {
   width: 240px;
 }
-.inbox-head select {
+/* The filters use the app's select look (Control/Select): no native
+ * chevron, a 12px one of ours. */
+.inbox-select {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.inbox-select select {
   width: 140px;
-  height: 31px;
+  padding-right: 28px;
+  appearance: none;
+  text-overflow: ellipsis;
+}
+.inbox-select svg {
+  position: absolute;
+  right: 10px;
+  color: var(--text-muted);
+  pointer-events: none;
 }
 .inbox-filters {
   display: flex;
@@ -93,6 +108,10 @@
   padding-top: 6px;
   padding-bottom: 2px;
 }
+/* Section labels share the cards' left edge (Figma "g-WORKING"). */
+.inbox-group-head .ui-group-label {
+  padding: 0;
+}
 .inbox-item {
   cursor: pointer;
 }
@@ -106,6 +125,7 @@
 .inbox-link.danger {
   color: var(--danger);
 }
+/* Idle sessions and shells: one row (Figma "idle"). */
 .inbox-idle {
   display: flex;
   align-items: center;
@@ -116,11 +136,22 @@
   color: var(--text-muted);
   font-size: 12.5px;
 }
-.inbox-idle span {
+.inbox-idle-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex: 1;
+  min-width: 0;
+  color: inherit;
+  text-align: left;
 }
-.inbox-idle svg {
-  color: var(--text-muted);
+.inbox-idle-toggle:disabled {
+  cursor: default;
+  opacity: 1;
+}
+.inbox-idle-toggle svg {
+  flex-shrink: 0;
+  color: var(--text-faint);
 }
 .inbox-none,
 .inbox-error {
@@ -259,33 +290,57 @@
   gap: 8px;
   padding-top: 8px;
 }
-.inbox-zero .inbox-idle {
-  width: 360px;
-  margin-top: 8px;
-}
-/* Working and idle sessions: one compact line each, under collapsible heads. */
-.inbox-group-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--text-faint);
-}
+/* Working and idle sessions: one bordered row card each (Figma
+ * "working-row"): dot, session, what it does, time. */
 .inbox-session-row,
 .inbox-cleanup-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
-  padding: 6px 10px;
+  padding: 9px 14px;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   font-size: var(--text-sm);
 }
+.inbox-cleanup-row {
+  padding: 6px 0;
+}
+.inbox-cleanup-row input[type="checkbox"] {
+  accent-color: var(--accent);
+}
 .inbox-session-row {
+  border-color: var(--line-pane);
+  background: var(--bg-raised);
   cursor: pointer;
+}
+.inbox-session-row .ui-dot {
+  flex-shrink: 0;
+  background: var(--ui-tone);
 }
 .inbox-session-row:hover {
   background: var(--bg-hover);
+}
+.inbox-session-row .inbox-session-name {
+  flex: 0 1 auto;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.inbox-session-activity {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.inbox-session-jump {
+  opacity: 0;
+}
+.inbox-session-row:hover .inbox-session-jump,
+.inbox-session-jump:focus-visible {
+  opacity: 1;
 }
 .inbox-session-row.selected {
   border-color: var(--line-selected);
@@ -341,11 +396,18 @@
   max-width: 100%;
   min-width: 0;
 }
+/* A long permission option wraps inside the pane instead of running past
+ * its edge. */
 .inbox-option .ui-chip {
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  height: auto;
+  min-height: 29px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+  line-height: 17px;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .inbox-fix {
   display: flex;

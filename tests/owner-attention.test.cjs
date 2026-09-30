@@ -70,12 +70,64 @@ test("inboxZeroSummary counts today's landings and running tasks", async () => {
   assert.equal(inboxZeroSummary([], now), "Nothing needs you.");
 });
 
-test("composeAnswer merges a pick and a note", async () => {
+test("composeAnswer: typed text replaces the pick, never prefixes it", async () => {
   const { composeAnswer } = await load();
   assert.equal(composeAnswer("dark", ""), "dark");
   assert.equal(composeAnswer("", " hi "), "hi");
-  assert.equal(composeAnswer("dark", "but soft"), "dark: but soft");
+  assert.equal(
+    composeAnswer("Raise budget", "wait for tomorrow"),
+    "wait for tomorrow",
+  );
+  assert.equal(composeAnswer("dark", "   "), "dark");
   assert.equal(composeAnswer("", ""), "");
+});
+
+const choice = (pick, note = "") => ({
+  pick,
+  preselected: "Raise budget",
+  note,
+});
+
+test("the preselected first option shows picked and a click on Answer sends it", async () => {
+  const { shownPick, clickAnswer } = await load();
+  assert.equal(shownPick(choice(undefined)), "Raise budget");
+  assert.equal(clickAnswer(choice(undefined)), "Raise budget");
+  // Typed text hides the pick and is the whole answer.
+  assert.equal(shownPick(choice(undefined, "wait")), "");
+  assert.equal(clickAnswer(choice(undefined, "wait")), "wait");
+  assert.equal(clickAnswer(choice("Stop", "wait")), "wait");
+  // An unpicked question has nothing to send until text is typed.
+  assert.equal(clickAnswer(choice("")), "");
+});
+
+test("togglePick: clicking the picked option unpicks it, the preselected one too", async () => {
+  const { togglePick } = await load();
+  assert.equal(togglePick(choice(undefined), "Raise budget"), "");
+  assert.equal(togglePick(choice(undefined), "Stop"), "Stop");
+  assert.equal(togglePick(choice("Stop"), "Stop"), "");
+  assert.equal(togglePick(choice(""), "Raise budget"), "Raise budget");
+  // While text replaces the pick, a click picks rather than unpicks.
+  assert.equal(togglePick(choice("Stop", "note"), "Stop"), "Stop");
+});
+
+test("enterAnswer never sends the preselection and waits out the arm delay", async () => {
+  const { enterAnswer, ENTER_ARM_MS } = await load();
+  const shownAt = 10_000;
+  const later = shownAt + ENTER_ARM_MS;
+  // Opening the Inbox (or the bubble) and pressing Enter answers nothing.
+  assert.equal(enterAnswer(choice(undefined), shownAt, later), "");
+  // An explicit pick (1-N or a click) or typed text for this item is sent.
+  assert.equal(enterAnswer(choice("Stop"), shownAt, later), "Stop");
+  assert.equal(
+    enterAnswer(choice(undefined, " wait "), shownAt, later),
+    "wait",
+  );
+  assert.equal(enterAnswer(choice("Stop", "wait"), shownAt, later), "wait");
+  assert.equal(enterAnswer(choice(""), shownAt, later), "");
+  // A held or second Enter right after the selection moved is ignored,
+  // even for an item that has a choice.
+  assert.equal(enterAnswer(choice("Stop"), shownAt, later - 1), "");
+  assert.equal(enterAnswer(choice(undefined, "wait"), shownAt, shownAt), "");
 });
 
 test("stepSelection clamps and falls back to the first key", async () => {

@@ -3,6 +3,8 @@
 // method in the protocol table, so OrchestratorPanel/Settings never spell out
 // a method string or cast a result themselves.
 import type {
+  BacklogBucket,
+  ChatKind,
   ChatSessionList,
   ChatThread,
   FailureRow,
@@ -30,6 +32,12 @@ export function orchestratorClientFor(host: string = LOCAL) {
   };
   return {
     ping: () => call<{ version: string; pid: number; dataDir: string }>("ping"),
+    /** Liveness only: pings the connection in use, never starts, restarts or
+     * provisions the daemon (the panel's interval check). */
+    probe: (): Promise<{ pid: number }> =>
+      window.bridge
+        ? window.bridge.orchestratorProbe(host)
+        : Promise.reject(new Error("Open the desktop app first.")),
     settingsGet: () => call<Settings>("settings.get"),
     settingsSet: (settings: Settings) =>
       call<Settings>("settings.set", { settings }),
@@ -40,10 +48,14 @@ export function orchestratorClientFor(host: string = LOCAL) {
         ...(includeArchived ? { includeArchived } : {}),
       }),
     taskGet: (id: string) => call<Task>("task.get", { id }),
+    /** `sinceDays`, or an inclusive UTC `from`/`to` (YYYY-MM-DD) range -
+     * never both. */
     costsSummary: (params: {
       repo?: string;
       taskId?: string;
       sinceDays?: number;
+      from?: string;
+      to?: string;
       groupBy: SpendGroup[];
     }) => call<SpendSummary>("costs.summary", params),
     taskEvidence: (id: string, path: string) =>
@@ -66,9 +78,20 @@ export function orchestratorClientFor(host: string = LOCAL) {
         base?: string;
         start?: boolean;
         source?: string;
+        dependsOn?: string[];
+        /** Parks the task in the planning backlog instead of starting it. */
+        backlog?: { bucket: BacklogBucket; order?: number };
       },
     ) => call<Task>("task.create", { repo, ...params }),
     taskStart: (id: string) => call<Task>("task.start", { id }),
+    /** Moves a task within or between backlog buckets; `null` takes it out.
+     * An omitted order appends to the end of the bucket. */
+    taskBacklog: (id: string, bucket: BacklogBucket | null, order?: number) =>
+      call<Task>("task.backlog", {
+        id,
+        bucket,
+        ...(order === undefined ? {} : { order }),
+      }),
     taskLand: (id: string) => call<Task>("task.land", { id }),
     taskStop: (id: string) => call<Task>("task.stop", { id }),
     taskAnswer: (id: string, answer: string) =>
@@ -88,16 +111,29 @@ export function orchestratorClientFor(host: string = LOCAL) {
       call<Record<string, never>>("task.delete", { id }),
     taskArchive: (id: string) => call<Task>("task.archive", { id }),
     taskUnarchive: (id: string) => call<Task>("task.unarchive", { id }),
-    chatGet: (repo: string) => call<ChatThread>("chat.get", { repo }),
-    chatSend: (repo: string, text: string) =>
-      call<Record<string, never>>("chat.send", { repo, text }),
-    chatCancel: (repo: string) =>
-      call<Record<string, never>>("chat.cancel", { repo }),
-    chatList: (repo: string) => call<ChatSessionList>("chat.list", { repo }),
-    chatNew: (repo: string) => call<ChatThread>("chat.new", { repo }),
-    chatSwitch: (repo: string, id: string) =>
-      call<ChatThread>("chat.switch", { repo, id }),
-    chatClear: (repo: string) => call<ChatThread>("chat.clear", { repo }),
+    // Every chat method acts on one kind's sessions; `chat` when omitted.
+    chatGet: (repo: string, kind: ChatKind = "chat") =>
+      call<ChatThread>("chat.get", { repo, kind }),
+    chatSend: (repo: string, text: string, kind: ChatKind = "chat") =>
+      call<Record<string, never>>("chat.send", { repo, text, kind }),
+    chatCancel: (repo: string, kind: ChatKind = "chat") =>
+      call<Record<string, never>>("chat.cancel", { repo, kind }),
+    chatList: (repo: string, kind: ChatKind = "chat") =>
+      call<ChatSessionList>("chat.list", { repo, kind }),
+    chatNew: (repo: string, kind: ChatKind = "chat") =>
+      call<ChatThread>("chat.new", { repo, kind }),
+    chatSwitch: (repo: string, id: string, kind: ChatKind = "chat") =>
+      call<ChatThread>("chat.switch", { repo, id, kind }),
+    chatClear: (repo: string, kind: ChatKind = "chat") =>
+      call<ChatThread>("chat.clear", { repo, kind }),
+    /** Drops a session's draft and keeps its messages: session `id`, or the
+     * kind's current one. Returns the kind's current session. */
+    chatClearDraft: (repo: string, kind: ChatKind = "chat", id?: string) =>
+      call<ChatThread>("chat.clearDraft", {
+        repo,
+        kind,
+        ...(id ? { id } : {}),
+      }),
     messageList: (repo: string) => call<Message[]>("message.list", { repo }),
     messageSend: (params: {
       from: string;

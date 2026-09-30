@@ -38,14 +38,11 @@ export function taskCreateParams(
 }
 
 export function formatDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return "0s";
-  const totalSeconds = Math.round(ms / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours) return `${hours}h ${minutes}m`;
-  if (minutes) return `${minutes}m ${seconds}s`;
-  return `${seconds}s`;
+  const minutes = Number.isFinite(ms) ? Math.floor(ms / 60_000) : 0;
+  if (minutes < 1) return "<1m";
+  if (minutes < 60) return `${minutes}m`;
+  const rest = minutes % 60;
+  return rest ? `${Math.floor(minutes / 60)}h ${rest}m` : `${minutes / 60}h`;
 }
 
 export function formatCost(costUsd: number | undefined): string {
@@ -724,6 +721,7 @@ const QUESTION_STAGE: Record<QuestionKind, Stage> = {
   dependency_ended: "implement",
   impossible: "implement",
   budget: "implement",
+  daily_budget: "implement",
   protected_path: "implement",
   agent_question: "implement",
 };

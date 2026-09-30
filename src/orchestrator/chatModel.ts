@@ -1,5 +1,5 @@
 // Pure helpers for the Chat and Brainstorm views: session list grouping and
-// times, task references in a reply, and option chips a reply offers.
+// times, and task references in a reply.
 import type { Task } from "./types";
 
 const MINUTE = 60_000;
@@ -12,8 +12,10 @@ function startOfDay(ts: number): number {
   return d.getTime();
 }
 
-/** "now", "2m", "3h" today; a weekday within the week; else "Sep 3". */
-export function sessionTime(ts: number, now = Date.now()): string {
+/** "now", "2m", "3h" today; a weekday within the week; else "Sep 3";
+ * nothing for a session an older daemon sent without a time. */
+export function sessionTime(ts: number | undefined, now = Date.now()): string {
+  if (ts == null || !Number.isFinite(ts)) return "";
   const age = now - ts;
   if (ts >= startOfDay(now)) {
     if (age < MINUTE) return "now";
@@ -28,22 +30,40 @@ export function sessionTime(ts: number, now = Date.now()): string {
   });
 }
 
-export type SessionRow<S> = { session: S; time?: number; preview?: string };
+const timeOf = (session: { updatedAt?: number }): number | null =>
+  session.updatedAt != null && Number.isFinite(session.updatedAt)
+    ? session.updatedAt
+    : null;
 
-/** Newest first, split into TODAY and EARLIER. A session with no known time
- * is new and empty when it has no title (TODAY), else older (EARLIER). */
-export function groupSessions<S extends { id: string; title?: string }>(
-  rows: SessionRow<S>[],
+/** Newest first by orchd's `updatedAt`; a session without one sorts last. */
+export function newestFirst(
+  a: { updatedAt?: number },
+  b: { updatedAt?: number },
+): number {
+  const [x, y] = [timeOf(a), timeOf(b)];
+  if (x === null || y === null) return x === y ? 0 : x === null ? 1 : -1;
+  return y - x;
+}
+
+/** Newest first, split into TODAY and EARLIER (a session without a time is
+ * earlier). */
+export function groupSessions<S extends { updatedAt?: number }>(
+  sessions: S[],
   now = Date.now(),
-): { label: "TODAY" | "EARLIER"; rows: SessionRow<S>[] }[] {
+): { label: "TODAY" | "EARLIER"; sessions: S[] }[] {
   const today = startOfDay(now);
-  const isToday = (row: SessionRow<S>) =>
-    row.time !== undefined ? row.time >= today : !row.session.title;
-  const newest = [...rows].reverse();
+  const newest = [...sessions].sort(newestFirst);
+  const isToday = (s: S) => (timeOf(s) ?? -Infinity) >= today;
   return [
-    { label: "TODAY" as const, rows: newest.filter(isToday) },
-    { label: "EARLIER" as const, rows: newest.filter((r) => !isToday(r)) },
-  ].filter((group) => group.rows.length > 0);
+    {
+      label: "TODAY" as const,
+      sessions: newest.filter(isToday),
+    },
+    {
+      label: "EARLIER" as const,
+      sessions: newest.filter((s) => !isToday(s)),
+    },
+  ].filter((group) => group.sessions.length > 0);
 }
 
 export function matchesQuery(
@@ -76,27 +96,4 @@ export function taskRefs(text: string, tasks: Task[], max = 3): Task[] {
     .sort((a, b) => a.at - b.at)
     .slice(0, max)
     .map((f) => f.task);
-}
-
-const OPTIONS_FENCE = /```sushi-options[^\n]*\n([\s\S]*?)```/g;
-
-/** Answers a reply offers in a ```sushi-options block (the last one wins). */
-export function optionsInText(text: string): string[] {
-  let options: string[] = [];
-  for (const match of text.matchAll(OPTIONS_FENCE)) {
-    try {
-      const parsed: unknown = JSON.parse(match[1]);
-      if (Array.isArray(parsed))
-        options = parsed
-          .filter((o): o is string => typeof o === "string" && !!o.trim())
-          .map((o) => o.trim());
-    } catch {
-      // A half-written block offers nothing.
-    }
-  }
-  return options;
-}
-
-export function stripOptions(text: string): string {
-  return text.replace(OPTIONS_FENCE, "").trim();
 }

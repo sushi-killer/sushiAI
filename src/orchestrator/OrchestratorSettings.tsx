@@ -20,7 +20,7 @@ import {
   type AutonomyPreset,
 } from "./autonomy";
 import type { ChatModels, ModelProfile } from "../types";
-import type { Harness, Route, Settings, Tier } from "./types";
+import type { Harness, Route, Settings, Tier, Variant } from "./types";
 
 const HARNESSES: Harness[] = ["claude", "codex"];
 
@@ -439,7 +439,6 @@ function OrchestratorSettingsBody({
     : [];
   const changes = countChanges(saved, settings);
   const preset: AutonomyPreset = presetOf(settings);
-  const dailyBudget = "maxDailyCostUsd" in settings;
 
   function resetToDefault(field: DefaultableSetting) {
     if (!defaults) return;
@@ -447,6 +446,52 @@ function OrchestratorSettingsBody({
       old ? resetSettingToDefault(old, defaults, field) : old,
     );
   }
+
+  /** The marker for a setting outside `DefaultableSetting`: `pick` reads
+   * it, `put` copies the default back. Nothing while it matches orchd's
+   * default. */
+  function valueMarker(
+    label: string,
+    pick: (from: Settings) => unknown,
+    put: (to: Settings, from: Settings) => Settings,
+    text: (value: unknown) => string,
+  ) {
+    if (!defaults || !settings) return null;
+    const value = pick(defaults);
+    if (JSON.stringify(pick(settings)) === JSON.stringify(value)) return null;
+    return (
+      <button
+        type="button"
+        className="os-diff"
+        aria-label={`Reset ${label} to default`}
+        title={`Reset ${label} to default`}
+        onClick={() =>
+          setSettings((old) => (old && defaults ? put(old, defaults) : old))
+        }
+      >
+        changed · default {text(value)} ↺
+      </button>
+    );
+  }
+  /** `valueMarker` for one experiment flag. */
+  function experimentMarker(
+    label: string,
+    key: keyof Variant,
+    text: (value: unknown) => string = (value) =>
+      typeof value === "boolean" ? (value ? "On" : "Off") : String(value),
+  ) {
+    return valueMarker(
+      label,
+      (from) => from.experiments[key],
+      (to, from) => ({
+        ...to,
+        experiments: { ...to.experiments, [key]: from.experiments[key] },
+      }),
+      text,
+    );
+  }
+  const dollars = (value: unknown) =>
+    typeof value === "number" && value > 0 ? `$${value}` : "No cap";
 
   /** "changed · default Off ↺" beside a setting saved away from orchd's
    * default. Reset only stages the value; Save still writes it. */
@@ -484,18 +529,19 @@ function OrchestratorSettingsBody({
     );
   }
 
+  /** One settings row; `marker` is its "changed · default" button. */
   function row(
     title: string,
     description: string,
     control: ReactNode,
-    field?: DefaultableSetting,
+    marker?: ReactNode,
   ) {
     return (
       <div className="os-row">
         <div className="os-row-text">
           <div className="os-row-head">
             <span className="os-row-title">{title}</span>
-            {field && defaultMarker(field)}
+            {marker}
           </div>
           <span className="os-row-desc">{description}</span>
         </div>
@@ -606,7 +652,7 @@ function OrchestratorSettingsBody({
           label="Answer stuck questions for me"
           onChange={(autoAnswer) => update({ autoAnswer })}
         />,
-        "autoAnswer",
+        defaultMarker("autoAnswer"),
       )}
       {row(
         "Land finished work",
@@ -616,6 +662,7 @@ function OrchestratorSettingsBody({
           label="Land finished work"
           onChange={(land) => updateExperiments({ land })}
         />,
+        experimentMarker("Land finished work", "land"),
       )}
       {row(
         "Max attempts",
@@ -626,7 +673,7 @@ function OrchestratorSettingsBody({
           value={settings.maxAttempts}
           onChange={(maxAttempts) => update({ maxAttempts })}
         />,
-        "maxAttempts",
+        defaultMarker("maxAttempts"),
       )}
 
       <SectionHead
@@ -766,7 +813,7 @@ function OrchestratorSettingsBody({
           <option value="native">native</option>
           <option value="host">host</option>
         </Select>,
-        "sandbox",
+        defaultMarker("sandbox"),
       )}
       {row(
         "Codex network access",
@@ -776,7 +823,7 @@ function OrchestratorSettingsBody({
           label="Codex network access"
           onChange={(codexNetwork) => update({ codexNetwork })}
         />,
-        "codexNetwork",
+        defaultMarker("codexNetwork"),
       )}
       <div className="os-block">
         <div className="os-row-head">
@@ -843,6 +890,7 @@ function OrchestratorSettingsBody({
             value={settings.experiments.maxCostUsd}
             onChange={(maxCostUsd) => updateExperiments({ maxCostUsd })}
           />
+          {experimentMarker("Budget per task", "maxCostUsd", dollars)}
         </div>
         <div className="os-limit">
           <span>Per attempt</span>
@@ -853,21 +901,22 @@ function OrchestratorSettingsBody({
               updateExperiments({ maxAttemptCostUsd })
             }
           />
+          {experimentMarker("Budget per attempt", "maxAttemptCostUsd", dollars)}
         </div>
-        {dailyBudget && (
-          <div className="os-limit">
-            <span>Per day</span>
-            <DollarInput
-              label="Budget per day"
-              value={(settings as { maxDailyCostUsd?: number }).maxDailyCostUsd}
-              onChange={(next) =>
-                setSettings((old) =>
-                  old ? { ...old, maxDailyCostUsd: next } : old,
-                )
-              }
-            />
-          </div>
-        )}
+        <div className="os-limit">
+          <span>Per day</span>
+          <DollarInput
+            label="Budget per day"
+            value={settings.dailyBudgetUsd}
+            onChange={(next) => update({ dailyBudgetUsd: next ?? 0 })}
+          />
+          {valueMarker(
+            "Budget per day",
+            (from) => from.dailyBudgetUsd,
+            (to, from) => ({ ...to, dailyBudgetUsd: from.dailyBudgetUsd }),
+            dollars,
+          )}
+        </div>
       </div>
 
       <button
@@ -891,6 +940,7 @@ function OrchestratorSettingsBody({
                 updateExperiments({ reviewEvidence })
               }
             />,
+            experimentMarker("Review with evidence", "reviewEvidence"),
           )}
           {row(
             "Advisor after a failed attempt",
@@ -900,6 +950,7 @@ function OrchestratorSettingsBody({
               label="Advisor after a failed attempt"
               onChange={(advisor) => updateExperiments({ advisor })}
             />,
+            experimentMarker("Advisor after a failed attempt", "advisor"),
           )}
           {row(
             "Loop detection",
@@ -909,6 +960,7 @@ function OrchestratorSettingsBody({
               label="Loop detection"
               onChange={(loopDetect) => updateExperiments({ loopDetect })}
             />,
+            experimentMarker("Loop detection", "loopDetect"),
           )}
           {row(
             "Stall timeout (seconds)",
@@ -929,6 +981,7 @@ function OrchestratorSettingsBody({
                 }
               />
             </label>,
+            experimentMarker("Stall timeout", "stallTimeoutSecs"),
           )}
           {settings.routes.map((route) =>
             row(

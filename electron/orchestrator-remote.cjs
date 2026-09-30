@@ -18,6 +18,17 @@ const REMOTE_PATH =
 const BUILD_TIMEOUT_MS = 20 * 60 * 1000;
 const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 
+// The setup errors the renderer reads the platform and the rustup command
+// back out of (`hostPlatform`/`rustupCommand` in src/orchestrator/hosts.ts);
+// tests/orchestrator-hosts.test.cjs parses these very strings.
+function needsRustMessage(name, platform) {
+  return `Rust is not installed on ${name} (${platform || "unknown platform"}), and orchd has to be built there. Install it on the host with: ${RUSTUP_COMMAND} - then connect again.`;
+}
+
+function noSourceMessage(name, platform, wanted) {
+  return `This build of sushiAI has no orchd source to build on ${name} (${platform || "unknown platform"}); it can only upload its own binary to a ${wanted} host.`;
+}
+
 /** One `key=value` per line, as the probe scripts below print them. */
 function parseProbe(output) {
   const values = {};
@@ -326,13 +337,9 @@ class RemoteOrchd {
       return;
     }
     if (info.cargo !== "1")
-      throw new Error(
-        `Rust is not installed on ${name} (${info.platform || "unknown platform"}), and orchd has to be built there. Install it on the host with: ${RUSTUP_COMMAND} - then connect again.`,
-      );
+      throw new Error(needsRustMessage(name, info.platform));
     if (!want.source)
-      throw new Error(
-        `This build of sushiAI has no orchd source to build on ${name} (${info.platform || "unknown platform"}); it can only upload its own binary to a ${want.platform} host.`,
-      );
+      throw new Error(noSourceMessage(name, info.platform, want.platform));
     this.#set("building", `Building orchd on ${name} (a few minutes)`);
     await this.connections.exec(this.endpoint, buildScript(want.hash), {
       input: await this.artifacts.archive(),
@@ -422,4 +429,6 @@ module.exports = {
   uploadScript,
   buildScript,
   RUSTUP_COMMAND,
+  needsRustMessage,
+  noSourceMessage,
 };

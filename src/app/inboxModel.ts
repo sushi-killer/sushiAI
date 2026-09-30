@@ -1,7 +1,7 @@
 // The Inbox's items and filters, without React: orchd tasks and agent
 // sessions in one queue, grouped by what the owner has to do with them.
 import type { InboxGroup, InboxRow } from "./attention.ts";
-import { groupKey, LOCAL_GROUP } from "./workspaceMerge.ts";
+import { groupKey } from "./workspaceMerge.ts";
 import {
   landTasks,
   matchesOwnerTask,
@@ -77,7 +77,7 @@ export function inboxItems(
       kind,
       title: t.title,
       project: projectName(t.repo),
-      host: LOCAL_GROUP,
+      host: groupKey(t.host),
       at: t.updatedAt,
       task: t,
     });
@@ -137,4 +137,10 @@ export function cleanupCandidates(
         (!project || row.workspace.name === project),
     );
   return { agents: rows("idle"), shells: rows("shells") };
+}
+
+/** "1 idle session", "2 idle sessions": a count and its noun, whose last
+ * word takes an "s" unless the count is one. */
+export function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }

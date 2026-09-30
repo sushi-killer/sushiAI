@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ArrowRight, ChartColumn, RefreshCw } from "lucide-react";
 import { Character } from "../mascot/Character";
 import { useOrchestratorClient } from "./hostContext";
@@ -176,6 +176,8 @@ export function HomeView({
   onOpenAnalytics,
   onSendNote,
   onTry,
+  remoteHost,
+  hostStrip,
 }: {
   cwd: string;
   tasks: Task[];
@@ -188,6 +190,10 @@ export function HomeView({
   /** Sends a message to the orchestrator chat; rejects when it fails. */
   onSendNote: (text: string) => Promise<void>;
   onTry: (text: string) => void;
+  /** The remote host the daemon runs on; unset on this Mac. */
+  remoteHost?: string;
+  /** Shown under the greeting: the remote host's preflight strip. */
+  hostStrip?: ReactNode;
 }) {
   const orchestratorClient = useOrchestratorClient();
   const [today, setToday] = useState<number | null>(null);
@@ -233,6 +239,7 @@ export function HomeView({
             <p>{clearLine(groups.running.length, groups.landedToday.length)}</p>
           </div>
         </div>
+        {hostStrip}
         {analytics}
       </div>
     );
@@ -241,8 +248,9 @@ export function HomeView({
     <div className="orch-view-scroll home">
       <div className="home-greet home-greeting">
         <h2>{greeting(owner.length)}</h2>
-        <p>{subLine(activeCount(live), today)}</p>
+        <p>{subLine(activeCount(live), today, remoteHost)}</p>
       </div>
+      {hostStrip}
       <span className="orch-eyebrow">NEEDS YOU · {owner.length}</span>
       {owner.map((task) => {
         const repo = projectName(task.repo);
@@ -300,7 +308,7 @@ export function HomeView({
                   </button>
                   <button
                     type="button"
-                    className="ui-button secondary"
+                    className="ui-button ghost"
                     disabled={busy}
                     onClick={() => setNoteFor(task.id)}
                   >

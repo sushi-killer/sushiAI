@@ -151,10 +151,34 @@ test("report line and question source only state what is known", async () => {
   });
   assert.equal(reportLine(t), "3 files · review PASS");
   assert.equal(reportLine(task()), "");
-  const waiting = task({
-    status: "waiting",
-    updatedAt: 0,
-    question: { text: "?", options: [], kind: "attempts_failing" },
+  const asked = {
+    text: "?",
+    options: [],
+    kind: "attempts_failing",
+    askedBy: "verify",
+    askedAt: 0,
+  };
+  assert.equal(questionSource(asked, 120_000), "asked by verify · 2m ago");
+  assert.equal(questionSource(asked, 30_000), "asked by verify · just now");
+  // A question from before orchd recorded who asked: nothing is guessed.
+  assert.equal(
+    questionSource({ text: "?", options: [], kind: "budget" }, 120_000),
+    "",
+  );
+});
+
+test("header facts are separate parts and a UUID branch is shortened", async () => {
+  const { headerFacts, shortBranch } = await model;
+  const done = task({
+    attempts: [attempt({ startedAt: 0, endedAt: 20 * 60_000 })],
   });
-  assert.equal(questionSource(waiting, 120_000), "asked by verify · 2m ago");
+  const facts = headerFacts(done, 4, 20 * 60_000);
+  assert.equal(facts[0], "1 attempt");
+  assert.ok(facts.every((part) => !part.startsWith("·")));
+  assert.equal(facts.includes("$0.31"), true);
+  assert.equal(
+    shortBranch("task/b61481a2-89ef-4a5b-8c33-5261f696b5cf"),
+    "task/b614…b5cf",
+  );
+  assert.equal(shortBranch("task/dark-mode"), "task/dark-mode");
 });

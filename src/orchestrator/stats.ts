@@ -5,14 +5,6 @@ import type { SpendSummary, Task } from "./types";
 export const DAY_MS = 24 * 60 * 60 * 1000;
 const PERIOD_DAYS = 7;
 
-/** Optional fields the daemon may add; each is read defensively. */
-export type TaskExtras = {
-  /** When the task landed on its base branch, ms epoch. */
-  landedAt?: number;
-  /** Question history, once the daemon keeps it. */
-  questions?: { askedAt?: number; answeredAt?: number; answeredBy?: string }[];
-};
-
 export type Period = { from: number; to: number };
 
 function startOfDay(ms: number): number {
@@ -34,18 +26,13 @@ export function median(values: number[]): number | null {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-function extras(task: Task): TaskExtras {
-  return task as Task & TaskExtras;
-}
-
 export function isLanded(task: Task): boolean {
   return task.status === "done" && !!task.landedSha;
 }
 
-/** When the work reached its branch: the daemon's `landedAt`, else the time
- * the report was written. */
+/** When the work reached its branch: the time the report was written. */
 export function landedTime(task: Task): number | undefined {
-  return extras(task).landedAt ?? task.reportAt;
+  return task.reportAt;
 }
 
 export function startedTime(task: Task): number {
@@ -73,15 +60,15 @@ export type PeriodStats = {
   failedBy: { kind: string; count: number }[];
   landedPercent: number | null;
   medianToLandMs: number | null;
-  /** Questions the daemon kept: answered for the owner, open now, or in a
-   * history it may provide. */
+  /** Every question asked: the answered ones in `questionHistory` plus the
+   * ones open now. */
   questions: number;
+  /** Answered by the answer policy, its judge or the orchestrator. */
   answeredForYou: number;
   overturned: number;
-  /** Median ms from a question to its answer; null without history. */
+  /** Median ms from a question being asked to the owner's answer; null when
+   * the owner answered none that carry an `askedAt`. */
   medianWaitMs: number | null;
-  /** Whether `questions` came from a real history. */
-  hasQuestionHistory: boolean;
 };
 
 function lastFailureKind(task: Task): string {
@@ -107,15 +94,13 @@ export function periodStats(tasks: Task[], period: Period): PeriodStats {
     if (at !== undefined && at >= startedTime(t))
       toLand.push(at - startedTime(t));
   }
-  const history = inPeriod.flatMap((t) => extras(t).questions ?? []);
-  const hasQuestionHistory = history.length > 0;
-  const assumptions = inPeriod.flatMap((t) =>
-    (t.assumptions ?? []).filter((a) => a.by === "policy" || a.by === "judge"),
-  );
+  const history = inPeriod.flatMap((t) => t.questionHistory ?? []);
   const open = inPeriod.filter((t) => t.status === "waiting" && t.question);
-  const waits = history
-    .filter((q) => q.askedAt !== undefined && q.answeredAt !== undefined)
-    .map((q) => (q.answeredAt as number) - (q.askedAt as number));
+  const waits = history.flatMap((q) =>
+    q.answeredBy === "owner" && q.askedAt !== undefined
+      ? [q.answeredAt - q.askedAt]
+      : [],
+  );
   return {
     started: inPeriod.length,
     landed: landed.length,
@@ -129,13 +114,14 @@ export function periodStats(tasks: Task[], period: Period): PeriodStats {
       ? Math.round((landed.length / inPeriod.length) * 100)
       : null,
     medianToLandMs: median(toLand),
-    questions: hasQuestionHistory
-      ? history.length
-      : assumptions.length + open.length,
-    answeredForYou: assumptions.length,
-    overturned: assumptions.filter((a) => a.overturned).length,
+    questions: history.length + open.length,
+    answeredForYou: history.filter((q) => q.answeredBy !== "owner").length,
+    overturned: inPeriod.flatMap((t) =>
+      (t.assumptions ?? []).filter(
+        (a) => a.overturned && (a.by === "policy" || a.by === "judge"),
+      ),
+    ).length,
     medianWaitMs: median(waits),
-    hasQuestionHistory,
   };
 }
 
@@ -174,6 +160,13 @@ export function weekSummary(
     costUsd,
     text: parts.join(" · "),
   };
+}
+
+/** The inclusive UTC `from`/`to` dates `costs.summary` windows a period
+ * by: the first and last of its `dayKeys`. */
+export function spendRange(period: Period): { from: string; to: string } {
+  const keys = dayKeys(period);
+  return { from: keys[0], to: keys[keys.length - 1] };
 }
 
 /** Seven `YYYY-MM-DD` keys, oldest first, as `costs.summary` groups a day
@@ -215,4 +208,27 @@ export function signed(
 ): string | null {
   if (!Number.isFinite(value) || value === 0) return null;
   return `${value > 0 ? "+" : "−"}${format(Math.abs(value))}`;
+}
+
+/** The Analytics insight about finished work that is not on its branch yet:
+ * done tasks that only wait for a Land click, and `landing` tasks that wait
+ * for their base checkout to be clean. Each part only when it applies. */
+export function landInsight(ready: number, landing: Task[]): string {
+  const tasks = (n: number) => `${n} finished task${n === 1 ? "" : "s"}`;
+  return [
+    ready ? `${tasks(ready)} ${ready === 1 ? "is" : "are"} ready to land` : "",
+    landing.length
+      ? `${tasks(landing.length)} ${landing.length === 1 ? "waits" : "wait"} for a clean checkout`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** Top-level tasks orchd holds in `landing`: done and checked, waiting for a
+ * clean checkout of their base branch. */
+export function landingTasks(tasks: Task[]): Task[] {
+  return tasks.filter(
+    (t) => t.status === "landing" && !t.archived && !t.parent,
+  );
 }

@@ -11,11 +11,14 @@ export type AutonomyFlags = {
   land: boolean;
 };
 
-/** `handsOff` also retries failures and lands follow-ups, which the daemon
- * cannot do yet, so it has no mapping and is never applied or detected. */
+/** `balanced` is orchd's own default: routine questions are answered by the
+ * answer policy (shown as assumptions) and passed work lands, while a stuck
+ * agent's question still comes to the owner. `handsOff` also retries
+ * failures and lands follow-ups, which the daemon cannot do yet, so it has
+ * no mapping and is never applied or detected. */
 export const AUTONOMY_FLAGS: Record<"ask" | "balanced", AutonomyFlags> = {
   ask: { autoAnswer: false, answerPolicy: false, land: false },
-  balanced: { autoAnswer: true, answerPolicy: true, land: true },
+  balanced: { autoAnswer: false, answerPolicy: true, land: true },
 };
 
 export function autonomyOf(settings: Settings): AutonomyFlags {

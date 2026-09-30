@@ -123,3 +123,27 @@ test("Clean up offers idle agents and shells apart, within the host filter", asy
     [],
   );
 });
+
+test("Inbox counts read singular for one and plural otherwise", async () => {
+  const { plural } = await load();
+  assert.equal(plural(1, "idle session"), "1 idle session");
+  assert.equal(plural(2, "idle session"), "2 idle sessions");
+  assert.equal(plural(1, "shell"), "1 shell");
+  assert.equal(plural(0, "file"), "0 files");
+});
+
+test("a remote-host task is filed under its host, not Local", async () => {
+  const { inboxItems } = await import("../src/app/inboxModel.ts");
+  const task = {
+    id: "t1",
+    title: "Remote question",
+    repo: "/srv/app",
+    status: "waiting",
+    updatedAt: 1,
+    host: "ssh:lab",
+    question: { text: "Which?", options: ["a", "b"] },
+    attempts: [],
+  };
+  const items = inboxItems([task], [task], []);
+  assert.equal(items[0].host, "ssh:lab");
+});

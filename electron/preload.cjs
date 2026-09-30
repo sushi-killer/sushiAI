@@ -71,6 +71,7 @@ contextBridge.exposeInMainWorld("bridge", {
   },
   orchestratorHosts: invoke("orchestrator-hosts"),
   orchestratorPreflight: invoke("orchestrator-preflight"),
+  orchestratorProbe: invoke("orchestrator-probe"),
   onOrchestratorHosts: (callback) => {
     const listener = () => callback();
     ipcRenderer.on("orchestrator-hosts-changed", listener);

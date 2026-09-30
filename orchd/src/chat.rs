@@ -677,8 +677,21 @@ pub async fn handle_clear_draft(
 ) -> Result<serde_json::Value, String> {
     let repo = repo_param(&params)?;
     let kind = ChatKind::param(&params)?;
+    // `id` names the session the draft came from; the current one without it.
+    let id = params
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let chats = change_idle(app, &repo, kind, |chats| {
-        chats.current_mut(kind).draft = None;
+        let session = match &id {
+            Some(id) => chats
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == *id && s.kind == kind)
+                .ok_or_else(|| "no such chat session".to_string())?,
+            None => chats.current_mut(kind),
+        };
+        session.draft = None;
         Ok(())
     })?;
     Ok(chats.thread_json(kind))
@@ -1581,7 +1594,21 @@ mod tests {
         let chats = load(&app, &repo);
         assert!(chats.current(ChatKind::Chat).draft.is_none());
         let other = chats.sessions.iter().find(|s| s.id == first).unwrap();
-        assert_eq!(other.draft, Some(draft));
+        assert_eq!(other.draft, Some(draft.clone()));
+
+        // With an id, the named session loses its draft, not the current one.
+        let mut session = load(&app, &repo).current(ChatKind::Chat).clone();
+        session.draft = Some(draft.clone());
+        save(&app, &repo, &session);
+        handle_clear_draft(&app, json!({"repo": repo, "id": first}))
+            .await
+            .unwrap();
+        let chats = load(&app, &repo);
+        assert_eq!(chats.current(ChatKind::Chat).draft, Some(draft));
+        let other = chats.sessions.iter().find(|s| s.id == first).unwrap();
+        assert!(other.draft.is_none());
+        let unknown = handle_clear_draft(&app, json!({"repo": repo, "id": "nope"})).await;
+        assert_eq!(unknown.unwrap_err(), "no such chat session");
     }
 
     fn bs() -> serde_json::Value {

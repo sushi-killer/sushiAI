@@ -25,7 +25,7 @@ function task(overrides = {}) {
   };
 }
 
-test("without daemon buckets every draft is NEXT, oldest first", async () => {
+test("drafts outside the backlog are NEXT, oldest first", async () => {
   const { planModel } = await model;
   const m = planModel([
     task({ id: "b", createdAt: 2000 }),
@@ -37,24 +37,87 @@ test("without daemon buckets every draft is NEXT, oldest first", async () => {
     ["a", "b"],
   );
   assert.equal(m.later.length, 0);
-  assert.equal(m.bucketed, false);
 });
 
-test("daemon bucket and order split NEXT and LATER", async () => {
+test("the backlog bucket and order split NEXT and LATER, backlog first", async () => {
   const { planModel } = await model;
   const m = planModel([
-    task({ id: "a", bucket: "later", order: 1 }),
-    task({ id: "b", bucket: "next", order: 2, createdAt: 1 }),
-    task({ id: "c", bucket: "next", order: 1, createdAt: 9 }),
+    task({ id: "a", backlog: { bucket: "later", order: 1 } }),
+    task({ id: "b", backlog: { bucket: "next", order: 2 }, createdAt: 1 }),
+    task({ id: "c", backlog: { bucket: "next", order: 1 }, createdAt: 9 }),
+    task({ id: "loose", createdAt: 0 }),
   ]);
   assert.deepEqual(
     m.next.map((i) => i.task.id),
-    ["c", "b"],
+    ["c", "b", "loose"],
   );
   assert.deepEqual(
     m.later.map((i) => i.task.id),
     ["a"],
   );
+});
+
+test("a task that already ran an attempt is not a draft", async () => {
+  const { planModel, unstartedDraft } = await model;
+  const planning = task({
+    id: "planning",
+    status: "queued",
+    attempts: [{ n: 1, stage: "plan", status: "running" }],
+  });
+  const parked = task({
+    id: "parked",
+    backlog: { bucket: "next", order: 0 },
+    attempts: [{ n: 1, stage: "plan", status: "passed" }],
+  });
+  assert.equal(unstartedDraft(planning), false);
+  assert.equal(unstartedDraft(parked), true);
+  assert.deepEqual(
+    planModel([planning, parked, task({ id: "new" })]).next.map(
+      (i) => i.task.id,
+    ),
+    ["parked", "new"],
+  );
+});
+
+test("backlog moves renumber the bucket and send only what changed", async () => {
+  const { planModel, backlogMoves } = await model;
+  const m = planModel([
+    task({ id: "a", backlog: { bucket: "next", order: 0 } }),
+    task({ id: "b", backlog: { bucket: "next", order: 1 } }),
+    task({ id: "loose", createdAt: 5 }),
+  ]);
+  assert.deepEqual(backlogMoves(m.next, 1, -1, "next"), [
+    { id: "b", order: 0 },
+    { id: "a", order: 1 },
+  ]);
+  // Moving the loose draft up parks it in the bucket.
+  assert.deepEqual(backlogMoves(m.next, 2, -1, "next"), [
+    { id: "loose", order: 1 },
+    { id: "b", order: 2 },
+  ]);
+  assert.deepEqual(backlogMoves(m.next, 0, -1, "next"), []);
+  assert.deepEqual(backlogMoves(m.next, 2, 1, "next"), []);
+});
+
+test("the autopilot's next is the first ready NEXT draft in the backlog", async () => {
+  const { planModel, autopilotNext } = await model;
+  const tasks = [
+    task({ id: "loose", title: "Loose", createdAt: 0 }),
+    task({
+      id: "blocked",
+      title: "Blocked",
+      backlog: { bucket: "next", order: 0 },
+      dependsOn: ["loose"],
+    }),
+    task({
+      id: "ready",
+      title: "Ready",
+      backlog: { bucket: "next", order: 1 },
+    }),
+    task({ id: "later", backlog: { bucket: "later", order: 0 } }),
+  ];
+  assert.equal(autopilotNext(planModel(tasks)).title, "Ready");
+  assert.equal(autopilotNext(planModel([task({ id: "x" })])), undefined);
 });
 
 test("split drafts group under their parent with after/waits", async () => {
@@ -100,56 +163,13 @@ test("meta pluralises criteria", async () => {
   );
 });
 
-test("autopilot is read defensively", async () => {
-  const { autopilotOf } = await model;
-  assert.equal(autopilotOf(null), null);
-  assert.equal(autopilotOf({}), null);
-  assert.equal(autopilotOf({ autopilot: true }), true);
-  assert.equal(autopilotOf({ autopilot: { enabled: false } }), false);
-});
-
-test("parseDraftBlock reads the last valid sushi-plan block", async () => {
-  const { parseDraftBlock, stripDraftBlock } = await model;
-  const text =
-    'Here:\n```sushi-plan\n{"title":"A","criteria":["x",{"text":"y","met":true}],"tier":"hard","dependsOn":["Z"]}\n```\nok\n```sushi-plan\n{bad\n```';
-  const draft = parseDraftBlock(text);
-  assert.equal(draft.title, "A");
-  assert.deepEqual(draft.criteria, [
-    { text: "x", met: false },
-    { text: "y", met: true },
-  ]);
-  assert.equal(draft.tier, "hard");
-  assert.deepEqual(draft.dependsOn, ["Z"]);
-  assert.equal(parseDraftBlock("no block"), null);
-  assert.equal(parseDraftBlock('```sushi-plan\n{"goal":"x"}\n```'), null);
-  assert.equal(stripDraftBlock(text).includes("sushi-plan"), false);
-});
-
-test("a structured thread draft wins over parsing chat text", async () => {
-  const { draftOfThread, optionsOf } = await model;
-  const messages = [
-    { role: "assistant", text: '```sushi-plan\n{"title":"Parsed"}\n```' },
-  ];
-  assert.equal(draftOfThread({ messages }).title, "Parsed");
-  assert.equal(
-    draftOfThread({ draft: { title: "Live" }, messages }).title,
-    "Live",
-  );
-  assert.equal(draftOfThread({ messages: [] }), null);
-  assert.deepEqual(
-    optionsOf({ role: "assistant", text: "", options: ["a", 1] }),
-    ["a"],
-  );
-  assert.deepEqual(optionsOf({ role: "assistant", text: "" }), []);
-});
-
-test("draftCreateParams resolves dependencies and honours start", async () => {
+test("draftCreateParams resolves dependencies and parks an unstarted draft", async () => {
   const { draftCreateParams } = await model;
   const tasks = [task({ id: "t9", title: "Lease table" })];
   const draft = {
     title: "T",
     goal: "",
-    criteria: [{ text: "c", met: false }],
+    criteria: ["c"],
     dependsOn: ["lease table", "unknown"],
   };
   assert.deepEqual(draftCreateParams(draft, tasks, false), {
@@ -157,7 +177,33 @@ test("draftCreateParams resolves dependencies and honours start", async () => {
     goal: "T",
     criteria: ["c"],
     dependsOn: ["t9"],
+    source: "brainstorm",
     start: false,
+    backlog: { bucket: "next" },
   });
-  assert.equal(draftCreateParams(draft, tasks, true).start, true);
+  const started = draftCreateParams(draft, tasks, true);
+  assert.equal(started.start, true);
+  assert.equal("backlog" in started, false);
+});
+
+test("planOnly keeps a stopped zero-attempt task that needs the owner on the rail", async () => {
+  const { planOnly } = await model;
+  const draft = task({ id: "draft" });
+  const parked = task({ id: "parked", backlog: { bucket: "next", order: 0 } });
+  const halted = task({
+    id: "halted",
+    status: "stopped",
+    decisions: ["Orchestrator: stopped - the brief is unclear"],
+  });
+  const ownerStopped = task({
+    id: "owner-stopped",
+    status: "stopped",
+    decisions: ["Owner: stop"],
+  });
+  const only = planOnly([draft, parked, halted, ownerStopped]);
+  assert.deepEqual([...only].map((t) => t.id).sort(), [
+    "draft",
+    "owner-stopped",
+    "parked",
+  ]);
 });

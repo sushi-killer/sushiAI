@@ -157,12 +157,54 @@ export function inboxZeroSummary(tasks: Task[], now = Date.now()): string {
     .join(" ");
 }
 
-/** The reply field and a picked option become one answer: the note wins, a
- * pick alone is sent as is, both read "pick: note". */
+/** The reply field and a picked option become one answer, as in the task
+ * view's question card: typed text replaces the pick, a pick alone is sent
+ * as is. */
 export function composeAnswer(pick: string, note: string): string {
-  const text = note.trim();
-  if (!pick) return text;
-  return text ? `${pick}: ${text}` : pick;
+  return note.trim() || pick;
+}
+
+/** A question's answer state. `pick` is the owner's own choice: undefined
+ * until they pick, "" once they unpick. `preselected` is the first option,
+ * shown picked up front so one click on Answer sends it. */
+export type AnswerChoice = {
+  pick: string | undefined;
+  preselected: string;
+  note: string;
+};
+
+/** The option a chip shows as picked: none while text is typed (it replaces
+ * the pick), else the owner's pick, else the preselection. */
+export function shownPick(choice: AnswerChoice): string {
+  if (choice.note.trim()) return "";
+  return choice.pick ?? choice.preselected;
+}
+
+/** Clicking the picked option unpicks it; any other one is picked. */
+export function togglePick(choice: AnswerChoice, option: string): string {
+  return shownPick(choice) === option ? "" : option;
+}
+
+/** What a click on Answer sends: the preselection counts, a click is
+ * deliberate. */
+export function clickAnswer(choice: AnswerChoice): string {
+  return composeAnswer(choice.pick ?? choice.preselected, choice.note);
+}
+
+/** How long Enter is ignored after a question appears or the selection
+ * moves to it, so a held or doubled Enter never answers the next one. */
+export const ENTER_ARM_MS = 500;
+
+/** What Enter sends, "" for nothing: only what the owner chose for this
+ * question (an explicit pick or typed text), never the preselection, and
+ * nothing within ENTER_ARM_MS of `shownAt`. */
+export function enterAnswer(
+  choice: AnswerChoice,
+  shownAt: number,
+  now: number,
+): string {
+  if (now - shownAt < ENTER_ARM_MS) return "";
+  return composeAnswer(choice.pick ?? "", choice.note);
 }
 
 /** The key after `delta` steps from `current`, clamped to the list; the first

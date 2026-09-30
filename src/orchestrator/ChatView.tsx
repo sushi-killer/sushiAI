@@ -9,20 +9,9 @@ import {
   Sparkles,
   SquareTerminal,
 } from "lucide-react";
-import { useOrchestratorClient } from "./hostContext";
-import {
-  enterKind,
-  isOfKind,
-  newSession,
-  noteThread,
-  sendInKind,
-  sessionMeta,
-  sessionsOfKind,
-  switchSession,
-  visibleText,
-  visibleTitle,
-  type KindedList,
-} from "./chatKinds";
+import { useOrchestratorClient, useOrchestratorHost } from "./hostContext";
+import { enterKind, eventKind, type KindedList } from "./chatKinds";
+import { hostOf } from "./hosts";
 import {
   groupSessions,
   matchesQuery,
@@ -201,7 +190,6 @@ function ChatHead({
 function Conversation({
   cwd,
   thread,
-  waiting,
   error,
   settings,
   tasks,
@@ -212,7 +200,6 @@ function Conversation({
 }: {
   cwd: string;
   thread: ChatThread | null;
-  waiting: boolean;
   error: string;
   settings: Settings | null;
   tasks: Task[];
@@ -241,20 +228,14 @@ function Conversation({
   return (
     <>
       <ChatHead
-        title={visibleTitle(thread?.title) || "New chat"}
+        title={thread?.title || "New chat"}
         settings={settings}
         busy={busy}
         canClear={messages.length > 0}
         onClear={onClear}
       />
       <div className={`ochat-scroll ${empty ? "empty" : ""}`}>
-        {waiting && (
-          <p className="ochat-wait">
-            The orchestrator is still answering in another session. This chat
-            opens when it finishes.
-          </p>
-        )}
-        {empty && !waiting ? (
+        {empty ? (
           <div className="ochat-empty">
             <h3>Ask about your tasks</h3>
             <p>
@@ -277,7 +258,7 @@ function Conversation({
           messages.map((message) =>
             message.role === "user" ? (
               <div key={message.id} className="ochat-you">
-                <div className="ochat-bubble">{visibleText(message.text)}</div>
+                <div className="ochat-bubble">{message.text}</div>
               </div>
             ) : (
               <OrchestratorTurn
@@ -316,7 +297,7 @@ function Conversation({
           placeholder="Ask the orchestrator…"
           ariaLabel="Message the orchestrator"
           sendLabel="Send message"
-          disabled={!thread || waiting}
+          disabled={!thread}
           sending={busy}
           onStop={() => void orchestratorClient.chatCancel(cwd)}
           route={
@@ -453,6 +434,7 @@ function MessageCard({
  * this repo, newest first, each reply under the message it answers. */
 function AgentMessages({ cwd, tasks }: { cwd: string; tasks: Task[] }) {
   const orchestratorClient = useOrchestratorClient();
+  const host = useOrchestratorHost();
   const [messages, setMessages] = useState<Message[]>([]);
   const [loadError, setLoadError] = useState("");
   useEffect(() => {
@@ -462,6 +444,7 @@ function AgentMessages({ cwd, tasks }: { cwd: string; tasks: Task[] }) {
       .then((loaded) => !cancelled && setMessages(loaded))
       .catch((e) => !cancelled && setLoadError(errorText(e)));
     const off = window.bridge?.onOrchestrator((event) => {
+      if (hostOf(event) !== host) return;
       if (event.event === "message" && event.message.repo === cwd)
         setMessages((old) => upsertMessage(old, event.message));
     });
@@ -469,7 +452,7 @@ function AgentMessages({ cwd, tasks }: { cwd: string; tasks: Task[] }) {
       cancelled = true;
       off?.();
     };
-  }, [cwd, orchestratorClient]);
+  }, [cwd, host, orchestratorClient]);
 
   const replies = new Map<string, Message[]>();
   for (const m of messages)
@@ -514,9 +497,9 @@ function AgentMessages({ cwd, tasks }: { cwd: string; tasks: Task[] }) {
 }
 
 /** The right-hand sessions column: New, search, the agent messages entry
- * and this repo's chat sessions, TODAY and EARLIER. */
+ * and this repo's chat sessions, TODAY and EARLIER. A session shows once it
+ * has a message: a new chat gets its row on the first send. */
 function Sessions({
-  cwd,
   list,
   current,
   kind,
@@ -526,7 +509,6 @@ function Sessions({
   onPick,
   onMessages,
 }: {
-  cwd: string;
   list: KindedList | null;
   current: string | undefined;
   kind: "chat" | "messages";
@@ -537,11 +519,9 @@ function Sessions({
   onMessages: () => void;
 }) {
   const [query, setQuery] = useState("");
-  const rows = sessionsOfKind(cwd, list, "chat")
-    .map((session) => ({ session, ...sessionMeta(cwd, session) }))
-    .filter((row) =>
-      matchesQuery(query, visibleTitle(row.session.title), row.preview),
-    );
+  const sessions = (list?.sessions ?? []).filter(
+    (session) => session.messageCount > 0 && matchesQuery(query, session.title),
+  );
   const wait = busy ? "Wait for the reply to finish" : undefined;
   return (
     <aside className="ochat-sessions" aria-label="Chat sessions">
@@ -579,10 +559,10 @@ function Sessions({
           <span className="ui-count">{pendingMessages}</span>
         )}
       </button>
-      {groupSessions(rows).map((group) => (
+      {groupSessions(sessions).map((group) => (
         <div key={group.label} className="ochat-group">
           <span className="ochat-group-label">{group.label}</span>
-          {group.rows.map(({ session, time, preview }) => {
+          {group.sessions.map((session) => {
             const selected = kind === "chat" && session.id === current;
             return (
               <button
@@ -596,7 +576,7 @@ function Sessions({
               >
                 <span className="ochat-session-h">
                   <span className="ochat-session-title">
-                    {visibleTitle(session.title) || "New chat"}
+                    {session.title || "New chat"}
                   </span>
                   {session.busy && (
                     <span
@@ -604,17 +584,10 @@ function Sessions({
                       aria-label="Answering"
                     />
                   )}
-                  {time !== undefined && (
-                    <span className="ochat-session-time">
-                      {sessionTime(time)}
-                    </span>
-                  )}
-                </span>
-                {(preview || !session.title) && (
-                  <span className="ochat-session-preview">
-                    {preview || "No messages yet"}
+                  <span className="ochat-session-time">
+                    {sessionTime(session.updatedAt)}
                   </span>
-                )}
+                </span>
               </button>
             );
           })}
@@ -626,8 +599,8 @@ function Sessions({
 
 /** The Chat view: the conversation (or the agent messages) in the centre and
  * this repo's chat sessions on the right. Stays mounted while hidden so a
- * half-typed message survives a look at a task; becoming visible makes the
- * last chat session current again (Brainstorm keeps sessions of its own). */
+ * half-typed message survives a look at a task; becoming visible reloads the
+ * chat kind's current session (Brainstorm's sessions are a kind of their own). */
 export function ChatView({
   cwd,
   kind,
@@ -649,51 +622,43 @@ export function ChatView({
   onOpenTask?: (id: string) => void;
 }) {
   const orchestratorClient = useOrchestratorClient();
+  const host = useOrchestratorHost();
   const [thread, setThread] = useState<ChatThread | null>(null);
   const [list, setList] = useState<KindedList | null>(null);
   const [error, setError] = useState("");
-  const [waiting, setWaiting] = useState(false);
-  const [retry, setRetry] = useState(0);
-  const waitingRef = useRef(false);
-  waitingRef.current = waiting;
   const visible = kind !== null;
 
   useEffect(() => {
     const off = window.bridge?.onOrchestrator((event) => {
-      if (event.event !== "chat" || event.thread.repo !== cwd) return;
-      const next = { current: event.current, sessions: event.sessions };
-      setList(next);
-      noteThread(cwd, event.thread);
-      if (isOfKind(cwd, next, event.thread.id, "chat")) {
-        if (!event.thread.busy) setError("");
-        setThread(event.thread);
-      }
-      if (!event.thread.busy && waitingRef.current) setRetry((n) => n + 1);
+      if (
+        hostOf(event) !== host ||
+        event.event !== "chat" ||
+        eventKind(event) !== "chat" ||
+        event.thread.repo !== cwd
+      )
+        return;
+      setList({ current: event.current, sessions: event.sessions });
+      if (!event.thread.busy) setError("");
+      setThread(event.thread);
     });
     return () => off?.();
-  }, [cwd]);
+  }, [cwd, host]);
 
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
-    enterKind(cwd, "chat")
+    enterKind(cwd, "chat", orchestratorClient)
       .then((entered) => {
         if (cancelled) return;
         setThread(entered.thread);
         setList(entered.list);
-        setWaiting(false);
         setError("");
       })
-      .catch((e) => {
-        if (cancelled) return;
-        const text = errorText(e);
-        if (/still answering/i.test(text)) setWaiting(true);
-        else setError(text);
-      });
+      .catch((e) => !cancelled && setError(errorText(e)));
     return () => {
       cancelled = true;
     };
-  }, [cwd, visible, retry]);
+  }, [cwd, visible, orchestratorClient]);
 
   function change(request: Promise<ChatThread>) {
     setError("");
@@ -706,7 +671,8 @@ export function ChatView({
   }
   function send(text: string): Promise<boolean> {
     setError("");
-    return sendInKind(cwd, "chat", text, thread, list)
+    return orchestratorClient
+      .chatSend(cwd, text)
       .then(() => true)
       .catch((e) => {
         setError(errorText(e));
@@ -714,14 +680,12 @@ export function ChatView({
       });
   }
   const busy = Boolean(list?.sessions.some((s) => s.busy) || thread?.busy);
-  const shown = waiting ? null : thread;
   return (
     <div className="orch-chat-view ochat" hidden={!visible}>
       <section className="ochat-convo" hidden={kind === "messages"}>
         <Conversation
           cwd={cwd}
-          thread={shown}
-          waiting={waiting}
+          thread={thread}
           error={error}
           settings={settings}
           tasks={tasks}
@@ -735,21 +699,20 @@ export function ChatView({
         <AgentMessages cwd={cwd} tasks={tasks} />
       </section>
       <Sessions
-        cwd={cwd}
         list={list}
-        current={shown?.id}
+        current={thread?.id}
         kind={kind ?? "chat"}
         busy={busy}
         pendingMessages={pendingMessages}
         onNew={() =>
-          shown && shown.messages.length === 0 && !shown.busy
+          thread && thread.messages.length === 0 && !thread.busy
             ? onShow("chat")
-            : change(newSession(cwd, "chat"))
+            : change(orchestratorClient.chatNew(cwd))
         }
         onPick={(id) =>
-          id === shown?.id
+          id === thread?.id
             ? onShow("chat")
-            : change(switchSession(cwd, "chat", id))
+            : change(orchestratorClient.chatSwitch(cwd, id))
         }
         onMessages={() => onShow("messages")}
       />

@@ -5,11 +5,16 @@ import {
   latestAttempt,
   latestImplementAttempt,
   reviewOf,
-  stageTrack,
   totalDurationMs,
 } from "./helpers.ts";
 import { elapsedLabel } from "./ownerAttention.ts";
-import type { Attempt, Task, TimelineSegment, TimelineStage } from "./types";
+import type {
+  Attempt,
+  Question,
+  Task,
+  TimelineSegment,
+  TimelineStage,
+} from "./types";
 
 /** The shape of one line of a segment's narration: what an icon and a tone
  * say before the words do. */
@@ -300,31 +305,33 @@ export function reportLine(task: Task): string {
     .join(" · ");
 }
 
-/** The owner's ask: which stage raised it and how long ago. `askedBy` and
- * `askedAt` are read when the daemon sends them; until then the stage comes
- * from the track and the time from the last update. */
-export function questionSource(task: Task, now = Date.now()): string {
-  const extra = (task.question ?? {}) as { askedBy?: string; askedAt?: number };
-  const by =
-    extra.askedBy ??
-    stageTrack(task).find((step) => step.state === "blocked")?.stage ??
-    "implement";
-  const minutes = Math.floor(
-    (now - (extra.askedAt ?? task.updatedAt)) / 60_000,
-  );
-  const ago =
-    minutes < 1
-      ? "just now"
-      : `${elapsedLabel(now - (extra.askedAt ?? task.updatedAt))} ago`;
-  return `asked by ${by} · ${ago}`;
+/** "asked by verify · 2m ago": the stage that asked the question and when,
+ * each part only when orchd recorded it (a question from before it did
+ * carries neither). */
+export function questionSource(
+  question: Pick<Question, "askedBy" | "askedAt">,
+  now = Date.now(),
+): string {
+  const at = question.askedAt;
+  return [
+    question.askedBy ? `asked by ${question.askedBy}` : "",
+    at === undefined
+      ? ""
+      : now - at < 60_000
+        ? "just now"
+        : `${elapsedLabel(now - at)} ago`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
-/** The header's facts line after the branch. */
+/** The header's facts after the branch, one part each, so the view can
+ * separate them without a separator ever starting a wrapped line. */
 export function headerFacts(
   task: Task,
   maxAttempts: number | undefined,
   now = Date.now(),
-): string {
+): string[] {
   const count = implementAttemptCount(task);
   const latest = latestAttempt(task);
   const finished = task.status === "done";
@@ -335,10 +342,16 @@ export function headerFacts(
     formatDuration(totalDurationMs(task, now)),
     formatCost(task.costUsd),
     !finished && latest ? `${latest.harness} · ${latest.model}` : "",
-  ]
-    .filter(Boolean)
-    .map((part) => `· ${part}`)
-    .join(" ");
+  ].filter(Boolean);
+}
+
+/** A branch as the header shows it: `task/<uuid>` shortened to its first
+ * and last four characters (`task/b614…b5cf`); a readable name stays. */
+export function shortBranch(branch: string): string {
+  return branch.replace(
+    /\b([0-9a-f]{4})[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{8}([0-9a-f]{4})\b/i,
+    "$1…$2",
+  );
 }
 
 /** `ACCEPTANCE` with the met count only when every criterion has one

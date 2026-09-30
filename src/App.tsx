@@ -23,7 +23,7 @@ import { resolveDialog, type Dialog } from "./dialogs/dialog-state";
 import { UpdateSettings } from "./dialogs/lazy-settings";
 import { NotificationsDialog } from "./app/NotificationsDialog";
 import { RoutineDialog } from "./app/RoutineDialog";
-import { SettingsDialog } from "./app/SettingsDialog";
+import { SettingsDialog, useSettingsTab } from "./app/SettingsDialog";
 import { SectionPage } from "./app/SectionPage";
 import { Sidebar } from "./app/Sidebar";
 import { TitleBar } from "./app/TitleBar";
@@ -70,9 +70,6 @@ export function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>(
     saved?.workspaces || [initialWorkspace()],
   );
-  const [settingsTab, setSettingsTab] = useState<
-    "general" | "connections" | "providers" | "orchestration" | "updates"
-  >("general");
   const {
     mode,
     section,
@@ -173,6 +170,8 @@ export function App() {
   });
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const closeDialog = useCallback(() => setDialog(null), []);
+  const [settingsTab, setSettingsTab, openConnections] =
+    useSettingsTab(setDialog);
   const target = resolveDialog(dialog, workspaces);
   const [workspaceQuery, setWorkspaceQuery] = useState("");
   const [compact, canvasRef] = useCompact();
@@ -481,6 +480,7 @@ export function App() {
               tabMode={tabMode}
               compact={compact}
               openPanelPicker={openPanelPicker}
+              openConnections={openConnections}
               merged={merged}
             />
           )}

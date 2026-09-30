@@ -42,22 +42,27 @@ test("greeting and lines pluralise", async () => {
     "4 tasks active · $1.21 today · orchd on Local",
   );
   assert.equal(m.subLine(1, null), "1 task active · orchd on Local");
+  assert.equal(
+    m.subLine(2, 0.5, "lab"),
+    "orchd on lab keeps running when your Mac sleeps",
+  );
   assert.equal(m.clearLine(2, 3), "2 tasks running, 3 landed today.");
   assert.equal(m.clearLine(1, 0), "1 task running, 0 landed today.");
 });
 
-test("question meta names the asker only when the daemon does", async () => {
+test("question meta names who asked and when, as far as orchd recorded it", async () => {
   const m = await model;
   const t = task({
     status: "waiting",
     attempts: [{ n: 1, stage: "implement" }],
     question: { text: "?", options: [], kind: "agent_question" },
   });
-  assert.equal(m.questionMeta("sushiai", t, 4), "sushiai · attempt 1/4");
+  assert.equal(m.questionMeta("sushiai", t, 4, 0), "sushiai · attempt 1/4");
   t.question.askedBy = "verify";
+  t.question.askedAt = 0;
   assert.equal(
-    m.questionMeta("sushiai", t, 4),
-    "sushiai · attempt 1/4 · asked by verify",
+    m.questionMeta("sushiai", t, 4, 2 * 60_000),
+    "sushiai · attempt 1/4 · asked by verify · 2m ago",
   );
 });
 

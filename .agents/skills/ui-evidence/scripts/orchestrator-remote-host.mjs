@@ -129,22 +129,20 @@ try {
     .click();
   await page.getByRole("button", { name: "Maximize Orchestrator" }).click();
 
-  const select = page.getByLabel("Orchestrator host");
-  await select.waitFor({ timeout: 15000 });
+  const toggle = page.locator(".orch-rail .orch-host-toggle");
+  await toggle.waitFor({ timeout: 15000 });
   await page.locator(".orchestrator-panel").first().waitFor({ timeout: 15000 });
   await page.screenshot({ path: shot("orchestrator-host-local") });
-  report.hostOptions = await select.locator("option").allInnerTexts();
-
-  await select.selectOption({ label: "Build box" });
-  const repoInput = page.getByLabel(/^Repo path on/);
-  await repoInput.waitFor({ timeout: 60000 });
-  await repoInput.fill(repo);
-  await repoInput.press("Enter");
+  await toggle.click();
+  const menu = page.locator(".orch-rail .orch-host-menu");
+  report.hostOptions = await menu.getByRole("menuitemradio").allInnerTexts();
+  await menu.getByRole("menuitemradio", { name: /^Build box/ }).click();
+  // The seeded task's repo is offered first, so the panel opens on it.
   const row = page.locator(".ui-task-row", {
     hasText: "Add rate limiting to the API",
   });
   await row.first().waitFor({ timeout: 60000 });
-  report.hostBar = (await page.locator(".orch-hostbar").innerText()).trim();
+  report.hostBar = (await toggle.innerText()).trim();
   await row.first().click();
   await page.locator(".td-head").waitFor();
   await page.screenshot({ path: shot("orchestrator-host-selector") });

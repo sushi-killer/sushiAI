@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, X } from "lucide-react";
-import { useOrchestratorClient } from "./hostContext";
+import { useOrchestratorClient, useOrchestratorHost } from "./hostContext";
+import { hostOf } from "./hosts";
 import { errorText } from "./helpers";
 import {
   failureNoteDraft,
@@ -22,6 +23,7 @@ import "./improvements.css";
  * command and is marked adopted by hand. */
 function Proposals({ cwd, refresh }: { cwd: string; refresh: string }) {
   const orchestratorClient = useOrchestratorClient();
+  const host = useOrchestratorHost();
   const [rows, setRows] = useState<Proposal[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -38,11 +40,12 @@ function Proposals({ cwd, refresh }: { cwd: string; refresh: string }) {
 
   useEffect(() => {
     const off = window.bridge?.onOrchestrator((event) => {
+      if (hostOf(event) !== host) return;
       if (event.event === "proposal" && event.proposal.repo === cwd)
         setRows((old) => upsertProposal(old, event.proposal));
     });
     return () => off?.();
-  }, [cwd]);
+  }, [cwd, host]);
 
   function act(id: string, run: () => Promise<Proposal>) {
     run()
@@ -112,7 +115,6 @@ function Proposals({ cwd, refresh }: { cwd: string; refresh: string }) {
                       )
                     }
                   >
-                    <Check size={14} />
                     Approve
                   </button>
                   <button
@@ -124,7 +126,6 @@ function Proposals({ cwd, refresh }: { cwd: string; refresh: string }) {
                       )
                     }
                   >
-                    <X size={14} />
                     Reject
                   </button>
                 </>
@@ -186,7 +187,7 @@ function RecurringFailures({
     return () => {
       cancelled = true;
     };
-  }, [cwd, refresh]);
+  }, [cwd, refresh, orchestratorClient]);
 
   const top = recurringFailures(rows);
   if (top.length === 0) return null;

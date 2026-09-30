@@ -9,9 +9,15 @@ import {
 } from "lucide-react";
 import { Character } from "./Character";
 import { isTyping, mascotMood, type Typing } from "./mood";
-import type { MascotNotice } from "./types";
+import type { MascotNotice, TaskMascotNotice } from "./types";
 import { doneMeta, noticeHeader } from "../orchestrator/notices";
-import { composeAnswer } from "../orchestrator/ownerAttention";
+import {
+  clickAnswer,
+  enterAnswer,
+  shownPick,
+  togglePick,
+  type AnswerChoice,
+} from "../orchestrator/ownerAttention";
 
 const FADE_MS = 700;
 
@@ -20,6 +26,16 @@ const cleanError = (failure: unknown) =>
     /^Error invoking remote method '[^']*': (Error: )?/,
     "",
   );
+
+/** A question notice's bold line (its first sentence) and the rest. */
+function splitQuestion(text: string): { lead: string; rest: string } {
+  const trimmed = text.trim();
+  const match = /^(.+?[.?!])\s+([\s\S]+)$/.exec(trimmed);
+  const [lead, rest] = match
+    ? [match[1], match[2]]
+    : [trimmed.split("\n")[0], trimmed.split("\n").slice(1).join("\n")];
+  return { lead, rest: rest.trim() };
+}
 
 function Kbd({ children }: { children: string }) {
   return <kbd className="kbd">{children}</kbd>;
@@ -71,7 +87,11 @@ function Bubble({
   onTyping: (typing: Typing) => void;
 }) {
   const [text, setText] = useState("");
-  const [picked, setPicked] = useState<number | null>(null);
+  // The owner's own pick: undefined until they pick, "" once they unpick.
+  // The first option only shows picked (Figma "Needs you") - a click on send
+  // takes it, Enter never does.
+  const [pick, setPick] = useState<string | undefined>(undefined);
+  const [shownAt] = useState(() => Date.now());
   const [error, setError] = useState("");
   const [fading, setFading] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -110,15 +130,23 @@ function Bubble({
       setError(cleanError(failure));
     }
   };
-  const value = composeAnswer(picked === null ? "" : options[picked], text);
-  const send = () => {
-    if (notice.kind === "input" && value) void answer(notice.taskId, value);
+  const choice: AnswerChoice = {
+    pick,
+    preselected: options[0] ?? "",
+    note: text,
   };
-  const sendRef = useRef(send);
-  sendRef.current = send;
+  const value = clickAnswer(choice);
+  const send = (answerText: string) => {
+    if (notice.kind === "input" && answerText)
+      void answer(notice.taskId, answerText);
+  };
+  const sendByKey = () => send(enterAnswer(choice, shownAt, Date.now()));
+  const keys = useRef({ sendByKey, options });
+  keys.current = { sendByKey, options };
 
-  // 1-N picks an option and Enter sends, unless the reply field has focus
-  // (digits are text there, and its form sends on Enter itself).
+  // 1-N picks an option and Enter sends what was picked or typed, unless the
+  // reply field has focus (digits are text there, and its form sends on
+  // Enter itself).
   const open = notice.kind === "input" && !notice.answered;
   useEffect(() => {
     if (!open) return;
@@ -129,10 +157,10 @@ function Bubble({
       const digit = Number(event.key);
       if (digit >= 1 && digit <= options.length) {
         event.preventDefault();
-        setPicked(digit - 1);
+        setPick(keys.current.options[digit - 1]);
       } else if (event.key === "Enter" && target?.tagName !== "BUTTON") {
         event.preventDefault();
-        sendRef.current();
+        keys.current.sendByKey();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -208,18 +236,29 @@ function Bubble({
         tone={TONES[notice.kind] ?? "info"}
         onDismiss={dismiss}
       />
-      <strong title={notice.title}>{notice.title}</strong>
+      {notice.kind === "input" ? (
+        <QuestionLines notice={notice} />
+      ) : (
+        <strong title={notice.title}>{notice.title}</strong>
+      )}
       {notice.kind === "input" ? (
         <div className="bubble-scroll">
-          <span className="bubble-body">{notice.body}</span>
+          {splitQuestion(notice.body).rest && (
+            <span className="bubble-body">
+              {splitQuestion(notice.body).rest}
+            </span>
+          )}
           {!!options.length && (
             <div className="bubble-options">
-              {options.map((option, at) => (
+              {options.map((option) => (
                 <button
                   key={option}
-                  className={picked === at ? "picked" : ""}
-                  aria-pressed={picked === at}
-                  onClick={() => setPicked(at)}
+                  className={shownPick(choice) === option ? "picked" : ""}
+                  aria-pressed={shownPick(choice) === option}
+                  onClick={() => {
+                    setPick(togglePick(choice, option));
+                    setText("");
+                  }}
                 >
                   {option}
                 </button>
@@ -237,8 +276,9 @@ function Bubble({
           <form
             className="bubble-answer"
             onSubmit={(event) => {
+              // Enter in the field: only typed text or an explicit pick.
               event.preventDefault();
-              send();
+              sendByKey();
             }}
           >
             <input
@@ -251,10 +291,11 @@ function Bubble({
               onBlur={() => setFocused(false)}
             />
             <button
-              type="submit"
+              type="button"
               className="kbd-button"
               aria-label="Send answer"
               disabled={!value}
+              onClick={() => send(value)}
             >
               <Kbd>⏎</Kbd>
             </button>
@@ -306,6 +347,21 @@ function Bubble({
         <span className="bubble-error">{error}</span>
       )}
     </div>
+  );
+}
+
+/** A question bubble's head: the question itself in bold, then the task and
+ * who asked it (Figma "Needs you"). */
+function QuestionLines({ notice }: { notice: TaskMascotNotice }) {
+  const { lead } = splitQuestion(notice.body);
+  const by = notice.askedBy;
+  return (
+    <>
+      <strong title={notice.body}>{lead}</strong>
+      <span className="bubble-sub" title={notice.title}>
+        {by ? `${notice.title} · asked by ${by}` : notice.title}
+      </span>
+    </>
   );
 }
 
@@ -458,11 +514,6 @@ export function Mascot() {
   return (
     <div className="mascot" ref={rootRef}>
       <div className="bubble-wrap">
-        <Bubble
-          key={`${shown.id}:${shown.kind !== "core-update" && shown.answered}`}
-          notice={shown}
-          onTyping={setTyping}
-        />
         {total > 1 && (
           <div className="queue">
             <button aria-label="Previous notice" onClick={() => step(-1)}>
@@ -483,6 +534,11 @@ export function Mascot() {
             </button>
           </div>
         )}
+        <Bubble
+          key={`${shown.id}:${shown.kind !== "core-update" && shown.answered}`}
+          notice={shown}
+          onTyping={setTyping}
+        />
       </div>
       {character}
     </div>

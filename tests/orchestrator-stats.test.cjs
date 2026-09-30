@@ -29,7 +29,9 @@ test("weekSummary counts the cohort and formats the one-liner", async () => {
     task({
       id: "d",
       status: "failed",
-      assumptions: [{ by: "policy", overturned: false }],
+      questionHistory: [
+        { answeredBy: "policy", askedAt: 0, answeredAt: 1, answer: "a" },
+      ],
     }),
     task({ id: "old", createdAt: NOW - 20 * DAY, landedSha: "x" }),
     task({ id: "sub", parent: "a" }),
@@ -48,16 +50,11 @@ test("weekSummary drops the parts it cannot know", async () => {
   assert.equal(weekSummary([], null, NOW).text, "0 of 0 landed");
 });
 
-test("periodStats: median to land prefers landedAt over reportAt", async () => {
+test("periodStats: median to land runs from the first attempt to the report", async () => {
   const { periodStats, periodAt } = await stats;
   const start = NOW - DAY;
   const tasks = [
-    task({
-      id: "a",
-      landedSha: "x",
-      landedAt: start + 10 * 60000,
-      reportAt: start + 99 * 60000,
-    }),
+    task({ id: "a", landedSha: "x", reportAt: start + 10 * 60000 }),
     task({ id: "b", landedSha: "x", reportAt: start + 30 * 60000 }),
   ];
   const result = periodStats(tasks, periodAt(NOW));
@@ -83,22 +80,86 @@ test("periodStats groups failures by the last failed attempt", async () => {
   ]);
 });
 
-test("periodStats uses question history when the daemon sends it", async () => {
+test("periodStats counts questions from questionHistory plus open ones", async () => {
   const { periodStats, periodAt } = await stats;
+  const answered = (answeredBy, askedAt, answeredAt) => ({
+    question: "?",
+    options: [],
+    kind: "agent_question",
+    askedBy: "implement",
+    askedAt,
+    answer: "a",
+    answeredAt,
+    answeredBy,
+  });
   const result = periodStats(
     [
       task({
-        questions: [
-          { askedAt: 0, answeredAt: 4 * 60000 },
-          { askedAt: 0, answeredAt: 2 * 60000 },
+        id: "a",
+        questionHistory: [
+          answered("owner", 0, 4 * 60000),
+          answered("owner", 0, 2 * 60000),
+          answered("policy", 0, 1),
+          answered("orchestrator", 0, 1),
+          // A question from before orchd stamped askedAt: no wait to measure.
+          { ...answered("owner", 0, 9), askedAt: undefined },
         ],
+        assumptions: [
+          { by: "policy", overturned: true },
+          { by: "planner", overturned: true },
+        ],
+      }),
+      task({
+        id: "b",
+        status: "waiting",
+        question: { text: "?", options: [], kind: "budget" },
       }),
     ],
     periodAt(NOW),
   );
-  assert.equal(result.questions, 2);
+  assert.equal(result.questions, 6);
+  assert.equal(result.answeredForYou, 2);
+  assert.equal(result.overturned, 1);
   assert.equal(result.medianWaitMs, 3 * 60000);
-  assert.equal(result.hasQuestionHistory, true);
+});
+
+test("periodStats has no median wait when the owner answered nothing", async () => {
+  const { periodStats, periodAt } = await stats;
+  const result = periodStats([task()], periodAt(NOW));
+  assert.equal(result.questions, 0);
+  assert.equal(result.medianWaitMs, null);
+});
+
+test("spendRange windows costs.summary by the period's UTC day keys", async () => {
+  const { spendRange, dayKeys, periodAt } = await stats;
+  const period = periodAt(NOW, 1);
+  const keys = dayKeys(period);
+  assert.deepEqual(spendRange(period), { from: keys[0], to: keys[6] });
+  assert.match(spendRange(period).from, /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test("the land insight only claims a dirty checkout for landing tasks", async () => {
+  const { landInsight, landingTasks } = await stats;
+  const landing = landingTasks([
+    task({ id: "l", status: "landing" }),
+    task({ id: "sub", status: "landing", parent: "l" }),
+    task({ id: "d" }),
+  ]);
+  assert.deepEqual(
+    landing.map((t) => t.id),
+    ["l"],
+  );
+  assert.equal(landInsight(2, []), "2 finished tasks are ready to land");
+  assert.equal(landInsight(1, []), "1 finished task is ready to land");
+  assert.equal(
+    landInsight(0, landing),
+    "1 finished task waits for a clean checkout",
+  );
+  assert.equal(
+    landInsight(3, landing),
+    "3 finished tasks are ready to land · 1 finished task waits for a clean checkout",
+  );
+  assert.equal(landInsight(0, []), "");
 });
 
 test("spendBars fills missing days and names today", async () => {

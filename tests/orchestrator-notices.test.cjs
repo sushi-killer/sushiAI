@@ -130,9 +130,17 @@ test("orchestratorNotice carries time, repo name, cost and the last review verdi
   const asked = orchestratorNotice({
     ...task,
     status: "waiting",
-    question: { text: "q", askedAt: 99 },
+    question: { text: "q", askedAt: 99, askedBy: "verify" },
   });
   assert.equal(asked.at, 99);
+  assert.equal(asked.askedBy, "verify");
   assert.equal(asked.costUsd, undefined);
+  assert.equal(done.askedBy, undefined);
+  const forged = orchestratorNotice({
+    ...task,
+    status: "waiting",
+    question: { text: "q", askedBy: "<img src=x>" },
+  });
+  assert.equal(forged.askedBy, undefined);
   assert.equal(orchestratorNotice({ ...task, updatedAt: 0 }).at, undefined);
 });

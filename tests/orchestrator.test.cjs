@@ -6,6 +6,7 @@ const path = require("node:path");
 const fs = require("node:fs/promises");
 const {
   OrchestratorService,
+  OrchestratorHosts,
   orchestratorNotice,
   socketPathFor,
   orchdBinaryPath,
@@ -281,6 +282,82 @@ test("call() reports a distinct error when a spawned daemon never answers ping (
   service.binary = binary;
   service.socketPath = path.join(directory, "orchd.sock"); // nobody listens here
   await assert.rejects(service.call("ping"), new RegExp(FAILED_TO_START));
+});
+
+test("probe() pings the socket in use and never spawns or provisions a daemon", async (t) => {
+  const { socketPath, directory, calls } = await fixtureServer(t, {
+    ping: () => ({ pid: 7 }),
+  });
+  // No binary: anything that went through #ensureRunning would fail NOT_BUILT.
+  const service = new OrchestratorService({
+    dataDir: directory,
+    root: directory,
+    resourcesPath: directory,
+    packaged: false,
+    send: () => {},
+  });
+  service.binary = path.join(directory, "missing-orchd");
+  service.socketPath = socketPath;
+  assert.deepEqual(await service.probe(), { pid: 7 });
+  assert.deepEqual(
+    calls.map((c) => c.method),
+    ["ping"],
+  );
+  // A dead socket is a plain connection error, not a spawn attempt.
+  service.socketPath = path.join(directory, "nobody.sock");
+  await assert.rejects(service.probe(), (error) => {
+    assert.doesNotMatch(error.message, new RegExp(NOT_BUILT));
+    assert.doesNotMatch(error.message, new RegExp(FAILED_TO_START));
+    return true;
+  });
+
+  // A remote service that has no connection yet never calls ensure().
+  let ensured = 0;
+  const remote = new OrchestratorService({
+    host: "ssh:box",
+    send: () => {},
+    remote: {
+      ensure: async () => {
+        ensured++;
+        return { socketPath, token: "t" };
+      },
+      reopen() {},
+      close() {},
+    },
+  });
+  await assert.rejects(remote.probe(), /not connected/);
+  assert.equal(ensured, 0);
+});
+
+test("OrchestratorHosts.probe never enables or creates a remote host", async () => {
+  let created = 0;
+  let probed = 0;
+  const hosts = new OrchestratorHosts({
+    local: { probe: async () => ({ pid: 1 }) },
+    connections: () => ({ get: () => ({}), list: () => [] }),
+    createService: () => {
+      created++;
+      return { connect() {}, probe: async () => ({ pid: 2 }) };
+    },
+    onChange: () => {},
+  });
+  assert.deepEqual(await hosts.probe("local"), { pid: 1 });
+  await assert.rejects(hosts.probe("ssh:box"), /not connected/);
+  assert.equal(created, 0);
+  assert.equal(
+    hosts.list().find((h) => h.id === "ssh:box"),
+    undefined,
+  );
+  // Once a call connected the host, the probe reaches its service.
+  hosts.services.set("ssh:box", {
+    probe: async () => {
+      probed++;
+      return { pid: 2 };
+    },
+  });
+  assert.deepEqual(await hosts.probe("ssh:box"), { pid: 2 });
+  assert.equal(probed, 1);
+  await assert.rejects(hosts.probe(42), /Invalid orchestrator host/);
 });
 
 test("every request but ping carries the daemon's control token", async (t) => {

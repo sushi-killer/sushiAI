@@ -1,30 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Plus, Sparkles } from "lucide-react";
-import { orchestratorClient } from "./client";
-import {
-  enterKind,
-  isOfKind,
-  newSession,
-  noteThread,
-  sendInKind,
-  sessionMeta,
-  sessionsOfKind,
-  switchSession,
-  visibleText,
-  visibleTitle,
-  type KindedList,
-} from "./chatKinds";
-import { optionsInText, sessionTime, stripOptions } from "./chatModel";
+import { enterKind, eventKind, type KindedList } from "./chatKinds";
+import { newestFirst, sessionTime } from "./chatModel";
 import { errorText } from "./helpers";
-import {
-  DRAFT_REQUEST,
-  draftCreateParams,
-  draftOfThread,
-  optionsOf,
-  stripDraftBlock,
-  type DraftTask,
-} from "./planModel";
-import type { ChatMessage, ChatThread, Task } from "./types";
+import { useOrchestratorClient, useOrchestratorHost } from "./hostContext";
+import { hostOf } from "./hosts";
+import { draftCreateParams } from "./planModel";
+import type { ChatDraft, ChatMessage, ChatThread, Task } from "./types";
 import { Chip, Criterion, Tag } from "./ui";
 import { Composer } from "./Composer";
 import "./plan.css";
@@ -35,20 +17,6 @@ const STARTERS = [
   "Answer questions from the Inbox",
   "A weekly digest of what landed",
 ];
-
-function createDraftTask(
-  cwd: string,
-  draft: DraftTask,
-  tasks: Task[],
-  start: boolean,
-): Promise<Task> {
-  if (!window.bridge)
-    return Promise.reject(new Error("Open the desktop app first."));
-  return window.bridge.orchestrator("task.create", {
-    repo: cwd,
-    ...draftCreateParams(draft, tasks, start),
-  }) as Promise<Task>;
-}
 
 function Bubble({
   message,
@@ -63,32 +31,36 @@ function Bubble({
   onPick: (option: string) => void;
 }) {
   const you = message.role === "user";
-  const text = you
-    ? message.text === DRAFT_REQUEST
-      ? "Draft this as a task."
-      : visibleText(message.text)
-    : stripOptions(stripDraftBlock(message.text)) || "Draft updated.";
-  const options = you
-    ? []
-    : [...new Set([...optionsOf(message), ...optionsInText(message.text)])];
+  // orchd falls back to the question as the reply's text when the reply was
+  // only a block; that question is not shown twice.
+  const questions = (message.questions ?? []).filter(
+    (q) => q.text !== message.text || q.options.length > 0,
+  );
   return (
     <div className={`brainstorm-bubble ${you ? "you" : "orch"}`}>
       <span className="brainstorm-who">{you ? "You" : "Orchestrator"}</span>
-      <p className="brainstorm-text">{text}</p>
-      {options.length > 0 && (
-        <div className="brainstorm-opts">
-          {options.map((option) => (
-            <Chip
-              key={option}
-              selected={nextUser === option}
-              disabled={disabled}
-              onClick={() => onPick(option)}
-            >
-              {option}
-            </Chip>
-          ))}
+      <p className="brainstorm-text">{message.text}</p>
+      {questions.map((question) => (
+        <div key={question.text} className="brainstorm-question">
+          {question.text !== message.text && (
+            <p className="brainstorm-text">{question.text}</p>
+          )}
+          {question.options.length > 0 && (
+            <div className="brainstorm-opts">
+              {question.options.map((option) => (
+                <Chip
+                  key={option}
+                  selected={nextUser === option}
+                  disabled={disabled}
+                  onClick={() => onPick(option)}
+                >
+                  {option}
+                </Chip>
+              ))}
+            </div>
+          )}
         </div>
-      )}
+      ))}
     </div>
   );
 }
@@ -97,18 +69,12 @@ function DraftPanel({
   draft,
   tasks,
   busy,
-  drafting,
-  canDraft,
-  onDraft,
   onAdd,
   onStart,
 }: {
-  draft: DraftTask | null;
+  draft: ChatDraft | undefined;
   tasks: Task[];
   busy: boolean;
-  drafting: boolean;
-  canDraft: boolean;
-  onDraft: () => void;
   onAdd: () => void;
   onStart: () => void;
 }) {
@@ -129,9 +95,9 @@ function DraftPanel({
             <>
               <span className="draft-eyebrow">ACCEPTANCE</span>
               <div className="draft-criteria">
-                {draft.criteria.map((c) => (
-                  <Criterion key={c.text} state={c.met ? "met" : "pending"}>
-                    {c.text}
+                {draft.criteria.map((criterion) => (
+                  <Criterion key={criterion} state="pending">
+                    {criterion}
                   </Criterion>
                 ))}
               </div>
@@ -145,10 +111,6 @@ function DraftPanel({
             <div>
               <dt>Tier</dt>
               <dd>{draft.tier ? `${draft.tier} (guess)` : "—"}</dd>
-            </div>
-            <div>
-              <dt>Base</dt>
-              <dd>{draft.base ?? "current branch"}</dd>
             </div>
           </dl>
           <span className="draft-spacer" />
@@ -172,23 +134,10 @@ function DraftPanel({
           </div>
         </>
       ) : (
-        <>
-          <p className="ochat-draft-empty">
-            The draft fills as you talk: title, goal, acceptance, dependencies
-            and a tier guess.
-          </p>
-          {canDraft && (
-            <button
-              type="button"
-              className="ui-button ghost brainstorm-draft-btn"
-              disabled={drafting}
-              onClick={onDraft}
-            >
-              <Sparkles size={14} />
-              {drafting ? "Drafting…" : "Draft from this chat"}
-            </button>
-          )}
-        </>
+        <p className="ochat-draft-empty">
+          The draft fills as you talk: title, goal, acceptance, dependencies and
+          a tier guess.
+        </p>
       )}
     </aside>
   );
@@ -196,14 +145,12 @@ function DraftPanel({
 
 /** "New brainstorm ▾": start a fresh brainstorm or reopen an earlier one. */
 function BrainstormMenu({
-  cwd,
   list,
   current,
   disabled,
   onNew,
   onPick,
 }: {
-  cwd: string;
   list: KindedList | null;
   current: string | undefined;
   disabled: boolean;
@@ -211,9 +158,9 @@ function BrainstormMenu({
   onPick: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const earlier = sessionsOfKind(cwd, list, "brainstorm")
-    .filter((s) => s.id !== current && s.title)
-    .reverse();
+  const earlier = (list?.sessions ?? [])
+    .filter((s) => s.id !== current && s.messageCount > 0)
+    .sort(newestFirst);
   return (
     <div className="ochat-bs-menu-wrap">
       <button
@@ -240,40 +187,34 @@ function BrainstormMenu({
           >
             <Plus size={13} /> New brainstorm
           </button>
-          {earlier.map((session) => {
-            const { time } = sessionMeta(cwd, session);
-            return (
-              <button
-                key={session.id}
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setOpen(false);
-                  onPick(session.id);
-                }}
-              >
-                <span className="ochat-menu-label">
-                  {visibleTitle(session.title)}
-                </span>
-                {time !== undefined && (
-                  <span className="ochat-session-time">
-                    {sessionTime(time)}
-                  </span>
-                )}
-              </button>
-            );
-          })}
+          {earlier.map((session) => (
+            <button
+              key={session.id}
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onPick(session.id);
+              }}
+            >
+              <span className="ochat-menu-label">
+                {session.title || "Brainstorm"}
+              </span>
+              <span className="ochat-session-time">
+                {sessionTime(session.updatedAt)}
+              </span>
+            </button>
+          ))}
         </div>
       )}
     </div>
   );
 }
 
-/** The Brainstorm view: a conversation on brainstorm sessions of its own
- * (never the Chat view's), and the draft task it fills. Opening it makes the
- * last brainstorm current, or starts one. A structured `draft` on the thread
- * (orchd) drives the panel; until then the orchestrator's `sushi-plan`
- * blocks do. */
+/** The Brainstorm view: a conversation on orchd's brainstorm sessions
+ * (never the Chat view's) and the task draft the session keeps. Opening it
+ * shows the current brainstorm; orchd starts an empty one when there is
+ * none. */
 export function BrainstormView({
   cwd,
   tasks = [],
@@ -287,57 +228,51 @@ export function BrainstormView({
   onOpenTask?: (id: string) => void;
   onPlan?: () => void;
 }) {
+  const orchestratorClient = useOrchestratorClient();
+  const host = useOrchestratorHost();
   const [thread, setThread] = useState<ChatThread | null>(null);
   const [list, setList] = useState<KindedList | null>(null);
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [drafting, setDrafting] = useState(false);
-  const [waiting, setWaiting] = useState(false);
-  const [retry, setRetry] = useState(0);
-  const waitingRef = useRef(false);
-  waitingRef.current = waiting;
+  // The session whose draft was just made into a task: its draft stays hidden
+  // until the next chat event, even when orchd refused to clear it.
+  const [usedDraft, setUsedDraft] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!cwd) return;
     const off = window.bridge?.onOrchestrator((event) => {
-      if (event.event !== "chat" || event.thread.repo !== cwd) return;
-      const next = { current: event.current, sessions: event.sessions };
-      setList(next);
-      noteThread(cwd, event.thread);
-      if (isOfKind(cwd, next, event.thread.id, "brainstorm")) {
-        if (!event.thread.busy) setDrafting(false);
-        setThread(event.thread);
-      }
-      if (!event.thread.busy && waitingRef.current) setRetry((n) => n + 1);
+      if (
+        hostOf(event) !== host ||
+        event.event !== "chat" ||
+        eventKind(event) !== "brainstorm" ||
+        event.thread.repo !== cwd
+      )
+        return;
+      setList({ current: event.current, sessions: event.sessions });
+      setThread(event.thread);
+      setUsedDraft(null);
     });
     return () => off?.();
-  }, [cwd]);
+  }, [cwd, host]);
 
   useEffect(() => {
     if (!cwd) return;
     let cancelled = false;
-    enterKind(cwd, "brainstorm")
+    enterKind(cwd, "brainstorm", orchestratorClient)
       .then((entered) => {
         if (cancelled) return;
         setThread(entered.thread);
         setList(entered.list);
-        setWaiting(false);
       })
-      .catch((e) => {
-        if (cancelled) return;
-        const message = errorText(e);
-        if (/still answering/i.test(message)) setWaiting(true);
-        else setError(message);
-      });
+      .catch((e) => !cancelled && setError(errorText(e)));
     return () => {
       cancelled = true;
     };
-  }, [cwd, retry]);
+  }, [cwd, orchestratorClient]);
 
-  const shown = waiting ? null : thread;
-  const messages = shown?.messages ?? [];
+  const messages = thread?.messages ?? [];
   const last = messages.length ? messages[messages.length - 1].id : "";
   useEffect(() => {
     endRef.current?.scrollIntoView?.({ block: "end" });
@@ -346,7 +281,8 @@ export function BrainstormView({
   function send(body: string) {
     if (!cwd) return Promise.resolve(false);
     setError("");
-    return sendInKind(cwd, "brainstorm", body, shown, list)
+    return orchestratorClient
+      .chatSend(cwd, body, "brainstorm")
       .then(() => true)
       .catch((e) => {
         setError(errorText(e));
@@ -355,88 +291,104 @@ export function BrainstormView({
   }
   function submit() {
     const body = text.trim();
-    if (!body || shown?.busy) return;
+    if (!body || thread?.busy) return;
     void send(body).then((sent) => sent && setText(""));
-  }
-  function requestDraft() {
-    setDrafting(true);
-    void send(DRAFT_REQUEST).then((sent) => sent || setDrafting(false));
   }
   function change(request: Promise<ChatThread>) {
     setError("");
     request.then(setThread).catch((e) => setError(errorText(e)));
   }
-  const draft = shown ? draftOfThread(shown) : null;
+  const draft = thread && usedDraft !== thread.id ? thread.draft : undefined;
+  const chatBusy = Boolean(thread?.busy);
 
-  function create(start: boolean) {
-    if (!cwd || !draft) return;
+  /** Creates the task, then drops the draft from the session it came from:
+   * it has been acted on. Not while a reply streams - orchd refuses to clear
+   * the draft then, and a second click would create the task again. A draft
+   * orchd would not clear stays hidden here, and the view stays open to say
+   * so instead of moving on. */
+  async function create(start: boolean) {
+    if (!cwd || !thread || !draft || busy || chatBusy) return;
+    const session = thread.id;
     setBusy(true);
     setError("");
-    createDraftTask(cwd, draft, tasks, start)
-      .then((task) => {
-        onCreated?.(task);
-        if (start) onOpenTask?.(task.id);
-        else onPlan?.();
-      })
-      .catch((e) => setError(errorText(e)))
-      .finally(() => setBusy(false));
+    try {
+      const task = await orchestratorClient.taskCreate(
+        cwd,
+        draftCreateParams(draft, tasks, start),
+      );
+      setUsedDraft(session);
+      onCreated?.(task);
+      try {
+        const cleared = await orchestratorClient.chatClearDraft(
+          cwd,
+          "brainstorm",
+          session,
+        );
+        if (cleared.id === session) setThread(cleared);
+      } catch (e) {
+        setError(
+          `“${task.title}” was created, but its draft could not be cleared: ${errorText(e)}`,
+        );
+        return;
+      }
+      if (start) onOpenTask?.(task.id);
+      else onPlan?.();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
-  const chatBusy = Boolean(shown?.busy);
   const anyBusy = chatBusy || !!list?.sessions.some((s) => s.busy);
-  const title = draft?.title || visibleTitle(shown?.title);
+  const title = draft?.title || thread?.title;
   const menu = cwd && (
     <BrainstormMenu
-      cwd={cwd}
       list={list}
-      current={shown?.id}
-      disabled={anyBusy || waiting}
+      current={thread?.id}
+      disabled={anyBusy}
       onNew={() => {
-        if (!shown || shown.messages.length > 0)
-          change(newSession(cwd, "brainstorm"));
+        if (!thread || thread.messages.length > 0)
+          change(orchestratorClient.chatNew(cwd, "brainstorm"));
       }}
-      onPick={(id) => change(switchSession(cwd, "brainstorm", id))}
+      onPick={(id) =>
+        change(orchestratorClient.chatSwitch(cwd, id, "brainstorm"))
+      }
     />
   );
   const empty = messages.length === 0 && !chatBusy;
-  const shownError = error || shown?.error;
+  const shownError = error || thread?.error;
   return (
     <div className="brainstorm ochat-bs">
       <div className="ochat-bs-main">
         <div className={`brainstorm-convo ${empty ? "ochat-bs-empty" : ""}`}>
-          {waiting && (
-            <p className="ochat-wait">
-              The orchestrator is still answering in another session. The
-              brainstorm opens when it finishes.
-            </p>
-          )}
           {empty ? (
-            !waiting && (
-              <div className="ochat-empty">
-                {menu}
-                <h3>What do you want to build?</h3>
-                <p>
-                  Describe a feature in a sentence. I ask one question at a time
-                  and fill the draft on the right; nothing runs until you add it
-                  to the plan.
-                </p>
-                <div className="ochat-starters">
-                  {STARTERS.map((starter) => (
-                    <Chip
-                      key={starter}
-                      disabled={!shown}
-                      onClick={() => void send(starter)}
-                    >
-                      {starter}
-                    </Chip>
-                  ))}
-                </div>
+            <div className="ochat-empty">
+              {menu}
+              <h3>What do you want to build?</h3>
+              <p>
+                Describe a feature in a sentence. I ask one question at a time
+                and fill the draft on the right; nothing runs until you add it
+                to the plan.
+              </p>
+              <div className="ochat-starters">
+                {STARTERS.map((starter) => (
+                  <Chip
+                    key={starter}
+                    disabled={!thread}
+                    onClick={() => void send(starter)}
+                  >
+                    {starter}
+                  </Chip>
+                ))}
               </div>
-            )
+            </div>
           ) : (
             <>
               <div className="brainstorm-head">
-                <Tag tone="info">Brainstorm</Tag>
+                <Tag tone="info" dot={false}>
+                  Brainstorm
+                </Tag>
                 {title && (
                   <span className="brainstorm-head-title">{title}</span>
                 )}
@@ -448,10 +400,7 @@ export function BrainstormView({
                   key={message.id}
                   message={message}
                   nextUser={
-                    messages
-                      .slice(i + 1)
-                      .find((m) => m.role === "user")
-                      ?.text.split("\n\n")[0]
+                    messages.slice(i + 1).find((m) => m.role === "user")?.text
                   }
                   disabled={chatBusy || !cwd}
                   onPick={(option) => void send(option)}
@@ -459,7 +408,7 @@ export function BrainstormView({
               ))}
               {chatBusy && (
                 <p className="ochat-tool ochat-bs-note">
-                  {shown?.note || "Thinking…"}
+                  {thread?.note || "Thinking…"}
                 </p>
               )}
             </>
@@ -481,9 +430,11 @@ export function BrainstormView({
             }
             ariaLabel="Brainstorm message"
             sendLabel="Send message"
-            disabled={!cwd || !shown}
+            disabled={!cwd || !thread}
             sending={chatBusy}
-            onStop={() => cwd && void orchestratorClient.chatCancel(cwd)}
+            onStop={() =>
+              cwd && void orchestratorClient.chatCancel(cwd, "brainstorm")
+            }
             route={
               <span className="chip orch-composer-route-static">
                 <Sparkles size={14} className="orch-composer-route-icon" />
@@ -497,12 +448,9 @@ export function BrainstormView({
       <DraftPanel
         draft={draft}
         tasks={tasks}
-        busy={busy}
-        drafting={drafting || chatBusy}
-        canDraft={messages.length > 0}
-        onDraft={requestDraft}
-        onAdd={() => create(false)}
-        onStart={() => create(true)}
+        busy={busy || chatBusy}
+        onAdd={() => void create(false)}
+        onStart={() => void create(true)}
       />
     </div>
   );

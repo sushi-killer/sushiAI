@@ -44,11 +44,6 @@ body,
   background: var(--bg-elevated);
   box-shadow: var(--shadow-popover);
 }
-.bubble.failed,
-.bubble.stopped {
-  border-color: var(--danger-line);
-  background: var(--danger-bg);
-}
 .bubble > * {
   flex-shrink: 0;
 }
@@ -60,6 +55,15 @@ body,
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+/* A question bubble's second line: the task and who asked. */
+.bubble-sub {
+  margin-top: -4px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .bubble-head {
   display: flex;
@@ -319,6 +323,7 @@ body,
 .sushi-hop {
   position: relative;
   margin-right: var(--gap-md);
+  z-index: 1;
   padding: 0;
   border: 0;
   background: transparent;
@@ -618,4 +623,18 @@ body,
   .bubble.leaving {
     animation: none !important;
   }
+}
+
+/* Beside a bubble the sushi is 80px and tucked against its bottom-right
+ * corner (Figma "04 Mascot notifications"); the pill keeps its small one. */
+.bubble-wrap + .sushi-hop {
+  margin-top: -24px;
+  margin-right: 4px;
+}
+.bubble-wrap + .sushi-hop .sushi {
+  width: 80px;
+  height: 80px;
+}
+.mascot {
+  padding-bottom: 14px;
 }

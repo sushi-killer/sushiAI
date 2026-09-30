@@ -2,6 +2,7 @@
 import { contains } from "../layout.ts";
 import { elapsedLabel, projectName } from "./ownerAttention.ts";
 import type { Workspace } from "../types.ts";
+import type { AskedBy } from "./types.ts";
 
 export type TaskNoticeFocus = "question" | "summary" | "report";
 
@@ -27,6 +28,8 @@ export type TaskNotice = {
   verdict?: "PASS" | "FAIL";
   /** A done task whose branch already landed. */
   landed?: boolean;
+  /** Which step asked a needs-input notice's question. */
+  askedBy?: AskedBy;
 };
 
 /** What opening a notice needs: the task, its repo and where to scroll. */

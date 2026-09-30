@@ -5,10 +5,8 @@ import {
   implementAttemptCount,
   latestAttempt,
 } from "./helpers.ts";
+import { questionSource } from "./taskDetailModel.ts";
 import type { Task } from "./types.ts";
-
-/** Optional question field the daemon may add. */
-type AskedBy = { askedBy?: string };
 
 export function greeting(needYou: number): string {
   if (needYou === 0) return "Nothing needs you";
@@ -27,8 +25,15 @@ export function activeCount(tasks: Task[]): number {
 }
 
 /** "4 tasks active · $1.21 today · orchd on Local"; the cost is left out
- * until it is known. */
-export function subLine(active: number, todayUsd: number | null): string {
+ * until it is known. On a remote host the line says where orchd runs
+ * instead (Figma "Home · remote host"). */
+export function subLine(
+  active: number,
+  todayUsd: number | null,
+  remoteHost?: string,
+): string {
+  if (remoteHost)
+    return `orchd on ${remoteHost} keeps running when your Mac sleeps`;
   return [
     `${active} task${active === 1 ? "" : "s"} active`,
     todayUsd === null ? "" : `$${todayUsd.toFixed(2)} today`,
@@ -43,20 +48,19 @@ export function clearLine(running: number, landedToday: number): string {
   return `${running} task${running === 1 ? "" : "s"} running, ${landedToday} landed today.`;
 }
 
-/** "sushiai · attempt 1/4 · asked by verify" - the asker only when the daemon
- * says who asked. */
+/** "sushiai · attempt 1/4 · asked by verify · 2m ago" - who asked and when
+ * only as far as orchd recorded it. */
 export function questionMeta(
   repo: string,
   task: Task,
   maxAttempts?: number,
+  now = Date.now(),
 ): string {
   const done = implementAttemptCount(task);
-  const askedBy = (task.question as (Task["question"] & AskedBy) | undefined)
-    ?.askedBy;
   return [
     repo,
     `attempt ${done}/${maxAttempts ?? done}`,
-    askedBy ? `asked by ${askedBy}` : "",
+    task.question ? questionSource(task.question, now) : "",
   ]
     .filter(Boolean)
     .join(" · ");

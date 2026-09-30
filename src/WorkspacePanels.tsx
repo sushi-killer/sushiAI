@@ -39,6 +39,8 @@ type PanelHostProps = {
   onSend(panel: Panel, text: string): void;
   onCancel(panelId: string): void;
   onAgent(panelId: string, agent: string): void;
+  /** Opens Settings -> Connections (the Orchestrator's "Add a host"). */
+  onOpenConnections?: () => void;
   extensionRegistry: ExtensionRegistry;
 };
 
@@ -67,6 +69,7 @@ export const PanelHost = memo(function PanelHost({
   onSend,
   onCancel,
   onAgent,
+  onOpenConnections,
   extensionRegistry,
 }: PanelHostProps) {
   return (
@@ -142,6 +145,7 @@ export const PanelHost = memo(function PanelHost({
             onViewChange={(orchestratorView) =>
               onPatch(panel.id, { orchestratorView })
             }
+            onAddHost={onOpenConnections}
             onHostChange={({ host, repo }) =>
               onPatch(panel.id, {
                 orchestratorHost: host,

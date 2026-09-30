@@ -15,6 +15,8 @@ import { hostOf } from "./hosts";
 import {
   groupSessions,
   matchesQuery,
+  isUnread,
+  lastMessageText,
   sessionTime,
   taskRefs,
 } from "./chatModel";
@@ -27,7 +29,14 @@ import {
   upsertMessage,
   type Tone,
 } from "./helpers";
-import type { ChatMessage, ChatThread, Message, Settings, Task } from "./types";
+import type {
+  ChatMessage,
+  ChatSessionSummary,
+  ChatThread,
+  Message,
+  Settings,
+  Task,
+} from "./types";
 import { RichText } from "../agents/AgentsView";
 import { Composer, OrchestratorRouteChip } from "./Composer";
 import { Chip, Tag } from "./ui";
@@ -505,12 +514,17 @@ function Sessions({
   kind,
   busy,
   pendingMessages,
+  previews,
+  unread,
   onNew,
   onPick,
   onMessages,
 }: {
   list: KindedList | null;
   current: string | undefined;
+  /** Last message per session id, for the sessions this view loaded. */
+  previews: Record<string, string>;
+  unread: (session: ChatSessionSummary) => boolean;
   kind: "chat" | "messages";
   busy: boolean;
   pendingMessages: number;
@@ -578,16 +592,29 @@ function Sessions({
                   <span className="ochat-session-title">
                     {session.title || "New chat"}
                   </span>
-                  {session.busy && (
+                  {session.busy ? (
                     <span
                       className="ui-dot ui-tone-info"
                       aria-label="Answering"
                     />
+                  ) : (
+                    !selected &&
+                    unread(session) && (
+                      <span
+                        className="ui-dot ui-tone-info"
+                        aria-label="Unread"
+                      />
+                    )
                   )}
                   <span className="ochat-session-time">
                     {sessionTime(session.updatedAt)}
                   </span>
                 </span>
+                {previews[session.id] && (
+                  <span className="ochat-session-preview">
+                    {previews[session.id]}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -627,6 +654,21 @@ export function ChatView({
   const [list, setList] = useState<KindedList | null>(null);
   const [error, setError] = useState("");
   const visible = kind !== null;
+  const [previews, setPreviews] = useState<Record<string, string>>({});
+  const [seen, setSeen] = useState<Record<string, number>>({});
+  const [since] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!thread) return;
+    const text = lastMessageText(thread);
+    setPreviews((old) =>
+      old[thread.id] === text ? old : { ...old, [thread.id]: text },
+    );
+  }, [thread]);
+  useEffect(() => {
+    if (thread && kind === "chat")
+      setSeen((old) => ({ ...old, [thread.id]: Date.now() }));
+  }, [thread, kind]);
 
   useEffect(() => {
     const off = window.bridge?.onOrchestrator((event) => {
@@ -704,6 +746,8 @@ export function ChatView({
         kind={kind ?? "chat"}
         busy={busy}
         pendingMessages={pendingMessages}
+        previews={previews}
+        unread={(session) => isUnread(session, seen[session.id], since)}
         onNew={() =>
           thread && thread.messages.length === 0 && !thread.busy
             ? onShow("chat")

@@ -4,6 +4,7 @@ import { enterKind, eventKind, type KindedList } from "./chatKinds";
 import { newestFirst, sessionTime } from "./chatModel";
 import { errorText } from "./helpers";
 import { useOrchestratorClient, useOrchestratorHost } from "./hostContext";
+import { LOCAL } from "./client";
 import { hostOf } from "./hosts";
 import { draftCreateParams } from "./planModel";
 import type { ChatDraft, ChatMessage, ChatThread, Task } from "./types";
@@ -68,12 +69,15 @@ function Bubble({
 function DraftPanel({
   draft,
   tasks,
+  base,
   busy,
   onAdd,
   onStart,
 }: {
   draft: ChatDraft | undefined;
   tasks: Task[];
+  /** The repo's checked-out branch, which a task created here starts from. */
+  base: string;
   busy: boolean;
   onAdd: () => void;
   onStart: () => void;
@@ -96,7 +100,7 @@ function DraftPanel({
               <span className="draft-eyebrow">ACCEPTANCE</span>
               <div className="draft-criteria">
                 {draft.criteria.map((criterion) => (
-                  <Criterion key={criterion} state="pending">
+                  <Criterion key={criterion} state="pending" title={criterion}>
                     {criterion}
                   </Criterion>
                 ))}
@@ -111,6 +115,10 @@ function DraftPanel({
             <div>
               <dt>Tier</dt>
               <dd>{draft.tier ? `${draft.tier} (guess)` : "—"}</dd>
+            </div>
+            <div>
+              <dt>Base</dt>
+              <dd title={base || undefined}>{base || "current branch"}</dd>
             </div>
           </dl>
           <span className="draft-spacer" />
@@ -239,6 +247,22 @@ export function BrainstormView({
   // until the next chat event, even when orchd refused to clear it.
   const [usedDraft, setUsedDraft] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const [base, setBase] = useState("");
+
+  useEffect(() => {
+    if (!cwd || !window.bridge) return setBase("");
+    let cancelled = false;
+    window.bridge
+      .projectInspect(host === LOCAL ? undefined : host, {
+        operation: "git",
+        root: cwd,
+      })
+      .then((r) => !cancelled && setBase(r?.branch || ""))
+      .catch(() => !cancelled && setBase(""));
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, host]);
 
   useEffect(() => {
     if (!cwd) return;
@@ -448,6 +472,7 @@ export function BrainstormView({
       <DraftPanel
         draft={draft}
         tasks={tasks}
+        base={base}
         busy={busy || chatBusy}
         onAdd={() => void create(false)}
         onStart={() => void create(true)}

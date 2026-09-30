@@ -254,7 +254,19 @@ test("a different platform without cargo says how to install Rust", async (t) =>
       error.message.includes("Rust is not installed on Box") &&
       error.message.includes(RUSTUP_COMMAND),
   );
-  assert.equal(hosts.list().find((h) => h.id === id).state, "error");
+  const failed = hosts.list().find((h) => h.id === id);
+  assert.equal(failed.state, "error");
+  // The probe's facts and the preflight reach the setup card even though
+  // orchd never started.
+  assert.equal(failed.platform, "Linux aarch64");
+  assert.equal(failed.orchdInstalled, false);
+  for (
+    let i = 0;
+    i < 100 && !hosts.list().find((h) => h.id === id).preflight;
+    i++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(hosts.list().find((h) => h.id === id).preflight.git, true);
   // Nothing was left half-installed.
   await assert.rejects(
     fs.access(path.join(fx.home, ".sushiai", "bin", "orchd")),

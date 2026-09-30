@@ -2,11 +2,17 @@
 // sessions in one queue, grouped by what the owner has to do with them.
 import type { InboxGroup, InboxRow } from "./attention.ts";
 import { groupKey } from "./workspaceMerge.ts";
+import { formatCost } from "../orchestrator/helpers.ts";
 import {
+  elapsedLabel,
+  enterAnswer,
+  inboxHeadline,
+  inboxZeroSummary,
   landTasks,
   matchesOwnerTask,
   ownerKind,
   projectName,
+  type AnswerChoice,
 } from "../orchestrator/ownerAttention.ts";
 import type { Task } from "../orchestrator/types.ts";
 
@@ -143,4 +149,75 @@ export function cleanupCandidates(
  * word takes an "s" unless the count is one. */
 export function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+/** "<1m" under a minute, else "2m", "1h", "3d". */
+export function ageLabel(ms: number): string {
+  return ms < 60_000 ? "<1m" : elapsedLabel(ms);
+}
+
+/** The subtitle for the items in view: "3 things need you across 1 project
+ * on 1 host · oldest 2m", counted within the project, host and search
+ * filters. */
+export function scopedHeadline(
+  needs: Item[],
+  filtered: boolean,
+  now: number,
+): string {
+  if (needs.length === 0)
+    return filtered ? "Nothing here needs you" : "Nothing needs you";
+  const oldest = Math.min(
+    ...needs.map((item) => (item.at == null ? now : item.at)),
+  );
+  const base = inboxHeadline(
+    needs.length,
+    new Set(needs.map((item) => item.project)).size,
+    new Set(needs.map((item) => item.host)).size,
+    null,
+  );
+  return needs.some((item) => item.at != null)
+    ? `${base} · oldest ${ageLabel(now - oldest)}`
+    : base;
+}
+
+/** What Enter sends in the Inbox. Enter stays unarmed for a moment after the
+ * selection moves (see `enterAnswer`), except after a digit or click pick
+ * made while this question was shown: that pick is as deliberate as a click
+ * on Answer, so the Enter right after it sends it. */
+export function inboxEnterAnswer(
+  choice: AnswerChoice,
+  selectedAt: number,
+  pickedAt: number | undefined,
+  now: number,
+): string {
+  const picked = pickedAt != null && pickedAt >= selectedAt;
+  return enterAnswer(choice, picked ? -Infinity : selectedAt, now);
+}
+
+/** The detail's branch box after the branch and +/−: "3 files · attempt 1/4
+ * · $0.04", each part only when there is something to say. */
+export function diffFacts(
+  files: number | undefined,
+  attempts: number,
+  maxAttempts: number | undefined,
+  costUsd: number | undefined,
+): string {
+  return [
+    files ? plural(files, "file") : "",
+    attempts > 0
+      ? `attempt ${attempts}${maxAttempts ? `/${maxAttempts}` : ""}`
+      : "",
+    costUsd && costUsd > 0 ? formatCost(costUsd) : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** The Inbox-zero line, which always says how the day went: "Nothing needs
+ * you. Nothing landed today yet." when nothing landed or runs. */
+export function zeroLine(tasks: Task[], now = Date.now()): string {
+  const summary = inboxZeroSummary(tasks, now);
+  return summary === "Nothing needs you."
+    ? `${summary} Nothing landed today yet.`
+    : summary;
 }

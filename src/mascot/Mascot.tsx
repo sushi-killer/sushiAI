@@ -324,7 +324,9 @@ function Bubble({
               Land
             </button>
           )}
-          <button onClick={openTask}>View diff</button>
+          <button className="bubble-ghost" onClick={openTask}>
+            View diff
+          </button>
         </div>
       )}
       {(notice.kind === "failed" || notice.kind === "stopped") && (
@@ -503,8 +505,10 @@ export function Mascot() {
                 : `${total} notice${total === 1 ? "" : "s"}`}
             </span>
             <span className="pill-sub">
-              {shown.title}
-              {total > 1 ? ` · +${total - 1}` : ""}
+              <span className="pill-sub-title" title={shown.title}>
+                {shown.title}
+              </span>
+              {total > 1 && <span>{` · +${total - 1}`}</span>}
             </span>
           </div>
           <Kbd>{"\u2325 Space"}</Kbd>

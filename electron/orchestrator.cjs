@@ -839,6 +839,8 @@ class OrchestratorHosts {
           detail: remote?.detail ?? "",
           enabled: this.services.has(id),
           preflight: remote?.preflight ?? null,
+          platform: remote?.platform || undefined,
+          orchdInstalled: remote?.orchdInstalled ?? undefined,
         };
       }),
     ];

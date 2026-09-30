@@ -581,8 +581,12 @@ export function planDrafts(tasks: Task[]): Task[] {
   );
 }
 
-function attemptOf(task: Task, maxAttempts?: number): string {
-  return `${implementAttemptCount(task)}/${maxAttempts ?? implementAttemptCount(task)}`;
+/** `2/4`, or a bare `5` once an answer granted attempts past the setting
+ * (orchd keeps that raised budget in memory, not on the task). */
+export function attemptOf(task: Task, maxAttempts?: number): string {
+  const count = implementAttemptCount(task);
+  const max = maxAttempts ?? count;
+  return count > max ? `${count}` : `${count}/${max}`;
 }
 
 const FAILURE_WORDS: Partial<Record<FailureKind, string>> = {

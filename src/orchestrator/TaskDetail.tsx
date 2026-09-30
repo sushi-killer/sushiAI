@@ -30,9 +30,12 @@ import { RichText } from "../agents/AgentsView";
 import { TaskCostLine, TaskTimeline } from "./TaskInsights";
 import {
   acceptanceHeading,
+  followUpLabel,
   headerFacts,
   questionSource,
+  reportBody,
   reportLine,
+  reportSummary,
   shortBranch,
 } from "./taskDetailModel";
 import { Chip, Criterion, StageTrack, Tag } from "./ui";
@@ -125,7 +128,11 @@ function AttemptRow({ attempt }: { attempt: Attempt }) {
           {attempt.gateBlocks > 0 &&
             ` · ${attempt.gateBlocks} Stop-hook block${attempt.gateBlocks === 1 ? "" : "s"}`}
         </p>
-        {attempt.reason && <p className="td-attempt-meta">{attempt.reason}</p>}
+        {/* The plain tier pick lives under Details; only a changed route
+         * (an escalation, a retry on another vendor) is news here. */}
+        {attempt.reason && attempt.reason !== "tier default" && (
+          <p className="td-attempt-meta">{attempt.reason}</p>
+        )}
         {attempt.verify.map((result, index) => (
           <VerifyRow key={index} result={result} />
         ))}
@@ -318,6 +325,8 @@ function TaskReport({
   const mark = task.leadTouch;
   const facts = reportLine(task);
   const followUps = task.followUps ?? [];
+  const [expanded, setExpanded] = useState(false);
+  const summary = task.report ? reportSummary(task.report, task.title) : "";
   if (!task.report && !facts && !mark && followUps.length === 0) return null;
   return (
     <section className="td-report" aria-label="Report">
@@ -337,17 +346,29 @@ function TaskReport({
             <Fragment key={id}>
               {i > 0 && " · "}
               <button className="td-link" onClick={() => onOpen(id)}>
-                Follow-up:{" "}
-                {tasks.find((t) => t.id === id)?.title ?? id.slice(0, 8)}
+                {followUpLabel(
+                  tasks.find((t) => t.id === id)?.title ?? id.slice(0, 8),
+                )}
               </button>
             </Fragment>
           ))}
         </p>
       )}
-      {task.report && (
+      {expanded && task.report ? (
         <div className="td-report-body">
-          <RichText text={task.report} />
+          <RichText text={reportBody(task.report)} />
         </div>
+      ) : (
+        summary && <p className="td-report-summary">{summary}</p>
+      )}
+      {task.report && (
+        <button
+          className="td-link td-report-toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((open) => !open)}
+        >
+          {expanded ? "Hide full report" : "Show full report"}
+        </button>
       )}
     </section>
   );
@@ -611,31 +632,33 @@ export function TaskDetail({
                 <Square size={12} /> Stop
               </button>
             )}
-            <button
-              className="td-icon-button"
-              title="Archive task"
-              aria-label="Archive task"
-              disabled={
-                busy ||
-                selected.status === "running" ||
-                selected.status === "drafting" ||
-                selected.status === "waiting"
-              }
-              onClick={() =>
-                act(() => orchestratorClient.taskArchive(selected.id))
-              }
-            >
-              <Archive size={16} />
-            </button>
-            <button
-              className="td-icon-button"
-              title="Delete task"
-              aria-label="Delete task"
-              disabled={busy}
-              onClick={onDelete}
-            >
-              <Trash2 size={16} />
-            </button>
+            {/* Archive for a task at rest, delete for one not finished. */}
+            {selected.status !== "running" &&
+              selected.status !== "drafting" &&
+              selected.status !== "waiting" && (
+                <button
+                  className="td-icon-button"
+                  title="Archive task"
+                  aria-label="Archive task"
+                  disabled={busy}
+                  onClick={() =>
+                    act(() => orchestratorClient.taskArchive(selected.id))
+                  }
+                >
+                  <Archive size={16} />
+                </button>
+              )}
+            {!done && (
+              <button
+                className="td-icon-button"
+                title="Delete task"
+                aria-label="Delete task"
+                disabled={busy}
+                onClick={onDelete}
+              >
+                <Trash2 size={16} />
+              </button>
+            )}
           </div>
         </div>
         {noting && (
@@ -708,7 +731,9 @@ export function TaskDetail({
             }
           />
         )}
-        <TaskTimeline task={selected} />
+        {/* A finished task reads report then timeline; a live one reads
+         * what is asked and checked first. */}
+        {done && <TaskTimeline task={selected} />}
         {selected.criteria.length > 0 && (
           <div className="td-criteria">
             <span className="td-eyebrow">
@@ -745,6 +770,7 @@ export function TaskDetail({
               )}
           </div>
         )}
+        {!done && <TaskTimeline task={selected} />}
         <EvidenceGallery task={selected} />
         {hasDetails && (
           <section className="td-details">

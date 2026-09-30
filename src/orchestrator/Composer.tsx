@@ -123,15 +123,31 @@ export function OrchestratorRouteChip({
 }
 
 /** A new task has no route of its own - its tier picks one - so the task
- * composer names it without offering a menu. */
-export function TaskRouteLabel() {
+ * composer's route menu names that and holds the one per-task choice left:
+ * the base branch. */
+export function TaskRouteLabel({
+  disabled,
+  onBaseBranch,
+}: {
+  disabled?: boolean;
+  onBaseBranch: () => void;
+}) {
   return (
-    <span
-      className="chip orch-composer-route-static"
-      title="A task's tier picks its route; set tiers in Settings"
-    >
-      <Sparkles size={14} className="orch-composer-route-icon" />
-      <span>Standard route</span>
-    </span>
+    <ChipPicker
+      icon={<Sparkles size={14} className="orch-composer-route-icon" />}
+      label="Standard route"
+      ariaLabel="Task route"
+      value=""
+      disabled={disabled}
+      onChange={(value) => value === "base" && onBaseBranch()}
+      options={[
+        {
+          value: "",
+          label: "Standard route",
+          title: "A task's tier picks its route; set tiers in Settings",
+        },
+        { value: "base", label: "Base branch…" },
+      ]}
+    />
   );
 }

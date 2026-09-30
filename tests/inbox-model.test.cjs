@@ -147,3 +147,71 @@ test("a remote-host task is filed under its host, not Local", async () => {
   const items = inboxItems([task], [task], []);
   assert.equal(items[0].host, "ssh:lab");
 });
+
+test("Enter after a digit pick sends it, even right after the selection moved; Enter alone never sends the preselection", async () => {
+  const { inboxEnterAnswer } = await load();
+  const picked = {
+    pick: "Keep behind a flag",
+    preselected: "Remove",
+    note: "",
+  };
+  const none = { pick: undefined, preselected: "Remove", note: "" };
+  // Selection moved at 1000, "2" at 1150, Enter at 1350: inside the arm window.
+  assert.equal(
+    inboxEnterAnswer(picked, 1000, 1150, 1350),
+    "Keep behind a flag",
+  );
+  // Digit, then Enter well after the window.
+  assert.equal(
+    inboxEnterAnswer(picked, 1000, 1150, 1700),
+    "Keep behind a flag",
+  );
+  // Enter alone: the preselection is not an answer, early or late.
+  assert.equal(inboxEnterAnswer(none, 1000, undefined, 1200), "");
+  assert.equal(inboxEnterAnswer(none, 1000, undefined, 5000), "");
+  // A pick made before the selection moved back here does not arm Enter.
+  assert.equal(inboxEnterAnswer(picked, 1000, 900, 1200), "");
+  assert.equal(inboxEnterAnswer(picked, 1000, 900, 1600), "Keep behind a flag");
+});
+
+test("times under a minute read <1m, and the subtitle counts only what the filters show", async () => {
+  const { ageLabel, scopedHeadline } = await load();
+  assert.equal(ageLabel(0), "<1m");
+  assert.equal(ageLabel(59_999), "<1m");
+  assert.equal(ageLabel(60_000), "1m");
+  const item = (project, host, at) => ({ project, host, at });
+  const now = 10 * 60_000;
+  assert.equal(
+    scopedHeadline([item("alpha", "local", now - 5000)], true, now),
+    "1 thing needs you across 1 project on 1 host · oldest <1m",
+  );
+  assert.equal(
+    scopedHeadline(
+      [item("alpha", "local", now - 120_000), item("beta", "lab", now)],
+      false,
+      now,
+    ),
+    "2 things need you across 2 projects on 2 hosts · oldest 2m",
+  );
+  assert.equal(scopedHeadline([], true, now), "Nothing here needs you");
+});
+
+test("the branch box facts omit a zero cost and an unknown cap", async () => {
+  const { diffFacts } = await load();
+  assert.equal(diffFacts(3, 1, 4, 0.04), "3 files · attempt 1/4 · $0.04");
+  assert.equal(diffFacts(1, 1, undefined, 0), "1 file · attempt 1");
+  assert.equal(diffFacts(undefined, 0, 4, undefined), "");
+});
+
+test("Inbox zero always says how the day went", async () => {
+  const { zeroLine } = await load();
+  const now = Date.now();
+  assert.equal(
+    zeroLine([], now),
+    "Nothing needs you. Nothing landed today yet.",
+  );
+  assert.equal(
+    zeroLine([task({ landedSha: "abc", updatedAt: now })], now),
+    "Nothing needs you. 1 task landed today.",
+  );
+});

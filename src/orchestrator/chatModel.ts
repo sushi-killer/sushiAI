@@ -97,3 +97,22 @@ export function taskRefs(text: string, tasks: Task[], max = 3): Task[] {
     .slice(0, max)
     .map((f) => f.task);
 }
+
+/** A session row's preview: its last message with any text, on one line. */
+export function lastMessageText(thread: {
+  messages: { text: string }[];
+}): string {
+  const last = [...thread.messages].reverse().find((m) => m.text.trim());
+  return last ? last.text.replace(/\s+/g, " ").trim() : "";
+}
+
+/** A session changed after the owner last looked at it. `since` stands in
+ * for a session never opened here, so an old history never reads as new. */
+export function isUnread(
+  session: { updatedAt?: number },
+  seenAt: number | undefined,
+  since: number,
+): boolean {
+  const at = timeOf(session);
+  return at !== null && at > (seenAt ?? since);
+}

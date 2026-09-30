@@ -236,6 +236,9 @@ class RemoteOrchd {
     this.state = "idle";
     this.detail = "";
     this.preflight = null;
+    // What the probe found: `uname -sm`, and whether any orchd is installed.
+    this.platform = "";
+    this.orchdInstalled = null;
     this.conn = null;
     this.inflight = null;
     this.closed = false;
@@ -290,6 +293,12 @@ class RemoteOrchd {
     );
     if (!info.home || !info.home.startsWith("/"))
       throw new Error("Could not read the home directory on the host.");
+    this.platform = info.platform || "";
+    this.orchdInstalled = info.installed === "1";
+    this.onChange?.();
+    // What the host offers is known before orchd is, so the setup card can
+    // show it while orchd builds (or fails to).
+    void this.refreshPreflight().catch(() => {});
     const want = await this.artifacts.describe();
     const plan = installPlan(info, want);
     if (plan !== "none") {
@@ -302,7 +311,6 @@ class RemoteOrchd {
     await this.connections.exec(this.endpoint, startScript());
     const conn = await this.#connect(info.home);
     this.conn = conn;
-    void this.refreshPreflight().catch(() => {});
     return conn;
   }
 

@@ -83,7 +83,7 @@ export function TaskTimeline({ task }: { task: Task }) {
           <button
             key={i}
             type="button"
-            className={`td-seg td-stage-${s.stage}${s.failureKind ? " failed" : ""}${i === index ? " picked" : ""}`}
+            className={`td-seg td-stage-${s.stage}${s.outcome === "open" ? " open" : ""}${s.failureKind ? " failed" : ""}${i === index ? " picked" : ""}`}
             style={{ flexGrow: Math.max(1, s.endedAt - s.startedAt) }}
             title={segmentTitle(s)}
             aria-label={segmentTitle(s)}

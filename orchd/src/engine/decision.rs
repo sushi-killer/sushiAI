@@ -89,6 +89,26 @@ pub(super) const EXHAUSTED_QUESTION: &str = "Attempts keep failing";
 /// (see `orchestrator_answer_line`).
 pub(super) const EXHAUSTED_ANSWER_PREFIX: &str = "Orchestrator: Attempts keep failing";
 
+/// A failure signature (`kind:normalized line`) as the owner reads it:
+/// "a verify failure (npm test failed)", "an error (Claude exited with an
+/// error)". The normalized line has its digits stripped, so punctuation
+/// left dangling at its end goes too.
+pub(super) fn signature_phrase(signature: &str) -> String {
+    let (kind, line) = signature.split_once(':').unwrap_or((signature, ""));
+    let line = line
+        .trim()
+        .trim_end_matches(|c: char| c == '.' || c == ':' || c.is_whitespace());
+    let what = match kind {
+        "error" => "an error".to_string(),
+        other => format!("a {} failure", other.replace('_', " ")),
+    };
+    if line.is_empty() {
+        what
+    } else {
+        format!("{what} ({line})")
+    }
+}
+
 pub fn decide_after_failure(input: &FailureDecisionInput) -> FailureDecision {
     if input.consecutive_same >= 3
         || input.repeated_reviews >= 2
@@ -97,7 +117,7 @@ pub fn decide_after_failure(input: &FailureDecisionInput) -> FailureDecision {
         return FailureDecision::Waiting {
             question: format!(
                 "{EXHAUSTED_QUESTION} with {}: continue, change approach, or stop?",
-                input.signature
+                signature_phrase(input.signature)
             ),
         };
     }

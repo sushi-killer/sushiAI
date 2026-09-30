@@ -11,7 +11,6 @@ const {
   rustupCommand,
   routeProblem,
   unavailableRoutes,
-  hostsInUse,
   repoSuggestions,
 } = require("../src/orchestrator/hosts.ts");
 const { orchestratorTarget } = require("../src/orchestrator/notices.ts");
@@ -72,14 +71,6 @@ test("a route is unavailable on a host whose harness CLI is missing or logged ou
 test("hosts and repo suggestions", () => {
   assert.equal(hostOf({}), "local");
   assert.equal(hostOf({ host: "ssh:x" }), "ssh:x");
-  assert.equal(
-    hostsInUse([
-      { id: "local", enabled: true },
-      { id: "ssh:a", enabled: true },
-      { id: "ssh:b", enabled: false },
-    ]),
-    2,
-  );
   // Workspaces opened on the host first, then its tasks' repos, each once.
   assert.deepEqual(
     repoSuggestions(
@@ -248,6 +239,20 @@ test("the setup steps follow the host's state, with the elapsed build time", () 
   assert.equal(building[1].detail, "no current build at ~/.sushiai/bin/orchd");
   assert.equal(building[2].title, "Building orchd from source");
   assert.match(building[2].detail, /cargo build --release · 1m 20s$/);
+
+  // The platform the SSH probe read, before any error names it.
+  const probed = setupSteps(
+    {
+      state: "building",
+      detail: "Building orchd on devbox (a few minutes)",
+      platform: "Linux x86_64",
+      orchdInstalled: false,
+    },
+    seen(["connecting", "building"]),
+  );
+  assert.equal(probed[0].detail, "Linux x86_64 · user@devbox");
+  assert.equal(probed[1].detail, "not installed at ~/.sushiai/bin/orchd");
+  assert.match(probed[2].detail, /^no matching build for Linux x86_64 · /);
 
   const connecting = setupSteps({ state: "connecting" }, seen(["connecting"]));
   assert.deepEqual(

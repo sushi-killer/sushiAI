@@ -666,6 +666,10 @@ export type OrchestratorHost = {
   /** Whether the app keeps this host's daemon connected. */
   enabled: boolean;
   preflight?: Preflight | null;
+  /** `uname -sm` on the host ("Linux x86_64"), once SSH connected. */
+  platform?: string;
+  /** Whether any orchd binary was on the host when it connected. */
+  orchdInstalled?: boolean;
 };
 
 /** What a host offers orchd's routes: git and each harness CLI. */

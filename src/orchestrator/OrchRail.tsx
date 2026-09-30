@@ -68,7 +68,6 @@ export function OrchRail({
   improvementsCount,
   archivedCount,
   offline = false,
-  hostName,
   header,
   bare = false,
   onOpen,
@@ -83,8 +82,6 @@ export function OrchRail({
   archivedCount: number;
   /** The daemon is down: the last known list stays, dimmed and inert. */
   offline?: boolean;
-  /** Named on each row only when several hosts are in use. */
-  hostName?: string;
   /** Pinned above the views: the host selector. */
   header?: ReactNode;
   /** Views only, no task groups: the host has no daemon to list yet. */
@@ -109,9 +106,7 @@ export function OrchRail({
         key={task.id}
         title={task.title}
         reason={taskReason(task, tasks, maxAttempts)}
-        meta={[hostName, taskMetaLine(task, maxAttempts)]
-          .filter(Boolean)
-          .join(" · ")}
+        meta={taskMetaLine(task, maxAttempts)}
         tone={taskTone(task)}
         selected={task.id === selectedId}
         onClick={() => onOpen({ kind: "task", id: task.id })}

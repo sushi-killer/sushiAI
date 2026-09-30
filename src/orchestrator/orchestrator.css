@@ -490,6 +490,9 @@
   font-size: 20px;
   font-weight: 600;
 }
+.orch-view-scroll > * {
+  flex-shrink: 0;
+}
 .orch-view-scroll > .ui-button {
   align-self: flex-start;
 }
@@ -552,6 +555,9 @@
 .orch-composer.disabled {
   opacity: 0.5;
 }
+.orch-composer.disabled .chip {
+  color: var(--text-faint);
+}
 .orch-composer textarea {
   display: block;
   flex: 1;
@@ -595,20 +601,6 @@
   color: var(--text-faint);
   font-size: var(--text-xs);
   white-space: nowrap;
-}
-.orch-composer-base-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  color: var(--text-faint);
-  font-size: var(--text-xs);
-  white-space: nowrap;
-}
-.orch-composer-base-toggle:hover {
-  background: var(--bg-hover);
-  color: var(--text-muted);
 }
 .orch-composer-base {
   width: 200px;

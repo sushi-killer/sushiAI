@@ -192,6 +192,12 @@
     padding: 14px 12px;
   }
 }
+/* Too narrow for the week to stay one line: Analytics has it. */
+@container orchestrator (max-width: 480px) {
+  .home-analytics {
+    display: none;
+  }
+}
 
 .home-note-sent,
 .home-note-error {

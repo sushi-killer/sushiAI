@@ -39,11 +39,6 @@ export function unavailableRoutes(
   return result;
 }
 
-/** Task rows name their host only when more than one host is in use. */
-export function hostsInUse(hosts: OrchestratorHost[]): number {
-  return hosts.filter((host) => host.enabled).length;
-}
-
 export function hostName(hosts: OrchestratorHost[], id: string): string {
   return hosts.find((host) => host.id === id)?.name ?? id.replace(/^ssh:/, "");
 }
@@ -199,11 +194,14 @@ function failedStep(
 /** The five-step setup card (Figma "Home · remote setup"): connect over SSH,
  * check for orchd, upload or build it, start the daemon, connect to it. */
 export function setupSteps(
-  host: Pick<OrchestratorHost, "state" | "detail">,
+  host: Pick<
+    OrchestratorHost,
+    "state" | "detail" | "platform" | "orchdInstalled"
+  >,
   seen: SetupSeen,
 ): SetupStep[] {
   const detail = host.detail ?? "";
-  const platform = hostPlatform(detail);
+  const platform = host.platform || hostPlatform(detail);
   const machine = [platform, seen.address].filter(Boolean).join(" · ");
   const built = seen.states.includes("building");
   const uploaded = seen.states.includes("installing");
@@ -303,7 +301,9 @@ export function setupSteps(
       detail:
         failure(1) ||
         (built || uploaded || (failed && current === 2)
-          ? `no current build at ${REMOTE_BINARY}`
+          ? host.orchdInstalled === false
+            ? `not installed at ${REMOTE_BINARY}`
+            : `no current build at ${REMOTE_BINARY}`
           : current > 2
             ? `found at ${REMOTE_BINARY}`
             : `looks in ${REMOTE_BINARY}`),

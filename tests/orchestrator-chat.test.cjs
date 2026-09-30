@@ -167,3 +167,23 @@ test("sessions without updatedAt sort last and never produce NaN", async () => {
   );
   assert.equal(sessionTime(undefined, now), "");
 });
+
+test("session previews and unread marks", async () => {
+  const { lastMessageText, isUnread } = await model;
+  assert.equal(
+    lastMessageText({
+      messages: [
+        { text: "first" },
+        { text: "It failed verify\n4 times" },
+        { text: "  " },
+      ],
+    }),
+    "It failed verify 4 times",
+  );
+  assert.equal(lastMessageText({ messages: [] }), "");
+  // Never opened: only a change after the view loaded counts.
+  assert.equal(isUnread({ updatedAt: 50 }, undefined, 100), false);
+  assert.equal(isUnread({ updatedAt: 150 }, undefined, 100), true);
+  assert.equal(isUnread({ updatedAt: 150 }, 200, 100), false);
+  assert.equal(isUnread({}, undefined, 0), false);
+});

@@ -228,7 +228,7 @@ pub(super) async fn run_harness(
                     if !status.success() && outcome.error.is_none() {
                         let tail = stderr_tail.trim();
                         outcome.error = Some(if tail.is_empty() {
-                            format!("{:?} exited with {status}.", req.harness)
+                            crate::harness::exit_error(req.harness, status)
                         } else {
                             tail.to_string()
                         });

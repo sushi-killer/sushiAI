@@ -117,6 +117,11 @@ test("the autopilot's next is the first ready NEXT draft in the backlog", async 
     task({ id: "later", backlog: { bucket: "later", order: 0 } }),
   ];
   assert.equal(autopilotNext(planModel(tasks)).title, "Ready");
+  // A top-level draft names what it waits for, like a split child does.
+  assert.deepEqual(
+    planModel(tasks).next.map((i) => i.after),
+    [["Loose"], [], []],
+  );
   assert.equal(autopilotNext(planModel([task({ id: "x" })])), undefined);
 });
 

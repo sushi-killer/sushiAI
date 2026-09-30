@@ -97,6 +97,7 @@ const SEEDS = [
       text: "Delete the legacy export path, or keep it behind a flag?",
       options: ["Delete it", "Keep behind a flag", "Stop"],
       kind: "agent_question",
+      askedBy: "verify",
     },
     attempts: [
       {

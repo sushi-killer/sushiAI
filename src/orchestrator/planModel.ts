@@ -11,6 +11,8 @@ export type PlanItem = {
   children: PlanChild[];
   /** Every dependency is done (or there is none). */
   ready: boolean;
+  /** Titles this draft comes after. */
+  after: string[];
 };
 export type PlanChild = {
   task: Task;
@@ -86,6 +88,7 @@ export function planModel(tasks: Task[]): PlanModel {
         waits: !depsDone(child, tasks),
       })),
     ready: depsDone(task, tasks),
+    after: dependencyTitles(task, tasks),
   }));
   return {
     next: items.filter((i) => i.task.backlog?.bucket !== "later"),

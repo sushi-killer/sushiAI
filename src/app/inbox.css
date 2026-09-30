@@ -85,6 +85,15 @@
   padding: 14px 16px 14px 24px;
   overflow-y: auto;
 }
+/* The list/detail scrollbars show only while the pointer is over them. */
+.inbox-queue::-webkit-scrollbar-thumb,
+.inbox-preview::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+.inbox-queue:hover::-webkit-scrollbar-thumb,
+.inbox-preview:hover::-webkit-scrollbar-thumb {
+  background: var(--line);
+}
 .inbox-preview {
   display: flex;
   flex: 1;
@@ -194,14 +203,25 @@
 .inbox-diff {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  min-width: 0;
+  white-space: nowrap;
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
   color: var(--text-muted);
   font-size: 11.5px;
 }
-.inbox-diff-branch {
+.inbox-diff svg,
+.inbox-diff > span {
+  flex-shrink: 0;
+}
+/* The branch gives way first; the numbers after it always show. */
+.inbox-diff > .inbox-diff-branch {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .inbox-diff-add {
@@ -439,14 +459,21 @@
 }
 .inbox-cleanup-foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 6px 10px;
   padding-top: 8px;
   color: var(--text-muted);
   font-size: 12px;
 }
+/* The note keeps one line; when Cancel and End no longer fit beside it
+ * they move under it, still right-aligned. */
 .inbox-cleanup-foot span {
-  flex: 1;
+  flex: 1 0 auto;
+  white-space: nowrap;
+}
+.inbox-cleanup-foot span + button {
+  margin-left: auto;
 }
 .inbox-zero-page {
   display: flex;

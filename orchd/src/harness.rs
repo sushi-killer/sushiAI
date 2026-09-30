@@ -481,6 +481,18 @@ impl RunOutcome {
 
 /// Folds a whole saved `events.jsonl` (stderr lines included; they are
 /// skipped) into an outcome, as if streamed.
+/// The error a harness run leaves when it exits non-zero with nothing on
+/// stderr. No exit code in the text: failure signatures strip digits, and
+/// "exit status: ." then reached the owner's question verbatim.
+pub fn exit_error(harness: Harness, status: std::process::ExitStatus) -> String {
+    let name = format!("{harness:?}");
+    if status.code().is_some() {
+        format!("{name} exited with an error.")
+    } else {
+        format!("{name} was stopped by a signal.")
+    }
+}
+
 pub fn replay_events(harness: Harness, text: &str) -> RunOutcome {
     let mut outcome = RunOutcome::default();
     for line in text.lines() {
@@ -706,6 +718,21 @@ fn feed_codex_line(v: &serde_json::Value, outcome: &mut RunOutcome) -> Option<St
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn a_silent_failed_exit_reads_as_words_without_a_code() {
+        use std::os::unix::process::ExitStatusExt;
+        let exited = std::process::ExitStatus::from_raw(1 << 8);
+        assert_eq!(
+            exit_error(Harness::Claude, exited),
+            "Claude exited with an error."
+        );
+        let killed = std::process::ExitStatus::from_raw(9);
+        assert_eq!(
+            exit_error(Harness::Codex, killed),
+            "Codex was stopped by a signal."
+        );
+    }
 
     fn base_req(harness: Harness, worktree: &Path) -> RunRequest<'_> {
         RunRequest {

@@ -9,7 +9,6 @@ import {
   ArchiveRestore,
   ChartColumn,
   ChevronDown,
-  GitBranch,
   LayoutList,
   ListTodo,
   MessageSquare,
@@ -34,7 +33,6 @@ import {
 import {
   hostOf,
   hostName as hostNameOf,
-  hostsInUse,
   needsSetup,
   repoSuggestions,
   runningCount,
@@ -176,7 +174,6 @@ function viewIcon(kind: View["kind"]) {
 
 function OrchestratorBody({
   cwd,
-  hostName,
   header,
   remote,
   onDaemon,
@@ -184,8 +181,6 @@ function OrchestratorBody({
   onViewChange,
 }: {
   cwd: string;
-  /** Set only when several hosts are in use: named on each task row. */
-  hostName?: string;
   /** The host selector, pinned at the top of the rail. */
   header: ReactNode;
   /** Set on a remote host: its name (the composer's "on <host>") and what
@@ -409,6 +404,23 @@ function OrchestratorBody({
     if (focusComposer) composerRef.current?.focus();
   }, [focusComposer]);
 
+  // First run: the composer is the only thing to do, so it takes the focus -
+  // unless the owner is typing somewhere outside this panel.
+  const firstRun =
+    daemonState === "ready" &&
+    current.kind === "home" &&
+    live.tasks.every((t) => t.archived);
+  useEffect(() => {
+    if (!firstRun) return;
+    const active = document.activeElement;
+    if (
+      !active ||
+      active === document.body ||
+      rootRef.current?.contains(active)
+    )
+      composerRef.current?.focus();
+  }, [firstRun]);
+
   function open(next: View) {
     setView(next);
     setSwitcherOpen(false);
@@ -579,7 +591,6 @@ function OrchestratorBody({
       improvementsCount={improvementsCount}
       archivedCount={archivedTasks.length}
       offline={offline && !connecting}
-      hostName={hostName}
       header={header}
       bare={connecting}
       onOpen={open}
@@ -884,12 +895,15 @@ function OrchestratorBody({
                     onRouteChange={setOrchestratorRoute}
                   />
                 ) : (
-                  <TaskRouteLabel />
+                  <TaskRouteLabel
+                    disabled={offline}
+                    onBaseBranch={() => setBaseOpen(true)}
+                  />
                 )
               }
               extra={
                 composerMode !== "ask" &&
-                (baseOpen ? (
+                baseOpen && (
                   <input
                     className="orch-composer-base"
                     aria-label="Base branch (optional)"
@@ -900,17 +914,7 @@ function OrchestratorBody({
                     onChange={(event) => setBaseBranchDraft(event.target.value)}
                     onBlur={() => !baseBranchDraft.trim() && setBaseOpen(false)}
                   />
-                ) : (
-                  <button
-                    type="button"
-                    className="orch-composer-base-toggle"
-                    disabled={offline}
-                    title="Base branch (optional)"
-                    onClick={() => setBaseOpen(true)}
-                  >
-                    <GitBranch size={12} /> Base branch
-                  </button>
-                ))
+                )
               }
             />
           </div>
@@ -1190,14 +1194,12 @@ export function OrchestratorPanel({
     );
   }
 
-  const showHostNames = hostsInUse(hosts) > 1;
   return (
     <div className="orchestrator-host">
       <OrchestratorHostProvider value={host}>
         <OrchestratorBody
           key={`${host}\n${repo}`}
           cwd={repo}
-          hostName={showHostNames ? name : undefined}
           header={hostSelect}
           remote={remote ? { name, preflight: info?.preflight } : undefined}
           onDaemon={onDaemon}

@@ -261,3 +261,34 @@ fn a_pending_acceptance_is_the_failed_review_attempt_with_the_accept_line_last()
     task.decisions.push(accept_line(1));
     assert_eq!(pending_acceptance(&task), None);
 }
+
+#[test]
+fn the_exhausted_question_reads_the_signature_as_words() {
+    let question = |signature: &str| match decide_after_failure(&FailureDecisionInput {
+        tier: Tier::Standard,
+        signature,
+        previous_signature: None,
+        consecutive_same: 1,
+        loops: 0,
+        repeated_reviews: 0,
+        attempt_n: 4,
+        max_attempts: 4,
+    }) {
+        FailureDecision::Waiting { question } => question,
+        other => panic!("expected a question, got {other:?}"),
+    };
+    // What an exit with no stderr used to leave: "exit status: 1." with
+    // its digit stripped.
+    assert_eq!(
+        question("error:Claude exited with exit status: ."),
+        "Attempts keep failing with an error (Claude exited with exit status): continue, change approach, or stop?"
+    );
+    assert_eq!(
+        question("error:Claude exited with an error."),
+        "Attempts keep failing with an error (Claude exited with an error): continue, change approach, or stop?"
+    );
+    assert_eq!(
+        question("no_deliverable:"),
+        "Attempts keep failing with a no deliverable failure: continue, change approach, or stop?"
+    );
+}

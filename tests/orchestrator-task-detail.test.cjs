@@ -182,3 +182,36 @@ test("header facts are separate parts and a UUID branch is shortened", async () 
   );
   assert.equal(shortBranch("task/dark-mode"), "task/dark-mode");
 });
+
+test("report summary is the first paragraph; the body drops the title", async () => {
+  const { reportSummary, reportBody } = await model;
+  const report =
+    "# Fix totals\n\nColumns are in the wrong order\nfor the Totals row.\n\n## Outcome\n\n- landed\n";
+  assert.equal(
+    reportSummary(report),
+    "Columns are in the wrong order for the Totals row.",
+  );
+  assert.equal(reportSummary("# Only a title\n\n## Outcome\n\n- landed\n"), "");
+  // A goal that only repeats the title says nothing new.
+  assert.equal(
+    reportSummary("# Fix totals\n\nFix totals\n\n## Outcome\n", "Fix totals"),
+    "",
+  );
+  assert.ok(reportBody(report).startsWith("Columns are"));
+});
+
+test("the attempt counter drops the max once an answer raised the budget", async () => {
+  const { headerFacts } = await model;
+  const running = task({
+    status: "running",
+    attempts: [1, 2, 3, 4, 5].map((n) => attempt({ n })),
+  });
+  assert.equal(headerFacts(running, 4)[0], "attempt 5");
+  assert.equal(headerFacts(running, 6)[0], "attempt 5/6");
+});
+
+test("a follow-up link never doubles its prefix", async () => {
+  const { followUpLabel } = await model;
+  assert.equal(followUpLabel("Follow-up: Fix totals"), "Follow-up: Fix totals");
+  assert.equal(followUpLabel("Fix totals"), "Follow-up: Fix totals");
+});

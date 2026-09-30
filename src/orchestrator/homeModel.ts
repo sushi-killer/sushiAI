@@ -1,10 +1,6 @@
 // Pure text and rows behind Home: greeting, sub-line, the all-clear line,
 // running rows and the "same failure" note. No React, no daemon calls.
-import {
-  formatDuration,
-  implementAttemptCount,
-  latestAttempt,
-} from "./helpers.ts";
+import { attemptOf, formatDuration, latestAttempt } from "./helpers.ts";
 import { questionSource } from "./taskDetailModel.ts";
 import type { Task } from "./types.ts";
 
@@ -56,10 +52,9 @@ export function questionMeta(
   maxAttempts?: number,
   now = Date.now(),
 ): string {
-  const done = implementAttemptCount(task);
   return [
     repo,
-    `attempt ${done}/${maxAttempts ?? done}`,
+    `attempt ${attemptOf(task, maxAttempts)}`,
     task.question ? questionSource(task.question, now) : "",
   ]
     .filter(Boolean)

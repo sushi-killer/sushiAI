@@ -922,7 +922,8 @@ textarea::placeholder {
   line-height: 1.8;
   margin: 0 0 23px;
 }
-.primary {
+/* The legacy button; the orchestrator's `.ui-button.primary` has its own. */
+.primary:not(.ui-button) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -937,7 +938,7 @@ textarea::placeholder {
   font-weight: 550;
   transition: background 0.15s;
 }
-.primary:hover {
+.primary:not(.ui-button):hover {
   background: #fff;
 }
 .agent-welcome .primary {

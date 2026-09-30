@@ -393,12 +393,22 @@ body,
   flex-shrink: 0;
   font-family: Menlo, monospace;
 }
+/* "<title> · +N": the title truncates, the count of other notices stays. */
 .pill-sub {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  display: flex;
+  min-width: 0;
   white-space: nowrap;
   color: var(--text-muted);
   font-size: var(--text-xs);
+}
+.pill-sub > span {
+  flex-shrink: 0;
+}
+.pill-sub > .pill-sub-title {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .sushi {
   display: block;

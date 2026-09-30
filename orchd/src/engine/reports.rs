@@ -26,6 +26,13 @@ fn report_excerpt(report: &str) -> String {
     truncate_chars(out.trim(), EXCERPT_MAX)
 }
 
+/// A follow-up task's title: one line naming the task it follows up, never
+/// the request (the note and the report excerpt live there).
+fn follow_up_title(task: &Task) -> String {
+    let title = task.title.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_chars(&format!("Follow-up: {title}"), 80)
+}
+
 /// The request of a follow-up task: the owner's note first, then the
 /// original's title, goal and criteria, then an excerpt of its report.
 fn follow_up_request(task: &Task, note: &str) -> String {
@@ -343,7 +350,7 @@ impl App {
             backlog: None,
             id: uuid::Uuid::new_v4().to_string(),
             repo_root: PathBuf::from(&task.repo),
-            title: truncate_chars(&request, 60),
+            title: follow_up_title(task),
             goal: String::new(),
             criteria: vec![],
             verify: vec![],
@@ -401,5 +408,25 @@ impl App {
                 app.broadcast_task(&task);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::test_support::task_with_status;
+
+    #[test]
+    fn a_follow_up_title_is_one_line_naming_the_original() {
+        let mut task = task_with_status(TaskStatus::Done);
+        task.title = "Columns are in the wrong order\nfor the Totals row".into();
+        let title = follow_up_title(&task);
+        assert_eq!(
+            title,
+            "Follow-up: Columns are in the wrong order for the Totals row"
+        );
+        assert!(!title.contains('\n'));
+        task.title = "x".repeat(200);
+        assert!(follow_up_title(&task).chars().count() <= 81);
     }
 }

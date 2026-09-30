@@ -1,4 +1,5 @@
 import {
+  attemptOf,
   formatCost,
   formatDuration,
   implementAttemptCount,
@@ -338,7 +339,7 @@ export function headerFacts(
   return [
     finished
       ? plural(count, "attempt")
-      : `attempt ${count}/${maxAttempts ?? count}`,
+      : `attempt ${attemptOf(task, maxAttempts)}`,
     formatDuration(totalDurationMs(task, now)),
     formatCost(task.costUsd),
     !finished && latest ? `${latest.harness} · ${latest.model}` : "",
@@ -360,4 +361,33 @@ export function acceptanceHeading(task: Task, met: boolean): string {
   return met && task.criteria.length > 0
     ? `ACCEPTANCE · ${task.criteria.length}/${task.criteria.length}`
     : "ACCEPTANCE";
+}
+
+/** The report's summary for the card: its first prose paragraph, skipping
+ * the title heading, tables, lists and a paragraph that only repeats the
+ * title (orchd writes the goal there). */
+export function reportSummary(report: string, title = ""): string {
+  const paragraphs = report
+    .split(/\n\s*\n/)
+    .map((block) => block.trim().replace(/\s*\n\s*/g, " "));
+  return (
+    paragraphs.find(
+      (block) =>
+        block &&
+        block !== title.trim() &&
+        !/^(#|\||[-*] |\d+\. |!\[)/.test(block),
+    ) ?? ""
+  );
+}
+
+/** The full report without its leading `# <title>`, which the page header
+ * already shows. */
+export function reportBody(report: string): string {
+  return report.replace(/^\s*# [^\n]*\n+/, "");
+}
+
+/** A follow-up's link: orchd titles new ones "Follow-up: <original>", so
+ * the prefix is added only to an older title that lacks it. */
+export function followUpLabel(title: string): string {
+  return /^follow-up\b/i.test(title) ? title : `Follow-up: ${title}`;
 }

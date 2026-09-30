@@ -1294,7 +1294,7 @@ async fn run(
                     if !status.success() && outcome.error.is_none() {
                         let tail = stderr_tail.trim();
                         outcome.error = Some(if tail.is_empty() {
-                            format!("{harness_kind:?} exited with {status}.")
+                            crate::harness::exit_error(harness_kind, status)
                         } else {
                             tail.to_string()
                         });

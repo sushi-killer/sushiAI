@@ -1,9 +1,18 @@
 /* Settings dialog shell (Figma "Settings dialog"): a left nav beside a
  * scrolling main column. The shared `.modal` frame is widened and unpadded
  * only when it holds this shell. */
+/* Figma "Settings · in window": the app stays visible behind a light,
+ * unblurred scrim and the dialog hangs 72px from the window top. */
+.modal-backdrop:has(> .modal > .settings-shell) {
+  align-items: flex-start;
+  padding-top: 72px;
+  background: rgb(0 0 0 / 55%);
+  backdrop-filter: none;
+}
 .modal:has(> .settings-shell) {
   width: 940px;
   max-width: 100%;
+  max-height: calc(100dvh - 96px);
   padding: 0;
   overflow: hidden;
   border-radius: 16px;
@@ -17,7 +26,7 @@
 
 .settings-shell {
   display: flex;
-  height: min(720px, calc(100dvh - 66px));
+  height: min(720px, calc(100dvh - 96px));
 }
 
 .settings-nav {
@@ -76,6 +85,13 @@
   min-width: 0;
   padding: 22px 32px 24px;
   overflow-y: auto;
+}
+/* The scrollbar thumb shows only while the pointer is over the column. */
+.settings-main::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+.settings-main:hover::-webkit-scrollbar-thumb {
+  background: var(--line);
 }
 .settings-title {
   display: flex;

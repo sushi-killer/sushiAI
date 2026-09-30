@@ -113,6 +113,14 @@ function StartOrWaits({
   );
 }
 
+function AfterChip({ after }: { after: string[] }) {
+  return after.length > 0 ? (
+    <span className="plan-after">
+      <Tag tone="neutral">after {after.join(", ")}</Tag>
+    </span>
+  ) : null;
+}
+
 function DraftGroup({
   item,
   moves,
@@ -144,6 +152,7 @@ function DraftGroup({
             {task.title}
           </button>
           <span className="plan-sub">{sub}</span>
+          <AfterChip after={item.after} />
         </div>
         <span className="plan-meta">{draftMeta(task)}</span>
         <MoveControls
@@ -166,11 +175,7 @@ function DraftGroup({
               >
                 {child.task.title}
               </button>
-              {child.after.length > 0 && (
-                <span className="plan-after">
-                  <Tag tone="neutral">after {child.after.join(", ")}</Tag>
-                </span>
-              )}
+              <AfterChip after={child.after} />
             </div>
             <span className="plan-meta">{draftMeta(child.task)}</span>
             {child.waits && <span className="plan-meta">waits</span>}
@@ -212,6 +217,7 @@ function DraftRow({
         {!later && goal && goal !== task.title && (
           <span className="plan-sub">{goal}</span>
         )}
+        <AfterChip after={item.after} />
       </div>
       <span className="plan-meta">{draftMeta(task)}</span>
       <MoveControls

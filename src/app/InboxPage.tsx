@@ -16,13 +16,18 @@ import type { InboxGroup, InboxRow } from "./attention.ts";
 import { LOCAL_GROUP, groupKey, groupLabel } from "./workspaceMerge.ts";
 import {
   KINDS,
+  ageLabel,
   agentName,
   cleanupCandidates,
+  diffFacts,
   inScope,
+  inboxEnterAnswer,
   inboxItems,
   landTargets,
   needsYou,
   plural,
+  scopedHeadline,
+  zeroLine,
   type Item,
   type Kind,
   type SessionItem,
@@ -47,12 +52,9 @@ import {
   stageTrack,
   taskReason,
 } from "../orchestrator/helpers.ts";
+import { shortBranch } from "../orchestrator/taskDetailModel.ts";
 import {
   clickAnswer,
-  elapsedLabel,
-  enterAnswer,
-  inboxHeadline,
-  inboxZeroSummary,
   ownerTarget,
   shownPick,
   stepSelection,
@@ -98,10 +100,11 @@ const TONE = {
 /** How often a blocked session's screen is re-read while it waits. */
 const SCREEN_REFRESH_MS = 2500;
 
-/** The diff numbers orchd will add to a task; absent until it does. */
-type DiffStat = { added?: number; removed?: number };
+/** orchd's `diffStat`: the task's branch against its base, absent until
+ * its first implement attempt. */
+type DiffStat = { files: number; added: number; removed: number };
 const diffOf = (task: Task): DiffStat | undefined =>
-  (task as Task & { diff?: DiffStat }).diff;
+  (task as Task & { diffStat?: DiffStat }).diffStat;
 
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 
@@ -282,18 +285,41 @@ export function InboxPage({
   useEffect(() => {
     selectedAt.current = Date.now();
   }, [shownKey]);
+  /** When the owner last picked an option on each item, by digit or click. */
+  const pickedAt = useRef<Record<string, number>>({});
+  const pickOption = (item: TaskItem, option: string) => {
+    pickedAt.current[item.key] = Date.now();
+    setPicks((old) => ({ ...old, [item.key]: option }));
+  };
+
+  /** The selected task's host's attempt cap, for "attempt 1/4". */
+  const [maxAttempts, setMaxAttempts] = useState<Record<string, number>>({});
+  const selectedHost =
+    selected?.source === "task" ? hostOf(selected.task) : undefined;
+  const selectedHostKey = selected?.source === "task" ? selected.host : null;
+  useEffect(() => {
+    if (selectedHostKey == null || maxAttempts[selectedHostKey] != null) return;
+    let live = true;
+    orchestratorClientFor(selectedHost)
+      .settingsGet()
+      .then((settings) => {
+        if (live)
+          setMaxAttempts((old) => ({
+            ...old,
+            [selectedHostKey]: settings.maxAttempts,
+          }));
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [selectedHostKey, selectedHost, maxAttempts]);
 
   const needs = items.filter(needsYou);
-  const oldest = needs.reduce<number | null>(
-    (min, item) =>
-      item.at != null && (min == null || item.at < min) ? item.at : min,
-    null,
-  );
-  const headline = inboxHeadline(
-    needs.length,
-    new Set(needs.map((item) => item.project)).size,
-    new Set(needs.map((item) => item.host)).size,
-    oldest == null ? null : Date.now() - oldest,
+  const headline = scopedHeadline(
+    scoped.filter(needsYou),
+    !!(project || hostFilter || query.trim()),
+    Date.now(),
   );
   const candidates = cleanupCandidates(groups, {
     project,
@@ -338,12 +364,18 @@ export function InboxPage({
       };
       setNotes(drop);
       setPicks(drop);
+      delete pickedAt.current[item.key];
     });
   };
   const answerByKey = (item: TaskItem) =>
     answerTask(
       item,
-      enterAnswer(choiceOf(item), selectedAt.current, Date.now()),
+      inboxEnterAnswer(
+        choiceOf(item),
+        selectedAt.current,
+        pickedAt.current[item.key],
+        Date.now(),
+      ),
     );
   /** Types into the session, one step at a time, then re-reads its screen. */
   const send = (item: SessionItem, steps: string[], clearNote = false) =>
@@ -412,7 +444,7 @@ export function InboxPage({
     const { task } = item;
     if (item.kind === "answer" && /^[1-9]$/.test(key)) {
       const option = task.question?.options[Number(key) - 1];
-      if (option) setPicks((old) => ({ ...old, [item.key]: option }));
+      if (option) pickOption(item, option);
     } else if (key === "enter" && item.kind === "answer") answerByKey(item);
     else if (key === "l" && item.kind === "land") land(task);
     else if (key === "r" && item.kind === "decide" && task.status !== "landing")
@@ -590,10 +622,7 @@ export function InboxPage({
           key={option}
           selected={shownPick(choice) === option}
           onClick={() => {
-            setPicks((old) => ({
-              ...old,
-              [item.key]: togglePick(choice, option),
-            }));
+            pickOption(item, togglePick(choice, option));
             setNote(item, "");
           }}
         >
@@ -655,9 +684,7 @@ export function InboxPage({
         <AttentionItem
           tone={TONE[item.kind]}
           title={item.title}
-          time={
-            item.at != null ? elapsedLabel(Date.now() - item.at) : undefined
-          }
+          time={item.at != null ? ageLabel(Date.now() - item.at) : undefined}
           context={context}
           question={item.kind === "answer"}
           actions={actions}
@@ -689,7 +716,7 @@ export function InboxPage({
         <span className="inbox-session-activity">{hostName(item)}</span>
         {item.at != null && (
           <span className="inbox-session-meta">
-            {elapsedLabel(Date.now() - item.at)}
+            {ageLabel(Date.now() - item.at)}
           </span>
         )}
         <button
@@ -821,9 +848,16 @@ export function InboxPage({
     if (item.source === "session") return sessionPreview(item);
     const { task } = item;
     const attempts = implementAttemptCount(task);
-    const files = latestImplementAttempt(task)?.changedFiles.length;
     const diff = diffOf(task);
+    const files =
+      diff?.files ?? latestImplementAttempt(task)?.changedFiles.length;
     const met = criteriaMet(task);
+    const facts = diffFacts(
+      files,
+      attempts,
+      maxAttempts[item.host],
+      task.costUsd,
+    );
     return (
       <>
         <div className="inbox-preview-head">
@@ -846,23 +880,16 @@ export function InboxPage({
         )}
         <div className="inbox-diff">
           <GitBranch size={13} />
-          <span className="inbox-diff-branch">{task.branch}</span>
-          {diff?.added != null && (
+          <span className="inbox-diff-branch" title={task.branch}>
+            {shortBranch(task.branch)}
+          </span>
+          {!!diff?.added && (
             <span className="inbox-diff-add">+{diff.added}</span>
           )}
-          {diff?.removed != null && (
+          {!!diff?.removed && (
             <span className="inbox-diff-del">{`−${diff.removed}`}</span>
           )}
-          <span className="inbox-diff-rest">
-            {[
-              files ? plural(files, "file") : "",
-              attempts > 0 ? `attempt ${attempts}` : "",
-              formatCost(task.costUsd),
-            ]
-              .filter(Boolean)
-              .map((part) => `· ${part}`)
-              .join(" ")}
-          </span>
+          {facts && <span className="inbox-diff-rest">{`· ${facts}`}</span>}
         </div>
         <div className="inbox-preview-spacer" />
         {item.kind === "answer" && (
@@ -912,7 +939,7 @@ export function InboxPage({
             <span className="inbox-zero-shadow" />
           </div>
           <h2>Inbox zero</h2>
-          <p>{inboxZeroSummary(allTasks)}</p>
+          <p>{zeroLine(allTasks)}</p>
           <div className="inbox-zero-actions">
             <button
               className="ui-button secondary"
@@ -926,20 +953,21 @@ export function InboxPage({
             >
               <ListChecks size={14} /> Open orchestrator
             </button>
-            {landed && (
-              <button
-                className="ui-button ghost"
-                onClick={() =>
-                  openOrchestratorTask({
-                    taskId: landed.id,
-                    repo: landed.repo,
-                    focus: "report",
-                  })
-                }
-              >
-                See what landed
-              </button>
-            )}
+            <button
+              className="ui-button ghost"
+              disabled={!landed}
+              title={landed ? undefined : "Nothing has landed yet"}
+              onClick={() =>
+                landed &&
+                openOrchestratorTask({
+                  taskId: landed.id,
+                  repo: landed.repo,
+                  focus: "report",
+                })
+              }
+            >
+              See what landed
+            </button>
           </div>
           {errorLine}
         </div>
@@ -1061,9 +1089,7 @@ export function InboxPage({
           </>
         )}
         <div className="inbox-cleanup-foot">
-          <span>
-            Running commands in ended sessions stop. Project files stay on disk.
-          </span>
+          <span>Ending stops running commands; files stay on disk.</span>
           <button className="inbox-link" onClick={() => setCleanup(null)}>
             Cancel
           </button>

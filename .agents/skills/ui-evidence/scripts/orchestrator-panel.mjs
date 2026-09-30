@@ -228,8 +228,16 @@ if (!seedPath || !title) {
         hasText: new RegExp(`^${escapeRegExp(title)}$`),
       }),
     });
-    // The rail can still be one render behind the panel container just after
-    // it mounts, so wait for the row itself rather than a one-shot count.
+    // Finished tasks sit in the folded EARLIER group; open it when the row is
+    // not in view. The rail can still be one render behind the panel
+    // container just after it mounts, so wait for the row itself rather than
+    // a one-shot count.
+    try {
+      await row.first().waitFor({ timeout: 5000 });
+    } catch {
+      const earlier = page.locator('.orch-rail-earlier[aria-expanded="false"]');
+      if (await earlier.count()) await earlier.first().click();
+    }
     try {
       await row.first().waitFor({ timeout: 10000 });
     } catch {

@@ -28,12 +28,12 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 
 ## Promoted
 
+- 2026-09-30 orchd defaults carried this repo's desktop smoke and one owner's MCP servers to every repo → defaults stay empty; repo specifics live in settings. `scoped_checks_and_chat_tools_default_to_none`.
 - 2026-09-30 A hook `allow` did not open `.claude/**` to a headless `claude -p` (also not a `Write(.claude/**)` rule or `updatedInput`; checked on 2.1.285) → an allowed write goes to `.orchd-staging/` and is copied in before verify. `an_allowed_write_under_claude_goes_through_staging_and_lands_before_verify`.
 - 2026-09-30 A connected MCP server that worked in `claude` failed under `--strict-mcp-config` (Slack's OAuth is keyed by the plugin name) → keep a plugin server's Claude Code name and probe with a real run. `chat_tools::server_key`.
 - 2026-09-29 A kill lost the whole workspace snapshot (Chromium had not committed localStorage) → durable state goes in `workspace-state.json`, atomically.
 - 2026-09-30 A preselected answer plus global Enter sent answers the owner never picked → Enter needs an explicit pick or typed text. `enterAnswer` in `ownerAttention.ts`.
 - 2026-09-29 Contradicting criteria cost three attempts → cross-check criteria before launch.
-- 2026-09-28 A/B cause guessed from averages → read `events.jsonl` before explaining a result.
 - 2026-09-24 `task.create` failed on an existing branch (`worktree add -b`) → new branch per task or omit `branch`.
 - 2026-09-28 Trusted `rtk rewrite` (`rtk read` drops code) → allowlist. `rtk_rewrite_output_*`.
 - 2026-09-25 A changed orchd default never reached earlier-saved settings (`settings.set` stores the whole struct) → mark settings differing from `settings.defaults`. `settings_defaults_reports_the_built_in_defaults_not_the_saved_settings`.

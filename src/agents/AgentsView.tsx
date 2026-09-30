@@ -35,36 +35,17 @@ import { AgentConnectionsPanel } from "./AgentConnectionsPanel";
 import { AgentAddonPanel } from "./AgentAddonPanel";
 import { AgentActivityPanel } from "./AgentActivityPanel";
 import { blank, visible, groupItems, label } from "./transcript";
+import type { SessionState } from "../app/useSessionState";
+import type { AgentTab } from "../workspaceState";
 import "./agents.css";
 
-type Tab = {
-  providerId: string;
-  agentId: string;
-  conversationId: string;
-  title: string;
-};
+type Tab = AgentTab;
 const identity = (t: Tab) =>
   JSON.stringify([t.providerId, t.agentId, t.conversationId]);
-const storage = "sushiai.agent-tabs.v1";
-const focusStorage = "sushiai.agent-focus.v1";
-// Which tab was open survives a restart alongside the tab list; unsent text
-// stays in memory across mode switches and is never written to storage.
-function savedFocus(): { providerId: string; agentId: string; active: string } {
-  const empty = { providerId: "", agentId: "", active: "" };
-  try {
-    const row = JSON.parse(localStorage.getItem(focusStorage) || "{}");
-    return row &&
-      ["providerId", "agentId", "active"].every(
-        (key) => typeof row[key] === "string",
-      )
-      ? { providerId: row.providerId, agentId: row.agentId, active: row.active }
-      : empty;
-  } catch {
-    return empty;
-  }
-}
+// Which tab was open survives a restart in the workspace snapshot, next to
+// the tab list; unsent text stays in memory across mode switches and is never
+// written to storage.
 const viewMemory = {
-  ...savedFocus(),
   drafts: {} as Record<string, string>,
   // The last known providers and agents survive a remount, so switching tabs
   // shows the roster at once instead of an empty list that fills in later.
@@ -79,24 +60,6 @@ type ConversationPage = {
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const display = (v: unknown) =>
   typeof v === "string" ? v : v == null ? "" : JSON.stringify(v, null, 2);
-function savedTabs(): Tab[] {
-  try {
-    const rows = JSON.parse(localStorage.getItem(storage) || "[]");
-    return Array.isArray(rows)
-      ? rows
-          .filter(
-            (t) =>
-              t &&
-              [t.providerId, t.agentId, t.conversationId, t.title].every(
-                (v) => typeof v === "string",
-              ),
-          )
-          .slice(0, 30)
-      : [];
-  } catch {
-    return [];
-  }
-}
 export function RichText({ text }: { text: string }) {
   return (
     <Markdown
@@ -372,7 +335,23 @@ function Interaction({
   );
 }
 
-export function AgentsView({ slot }: { slot: HTMLElement | null }) {
+export function AgentsView({
+  slot,
+  session,
+}: {
+  slot: HTMLElement | null;
+  session: SessionState;
+}) {
+  const {
+    agentTabs: tabs,
+    setAgentTabs: setTabs,
+    agentFocus: focus,
+    setAgentFocus: setFocus,
+  } = session;
+  const tabsRef = useRef(tabs);
+  const focusRef = useRef(focus);
+  tabsRef.current = tabs;
+  focusRef.current = focus;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const composerInput = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
@@ -400,15 +379,14 @@ export function AgentsView({ slot }: { slot: HTMLElement | null }) {
     viewMemory.providers = rows;
     setProvidersState(rows);
   };
-  const [providerId, setProviderId] = useState(viewMemory.providerId);
+  const [providerId, setProviderId] = useState(focus.providerId);
   const [agents, setAgentsState] = useState<AgentIdentity[]>(viewMemory.agents);
   const setAgents = (rows: AgentIdentity[]) => {
     viewMemory.agents = rows;
     setAgentsState(rows);
   };
-  const [agentId, setAgentId] = useState(viewMemory.agentId);
-  const [tabs, setTabs] = useState<Tab[]>(savedTabs);
-  const [active, setActive] = useState(viewMemory.active);
+  const [agentId, setAgentId] = useState(focus.agentId);
+  const [active, setActive] = useState(focus.active);
   const [snapshots, setSnapshots] = useState<Record<string, AgentSnapshot>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>(
     viewMemory.drafts,
@@ -521,7 +499,7 @@ export function AgentsView({ slot }: { slot: HTMLElement | null }) {
         old.map((t) => (identity(t) === id ? { ...t, title: s.title } : t)),
       );
     });
-  }, []);
+  }, [setTabs]);
   useEffect(() => {
     if (!providerId) return;
     const gen = ++generation.current;
@@ -532,13 +510,13 @@ export function AgentsView({ slot }: { slot: HTMLElement | null }) {
       .then((rows) => {
         if (gen !== generation.current) return;
         setAgents(rows);
-        const selected = rows.some((a) => a.id === viewMemory.agentId)
-          ? viewMemory.agentId
+        const selected = rows.some((a) => a.id === focusRef.current.agentId)
+          ? focusRef.current.agentId
           : rows[0]?.id || "";
         setAgentId(selected);
-        const previous = savedTabs().find(
+        const previous = tabsRef.current.find(
           (t) =>
-            identity(t) === viewMemory.active &&
+            identity(t) === focusRef.current.active &&
             t.providerId === providerId &&
             t.agentId === selected,
         );
@@ -571,25 +549,11 @@ export function AgentsView({ slot }: { slot: HTMLElement | null }) {
       .finally(() => {
         if (gen === generation.current) setBusy(false);
       });
-  }, [providerId]);
-  useEffect(() => {
-    try {
-      localStorage.setItem(storage, JSON.stringify(tabs.slice(-30)));
-    } catch {
-      /* The current window remains usable without storage. */
-    }
-  }, [tabs]);
-  useEffect(() => {
-    Object.assign(viewMemory, { providerId, agentId, active });
-    try {
-      localStorage.setItem(
-        focusStorage,
-        JSON.stringify({ providerId, agentId, active }),
-      );
-    } catch {
-      /* The current window remains usable without storage. */
-    }
-  }, [providerId, agentId, active]);
+  }, [providerId, setTabs]);
+  useEffect(
+    () => setFocus({ providerId, agentId, active }),
+    [providerId, agentId, active, setFocus],
+  );
   useEffect(() => {
     viewMemory.drafts = drafts;
   }, [drafts]);

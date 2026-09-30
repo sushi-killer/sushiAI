@@ -11,6 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { ExtensionsView } from "../extensions/ExtensionsView.tsx";
+import { InboxPage } from "./InboxPage.tsx";
 import { PageFrame } from "./PageFrame.tsx";
 import {
   ExtensionNavSlot,
@@ -30,6 +31,9 @@ import type { SkillCatalogItem, SkillManagementAction } from "../types";
 import type { WorkspaceController } from "../workspace/useWorkspaces.ts";
 import type { ProjectGit } from "./useProjectGit.ts";
 import { closedMemberIds, dashboardEntries } from "./projects.ts";
+import type { InboxGroup } from "./attention.ts";
+import type { Task } from "../orchestrator/types.ts";
+import type { TaskTarget } from "../orchestrator/notices.ts";
 
 /** The one page in the working area. A core section and a page an extension
  * contributed are both drawn here, in the same frame - there is no second path
@@ -56,6 +60,8 @@ export function SectionPage({
   ws,
   projectGit,
   connectionProfiles,
+  attention,
+  openOrchestratorTask,
 }: {
   section: SectionRef;
   runExtensionCommand(extensionId: string, commandId: string): void;
@@ -92,6 +98,16 @@ export function SectionPage({
   ws: WorkspaceController;
   projectGit: Record<string, ProjectGit>;
   connectionProfiles: ConnectionProfile[];
+  /** The attention queue `useAttention` computes - the Inbox page's own
+   * groups and its "mark seen" action. */
+  attention: {
+    groups: InboxGroup[];
+    ownerTasks: Task[];
+    tasks: Task[];
+    markSeen(panelId: string): void;
+  };
+  /** Opens an orchd task in its Orchestrator panel (adding the panel if missing). */
+  openOrchestratorTask(target: TaskTarget): void;
 }) {
   const surface =
     section.kind === "extension" ? activePage(registry, section) : undefined;
@@ -123,6 +139,24 @@ export function SectionPage({
       </PageFrame>
     );
   const name = section.id;
+  if (name === "Inbox")
+    return (
+      <InboxPage
+        groups={attention.groups}
+        markSeen={attention.markSeen}
+        ownerTasks={attention.ownerTasks}
+        allTasks={attention.tasks}
+        openOrchestratorTask={openOrchestratorTask}
+        switchWorkspace={switchWorkspace}
+        ws={ws}
+        connectionProfiles={connectionProfiles}
+        registry={registry}
+        openExtensionTarget={openExtensionTarget}
+        cwd={cwd}
+        connection={connection}
+        workspaces={workspaces}
+      />
+    );
   const projects = dashboardEntries(
     workspaces,
     ws.closedProjects,
@@ -142,7 +176,7 @@ export function SectionPage({
               ? "App-wide packages that can add pages, panels and actions."
               : name === "Skills"
                 ? "Skills found on this Mac, grouped by harness and ready for cleanup review."
-                : "Extensions connected to your Herdr session."
+                : undefined
       }
       actions={
         <>

@@ -2,12 +2,14 @@ const {
   app,
   BrowserWindow,
   ipcMain,
+  screen,
   dialog,
   Menu,
   session,
   shell,
   safeStorage,
   powerMonitor,
+  globalShortcut,
 } = require("electron");
 const path = require("node:path");
 const os = require("node:os");
@@ -29,12 +31,31 @@ const { registerTerminalIpc } = require("./ipc/terminals.cjs");
 const { registerChatIpc } = require("./ipc/chat.cjs");
 const { registerAppIpc } = require("./ipc/app.cjs");
 const { registerExtensionIpc } = require("./ipc/extensions.cjs");
+const { registerAttentionIpc } = require("./attention.cjs");
+const { registerWorkspaceSnapshot } = require("./workspace-snapshot.cjs");
+const {
+  DEFAULT_BOUNDS,
+  loadWindowState,
+  saveWindowState,
+  clampBounds,
+} = require("./window-state.cjs");
+const { registerMascot, watchPresenting } = require("./mascot.cjs");
+const { createMascotShortcut } = require("./mascot-shortcut.cjs");
+const { DEV_RESTART_EXIT_CODE, watchCore } = require("./dev-restart.cjs");
+const { testWindow } = require("./test-window.cjs");
+
+const testMode = testWindow();
 const { SurfaceStateStore } = require("./extensions/surface-state.cjs");
 const { ExtensionManager } = require("./extensions/extension-manager.cjs");
 const {
   HERDR_MANIFEST,
   registerHerdrExtension,
 } = require("./extensions/builtin-herdr.cjs");
+const {
+  ORCHESTRATOR_MANIFEST,
+  registerOrchestratorExtension,
+  orchestratorNotice,
+} = require("./orchestrator.cjs");
 const {
   install,
   applicationPath,
@@ -54,7 +75,7 @@ const dataDir = process.env.BRIDGE_DATA_DIR;
 if (dataDir) app.setPath("userData", path.resolve(dataDir));
 const extensions = new ExtensionManager({
   dataDir: app.getPath("userData"),
-  builtins: [HERDR_MANIFEST],
+  builtins: [HERDR_MANIFEST, ORCHESTRATOR_MANIFEST],
   // Folders dropped here are read as JSON manifests, never executed. The
   // override exists so the desktop smoke can point at its own fixtures.
   localDir: process.env.SUSHIAI_EXTENSIONS_DIR
@@ -144,6 +165,12 @@ registerExtensionIpc({
   announce: (change) => send("extensions-state-changed", change),
 });
 registerHerdrExtension({ handle, getConnections: () => connections, id });
+registerWorkspaceSnapshot({
+  ipcMain,
+  handle,
+  getMainWindow: () => mainWindow,
+  userDataDir: () => app.getPath("userData"),
+});
 const terminalIpc = registerTerminalIpc({
   handle,
   send,
@@ -184,6 +211,75 @@ registerAppIpc({
   userDataDir: () => app.getPath("userData"),
   stageModelSettings,
 });
+let orchestrator;
+let devRestart = false;
+let closeCoreWatch = null;
+let closePresentingWatch = null;
+const mascot = registerMascot({
+  ipcMain,
+  BrowserWindow,
+  screen,
+  root,
+  policy: testMode.mascot,
+  devURL: process.env.BRIDGE_DEV_URL,
+  getService: () => orchestrator,
+  showMainWindow: () => attention.showWindow(),
+  send,
+  restart: () => {
+    devRestart = true;
+    app.quit();
+  },
+});
+function coreUpdated(file) {
+  console.log(`[dev] electron/${file} changed - restart from the mascot`);
+  mascot.add({
+    kind: "core-update",
+    title: "sushiAI core",
+    body: "Core updated - restart?",
+  });
+}
+if (process.env.BRIDGE_DEV_URL)
+  closeCoreWatch = watchCore({ dir: __dirname, onChange: coreUpdated });
+// A test run owns neither the owner's keyboard nor their screen state.
+const mascotShortcut = createMascotShortcut({
+  globalShortcut,
+  toggle: () => mascot.toggle(),
+});
+handle("mascot-shortcut-status", () => mascotShortcut.status());
+const attention = registerAttentionIpc({
+  handle,
+  send,
+  app,
+  getMainWindow: () => mainWindow,
+  userDataDir: app.getPath("userData"),
+  trayIconPath: path.join(root, "dist/trayTemplate.png"),
+  mascot,
+  hidden: testMode.hidden,
+  onPreferences: (preferences) => {
+    if (!testMode.test) mascotShortcut.sync(preferences.mascotShortcut);
+  },
+});
+orchestrator = registerOrchestratorExtension({
+  handle,
+  extensions,
+  send,
+  notify: (notice) => attention.notifyTask(notice),
+  onTask: (task) => mascot.onTask(task),
+  dataDir: path.join(app.getPath("userData"), "orchestrator"),
+  root,
+  resourcesPath: process.resourcesPath,
+  packaged: app.isPackaged,
+  getClaudeMcp: () => claudeMcp,
+  getModelProviders: () => modelProviders,
+  stopDaemonOnQuit: testMode.test,
+  getConnections: () => connections,
+  hostsFile: path.join(app.getPath("userData"), "orchestrator-hosts.json"),
+  hostsChanged: () => send("orchestrator-hosts-changed"),
+});
+// Turning the orchestrator off also drops the notices it already queued.
+extensions.onChange((id, enabled) => {
+  if (id === ORCHESTRATOR_MANIFEST.id && !enabled) mascot.clear();
+});
 function validWebURL(value) {
   try {
     return ["http:", "https:"].includes(new URL(value).protocol);
@@ -192,8 +288,14 @@ function validWebURL(value) {
   }
 }
 app.whenReady().then(async () => {
-  connections = new Connections(app.getPath("userData"));
+  // A hidden test run may hand in a fake ssh (evidence and smoke runs).
+  const fakeSsh = testMode.hidden ? process.env.SUSHIAI_TEST_SSH : "";
+  connections = new Connections(
+    app.getPath("userData"),
+    fakeSsh ? { ssh: fakeSsh } : undefined,
+  );
   await connections.init();
+  await orchestrator.start();
   // Sleep/wake can drop every SSH tunnel at once - retry them all rather than
   // waiting for each one's own backoff timer to come back around.
   powerMonitor.on("resume", () => connections.retryAutoConnect());
@@ -212,12 +314,14 @@ app.whenReady().then(async () => {
     openPath: (file) => shell.openPath(file),
     openExternal: (url) => shell.openExternal(url),
     onChange: (state) => send("updates-state", state),
-    automatic: app.isPackaged && process.env.SUSHIAI_TEST_HEADLESS !== "1",
+    automatic: app.isPackaged && !testMode.hidden,
   });
   await updates.init();
+  await attention.init();
   preview = new PreviewServer(connections);
   await preview.start();
-  if (
+  if (process.platform === "darwin" && testMode.hidden) app.dock.hide();
+  else if (
     process.platform === "darwin" &&
     existsSync(path.join(root, "dist/sushi-dock.png"))
   )
@@ -225,24 +329,91 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionRequestHandler((_, __, callback) =>
     callback(false),
   );
+  const windowStateFile = path.join(
+    app.getPath("userData"),
+    "window-state.json",
+  );
+  const savedWindow = loadWindowState(windowStateFile);
+  const startBounds = savedWindow
+    ? clampBounds(
+        savedWindow,
+        screen.getAllDisplays(),
+        screen.getPrimaryDisplay(),
+      )
+    : DEFAULT_BOUNDS;
   mainWindow = new BrowserWindow({
-    width: 1380,
-    height: 880,
+    ...startBounds,
     minWidth: 600,
     minHeight: 440,
     title: "sushiAI",
-    show: process.env.SUSHIAI_TEST_HEADLESS !== "1",
     backgroundColor: "#0b0b0b",
     titleBarStyle: "hidden",
     trafficLightPosition: { x: 14, y: 14 },
+    ...testMode.windowOptions,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
       webviewTag: true,
-      backgroundThrottling: process.env.SUSHIAI_TEST_HEADLESS !== "1",
+      ...testMode.windowOptions.webPreferences,
     },
+  });
+  // Evidence seam: pushes a task through the real notice path (no daemon).
+  if (process.env.SUSHIAI_TEST_MASCOT === "1")
+    globalThis.__sushiaiMascot = {
+      notify: (task) => attention.notifyTask(orchestratorNotice(task)),
+      coreUpdated: () => coreUpdated("<seam>"),
+      queue: () => mascot.snapshot(),
+      window: () => mascot.getWindow(),
+      workArea: () => screen.getPrimaryDisplay().workArea,
+      toggle: () => mascot.toggle(),
+      setPresenting: (value) => mascot.setPresenting(value),
+    };
+  // A test run owns neither the owner's keyboard nor their screen state.
+  if (!testMode.test) {
+    closePresentingWatch = watchPresenting({
+      screen,
+      onChange: (presenting) => mascot.setPresenting(presenting),
+    });
+  }
+  if (savedWindow && !testMode.hidden) {
+    if (savedWindow.isFullScreen) mainWindow.setFullScreen(true);
+    else if (savedWindow.isMaximized) mainWindow.maximize();
+  }
+  const saveWindow = () => {
+    if (mainWindow.isDestroyed()) return;
+    const normalBounds = mainWindow.getNormalBounds();
+    try {
+      saveWindowState(windowStateFile, {
+        bounds: normalBounds,
+        displayId: screen.getDisplayMatching(normalBounds).id,
+        isMaximized: mainWindow.isMaximized(),
+        isFullScreen: mainWindow.isFullScreen(),
+      });
+    } catch {
+      // A failed save must never block closing.
+    }
+  };
+  let saveTimer = null;
+  const saveWindowSoon = () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveWindow, 500);
+  };
+  for (const name of [
+    "resize",
+    "move",
+    "maximize",
+    "unmaximize",
+    "enter-full-screen",
+    "leave-full-screen",
+  ])
+    mainWindow.on(name, saveWindowSoon);
+  mainWindow.on("closed", () => mascot.destroy());
+  mainWindow.on("close", (event) => {
+    clearTimeout(saveTimer);
+    saveWindow();
+    if (attention.handleWindowClose(mainWindow)) event.preventDefault();
   });
   mainWindow.webContents.on("will-navigate", (event) => event.preventDefault());
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -300,6 +471,10 @@ app.whenReady().then(async () => {
           { role: "togglefullscreen" },
         ],
       },
+      {
+        label: "Window",
+        submenu: [{ role: "close" }],
+      },
     ]),
   );
   mainWindow.webContents.once("did-finish-load", async () => {
@@ -318,11 +493,28 @@ app.whenReady().then(async () => {
   else mainWindow.loadFile(path.join(root, "dist/index.html"));
 });
 app.on("window-all-closed", () => app.quit());
+app.on("activate", () => attention.showWindow());
 let quitReady = false;
+app.on("will-quit", (event) => {
+  mascotShortcut.close();
+  globalShortcut.unregisterAll();
+  closePresentingWatch?.();
+  if (!devRestart) return;
+  event.preventDefault();
+  app.exit(DEV_RESTART_EXIT_CODE);
+});
 app.on("before-quit", (event) => {
+  attention.setQuitting(true);
   if (quitReady) return;
   event.preventDefault();
+  closeCoreWatch?.();
   updates?.close();
+  attention.close();
+  mascot.destroy();
+  // The daemon may take several seconds to stop its agents; the app should
+  // look closed meanwhile, not frozen.
+  for (const window of BrowserWindow.getAllWindows())
+    if (!window.isDestroyed()) window.hide();
   preview?.close();
   terminalIpc.close();
   for (const pending of terminalPending.values()) pending.cancelled = true;
@@ -332,6 +524,7 @@ app.on("before-quit", (event) => {
   Promise.allSettled([
     Promise.resolve(connections?.close()),
     agents.close(),
+    orchestrator.quit(),
   ]).finally(() => {
     quitReady = true;
     app.quit();

@@ -1,0 +1,202 @@
+/* Plan and Brainstorm views (Figma 06). Sizes are the frames' own; colours
+ * are tokens. */
+
+.plan-view {
+  gap: 12px;
+}
+.plan-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.plan-head-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 3px;
+  min-width: 0;
+}
+.plan-lede {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 15px;
+}
+.plan-head > .ui-button.ghost {
+  height: 30px;
+}
+.plan-card {
+  display: flex;
+  border: 1px solid var(--line-pane);
+  border-radius: 8px;
+  background: var(--bg-raised);
+}
+.plan-autopilot {
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+}
+.plan-autopilot-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.plan-desc {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 15px;
+}
+.plan-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 32px;
+  height: 18px;
+  padding: 2px;
+  border-radius: 9px;
+  background: var(--bg-control);
+  flex-shrink: 0;
+}
+.plan-toggle.on {
+  justify-content: flex-end;
+  background: var(--accent);
+}
+.plan-toggle:disabled {
+  opacity: 0.5;
+}
+.plan-toggle-knob {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+.plan-toggle.on .plan-toggle-knob {
+  background: var(--accent-ink);
+}
+.plan-label {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 12px;
+}
+.plan-group {
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 12px;
+}
+.plan-row,
+.plan-single {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.plan-single {
+  padding: 10px 12px;
+}
+.plan-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 4px;
+  min-width: 0;
+}
+.plan-title {
+  padding: 0;
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 500;
+  line-height: 16px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plan-title.static {
+  cursor: default;
+}
+.plan-single.later .plan-title {
+  color: var(--text-muted);
+}
+.plan-sub {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plan-meta {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+.plan-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex-shrink: 0;
+}
+.plan-dot.ready {
+  background: var(--tone-ok);
+}
+.plan-children {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 18px;
+}
+.plan-child {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-sunken);
+}
+.plan-child-title {
+  padding: 0;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 15px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plan-after {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.plan-empty,
+.plan-error {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.plan-error {
+  color: var(--danger);
+}
+
+.plan-moves {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+}
+/* Reorder and Later only for the row under the pointer or keyboard. */
+.plan-single:hover .plan-moves,
+.plan-row:hover .plan-moves,
+.plan-moves:focus-within {
+  opacity: 1;
+}
+.plan-bucket-btn {
+  height: 26px;
+  padding: 0 8px;
+}

@@ -26,30 +26,29 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 
 ## Open
 
-## 2026-09-15 — A gate chain let a failing change commit
-
-Root cause: checks were joined with `;`, so `git commit` ran after `tsc` failed; later a zsh variable holding file paths was not word-split, prettier matched nothing and the commit still went through.
-Rule: join every gate to the commit with `&&`, and pass file lists as explicit arguments, never an unquoted variable.
+## 2026-09-30 — Parallel lane worktrees filled the disk
+Root cause: each `.claude/worktrees/agent-*` lane built its own `orchd/target`; ten lanes left 262 MB free.
+Rule: delete a lane's `orchd/target` once it is merged; check `df` before more lanes.
 
 ## Promoted
 
-- 2026-09-15 Desktop smoke failed under load, then passed on the same tree: asserts followed fixed sleeps → wait for the asserted state instead. `scripts/smoke.mjs`.
-- 2026-09-15 Unit fixtures merged worktrees but the real layout (main, worktree, unrelated clone) did not → grouping fixtures include a realistic distractor. `tests/workspace-merge.test.cjs`, `tests/projects.test.cjs`.
-- 2026-09-14 A layout check passed while a label rendered 0px wide: it measured a `flex: 1`-stretched box → measure text ink with a `Range`, assert non-zero label widths. `ui-evidence` skill.
-- 2026-09-14 A test copied from a live debug session carried a real private IP, host alias and ports → examples use 192.0.2.0/24 (RFC 5737); private addresses fail CI. `check-conventions.mjs`.
-- 2026-09-13 Flat workspace list reordered on every poll: reconciliation appended each refresh at the array end, reshuffling other hosts → update in place. `herdrSnapshot.ts`.
-- 2026-09-13 A wrapper printed "All files formatted correctly" for a run that exited 1 → exit code is the verdict, never `npx`. `sushiai-testing` skill.
-- 2026-09-13 A user's ssh_config (`LocalForward`, `/dev/null` known-hosts) broke our SSH tunnel → own `known_hosts`, private connection. `connections.cjs`.
-- 2026-09-13 One global `connected` flag colored every host's status dot → per-endpoint `statusByEndpoint`. `useHerdr.ts`.
-- 2026-09-12 Extension page opened in Agent/Chat mode left the sidebar blank → AGENTS.md, `toggleSection`/`src/app/navigation.ts`
-- 2026-09-12 Duplicate manifest labels broke a Playwright selector → `manifest.cjs`, `extension-contract-coverage.test.cjs`
-- 2026-09-12 Commands without a `surfaceId` silently did nothing at runtime → AGENTS.md, `manifest.cjs`
-- 2026-09-12 `webUtils.getPathForFile()` empty for dropped files (Electron 30-33 regression) → AGENTS.md
-- 2026-09-12 Drag highlight flickered crossing a child element's boundary → AGENTS.md
-- 2026-09-12 A copy-pasted duplicate in `ACTION_PLACEMENTS`/`ICONS` shipped silently → `extension-contract-coverage.test.cjs`
-- 2026-09-12 Smoke test failed ("expected 1, got 2") after deleting a fixture → `scripts/smoke.mjs`
-- 2026-09-12 `types.ts` drifted from the manifest validator mid-session → `extension-manifest-change` skill
-- 2026-09-12 Import-isolation check caught one import style → `check-conventions.mjs`
-- 2026-09-12 CI silently never ran 33 of 52 test files → `package.json` `ci` script
-- 2026-09-12 `scripts/smoke.mjs` discards an external `SUSHIAI_EXTENSIONS_DIR`; manifest fields are non-obvious → `author-and-verify-extension` skill
-- 2026-09-13 Pushed a 31-commit branch to `main` unsquashed → squash-only is a `main`-history invariant. AGENTS.md.
+- 2026-09-30 orchd defaults carried this repo's desktop smoke and one owner's MCP servers to every repo → defaults stay empty; repo specifics live in settings. `scoped_checks_and_chat_tools_default_to_none`.
+- 2026-09-30 A hook `allow` did not open `.claude/**` to a headless `claude -p` (also not a `Write(.claude/**)` rule or `updatedInput`; checked on 2.1.285) → an allowed write goes to `.orchd-staging/` and is copied in before verify. `an_allowed_write_under_claude_goes_through_staging_and_lands_before_verify`.
+- 2026-09-30 A connected MCP server that worked in `claude` failed under `--strict-mcp-config` (Slack's OAuth is keyed by the plugin name) → keep a plugin server's Claude Code name and probe with a real run. `chat_tools::server_key`.
+- 2026-09-29 A kill lost the whole workspace snapshot (Chromium had not committed localStorage) → durable state goes in `workspace-state.json`, atomically.
+- 2026-09-30 A preselected answer plus global Enter sent answers the owner never picked → Enter needs an explicit pick or typed text. `enterAnswer` in `ownerAttention.ts`.
+- 2026-09-29 Contradicting criteria cost three attempts → cross-check criteria before launch.
+- 2026-09-28 Trusted `rtk rewrite` (`rtk read` drops code) → allowlist. `rtk_rewrite_output_*`.
+- 2026-09-25 A changed orchd default never reached earlier-saved settings (`settings.set` stores the whole struct) → mark settings differing from `settings.defaults`. `settings_defaults_reports_the_built_in_defaults_not_the_saved_settings`.
+- 2026-09-25 Disabled `select!` branch still built `Instant + Duration::MAX`, panicking the loop → bounded deadline. `run_harness`.
+- 2026-09-24 An unparsed review verdict counted as PASS → no verdict asks the owner. `a_review_without_a_verdict_waits_for_the_owner_instead_of_passing`.
+- 2026-09-24 Chat harness outlived daemon shutdown → drain every live-child map. `shutdown_kills_a_live_orchestrator_chat_turn_s_child`.
+- 2026-09-24 Orchestrator chat edited code instead of filing tasks → enforce roles with tools. `orchd/src/chat.rs`.
+- 2026-09-24 Unset `HERDR_SOCKET_PATH`/inherited `BRIDGE_DEV_URL` photographed the owner's Herdr/dev server → override both. `ui-evidence` template.
+- 2026-09-24 Real Claude/Codex output broke `orchd` while self-written fakes passed → parsers assert captured CLI lines. `parses_captured_real_cli_streams`.
+- 2026-09-15 A `;`-joined gate chain let a failure commit → join gates with `&&`.
+- 2026-09-14 A `flex: 1`-stretched label measured 0px wide → measure text ink with a `Range`, assert non-zero widths. `ui-evidence` skill.
+- 2026-09-14 A copied debug session leaked a real private IP/host/ports → examples use 192.0.2.0/24 (RFC 5737). `check-conventions.mjs`.
+- 2026-09-13 A wrapper printed success for a run that exited 1 → exit code is the verdict, never `npx`. `sushiai-testing` skill.
+- 2026-09-29 orchd preflights checks on a fresh checkout → check commands build what they need. `package.json`.
+- 2026-09-18 A fixture invented a Herdr status (`running`) → check vocabularies against `herdr api snapshot`. `tests/herdr-snapshot.test.cjs`.

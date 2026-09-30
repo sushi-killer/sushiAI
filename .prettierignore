@@ -4,3 +4,4 @@ release/
 .runtime/
 artifacts/
 concepts/
+.sushiai/

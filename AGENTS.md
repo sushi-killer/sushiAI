@@ -142,6 +142,10 @@ don't invent detail beyond what's stated here.
 
 ## Product and validation — Definition of Done
 
+Inside an orchd task (`ORCHD_TASK` is set) the task brief is the definition
+of done: orchd runs the checks, reviews and commits, and the lead session
+owns release fragments and `docs/LESSONS.md`. The list below is for the lead.
+
 - `npm run ci` is green.
 - Desktop smoke (`npm run test:desktop`) was run if `src/app`,
   `src/extensions`, or `electron/` changed.
@@ -198,8 +202,20 @@ by `scripts/check-conventions.mjs` in CI, not just a naming convention:
 
 ## Execution gotchas
 
+- Before finishing, run `./node_modules/.bin/prettier --write` on the files
+  you touched; `prettier --check` in CI fails otherwise. orchd is a bin-only
+  crate: use `cargo test --manifest-path orchd/Cargo.toml` (or
+  `--bin orchd <filter>`), never `--lib`. `src/App.tsx` is capped at 600 lines
+  (`tests/app-boundary.test.cjs`) - move logic out instead of growing it.
+- Screenshots of the built app come from the `ui-evidence` scripts:
+  `.agents/skills/ui-evidence/scripts/<screen>.mjs` (orchestrator panel,
+  notices, remote host, mascot) or a copy of `driver-template.mjs`; each
+  needs `npm run build` first.
 - `npm run dev` is not a build. `npm run package` **overwrites
   `release/mac-arm64` with no backup** — confirm before running it.
+- Every Electron test launcher passes `SUSHIAI_TEST_WINDOW=hidden` (no window,
+  focus, dock, tray or mascot, and screenshots still render); a
+  `check-conventions` rule enforces it.
 - `webUtils.getPathForFile()` returns empty paths for drag-and-drop `File`
   objects on Electron 30-33 (`electron/preload.cjs` is the only place it's
   used) — this is a known upstream Electron regression, not an app bug; don't
@@ -235,13 +251,13 @@ The owner gives a task and leaves; `$sushiai-task` carries it to a local
 commit and a report whose only questions are the ones the owner must answer.
 Roles are subagents in `.claude/agents/`, each with a deliberate model:
 
-| Role            | Model  | Job                                                     |
-| --------------- | ------ | ------------------------------------------------------- |
-| main session    | —      | lead: scope, briefs, integration, commit, report        |
-| `implementer`   | sonnet | one bounded code lane and its tests                     |
-| `functional-qa` | sonnet | proof against the acceptance criteria                   |
-| `reviewer`      | opus   | fresh review of the diff before commit                  |
-| `design-critic` | opus   | judgement of screenshots when a screen changes          |
+| Role            | Model  | Job                                              |
+| --------------- | ------ | ------------------------------------------------ |
+| main session    | —      | lead: scope, briefs, integration, commit, report |
+| `implementer`   | sonnet | one bounded code lane and its tests              |
+| `functional-qa` | sonnet | proof against the acceptance criteria            |
+| `reviewer`      | opus   | fresh review of the diff before commit           |
+| `design-critic` | opus   | judgement of screenshots when a screen changes   |
 
 Skills live in `.agents/skills/<name>/SKILL.md` (Codex reads them there),
 each linked from `.claude/skills/`. The harness loads a skill from its
@@ -262,6 +278,9 @@ or `./node_modules/.bin/<tool>`, never `npx`. The owner merges.
   picks proof; `$ui-evidence` measures and photographs the built UI;
   `$deslop` then `$autoreview` clean and review a diff before commit.
 
+- `docs/architecture.md` — Mermaid map of the app, orchd, the task
+  lifecycle and the references we borrowed from; update it in the same
+  commit as a change that moves a box or an arrow.
 - `docs/AGENTS-INTEGRATION.md` — documents the in-app "Agents" **feature**
   (the product surface for running agents inside sushiAI). Unrelated to this
   file; don't confuse the two.

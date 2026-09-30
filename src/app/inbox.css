@@ -1,0 +1,501 @@
+/* The Inbox page: header, kind chips, queue + preview split, key legend. */
+.section-page.inbox-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+.inbox-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 20px 24px 12px;
+}
+.inbox-head-title {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+.inbox-head-title h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 24px;
+  color: var(--text);
+}
+.inbox-head-title p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 15px;
+}
+.inbox-search input,
+.inbox-select select,
+.inbox-reply input {
+  height: 31px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-app);
+  color: var(--text);
+  font-size: 12.5px;
+}
+.inbox-search input {
+  width: 240px;
+}
+/* The filters use the app's select look (Control/Select): no native
+ * chevron, a 12px one of ours. */
+.inbox-select {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.inbox-select select {
+  width: 140px;
+  padding-right: 28px;
+  appearance: none;
+  text-overflow: ellipsis;
+}
+.inbox-select svg {
+  position: absolute;
+  right: 10px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.inbox-filters {
+  display: flex;
+  gap: 6px;
+  padding: 0 24px 12px;
+}
+.inbox-split {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  border-top: 1px solid var(--line-divider);
+}
+.inbox-queue {
+  display: flex;
+  flex: 0 0 560px;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px 14px 24px;
+  overflow-y: auto;
+}
+/* The list/detail scrollbars show only while the pointer is over them. */
+.inbox-queue::-webkit-scrollbar-thumb,
+.inbox-preview::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+.inbox-queue:hover::-webkit-scrollbar-thumb,
+.inbox-preview:hover::-webkit-scrollbar-thumb {
+  background: var(--line);
+}
+.inbox-preview {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 24px;
+  border-left: 1px solid var(--line-divider);
+  background: var(--bg-sunken);
+  overflow-y: auto;
+}
+.inbox-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.inbox-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 6px;
+  padding-bottom: 2px;
+}
+/* Section labels share the cards' left edge (Figma "g-WORKING"). */
+.inbox-group-head .ui-group-label {
+  padding: 0;
+}
+.inbox-item {
+  cursor: pointer;
+}
+.inbox-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--focus);
+  font-size: var(--text-sm);
+}
+.inbox-link.danger {
+  color: var(--danger);
+}
+/* Idle sessions and shells: one row (Figma "idle"). */
+.inbox-idle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-pane);
+  border-radius: 10px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+.inbox-idle-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  color: inherit;
+  text-align: left;
+}
+.inbox-idle-toggle:disabled {
+  cursor: default;
+  opacity: 1;
+}
+.inbox-idle-toggle svg {
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+.inbox-none,
+.inbox-error {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+.inbox-error {
+  color: var(--danger);
+}
+.inbox-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.inbox-preview-head h2 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 19px;
+  color: var(--text);
+}
+.inbox-criteria {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.inbox-eyebrow {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 12px;
+}
+.inbox-diff {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  white-space: nowrap;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+.inbox-diff svg,
+.inbox-diff > span {
+  flex-shrink: 0;
+}
+/* The branch gives way first; the numbers after it always show. */
+.inbox-diff > .inbox-diff-branch {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.inbox-diff-add {
+  color: var(--tone-ok);
+}
+.inbox-diff-del {
+  color: var(--tone-danger);
+}
+.inbox-diff-rest {
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+.inbox-preview-spacer {
+  flex: 1;
+}
+.inbox-reply {
+  display: flex;
+  gap: 8px;
+}
+.inbox-reply input {
+  flex: 1;
+}
+.inbox-keys {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 24px 12px;
+  border-top: 1px solid var(--line-divider);
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+.inbox-keys span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.inbox-keys kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-count);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 12px;
+}
+.inbox-zero {
+  display: flex;
+  flex: 1 0 auto;
+  padding: 32px 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.inbox-zero h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text);
+}
+.inbox-zero p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+.inbox-zero-mascot {
+  position: relative;
+  display: flex;
+  height: 80px;
+  width: 76px;
+  align-items: flex-start;
+  justify-content: center;
+}
+.inbox-zero-shadow {
+  position: absolute;
+  bottom: 0;
+  width: 44px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--bg-app);
+}
+.inbox-zero-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+}
+/* Working and idle sessions: one bordered row card each (Figma
+ * "working-row"): dot, session, what it does, time. */
+.inbox-session-row,
+.inbox-cleanup-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+.inbox-cleanup-row {
+  padding: 6px 0;
+}
+.inbox-cleanup-row input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+.inbox-session-row {
+  border-color: var(--line-pane);
+  background: var(--bg-raised);
+  cursor: pointer;
+}
+.inbox-session-row .ui-dot {
+  flex-shrink: 0;
+  background: var(--ui-tone);
+}
+.inbox-session-row:hover {
+  background: var(--bg-hover);
+}
+.inbox-session-row .inbox-session-name {
+  flex: 0 1 auto;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.inbox-session-activity {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.inbox-session-jump {
+  opacity: 0;
+}
+.inbox-session-row:hover .inbox-session-jump,
+.inbox-session-jump:focus-visible {
+  opacity: 1;
+}
+.inbox-session-row.selected {
+  border-color: var(--line-selected);
+  background: var(--bg-selected);
+}
+.inbox-session-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.inbox-session-meta {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+.inbox-session-line {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+/* A blocked session's prompt, read from its screen. */
+.inbox-prompt-question {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-md);
+  line-height: 18px;
+}
+.inbox-prompt-detail {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-app);
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 16px;
+  white-space: pre-wrap;
+}
+.inbox-prompt-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.inbox-option {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+}
+/* A long permission option wraps inside the pane instead of running past
+ * its edge. */
+.inbox-option .ui-chip {
+  max-width: 100%;
+  height: auto;
+  min-height: 29px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+  line-height: 17px;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.inbox-fix {
+  display: flex;
+  flex: 1;
+  gap: 6px;
+}
+.inbox-fix input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  color: var(--text);
+  font-size: 12.5px;
+}
+/* Clean up: the sessions it would end, each one opt-out. */
+.inbox-cleanup {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-pane);
+  border-radius: 10px;
+}
+.inbox-cleanup .inbox-eyebrow {
+  padding: 6px 0 2px;
+}
+.inbox-cleanup-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding-top: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+/* The note keeps one line; when Cancel and End no longer fit beside it
+ * they move under it, still right-aligned. */
+.inbox-cleanup-foot span {
+  flex: 1 0 auto;
+  white-space: nowrap;
+}
+.inbox-cleanup-foot span + button {
+  margin-left: auto;
+}
+.inbox-zero-page {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow-y: auto;
+}
+.inbox-zero-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(640px, 100%);
+  margin: 0 auto;
+  padding: 0 16px 24px;
+}
+.inbox-zero .inbox-cleanup {
+  width: 420px;
+  margin-top: 8px;
+}
+@media (max-width: 1100px) {
+  .inbox-queue {
+    flex-basis: 50%;
+  }
+}

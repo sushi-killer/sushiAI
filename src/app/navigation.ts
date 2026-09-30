@@ -24,6 +24,7 @@ export type NavigationState = {
 export type NavigationAction =
   | { type: "setMode"; mode: CoreMode }
   | { type: "toggleSection"; section: SectionRef }
+  | { type: "openSection"; section: SectionRef }
   | { type: "showWorkspace" };
 
 const workspaceView: NavigationState = { mode: "Code", section: null };
@@ -83,6 +84,12 @@ export function navigationReducer(
       // leaving the sidebar blank if the mode were kept.
       return { mode: section ? "Code" : state.mode, section };
     }
+    case "openSection":
+      // Opened from outside the shell (the desktop mascot): never closes a
+      // page that is already open.
+      return state.mode === "Code" && sameSection(state.section, action.section)
+        ? state
+        : { mode: "Code", section: action.section };
     case "showWorkspace":
       return state.mode === "Code" && !state.section ? state : workspaceView;
   }

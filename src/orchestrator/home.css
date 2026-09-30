@@ -1,0 +1,212 @@
+/* Home (Figma "Home"): greeting, what needs you, the week in one line. */
+.home-greet {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.home-greet h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 24px;
+}
+.home-greet p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+/* All clear: the idle character beside the headline. */
+.home-clear {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 4px 0 8px;
+}
+.home-mascot {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 76px;
+  height: 80px;
+}
+.home-mascot::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 16px;
+  width: 44px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--bg-hover);
+}
+.home-mascot svg {
+  width: 68px;
+  height: 68px;
+  margin-top: 4px;
+}
+
+/* The week, one line, with a way into Analytics. */
+.home-analytics {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+.home-analytics-text {
+  flex: 1;
+  min-width: 0;
+}
+.home-analytics-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--focus);
+  font-size: var(--text-sm);
+}
+.home-analytics-link:hover {
+  text-decoration: underline;
+}
+
+/* "Run with a note". */
+.home-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.home-note input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-app);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.home-note input::placeholder {
+  color: var(--text-faint);
+}
+
+/* Running rows: only where the rail is hidden. */
+.home-running {
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+}
+.home-run {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  text-align: left;
+}
+.home-run-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ui-tone);
+  flex-shrink: 0;
+}
+.home-run-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.home-run-meta {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+/* Home before the first task. */
+.home-first-run {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 20px;
+  min-height: 0;
+  padding: 22px 28px 18px;
+  overflow-y: auto;
+  text-align: center;
+}
+.home-first-run h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 24px;
+}
+.home-first-run p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-md);
+  line-height: 20px;
+}
+.home-first-run-track {
+  width: min(560px, 100%);
+}
+.home-first-run-try {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding-top: 12px;
+}
+.home-first-run-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+@container orchestrator (max-width: 640px) {
+  .home-greeting {
+    display: none;
+  }
+  .home-running {
+    display: flex;
+  }
+  .home-first-run {
+    gap: 12px;
+    padding: 14px 12px;
+  }
+}
+/* Too narrow for the week to stay one line: Analytics has it. */
+@container orchestrator (max-width: 480px) {
+  .home-analytics {
+    display: none;
+  }
+}
+
+.home-note-sent,
+.home-note-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+.home-note-error {
+  color: var(--danger);
+}

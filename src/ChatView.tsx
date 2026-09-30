@@ -1,3 +1,4 @@
+import type { SessionState } from "./app/useSessionState";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -6,10 +7,7 @@ import {
   AudioLines,
   ChevronDown,
   ChevronRight,
-  FileText,
   FolderClosed,
-  Image as ImageIcon,
-  X,
   GitBranch,
   Gauge,
   PanelRight,
@@ -27,7 +25,8 @@ import {
   modelName as readableModel,
   relativeTime,
 } from "./chat-threads";
-import { RichText } from "./agents/AgentsView";
+import { Attachment, ChatTranscript } from "./ChatTranscript";
+import { ChipPicker } from "./ChipPicker";
 import "./ChatView.css";
 
 // Models come from each CLI at runtime, so a new Codex release shows up here
@@ -52,58 +51,13 @@ const SUGGESTIONS = [
   "Review recent changes",
   "Plan the next feature",
 ];
-// Which thread was open survives a restart, the way the Agent tab remembers its
-// conversation. Unsent drafts stay in memory and are never written to storage.
-const focusStorage = "sushiai.chat-focus.v1";
-function savedFocus(): string {
-  try {
-    const id = localStorage.getItem(focusStorage);
-    return typeof id === "string" ? id : "";
-  } catch {
-    return "";
-  }
-}
+// Which thread was open survives a restart in the workspace snapshot, the way
+// the Agent tab remembers its conversation. Unsent drafts stay in memory and
+// are never written to storage.
 const memory = {
-  selected: savedFocus(),
   drafts: {} as Record<string, string>,
   attachments: {} as Record<string, string[]>,
 };
-function remember(id: string) {
-  memory.selected = id;
-  try {
-    localStorage.setItem(focusStorage, id);
-  } catch {
-    /* a full store still leaves the thread open for this session */
-  }
-}
-const basename = (p: string) => p.split("/").filter(Boolean).at(-1) || p;
-const isImage = (p: string) => /\.(png|jpe?g|gif|webp)$/i.test(p);
-const isFolder = (p: string) =>
-  p.endsWith("/") || !/\.[^/]+$/.test(basename(p));
-function Attachment({
-  path,
-  onRemove,
-}: {
-  path: string;
-  onRemove?: () => void;
-}) {
-  const Icon = isImage(path)
-    ? ImageIcon
-    : isFolder(path)
-      ? FolderClosed
-      : FileText;
-  return (
-    <span className="attachment" title={path}>
-      <Icon size={12} />
-      <span>{basename(path)}</span>
-      {onRemove && (
-        <button aria-label={`Remove ${basename(path)}`} onClick={onRemove}>
-          <X size={11} />
-        </button>
-      )}
-    </span>
-  );
-}
 
 export function ChatView({
   workspaces,
@@ -116,6 +70,7 @@ export function ChatView({
   onPatch,
   onDelete,
   onToggleSidebar,
+  session: { chatFocus: focus, setChatFocus: onFocus },
 }: {
   workspaces: Workspace[];
   active: Workspace;
@@ -127,8 +82,10 @@ export function ChatView({
   onPatch(panelId: string, patch: Partial<Panel>): void;
   onDelete(workspaceId: string, panel: Panel): void;
   onToggleSidebar(): void;
+  /** Holds the thread that was open and takes a change of it. */
+  session: SessionState;
 }) {
-  const [selected, setSelected] = useState(memory.selected);
+  const [selected, setSelected] = useState(focus);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [branch, setBranch] = useState("");
   const [renaming, setRenaming] = useState("");
@@ -145,7 +102,6 @@ export function ChatView({
   const [dragging, setDragging] = useState(false);
   const [catalog, setCatalog] = useState<ChatModels>({});
   const textarea = useRef<HTMLTextAreaElement>(null);
-  const end = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const timer = setInterval(() => tick((n) => n + 1), 60_000);
@@ -159,9 +115,6 @@ export function ChatView({
       .catch(() => setBranch(""));
   }, [active.cwd, active.connection]);
   useEffect(() => {
-    end.current?.scrollIntoView({ block: "end" });
-  }, [current?.messages, current?.busy, current?.note]);
-  useEffect(() => {
     window.bridge
       ?.chatModels()
       .then(setCatalog)
@@ -171,7 +124,7 @@ export function ChatView({
   function open(workspaceId: string, panelId: string) {
     memory.drafts[current?.id || ""] = draft;
     memory.attachments[current?.id || ""] = attachments;
-    remember(panelId);
+    onFocus(panelId);
     setSelected(panelId);
     setDraft(memory.drafts[panelId] || "");
     setAttachments(memory.attachments[panelId] || []);
@@ -316,7 +269,7 @@ export function ChatView({
           onClick={() => {
             if (!window.confirm(`Delete thread “${panel.title}”?`)) return;
             if (panel.id === selected) {
-              remember("");
+              onFocus("");
               setSelected("");
             }
             onDelete(workspace.id, panel);
@@ -453,9 +406,20 @@ export function ChatView({
             </button>
           </span>
         </header>
-        <div className="chat-scroll">
-          {!current?.messages?.length ? (
-            <div className="chat-welcome" key="welcome">
+        <ChatTranscript
+          messages={current?.messages}
+          busy={current?.busy}
+          note={current?.note}
+          error={current?.error}
+          columnKey={current?.id}
+          renderModelLabel={(message) =>
+            message.model &&
+            answeredBy.size > 1 && (
+              <span className="message-model">{modelName(message.model)}</span>
+            )
+          }
+          welcome={
+            <>
               <Asterisk size={34} strokeWidth={1.2} />
               <h2>What should we work on?</h2>
               <p>Give your agent a task. Keep the conversation here.</p>
@@ -472,56 +436,9 @@ export function ChatView({
                   </button>
                 ))}
               </div>
-            </div>
-          ) : (
-            <div className="chat-column" key={current.id}>
-              {current.messages.map((message) => (
-                <div key={message.id} className={`message ${message.role}`}>
-                  {message.role === "assistant" ? (
-                    message.text ? (
-                      <>
-                        {message.model && answeredBy.size > 1 && (
-                          <span className="message-model">
-                            {modelName(message.model)}
-                          </span>
-                        )}
-                        <RichText text={message.text} />
-                      </>
-                    ) : null
-                  ) : (
-                    <>
-                      {message.text}
-                      {message.attachments?.length ? (
-                        <div className="chat-attachments">
-                          {message.attachments.map((path) => (
-                            <Attachment key={path} path={path} />
-                          ))}
-                        </div>
-                      ) : null}
-                    </>
-                  )}
-                </div>
-              ))}
-              {/* Codex often answers, then keeps working; progress belongs
-                  under the thread, not inside an empty bubble. */}
-              {current.busy && (
-                <div className="chat-progress">
-                  <i />
-                  <span className="thinking">
-                    {current.note || "Thinking"}
-                    <span>…</span>
-                  </span>
-                </div>
-              )}
-              {current.error && (
-                <div className="chat-error" role="alert">
-                  {current.error}
-                </div>
-              )}
-              <div ref={end} />
-            </div>
-          )}
-        </div>
+            </>
+          }
+        />
         <div
           className={`chat-composer ${dragging ? "dragging" : ""}`}
           onDragOver={(event) => {
@@ -600,111 +517,98 @@ export function ChatView({
               <Plus size={14} />
             </button>
             <i className="chat-sep" />
-            <label className="chip">
-              <img
-                className="harness-icon"
-                src={`./agents/${agent}.svg`}
-                width={12}
-                height={12}
-                alt=""
-              />
-              <span>{agent === "codex" ? "Codex" : "Claude"}</span>
-              <ChevronDown size={11} />
-              <select
-                aria-label="Agent"
-                disabled={current?.busy}
-                value={agent}
-                onChange={(event) =>
-                  onPatch((current || create(active.id)).id, {
-                    agent: event.target.value,
-                    model: "",
-                    effort: "",
-                  })
-                }
-              >
-                <option value="claude">Claude</option>
-                <option value="codex">Codex</option>
-              </select>
-            </label>
-            <label className="chip">
-              <span>{modelLabel}</span>
-              <ChevronDown size={11} />
-              <select
-                aria-label="Model"
-                disabled={current?.busy}
-                value={current?.model || ""}
-                onChange={(event) => {
-                  const next = models.find((m) => m.id === event.target.value);
-                  onPatch((current || create(active.id)).id, {
-                    model: event.target.value,
-                    // Keep the level only when the new model offers it.
-                    effort:
-                      current?.effort && next?.efforts.includes(current.effort)
-                        ? current.effort
-                        : "",
-                  });
-                }}
-              >
-                <option value="">
-                  {provider?.defaultModel
+            <ChipPicker
+              icon={
+                <img
+                  className="harness-icon"
+                  src={`./agents/${agent}.svg`}
+                  width={12}
+                  height={12}
+                  alt=""
+                />
+              }
+              label={agent === "codex" ? "Codex" : "Claude"}
+              ariaLabel="Agent"
+              disabled={current?.busy}
+              value={agent}
+              onChange={(value) =>
+                onPatch((current || create(active.id)).id, {
+                  agent: value,
+                  model: "",
+                  effort: "",
+                })
+              }
+              options={[
+                { value: "claude", label: "Claude" },
+                { value: "codex", label: "Codex" },
+              ]}
+            />
+            <ChipPicker
+              label={modelLabel}
+              ariaLabel="Model"
+              disabled={current?.busy}
+              value={current?.model || ""}
+              onChange={(value) => {
+                const next = models.find((m) => m.id === value);
+                onPatch((current || create(active.id)).id, {
+                  model: value,
+                  // Keep the level only when the new model offers it.
+                  effort:
+                    current?.effort && next?.efforts.includes(current.effort)
+                      ? current.effort
+                      : "",
+                });
+              }}
+              options={[
+                {
+                  value: "",
+                  label: provider?.defaultModel
                     ? `Default · ${provider.defaultModel}`
-                    : "Default model"}
-                </option>
-                {models.map((m) => (
-                  <option key={m.id} value={m.id} title={m.description}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="chip">
-              <Gauge size={12} />
-              <span>{effortLabel}</span>
-              <ChevronDown size={11} />
-              <select
-                aria-label="Effort"
-                disabled={current?.busy}
-                value={current?.effort || ""}
-                onChange={(event) =>
-                  onPatch((current || create(active.id)).id, {
-                    effort: event.target.value,
-                  })
-                }
-              >
-                <option value="">
-                  {fallbackEffort
+                    : "Default model",
+                },
+                ...models.map((m) => ({
+                  value: m.id,
+                  label: m.label,
+                  title: m.description,
+                })),
+              ]}
+            />
+            <ChipPicker
+              icon={<Gauge size={12} />}
+              label={effortLabel}
+              ariaLabel="Effort"
+              disabled={current?.busy}
+              value={current?.effort || ""}
+              onChange={(value) =>
+                onPatch((current || create(active.id)).id, { effort: value })
+              }
+              options={[
+                {
+                  value: "",
+                  label: fallbackEffort
                     ? `Default · ${effortName(fallbackEffort)}`
-                    : "Default effort"}
-                </option>
-                {efforts.map((id) => (
-                  <option key={id} value={id}>
-                    {effortName(id)}
-                  </option>
-                ))}
-              </select>
-            </label>
+                    : "Default effort",
+                },
+                ...efforts.map((id) => ({ value: id, label: effortName(id) })),
+              ]}
+            />
             <i className="chat-sep" />
-            <label className="chip">
-              <Pencil size={12} />
-              <span>{permissionLabel}</span>
-              <ChevronDown size={11} />
-              <select
-                aria-label="Permission mode"
-                disabled={current?.busy}
-                value={current?.permission || "default"}
-                onChange={(event) =>
-                  onPatch((current || create(active.id)).id, {
-                    permission: event.target.value,
-                  })
-                }
-              >
-                {PERMISSIONS.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <ChipPicker
+              icon={<Pencil size={12} />}
+              label={permissionLabel}
+              ariaLabel="Permission mode"
+              disabled={current?.busy}
+              value={current?.permission || "default"}
+              onChange={(value) =>
+                onPatch((current || create(active.id)).id, {
+                  permission: value,
+                })
+              }
+              options={PERMISSIONS.map((p) => ({
+                value: p.id,
+                label: p.label,
+              }))}
+            />
             <span className="chat-toolbar-right">
               {usage && <span className="chat-usage">{usage}</span>}
               <button

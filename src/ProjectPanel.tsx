@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { SyntaxHighlightedCode } from "./SyntaxHighlightedCode";
 import { RenderProfiler } from "./RenderProfiler";
+import type { FilesView } from "./types";
 
 const GitHistoryPanel = lazy(() =>
   import("./GitHistoryPanel").then(({ GitHistoryPanel: Component }) => ({
@@ -29,18 +30,32 @@ export function ProjectPanel({
   cwd,
   initialFile,
   initialEdit,
+  initialView,
   endpoint,
   onHTML,
+  onViewChange,
 }: {
   cwd: string;
   initialFile?: string;
   initialEdit?: boolean;
+  /** Where the pane was browsing when it was last open. Read once, when the
+   * pane mounts; it wins over `initialFile`, which only says where a new pane
+   * was opened. */
+  initialView?: FilesView;
   endpoint?: string;
   onHTML(root: string, path: string, endpoint?: string): void;
+  /** Reports the folder and file after each change, for the panel to save. */
+  onViewChange(view: FilesView): void;
 }) {
-  const [root, setRoot] = useState(cwd),
-    [draft, setDraft] = useState(cwd),
-    [directory, setDirectory] = useState("."),
+  const [start] = useState(() => ({
+    root: initialView?.root || cwd,
+    directory: initialView?.directory || ".",
+    file: initialView ? initialView.file || undefined : initialFile,
+    edit: initialView ? false : initialEdit,
+  }));
+  const [root, setRoot] = useState(start.root),
+    [draft, setDraft] = useState(start.root),
+    [directory, setDirectory] = useState(start.directory),
     [entries, setEntries] = useState<Entry[]>([]),
     [tab, setTab] = useState("files"),
     [hidden, setHidden] = useState(false),
@@ -117,18 +132,25 @@ export function ProjectPanel({
     };
   }, [root, directory, tab, hidden, endpoint]);
   useEffect(() => {
-    if (!initialFile || tab !== "files") return;
-    const slash = initialFile.lastIndexOf("/");
-    const targetDirectory = slash > 0 ? initialFile.slice(0, slash) : ".";
+    if (!start.file || tab !== "files") return;
+    const slash = start.file.lastIndexOf("/");
+    const targetDirectory = slash > 0 ? start.file.slice(0, slash) : ".";
     if (directory !== targetDirectory) {
       setDirectory(targetDirectory);
       return;
     }
-    const openKey = `${initialFile}:${initialEdit ? "edit" : "view"}`;
+    const openKey = `${start.file}:${start.edit ? "edit" : "view"}`;
     if (initialOpen.current === openKey) return;
     initialOpen.current = openKey;
-    void openFile(initialFile, diffMode, initialEdit);
-  }, [initialFile, initialEdit, tab, directory]);
+    void openFile(start.file, diffMode, start.edit);
+  }, [start, tab, directory]);
+  useEffect(() => {
+    // Until the file the pane starts on has begun opening, `selected` is still
+    // empty and reporting it would erase that file from the saved view.
+    if (tab !== "files" || (!selected && start.file && !initialOpen.current))
+      return;
+    onViewChange({ root, directory, file: selected });
+  }, [root, directory, selected, tab]);
   async function openFile(file: string, mode = diffMode, enterEdit = false) {
     if (!leaveEditor()) return;
     const revision = ++version.current;

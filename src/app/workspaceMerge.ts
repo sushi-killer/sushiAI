@@ -184,18 +184,68 @@ export function computeMergeGroups(
   return byWorkspaceId;
 }
 
+/** The slice of an orchd task the sidebar needs to name its worktree. */
+export type WorktreeTask = {
+  title: string;
+  branch: string;
+  worktree: string;
+  repo: string;
+  updatedAt: number;
+};
+
+const trimSlashes = (path: string) => (path || "").replace(/\/+$/, "");
+
+/** The orchd task a local member's checkout belongs to: by worktree path, or
+ * by branch inside the same repository. The newest match wins. */
+export function memberTask(
+  member: MergedMember,
+  tasks: WorktreeTask[],
+): WorktreeTask | undefined {
+  if (member.hostKey !== LOCAL_GROUP) return undefined;
+  const { checkout, branch, commonDir } = member.git;
+  let best: WorktreeTask | undefined;
+  for (const task of tasks) {
+    const match =
+      (Boolean(task.worktree) &&
+        trimSlashes(task.worktree) === trimSlashes(checkout)) ||
+      (Boolean(task.branch) &&
+        task.branch === branch &&
+        `${trimSlashes(task.repo)}/.git` === commonDir);
+    if (match && (!best || task.updatedAt > best.updatedAt)) best = task;
+  }
+  return best;
+}
+
 /** What names one member inside its row: the host, as before, until a host
- * contributes several worktrees - then the branch, prefixed by the host only
- * off this Mac (a detached checkout reports its short commit). */
+ * contributes several worktrees - then the orchd task's title when the
+ * worktree belongs to one, else the branch, prefixed by the host only off
+ * this Mac (a detached checkout reports its short commit). */
 export function memberLabel(
   group: MergeGroup,
   member: MergedMember,
   profiles: ConnectionProfile[],
+  tasks: WorktreeTask[] = [],
 ): string {
   const host = groupLabel(member.hostKey, profiles);
   if (!group.worktrees) return host;
+  const title = memberTask(member, tasks)?.title;
+  if (title) return title;
   const branch = member.git.branch || basenameOf(member.git.checkout);
   return member.hostKey === LOCAL_GROUP ? branch : `${host} · ${branch}`;
+}
+
+/** The label, plus the branch when the label is a task title. */
+export function memberTooltip(
+  group: MergeGroup,
+  member: MergedMember,
+  profiles: ConnectionProfile[],
+  tasks: WorktreeTask[] = [],
+): string {
+  const label = memberLabel(group, member, profiles, tasks);
+  const titled = group.worktrees && memberTask(member, tasks);
+  return titled && member.git.branch
+    ? `${label} (${member.git.branch})`
+    : label;
 }
 
 /** D2: the merged row's single status dot follows the active member, else
@@ -221,11 +271,15 @@ export function mergedRowStatusKey(
 export function shouldCollapseHostMarkers(
   group: MergeGroup,
   profiles: ConnectionProfile[],
+  tasks: WorktreeTask[] = [],
 ): boolean {
   if (group.members.length >= 3) return true;
   const charCount = group.members
     .filter((m) => group.worktrees || m.hostKey !== LOCAL_GROUP)
-    .reduce((total, m) => total + memberLabel(group, m, profiles).length, 0);
+    .reduce(
+      (total, m) => total + memberLabel(group, m, profiles, tasks).length,
+      0,
+    );
   return charCount > 12;
 }
 
@@ -246,9 +300,10 @@ export function mergedMarkerAccessibleName(
   profiles: ConnectionProfile[],
   localSocket: string,
   statusByEndpoint: Record<string, string>,
+  tasks: WorktreeTask[] = [],
 ): string {
   const parts = group.members.map((m) => {
-    const label = memberLabel(group, m, profiles);
+    const label = memberLabel(group, m, profiles, tasks);
     const status = groupStatus(m.hostKey, localSocket, statusByEndpoint);
     return `${label} (${stateWord(status)})`;
   });

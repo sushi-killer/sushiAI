@@ -13,9 +13,14 @@
   --bg-hover: #1b1d1b;
   --bg-selected: #1d241d;
   --bg-elevated: #1b1b1b;
+  --bg-control: #232323;
+  --bg-count: #262626;
+  --shadow-popover: 0 8px 30px #0008;
 
   /* Line. */
   --line: #303030;
+  --line-pane: #2a2a2a;
+  --line-divider: #202020;
   --line-strong: #4a554b;
   --line-selected: #71866e;
 
@@ -23,6 +28,7 @@
   --text: #e7e8e0;
   --text-muted: #8f948d;
   --text-faint: #6c726d;
+  --text-nav: #929292;
 
   /* Accent and state. */
   --accent: #a9c58b;

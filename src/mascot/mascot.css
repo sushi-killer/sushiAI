@@ -1,0 +1,650 @@
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  color: var(--text);
+  font:
+    var(--text-md) system-ui,
+    sans-serif;
+}
+.mascot {
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: flex-end;
+  gap: var(--gap-sm);
+  padding: var(--gap-sm);
+}
+.bubble-wrap {
+  position: relative;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--gap-sm);
+}
+.bubble {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 340px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-popover);
+}
+.bubble > * {
+  flex-shrink: 0;
+}
+.bubble strong {
+  font-size: var(--text-md);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* A question bubble's second line: the task and who asked. */
+.bubble-sub {
+  margin-top: -4px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bubble-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 16px;
+}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 12px;
+  color: var(--tone-info);
+  background: var(--tone-info-bg);
+}
+.tag i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.tag.ok {
+  color: var(--tone-ok);
+  background: var(--tone-ok-bg);
+}
+.tag.warn {
+  color: var(--tone-warning);
+  background: var(--tone-warning-bg);
+}
+.tag.bad {
+  color: var(--tone-danger);
+  background: var(--tone-danger-bg);
+}
+.bubble-source {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+.bubble-body {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.bubble-body.clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.bubble > .bubble-scroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.bubble-scroll > * {
+  flex-shrink: 0;
+}
+.bubble button,
+.bubble input,
+.queue button,
+.pill {
+  font: inherit;
+  font-size: var(--text-md);
+  color: var(--text);
+}
+.bubble button,
+.queue button {
+  cursor: pointer;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+}
+.bubble button:focus-visible,
+.bubble input:focus-visible,
+.queue button:focus-visible,
+.sushi-hop:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.bubble-actions {
+  display: flex;
+  gap: 8px;
+}
+.bubble .bubble-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  border-radius: 7px;
+  font-weight: 500;
+  background: var(--bg-control);
+}
+.bubble .bubble-actions button:hover {
+  background: var(--bg-hover);
+}
+.bubble .bubble-actions .bubble-primary {
+  color: var(--accent-ink);
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.bubble .bubble-actions .bubble-primary:hover {
+  background: var(--accent-sage);
+}
+.bubble .bubble-actions .bubble-ghost {
+  border-color: transparent;
+  background: transparent;
+}
+.bubble .bubble-actions .bubble-ghost:hover {
+  background: var(--bg-hover);
+}
+.bubble .bubble-dismiss {
+  display: grid;
+  place-items: center;
+  margin-left: auto;
+  padding: 2px;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+.bubble-msg {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12.5px;
+}
+.bubble-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.bubble .bubble-options button {
+  max-width: 100%;
+  padding: 6px 12px;
+  border-radius: 7px;
+  font-size: var(--text-sm);
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  border-color: transparent;
+  background: var(--bg-control);
+}
+.bubble .bubble-options button.picked {
+  color: var(--text);
+  border-color: var(--line-selected);
+  background: var(--bg-selected);
+}
+.bubble-answer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-sunken);
+}
+.bubble .bubble-answer input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 12.5px;
+}
+.bubble .bubble-answer input::placeholder {
+  color: var(--text-faint);
+}
+.bubble .bubble-answer input:focus-visible {
+  outline: none;
+}
+.bubble-answer:focus-within {
+  border-color: var(--focus);
+}
+.bubble .kbd-button {
+  border: 0;
+  background: transparent;
+}
+.bubble .kbd-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-count);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 14px;
+}
+.bubble-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 16px;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+.bubble .bubble-link {
+  margin-left: auto;
+  border: 0;
+  color: var(--accent-blue);
+  font-size: 11.5px;
+}
+.bubble-error {
+  color: var(--danger);
+  font-size: var(--text-xs);
+}
+.queue {
+  flex-shrink: 0;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 340px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.queue button {
+  display: grid;
+  place-items: center;
+  padding: 2px;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+.queue button:hover {
+  color: var(--text);
+}
+.queue .queue-inbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--accent-blue);
+  font-size: var(--text-sm);
+}
+.queue .queue-inbox:hover {
+  color: var(--accent-blue);
+  text-decoration: underline;
+}
+.sushi-hop {
+  position: relative;
+  margin-right: var(--gap-md);
+  z-index: 1;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.sushi-badge {
+  position: absolute;
+  top: 2px;
+  right: -4px;
+  min-width: 18px;
+  height: 18px;
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: var(--accent-amber);
+  color: var(--accent-ink);
+  font-size: 10px;
+  font-weight: 600;
+}
+.sushi-badge.ok {
+  background: var(--tone-ok);
+}
+.pill {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 252px;
+  min-height: 46px;
+  padding: 2px 14px 2px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 22px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-popover);
+}
+.pill .sushi-hop {
+  flex-shrink: 0;
+  margin: 0;
+}
+.pill .sushi {
+  width: 34px;
+  height: 34px;
+}
+.pill .sushi-badge {
+  top: 4px;
+  right: -2px;
+  min-width: 10px;
+  height: 10px;
+  padding: 0 2px;
+  border-radius: 5px;
+  font-size: 6px;
+}
+.pill-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.pill-title {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.pill .kbd {
+  flex-shrink: 0;
+  font-family: Menlo, monospace;
+}
+/* "<title> · +N": the title truncates, the count of other notices stays. */
+.pill-sub {
+  display: flex;
+  min-width: 0;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.pill-sub > span {
+  flex-shrink: 0;
+}
+.pill-sub > .pill-sub-title {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sushi {
+  display: block;
+  width: 64px;
+  height: 64px;
+  transform-origin: 50% 100%;
+  animation: sushi-bob 2.4s ease-in-out infinite;
+}
+.sushi .body,
+.sushi .arm,
+.sushi .eyes,
+.sushi .sparkles,
+.sushi .sweat,
+.sushi .dot {
+  transform-box: view-box;
+}
+.sushi .body {
+  transform-origin: 12px 21.5px;
+}
+.sushi .arm-left {
+  transform-origin: 2.6px 14.2px;
+}
+.sushi .arm-right {
+  transform-origin: 21.4px 15.2px;
+}
+.sushi .eyes {
+  transform-origin: 12px 17.3px;
+  animation: eyes-blink 4s ease-in-out infinite;
+}
+.sushi.done .eyes {
+  animation: none;
+}
+.sushi.done .body {
+  translate: 0 -2px;
+  animation: cheer-hop 0.8s ease-out 0.2s 2;
+}
+.sushi.done .arm {
+  animation: cheer-arms 0.4s ease-out 0.2s 4;
+}
+.sushi.done .sparkles {
+  transform-origin: 14px 4px;
+  animation: sparkle-twinkle 0.6s ease-in-out 0.2s 2;
+}
+.sushi.needs-you .arm-left {
+  animation: arm-wave 0.9s ease-in-out infinite;
+}
+.sushi.listening .eyes {
+  animation:
+    eyes-blink 6s ease-in-out infinite,
+    eyes-drift 3s ease-in-out infinite;
+}
+.sushi.working .arm-left {
+  animation: arm-type 0.35s ease-in-out infinite alternate;
+}
+.sushi.working .arm-right {
+  animation: arm-type 0.35s ease-in-out infinite alternate-reverse;
+}
+.sushi.working .dot {
+  animation: dot-pulse 1.2s ease-in-out infinite;
+}
+.sushi.working .dot-2 {
+  animation-delay: 0.2s;
+}
+.sushi.working .dot-3 {
+  animation-delay: 0.4s;
+}
+.sushi.failed {
+  animation:
+    sushi-bob 2.4s ease-in-out infinite,
+    sushi-wobble 0.6s ease-in-out 0.3s 3;
+}
+.sushi.failed .sweat {
+  animation: sweat-drip 3s ease-in infinite;
+}
+.sushi-hop.hop-0 {
+  animation: sushi-hop 0.5s ease-out;
+}
+.sushi-hop.hop-1 {
+  animation: sushi-hop-b 0.5s ease-out;
+}
+.bubble.leaving {
+  animation: bubble-fade 0.7s ease-in forwards;
+}
+@keyframes sushi-bob {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+  50% {
+    translate: 0 -3px;
+  }
+}
+@keyframes sushi-hop {
+  0% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-16px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+@keyframes sushi-hop-b {
+  0% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-16px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+@keyframes eyes-blink {
+  0%,
+  96%,
+  100% {
+    transform: scaleY(1);
+  }
+  98% {
+    transform: scaleY(0.1);
+  }
+}
+@keyframes eyes-drift {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+  50% {
+    translate: -0.35px -0.2px;
+  }
+}
+@keyframes arm-wave {
+  0%,
+  100% {
+    rotate: -18deg;
+  }
+  50% {
+    rotate: 18deg;
+  }
+}
+@keyframes arm-type {
+  from {
+    translate: 0 -0.5px;
+  }
+  to {
+    translate: 0 0.5px;
+  }
+}
+@keyframes dot-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  40% {
+    opacity: 1;
+  }
+}
+@keyframes cheer-hop {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-2.5px);
+  }
+}
+@keyframes cheer-arms {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-1px);
+  }
+}
+@keyframes sparkle-twinkle {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.3);
+    opacity: 0.4;
+  }
+}
+@keyframes sweat-drip {
+  0% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  60%,
+  100% {
+    transform: translateY(2px);
+    opacity: 0;
+  }
+}
+@keyframes sushi-wobble {
+  0%,
+  100% {
+    rotate: 0deg;
+  }
+  25% {
+    rotate: -6deg;
+  }
+  75% {
+    rotate: 6deg;
+  }
+}
+@keyframes bubble-fade {
+  to {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sushi,
+  .sushi *,
+  .sushi-hop.hop-0,
+  .sushi-hop.hop-1,
+  .bubble.leaving {
+    animation: none !important;
+  }
+}
+
+/* Beside a bubble the sushi is 80px and tucked against its bottom-right
+ * corner (Figma "04 Mascot notifications"); the pill keeps its small one. */
+.bubble-wrap + .sushi-hop {
+  margin-top: -24px;
+  margin-right: 4px;
+}
+.bubble-wrap + .sushi-hop .sushi {
+  width: 80px;
+  height: 80px;
+}
+.mascot {
+  padding-bottom: 14px;
+}

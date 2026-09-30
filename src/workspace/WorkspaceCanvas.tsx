@@ -17,6 +17,7 @@ export function WorkspaceCanvas({
   tabMode,
   compact,
   openPanelPicker,
+  openConnections,
   merged,
 }: {
   ws: WorkspaceController;
@@ -25,6 +26,7 @@ export function WorkspaceCanvas({
   tabMode: boolean;
   compact: boolean;
   openPanelPicker(): void;
+  openConnections(): void;
   /** The active workspace's merge group (flat mode only, from
    * useMergedCanvas). When set (C1), every member's code panels are drawn
    * together instead of just the active workspace's own. */
@@ -41,6 +43,8 @@ export function WorkspaceCanvas({
     endPanelDrag,
     zoomPanel,
     startPanel,
+    reopenPanel,
+    updatePanel,
     navigatePanel,
     setPanelAgent,
     cancelPanelChat,
@@ -85,8 +89,11 @@ export function WorkspaceCanvas({
         onClose={closePanel}
         onZoom={zoomPanel}
         onAdd={openPanelPicker}
+        onOpenConnections={openConnections}
         onRename={renamePanel}
         onStart={startPanel}
+        onReopen={reopenPanel}
+        onPatch={updatePanel}
         onNavigate={navigatePanel}
         onHTML={openHTML}
         onSend={sendChat}

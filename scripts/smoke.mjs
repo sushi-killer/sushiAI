@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { readdir, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 const root = process.cwd();
 
 // Polls a check instead of sleeping a fixed time: run straight after
@@ -61,6 +63,22 @@ const navLabel = (id) => contributed("navigation", id).label;
 const ledger = surfaceOf("probe.ledger");
 const itemLabel = ledger.view.document.itemLabel;
 const profile = await fs.mkdtemp("/tmp/sushiai-smoke-");
+const orchdBuilt = existsSync(path.join(root, "orchd/target/release/orchd"));
+// Polls `ps` until a daemon for this profile's data dir is (or is no longer)
+// running; true when the wanted state was reached in time.
+async function pollOrchd(wantRunning, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const running = execFileSync("ps", ["-axo", "pid=,command="], {
+      encoding: "utf8",
+    })
+      .split("\n")
+      .some((line) => line.includes(`--data ${profile}/orchestrator`));
+    if (running === wantRunning) return true;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  } while (Date.now() < deadline);
+  return false;
+}
 await fs.mkdir("artifacts", { recursive: true });
 // The app under test is the built bundle, not the sources: a stale dist silently
 // tests the previous build. Fail loudly instead.
@@ -90,8 +108,52 @@ const desktop = await electron.launch({
     ...process.env,
     BRIDGE_DATA_DIR: profile,
     SUSHIAI_EXTENSIONS_DIR: "tests/fixtures/extensions",
+    // Inherited from `npm run dev`, it would load the dev server, not dist/.
+    BRIDGE_DEV_URL: "",
+    // The smoke drives a real Electron app: keep its window off screen so a
+    // test run never steals focus or covers what you are working in.
+    SUSHIAI_TEST_WINDOW: "hidden",
   },
 });
+// A hidden run must put nothing on the owner's screen and still render at the
+// real content size, so screenshots and measurements can be trusted.
+async function assertHiddenWindow(page) {
+  const state = await desktop.evaluate(({ BrowserWindow, app }) => {
+    const [win] = BrowserWindow.getAllWindows();
+    const [width, height] = win.getContentSize();
+    return {
+      visible: BrowserWindow.getAllWindows().filter((w) => w.isVisible())
+        .length,
+      focused: BrowserWindow.getFocusedWindow() !== null,
+      dockVisible: process.platform === "darwin" ? app.dock.isVisible() : false,
+      content: { width, height },
+    };
+  });
+  assert.equal(state.visible, 0, "no BrowserWindow may be visible");
+  assert.equal(state.focused, false, "no BrowserWindow may be focused");
+  assert.equal(state.dockVisible, false, "the dock icon must be hidden");
+  const viewport = await page.evaluate(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+    ratio: window.devicePixelRatio,
+  }));
+  assert.equal(viewport.width, state.content.width);
+  assert.equal(viewport.height, state.content.height);
+  assert.deepEqual(
+    [viewport.width, viewport.height],
+    [1380, 880],
+    "viewport is the 1380x880 content size",
+  );
+  const file = path.join(root, "artifacts/smoke-hidden-window.png");
+  await page.screenshot({ path: file });
+  const png = await fs.readFile(file);
+  assert.equal(png.readUInt32BE(16), viewport.width * viewport.ratio);
+  assert.equal(png.readUInt32BE(20), viewport.height * viewport.ratio);
+  console.log(
+    `Hidden window: ${state.visible} visible, none focused, dock hidden, viewport ${viewport.width}x${viewport.height}`,
+  );
+}
+
 const errors = [];
 const skipped = [];
 const preview = http.createServer((_, response) => {
@@ -108,6 +170,7 @@ try {
     console.error("Renderer:", error.stack);
   });
   await page.waitForSelector(".panel-agent");
+  await assertHiddenWindow(page);
   await page
     .waitForFunction(
       () => document.querySelectorAll(".workspace-name").length > 1,
@@ -258,6 +321,51 @@ try {
     .getByRole("button", { name: "Close zsh", exact: true })
     .last()
     .click();
+  assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);
+  // The Inbox replaced the Sessions dialog: it lists the same panels as an
+  // attention queue, and Jump gets you back to the workspace the same way
+  // the old dialog's Show did. Its nav entry may carry a waiting count next
+  // to the label (real agents elsewhere on this machine can be blocked or
+  // done), so the click below matches on the label alone.
+  await page
+    .locator(".primary-nav")
+    .getByRole("button", { name: "Inbox", exact: false })
+    .click();
+  await page
+    .locator(".section-page")
+    .getByRole("heading", { name: "Inbox", exact: true })
+    .waitFor();
+  // A plain shell never sits in the queue: it is listed for review under
+  // Clean up, unticked (it may be running a dev server), with its own Jump.
+  await page
+    .locator(".section-page")
+    .getByRole("button", { name: "Clean up", exact: true })
+    .click();
+  const shellRow = page
+    .locator(".inbox-cleanup-row")
+    .filter({ hasText: "zsh" })
+    .filter({ hasText: "sushiai" })
+    .first();
+  await shellRow.waitFor();
+  assert.equal(
+    await shellRow.getByRole("checkbox").isChecked(),
+    false,
+    "Clean up never ticks a shell by default",
+  );
+  await shellRow.getByRole("button", { name: "Jump to zsh" }).click();
+  await page.waitForFunction(
+    () => document.querySelectorAll(".workspace-canvas .panel").length === 1,
+  );
+  assert.equal(
+    await page.locator(".section-page").count(),
+    0,
+    "Jump returns to the workspace canvas, closing the Inbox page",
+  );
+  assert.equal(await page.locator(".workspace-canvas .panel").count(), 1);
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(
+    () => document.querySelectorAll(".workspace-canvas .panel").length === 4,
+  );
   assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);
   await page.getByRole("button", { name: "Extensions", exact: true }).click();
   await page.getByText(probe.name, { exact: true }).first().waitFor();
@@ -473,9 +581,9 @@ try {
       label.replace(/\d+$/, ""),
     ),
     [
-      "Dashboard",
-      "Sessions",
+      "Inbox",
       "Routines",
+      "Dashboard",
       "Extensions",
       "Skills",
       ...probe.contributions.navigation
@@ -589,17 +697,34 @@ try {
     (history) => history.includes("\r\nROUTINE_OK"),
   );
   assert.ok(routineOutput.includes("\r\nROUTINE_OK"));
+  // The daemon starts lazily on the first request; send one so the exit check
+  // in `finally` has a daemon to look for.
+  if (orchdBuilt) await page.evaluate(() => window.bridge.orchestrator("ping"));
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Close Smoke routine" }).click();
   // The reload must find the close already persisted, not race its write.
-  await page.waitForFunction(() => {
-    const saved = JSON.parse(localStorage.getItem("sushiai.v1") || "null");
+  await until(async () => {
+    const saved = JSON.parse(
+      await fs
+        .readFile(`${profile}/workspace-state.json`, "utf8")
+        .catch(() => "null"),
+    );
     const active = saved?.workspaces.find((w) => w.id === saved.activeId);
-    return active && !active.panels.some((p) => p.title === "Smoke routine");
-  });
+    return Boolean(
+      active && !active.panels.some((p) => p.title === "Smoke routine"),
+    );
+  }, Boolean);
   await page.reload();
   await page.waitForSelector(".panel-agent");
   assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);
+  await assertHiddenWindow(page);
+  // orchd starts lazily on the first real orchestrator request; make one so
+  // the teardown below has a daemon to prove it stops with the app.
+  if (orchdBuilt) {
+    await page.evaluate(() =>
+      window.bridge.orchestrator("chat.list", {}).catch(() => null),
+    );
+  }
   assert.deepEqual(errors, [], "No uncaught renderer errors");
   console.log(
     JSON.stringify(
@@ -620,6 +745,7 @@ try {
           "settings connection",
           "routine execution",
           "layout persistence",
+          "orchd starts on first use and exits with the app",
           "no renderer errors",
           ...(skipped.length ? [] : ["Herdr ping + workspace sync"]),
         ],
@@ -637,6 +763,19 @@ try {
   throw error;
 } finally {
   await new Promise((resolve) => preview.close(resolve));
+  // orchd starts on first use, so make one call. A test-launched app stops
+  // its own daemon on quit: prove one ran (so the check below cannot pass
+  // trivially), then that none outlives the app.
+  if (orchdBuilt)
+    await (
+      await desktop.firstWindow()
+    )
+      .evaluate(() => window.bridge.orchestrator("task.list", {}))
+      .catch(() => {});
+  const orchdRan = orchdBuilt && (await pollOrchd(true, 10000));
   await desktop.close();
+  const orchdGone = !orchdBuilt || (await pollOrchd(false, 3000));
   await fs.rm(profile, { recursive: true, force: true });
+  assert.ok(!orchdBuilt || orchdRan, "orchd never started for this data dir");
+  assert.ok(orchdGone, "orchd for this data dir outlived the app");
 }

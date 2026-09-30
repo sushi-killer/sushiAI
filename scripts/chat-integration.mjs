@@ -6,7 +6,11 @@ const project = await fs.mkdtemp("/tmp/sushiai-chat-project-");
 const desktop = await electron.launch({
   args: ["."],
   cwd: process.cwd(),
-  env: { ...process.env, BRIDGE_DATA_DIR: profile },
+  env: {
+    ...process.env,
+    SUSHIAI_TEST_WINDOW: "hidden",
+    BRIDGE_DATA_DIR: profile,
+  },
 });
 try {
   const page = await desktop.firstWindow();

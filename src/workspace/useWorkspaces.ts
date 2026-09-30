@@ -18,14 +18,22 @@ import {
   findPanelOwner,
   fixSelection,
   groupPanelIds,
+  isVanished,
   movePanel as moveInLayout,
   removeClosedPanels,
   removePanel,
+  reopenInSlot,
   retitleTerminal,
   tidyGroupLayout,
   tidyWorkspace,
 } from "./workspace-actions.ts";
 import type { GroupCanvasContext } from "./workspace-actions.ts";
+import {
+  herdrWorkspaceKey,
+  launchesInWorktree,
+  worktreeBranchError,
+  worktreeCreateParams,
+} from "./worktree.ts";
 import type { ModelProfile, Panel, PanelKind, Workspace } from "../types";
 
 export type WorkspaceController = ReturnType<typeof useWorkspaces>;
@@ -241,7 +249,7 @@ export function useWorkspaces({
           });
         await refreshHerdr(endpoint);
         switchWorkspace(
-          `herdr:${endpoint.startsWith("ssh:") ? endpoint : "local"}:${result.workspace.workspace_id}`,
+          herdrWorkspaceKey(endpoint, result.workspace.workspace_id),
         );
       } else {
         const w = initialWorkspace(cwd);
@@ -296,6 +304,24 @@ export function useWorkspaces({
     showWorkspace();
     setZoomed(null);
   }
+  /** What a Herdr pane is sent to start an agent: the CLI's name, or - for
+   * Claude on a custom model - the command with its staged settings file. */
+  async function agentLaunchText(
+    endpoint: string,
+    agent: string,
+    modelProfileId?: string,
+  ) {
+    if (agent === "claude" && modelProfileId) {
+      if (endpoint.startsWith("ssh:"))
+        throw new Error(
+          "Custom models aren't supported on remote (SSH) workspaces yet.",
+        );
+      const settingsPath =
+        await window.bridge!.modelSettingsStage(modelProfileId);
+      return `claude --settings '${settingsPath}'`;
+    }
+    return agent;
+  }
   async function addPanel(
     kind: PanelKind,
     agent = "claude",
@@ -303,6 +329,7 @@ export function useWorkspaces({
     modelProfile?: ModelProfile,
     backend?: "herdr" | "local",
     targetWorkspaceId?: string,
+    worktree?: { branch: string },
   ) {
     const modelProfileId = modelProfile?.id;
     // A merged-row session host choice (D2): defaults to the active
@@ -317,22 +344,43 @@ export function useWorkspaces({
       // A Herdr workspace runs its sessions in Herdr unless this panel was
       // asked to be local. Nothing else can start a process.
       const viaHerdr = current.herdrId && (backend ?? "herdr") === "herdr";
-      if (viaHerdr && (kind === "terminal" || kind === "agent")) {
+      if (viaHerdr && launchesInWorktree(kind)) {
         if (!window.bridge) throw new Error("Open the desktop app first.");
         const endpoint = current.connection || socket;
+        if (worktree) {
+          const branchError = worktreeBranchError(worktree.branch);
+          if (branchError) throw new Error(branchError);
+        }
         // Staged before the pane exists: a gateway that can't be reached
         // shouldn't leave an empty pane behind. Herdr panes are just a typed
         // shell command, so the model swap rides on that command line
         // instead of the argv/env injection the direct local launch uses.
-        let launchText = agent;
-        if (kind === "agent" && agent === "claude" && modelProfileId) {
-          if (endpoint.startsWith("ssh:"))
-            throw new Error(
-              "Custom models aren't supported on remote (SSH) workspaces yet.",
-            );
-          const settingsPath =
-            await window.bridge.modelSettingsStage(modelProfileId);
-          launchText = `claude --settings '${settingsPath}'`;
+        const launchText = await agentLaunchText(
+          endpoint,
+          agent,
+          kind === "agent" ? modelProfileId : undefined,
+        );
+        if (worktree) {
+          // A linked worktree of the same repository: the existing merge
+          // logic groups it with the project row automatically.
+          const result = await window.bridge.herdr(
+            endpoint,
+            "worktree.create",
+            worktreeCreateParams(current, worktree.branch),
+          );
+          const paneId = result.root_pane?.pane_id;
+          if (kind === "agent" && paneId)
+            await window.bridge.herdr(endpoint, "pane.send_input", {
+              pane_id: paneId,
+              text: launchText,
+              keys: ["Enter"],
+            });
+          await refreshHerdr(endpoint);
+          switchWorkspace(
+            herdrWorkspaceKey(endpoint, result.workspace.workspace_id),
+          );
+          if (paneId) setSelected(herdrWorkspaceKey(endpoint, paneId));
+          return;
         }
         const result = await window.bridge.herdr(endpoint, "pane.split", {
           workspace_id: current.herdrId,
@@ -349,10 +397,34 @@ export function useWorkspaces({
             keys: ["Enter"],
           });
         await refreshHerdr(endpoint);
-        if (paneId)
-          setSelected(
-            `herdr:${endpoint.startsWith("ssh:") ? endpoint : "local"}:${paneId}`,
-          );
+        if (paneId) setSelected(herdrWorkspaceKey(endpoint, paneId));
+      } else if (worktree && launchesInWorktree(kind)) {
+        // The local counterpart of the branch above: no Herdr involved, so
+        // the new checkout runs as a plain local process on this Mac (also
+        // reached from a Herdr workspace whose picker backend was "local").
+        if (!window.bridge) throw new Error("Open the desktop app first.");
+        const branchError = worktreeBranchError(worktree.branch);
+        if (branchError) throw new Error(branchError);
+        const { path } = await window.bridge.worktreeCreate(
+          current.cwd,
+          worktree.branch,
+        );
+        const w = initialWorkspace(path);
+        w.name = `${current.name} · ${worktree.branch}`;
+        const panel: Panel = {
+          id: uid(),
+          kind,
+          title:
+            kind === "agent" ? modelProfile?.label || agentTitle(agent) : "zsh",
+          agent: kind === "agent" ? agent : undefined,
+          started: kind === "agent",
+          modelProfileId: kind === "agent" ? modelProfileId : undefined,
+        };
+        w.panels = [panel];
+        w.layout = leaf(panel.id);
+        setWorkspaces((items) => [...items, w]);
+        switchWorkspace(w.id);
+        return;
       } else {
         const panel: Panel = {
           id: uid(),
@@ -366,7 +438,9 @@ export function useWorkspaces({
                   ? "Browser"
                   : kind === "files"
                     ? "Files & Git"
-                    : "Thread",
+                    : kind === "orchestrator"
+                      ? "Orchestrator"
+                      : "Thread",
           agent: kind === "agent" || kind === "chat" ? agent : undefined,
           started: kind === "agent",
           messages: kind === "chat" ? [] : undefined,
@@ -389,16 +463,104 @@ export function useWorkspaces({
       setAdding(false);
     }
   }
+  /** Brings an ended Herdr pane back as a new one at the workspace's folder:
+   * a split in a workspace Herdr still lists, or - when the whole workspace
+   * is gone - a new Herdr workspace the old one is rebound to. An agent pane
+   * gets the same launch text `addPanel` sends. */
+  async function reopenPanel(panelId: string) {
+    const owner = findPanelOwner(workspacesRef.current, panelId);
+    const ended = owner?.panels.find((item) => item.id === panelId);
+    if (!owner || !ended?.ended || !ended.herdrId || adding) return;
+    setAdding(true);
+    try {
+      if (!window.bridge) throw new Error("Open the desktop app first.");
+      const endpoint = owner.connection || socket;
+      const launchText =
+        ended.kind === "agent"
+          ? await agentLaunchText(
+              endpoint,
+              ended.agent || "claude",
+              ended.modelProfileId,
+            )
+          : "";
+      const target = owner.panels.find((p) => p.herdrId && !p.ended);
+      let paneId: string;
+      let herdrWorkspaceId: string | undefined;
+      if (target) {
+        const result = await window.bridge.herdr(endpoint, "pane.split", {
+          workspace_id: owner.herdrId,
+          target_pane_id: target.herdrId,
+          direction: "right",
+          focus: false,
+          cwd: owner.cwd,
+        });
+        paneId = result.pane?.pane_id || result.pane_id;
+      } else {
+        const result = await window.bridge.herdr(endpoint, "workspace.create", {
+          label: owner.name,
+          cwd: owner.cwd,
+          focus: false,
+        });
+        paneId = result.root_pane?.pane_id;
+        herdrWorkspaceId = result.workspace?.workspace_id;
+      }
+      if (!paneId) throw new Error("Herdr did not report the new pane.");
+      if (launchText)
+        await window.bridge.herdr(endpoint, "pane.send_input", {
+          pane_id: paneId,
+          text: launchText,
+          keys: ["Enter"],
+        });
+      const next: Panel = {
+        ...ended,
+        id: herdrWorkspaceKey(endpoint, paneId),
+        herdrId: paneId,
+      };
+      delete next.ended;
+      setWorkspaces((list) =>
+        list
+          // A poll between the RPC and this update may have listed the new
+          // workspace on its own; the rebound one replaces that copy.
+          .filter(
+            (w) =>
+              !herdrWorkspaceId ||
+              w.id === owner.id ||
+              w.connection !== owner.connection ||
+              w.herdrId !== herdrWorkspaceId,
+          )
+          .map((w) =>
+            w.id === owner.id
+              ? reopenInSlot(w, panelId, next, herdrWorkspaceId)
+              : w,
+          ),
+      );
+      disposeTerminal(panelId);
+      window.bridge.terminalClose(panelId).catch(() => {});
+      setSelected(next.id);
+      if (zoomedRef.current === panelId) setZoomed(next.id);
+      await refreshHerdr(endpoint);
+    } catch (error) {
+      notify(errorText(error));
+    } finally {
+      setAdding(false);
+    }
+  }
   const closePanel = useCallback(
     (panelId: string) => {
       const owner = findPanelOwner(workspacesRef.current, panelId);
       const panel = owner?.panels.find((item) => item.id === panelId);
       if (!owner || !panel) return;
-      if (panel.herdrId) {
+      if (panel.herdrId && !panel.ended) {
         confirmClose({ workspace: owner, panel });
         return;
       }
       disposeTerminal(panel.id);
+      // An ended pane has no session left to end: drop it outright.
+      if (panel.ended) {
+        setWorkspaces((list) => removeClosedPanels(list, new Set([panel.id])));
+        if (zoomedRef.current === panel.id) setZoomed(null);
+        return;
+      }
       // Closing an imported panel hides it locally; it never kills a Herdr process.
       if (!panel.herdrId)
         window.bridge
@@ -548,13 +710,14 @@ export function useWorkspaces({
       errors: string[] = [];
     for (const { workspace, panel } of items) {
       try {
-        if (panel.herdrId)
-          await window.bridge!.herdr(
-            workspace.connection || socket,
-            "pane.close",
-            { pane_id: panel.herdrId },
-          );
-        else await window.bridge?.terminalClose(panel.id);
+        if (panel.herdrId) {
+          if (!panel.ended)
+            await window.bridge!.herdr(
+              workspace.connection || socket,
+              "pane.close",
+              { pane_id: panel.herdrId },
+            );
+        } else await window.bridge?.terminalClose(panel.id);
         if (panel.busy) await window.bridge?.cancelChat(panel.id);
         await window.bridge?.terminalClose(panel.id);
         disposeTerminal(panel.id);
@@ -575,7 +738,7 @@ export function useWorkspaces({
   }
   async function endWorkspace(workspace: Workspace) {
     try {
-      if (workspace.herdrId)
+      if (workspace.herdrId && !isVanished(workspace))
         await window.bridge!.herdr(
           workspace.connection || socket,
           "workspace.close",
@@ -693,6 +856,7 @@ export function useWorkspaces({
     endPanelDrag,
     zoomPanel,
     startPanel,
+    reopenPanel,
     navigatePanel,
     setPanelAgent,
     cancelPanelChat,

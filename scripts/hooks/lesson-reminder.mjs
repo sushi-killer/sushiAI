@@ -13,7 +13,9 @@ import os from "node:os";
 
 // The stage-2 call below is itself a `claude -p` run in this project, so it
 // would trigger this very hook again when it finishes. This breaks that loop.
-if (process.env.SUSHIAI_LESSON_REMINDER_NESTED) process.exit(0);
+// ORCHD_TASK: an orchd task agent; the orchestrator owns lessons there.
+if (process.env.SUSHIAI_LESSON_REMINDER_NESTED || process.env.ORCHD_TASK)
+  process.exit(0);
 
 const input = JSON.parse(readFileSync(0, "utf8"));
 if (input.stop_hook_active) process.exit(0);

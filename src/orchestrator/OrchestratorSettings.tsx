@@ -1048,13 +1048,18 @@ function OrchestratorSettingsBody({
       />
       {row(
         "Cheap checks route",
-        "A read-only run that checks a brief for contradictions before the first attempt. Off skips the check.",
+        "A read-only run that checks a brief for contradictions before the first attempt. Automatic uses the cheapest route whose CLI is installed; Off skips the check.",
         <Select
           label="Cheap checks route"
-          value={settings.briefCheckRoute ?? ""}
+          value={settings.briefCheckRoute ?? "auto"}
           onChange={(briefCheckRoute) => update({ briefCheckRoute })}
         >
-          {routeOptions(<option value="">Off</option>)}
+          {routeOptions(
+            <>
+              <option value="auto">Automatic</option>
+              <option value="">Off</option>
+            </>,
+          )}
         </Select>,
       )}
       {row(

@@ -1,8 +1,11 @@
+import { useLayoutEffect, useRef } from "react";
 import type { ReactNode, Ref } from "react";
 import { ArrowUp, Sparkles, Square } from "lucide-react";
 import { ChipPicker } from "../ChipPicker";
 import { CHAT_MODES } from "./chatModel";
 import type { ChatMode, Settings } from "./types";
+
+const MAX_HEIGHT = 220;
 
 /** Pane/Composer: the one input at the bottom of the orchestrator - a new
  * task on Home, a message in Chat. The caller owns the draft and decides
@@ -44,11 +47,35 @@ export function Composer({
   host?: string;
   inputRef?: Ref<HTMLTextAreaElement>;
 }) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const areaRef = useRef<HTMLTextAreaElement | null>(null);
+  // The one sizing path: height follows the value (typed, pasted or set by
+  // the caller) from one line up to min(220px, 40% of the pane), then scrolls.
+  useLayoutEffect(() => {
+    const el = areaRef.current;
+    if (!el) return;
+    const pane = rootRef.current?.closest<HTMLElement>(".orch-main");
+    const cap = pane
+      ? Math.min(MAX_HEIGHT, Math.max(48, pane.clientHeight * 0.4))
+      : MAX_HEIGHT;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
+    el.style.overflowY = el.scrollHeight > cap ? "auto" : "hidden";
+  }, [value]);
+  const setRefs = (node: HTMLTextAreaElement | null) => {
+    areaRef.current = node;
+    if (typeof inputRef === "function") inputRef(node);
+    else if (inputRef)
+      (inputRef as { current: HTMLTextAreaElement | null }).current = node;
+  };
   const canSend = !disabled && !sending && value.trim().length > 0;
   return (
-    <div className={`orch-composer${disabled ? " disabled" : ""}`}>
+    <div
+      ref={rootRef}
+      className={`orch-composer${disabled ? " disabled" : ""}`}
+    >
       <textarea
-        ref={inputRef}
+        ref={setRefs}
         rows={1}
         aria-label={ariaLabel}
         placeholder={placeholder}
@@ -56,9 +83,6 @@ export function Composer({
         disabled={disabled}
         onChange={(event) => {
           onChange(event.target.value);
-          const el = event.target;
-          el.style.height = "";
-          el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
         }}
         onKeyDown={(event) => {
           if (

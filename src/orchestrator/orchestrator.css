@@ -560,7 +560,7 @@
 }
 .orch-composer textarea {
   display: block;
-  flex: 1;
+  flex: none;
   width: 100%;
   min-height: 16px;
   max-height: 220px;
@@ -690,6 +690,7 @@
   display: none;
 }
 .orch-chat-view .orch-composer {
+  flex-shrink: 0;
   margin-bottom: 16px;
 }
 

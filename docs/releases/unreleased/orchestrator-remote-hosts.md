@@ -1,10 +1,11 @@
 # The Orchestrator runs on your SSH hosts
 
 Pick a host at the top of the Orchestrator panel: Local or any Connections
-profile. On a remote host the app installs orchd into `~/.sushiai/bin` (it
-uploads your build when the host has the same OS and CPU, otherwise builds the
-source there with cargo, or tells you the one command that installs Rust),
-starts it detached, and drives it over the existing SSH connection - no new
+profile. On a remote host the app installs orchd into `~/.sushiai/bin`. The
+packaged app uploads its own build, so in this release a remote host has to
+be an Apple silicon Mac; running from a source checkout also builds orchd on
+any other host with cargo (or tells you the one command that installs Rust).
+The app starts it detached, and drives it over the existing SSH connection - no new
 open ports. The daemon keeps running when you quit the app or the laptop
 sleeps; reopening reconnects and shows its tasks.
 

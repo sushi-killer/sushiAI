@@ -1411,6 +1411,7 @@ fn answering_stop_after_a_daemon_restart_stops_the_parent_and_its_subtasks() {
         "task.answer",
         serde_json::json!({"id": parent_id, "answer": "stop"}),
     );
+    poll_until(&daemon, &parent_id, Duration::from_secs(15), |s| s == "stopped");
     // Give a wrongly relaunched loop time to run its preflight again.
     std::thread::sleep(Duration::from_millis(1500));
     let parent = daemon.request("task.get", serde_json::json!({"id": parent_id}));

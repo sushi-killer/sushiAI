@@ -1,6 +1,9 @@
 const { randomUUID } = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
+const execFileAsync = promisify(execFile);
 
 function normalizeRemote(url) {
   if (typeof url !== "string" || !url.trim()) return "";
@@ -262,6 +265,54 @@ class Projects {
     if (host !== "local" && !project?.hosts?.[host]?.trusted) return null;
     const override = await this.#secretValue(id, `${name}@${host}`);
     return override ?? this.secretFor(id, name);
+  }
+
+  async environmentFor(id, stage = "agent", host = "local") {
+    const project = await this.get(id);
+    if (!project) return {};
+    const env = {};
+    for (const entry of project.env) {
+      const availableTo = entry.availableTo || ["setup", "agent"];
+      if (!availableTo.includes(stage)) continue;
+      const value = await this.secretForHost(id, entry.name, host);
+      if (value !== null) env[entry.name] = value;
+    }
+    return env;
+  }
+
+  async resolveDirectory(directory) {
+    try {
+      const { stdout } = await execFileAsync(
+        "git",
+        ["remote", "get-url", "origin"],
+        {
+          cwd: directory,
+          timeout: 2000,
+          maxBuffer: 10000,
+        },
+      );
+      return this.resolve(stdout.trim());
+    } catch {
+      return null;
+    }
+  }
+
+  async agentEnvironments() {
+    const projects = await this.#read(this.projectsFile);
+    const output = {};
+    for (const project of Object.values(projects)) {
+      output[project.id] = await this.environmentFor(project.id, "agent");
+    }
+    return output;
+  }
+
+  async mcpEnvironments() {
+    const projects = await this.#read(this.projectsFile);
+    const output = {};
+    for (const project of Object.values(projects)) {
+      output[project.id] = await this.environmentFor(project.id, "mcp");
+    }
+    return output;
   }
 
   async #secretValue(id, key) {

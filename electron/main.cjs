@@ -194,6 +194,7 @@ const terminalIpc = registerTerminalIpc({
   terminalPending,
   stageModelSettings,
   stageClaudeAccount,
+  projects,
 });
 const chatIpc = registerChatIpc({
   handle,
@@ -282,6 +283,7 @@ orchestrator = registerOrchestratorExtension({
   packaged: app.isPackaged,
   getClaudeMcp: () => claudeMcp,
   getModelProviders: () => modelProviders,
+  getProjects: () => projects,
   stopDaemonOnQuit: testMode.test,
   getConnections: () => connections,
   hostsFile: path.join(app.getPath("userData"), "orchestrator-hosts.json"),

@@ -405,6 +405,7 @@ class OrchestratorService {
     onTask,
     getClaudeMcp,
     getModelProviders,
+    getProjects,
     spawnRetries = 50,
     spawnIntervalMs = 100,
     stopDaemonOnQuit = false,
@@ -430,6 +431,7 @@ class OrchestratorService {
     this.onTask = onTask;
     this.getClaudeMcp = getClaudeMcp;
     this.getModelProviders = getModelProviders;
+    this.getProjects = getProjects;
     this.spawnRetries = spawnRetries;
     this.spawnIntervalMs = spawnIntervalMs;
     this.stopDaemonOnQuit = stopDaemonOnQuit;
@@ -596,11 +598,28 @@ class OrchestratorService {
 
   async #withMcp(params) {
     // The project's .mcp.json lives on this machine; a remote repo path has none here.
-    if (this.remote || !this.getClaudeMcp || typeof params?.repo !== "string")
-      return params;
+    if (this.remote || typeof params?.repo !== "string") return params;
+    if (this.getProjects) {
+      try {
+        const project = await this.getProjects().resolveDirectory(params.repo);
+        if (project) {
+          params = { ...params, projectId: project.id };
+          if (Object.keys(project.mcp || {}).length) {
+            const current = params.mcp?.mcpServers || params.mcp || {};
+            params.mcp = { mcpServers: { ...project.mcp, ...current } };
+          }
+        }
+      } catch {}
+    }
+    if (!this.getClaudeMcp) return params;
     try {
       const mcp = await this.getClaudeMcp().launchConfig(params.repo);
-      return { ...params, mcp };
+      const project = params.mcp?.mcpServers || params.mcp || {};
+      const local = mcp?.mcpServers || mcp || {};
+      return {
+        ...params,
+        mcp: { mcpServers: { ...local, ...project } },
+      };
     } catch {
       // No .mcp.json / no readable project: the task still starts, just
       // without MCP servers wired into the Claude run.
@@ -660,7 +679,20 @@ class OrchestratorService {
     await orchdRequest(
       this.socketPath,
       "secrets.set",
-      { profiles, accounts },
+      {
+        profiles,
+        accounts,
+        projects: this.getProjects
+          ? await this.getProjects()
+              .agentEnvironments()
+              .catch(() => ({}))
+          : {},
+        projectMcp: this.getProjects
+          ? await this.getProjects()
+              .mcpEnvironments()
+              .catch(() => ({}))
+          : {},
+      },
       this.token,
       5000,
     ).catch(() => {});
@@ -682,6 +714,7 @@ class OrchestratorService {
       method === "chat.edit"
         ? await this.#withMcp(params)
         : params;
+    if (method === "task.create") await this.#pushSecrets();
     const result = await orchdRequest(
       this.socketPath,
       method,
@@ -1101,6 +1134,7 @@ function createOrchestratorHosts({
   packaged,
   getClaudeMcp,
   getModelProviders,
+  getProjects,
   stopDaemonOnQuit,
   getConnections,
   hostsFile,
@@ -1120,6 +1154,7 @@ function createOrchestratorHosts({
     onTask,
     getClaudeMcp,
     getModelProviders,
+    getProjects,
     stopDaemonOnQuit,
   });
   const artifacts = localArtifacts({
@@ -1141,6 +1176,7 @@ function createOrchestratorHosts({
         send,
         notify,
         onTask,
+        getProjects: undefined,
         remote: new RemoteOrchd({
           connections: getConnections(),
           endpoint: host,

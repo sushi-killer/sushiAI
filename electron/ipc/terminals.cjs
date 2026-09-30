@@ -31,6 +31,7 @@ function registerTerminalIpc({
   terminalPending,
   stageModelSettings,
   stageClaudeAccount,
+  projects,
 }) {
   const detectionTimer = setInterval(() => {
     for (const [panelId, entry] of terminals) {
@@ -62,6 +63,7 @@ function registerTerminalIpc({
       herdrId,
       modelProfileId,
       claudeAccountId,
+      projectId,
     }) => {
       id(panelId);
       if (terminals.has(panelId))
@@ -138,6 +140,8 @@ function registerTerminalIpc({
       let accountSettingsPath;
       let accountKeyPath;
       let accountTokenPath;
+      const project =
+        !remote && projects ? await projects.resolveDirectory(cwd) : null;
       if (claudeAccountId && command === "claude" && !remote) {
         const staged = await stageClaudeAccount(claudeAccountId);
         accountSettingsPath = staged.settingsPath;
@@ -160,7 +164,12 @@ function registerTerminalIpc({
         cols: Math.max(10, Math.min(500, cols)),
         rows: Math.max(3, Math.min(300, rows)),
         cwd: remote ? os.homedir() : cwd,
-        env: terminalEnvironment(),
+        env: {
+          ...terminalEnvironment(),
+          ...(projects && (projectId || project?.id)
+            ? await projects.environmentFor(projectId || project.id, "agent")
+            : {}),
+        },
       });
       const entry = {
         proc,

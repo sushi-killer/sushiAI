@@ -50,6 +50,58 @@ fn engine_loop_passes_when_verify_succeeds() {
 }
 
 #[test]
+fn project_secrets_reach_the_agent_but_not_settings_logs_or_task_mcp() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let marker = scripts_dir.path().join("observed-env");
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        &format!("#!/bin/sh\nprintf '%s|%s' \"$PROJECT_TOKEN\" \"${{SETUP_ONLY-unset}}\" > '{}'\necho \"observed $PROJECT_TOKEN\"\necho changed > CHANGED_MARKER.txt\ncat > /dev/null\necho '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-project\"}}'\necho '{{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}},\"result\":\"done\"}}'\n", marker.display()),
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    daemon.request(
+        "secrets.set",
+        serde_json::json!({
+            "projects": {"project-test": {"PROJECT_TOKEN": "invented-project-secret-42"}}
+        }),
+    );
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "projectId": "project-test",
+            "title": "Use project environment",
+            "goal": "Verify project environment delivery",
+            "criteria": [],
+            "verify": ["true"],
+            "mcp": {"mcpServers": {"example": {"command": "server", "env": {"TOKEN": "${PROJECT_TOKEN}"}}}}
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap();
+    let settled = poll_task_status(&daemon, task_id, Duration::from_secs(15));
+    assert_eq!(settled["status"], "done", "task JSON: {settled}");
+    assert_eq!(
+        std::fs::read_to_string(marker).unwrap(),
+        "invented-project-secret-42|unset"
+    );
+    let task_dir = daemon.data_dir.path().join("tasks").join(task_id);
+    let task_mcp = std::fs::read_to_string(task_dir.join("mcp.json")).unwrap();
+    assert!(task_mcp.contains("${PROJECT_TOKEN}"));
+    assert!(!task_mcp.contains("invented-project-secret-42"));
+    let run_mcp = std::fs::read_to_string(task_dir.join("runs/1/mcp.json")).unwrap();
+    assert!(run_mcp.contains("invented-project-secret-42"));
+    let events = std::fs::read_to_string(task_dir.join("runs/1/events.jsonl")).unwrap();
+    assert!(!events.contains("invented-project-secret-42"));
+    assert!(events.contains("[REDACTED]"));
+    let settings = std::fs::read_to_string(task_dir.join("runs/1/settings.json")).unwrap();
+    assert!(!settings.contains("invented-project-secret-42"));
+}
+
+#[test]
 fn engine_loop_waits_after_verify_keeps_failing_and_attempts_are_exhausted() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(

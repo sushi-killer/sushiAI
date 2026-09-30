@@ -203,6 +203,8 @@ struct AccountSecret {
 struct Secrets {
     profiles: HashMap<String, ProfileSecret>,
     accounts: HashMap<String, AccountSecret>,
+    projects: HashMap<String, HashMap<String, String>>,
+    project_mcp: HashMap<String, HashMap<String, String>>,
 }
 
 struct TaskControl {

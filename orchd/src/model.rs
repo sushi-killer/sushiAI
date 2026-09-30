@@ -1173,6 +1173,9 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<String>,
     pub repo: String,
+    /// Local project whose in-memory environment is available to this task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     pub worktree: String,
     /// The worktree directory was removed because the task no longer needs
     /// it (done, archived, or gc); it is recreated from the branch when the
@@ -2020,6 +2023,7 @@ mod tests {
             held_out: None,
             request: Some("fix the thing that's broken".into()),
             repo: "/repo".into(),
+            project_id: None,
             worktree: "/repo-task".into(),
             worktree_removed: false,
             deliverables: vec![],
@@ -2263,6 +2267,7 @@ mod tests {
             held_out: None,
             request: None,
             repo: "/repo".into(),
+            project_id: None,
             worktree: "/repo-task".into(),
             worktree_removed: false,
             deliverables: vec![],
@@ -2325,6 +2330,7 @@ mod tests {
             held_out: None,
             request: None,
             repo: "/repo".into(),
+            project_id: None,
             worktree: "/repo-task".into(),
             worktree_removed: false,
             deliverables: vec![],
@@ -2413,6 +2419,7 @@ mod tests {
             held_out: None,
             request: None,
             repo: "/repo".into(),
+            project_id: None,
             worktree: "/repo-task".into(),
             worktree_removed: false,
             deliverables: vec![],

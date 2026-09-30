@@ -108,6 +108,30 @@ test("unavailable secure storage fails without writing a value", async (t) => {
   await assert.rejects(fs.access(path.join(dir, "project-secrets.json")));
 });
 
+test("stage environments keep setup-only and MCP-only values out of agents", async (t) => {
+  const { projects } = await fixture(t);
+  const project = await projects.upsert({
+    name: "Demo",
+    env: [
+      { name: "AGENT_TOKEN", availableTo: ["agent"] },
+      { name: "INSTALL_TOKEN", availableTo: ["setup"] },
+      { name: "MCP_TOKEN", availableTo: ["mcp"] },
+    ],
+  });
+  await projects.setSecret(project.id, "AGENT_TOKEN", "agent-value");
+  await projects.setSecret(project.id, "INSTALL_TOKEN", "install-value");
+  await projects.setSecret(project.id, "MCP_TOKEN", "mcp-value");
+  assert.deepEqual(await projects.environmentFor(project.id, "agent"), {
+    AGENT_TOKEN: "agent-value",
+  });
+  assert.deepEqual(await projects.environmentFor(project.id, "setup"), {
+    INSTALL_TOKEN: "install-value",
+  });
+  assert.deepEqual(await projects.agentEnvironments(), {
+    [project.id]: { AGENT_TOKEN: "agent-value" },
+  });
+});
+
 test("clearing or removing a secret env entry removes its ciphertext", async (t) => {
   const { dir, projects } = await fixture(t);
   const project = await projects.upsert({

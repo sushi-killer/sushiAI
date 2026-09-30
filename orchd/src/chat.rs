@@ -2738,6 +2738,7 @@ mod tests {
             held_out: None,
             request: None,
             repo: "/repo".into(),
+            project_id: None,
             worktree: "/wt".into(),
             worktree_removed: false,
             deliverables: vec![],

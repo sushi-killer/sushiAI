@@ -498,6 +498,8 @@ test("settings.set pushes a full-replace secrets.set: each route's resolved prof
     accounts: {
       "account-1": { kind: "subscription", value: "account-token" },
     },
+    projects: {},
+    projectMcp: {},
   });
 });
 
@@ -522,7 +524,12 @@ test("secrets.set is always pushed, even to clear it: no profiles means profiles
     secretsCall,
     "a full replace is pushed even when everything clears",
   );
-  assert.deepEqual(secretsCall.params, { profiles: {}, accounts: {} });
+  assert.deepEqual(secretsCall.params, {
+    profiles: {},
+    accounts: {},
+    projects: {},
+    projectMcp: {},
+  });
 });
 
 test("connect() relays subscribe events and raises one notice per (task, question)", async (t) => {

@@ -56,7 +56,14 @@ const server = net.createServer((socket) => {
         socket.write(JSON.stringify({ event: "task", task: tasks[0] }) + "\n");
       } else if (message.method === "shutdown") {
         reply({});
-        setTimeout(() => process.exit(0), 20);
+        // An "exit-delay" file (ms) in the data dir makes a slow shutdown.
+        let delay = 20;
+        try {
+          delay = Number(
+            fs.readFileSync(path.join(data, "exit-delay"), "utf8"),
+          );
+        } catch {}
+        setTimeout(() => process.exit(0), delay);
       } else reply({});
     }
   });

@@ -126,7 +126,23 @@ async function fixture(
       });
   });
 
-  async function open() {
+  async function open({ packaged = false, stopWaitSeconds } = {}) {
+    // A packaged app has no orchd/ next to it: the source is a tarball among
+    // the resources, next to the bundled binary.
+    const resources = path.join(dir, "resources");
+    if (packaged) {
+      await fs.mkdir(resources, { recursive: true });
+      await fs.copyFile(binary, path.join(resources, "orchd"));
+      execFileSync("tar", [
+        "-czf",
+        path.join(resources, "orchd-src.tar.gz"),
+        "--exclude",
+        "target",
+        "-C",
+        root,
+        "orchd",
+      ]);
+    }
     const connections = new Connections(path.join(dir, "userdata"), { ssh });
     await connections.init();
     const profile =
@@ -143,9 +159,10 @@ async function fixture(
       send: (channel, message) => events.push({ channel, message }),
       notify: (notice) => notices.push(notice),
       dataDir: path.join(dir, "local-data"),
-      root,
-      resourcesPath: root,
-      packaged: false,
+      root: packaged ? path.join(dir, "asar") : root,
+      resourcesPath: packaged ? resources : root,
+      packaged,
+      stopWaitSeconds,
       getConnections: () => connections,
       hostsFile: path.join(dir, "hosts.json"),
       hostsChanged: () => changes.push(hosts.list().at(-1).state),
@@ -172,7 +189,7 @@ async function fixture(
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line));
-  return { dir, home, remoteData, open, sshCommands };
+  return { dir, home, root, remoteData, open, sshCommands };
 }
 
 const alive = (pid) => {
@@ -243,6 +260,94 @@ test("a different platform builds from the source with cargo on the host", async
   await fs.access(path.join(src, "src", "main.rs"));
   await fs.access(path.join(src, "target", "release", "orchd"));
   await fs.access(path.join(fx.home, ".sushiai", "bin", "orchd"));
+});
+
+test("a packaged app builds a Linux host from its bundled source tarball", async (t) => {
+  const fx = await fixture(t, { platform: "Linux x86_64", cargo: true });
+  const { hosts, id } = await fx.open({ packaged: true });
+  // No "no orchd source" error: the tarball is the source.
+  const tasks = await hosts.call("task.list", {}, id);
+  assert.equal(tasks[0].id, "remote-task-1");
+  assert.match(
+    await fs.readFile(path.join(fx.home, "cargo.log"), "utf8"),
+    /cargo build --release/,
+  );
+  const src = path.join(fx.home, ".sushiai", "src", "orchd");
+  await fs.access(path.join(src, "Cargo.toml"));
+  await fs.access(path.join(src, "src", "main.rs"));
+  await fs.access(path.join(fx.home, ".sushiai", "bin", "orchd"));
+  // The version key is the tarball's, not a source directory's.
+  const tarball = await fs.readFile(
+    path.join(fx.dir, "resources", "orchd-src.tar.gz"),
+  );
+  assert.equal(
+    await fs.readFile(
+      path.join(fx.home, ".sushiai", "bin", "orchd.hash"),
+      "utf8",
+    ),
+    require("node:crypto")
+      .createHash("sha256")
+      .update(tarball)
+      .digest("hex")
+      .slice(0, 32),
+  );
+});
+
+test("a packaged app without cargo on a Linux host still says how to install Rust", async (t) => {
+  const fx = await fixture(t, { platform: "Linux x86_64", cargo: false });
+  const { hosts, id } = await fx.open({ packaged: true });
+  await assert.rejects(
+    hosts.call("task.list", {}, id),
+    (error) =>
+      error.message.includes(RUSTUP_COMMAND) &&
+      !error.message.includes("no orchd source"),
+  );
+});
+
+test("an upgrade waits for the old daemon to exit before starting the new one", async (t) => {
+  const fx = await fixture(t);
+  const first = await fx.open();
+  await first.hosts.call("task.list", {}, first.id);
+  const oldPid = Number(
+    await fs.readFile(path.join(fx.remoteData, "orchd.pid"), "utf8"),
+  );
+  await first.hosts.quit();
+  await first.connections.close();
+  // The old daemon lingers 1.5 s after it accepts the shutdown; a changed
+  // source makes the app plan an upgrade.
+  await fs.writeFile(path.join(fx.remoteData, "exit-delay"), "1500");
+  await fs.appendFile(path.join(fx.root, "orchd", "src", "main.rs"), "// v2\n");
+  const second = await fx.open();
+  const tasks = await second.hosts.call("task.list", {}, second.id);
+  assert.equal(tasks[0].title, "Remote job");
+  assert.equal(alive(oldPid), false);
+  const newPid = Number(
+    await fs.readFile(path.join(fx.remoteData, "orchd.pid"), "utf8"),
+  );
+  assert.notEqual(newPid, oldPid);
+  assert.equal(alive(newPid), true);
+});
+
+test("an upgrade fails clearly, without recording the new hash, when the old daemon will not exit", async (t) => {
+  const fx = await fixture(t);
+  const first = await fx.open();
+  await first.hosts.call("task.list", {}, first.id);
+  const oldPid = Number(
+    await fs.readFile(path.join(fx.remoteData, "orchd.pid"), "utf8"),
+  );
+  const hashFile = path.join(fx.home, ".sushiai", "bin", "orchd.hash");
+  const oldHash = await fs.readFile(hashFile, "utf8");
+  await first.hosts.quit();
+  await first.connections.close();
+  await fs.writeFile(path.join(fx.remoteData, "exit-delay"), "60000");
+  await fs.appendFile(path.join(fx.root, "orchd", "src", "main.rs"), "// v2\n");
+  const second = await fx.open({ stopWaitSeconds: 1 });
+  await assert.rejects(
+    second.hosts.call("task.list", {}, second.id),
+    /did not stop within 1 s/,
+  );
+  assert.equal(await fs.readFile(hashFile, "utf8"), oldHash);
+  assert.equal(alive(oldPid), true);
 });
 
 test("a different platform without cargo says how to install Rust", async (t) => {

@@ -900,6 +900,7 @@ function createOrchestratorHosts({
   hostsFile,
   hostsChanged,
   spawnRetries,
+  stopWaitSeconds,
   spawnIntervalMs,
 }) {
   const local = new OrchestratorService({
@@ -917,6 +918,8 @@ function createOrchestratorHosts({
   const artifacts = localArtifacts({
     root,
     binary: orchdBinaryPath({ root, resourcesPath, packaged }),
+    resourcesPath,
+    packaged,
   });
   return new OrchestratorHosts({
     local,
@@ -937,6 +940,7 @@ function createOrchestratorHosts({
           request: orchdRequest,
           onChange: hostsChanged,
           spawnRetries,
+          stopWaitSeconds,
           spawnIntervalMs,
         }),
       }),

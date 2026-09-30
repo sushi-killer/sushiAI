@@ -23,3 +23,6 @@ orchd/target/
 
 # orchd task worktrees live inside the repo; the main checkout never walks them.
 .sushiai/
+
+# Source tarball of orchd that the packaged app ships (scripts/pack-orchd-src.mjs).
+build/orchd-src.tar.gz

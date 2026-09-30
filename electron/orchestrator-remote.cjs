@@ -18,6 +18,10 @@ const REMOTE_PATH =
 const BUILD_TIMEOUT_MS = 20 * 60 * 1000;
 const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 const RETRY_AFTER_MS = 30 * 1000;
+// How long a planned install waits for the old daemon to exit.
+const STOP_WAIT_SECONDS = 10;
+// The orchd source the packaged app ships (scripts/pack-orchd-src.mjs).
+const SOURCE_ARCHIVE = "orchd-src.tar.gz";
 
 // The setup errors the renderer reads the platform and the rustup command
 // back out of (`hostPlatform`/`rustupCommand` in src/orchestrator/hosts.ts);
@@ -28,6 +32,10 @@ function needsRustMessage(name, platform) {
 
 function noSourceMessage(name, platform, wanted) {
   return `This build of sushiAI has no orchd source to build on ${name} (${platform || "unknown platform"}); it can only upload its own binary to a ${wanted} host.`;
+}
+
+function stillRunningMessage(name, seconds) {
+  return `The old orchestrator on ${name} did not stop within ${seconds} s, so the update was not installed. Check ~/.sushiai/orchestrator/orchd.log on the host, then connect again.`;
 }
 
 /** One `key=value` per line, as the probe scripts below print them. */
@@ -94,6 +102,20 @@ echo "started=1"
 exit 0`;
 }
 
+// Polls the old daemon's pid; prints `stopped=1` once it is gone, `alive=1`
+// when it outlives the bound.
+function waitStoppedScript(seconds) {
+  return `p="${REMOTE_DATA}/orchd.pid"
+i=0
+while [ -f "$p" ] && kill -0 "$(cat "$p")" 2>/dev/null; do
+  i=$((i+1))
+  if [ "$i" -gt ${seconds * 10} ]; then echo "alive=1"; exit 0; fi
+  sleep 0.1
+done
+echo "stopped=1"
+exit 0`;
+}
+
 function uploadScript(hash) {
   return `set -e
 b="${REMOTE_BIN}"
@@ -111,7 +133,7 @@ s="$HOME/.sushiai/src"
 b="${REMOTE_BIN}"
 rm -rf "$s"
 mkdir -p "$s" "$b"
-tar -xf - -C "$s"
+tar -xzf - -C "$s"
 cd "$s/orchd"
 cargo build --release
 cp target/release/orchd "$b/orchd.new"
@@ -145,41 +167,42 @@ function uname() {
 }
 
 /** What the app can put on a host: its own orchd binary (same platform only)
- * and the orchd source (any platform, built there). The version key is a hash
- * of `orchd/` (working tree, `target/` excluded) - or of the binary when the
- * source is not shipped, as in a packaged app. */
-function localArtifacts({ root, binary }) {
+ * and the orchd source (any platform, built there). The source is the live
+ * `orchd/` checkout in development and the bundled `orchd-src.tar.gz` when
+ * packaged. The version key is a hash of that source (`target/` excluded) - or
+ * of the binary when no source is available. */
+function localArtifacts({ root, binary, resourcesPath, packaged = false }) {
   const sourceDir = path.join(root, "orchd");
+  const bundled =
+    packaged && resourcesPath ? path.join(resourcesPath, SOURCE_ARCHIVE) : null;
+  const exists = (file) =>
+    fs.access(file).then(
+      () => true,
+      () => false,
+    );
   let memo = null;
   const sha = async () => {
     const hash = createHash("sha256");
     let hasSource = false;
-    try {
-      await fs.access(path.join(sourceDir, "Cargo.toml"));
-      hasSource = true;
-    } catch {
-      // No source next to the app (packaged): key on the binary instead.
-    }
-    if (hasSource) {
-      for (const file of await sourceFiles(sourceDir)) {
-        hash.update(file + "\0");
-        hash.update(await fs.readFile(path.join(sourceDir, file)));
-      }
+    if (bundled) {
+      hasSource = await exists(bundled);
+      if (hasSource) hash.update(await fs.readFile(bundled));
     } else {
-      hash.update(await fs.readFile(binary));
+      hasSource = await exists(path.join(sourceDir, "Cargo.toml"));
+      if (hasSource)
+        for (const file of await sourceFiles(sourceDir)) {
+          hash.update(file + "\0");
+          hash.update(await fs.readFile(path.join(sourceDir, file)));
+        }
     }
+    // No source shipped: key on the binary instead.
+    if (!hasSource) hash.update(await fs.readFile(binary));
     return { hash: hash.digest("hex").slice(0, 32), hasSource };
   };
   return {
     async describe() {
       if (memo) return memo;
-      let binaryExists = false;
-      try {
-        await fs.access(binary);
-        binaryExists = true;
-      } catch {
-        // Not built: only a source build on the host is possible.
-      }
+      const binaryExists = await exists(binary);
       const { hash, hasSource } = await sha();
       memo = {
         hash,
@@ -190,11 +213,13 @@ function localArtifacts({ root, binary }) {
       return memo;
     },
     readBinary: () => fs.readFile(binary),
+    // A gzipped tar holding `orchd/`, whichever the source is.
     archive() {
+      if (bundled) return fs.readFile(bundled);
       return new Promise((resolve, reject) => {
         const child = spawn(
           "tar",
-          ["-cf", "-", "--exclude", "target", "-C", root, "orchd"],
+          ["-czf", "-", "--exclude", "target", "-C", root, "orchd"],
           {
             stdio: ["ignore", "pipe", "pipe"],
             env: { ...process.env, COPYFILE_DISABLE: "1" },
@@ -226,6 +251,7 @@ class RemoteOrchd {
     onChange,
     spawnRetries = 50,
     spawnIntervalMs = 200,
+    stopWaitSeconds = STOP_WAIT_SECONDS,
   }) {
     this.connections = connections;
     this.endpoint = endpoint;
@@ -234,6 +260,7 @@ class RemoteOrchd {
     this.onChange = onChange;
     this.spawnRetries = spawnRetries;
     this.spawnIntervalMs = spawnIntervalMs;
+    this.stopWaitSeconds = stopWaitSeconds;
     this.state = "idle";
     this.detail = "";
     this.preflight = null;
@@ -323,6 +350,9 @@ class RemoteOrchd {
       // A running old daemon is asked to shut down first (its tasks resume
       // under the new one); the connection is best-effort.
       await this.#shutdownRunning(info.home);
+      // The new binary is only recorded once the old daemon is gone: a
+      // still-running old pid would keep startScript from starting it.
+      await this.#waitStopped();
       await this.#install(plan, info, want);
     }
     this.#set("starting");
@@ -350,6 +380,18 @@ class RemoteOrchd {
     } catch {
       // Nothing running: nothing to stop.
     }
+  }
+
+  async #waitStopped() {
+    const out = parseProbe(
+      await this.connections.exec(
+        this.endpoint,
+        waitStoppedScript(this.stopWaitSeconds),
+        { timeout: (this.stopWaitSeconds + 30) * 1000 },
+      ),
+    );
+    if (out.stopped !== "1")
+      throw new Error(stillRunningMessage(this.name, this.stopWaitSeconds));
   }
 
   async #install(plan, info, want) {

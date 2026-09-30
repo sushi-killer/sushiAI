@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Pencil, RefreshCw, Trash2 } from "lucide-react";
 import type { ConnectionProfile, Project, ProjectHostReadiness } from "./types";
 import { ProjectMcpServersTab } from "./ProjectMcpServersTab";
+import { ProjectEnvironmentTab } from "./ProjectEnvironmentTab";
 
 type Tab = "General" | "Environment" | "MCP servers" | "Hosts";
 
@@ -383,10 +384,11 @@ export function ProjectSettingsDialog({
             </p>
           ))}
         {tab === "Environment" && (
-          <div className="project-settings-placeholder">
-            <h3>Environment</h3>
-            <p>Project variables and secrets will appear here.</p>
-          </div>
+          <ProjectEnvironmentTab
+            gitRemote={project?.git.url || ""}
+            projectName={workspaceName}
+            key={refreshKey}
+          />
         )}
         {tab === "MCP servers" &&
           (project ? (

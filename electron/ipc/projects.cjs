@@ -23,6 +23,9 @@ function registerProjectIpc({
     handle("projects:secret:set", (id, name, value) =>
       projects.setSecret(id, name, value),
     );
+    handle("projects:host:secret:set", (id, name, host, value) =>
+      projects.setHostSecret(id, name, host, value),
+    );
     handle("projects:secret:clear", (id, name) =>
       projects.clearSecret(id, name),
     );
@@ -46,6 +49,9 @@ function registerProjectIpc({
       );
       return readiness({ output, project: { ...project, host }, cwd });
     });
+    handle("projects:env:import-review", (id, entries) =>
+      projects.reviewEnvImport(id, entries),
+    );
     handle("projects:resolve", (remote) => projects.resolve(remote));
   }
 

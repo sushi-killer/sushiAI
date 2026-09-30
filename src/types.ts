@@ -145,8 +145,10 @@ export type Project = {
   env: {
     name: string;
     secret: boolean;
+    hasValue?: boolean;
     hint?: string;
     availableTo?: string[];
+    hosts?: string[];
   }[];
   mcp: Record<string, unknown>;
   setup: { install: string; check: string };
@@ -590,6 +592,12 @@ export interface Bridge {
     name: string,
     value: string,
   ): Promise<{ hasValue: boolean; hint: string }>;
+  projectHostSecretSet(
+    id: string,
+    name: string,
+    host: string,
+    value: string,
+  ): Promise<{ hasValue: boolean; hint: string }>;
   projectSecretClear(id: string, name: string): Promise<void>;
   projectHostTrust(
     id: string,
@@ -606,6 +614,10 @@ export interface Bridge {
     host: string,
     cwd?: string,
   ): Promise<ProjectHostReadiness>;
+  projectEnvImportReview(
+    id: string,
+    entries: { name: string; value: string }[],
+  ): Promise<{ name: string; status: "exists" | "differs" | "new" | "same" }[]>;
   projectsResolve(
     remote: string | { remote: string; endpoint?: string },
   ): Promise<Project | null>;

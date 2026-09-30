@@ -126,3 +126,79 @@ test("clearing or removing a secret env entry removes its ciphertext", async (t)
   );
   assert.equal(disk.includes("invented-secret-value"), false);
 });
+
+test("import review compares stored values without returning existing values", async (t) => {
+  const { projects } = await fixture(t);
+  const project = await projects.upsert({
+    name: "Demo",
+    env: [
+      { name: "TOKEN", secret: true },
+      { name: "OTHER", secret: false },
+      { name: "EMPTY", secret: false },
+    ],
+  });
+  await projects.setSecret(project.id, "TOKEN", "invented-secret");
+  await projects.setSecret(project.id, "OTHER", "plain-value");
+  assert.deepEqual(
+    await projects.reviewEnvImport(project.id, [
+      { name: "TOKEN", value: "invented-secret" },
+      { name: "OTHER", value: "new-value" },
+      { name: "NEW", value: "anything" },
+      { name: "EMPTY", value: "unknown" },
+    ]),
+    [
+      { name: "TOKEN", status: "same" },
+      { name: "OTHER", status: "differs" },
+      { name: "NEW", status: "new" },
+      { name: "EMPTY", status: "exists" },
+    ],
+  );
+});
+
+test("project environment values preserve whitespace and empty strings", async (t) => {
+  const { projects } = await fixture(t);
+  const project = await projects.upsert({
+    name: "Demo",
+    env: [
+      { name: "QUOTED", secret: false },
+      { name: "EMPTY", secret: false },
+    ],
+  });
+  await projects.setSecret(project.id, "QUOTED", "  value  ");
+  await projects.setSecret(project.id, "EMPTY", "");
+  assert.equal(await projects.secretFor(project.id, "QUOTED"), "  value  ");
+  assert.equal(await projects.secretFor(project.id, "EMPTY"), "");
+});
+
+test("host environment overrides preserve the shared value and stay encrypted", async (t) => {
+  const { dir, projects } = await fixture(t);
+  const project = await projects.upsert({
+    name: "Demo",
+    env: [{ name: "API_TOKEN", secret: true, hosts: ["ssh:user@devbox"] }],
+  });
+  await projects.setSecret(project.id, "API_TOKEN", "shared-invented-secret");
+  await projects.setHostSecret(
+    project.id,
+    "API_TOKEN",
+    "ssh:user@devbox",
+    "host-invented-secret",
+  );
+  await projects.setHostTrust(project.id, "ssh:user@devbox", true);
+  assert.equal(
+    await projects.secretFor(project.id, "API_TOKEN"),
+    "shared-invented-secret",
+  );
+  assert.equal(
+    await projects.secretForHost(project.id, "API_TOKEN", "ssh:user@devbox"),
+    "host-invented-secret",
+  );
+  assert.equal(
+    await projects.secretForHost(project.id, "API_TOKEN", "local"),
+    "shared-invented-secret",
+  );
+  const disk = await fs.readFile(
+    path.join(dir, "project-secrets.json"),
+    "utf8",
+  );
+  assert.equal(disk.includes("host-invented-secret"), false);
+});

@@ -64,10 +64,11 @@ class Projects {
   #public(project) {
     return {
       ...project,
-      env: (project.env || []).map(({ name, secret, availableTo }) => ({
+      env: (project.env || []).map(({ name, secret, availableTo, hosts }) => ({
         name,
         secret: !!secret,
         ...(availableTo ? { availableTo } : {}),
+        ...(hosts?.length ? { hosts } : {}),
       })),
     };
   }
@@ -117,6 +118,9 @@ class Projects {
           availableTo: Array.isArray(entry.availableTo)
             ? entry.availableTo
             : undefined,
+          hosts: Array.isArray(entry.hosts)
+            ? entry.hosts.map(String)
+            : undefined,
         }))
         .filter((entry) => entry.name),
       mcp:
@@ -147,7 +151,10 @@ class Projects {
     if ([...previousNames].some((name) => !nextNames.has(name))) {
       const secrets = await this.#read(this.secretsFile);
       for (const name of previousNames)
-        if (!nextNames.has(name)) delete secrets[`${id}:${name}`];
+        if (!nextNames.has(name))
+          for (const key of Object.keys(secrets))
+            if (key === `${id}:${name}` || key.startsWith(`${id}:${name}@`))
+              delete secrets[key];
       await this.#write(this.secretsFile, secrets);
     }
     return this.#withHints(project, await this.#read(this.secretsFile));
@@ -164,35 +171,79 @@ class Projects {
   }
 
   async setSecret(id, name, value) {
-    if (typeof value !== "string" || !value.trim())
-      throw new Error("Enter a secret value.");
     const projects = await this.#read(this.projectsFile);
     if (!projects[id]) throw new Error("Unknown project.");
-    if (
-      !(projects[id].env || []).some(
-        (entry) => entry.name === name && entry.secret,
-      )
-    )
-      throw new Error("Unknown project secret.");
+    if (!(projects[id].env || []).some((entry) => entry.name === name))
+      throw new Error("Unknown project variable.");
+    return this.#setEncryptedValue(id, `${name}`, value);
+  }
+
+  async #setEncryptedValue(id, key, value) {
+    if (typeof value !== "string") throw new Error("Enter a string value.");
+    const projects = await this.#read(this.projectsFile);
+    if (!projects[id]) throw new Error("Unknown project.");
     if (!this.safeStorage?.isEncryptionAvailable?.())
       throw new Error("Secure storage is unavailable.");
     if (this.safeStorage.getSelectedStorageBackend?.() === "basic_text")
       throw new Error("Secure storage is unavailable.");
     const secrets = await this.#read(this.secretsFile);
-    const trimmed = value.trim();
-    secrets[`${id}:${name}`] = {
+    secrets[`${id}:${key}`] = {
       v: 1,
-      ct: this.safeStorage.encryptString(trimmed).toString("base64"),
-      hint: hint(trimmed),
+      ct: this.safeStorage.encryptString(value).toString("base64"),
+      hint: hint(value),
     };
     await this.#write(this.secretsFile, secrets);
-    return { hasValue: true, hint: hint(trimmed) };
+    return { hasValue: true, hint: hint(value) };
+  }
+
+  async setHostSecret(id, name, host, value) {
+    if (
+      typeof host !== "string" ||
+      (host !== "local" && !host.startsWith("ssh:"))
+    )
+      throw new Error("Invalid project host.");
+    const projects = await this.#read(this.projectsFile);
+    const project = projects[id];
+    if (!project) throw new Error("Unknown project.");
+    if (!(project.env || []).some((entry) => entry.name === name))
+      throw new Error("Unknown project variable.");
+    return this.#setEncryptedValue(id, `${name}@${host}`, value);
   }
 
   async clearSecret(id, name) {
     const secrets = await this.#read(this.secretsFile);
-    delete secrets[`${id}:${name}`];
+    for (const key of Object.keys(secrets))
+      if (key === `${id}:${name}` || key.startsWith(`${id}:${name}@`))
+        delete secrets[key];
     await this.#write(this.secretsFile, secrets);
+  }
+
+  async reviewEnvImport(id, entries) {
+    const projects = await this.#read(this.projectsFile);
+    if (!projects[id]) throw new Error("Unknown project.");
+    const secrets = await this.#read(this.secretsFile);
+    return entries.map(({ name, value }) => {
+      const existing = (projects[id].env || []).find(
+        (entry) => entry.name === name,
+      );
+      if (!existing) return { name, status: "new" };
+      const stored = secrets[`${id}:${name}`];
+      let previous;
+      try {
+        previous =
+          stored &&
+          this.safeStorage.decryptString(Buffer.from(stored.ct, "base64"));
+      } catch {}
+      return {
+        name,
+        status:
+          previous === undefined
+            ? "exists"
+            : previous === value
+              ? "same"
+              : "differs",
+      };
+    });
   }
 
   async secretFor(id, name) {
@@ -208,8 +259,20 @@ class Projects {
 
   async secretForHost(id, name, host) {
     const project = await this.get(id);
-    if (!project?.hosts?.[host]?.trusted) return null;
-    return this.secretFor(id, name);
+    if (host !== "local" && !project?.hosts?.[host]?.trusted) return null;
+    const override = await this.#secretValue(id, `${name}@${host}`);
+    return override ?? this.secretFor(id, name);
+  }
+
+  async #secretValue(id, key) {
+    const secrets = await this.#read(this.secretsFile);
+    const stored = secrets[`${id}:${key}`];
+    if (!stored) return null;
+    try {
+      return this.safeStorage.decryptString(Buffer.from(stored.ct, "base64"));
+    } catch {
+      return null;
+    }
   }
 
   async setHostTrust(id, host, trusted) {

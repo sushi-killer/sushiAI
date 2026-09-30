@@ -209,42 +209,33 @@ pub(super) fn add_task_cost(app: &Arc<App>, task_id: &str, cost: f64) {
     }
 }
 
-/// The `briefCheckRoute` id, the route it resolves to (`None` when nothing
-/// usable is configured) and, when the id names no route and the mechanical
-/// tier's route stands in, the reason to record; `None` overall when the
-/// setting is empty, i.e. cheap checks are off.
+/// The `briefCheckRoute` id, the route it resolves to (`None` when no route
+/// on an available harness exists) and, when the id is not usable and the
+/// cheapest available route stands in, the reason to record; `None` overall
+/// when the setting is empty, i.e. cheap checks are off. `"auto"` names no
+/// route: it is the cheapest configured route whose harness is available.
 pub(super) fn check_route(app: &App) -> Option<(String, Option<Route>, Option<String>)> {
     let settings = app.settings.read().unwrap();
     let route_id = settings.brief_check_route.clone();
     if route_id.is_empty() {
         return None;
     }
-    let route = settings
+    let has = |h| app.harness_available(h);
+    let named = settings
         .routes
         .iter()
-        .find(|r| r.id == route_id)
-        .cloned()
-        .or_else(|| {
-            Settings::default()
-                .routes
-                .into_iter()
-                .find(|r| r.id == route_id)
-        });
-    if route.is_some() {
-        return Some((route_id, route, None));
+        .find(|r| r.id == route_id && has(r.harness));
+    if let Some(route) = named {
+        return Some((route_id.clone(), Some(route.clone()), None));
     }
-    let mechanical = settings
-        .tiers
-        .get(&Tier::Mechanical)
-        .and_then(|id| settings.routes.iter().find(|r| &r.id == id))
-        .cloned();
-    let note = mechanical.as_ref().map(|m| {
+    let cheapest = cheapest_available(&settings, has);
+    let note = cheapest.as_ref().filter(|_| route_id != "auto").map(|c| {
         format!(
-            "route {route_id} is not configured; using the mechanical tier's route {}",
-            m.id
+            "route {route_id} is not configured or unavailable; using the cheapest available route {}",
+            c.id
         )
     });
-    Some((route_id, mechanical, note))
+    Some((route_id, cheapest, note))
 }
 
 /// Checks the stored task's goal and criteria once. `can_redraft` is true
@@ -271,10 +262,12 @@ pub(super) async fn check_brief(
         Some(route) => match run_check(app, &task, route, attempt_n, cancel).await {
             Ok(v) => v,
             Err(RunError::Cancelled) => return BriefAction::Cancelled,
-            Err(RunError::Io(msg)) => (Verdict::Unusable(msg), None),
+            Err(RunError::Io(msg) | RunError::NotFound(msg)) => (Verdict::Unusable(msg), None),
         },
         None => (
-            Verdict::Unusable(format!("route {route_id} is not configured")),
+            Verdict::Unusable(format!(
+                "no route on an installed agent CLI for {route_id}; the check is off"
+            )),
             None,
         ),
     };

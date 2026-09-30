@@ -92,6 +92,9 @@ impl App {
         if !p.settings.daily_budget_usd.is_finite() || p.settings.daily_budget_usd < 0.0 {
             return Err("dailyBudgetUsd must be a finite number, 0 or more".to_string());
         }
+        if p.settings.verify_timeout_secs == 0 {
+            return Err("verifyTimeoutSecs must be at least 1".to_string());
+        }
         p.settings.experiments.check()?;
         let mut tool_ids = std::collections::HashSet::new();
         for tool in &p.settings.chat_tools {
@@ -107,6 +110,8 @@ impl App {
             .save_settings(&p.settings)
             .map_err(|e| e.to_string())?;
         *self.settings.write().unwrap() = p.settings.clone();
+        self.refresh_availability();
+        set_verify_timeout_secs(p.settings.verify_timeout_secs);
         self.advance_autopilot();
         serde_json::to_value(&p.settings).map_err(|e| e.to_string())
     }

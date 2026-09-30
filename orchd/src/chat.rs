@@ -1064,8 +1064,9 @@ const QUESTION_TURN_REPLY: &str =
 /// changed since the session's last turn.
 fn begin_turn(app: &App, repo: &str) -> Result<(ChatSession, Route, CancelToken), String> {
     let settings = app.settings.read().unwrap().clone();
-    let route =
-        orchestrator_route(&settings).ok_or("no route is configured for the orchestrator")?;
+    let route = app
+        .chat_route(&settings)
+        .ok_or("no route is configured for the orchestrator")?;
     let cancel = CancelToken::new();
     {
         let mut turns = app.chat_turns.lock().unwrap();
@@ -1762,7 +1763,9 @@ async fn run_turn(
             }
         }
         (Err(RunError::Cancelled), Turn::Owner(_)) => thread.error = Some("Stopped.".into()),
-        (Err(RunError::Io(error)), Turn::Owner(_)) => thread.error = Some(error),
+        (Err(RunError::Io(error) | RunError::NotFound(error)), Turn::Owner(_)) => {
+            thread.error = Some(error)
+        }
         (Err(_), Turn::Questions(_)) => {}
     }
     finish_turn(app, &repo, &thread);

@@ -262,7 +262,7 @@ pub(super) async fn heal_feasibility(
                     rulings.push((failed.clone(), r));
                 }
             }
-            Err(RunError::Io(_)) => {}
+            Err(RunError::Io(_) | RunError::NotFound(_)) => {}
         }
     }
     let Ok(Some(mut task)) = app.store.load_task(task_id) else {

@@ -119,7 +119,7 @@ pub(super) async fn run_advisor_before_retry(
             task.attempts[failed].advisor_fingerprint = read_cancelled_fingerprint(&events_path);
             return Some(cost);
         }
-        Err(RunError::Io(_)) => return None,
+        Err(RunError::Io(_) | RunError::NotFound(_)) => return None,
     };
     let cost = outcome.cost_usd.unwrap_or(0.0);
     task.attempts[failed].advisor_cost_usd = Some(cost);

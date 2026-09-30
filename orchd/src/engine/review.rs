@@ -551,7 +551,7 @@ pub(super) async fn run_review(
                 .unwrap_or(0.0);
             Err(ReviewFailure::Cancelled)
         }
-        Err(RunError::Io(why)) => Err(ReviewFailure::Harness(why)),
+        Err(RunError::Io(why) | RunError::NotFound(why)) => Err(ReviewFailure::Harness(why)),
     }
 }
 

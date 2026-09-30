@@ -34,6 +34,7 @@ pub(super) fn policy_open(app: &App, task: &Task, kind: QuestionKind) -> bool {
             kind,
             QuestionKind::Budget
                 | QuestionKind::DailyBudget
+                | QuestionKind::HarnessMissing
                 | QuestionKind::ProtectedPath
                 | QuestionKind::Permission
         )

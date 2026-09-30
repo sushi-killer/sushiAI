@@ -179,7 +179,7 @@ fn run_cost(app: &App, res: &Result<harness::RunOutcome, RunError>, events: &Pat
         Err(RunError::Cancelled) => replay_run_cost(events, &app.settings.read().unwrap().prices)
             .and_then(|o| o.cost_usd)
             .unwrap_or(0.0),
-        Err(RunError::Io(_)) => 0.0,
+        Err(RunError::Io(_) | RunError::NotFound(_)) => 0.0,
     }
 }
 
@@ -622,6 +622,6 @@ async fn run_pick(
             Ok((brief::parse_pick(&text), cost))
         }
         Err(RunError::Cancelled) => Err(RunError::Cancelled),
-        Err(RunError::Io(_)) => Ok((None, 0.0)),
+        Err(RunError::Io(_) | RunError::NotFound(_)) => Ok((None, 0.0)),
     }
 }

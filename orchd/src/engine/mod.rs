@@ -33,6 +33,7 @@ mod messages;
 mod advisor;
 mod answer_policy;
 mod attempt_run;
+mod availability;
 mod backlog;
 mod base_check;
 mod best_of;
@@ -69,6 +70,7 @@ mod worktrees;
 use advisor::*;
 use answer_policy::*;
 use attempt_run::*;
+use availability::*;
 use backlog::*;
 use base_check::*;
 use best_of::*;
@@ -286,6 +288,8 @@ pub struct App {
     /// Keyed by (base sha, command): what a command did on that commit, so an
     /// unchanged base is never checked twice for the same command.
     base_runs: std::sync::Mutex<HashMap<(String, String), VerifyOutcome>>,
+    /// Which harness CLIs the last probe found (`availability.rs`).
+    harness_avail: StdMutex<HashMap<Harness, bool>>,
     pid: u32,
     /// The executable's mtime at startup, so the app can tell a rebuilt
     /// binary from the one this daemon is running.
@@ -454,6 +458,7 @@ impl App {
             autopilot_admission: StdMutex::new(()),
             verify_cache: std::sync::Mutex::new(HashMap::new()),
             base_runs: std::sync::Mutex::new(HashMap::new()),
+            harness_avail: StdMutex::new(HashMap::new()),
             pid: std::process::id(),
             binary_mtime_ms,
             control_token,
@@ -468,6 +473,8 @@ impl App {
             self_ref: OnceLock::new(),
         });
         let _ = app.self_ref.set(Arc::downgrade(&app));
+        app.refresh_availability();
+        set_verify_timeout_secs(app.settings.read().unwrap().verify_timeout_secs);
         Ok(app)
     }
 
@@ -662,6 +669,7 @@ mod tests {
     //! the qualified test names stay `engine::tests::*`.
     use super::*;
 
+    include!("tests/availability.rs");
     include!("tests/cost.rs");
     include!("tests/decision.rs");
     include!("tests/graph.rs");

@@ -178,14 +178,14 @@ fn an_empty_route_turns_the_check_off() {
 }
 
 #[test]
-fn a_route_that_names_nothing_falls_back_to_the_mechanical_tier() {
+fn a_route_that_names_nothing_falls_back_to_the_cheapest_available_route() {
     let r = run(CLEAR_RESULT, Some("claude-haiku"), explicit());
     assert_eq!(r.task["status"], "done", "task JSON: {}", r.task);
     assert_eq!(count(&r.calls, "check"), 1, "calls: {:?}", r.calls);
     let lines = decisions(&r.task);
     assert!(
         lines.iter().any(|l| l
-            == "Brief check: route claude-haiku is not configured; using the mechanical tier's route claude-sonnet"),
+            == "Brief check: route claude-haiku is not configured or unavailable; using the cheapest available route claude-sonnet"),
         "{lines:?}"
     );
     r.daemon.shutdown_and_wait();

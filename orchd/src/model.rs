@@ -130,6 +130,10 @@ pub struct Settings {
     /// stays the global cap).
     #[serde(default = "default_child_parallel")]
     pub child_parallel: u32,
+    /// Seconds one verify command may run before it is killed. The Stop
+    /// hook's budget derives from it, capped under Claude's 600 s hook limit.
+    #[serde(default = "default_verify_timeout_secs")]
+    pub verify_timeout_secs: u64,
     /// Route id used for the drafting/plan stage of a `{repo, request}`
     /// `task.create`; `""` turns planning off (that create form is then
     /// rejected -- there is nothing to run it with).
@@ -393,9 +397,9 @@ fn default_answer_policy() -> bool {
 }
 
 /// Route the brief consistency check runs on unless settings name another:
-/// the route `Settings::default` gives the mechanical tier.
+/// `auto` is the cheapest configured route whose harness CLI is installed.
 fn default_brief_check_route() -> String {
-    "codex".to_string()
+    "auto".to_string()
 }
 
 /// A criterion the task's tools cannot meet: `tool_id` names the connected
@@ -465,6 +469,10 @@ impl BriefCheck {
 
 fn default_child_parallel() -> u32 {
     3
+}
+
+fn default_verify_timeout_secs() -> u64 {
+    1200
 }
 
 fn default_planner() -> String {
@@ -547,6 +555,7 @@ impl Default for Settings {
             parallel: 2,
             daily_budget_usd: 0.0,
             child_parallel: default_child_parallel(),
+            verify_timeout_secs: default_verify_timeout_secs(),
             planner: default_planner(),
             brief_check_route: default_brief_check_route(),
             orchestrator: String::new(),
@@ -1013,6 +1022,8 @@ pub enum QuestionKind {
     PlanQuestion,
     /// Today's spend reached `dailyBudgetUsd`; never answered by policy.
     DailyBudget,
+    /// No agent CLI (claude or codex) is installed; never answered by policy.
+    HarnessMissing,
     #[default]
     AgentQuestion,
 }
@@ -1464,7 +1475,9 @@ pub fn is_command_check(text: &str) -> bool {
         return false;
     }
     const TOOLS: &[&str] = &[
-        "cargo", "npm", "npx", "pnpm", "yarn", "node", "pytest", "make", "jest", "vitest",
+        "cargo", "npm", "npx", "pnpm", "yarn", "bun", "node", "deno", "pytest", "tox", "uv",
+        "make", "cmake", "ctest", "jest", "vitest", "gradle", "gradlew", "mvn", "mvnw", "dotnet",
+        "rspec", "rake", "phpunit",
     ];
     let has_word = check
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -1862,17 +1875,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_settings_have_no_haiku_route_and_check_on_the_mechanical_route() {
+    fn default_settings_have_no_haiku_route_and_check_on_the_cheapest_available_route() {
         let settings = Settings::default();
         assert!(!settings
             .routes
             .iter()
             .any(|r| r.id.contains("haiku")
                 || r.model.as_deref().is_some_and(|m| m.contains("haiku"))));
-        assert_eq!(
-            Some(&settings.brief_check_route),
-            settings.tiers.get(&Tier::Mechanical)
-        );
+        assert_eq!(settings.brief_check_route, "auto");
     }
 
     fn minimal_task_json() -> serde_json::Value {

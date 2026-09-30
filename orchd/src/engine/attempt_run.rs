@@ -30,6 +30,8 @@ impl CostTag {
 pub(super) enum RunError {
     Cancelled,
     Io(String),
+    /// The harness binary does not exist: nothing ran, so it costs no attempt.
+    NotFound(String),
 }
 
 /// Spawn `claude`/`codex` in its own process group, write `brief` to
@@ -91,9 +93,14 @@ pub(super) async fn run_harness(
         });
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| RunError::Io(format!("{bin}: {e}")))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        let text = format!("{bin}: {e}");
+        if e.kind() == std::io::ErrorKind::NotFound {
+            RunError::NotFound(text)
+        } else {
+            RunError::Io(text)
+        }
+    })?;
     let pgid = child.id().map(|p| p as i32);
     if track_attempt {
         if let Some(pgid) = pgid {

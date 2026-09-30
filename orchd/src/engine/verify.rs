@@ -1,6 +1,24 @@
 use super::*;
 
-const VERIFY_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+/// `settings.verifyTimeoutSecs`, set when the daemon starts and on every
+/// `settings.set`; the verify runners are free functions with no `App`.
+static VERIFY_TIMEOUT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1200);
+
+/// The most the Stop hook waits for verify: under Claude's 600 s hook limit.
+const HOOK_BUDGET_CAP_SECS: u64 = 540;
+
+/// The Stop hook's verify budget: the verify timeout, capped.
+pub(super) fn hook_budget_secs(verify_timeout_secs: u64) -> u64 {
+    verify_timeout_secs.clamp(1, HOOK_BUDGET_CAP_SECS)
+}
+
+pub(super) fn set_verify_timeout_secs(secs: u64) {
+    VERIFY_TIMEOUT_SECS.store(secs.max(1), Ordering::SeqCst);
+}
+
+fn verify_timeout() -> Duration {
+    Duration::from_secs(VERIFY_TIMEOUT_SECS.load(Ordering::SeqCst))
+}
 
 /// Every path a verify command is allowed to write under when sandboxed:
 /// the worktree and its own run dir, plus the usual OS/package-manager temp
@@ -235,7 +253,7 @@ pub(super) async fn run_verify_commands(
             run_one_verify_command(
                 cwd,
                 cmd,
-                VERIFY_TIMEOUT,
+                verify_timeout(),
                 sandbox,
                 &allow_write,
                 base_sha,
@@ -276,7 +294,7 @@ pub(super) async fn run_eval_check(
     let out = run_one_verify_command(
         &path,
         cmd,
-        VERIFY_TIMEOUT,
+        verify_timeout(),
         sandbox,
         &allow_write,
         sha,
@@ -528,7 +546,14 @@ pub(super) fn verify_tail(stdout: &[u8], stderr: &[u8]) -> String {
     body
 }
 
-const TIMED_OUT_TAIL: &str = "timed out after 20 minutes";
+pub(super) fn timed_out_tail(timeout: Duration) -> String {
+    let secs = timeout.as_secs();
+    if secs >= 60 && secs.is_multiple_of(60) {
+        format!("timed out after {} minutes", secs / 60)
+    } else {
+        format!("timed out after {secs} seconds")
+    }
+}
 const CANCELLED_TAIL: &str = "cancelled";
 const SPAWN_FAILED_PREFIX: &str = "failed to run: ";
 const INTERNAL_ERROR_PREFIX: &str = "internal error: ";
@@ -769,7 +794,7 @@ pub(super) async fn run_one_verify_command(
             VerifyOutcome {
                 command: cmd.to_string(),
                 code: None,
-                tail: TIMED_OUT_TAIL.to_string(),
+                tail: timed_out_tail(timeout),
                 ms: start.elapsed().as_millis() as u64,
             }
         }
@@ -785,28 +810,67 @@ pub(super) async fn run_one_verify_command(
     }
 }
 
+/// The package runner the repo's lockfile names: pnpm, yarn, bun, else npm.
+fn package_runner(worktree: &Path) -> &'static str {
+    let has = |name: &str| worktree.join(name).exists();
+    if has("pnpm-lock.yaml") {
+        "pnpm"
+    } else if has("yarn.lock") {
+        "yarn"
+    } else if has("bun.lockb") || has("bun.lock") {
+        "bun"
+    } else {
+        "npm"
+    }
+}
+
 /// Suggested quick-reply options for the synthesized "no verification
 /// command" question: each of the target repo's own `package.json` scripts,
-/// as `npm run <script>`, `test`-named scripts ranked first (they're by far
-/// the most likely answer). Empty (not an error) when there's no
-/// `package.json` or no `scripts` -- the question still accepts free text.
-pub(super) fn verify_options_from_package_json(worktree: &Path) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(worktree.join("package.json")) else {
-        return vec![];
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return vec![];
-    };
-    let Some(scripts) = v.get("scripts").and_then(|s| s.as_object()) else {
-        return vec![];
-    };
-    let mut names: Vec<&String> = scripts.keys().collect();
-    names.sort_by_key(|k| (!k.to_ascii_lowercase().contains("test"), k.as_str()));
-    names
-        .into_iter()
-        .take(4)
-        .map(|k| format!("npm run {k}"))
-        .collect()
+/// as `<runner> run <script>` (the runner follows the lockfile), `test`-named
+/// scripts ranked first (they're by far the most likely answer), then the
+/// test command of each other toolchain the repo shows: `cargo test`,
+/// `go test ./...`, `pytest`, `make test`. Empty (not an error) when nothing
+/// is recognised -- the question still accepts free text.
+pub(super) fn verify_options(worktree: &Path) -> Vec<String> {
+    let mut options: Vec<String> = Vec::new();
+    let scripts = std::fs::read_to_string(worktree.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|v| v.get("scripts").and_then(|s| s.as_object()).cloned());
+    if let Some(scripts) = scripts {
+        let runner = package_runner(worktree);
+        let mut names: Vec<&String> = scripts.keys().collect();
+        names.sort_by_key(|k| (!k.to_ascii_lowercase().contains("test"), k.as_str()));
+        options.extend(
+            names
+                .into_iter()
+                .take(4)
+                .map(|k| format!("{runner} run {k}")),
+        );
+    }
+    let has = |name: &str| worktree.join(name).exists();
+    if has("Cargo.toml") {
+        options.push("cargo test".to_string());
+    }
+    if has("go.mod") {
+        options.push("go test ./...".to_string());
+    }
+    if has("pyproject.toml") || has("pytest.ini") {
+        options.push("pytest".to_string());
+    }
+    let make_test = ["Makefile", "makefile", "GNUmakefile"]
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(worktree.join(f)).ok())
+        .any(|text| {
+            text.lines().any(|l| {
+                l.strip_prefix("test")
+                    .is_some_and(|r| r.trim_start().starts_with(':'))
+            })
+        });
+    if make_test {
+        options.push("make test".to_string());
+    }
+    options
 }
 
 #[cfg(test)]
@@ -852,7 +916,7 @@ mod grounded_checks_tests {
             Some(Baseline::Env)
         );
         assert_eq!(
-            classify_baseline(&outcome(None, TIMED_OUT_TAIL)),
+            classify_baseline(&outcome(None, &timed_out_tail(Duration::from_secs(1200)))),
             Some(Baseline::Fail)
         );
         assert_eq!(classify_baseline(&outcome(None, CANCELLED_TAIL)), None);

@@ -70,7 +70,7 @@ pub(super) async fn owner_accepts(
     cancel: &CancelToken,
 ) -> bool {
     let settings = app.settings.read().unwrap().clone();
-    let Some(route) = chat::orchestrator_route(&settings) else {
+    let Some(route) = app.chat_route(&settings) else {
         return false;
     };
     let attempt_n = task.attempts[idx].n;
@@ -262,7 +262,7 @@ async fn run_triage(
     if !settings.auto_answer && !force {
         return None;
     }
-    let route = chat::orchestrator_route(&settings)?;
+    let route = app.chat_route(&settings)?;
 
     let run_dir = app.store.run_dir(task_id, attempt_n).join("triage");
     let _ = std::fs::create_dir_all(&run_dir);
@@ -332,7 +332,7 @@ async fn run_triage(
             decision: brief::sanitize_triage(None, question, options),
             cost_usd: o.cost_usd,
         }),
-        Err(RunError::Io(_)) => Some(TriageRun {
+        Err(RunError::Io(_) | RunError::NotFound(_)) => Some(TriageRun {
             decision: brief::sanitize_triage(None, question, options),
             cost_usd: None,
         }),

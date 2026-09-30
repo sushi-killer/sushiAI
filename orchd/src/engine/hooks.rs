@@ -41,10 +41,12 @@ impl App {
             let app = self.arc();
             let run_dir = self.store.run_dir(&ctx.task_id, ctx.attempt_n);
 
-            // Budget well under Claude's own 600s hook timeout; on timeout,
-            // fail open rather than block the agent forever.
+            // Derived from the verify timeout, capped well under Claude's
+            // own 600s hook timeout; on timeout, fail open rather than block
+            // the agent forever.
+            let budget = hook_budget_secs(self.settings.read().unwrap().verify_timeout_secs);
             match tokio::time::timeout(
-                Duration::from_secs(540),
+                Duration::from_secs(budget),
                 run_verify_cached(
                     &app,
                     &ctx.task_id,

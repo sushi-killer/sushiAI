@@ -460,6 +460,22 @@ pub(super) async fn run_task_loop(
             }
         }
 
+        let resume_status = task.status;
+        if !wait_for_harness(
+            &app,
+            &task_id,
+            &mut task,
+            resume_status,
+            &pending_answer,
+            &cancel,
+            &mut permit,
+        )
+        .await
+        {
+            drop(permit);
+            app.finish_task_loop(&task_id);
+            return;
+        }
         let settings = app.settings.read().unwrap().clone();
         let attempt_n = implement_attempt_count(&task) + 1;
         // A landing that conflicted only needs its markers resolved: that
@@ -506,6 +522,15 @@ pub(super) async fn run_task_loop(
                 profile_id: None,
                 strength: None,
             });
+        let Some((route, swap)) = app.usable_route(&settings, route) else {
+            // No route runs on an installed harness: ask again.
+            continue 'attempts;
+        };
+        if let Some(line) = swap {
+            if !task.decisions.contains(&line) {
+                task.decisions.push(line);
+            }
+        }
 
         let worktree = PathBuf::from(&task.worktree);
         let base_sha = task.base_sha.clone();
@@ -822,6 +847,19 @@ pub(super) async fn run_task_loop(
                 drop(permit);
                 app.finish_task_loop(&task_id);
                 return;
+            }
+            Err(RunError::NotFound(msg)) => {
+                // Nothing ran: the attempt is not spent. The harness is
+                // marked missing so the next round routes around it.
+                app.mark_harness_missing(route.harness);
+                task.attempts.remove(idx);
+                task.decisions
+                    .push(format!("Orchestrator: {msg}; no attempt was used"));
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+                drop(permit);
+                continue;
             }
             Err(RunError::Io(msg)) => {
                 match fail_and_continue(
@@ -1732,10 +1770,18 @@ pub(super) async fn run_task_loop(
         }
         let mut review_result: Option<ReviewResult> = None;
         if !settings.review.is_empty() {
-            if let Some((review_route, why)) = select_review_route(&settings, &route, task.tier) {
+            let selected =
+                select_review_route(&settings, &route, task.tier).and_then(|(r, why)| {
+                    app.usable_route(&settings, r.clone())
+                        .map(|(r, swap)| (r, why, swap))
+                });
+            if let Some((review_route, why, swap)) = selected {
+                let review_route = &review_route;
                 let note = format!("Orchestrator: review: {} ({why})", review_route.id);
-                if !task.decisions.contains(&note) {
-                    task.decisions.push(note);
+                for line in swap.into_iter().chain([note]) {
+                    if !task.decisions.contains(&line) {
+                        task.decisions.push(line);
+                    }
                 }
                 if !wait_while_over_budget(
                     &app,

@@ -257,7 +257,7 @@ fn finish(app: &App, audit: &mut Audit, result: Result<harness::RunOutcome, RunE
             audit.status = AuditStatus::Stopped;
             audit.error = Some("Stopped.".to_string());
         }
-        Err(RunError::Io(error)) => {
+        Err(RunError::Io(error) | RunError::NotFound(error)) => {
             audit.status = AuditStatus::Failed;
             audit.error = Some(error);
         }

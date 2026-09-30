@@ -437,6 +437,19 @@ pub(super) async fn run_plan_stage(
             return end_plan_stage(app, task_id, None).await;
         }
 
+        if !wait_for_harness(
+            app,
+            task_id,
+            &mut task,
+            TaskStatus::Drafting,
+            pending_answer,
+            cancel,
+            permit,
+        )
+        .await
+        {
+            return end_plan_stage(app, task_id, None).await;
+        }
         let settings = app.settings.read().unwrap().clone();
         let variant = task.variant();
         let planner = variant.plan_route_id(&settings);
@@ -453,6 +466,14 @@ pub(super) async fn run_plan_stage(
             return end_plan_stage(app, task_id, None).await;
         };
 
+        let Some((route, swap)) = app.usable_route(&settings, route) else {
+            return end_plan_stage(app, task_id, None).await;
+        };
+        if let Some(line) = swap {
+            if !task.decisions.contains(&line) {
+                task.decisions.push(line);
+            }
+        }
         if variant.planner_route.is_some() {
             let line = variant_route_line("planner", &route.id);
             if !task.decisions.contains(&line) {
@@ -674,7 +695,7 @@ pub(super) async fn run_plan_stage(
                     let _ = std::fs::remove_file(&key_path);
                     return end_plan_stage(app, task_id, Some(idx)).await;
                 }
-                Err(RunError::Io(msg)) => {
+                Err(RunError::Io(msg) | RunError::NotFound(msg)) => {
                     record_failure(&mut task, idx, FailureKind::Error, msg);
                     task.status = TaskStatus::Failed;
                     task.updated_at = now_ms();
@@ -939,7 +960,7 @@ pub(super) async fn run_plan_stage(
         // Unconditional on an empty `verify` (review item P2e): ask
         // outright rather than skipping the question.
         if task.verify.is_empty() {
-            let options = verify_options_from_package_json(&worktree);
+            let options = verify_options(&worktree);
             match ask_plan_question(
                 app,
                 task_id,

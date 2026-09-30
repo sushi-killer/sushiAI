@@ -6,12 +6,27 @@ function registerProjectIpc({
   getPreview,
   terminals,
   terminalPending,
+  projects,
 }) {
   const connections = () => {
     const value = getConnections();
     if (!value) throw new Error("Connections are not ready.");
     return value;
   };
+
+  if (projects) {
+    handle("projects:list", () => projects.list());
+    handle("projects:get", (id) => projects.get(id));
+    handle("projects:upsert", (project) => projects.upsert(project));
+    handle("projects:delete", (id) => projects.delete(id));
+    handle("projects:secret:set", (id, name, value) =>
+      projects.setSecret(id, name, value),
+    );
+    handle("projects:secret:clear", (id, name) =>
+      projects.clearSecret(id, name),
+    );
+    handle("projects:resolve", (remote) => projects.resolve(remote));
+  }
 
   async function disconnectEndpoint(endpoint) {
     for (const pending of terminalPending.values()) {

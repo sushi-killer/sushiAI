@@ -130,6 +130,22 @@ export type Workspace = {
   panels: Panel[];
   layout: Layout | null;
 };
+export type Project = {
+  id: string;
+  name: string;
+  git: { url: string; defaultBranch: string };
+  env: {
+    name: string;
+    secret: boolean;
+    hint?: string;
+    availableTo?: string[];
+  }[];
+  mcp: Record<string, unknown>;
+  setup: { install: string; check: string };
+  network: { allowedDomains: string[] };
+  sessions: { claudeAccount?: string; backend?: "herdr" | "local" };
+  targets: string[];
+};
 export type Snapshot = {
   version: string;
   workspaces: {
@@ -533,6 +549,19 @@ export interface Bridge {
   connectionsConnect(endpoint: string): Promise<void>;
   connectionsDisconnect(endpoint: string): Promise<void>;
   connectionsForward(endpoint: string, url: string): Promise<string>;
+  projectsList(): Promise<Project[]>;
+  projectsGet(id: string): Promise<Project | null>;
+  projectsUpsert(project: Partial<Project>): Promise<Project>;
+  projectsDelete(id: string): Promise<void>;
+  projectSecretSet(
+    id: string,
+    name: string,
+    value: string,
+  ): Promise<{ hasValue: boolean; hint: string }>;
+  projectSecretClear(id: string, name: string): Promise<void>;
+  projectsResolve(
+    remote: string | { remote: string; endpoint?: string },
+  ): Promise<Project | null>;
   projectInspect(
     endpoint: string | undefined,
     options: Record<string, unknown>,

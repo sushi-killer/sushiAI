@@ -131,6 +131,13 @@ contextBridge.exposeInMainWorld("bridge", {
   connectionsDisconnect: invoke("connections-disconnect"),
   connectionsForward: invoke("connections-forward"),
   projectInspect: invoke("project-inspect"),
+  projectsList: invoke("projects:list"),
+  projectsGet: invoke("projects:get"),
+  projectsUpsert: invoke("projects:upsert"),
+  projectsDelete: invoke("projects:delete"),
+  projectSecretSet: invoke("projects:secret:set"),
+  projectSecretClear: invoke("projects:secret:clear"),
+  projectsResolve: invoke("projects:resolve"),
   projectPreview: invoke("project-preview"),
   worktreeCreate: invoke("worktree-create"),
   onTerminal: (callback) => {

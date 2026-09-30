@@ -24,6 +24,7 @@ const { manageSkill } = require("./skills-manager.cjs");
 const { ClaudeMcp } = require("./claude-mcp.cjs");
 const { ClaudePlugins } = require("./claude-plugins.cjs");
 const { ModelProviders } = require("./model-providers.cjs");
+const { Projects } = require("./projects.cjs");
 const { AgentRegistry } = require("./agents/registry.cjs");
 const { HermesProvider } = require("./agents/hermes-provider.cjs");
 const { registerProjectIpc } = require("./ipc/projects.cjs");
@@ -100,6 +101,10 @@ const modelProviders = new ModelProviders({
   userDataDir: app.getPath("userData"),
   safeStorage,
 });
+const projects = new Projects({
+  userDataDir: app.getPath("userData"),
+  safeStorage,
+});
 const extraPath = [
   path.join(os.homedir(), ".local/bin"),
   "/opt/homebrew/bin",
@@ -157,6 +162,7 @@ registerProjectIpc({
   getPreview: () => preview,
   terminals,
   terminalPending,
+  projects,
 });
 registerExtensionIpc({
   handle,

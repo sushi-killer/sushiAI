@@ -87,7 +87,7 @@ pub(super) async fn run_advisor_before_retry(
         mcp_config: Some(&mcp_path),
         settings_path: Some(&settings_path),
         network_allowed: false,
-        codex_mcp: None,
+        codex_mcp: &[],
         images: &[],
         repo_settings: true,
     };

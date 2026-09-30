@@ -23,9 +23,10 @@ pub struct RunRequest<'a> {
     /// Codex only: whether the sandbox has network access
     /// (`sandbox_workspace_write.network_access`).
     pub network_allowed: bool,
-    /// Codex only: an MCP server (name, `{command, args, env?}`) passed as
-    /// `-c mcp_servers.*` flags; Claude reads its servers from `mcp_config`.
-    pub codex_mcp: Option<(&'a str, &'a serde_json::Value)>,
+    /// Codex only: MCP servers (name, `{command, args, env?}` or `{url}`)
+    /// passed as `-c mcp_servers.*` flags; Claude reads its servers from
+    /// `mcp_config`.
+    pub codex_mcp: &'a [(String, serde_json::Value)],
     /// Codex only: images attached to the prompt (`--image`); Claude opens
     /// image files itself with its Read tool.
     pub images: &'a [std::path::PathBuf],
@@ -40,9 +41,13 @@ pub struct RunRequest<'a> {
 /// does not delegate. `Task` and `Agent` are the subagent tool's two names.
 pub const DELEGATION_TOOLS: &str = "Task,Agent,Workflow,SendMessage,ListAgents";
 
-/// `-c mcp_servers.<name>.{command,args,env.*}` for one MCP server. JSON
-/// strings and string arrays are valid TOML values as they are.
+/// `-c mcp_servers.<name>.{command,args,env.*}` for one MCP server, or
+/// `.url` for an HTTP one. JSON strings and string arrays are valid TOML
+/// values as they are.
 pub fn codex_mcp_flags(name: &str, server: &serde_json::Value) -> Vec<String> {
+    if let Some(url) = server.get("url").filter(|u| u.is_string()) {
+        return vec!["-c".to_string(), format!("mcp_servers.{name}.url={url}")];
+    }
     let mut flags = vec![
         "-c".to_string(),
         format!("mcp_servers.{name}.command={}", server["command"]),
@@ -146,7 +151,7 @@ pub fn codex_argv(req: &RunRequest) -> Vec<String> {
             req.network_allowed
         ));
     }
-    if let Some((name, server)) = req.codex_mcp {
+    for (name, server) in req.codex_mcp {
         argv.extend(codex_mcp_flags(name, server));
     }
     if let Some(model) = req.model {
@@ -773,10 +778,39 @@ mod tests {
             mcp_config: None,
             settings_path: None,
             network_allowed: true,
-            codex_mcp: None,
+            codex_mcp: &[],
             images: &[],
             repo_settings: true,
         }
+    }
+
+    #[test]
+    fn codex_gets_a_task_server_and_an_http_one_as_a_url() {
+        let wt = PathBuf::from("/repo-task");
+        let mut req = base_req(Harness::Codex, &wt);
+        let servers = [
+            (
+                "design".to_string(),
+                serde_json::json!({"command": "npx", "args": ["-y", "d"], "env": {"K": "v"}}),
+            ),
+            (
+                "web".to_string(),
+                serde_json::json!({"type": "http", "url": "https://example.test/mcp"}),
+            ),
+        ];
+        req.codex_mcp = &servers;
+        let argv = codex_argv(&req);
+        for flag in [
+            "mcp_servers.design.command=\"npx\"",
+            "mcp_servers.design.args=[\"-y\",\"d\"]",
+            "mcp_servers.design.env.K=\"v\"",
+            "mcp_servers.web.url=\"https://example.test/mcp\"",
+        ] {
+            assert!(argv.contains(&flag.to_string()), "{flag}: {argv:?}");
+        }
+        assert!(!argv
+            .iter()
+            .any(|a| a.starts_with("mcp_servers.web.command")));
     }
 
     #[test]
@@ -784,7 +818,8 @@ mod tests {
         let wt = PathBuf::from("/repo-task");
         let server = serde_json::json!({"command": "/o", "args": ["mcp", "--task", "t"]});
         let mut req = base_req(Harness::Codex, &wt);
-        req.codex_mcp = Some(("sushiai-messages", &server));
+        let servers = [("sushiai-messages".to_string(), server.clone())];
+        req.codex_mcp = &servers;
         let command = "mcp_servers.sushiai-messages.command=\"/o\"".to_string();
         let args = "mcp_servers.sushiai-messages.args=[\"mcp\",\"--task\",\"t\"]".to_string();
         let argv = codex_argv(&req);

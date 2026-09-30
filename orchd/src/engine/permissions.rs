@@ -172,6 +172,24 @@ impl TaskTools {
         json!({"mcpServers": servers})
     }
 
+    /// The servers a Codex run gets: the task's own (the owner attached them
+    /// to this task) and `messages_server`. Codex has no hook that asks the
+    /// owner before a write, so connected tools and the repository's
+    /// servers stay Claude-only.
+    pub fn codex_servers(
+        &self,
+        messages_server: &serde_json::Value,
+    ) -> Vec<(String, serde_json::Value)> {
+        let mut servers: Vec<(String, serde_json::Value)> = self
+            .task
+            .iter()
+            .filter(|(key, _)| key.as_str() != messages::SERVER)
+            .map(|(key, def)| (key.clone(), def.clone()))
+            .collect();
+        servers.push((messages::SERVER.to_string(), messages_server.clone()));
+        servers
+    }
+
     /// `permissions.allow` entries for the run: read tools of the connected
     /// tools and tools the owner allowed. Never a write tool of its own
     /// accord.
@@ -977,6 +995,14 @@ mod tests {
         assert_eq!(servers["a"]["command"], "project");
         assert!(servers.contains_key("p") && servers.contains_key("t"));
         assert_eq!(servers[messages::SERVER]["command"], "messages");
+        // Codex gets only the task's own servers and the messages server:
+        // it has no hook to ask the owner before a connected tool writes.
+        let codex: Vec<String> = tools
+            .codex_servers(&json!({"command": "messages"}))
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(codex, vec!["t".to_string(), messages::SERVER.to_string()]);
         let block = tools_block(&tools, false);
         assert!(
             block.contains("a: read tools get; write tools send"),

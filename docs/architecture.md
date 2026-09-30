@@ -118,6 +118,8 @@ flowchart TB
   remoteOrchd -->|task agent env + project MCP| taskAgent
 ```
 
+Project metadata is stored in `projects.json`; environment and account values are stored separately in `project-secrets.json` through Electron `safeStorage`. The renderer receives presence and masked hints, while the main process resolves values for the selected project, stage, and host. Local sessions receive their stage-specific environment at launch. Remote task values cross only to a project-and-host pair the owner has trusted, through the forwarded orchd socket; remote terminal values use a one-shot file sent over SSH stdin and removed after sourcing. Revoking trust prevents later reads from including that host's project values.
+
 ## 2. Task lifecycle
 
 ```mermaid

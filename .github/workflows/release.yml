@@ -45,6 +45,7 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+      - uses: dtolnay/rust-toolchain@1.94.1
       - run: npm ci
       - run: npm run package:dmg
       - run: cd release && shasum -a 256 *.dmg > SHA256SUMS.txt

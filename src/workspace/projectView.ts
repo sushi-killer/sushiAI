@@ -24,7 +24,7 @@ export function rememberView(
 /** Decides what a key change should zoom to. `switchWorkspace` always resets
  * `zoomed` to `null` before anything else runs, so a non-null value seen here
  * can only come from an explicit "show this pane" set in the same batch
- * (App.tsx's selectHostPane, SessionsDialog's onShow, the blocked-panel
+ * (App.tsx's selectHostPane, the Inbox's jump, the blocked-panel
  * notification) - that intent wins over the project's own stored zoom.
  * Otherwise there was no explicit pane to show, so the stored zoom restores
  * as before. */

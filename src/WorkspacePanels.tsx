@@ -9,6 +9,7 @@ import { RenderProfiler } from "./RenderProfiler";
 import { Icon } from "./PanelIcon";
 import type { ExtensionRegistry } from "./extensions/registry";
 import { ExtensionSurface } from "./extensions/SurfaceRenderer";
+import { OrchestratorPanel } from "./orchestrator/OrchestratorPanel";
 
 type PanelHostProps = {
   panel: Panel;
@@ -30,11 +31,16 @@ type PanelHostProps = {
   onAdd(): void;
   onRename(panelId: string, title: string): void;
   onStart(panelId: string): void;
+  onReopen(panelId: string): void;
+  /** Saves per-pane state (Files folder, Orchestrator view) on the panel. */
+  onPatch(panelId: string, patch: Partial<Panel>): void;
   onNavigate(panelId: string, url: string): void;
   onHTML(root: string, file: string, endpoint?: string): void;
   onSend(panel: Panel, text: string): void;
   onCancel(panelId: string): void;
   onAgent(panelId: string, agent: string): void;
+  /** Opens Settings -> Connections (the Orchestrator's "Add a host"). */
+  onOpenConnections?: () => void;
   extensionRegistry: ExtensionRegistry;
 };
 
@@ -56,11 +62,14 @@ export const PanelHost = memo(function PanelHost({
   onAdd,
   onRename,
   onStart,
+  onReopen,
+  onPatch,
   onNavigate,
   onHTML,
   onSend,
   onCancel,
   onAgent,
+  onOpenConnections,
   extensionRegistry,
 }: PanelHostProps) {
   return (
@@ -88,6 +97,7 @@ export const PanelHost = memo(function PanelHost({
               endpoint={endpoint}
               hostLabel={hostLabel}
               onStart={() => onStart(panel.id)}
+              onReopen={() => onReopen(panel.id)}
             />
           ) : (
             <div className="loading">Opening workspace…</div>
@@ -105,8 +115,18 @@ export const PanelHost = memo(function PanelHost({
             cwd={panel.filesTarget?.root || cwd}
             initialFile={panel.filesTarget?.path}
             initialEdit={panel.filesTarget?.edit}
+            initialView={panel.filesView}
             endpoint={panel.filesTarget ? panel.filesTarget.endpoint : endpoint}
             onHTML={onHTML}
+            onViewChange={(filesView) => {
+              const old = panel.filesView;
+              if (
+                old?.root !== filesView.root ||
+                old.directory !== filesView.directory ||
+                old.file !== filesView.file
+              )
+                onPatch(panel.id, { filesView });
+            }}
           />
         ) : panel.kind === "extension" ? (
           <ExtensionSurface
@@ -114,6 +134,24 @@ export const PanelHost = memo(function PanelHost({
             cwd={cwd}
             connection={endpoint}
             registry={extensionRegistry}
+          />
+        ) : panel.kind === "orchestrator" ? (
+          <OrchestratorPanel
+            cwd={cwd}
+            endpoint={endpoint}
+            view={panel.orchestratorView}
+            host={panel.orchestratorHost}
+            repo={panel.orchestratorRepo}
+            onViewChange={(orchestratorView) =>
+              onPatch(panel.id, { orchestratorView })
+            }
+            onAddHost={onOpenConnections}
+            onHostChange={({ host, repo }) =>
+              onPatch(panel.id, {
+                orchestratorHost: host,
+                orchestratorRepo: repo,
+              })
+            }
           />
         ) : (
           <ChatPanel

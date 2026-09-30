@@ -7,30 +7,24 @@ const splitLayout = (
   axis: "row" | "column",
   ratio = 0.5,
 ): Layout => ({ type: "split", id: crypto.randomUUID(), axis, ratio, a, b });
-function removeLayout(node: Layout | null, id: string): Layout | null {
-  if (!node) return null;
-  const values = new Map<Layout, Layout | null>();
-  const stack: { node: Layout; visited: boolean }[] = [
-    { node, visited: false },
-  ];
+/** Every leaf id, walked without recursion: a layout can be thousands deep. */
+function leafSet(layout: Layout | null): Set<string> {
+  const ids = new Set<string>();
+  const stack = layout ? [layout] : [];
   while (stack.length) {
-    const frame = stack.pop();
-    if (!frame) break;
-    if (frame.node.type === "leaf") {
-      values.set(frame.node, frame.node.id === id ? null : frame.node);
-      continue;
-    }
-    if (!frame.visited) {
-      stack.push({ node: frame.node, visited: true });
-      stack.push({ node: frame.node.b, visited: false });
-      stack.push({ node: frame.node.a, visited: false });
-      continue;
-    }
-    const a = values.get(frame.node.a) ?? null;
-    const b = values.get(frame.node.b) ?? null;
-    values.set(frame.node, a && b ? { ...frame.node, a, b } : a || b);
+    const node = stack.pop()!;
+    if (node.type === "leaf") ids.add(node.id);
+    else stack.push(node.a, node.b);
   }
-  return values.get(node) ?? null;
+  return ids;
+}
+/** A Herdr pane its host no longer lists. It keeps its slot and its saved
+ * state; the pane shows "Session ended" until it is reopened or closed. */
+function endPane(panel: Panel): Panel {
+  if (panel.ended) return panel;
+  const next: Panel = { ...panel, ended: true };
+  delete next.status;
+  return next;
 }
 function tidy(ids: string[]): Layout | null {
   if (!ids.length) return null;
@@ -83,6 +77,17 @@ function sameValue(
 
 function sameWorkspaces(a: Workspace[], b: Workspace[]): boolean {
   return sameValue(a, b);
+}
+
+/** A workspace its host no longer lists stays in the list, every Herdr pane
+ * of it ended. Returns the same object when nothing changes. */
+function endWorkspace(workspace: Workspace): Workspace {
+  const panels = workspace.panels.map((panel) =>
+    panel.herdrId ? endPane(panel) : panel,
+  );
+  return panels.every((panel, index) => panel === workspace.panels[index])
+    ? workspace
+    : { ...workspace, panels };
 }
 
 export function reconcileHerdrWorkspaces(
@@ -143,19 +148,27 @@ export function reconcileHerdrWorkspaces(
         agent: pane.agent,
         status: pane.agent_status,
       };
+      delete nextPanel.ended;
       return existingPanel && sameValue(existingPanel, nextPanel)
         ? existingPanel
         : nextPanel;
     });
     const remotePanelIds = new Set(panels.map((panel) => panel.id));
+    // A pane the host dropped stays in its layout slot, marked ended. One that
+    // was already hidden from the layout has nothing to show, so it goes.
+    const inLayout = leafSet(old?.layout ?? null);
+    const gone = (old?.panels || [])
+      .filter(
+        (panel) =>
+          panel.herdrId &&
+          !remotePanelIds.has(panel.id) &&
+          inLayout.has(panel.id),
+      )
+      .map(endPane);
     const extras = (old?.panels || []).filter((panel) => !panel.herdrId);
-    const allPanels = [...panels, ...extras];
+    const allPanels = [...panels, ...gone, ...extras];
     let layout = old ? old.layout : tidy(allPanels.map((panel) => panel.id));
     if (old) {
-      for (const panel of old.panels) {
-        if (!remotePanelIds.has(panel.id) && panel.herdrId)
-          layout = removeLayout(layout, panel.id);
-      }
       const oldPanelIds = new Set(old.panels.map((panel) => panel.id));
       const addedPanels = panels.filter((panel) => !oldPanelIds.has(panel.id));
       if (addedPanels.length) {
@@ -190,15 +203,13 @@ export function reconcileHerdrWorkspaces(
   // visibly reshuffled every few seconds, and the order-sensitive equality
   // check below saw a "change" (spurious re-renders) even when nothing about
   // any workspace had actually changed.
-  const nextBase = current
-    .map((workspace) => {
-      if (!workspace.herdrId || workspace.connection !== connection)
-        return workspace;
-      return bySnapshotId.has(workspace.herdrId)
-        ? buildWorkspace(workspace.herdrId)
-        : null;
-    })
-    .filter((workspace): workspace is Workspace => workspace !== null);
+  const nextBase = current.map((workspace) => {
+    if (!workspace.herdrId || workspace.connection !== connection)
+      return workspace;
+    return bySnapshotId.has(workspace.herdrId)
+      ? buildWorkspace(workspace.herdrId)
+      : endWorkspace(workspace);
+  });
   const brandNew = [...bySnapshotId.keys()]
     .filter((id) => !existing.has(id))
     .map((id) => buildWorkspace(id));

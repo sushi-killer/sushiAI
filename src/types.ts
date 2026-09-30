@@ -1,4 +1,5 @@
-export type PanelKind = "agent" | "terminal" | "browser" | "chat" | "files";
+export type PanelKind =
+  "agent" | "terminal" | "browser" | "chat" | "files" | "orchestrator";
 export type ConnectionProfile = {
   id: string;
   name: string;
@@ -20,6 +21,21 @@ export type Message = {
   /** The model that actually answered, as the CLI resolved it. */
   model?: string;
 };
+/** What the Orchestrator panel shows: home (the default), the plan, its
+ * chat, one task, improvements, analytics, the archive or the
+ * agent messages. Kept on the panel so a restart reopens the same view. */
+export type OrchestratorView =
+  | { kind: "home" }
+  | { kind: "plan" }
+  | { kind: "chat" }
+  | { kind: "task"; id: string }
+  | { kind: "improvements" }
+  | { kind: "analytics" }
+  | { kind: "archive" }
+  | { kind: "messages" };
+/** Where a Files pane was browsing: its root folder, the folder listed and the
+ * open file ("" for none). Not part of the panel's remount key. */
+export type FilesView = { root: string; directory: string; file: string };
 type PanelState = {
   id: string;
   title: string;
@@ -39,6 +55,15 @@ type PanelState = {
     edit?: boolean;
     openToken?: number;
   };
+  orchestratorView?: OrchestratorView;
+  /** The host ("local" or "ssh:<id>") and the repo path on it this Orchestrator
+   * pane was pointed at; unset follows the workspace. */
+  orchestratorHost?: string;
+  orchestratorRepo?: string;
+  filesView?: FilesView;
+  /** A Herdr pane that is gone from its host: the slot stays in the layout
+   * with a Reopen button until the user reopens or closes it. */
+  ended?: boolean;
   pinned?: boolean;
   updatedAt?: number;
   note?: string;
@@ -241,7 +266,47 @@ export type UpdateState = {
   checkedAt: string | null;
   error: string | null;
 };
+/** A panel an attention event points at: a notification click opens it. */
+export type AttentionTarget = { workspaceId: string; panelId: string };
+export type AttentionNotice = AttentionTarget & { title: string; body: string };
+/** Kept by the main process, which needs both before any window exists. */
+export type AppPreferences = {
+  /** Closing the window hides it; sushiAI stays in the menu bar. */
+  runInMenuBar: boolean;
+  /** macOS notifications for agents that need input or finished. */
+  notifications: boolean;
+  /** Shows orchd task notices in a desktop mascot instead of a native
+   * notification (needs notifications on). */
+  desktopMascot: boolean;
+  /** Opt-in global shortcut that toggles the mascot. */
+  mascotShortcut: boolean;
+};
+export type MascotShortcutStatus = {
+  accelerator: string;
+  registered: boolean;
+  /** The OS refused the accelerator, usually because another app holds it. */
+  failed: boolean;
+};
 export interface Bridge {
+  /** The workspace snapshot text from <userData>/workspace-state.json, or
+   * null when none is stored. Synchronous: restore() runs before first paint. */
+  workspaceStateRead(): string | null;
+  /** Debounced snapshot write; the main process writes it atomically. */
+  workspaceStateWrite(text: string): Promise<void>;
+  /** Synchronous write for when the window is going away. */
+  workspaceStateFlush(text: string): void;
+  /** Shows a macOS notification unless notifications are off or the window
+   * is focused. Clicking it shows the window and fires `onAttentionOpen`. */
+  attentionNotify(notice: AttentionNotice): Promise<void>;
+  /** Waiting count for the Dock badge and the menu bar title; 0 clears both. */
+  attentionBadge(count: number, working: number): Promise<void>;
+  onAttentionOpen(callback: (target: AttentionTarget) => void): () => void;
+  /** Adds a git worktree on a new branch next to the repository holding
+   * `cwd`, on this Mac. Resolves to the new checkout's path. */
+  worktreeCreate(cwd: string, branch: string): Promise<{ path: string }>;
+  appPreferences(): Promise<AppPreferences>;
+  appPreferencesSet(patch: Partial<AppPreferences>): Promise<AppPreferences>;
+  mascotShortcutStatus(): Promise<MascotShortcutStatus>;
   agentProviders(): Promise<import("./agents/types").AgentProvider[]>;
   agentCall: import("./agents/types").AgentCall;
   agentOpenExternal(url: string): Promise<void>;
@@ -293,6 +358,42 @@ export interface Bridge {
     params?: Record<string, unknown>,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic RPC passthrough, callers narrow the result themselves
   ): Promise<any>;
+  /** Raw NDJSON-RPC passthrough to the orchestrator daemon; the renderer's
+   * typed wrapper is `src/orchestrator/client.ts`. */
+  orchestrator(
+    method: string,
+    params?: Record<string, unknown>,
+    /** The host whose daemon answers: "local" (the default) or "ssh:<id>". */
+    host?: string,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic RPC passthrough, callers narrow the result themselves
+  ): Promise<any>;
+  orchestratorHosts(): Promise<
+    import("./orchestrator/types.ts").OrchestratorHost[]
+  >;
+  orchestratorPreflight(
+    host: string,
+  ): Promise<import("./orchestrator/types.ts").Preflight | null>;
+  /** The owner's one button: provisions the host, installing Rust there first
+   * when orchd has to be built and cargo is missing. */
+  orchestratorHostSetup(
+    host: string,
+  ): Promise<import("./orchestrator/types.ts").Preflight | null>;
+  /** A ping of the host's current connection that never starts or
+   * provisions its daemon. */
+  orchestratorProbe(host: string): Promise<{ pid: number }>;
+  onOrchestratorHosts(callback: () => void): () => void;
+  onOrchestrator(
+    callback: (
+      event: import("./orchestrator/types.ts").OrchestratorEvent,
+    ) => void,
+  ): () => void;
+  /** The owner clicked a native orchd notification or the desktop mascot's
+   * Open button. */
+  onOrchestratorOpen(
+    callback: (target: import("./orchestrator/notices.ts").TaskTarget) => void,
+  ): () => void;
+  /** The desktop mascot's Answer all in Inbox. */
+  onOpenInbox(callback: () => void): () => void;
   chat(options: {
     panelId: string;
     cwd: string;

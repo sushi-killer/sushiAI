@@ -10,7 +10,7 @@ const panel = (id, kind = "terminal", extra = {}) => ({
 });
 
 test("restore normalizes durable state and resets transient panel runtime", async () => {
-  const { restore, STORAGE } = await library;
+  const { restore } = await library;
   const remote = {
     id: "remote",
     name: "Remote",
@@ -41,7 +41,7 @@ test("restore normalizes durable state and resets transient panel runtime", asyn
     zoomed: "",
     sidebar: "yes",
   });
-  const saved = restore({ getItem: (key) => (key === STORAGE ? data : null) });
+  const saved = restore({ read: () => data });
   assert.equal(saved.mode, "Code");
   assert.equal(saved.tabMode, false);
   assert.equal(saved.section, "");
@@ -80,7 +80,7 @@ test("restore preserves explicit Herdr connection and clears local connection", 
     },
   ];
   const saved = restore({
-    getItem: () => JSON.stringify({ workspaces, socket: "ssh:fallback" }),
+    read: () => JSON.stringify({ workspaces, socket: "ssh:fallback" }),
   });
   assert.equal(saved.workspaces[0].connection, "ssh:one");
   assert.equal(saved.workspaces[1].connection, undefined);
@@ -88,19 +88,19 @@ test("restore preserves explicit Herdr connection and clears local connection", 
 
 test("restore returns null for missing, malformed, or incomplete storage", async () => {
   const { restore } = await library;
-  assert.equal(restore({ getItem: () => null }), null);
-  assert.equal(restore({ getItem: () => "{" }), null);
+  assert.equal(restore({ read: () => null }), null);
+  assert.equal(restore({ read: () => "{" }), null);
   assert.equal(
-    restore({ getItem: () => JSON.stringify({ workspaces: [] }) }),
+    restore({ read: () => JSON.stringify({ workspaces: [] }) }),
     null,
   );
   assert.equal(
-    restore({ getItem: () => JSON.stringify({ workspaces: "bad" }) }),
+    restore({ read: () => JSON.stringify({ workspaces: "bad" }) }),
     null,
   );
   assert.equal(
     restore({
-      getItem: () => {
+      read: () => {
         throw new Error("storage unavailable");
       },
     }),
@@ -108,8 +108,8 @@ test("restore returns null for missing, malformed, or incomplete storage", async
   );
 });
 
-test("saveWorkspaceState writes the stable key and propagates storage errors", async () => {
-  const { saveWorkspaceState, STORAGE } = await library;
+test("saveWorkspaceState writes the serialized snapshot through the store and propagates its errors", async () => {
+  const { saveWorkspaceState, flushWorkspaceState } = await library;
   const value = {
     workspaces: [],
     activeId: "active",
@@ -117,23 +117,70 @@ test("saveWorkspaceState writes the stable key and propagates storage errors", a
     routines: [],
     fontScale: 1,
   };
-  let write;
-  saveWorkspaceState(value, {
-    setItem: (key, payload) => {
-      write = { key, payload };
-    },
-  });
-  assert.equal(write.key, STORAGE);
-  assert.deepEqual(JSON.parse(write.payload), value);
-  assert.throws(
-    () =>
-      saveWorkspaceState(value, {
-        setItem: () => {
-          throw new Error("quota");
-        },
-      }),
-    /quota/,
+  const writes = [];
+  const store = {
+    write: (text) => writes.push(["write", text]),
+    flush: (text) => writes.push(["flush", text]),
+  };
+  saveWorkspaceState(value, store);
+  flushWorkspaceState(value, store);
+  assert.deepEqual(
+    writes.map(([kind]) => kind),
+    ["write", "flush"],
   );
+  for (const [, text] of writes) assert.deepEqual(JSON.parse(text), value);
+  const failing = {
+    write: () => {
+      throw new Error("quota");
+    },
+    flush: () => {
+      throw new Error("quota");
+    },
+  };
+  assert.throws(() => saveWorkspaceState(value, failing), /quota/);
+  assert.throws(() => flushWorkspaceState(value, failing), /quota/);
+});
+
+test("snapshotStore uses the bridge when there is one and localStorage under a new key otherwise", async () => {
+  const { snapshotStore, BROWSER_KEY } = await library;
+  const bridgeCalls = [];
+  globalThis.window = {
+    bridge: {
+      workspaceStateRead: () => "from-file",
+      workspaceStateWrite: async (text) => bridgeCalls.push(["write", text]),
+      workspaceStateFlush: (text) => bridgeCalls.push(["flush", text]),
+    },
+  };
+  const items = new Map();
+  globalThis.localStorage = {
+    getItem: (key) => items.get(key) ?? null,
+    setItem: (key, value) => items.set(key, value),
+    removeItem: (key) => items.delete(key),
+  };
+  try {
+    const desktop = snapshotStore();
+    assert.equal(desktop.read(), "from-file");
+    await desktop.write("a");
+    desktop.flush("b");
+    assert.deepEqual(bridgeCalls, [
+      ["write", "a"],
+      ["flush", "b"],
+    ]);
+    assert.equal(items.size, 0, "the bridge never touches localStorage");
+
+    delete globalThis.window;
+    const web = snapshotStore();
+    assert.equal(web.read(), null);
+    web.write("c");
+    assert.equal(items.get(BROWSER_KEY), "c");
+    assert.equal(web.read(), "c");
+    web.flush("d");
+    assert.equal(web.read(), "d");
+    assert.ok(!BROWSER_KEY.startsWith("sushiai.v1"));
+  } finally {
+    delete globalThis.window;
+    delete globalThis.localStorage;
+  }
 });
 
 test("restore accepts only a well-formed closedProjects array", async () => {
@@ -163,7 +210,7 @@ test("restore accepts only a well-formed closedProjects array", async () => {
     },
   };
   const saved = restore({
-    getItem: () =>
+    read: () =>
       JSON.stringify({
         workspaces,
         socket: "local",
@@ -179,12 +226,12 @@ test("restore accepts only a well-formed closedProjects array", async () => {
   assert.deepEqual(saved.closedProjects[0], good);
 
   const missingArray = restore({
-    getItem: () => JSON.stringify({ workspaces, socket: "local" }),
+    read: () => JSON.stringify({ workspaces, socket: "local" }),
   });
   assert.deepEqual(missingArray.closedProjects, []);
 
   const notAnArray = restore({
-    getItem: () =>
+    read: () =>
       JSON.stringify({ workspaces, socket: "local", closedProjects: "bad" }),
   });
   assert.deepEqual(notAnArray.closedProjects, []);

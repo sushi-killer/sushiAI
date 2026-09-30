@@ -176,6 +176,28 @@ class ClaudeMcp {
     };
   }
 
+  /** `{mcpServers: {name: definition}}` for `claude --mcp-config`: every
+   * enabled server, resolved from whichever source `listEntries` already
+   * picked for it. Reuses `load`/`listEntries` rather than re-deriving
+   * precedence here. */
+  async launchConfig(cwd) {
+    const state = await this.load(cwd);
+    const servers = {};
+    for (const entry of listEntries(state)) {
+      if (entry.disabled) continue;
+      const definition =
+        entry.source === "local"
+          ? mapObject(state.project.mcpServers)[entry.name]
+          : entry.source === "project"
+            ? mapObject(state.projectFile.mcpServers)[entry.name]
+            : entry.source === "user"
+              ? mapObject(state.config.mcpServers)[entry.name]
+              : undefined; // "saved": a disabled marker with no live definition.
+      if (definition) servers[entry.name] = definition;
+    }
+    return { mcpServers: servers };
+  }
+
   async toggle(input) {
     if (
       !input ||

@@ -20,6 +20,7 @@ function registerHerdrExtension({ handle, getConnections, id }) {
     "session.snapshot",
     "workspace.create",
     "workspace.rename",
+    "worktree.create",
     "pane.rename",
     "pane.split",
     "pane.read",

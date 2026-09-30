@@ -1,9 +1,20 @@
-import type { Panel, Workspace } from "./types";
-import { contains, leaf, split, uid } from "./layout.ts";
+import type { Layout, Panel, Workspace } from "./types";
+import { contains, isValidLayout, leaf, split, uid } from "./layout.ts";
 import { validRoute, type RouteRef } from "./extensions/routes.ts";
 import type { ProjectGit } from "./app/useProjectGit.ts";
 
-export const STORAGE = "sushiai.v1";
+/** Where the snapshot lives when there is no desktop bridge (dev:web). With
+ * the bridge it is <userData>/workspace-state.json, written by the main
+ * process. */
+export const BROWSER_KEY = "sushiai.workspace-state";
+// The keys the app used before the snapshot had one owner. They are named
+// here and nowhere else: `importLegacy` folds them into one snapshot once.
+const LEGACY_SNAPSHOT = "sushiai.v1";
+const LEGACY_MERGED = "sushiai.mergedLayouts.v1";
+const LEGACY_AGENT_TABS = "sushiai.agent-tabs.v1";
+const LEGACY_AGENT_FOCUS = "sushiai.agent-focus.v1";
+const LEGACY_CHAT_FOCUS = "sushiai.chat-focus.v1";
+export const MAX_AGENT_TABS = 30;
 
 export type Routine = { id: string; name: string; command: string };
 
@@ -26,6 +37,20 @@ export type ClosedProject = {
 export type ProjectView = { tabMode: boolean; zoomed: string | null };
 export type ProjectViews = Record<string, ProjectView>;
 
+/** An Agent-mode conversation tab. */
+export type AgentTab = {
+  providerId: string;
+  agentId: string;
+  conversationId: string;
+  title: string;
+};
+/** Which Agent-mode provider, agent and tab (by identity) was open. */
+export type AgentFocus = {
+  providerId: string;
+  agentId: string;
+  active: string;
+};
+
 export type Saved = {
   workspaces: Workspace[];
   activeId: string;
@@ -44,12 +69,48 @@ export type Saved = {
   workspaceGrouping?: "grouped" | "flat";
   closedProjects?: ClosedProject[];
   views?: ProjectViews;
+  /** The combined canvas of each merged project, keyed by merge group id. */
+  mergedLayouts?: Record<string, Layout>;
+  agentTabs?: AgentTab[];
+  agentFocus?: AgentFocus;
+  /** The Chat-mode thread that was open. */
+  chatFocus?: string;
 };
 
-export type WorkspaceStorage = {
+export type LegacyStorage = {
   getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
 };
+
+/** The one storage adapter behind `restore` and `saveWorkspaceState`. `read`
+ * is synchronous because the first render needs the state; `write` may be
+ * asynchronous, `flush` never is (it runs while the window is closing). */
+export type SnapshotStore = {
+  read(): string | null;
+  write(text: string): void | Promise<void>;
+  flush(text: string): void;
+  /** Where the pre-snapshot keys live, when that place exists. */
+  legacy?: LegacyStorage;
+};
+
+export function snapshotStore(): SnapshotStore {
+  const legacy = typeof localStorage === "undefined" ? undefined : localStorage;
+  const bridge = typeof window === "undefined" ? undefined : window.bridge;
+  if (bridge)
+    return {
+      read: () => bridge.workspaceStateRead(),
+      write: (text) => bridge.workspaceStateWrite(text),
+      flush: (text) => bridge.workspaceStateFlush(text),
+      legacy,
+    };
+  const put = (text: string) => localStorage.setItem(BROWSER_KEY, text);
+  return {
+    read: () => localStorage.getItem(BROWSER_KEY),
+    write: put,
+    flush: put,
+    legacy,
+  };
+}
 
 function normalizeGit(value: unknown): ProjectGit {
   const g = (value as Partial<ProjectGit>) || {};
@@ -104,13 +165,96 @@ function normalizeViews(value: unknown): ProjectViews {
   );
 }
 
-export function restore(
-  storage?: Pick<WorkspaceStorage, "getItem">,
-): Saved | null {
+function normalizeMergedLayouts(value: unknown): Record<string, Layout> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).filter(([, layout]) =>
+      isValidLayout(layout),
+    ),
+  ) as Record<string, Layout>;
+}
+
+function normalizeAgentTabs(value: unknown): AgentTab[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(
+      (t): t is AgentTab =>
+        Boolean(t) &&
+        ["providerId", "agentId", "conversationId", "title"].every(
+          (key) => typeof (t as Record<string, unknown>)[key] === "string",
+        ),
+    )
+    .map((t) => ({
+      providerId: t.providerId,
+      agentId: t.agentId,
+      conversationId: t.conversationId,
+      title: t.title,
+    }))
+    .slice(-MAX_AGENT_TABS);
+}
+
+function normalizeAgentFocus(value: unknown): AgentFocus {
+  const row = (value || {}) as Record<string, unknown>;
+  return ["providerId", "agentId", "active"].every(
+    (key) => typeof row[key] === "string",
+  )
+    ? {
+        providerId: row.providerId as string,
+        agentId: row.agentId as string,
+        active: row.active as string,
+      }
+    : { providerId: "", agentId: "", active: "" };
+}
+
+const LEGACY_KEYS = [
+  LEGACY_SNAPSHOT,
+  LEGACY_MERGED,
+  LEGACY_AGENT_TABS,
+  LEGACY_AGENT_FOCUS,
+  LEGACY_CHAT_FOCUS,
+];
+
+/** The one place the pre-snapshot localStorage keys are read. Runs when no
+ * snapshot exists: folds them into one, writes it, then deletes them. A
+ * failed write keeps the keys, so the next start tries again. */
+function importLegacy(store: SnapshotStore): string | null {
+  const legacy = store.legacy;
+  if (!legacy) return null;
+  const json = (key: string): unknown => {
+    try {
+      return JSON.parse(legacy.getItem(key) || "null");
+    } catch {
+      return null;
+    }
+  };
+  const drop = () => {
+    for (const key of LEGACY_KEYS) legacy.removeItem(key);
+  };
+  const main = json(LEGACY_SNAPSHOT) as Record<string, unknown> | null;
+  if (!main || typeof main !== "object" || !Array.isArray(main.workspaces)) {
+    // Nothing to fold: the other keys are orphans, clear them once.
+    drop();
+    return null;
+  }
+  const text = JSON.stringify({
+    ...main,
+    mergedLayouts: json(LEGACY_MERGED) ?? undefined,
+    agentTabs: json(LEGACY_AGENT_TABS) ?? undefined,
+    agentFocus: json(LEGACY_AGENT_FOCUS) ?? undefined,
+    chatFocus: legacy.getItem(LEGACY_CHAT_FOCUS) ?? undefined,
+  });
   try {
-    const value = JSON.parse(
-      (storage || localStorage).getItem(STORAGE) || "null",
-    );
+    store.flush(text);
+    drop();
+  } catch {
+    /* the import still restores this session; the keys stay for next time */
+  }
+  return text;
+}
+
+export function restore(store: SnapshotStore = snapshotStore()): Saved | null {
+  try {
+    const value = JSON.parse(store.read() ?? importLegacy(store) ?? "null");
     if (!Array.isArray(value?.workspaces) || !value.workspaces.length)
       return null;
     const mode =
@@ -128,6 +272,10 @@ export function restore(
         value.workspaceGrouping === "flat" ? "flat" : "grouped",
       closedProjects: normalizeClosedProjects(value.closedProjects),
       views: normalizeViews(value.views),
+      mergedLayouts: normalizeMergedLayouts(value.mergedLayouts),
+      agentTabs: normalizeAgentTabs(value.agentTabs),
+      agentFocus: normalizeAgentFocus(value.agentFocus),
+      chatFocus: typeof value.chatFocus === "string" ? value.chatFocus : "",
       workspaces: value.workspaces.map((w: Workspace) => ({
         ...w,
         connection: w.herdrId ? w.connection || value.socket : undefined,
@@ -136,7 +284,9 @@ export function restore(
           busy: false,
           started: false,
           // A reply that never arrived leaves an empty bubble; drop it.
-          messages: p.messages?.filter((m) => m.role === "user" || m.text),
+          ...(p.messages && {
+            messages: p.messages.filter((m) => m.role === "user" || m.text),
+          }),
         })),
       })),
     };
@@ -145,11 +295,22 @@ export function restore(
   }
 }
 
+/** Debounced write; the returned promise (desktop only) rejects when the main
+ * process could not write the file. */
 export function saveWorkspaceState(
   value: Saved,
-  storage?: Pick<WorkspaceStorage, "setItem">,
+  store: SnapshotStore = snapshotStore(),
+): void | Promise<void> {
+  return store.write(JSON.stringify(value));
+}
+
+/** Synchronous write for beforeunload/pagehide, where an async one would be
+ * dropped with the window. */
+export function flushWorkspaceState(
+  value: Saved,
+  store: SnapshotStore = snapshotStore(),
 ): void {
-  (storage || localStorage).setItem(STORAGE, JSON.stringify(value));
+  store.flush(JSON.stringify(value));
 }
 
 export function initialWorkspace(cwd = ""): Workspace {

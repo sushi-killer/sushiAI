@@ -36,6 +36,7 @@ export default tseslint.config(
       ".runtime/**",
       "public/**",
       ".claude/worktrees/**",
+      ".sushiai/**",
     ],
   },
   // React/TypeScript sources: the renderer, where hook misuse actually bites.

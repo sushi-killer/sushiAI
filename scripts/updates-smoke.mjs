@@ -3,6 +3,25 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import assert from "node:assert/strict";
 const profile = await fs.mkdtemp("/tmp/sushiai-updates-test-");
+// The app restores its workspace from this file on the first paint.
+await fs.writeFile(
+  `${profile}/workspace-state.json`,
+  JSON.stringify({
+    activeId: "review",
+    socket: "/tmp/absent-sushiai-review.sock",
+    routines: [],
+    fontScale: 1,
+    workspaces: [
+      {
+        id: "review",
+        name: "Review",
+        cwd: "/tmp",
+        panels: [{ id: "chat", kind: "chat", title: "Thread" }],
+        layout: { type: "leaf", id: "chat" },
+      },
+    ],
+  }),
+);
 const artifacts = path.resolve("artifacts");
 await fs.mkdir(artifacts, { recursive: true });
 const app = await electron.launch({
@@ -10,7 +29,11 @@ const app = await electron.launch({
     ? { executablePath: process.env.SUSHIAI_EXECUTABLE }
     : {}),
   args: process.env.SUSHIAI_EXECUTABLE ? [] : ["."],
-  env: { ...process.env, SUSHIAI_TEST_HEADLESS: "1", BRIDGE_DATA_DIR: profile },
+  env: {
+    ...process.env,
+    SUSHIAI_TEST_WINDOW: "hidden",
+    BRIDGE_DATA_DIR: profile,
+  },
 });
 try {
   const page = await app.firstWindow();
@@ -91,27 +114,6 @@ try {
     await globalThis.smokeUpdates.init();
     await globalThis.smokeUpdates.configure({ autoDownload: false });
   });
-  await page.evaluate(() =>
-    localStorage.setItem(
-      "sushiai.v1",
-      JSON.stringify({
-        activeId: "review",
-        socket: "/tmp/absent-sushiai-review.sock",
-        routines: [],
-        fontScale: 1,
-        workspaces: [
-          {
-            id: "review",
-            name: "Review",
-            cwd: "/tmp",
-            panels: [{ id: "chat", kind: "chat", title: "Thread" }],
-            layout: { type: "leaf", id: "chat" },
-          },
-        ],
-      }),
-    ),
-  );
-  await page.reload();
   await page.getByRole("button", { name: /^Dashboard/ }).click();
   await page
     .getByRole("heading", { name: "Pick up where you left off" })

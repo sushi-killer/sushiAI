@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "example-notes": { "command": "example-notes-mcp", "args": [] },
+    "example-tracker": {
+      "type": "http",
+      "url": "https://tracker.example.invalid/mcp"
+    }
+  }
+}

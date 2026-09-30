@@ -4,11 +4,12 @@ import type { Panel, Workspace } from "./types";
 import { uid } from "./layout";
 import { ChatView } from "./ChatView";
 import { AgentsView } from "./agents/AgentsView";
-import { SessionsDialog } from "./SessionsDialog";
 import { ClaudeMcpSettings } from "./ClaudeMcpSettings";
 import { WorkspaceDialog } from "./WorkspaceDialog";
 import { errorText } from "./app/errors";
 import { useAppPersistence } from "./app/useAppPersistence";
+import { useSessionState } from "./app/useSessionState";
+import { useAttention } from "./app/useAttention";
 import { useCompact } from "./app/useCompact";
 import { useKeepAwake } from "./app/useKeepAwake";
 import { useAgentNotices } from "./app/useAgentNotices";
@@ -22,7 +23,7 @@ import { resolveDialog, type Dialog } from "./dialogs/dialog-state";
 import { UpdateSettings } from "./dialogs/lazy-settings";
 import { NotificationsDialog } from "./app/NotificationsDialog";
 import { RoutineDialog } from "./app/RoutineDialog";
-import { SettingsDialog } from "./app/SettingsDialog";
+import { SettingsDialog, useSettingsTab } from "./app/SettingsDialog";
 import { SectionPage } from "./app/SectionPage";
 import { Sidebar } from "./app/Sidebar";
 import { TitleBar } from "./app/TitleBar";
@@ -34,8 +35,8 @@ import { useMergedCanvas } from "./workspace/mergedLayouts";
 import { useProjectView } from "./workspace/projectView";
 import { useSkills } from "./app/useSkills";
 import { useToast } from "./app/useToast";
+import { useOrchestratorNotices } from "./orchestrator/useOrchestratorNotices";
 import { useUpdates } from "./app/useUpdates";
-import { blockedPanels } from "./workspace/workspace-actions";
 import {
   activePage,
   resolveNavigation,
@@ -69,9 +70,6 @@ export function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>(
     saved?.workspaces || [initialWorkspace()],
   );
-  const [settingsTab, setSettingsTab] = useState<
-    "general" | "connections" | "providers" | "updates"
-  >("general");
   const {
     mode,
     section,
@@ -159,34 +157,54 @@ export function App() {
     if (window.innerWidth < 760) setSidebar(false);
     ws.switchWorkspace(id);
   }
+  const attention = useAttention({
+    workspaces,
+    connectionProfiles,
+    section,
+    active,
+    selected,
+    zoomed,
+    switchWorkspace,
+    setSelected,
+    setZoomed,
+  });
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const closeDialog = useCallback(() => setDialog(null), []);
+  const [settingsTab, setSettingsTab, openConnections] =
+    useSettingsTab(setDialog);
   const target = resolveDialog(dialog, workspaces);
   const [workspaceQuery, setWorkspaceQuery] = useState("");
   const [compact, canvasRef] = useCompact();
   const [routines, setRoutines] = useState<Routine[]>(saved?.routines || []);
   const [fontScale, setFontScale] = useState(saved?.fontScale || 1);
-  // Held here, not in SettingsDialog: the blocker must be active whenever the
-  // app is open, not only while the preferences dialog happens to be mounted.
+  // Held here, not in SettingsDialog: the blocker runs whenever the app is open.
   const [keepAwake, setKeepAwake] = useKeepAwake();
   const connected = connection === "connected";
   const activeEndpoint = active.connection || socket;
-  // Pane provenance (AC23-AC26, D5): only set when the active workspace is a
-  // member of a merged row, and only in flat mode - the sidebar draws that
-  // row, but the canvas is where a Herdr/agent pane actually names its host.
   const projectGit = useProjectGit(workspaces, active.id);
+  const session = useSessionState(saved);
   const merged = useMergedCanvas(
     ws,
     projectGit,
     connectionProfiles,
     workspaceGrouping,
     socket,
+    session,
   );
   const { tabMode, setTabMode, views } = useProjectView(
     merged.group?.id ?? active.id,
     ws,
     saved,
   );
+  const orchestrator = useOrchestratorNotices({
+    workspaces,
+    showWorkspace,
+    switchWorkspace,
+    setSelected,
+    setZoomed,
+    addPanel,
+    createWorkspace: ws.createWorkspace,
+  });
   const hostContext = useMemo(
     () => ({ workspaces, projectGit, connectionProfiles, workspaceGrouping }),
     [workspaces, projectGit, connectionProfiles, workspaceGrouping],
@@ -198,7 +216,6 @@ export function App() {
     setZoomed(panel.id);
   }
   const primaryExtensionNavigation = primaryNavigation(extensionRegistry);
-
   const openPanelPicker = useCallback(() => setDialog({ kind: "pane" }), []);
 
   useAppPersistence(
@@ -218,6 +235,7 @@ export function App() {
       workspaceGrouping,
       closedProjects: ws.closedProjects,
       views,
+      ...session,
     },
     notify,
   );
@@ -308,7 +326,6 @@ export function App() {
     ? merged.panes.length
     : codePanels(active).length;
   const useTabs = tabMode || compact || paneCount > 6;
-  const blocked = blockedPanels(workspaces);
 
   return (
     <div
@@ -345,19 +362,19 @@ export function App() {
           showWorkspace();
           setTabMode(false);
         }}
-        blocked={blocked}
         noticeCount={agentNotices.length}
       />
       <div className="app-body">
         {sidebar && (
           <Sidebar
+            worktreeTasks={orchestrator.worktreeTasks}
             registry={extensionRegistry}
             openExtensionTarget={openExtensionTarget}
             runExtensionCommand={runExtensionCommand}
             mode={mode}
             onWorkspace={!section}
             currentRouteId={route.surfaceId}
-            showWorkspace={showWorkspace}
+            inboxCount={attention.waiting}
             toggleCoreSection={toggleCoreSection}
             openDialog={(kind) => setDialog({ kind })}
             manageWorkspace={(workspace) =>
@@ -422,6 +439,7 @@ export function App() {
               activeEndpoint={activeEndpoint}
               home={system?.home}
               switchWorkspace={switchWorkspace}
+              openOrchestratorTask={orchestrator.openTask}
               addExtensionPanel={addExtensionPanel}
               setExtensionEnabled={(extensionId, enabled) =>
                 void setExtensionEnabled(extensionId, enabled)
@@ -432,9 +450,10 @@ export function App() {
               ws={ws}
               projectGit={projectGit}
               connectionProfiles={connectionProfiles}
+              attention={attention}
             />
           ) : mode === "Agent" ? (
-            <AgentsView slot={slot} />
+            <AgentsView slot={slot} session={session} />
           ) : mode === "Chat" ? (
             <ChatView
               workspaces={workspaces}
@@ -451,6 +470,7 @@ export function App() {
               onPatch={updatePanel}
               onDelete={deleteThread}
               onToggleSidebar={() => setSidebar(!sidebar)}
+              session={session}
             />
           ) : (
             <WorkspaceCanvas
@@ -460,6 +480,7 @@ export function App() {
               tabMode={tabMode}
               compact={compact}
               openPanelPicker={openPanelPicker}
+              openConnections={openConnections}
               merged={merged}
             />
           )}
@@ -481,21 +502,6 @@ export function App() {
             >
               <UpdateSettings state={updates} />
             </Suspense>
-          ) : dialog.kind === "sessions" ? (
-            <SessionsDialog
-              registry={extensionRegistry}
-              openExtensionTarget={openExtensionTarget}
-              cwd={active.cwd}
-              connection={active.connection}
-              workspaces={workspaces}
-              activeId={active.id}
-              onCloseSessions={endSessions}
-              onShow={(w, p) => {
-                switchWorkspace(w.id);
-                setZoomed(p.id);
-                closeDialog();
-              }}
-            />
           ) : dialog.kind === "close-session" && target?.panel ? (
             <CloseSessionDialog
               workspace={target!.workspace}
@@ -584,13 +590,7 @@ export function App() {
               agentNotices={agentNotices}
               setAgentNotices={setAgentNotices}
               updates={updates}
-              blocked={blocked}
               openUpdates={() => setDialog({ kind: "updates" })}
-              showBlockedPanel={({ workspace, panel }) => {
-                switchWorkspace(workspace.id);
-                setZoomed(panel.id);
-                closeDialog();
-              }}
             />
           ))}
       </DialogHost>

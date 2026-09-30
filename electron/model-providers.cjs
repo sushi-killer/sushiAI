@@ -9,8 +9,9 @@
 //
 // Two files in userData, kept apart on purpose: `providers.json` holds
 // non-secret metadata (readable, gitignored by virtue of living outside the
-// repo), `secrets.json` holds only encrypted key material. The key itself
-// never crosses back out of this module — callers get `hasKey`/`keyHint`.
+// repo), `secrets.json` holds only encrypted key material. The key never
+// crosses the IPC boundary — renderer-facing methods only ever return
+// `hasKey`/`keyHint`.
 const { randomUUID } = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");

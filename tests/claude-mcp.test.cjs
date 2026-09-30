@@ -111,6 +111,25 @@ test("lists project, local, user and saved Claude MCP choices without secrets", 
   }
 });
 
+test("launchConfig carries only enabled servers, each from listEntries's own source", async () => {
+  const f = await fixture();
+  try {
+    const config = await f.claude.launchConfig(f.cwd);
+    // projectTools/userTools/claude.ai Calendar are disabled and excluded;
+    // "duplicate" resolves to the local definition, the one listEntries
+    // picked as its source, not the (also present) project one.
+    assert.deepEqual(config, {
+      mcpServers: {
+        duplicate: { command: "node", args: ["local.js"] },
+        localTools: { command: "node", args: ["local.js"] },
+      },
+    });
+    assert.equal(JSON.stringify(config).includes("do-not-return"), false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("toggles project-scoped servers through disabledMcpjsonServers and preserves config", async () => {
   const f = await fixture();
   try {

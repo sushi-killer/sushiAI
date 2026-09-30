@@ -56,7 +56,11 @@ function allSegments(text) {
   return [...segments, ...fromScripts];
 }
 
+// SUSHIAI_GUARD_ASK=off (e.g. in .claude/settings.local.json "env") turns
+// the reminders off for an owner who already runs with bypassed
+// permissions; the hard denies below stay.
 const ask = (reason) => {
+  if (process.env.SUSHIAI_GUARD_ASK === "off") return;
   console.log(
     JSON.stringify({
       hookSpecificOutput: {

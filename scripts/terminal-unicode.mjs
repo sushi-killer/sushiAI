@@ -12,6 +12,7 @@ try {
     cwd: process.cwd(),
     env: {
       ...process.env,
+      SUSHIAI_TEST_WINDOW: "hidden",
       BRIDGE_DATA_DIR: profile,
       ZDOTDIR: profile,
       LANG: "C",

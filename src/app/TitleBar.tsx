@@ -27,7 +27,6 @@ export function TitleBar({
   runExtensionCommand,
   tidy,
   openFiles,
-  blocked,
   noticeCount,
 }: {
   nav: {
@@ -55,7 +54,6 @@ export function TitleBar({
   runExtensionCommand(extensionId: string, commandId: string): void;
   tidy(): void;
   openFiles(): void;
-  blocked: unknown[];
   noticeCount: number;
 }) {
   const { mode, section, currentRouteId } = nav;
@@ -198,7 +196,7 @@ export function TitleBar({
           onClick={() => openDialog("notifications")}
         >
           <Bell size={14} />
-          {(blocked.length > 0 || updates?.release || noticeCount > 0) && <i />}
+          {(updates?.release || noticeCount > 0) && <i />}
         </button>
       </div>
     </header>

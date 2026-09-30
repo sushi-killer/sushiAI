@@ -39,11 +39,15 @@ Version 0.0.1 Alpha does not include an updater. Download and install 0.0.6 manu
 - **Files, editing, and Git:** install Python 3 and Git. On macOS, sushiAI uses `/usr/bin/python3`; Xcode Command Line Tools provide these tools. Install them with `xcode-select --install` if needed.
 - **Remote workspaces:** configure SSH access and install Herdr, Python 3, Git, and your agent CLIs on the remote host. Verify SSH in Terminal before adding the host in **Settings → Connections**.
 
+- **Orchestrator settings:** every orchestrator setting is documented in [orchd settings](orchd-settings.md); the ones without a control are editable under **Settings → Orchestration → Advanced**.
+
 Use `~/.config/herdr/herdr.sock` for the default Herdr socket or `~/.config/herdr/sessions/<name>/herdr.sock` for a named session. See [connecting to Herdr](../README.md#connect-to-herdr) for details.
 
 ## Build from source
 
 On macOS, install **Node.js 22.18+**, npm, Git, and Xcode Command Line Tools.
+
+The orchestrator daemon (`orchd`) is written in Rust. `npm run build:orchd`, CI and packaging need the Rust toolchain (`cargo`, from [rustup](https://rustup.rs)). The installed app does not: a packaged sushiAI ships the built daemon.
 
 ```sh
 git clone https://github.com/sushi-killer/sushiAI.git

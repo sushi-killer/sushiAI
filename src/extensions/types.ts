@@ -188,6 +188,8 @@ export type ExtensionStatus = "active" | "disabled";
 export type ExtensionRecord = {
   manifest: ExtensionManifest;
   status: ExtensionStatus;
+  /** False for the built-ins that are part of the shell. */
+  canDisable?: boolean;
   error?: string;
 };
 

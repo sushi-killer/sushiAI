@@ -1,0 +1,1287 @@
+//! Argv construction for `claude`/`codex`, and parsing of their streamed
+//! JSON events. Argv building is pure (`Vec<String>` in, testable without a
+//! process); stream parsing folds one line at a time into a
+//! [`RunOutcome`] as the engine reads the child's stdout.
+
+use crate::model::{price_for, Fingerprint, Harness, Price, SandboxMode};
+use std::collections::BTreeMap;
+use std::path::Path;
+
+pub struct RunRequest<'a> {
+    pub harness: Harness,
+    pub worktree: &'a Path,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    /// Claude only: `--max-budget-usd`. Every harness: orchd itself stops the
+    /// run once its streamed usage, priced with `settings.prices`, exceeds it.
+    pub max_budget_usd: Option<f64>,
+    /// Read-only review session instead of an implement session.
+    pub review: bool,
+    /// Claude only: paths to the run's `mcp.json` / `settings.json`.
+    pub mcp_config: Option<&'a Path>,
+    pub settings_path: Option<&'a Path>,
+    /// Codex only: whether the sandbox has network access
+    /// (`sandbox_workspace_write.network_access`).
+    pub network_allowed: bool,
+    /// Codex only: an MCP server (name, `{command, args, env?}`) passed as
+    /// `-c mcp_servers.*` flags; Claude reads its servers from `mcp_config`.
+    pub codex_mcp: Option<(&'a str, &'a serde_json::Value)>,
+    /// Codex only: images attached to the prompt (`--image`); Claude opens
+    /// image files itself with its Read tool.
+    pub images: &'a [std::path::PathBuf],
+    /// Claude only: load the checkout's own `.claude/settings{,.local}.json`
+    /// (`--setting-sources project,local`). Off for a run in a checkout
+    /// orchd does not own (an audited repo): those settings carry hooks,
+    /// shell commands that run outside the sandbox.
+    pub repo_settings: bool,
+}
+
+/// The tools an orchd agent never needs: it implements one bounded task and
+/// does not delegate. `Task` and `Agent` are the subagent tool's two names.
+pub const DELEGATION_TOOLS: &str = "Task,Agent,Workflow,SendMessage,ListAgents";
+
+/// `-c mcp_servers.<name>.{command,args,env.*}` for one MCP server. JSON
+/// strings and string arrays are valid TOML values as they are.
+pub fn codex_mcp_flags(name: &str, server: &serde_json::Value) -> Vec<String> {
+    let mut flags = vec![
+        "-c".to_string(),
+        format!("mcp_servers.{name}.command={}", server["command"]),
+        "-c".to_string(),
+        format!("mcp_servers.{name}.args={}", server["args"]),
+    ];
+    if let Some(env) = server.get("env").and_then(|e| e.as_object()) {
+        for (key, value) in env {
+            flags.push("-c".to_string());
+            flags.push(format!("mcp_servers.{name}.env.{key}={value}"));
+        }
+    }
+    flags
+}
+
+/// `claude -p --output-format stream-json --verbose --setting-sources
+/// project,local --disable-slash-commands --strict-mcp-config --mcp-config
+/// <mcp.json> --settings <settings.json> --permission-mode acceptEdits
+/// --disallowedTools <DELEGATION_TOOLS> --permission-prompts none [--model]
+/// [--effort] [--max-budget-usd] `; review swaps `--permission-mode acceptEdits`
+/// (and the delegation-tools trim, which review never gets) for
+/// `--tools Read,Grep,Glob --permission-mode plan`.
+pub fn claude_argv(req: &RunRequest) -> Vec<String> {
+    let mut argv = vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+        "--setting-sources".to_string(),
+        if req.repo_settings {
+            "project,local"
+        } else {
+            ""
+        }
+        .to_string(),
+        "--disable-slash-commands".to_string(),
+        "--strict-mcp-config".to_string(),
+    ];
+    if let Some(mcp) = req.mcp_config {
+        argv.push("--mcp-config".to_string());
+        argv.push(mcp.to_string_lossy().to_string());
+    }
+    if let Some(settings) = req.settings_path {
+        argv.push("--settings".to_string());
+        argv.push(settings.to_string_lossy().to_string());
+    }
+    if req.review {
+        argv.push("--tools".to_string());
+        argv.push("Read,Grep,Glob".to_string());
+        argv.push("--permission-mode".to_string());
+        argv.push("plan".to_string());
+    } else {
+        argv.push("--permission-mode".to_string());
+        argv.push("acceptEdits".to_string());
+        // One comma-joined value: the flag is variadic.
+        argv.push("--disallowedTools".to_string());
+        argv.push(DELEGATION_TOOLS.to_string());
+    }
+    argv.push("--permission-prompts".to_string());
+    argv.push("none".to_string());
+    if let Some(model) = req.model {
+        argv.push("--model".to_string());
+        argv.push(model.to_string());
+    }
+    if let Some(effort) = req.effort {
+        argv.push("--effort".to_string());
+        argv.push(effort.to_string());
+    }
+    if let Some(cap) = req.max_budget_usd {
+        argv.push("--max-budget-usd".to_string());
+        argv.push(cap.to_string());
+    }
+    argv
+}
+
+/// `codex exec --json --skip-git-repo-check -C
+/// <worktree> --sandbox workspace-write -c
+/// sandbox_workspace_write.network_access=<bool> [--model] [-c
+/// model_reasoning_effort="<e>"] -`; review uses `--sandbox read-only` and
+/// drops the network flag (nothing to write, nothing to reach).
+pub fn codex_argv(req: &RunRequest) -> Vec<String> {
+    let mut argv = vec!["exec".to_string()];
+    // `--image=` right after `exec`: the flag takes several values, so it
+    // must not sit where it could swallow the trailing `-`.
+    for image in req.images {
+        argv.push(format!("--image={}", image.to_string_lossy()));
+    }
+    argv.push("--json".to_string());
+    argv.push("--skip-git-repo-check".to_string());
+    argv.push("-C".to_string());
+    argv.push(req.worktree.to_string_lossy().to_string());
+    if req.review {
+        argv.push("--sandbox".to_string());
+        argv.push("read-only".to_string());
+    } else {
+        argv.push("--sandbox".to_string());
+        argv.push("workspace-write".to_string());
+        argv.push("-c".to_string());
+        argv.push(format!(
+            "sandbox_workspace_write.network_access={}",
+            req.network_allowed
+        ));
+    }
+    if let Some((name, server)) = req.codex_mcp {
+        argv.extend(codex_mcp_flags(name, server));
+    }
+    if let Some(model) = req.model {
+        argv.push("--model".to_string());
+        argv.push(model.to_string());
+    }
+    if let Some(effort) = req.effort {
+        argv.push("-c".to_string());
+        argv.push(format!("model_reasoning_effort=\"{effort}\""));
+    }
+    argv.push("-".to_string());
+    argv
+}
+
+pub fn build_argv(req: &RunRequest) -> Vec<String> {
+    match req.harness {
+        Harness::Claude => claude_argv(req),
+        Harness::Codex => codex_argv(req),
+    }
+}
+
+/// The Stop hook wiring for a Claude run: `orchd`'s own path, the daemon's
+/// socket, and the token that maps this run's `hook.stop` calls back to its
+/// task/attempt.
+pub struct StopHook<'a> {
+    pub orchd_path: &'a str,
+    pub socket_path: &'a str,
+    pub token: &'a str,
+}
+
+/// The tools `hook.edit` decides for: file edits (lease check, protected
+/// paths), every MCP tool (a write asks the owner) and the web tools a
+/// headless run is not allowed to use on its own.
+pub const HOOKED_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit|mcp__.*|WebFetch|WebSearch";
+
+/// How long a hooked call may be held for an owner answer (seconds).
+pub const HOOK_HOLD_SECS: u32 = 4 * 3600;
+
+/// `Bash` prefixes an agent may never run directly (`permissions.deny`
+/// below).
+pub const DENIED_BASH_COMMANDS: [&str; 2] = ["git commit", "git push"];
+
+/// The `settings.json` written alongside a Claude run: profile
+/// env/apiKeyHelper (opaque, passed through) + sandbox block (omitted for
+/// `host`) + the Stop hook wired to `orchd hook stop` (omitted when
+/// `stop_hook` is `None` -- a review session has no registered token, so
+/// installing a hook for it would just be a guaranteed no-op fail-open
+/// round trip).
+pub fn build_claude_settings(
+    profile: Option<&serde_json::Value>,
+    sandbox: SandboxMode,
+    allowed_domains: &[String],
+    deny_read: &[String],
+    stop_hook: Option<StopHook>,
+) -> serde_json::Value {
+    let mut obj = match profile {
+        Some(serde_json::Value::Object(m)) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+
+    if sandbox == SandboxMode::Native {
+        obj.insert(
+            "sandbox".to_string(),
+            serde_json::json!({
+                "enabled": true,
+                // Headless runs answer no prompts (`--permission-prompts
+                // none`), so without this every sandboxed command is denied.
+                "autoAllowBashIfSandboxed": true,
+                "allowUnsandboxedCommands": false,
+                // Only `allowedDomains`: with `strictAllowlist` /
+                // `allowUnixSockets` present, Claude Code denied every Bash
+                // call headlessly (`cargo --version` included), so agents
+                // could never build or test. `["*"]` opens the network.
+                // Unix sockets stay blocked by the sandbox's own default
+                // (checked: a connect from inside fails with EPERM).
+                "network": {
+                    "allowedDomains": allowed_domains,
+                },
+                // Keeps the agent from reading `control.token` / per-run key
+                // files even if it somehow finds the data dir's path.
+                "filesystem": {
+                    "denyRead": deny_read,
+                },
+            }),
+        );
+    }
+
+    // The daemon commits after the gates pass and nothing is ever pushed, so
+    // the agent may not do either. Bash is allowed outright: a headless run
+    // has no one to approve a prompt, and `autoAllowBashIfSandboxed` still
+    // prompts for compound commands (`npm test; echo $?`), which then fail.
+    // The sandbox, not the prompt, is the boundary.
+    obj.insert(
+        "permissions".to_string(),
+        serde_json::json!({
+            "allow": ["Bash"],
+            "deny": DENIED_BASH_COMMANDS
+                .iter()
+                .map(|c| format!("Bash({c}:*)"))
+                .collect::<Vec<_>>(),
+        }),
+    );
+
+    if let Some(hook) = stop_hook {
+        let command = |kind: &str| {
+            format!(
+                "{} hook {kind} --socket {} --token {}",
+                shell_quote(hook.orchd_path),
+                shell_quote(hook.socket_path),
+                shell_quote(hook.token)
+            )
+        };
+        let hooks = serde_json::json!({
+            "Stop": [
+                {
+                    "hooks": [
+                        {"type": "command", "command": command("stop"), "timeout": 600}
+                    ]
+                }
+            ],
+            // Asks the daemon (`hook.edit`) whether another live task holds
+            // the file, and holds a call the run may not make until the owner
+            // answers; a denial names why so the agent goes on.
+            "PreToolUse": [
+                {
+                    "matcher": HOOKED_TOOLS,
+                    "hooks": [
+                        {"type": "command", "command": command("edit"), "timeout": HOOK_HOLD_SECS}
+                    ]
+                }
+            ]
+        });
+        obj.insert("hooks".to_string(), hooks);
+    }
+
+    serde_json::Value::Object(obj)
+}
+
+/// POSIX single-quote quoting: the hook command (and a profile's
+/// `apiKeyHelper`) runs through a shell, and the real data dir
+/// (`Application Support`) contains a space.
+pub fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+// -- run fingerprint -------------------------------------------------------
+
+/// FNV-1a, 64 bit, hex: stable across Rust versions and platforms, which
+/// `DefaultHasher` is not, and short enough to print in a report row.
+fn short_hash(parts: &[&str]) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for part in parts {
+        for byte in part.bytes().chain(std::iter::once(0xff)) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("{:08x}", hash >> 32)
+}
+
+/// The argv without the values that differ per run or per machine: paths,
+/// session ids, the MCP server wiring.
+fn stable_argv(argv: &[String]) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut skip_next = false;
+    let mut after_resume = false;
+    for (i, arg) in argv.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let prev = i.checked_sub(1).map(|p| argv[p].as_str());
+        if after_resume {
+            after_resume = false;
+            continue;
+        }
+        match arg.as_str() {
+            "--mcp-config" | "--settings" | "--resume" | "-C" => skip_next = true,
+            "resume" if i == 1 => after_resume = true,
+            a if a.starts_with("--image=") => {}
+            a if a.starts_with("mcp_servers.") && prev == Some("-c") => {
+                out.pop();
+            }
+            a => out.push(a),
+        }
+    }
+    out
+}
+
+/// The run settings JSON without secrets (profile env, key helper) and
+/// without the per-machine paths (hook commands, denied-read dirs).
+fn stable_settings(settings: &serde_json::Value) -> String {
+    let mut settings = settings.clone();
+    if let Some(obj) = settings.as_object_mut() {
+        for key in ["env", "apiKeyHelper", "hooks"] {
+            obj.remove(key);
+        }
+        if let Some(sandbox) = obj.get_mut("sandbox").and_then(|s| s.as_object_mut()) {
+            sandbox.remove("filesystem");
+        }
+    }
+    settings.to_string()
+}
+
+/// The hash of the inputs orchd controls for one run. The task-specific
+/// brief text is deliberately not part of it.
+pub fn prompt_hash(argv: &[String], settings: Option<&serde_json::Value>) -> String {
+    let version = crate::brief::BRIEF_TEMPLATE_VERSION.to_string();
+    let settings = settings.map(stable_settings).unwrap_or_default();
+    let argv = stable_argv(argv).join("\u{1f}");
+    short_hash(&[&version, &argv, &settings])
+}
+
+impl RunOutcome {
+    /// Builds the run's fingerprint from what the harness reported. The
+    /// requested alias is never a stand-in for a model the harness did not
+    /// name: that would hide exactly the drift the fingerprint is for.
+    pub fn build_fingerprint(
+        &self,
+        harness: Harness,
+        harness_version: Option<String>,
+        prompt_hash: String,
+    ) -> Fingerprint {
+        Fingerprint {
+            models: self.real_models(),
+            harness,
+            harness_version: self.harness_version.clone().or(harness_version),
+            prompt_hash,
+        }
+    }
+}
+
+// -- stream event parsing --------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+pub struct RunOutcome {
+    pub session_id: Option<String>,
+    pub cost_usd: Option<f64>,
+    pub usage_input: u64,
+    pub usage_output: u64,
+    pub usage_cached: u64,
+    pub final_text: Option<String>,
+    /// A harness-reported failure (Claude `is_error` result, Codex
+    /// `turn.failed`/`error`), used as the failure detail when the run
+    /// produced nothing.
+    pub error: Option<String>,
+    /// The run printed nothing for its stall timeout and was killed.
+    pub stalled: bool,
+    /// The loop detector killed the run; the failure detail.
+    pub looped: Option<String>,
+    /// The run's estimated cost passed `RunRequest::max_budget_usd` and it
+    /// was stopped (or the CLI reported `error_max_budget_usd`).
+    pub over_budget: bool,
+    /// Claude only: input + cache creation + cache read tokens of the first
+    /// `assistant` event, i.e. the whole prompt the first turn was sent,
+    /// whether or not an earlier run left it in the prompt cache.
+    pub first_turn_tokens: Option<u64>,
+    /// Claude only: the usage of each top-level assistant message, by
+    /// message id -- the stream repeats a message once per content block.
+    pub messages: BTreeMap<String, MessageUsage>,
+    /// `cost_usd` was priced from `messages`: the run printed no `result`.
+    pub cost_estimated: bool,
+    /// What the harness reported it ran: Claude's init `model` and
+    /// `claude_code_version`, the `modelUsage` keys of its result (every
+    /// real model id, subagents included), Codex's reported `model`.
+    pub init_model: Option<String>,
+    pub harness_version: Option<String>,
+    pub usage_models: Vec<String>,
+    /// Set by the engine once the run ends.
+    pub fingerprint: Option<Fingerprint>,
+    /// Claude only: the calls the run was not allowed to make
+    /// (`permission_denials` of its result).
+    pub permission_denials: Vec<PermissionDenial>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PermissionDenial {
+    pub tool: String,
+    pub input: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MessageUsage {
+    pub model: String,
+    pub input: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
+    pub output: u64,
+}
+
+impl RunOutcome {
+    /// The model ids that really ran: init model, then every `modelUsage`
+    /// key, then any top-level message's model, without repeats.
+    pub fn real_models(&self) -> Vec<String> {
+        let mut models: Vec<String> = Vec::new();
+        let all = self
+            .init_model
+            .iter()
+            .chain(self.usage_models.iter())
+            .chain(self.messages.values().map(|m| &m.model))
+            .filter(|m| !m.is_empty());
+        for m in all {
+            if !models.contains(m) {
+                models.push(m.clone());
+            }
+        }
+        models
+    }
+
+    /// A Claude run that ended without its `result` event (killed, stalled,
+    /// crashed): price the messages it did stream, fill in their token
+    /// usage, and mark the cost estimated. No-op once a cost is known, or
+    /// when no message has a price.
+    pub fn estimate_cost(&mut self, prices: &BTreeMap<String, Price>) {
+        if self.cost_usd.is_some() {
+            return;
+        }
+        if let Some(cost) = self.streamed_cost(prices) {
+            self.cost_usd = Some(cost);
+            self.cost_estimated = true;
+            let sum = |f: fn(&MessageUsage) -> u64| self.messages.values().map(f).sum::<u64>();
+            self.usage_input = sum(|m| m.input);
+            self.usage_cached = sum(|m| m.cache_read);
+            self.usage_output = sum(|m| m.output);
+        }
+    }
+
+    /// The streamed messages priced so far; `None` when none has a price.
+    pub fn streamed_cost(&self, prices: &BTreeMap<String, Price>) -> Option<f64> {
+        let priced: Vec<(&MessageUsage, Price)> = self
+            .messages
+            .values()
+            .filter_map(|m| price_for(prices, &m.model).map(|p| (m, p)))
+            .collect();
+        if priced.is_empty() {
+            return None;
+        }
+        Some(
+            priced
+                .iter()
+                .map(|(m, p)| p.claude_cost(m.input, m.cache_write, m.cache_read, m.output))
+                .sum(),
+        )
+    }
+}
+
+/// Folds a whole saved `events.jsonl` (stderr lines included; they are
+/// skipped) into an outcome, as if streamed.
+/// The error a harness run leaves when it exits non-zero with nothing on
+/// stderr. No exit code in the text: failure signatures strip digits, and
+/// "exit status: ." then reached the owner's question verbatim.
+pub fn exit_error(harness: Harness, status: std::process::ExitStatus) -> String {
+    let name = format!("{harness:?}");
+    if status.code().is_some() {
+        format!("{name} exited with an error.")
+    } else {
+        format!("{name} was stopped by a signal.")
+    }
+}
+
+pub fn replay_events(harness: Harness, text: &str) -> RunOutcome {
+    let mut outcome = RunOutcome::default();
+    for line in text.lines() {
+        feed_stream_line(harness, line, &mut outcome);
+    }
+    outcome
+}
+
+/// Folds one line of a harness's streamed JSON output into `outcome`,
+/// returning a short human-readable note for the `log` subscribe event when
+/// the line is worth surfacing (at most one line per event, per spec).
+/// Unparseable or irrelevant lines are ignored, never fatal -- a harness
+/// version bump changing an unrelated field must not break the run.
+pub fn feed_stream_line(harness: Harness, line: &str, outcome: &mut RunOutcome) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    match harness {
+        Harness::Claude => feed_claude_line(&v, outcome),
+        Harness::Codex => feed_codex_line(&v, outcome),
+    }
+}
+
+fn feed_claude_line(v: &serde_json::Value, outcome: &mut RunOutcome) -> Option<String> {
+    let ty = v.get("type").and_then(|x| x.as_str())?;
+    match ty {
+        "system" if v.get("subtype").and_then(|x| x.as_str()) == Some("init") => {
+            outcome.session_id = v
+                .get("session_id")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            outcome.init_model = v.get("model").and_then(|x| x.as_str()).map(str::to_string);
+            outcome.harness_version = v
+                .get("claude_code_version")
+                .and_then(|x| x.as_str())
+                .map(str::to_string);
+            Some("session started".to_string())
+        }
+        "result" => {
+            if let Some(usage) = v.get("modelUsage").and_then(|x| x.as_object()) {
+                for key in usage.keys() {
+                    if !outcome.usage_models.contains(key) {
+                        outcome.usage_models.push(key.clone());
+                    }
+                }
+            }
+            outcome.cost_usd = v.get("total_cost_usd").and_then(|x| x.as_f64());
+            outcome.permission_denials = v
+                .get("permission_denials")
+                .and_then(|x| x.as_array())
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|d| {
+                            Some(PermissionDenial {
+                                tool: d.get("tool_name")?.as_str()?.to_string(),
+                                input: d.get("tool_input").cloned().unwrap_or_default(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(usage) = v.get("usage") {
+                outcome.usage_input = usage
+                    .get("input_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                outcome.usage_output = usage
+                    .get("output_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                outcome.usage_cached = usage
+                    .get("cache_read_input_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+            }
+            outcome.final_text = v
+                .get("result")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            if v.get("subtype").and_then(|x| x.as_str()) == Some("error_max_budget_usd") {
+                outcome.over_budget = true;
+            }
+            if v.get("is_error").and_then(|x| x.as_bool()) == Some(true) {
+                outcome.error = outcome
+                    .final_text
+                    .clone()
+                    .or(Some("Claude reported an error.".into()));
+            }
+            Some("session finished".to_string())
+        }
+        "assistant" => {
+            if outcome.first_turn_tokens.is_none() {
+                outcome.first_turn_tokens = first_turn_tokens(v);
+            }
+            record_message_usage(v, outcome);
+            claude_tool_note(v)
+        }
+        _ => None,
+    }
+}
+
+fn first_turn_tokens(v: &serde_json::Value) -> Option<u64> {
+    let usage = v.get("message")?.get("usage")?;
+    let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    Some(n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens"))
+}
+
+/// A subagent's messages (`parent_tool_use_id` set) are left out: only the
+/// top-level conversation is counted. A repeated message id keeps its latest
+/// usage, which is the fullest.
+fn record_message_usage(v: &serde_json::Value, outcome: &mut RunOutcome) {
+    if v.get("parent_tool_use_id").is_some_and(|p| !p.is_null()) {
+        return;
+    }
+    let Some(message) = v.get("message") else {
+        return;
+    };
+    let Some(usage) = message.get("usage") else {
+        return;
+    };
+    let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    let id = message
+        .get("id")
+        .and_then(|x| x.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("#{}", outcome.messages.len()));
+    let model = message
+        .get("model")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    outcome.messages.insert(
+        id,
+        MessageUsage {
+            model,
+            input: n("input_tokens"),
+            cache_write: n("cache_creation_input_tokens"),
+            cache_read: n("cache_read_input_tokens"),
+            output: n("output_tokens"),
+        },
+    );
+}
+
+fn claude_tool_note(v: &serde_json::Value) -> Option<String> {
+    let blocks = v.get("message")?.get("content")?.as_array()?;
+    blocks.iter().find_map(|b| {
+        if b.get("type").and_then(|x| x.as_str()) != Some("tool_use") {
+            return None;
+        }
+        let name = b.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
+        let input = b.get("input");
+        let detail = input
+            .and_then(|i| {
+                i.get("command")
+                    .or_else(|| i.get("file_path"))
+                    .or_else(|| i.get("pattern"))
+            })
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        Some(short_note(&format!("{name} {detail}")))
+    })
+}
+
+fn short_note(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.chars().count() > 120 {
+        format!("{}…", line.chars().take(119).collect::<String>())
+    } else {
+        line.to_string()
+    }
+}
+
+fn feed_codex_line(v: &serde_json::Value, outcome: &mut RunOutcome) -> Option<String> {
+    if let Some(model) = v.get("model").and_then(|x| x.as_str()) {
+        outcome.init_model = Some(model.to_string());
+    }
+    let ty = v.get("type").and_then(|x| x.as_str())?;
+    match ty {
+        "thread.started" => {
+            outcome.session_id = v
+                .get("thread_id")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            Some("session started".to_string())
+        }
+        "turn.completed" => {
+            if let Some(usage) = v.get("usage") {
+                let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                outcome.usage_input = n("input_tokens");
+                outcome.usage_output = n("output_tokens");
+                outcome.usage_cached = n("cached_input_tokens");
+            }
+            Some("turn completed".to_string())
+        }
+        "turn.failed" | "error" => {
+            let message = v
+                .get("error")
+                .and_then(|e| e.get("message").or(Some(e)))
+                .or_else(|| v.get("message"))
+                .map(|m| {
+                    m.as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| m.to_string())
+                })
+                .unwrap_or_else(|| "Codex reported an error.".into());
+            outcome.error = Some(message.clone());
+            Some(short_note(&message))
+        }
+        "item.completed" | "item.started" => {
+            let item = v.get("item")?;
+            let done = ty == "item.completed";
+            match item.get("type").and_then(|x| x.as_str())? {
+                "agent_message" if done => {
+                    outcome.final_text = item
+                        .get("text")
+                        .and_then(|x| x.as_str())
+                        .map(str::to_string);
+                    Some("agent message".to_string())
+                }
+                "command_execution" => {
+                    let cmd = item
+                        .get("command")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("a command");
+                    Some(short_note(&format!(
+                        "{} {cmd}",
+                        if done { "Ran" } else { "Running" }
+                    )))
+                }
+                "file_change" if done => Some("Edited files".to_string()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_silent_failed_exit_reads_as_words_without_a_code() {
+        use std::os::unix::process::ExitStatusExt;
+        let exited = std::process::ExitStatus::from_raw(1 << 8);
+        assert_eq!(
+            exit_error(Harness::Claude, exited),
+            "Claude exited with an error."
+        );
+        let killed = std::process::ExitStatus::from_raw(9);
+        assert_eq!(
+            exit_error(Harness::Codex, killed),
+            "Codex was stopped by a signal."
+        );
+    }
+
+    fn base_req(harness: Harness, worktree: &Path) -> RunRequest<'_> {
+        RunRequest {
+            harness,
+            worktree,
+            model: None,
+            effort: None,
+            max_budget_usd: None,
+            review: false,
+            mcp_config: None,
+            settings_path: None,
+            network_allowed: true,
+            codex_mcp: None,
+            images: &[],
+            repo_settings: true,
+        }
+    }
+
+    #[test]
+    fn codex_gets_the_messages_server() {
+        let wt = PathBuf::from("/repo-task");
+        let server = serde_json::json!({"command": "/o", "args": ["mcp", "--task", "t"]});
+        let mut req = base_req(Harness::Codex, &wt);
+        req.codex_mcp = Some(("sushiai-messages", &server));
+        let command = "mcp_servers.sushiai-messages.command=\"/o\"".to_string();
+        let args = "mcp_servers.sushiai-messages.args=[\"mcp\",\"--task\",\"t\"]".to_string();
+        let argv = codex_argv(&req);
+        assert!(argv.contains(&command));
+        assert!(argv.contains(&args));
+        assert_eq!(argv.last().unwrap(), "-");
+    }
+
+    #[test]
+    fn effort_and_the_attempt_cap_reach_every_argv_shape_or_none() {
+        let wt = PathBuf::from("/repo-task");
+        for harness in [Harness::Claude, Harness::Codex] {
+            for review in [false, true] {
+                let mut req = base_req(harness, &wt);
+                req.review = review;
+                let none = build_argv(&req);
+                assert!(!none.iter().any(|a| a.contains("effort")), "{none:?}");
+                assert!(!none.contains(&"--max-budget-usd".to_string()));
+                req.effort = Some("medium");
+                req.max_budget_usd = Some(1.5);
+                let argv = build_argv(&req);
+                match harness {
+                    Harness::Claude => {
+                        let i = argv.iter().position(|a| a == "--effort").unwrap();
+                        assert_eq!(argv[i + 1], "medium");
+                        let i = argv.iter().position(|a| a == "--max-budget-usd").unwrap();
+                        assert_eq!(argv[i + 1], "1.5");
+                    }
+                    Harness::Codex => {
+                        assert!(argv.contains(&"model_reasoning_effort=\"medium\"".to_string()));
+                        assert!(!argv.contains(&"--max-budget-usd".to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn claude_implement_argv_has_accept_edits_and_no_tools_restriction() {
+        let wt = PathBuf::from("/repo-task");
+        let mcp = PathBuf::from("/repo-task/runs/1/mcp.json");
+        let settings = PathBuf::from("/repo-task/runs/1/settings.json");
+        let mut req = base_req(Harness::Claude, &wt);
+        req.mcp_config = Some(&mcp);
+        req.settings_path = Some(&settings);
+        req.model = Some("sonnet");
+        let argv = claude_argv(&req);
+        assert!(argv.contains(&"--permission-mode".to_string()));
+        let idx = argv.iter().position(|a| a == "--permission-mode").unwrap();
+        assert_eq!(argv[idx + 1], "acceptEdits");
+        assert!(!argv.contains(&"--tools".to_string()));
+        assert!(argv.contains(&"--mcp-config".to_string()));
+        assert!(argv.contains(&"--model".to_string()));
+    }
+
+    /// Pins today's argv: an implement run always trims the delegation
+    /// tools now, unconditionally.
+    #[test]
+    fn claude_implement_argv_always_trims_delegation_tools() {
+        let wt = PathBuf::from("/w");
+        let mcp = PathBuf::from("/r/mcp.json");
+        let settings = PathBuf::from("/r/settings.json");
+        let mut req = base_req(Harness::Claude, &wt);
+        req.mcp_config = Some(&mcp);
+        req.settings_path = Some(&settings);
+        req.model = Some("opus");
+        req.effort = Some("high");
+        let expected: Vec<String> = [
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--setting-sources",
+            "project,local",
+            "--disable-slash-commands",
+            "--strict-mcp-config",
+            "--mcp-config",
+            "/r/mcp.json",
+            "--settings",
+            "/r/settings.json",
+            "--permission-mode",
+            "acceptEdits",
+            "--disallowedTools",
+            DELEGATION_TOOLS,
+            "--permission-prompts",
+            "none",
+            "--model",
+            "opus",
+            "--effort",
+            "high",
+        ]
+        .map(String::from)
+        .to_vec();
+        let argv = claude_argv(&req);
+        assert_eq!(argv, expected);
+        let at = argv.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert!(argv[at + 1].split(',').any(|t| t == "Task"));
+    }
+
+    #[test]
+    fn claude_review_never_gets_the_delegation_tools_trim() {
+        let wt = PathBuf::from("/w");
+        let mut req = base_req(Harness::Claude, &wt);
+        req.review = true;
+        assert!(!claude_argv(&req).contains(&"--disallowedTools".to_string()));
+    }
+
+    #[test]
+    fn claude_review_uses_read_only_tools_and_plan_mode() {
+        let wt = PathBuf::from("/repo-task");
+        let mut req = base_req(Harness::Claude, &wt);
+        req.review = true;
+        let argv = claude_argv(&req);
+        assert!(argv.contains(&"--tools".to_string()));
+        let tools_idx = argv.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(argv[tools_idx + 1], "Read,Grep,Glob");
+        let mode_idx = argv.iter().position(|a| a == "--permission-mode").unwrap();
+        assert_eq!(argv[mode_idx + 1], "plan");
+    }
+
+    #[test]
+    fn codex_implement_argv_sets_workspace_write_and_network_flag() {
+        let wt = PathBuf::from("/repo-task");
+        let mut req = base_req(Harness::Codex, &wt);
+        req.network_allowed = false;
+        let argv = codex_argv(&req);
+        assert!(argv.contains(&"workspace-write".to_string()));
+        assert!(argv.contains(&"sandbox_workspace_write.network_access=false".to_string()));
+        assert_eq!(argv.last().unwrap(), "-");
+    }
+
+    #[test]
+    fn codex_review_attaches_images_before_the_other_flags() {
+        let images = vec![std::path::PathBuf::from("/w/artifacts/a.png")];
+        let mut req = base_req(Harness::Codex, Path::new("/w"));
+        req.review = true;
+        req.images = &images;
+        let argv = codex_argv(&req);
+        assert_eq!(argv[1], "--image=/w/artifacts/a.png");
+        assert_eq!(argv.last().unwrap(), "-");
+    }
+
+    #[test]
+    fn codex_review_is_sandboxed_read_only() {
+        let wt = PathBuf::from("/repo-task");
+        let mut req = base_req(Harness::Codex, &wt);
+        req.review = true;
+        let argv = codex_argv(&req);
+        assert!(argv.contains(&"read-only".to_string()));
+        assert!(!argv.iter().any(|a| a.contains("network_access")));
+    }
+
+    #[test]
+    fn claude_settings_merges_profile_and_omits_sandbox_for_host() {
+        let profile = serde_json::json!({"env": {"ANTHROPIC_API_KEY_HELPER": "x"}, "apiKeyHelper": "helper.sh"});
+        let domains = vec!["github.com".to_string()];
+        let hook = StopHook {
+            orchd_path: "/usr/local/bin/orchd",
+            socket_path: "/tmp/orchd.sock",
+            token: "tok-1",
+        };
+        let deny_read = vec!["/data".to_string()];
+        let native = build_claude_settings(
+            Some(&profile),
+            SandboxMode::Native,
+            &domains,
+            &deny_read,
+            Some(hook),
+        );
+        assert_eq!(native["apiKeyHelper"], "helper.sh");
+        assert_eq!(native["sandbox"]["enabled"], true);
+        assert_eq!(
+            native["sandbox"]["network"]["allowedDomains"][0],
+            "github.com"
+        );
+        assert!(native["sandbox"]["network"]
+            .get("strictAllowlist")
+            .is_none());
+        assert_eq!(native["sandbox"]["filesystem"]["denyRead"][0], "/data");
+        assert_eq!(native["hooks"]["Stop"][0]["hooks"][0]["timeout"], 600);
+        assert_eq!(native["hooks"]["PreToolUse"][0]["matcher"], HOOKED_TOOLS);
+        assert!(native["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("hook edit --socket '/tmp/orchd.sock' --token 'tok-1'"));
+        assert!(native["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("hook stop --socket '/tmp/orchd.sock' --token 'tok-1'"));
+
+        let hook2 = StopHook {
+            orchd_path: "/usr/local/bin/orchd",
+            socket_path: "/tmp/orchd.sock",
+            token: "tok-1",
+        };
+        let host =
+            build_claude_settings(None, SandboxMode::Host, &domains, &deny_read, Some(hook2));
+        assert!(host.get("sandbox").is_none());
+        assert!(host.get("hooks").is_some());
+    }
+
+    #[test]
+    fn claude_settings_omits_hooks_entirely_when_no_stop_hook_given() {
+        let domains = vec!["github.com".to_string()];
+        let review = build_claude_settings(None, SandboxMode::Native, &domains, &[], None);
+        assert!(
+            review.get("hooks").is_none(),
+            "a review session has no registered token, so it must not get a Stop hook"
+        );
+        assert_eq!(review["sandbox"]["enabled"], true);
+    }
+
+    #[test]
+    fn feeds_claude_stream_lines_into_outcome() {
+        let mut outcome = RunOutcome::default();
+        feed_stream_line(
+            Harness::Claude,
+            r#"{"type":"system","subtype":"init","session_id":"sess-9"}"#,
+            &mut outcome,
+        );
+        feed_stream_line(
+            Harness::Claude,
+            r#"{"type":"result","total_cost_usd":0.42,"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":5},"result":"done"}"#,
+            &mut outcome,
+        );
+        assert_eq!(outcome.session_id.as_deref(), Some("sess-9"));
+        assert_eq!(outcome.cost_usd, Some(0.42));
+        assert_eq!(outcome.usage_input, 10);
+        assert_eq!(outcome.final_text.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn feeds_codex_stream_lines_into_outcome() {
+        let mut outcome = RunOutcome::default();
+        feed_stream_line(
+            Harness::Codex,
+            r#"{"type":"thread.started","thread_id":"th-1"}"#,
+            &mut outcome,
+        );
+        feed_stream_line(
+            Harness::Codex,
+            r#"{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":4,"cached_input_tokens":1}}"#,
+            &mut outcome,
+        );
+        feed_stream_line(
+            Harness::Codex,
+            r#"{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"all set"}}"#,
+            &mut outcome,
+        );
+        assert_eq!(outcome.session_id.as_deref(), Some("th-1"));
+        assert_eq!(outcome.usage_output, 4);
+        assert_eq!(outcome.usage_cached, 1);
+        assert!(outcome.error.is_none());
+        feed_stream_line(
+            Harness::Codex,
+            r#"{"type":"turn.failed","error":{"message":"model not supported"}}"#,
+            &mut outcome,
+        );
+        assert_eq!(outcome.error.as_deref(), Some("model not supported"));
+        assert_eq!(outcome.final_text.as_deref(), Some("all set"));
+    }
+
+    /// Shape captured from `claude -p --output-format stream-json --verbose`
+    /// (2.1.283): the first turn read most of its prompt from the cache.
+    #[test]
+    fn first_turn_tokens_count_cached_prompt_tokens_from_the_first_assistant_event() {
+        let mut outcome = RunOutcome::default();
+        for line in [
+            r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":9,"cache_creation_input_tokens":11644,"cache_read_input_tokens":18198,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":11644},"output_tokens":4,"service_tier":"standard"}},"session_id":"s"}"#,
+            r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":5,"cache_read_input_tokens":40000}},"session_id":"s"}"#,
+            r#"{"type":"result","usage":{"input_tokens":14,"cache_read_input_tokens":58198,"output_tokens":9},"result":"ok"}"#,
+        ] {
+            feed_stream_line(Harness::Claude, line, &mut outcome);
+        }
+        assert_eq!(outcome.first_turn_tokens, Some(9 + 11644 + 18198));
+
+        let mut none = RunOutcome::default();
+        feed_stream_line(
+            Harness::Claude,
+            r#"{"type":"result","usage":{"input_tokens":1},"result":"ok"}"#,
+            &mut none,
+        );
+        assert_eq!(none.first_turn_tokens, None);
+    }
+
+    /// Shape of `claude -p --output-format stream-json --verbose` (2.1.283)
+    /// cut off before its `result`: one message streamed as two events (a
+    /// text block, then a tool_use block) under the same id, a second
+    /// message, a subagent's message, and a stderr line from events.jsonl.
+    #[test]
+    fn a_run_without_a_result_is_priced_from_its_unique_messages_and_marked_estimated() {
+        let events = [
+            r#"{"type":"system","subtype":"init","session_id":"s","model":"claude-opus-5-5"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","id":"msg_01A","type":"message","role":"assistant","content":[{"type":"text","text":"Reading."}],"usage":{"input_tokens":6,"cache_creation_input_tokens":12000,"cache_read_input_tokens":18000,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":12000},"output_tokens":30,"service_tier":"standard"}},"parent_tool_use_id":null,"session_id":"s"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","id":"msg_01A","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/w/a.rs"}}],"usage":{"input_tokens":6,"cache_creation_input_tokens":12000,"cache_read_input_tokens":18000,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":12000},"output_tokens":30,"service_tier":"standard"}},"parent_tool_use_id":null,"session_id":"s"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"fn a() {}"}]},"parent_tool_use_id":null,"session_id":"s"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","id":"msg_01B","type":"message","role":"assistant","content":[{"type":"text","text":"Editing."}],"usage":{"input_tokens":2,"cache_creation_input_tokens":500,"cache_read_input_tokens":30000,"output_tokens":400,"service_tier":"standard"}},"parent_tool_use_id":null,"session_id":"s"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","id":"msg_sub","type":"message","role":"assistant","content":[],"usage":{"input_tokens":9999,"output_tokens":9999}},"parent_tool_use_id":"toolu_9","session_id":"s"}"#,
+            "[stderr] warning: something",
+        ]
+        .join("\n");
+        let mut outcome = replay_events(Harness::Claude, &events);
+        assert_eq!(outcome.messages.len(), 2);
+        assert_eq!(outcome.cost_usd, None);
+        let prices = crate::model::Settings::default().prices;
+        outcome.estimate_cost(&prices);
+        let expected = (6.0 * 4.0 + 12_000.0 * 5.0 + 18_000.0 * 0.20 + 30.0 * 20.0) / 1e6
+            + (2.0 * 4.0 + 500.0 * 5.0 + 30_000.0 * 0.20 + 400.0 * 20.0) / 1e6;
+        let cost = outcome.cost_usd.unwrap();
+        assert!((cost - expected).abs() < 1e-12, "{cost} vs {expected}");
+        assert!(outcome.cost_estimated);
+        assert_eq!(
+            (
+                outcome.usage_input,
+                outcome.usage_cached,
+                outcome.usage_output
+            ),
+            (8, 48_000, 430)
+        );
+
+        // A run that did print its result keeps the CLI's own figure.
+        let finished = format!(
+            "{events}\n{}",
+            r#"{"type":"result","total_cost_usd":0.5,"usage":{"input_tokens":8},"result":"ok"}"#
+        );
+        let mut outcome = replay_events(Harness::Claude, &finished);
+        outcome.estimate_cost(&prices);
+        assert_eq!(outcome.cost_usd, Some(0.5));
+        assert!(!outcome.cost_estimated);
+
+        // No price for the model: no guess.
+        let mut unpriced = replay_events(Harness::Claude, &events.replace("claude-opus-5-5", "x"));
+        unpriced.estimate_cost(&prices);
+        assert_eq!(unpriced.cost_usd, None);
+        assert!(!unpriced.cost_estimated);
+    }
+
+    #[test]
+    fn malformed_lines_are_ignored_not_fatal() {
+        let mut outcome = RunOutcome::default();
+        let note = feed_stream_line(Harness::Claude, "not json at all", &mut outcome);
+        assert!(note.is_none());
+        assert!(outcome.session_id.is_none());
+    }
+
+    /// Lines captured from real `codex exec --json` (0.154) and
+    /// `claude -p --output-format stream-json` (2.1.280) runs, trimmed to the
+    /// fields we read. A hand-written fake once agreed with a wrong parser;
+    /// these keep the parser honest against the CLIs' actual shapes.
+    #[test]
+    fn parses_captured_real_cli_streams() {
+        let mut codex = RunOutcome::default();
+        for line in [
+            r#"{"type":"thread.started","thread_id":"01a0ceb4-8341-7a52-98b6-e8a84e9db9cf"}"#,
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"error","message":"`[features].collab` is deprecated."}}"#,
+            r#"{"type":"turn.started"}"#,
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"hi"}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":19775,"cached_input_tokens":12928,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}"#,
+        ] {
+            feed_stream_line(Harness::Codex, line, &mut codex);
+        }
+        assert_eq!(
+            codex.session_id.as_deref(),
+            Some("01a0ceb4-8341-7a52-98b6-e8a84e9db9cf")
+        );
+        assert_eq!(codex.final_text.as_deref(), Some("hi"));
+        assert_eq!(
+            (codex.usage_input, codex.usage_cached, codex.usage_output),
+            (19775, 12928, 5)
+        );
+        assert!(
+            codex.error.is_none(),
+            "a deprecation item is not a run failure"
+        );
+
+        let mut claude = RunOutcome::default();
+        for line in [
+            r#"{"type":"system","subtype":"init","session_id":"6e8e54b3-2bcb-48aa-9b85-5f9a848efe52","model":"claude-haiku-4-5-20251001"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"hi","session_id":"6e8e54b3-2bcb-48aa-9b85-5f9a848efe52","total_cost_usd":0.0133868,"usage":{"input_tokens":9,"cache_read_input_tokens":18198,"output_tokens":50}}"#,
+        ] {
+            feed_stream_line(Harness::Claude, line, &mut claude);
+        }
+        assert_eq!(
+            claude.session_id.as_deref(),
+            Some("6e8e54b3-2bcb-48aa-9b85-5f9a848efe52")
+        );
+        assert_eq!(claude.final_text.as_deref(), Some("hi"));
+        assert_eq!(claude.cost_usd, Some(0.0133868));
+        assert_eq!(
+            (claude.usage_input, claude.usage_cached, claude.usage_output),
+            (9, 18198, 50)
+        );
+        assert!(claude.error.is_none());
+    }
+
+    #[test]
+    fn claude_events_give_the_real_models_and_version() {
+        let text = r#"{"type":"system","subtype":"init","session_id":"s","model":"claude-sonnet-5-5","claude_code_version":"2.1.284"}
+{"type":"result","total_cost_usd":0.1,"modelUsage":{"claude-sonnet-5-5":{},"claude-haiku-4-5-20251001":{}},"result":"x"}"#;
+        let outcome = replay_events(Harness::Claude, text);
+        let fp = outcome.build_fingerprint(Harness::Claude, None, "h".into());
+        assert_eq!(
+            fp.models,
+            ["claude-sonnet-5-5", "claude-haiku-4-5-20251001"]
+        );
+        assert_eq!(fp.harness_version.as_deref(), Some("2.1.284"));
+        assert_eq!(
+            fp.label(),
+            "claude-sonnet-5-5+claude-haiku-4-5-20251001 (2.1.284)"
+        );
+    }
+
+    #[test]
+    fn prompt_hash_ignores_codex_mcp_wiring() {
+        let argv = |cmd: &str, key: &str| -> Vec<String> {
+            [
+                "exec",
+                "-c",
+                &format!("mcp_servers.m.command=\"{cmd}\""),
+                "-c",
+                &format!("mcp_servers.m.env.TOKEN=\"{key}\""),
+                "--model",
+                "gpt",
+            ]
+            .map(String::from)
+            .to_vec()
+        };
+        assert_eq!(
+            prompt_hash(&argv("/a", "k1"), None),
+            prompt_hash(&argv("/b", "k2"), None)
+        );
+        assert!(!stable_argv(&argv("/a", "k1"))
+            .iter()
+            .any(|a| a.contains("mcp_servers")));
+    }
+
+    #[test]
+    fn prompt_hash_ignores_paths_ids_and_secrets_but_not_real_settings() {
+        let argv = |mcp: &str, resume: &str| -> Vec<String> {
+            [
+                "-p",
+                "--mcp-config",
+                mcp,
+                "--resume",
+                resume,
+                "--model",
+                "sonnet",
+            ]
+            .map(String::from)
+            .to_vec()
+        };
+        let settings = |key: &str, cap: bool| {
+            serde_json::json!({
+                "env": {"ANTHROPIC_API_KEY": key},
+                "hooks": {"Stop": key},
+                "permissions": {"allow": ["Bash"]},
+                "bashOutputMaxChars": if cap { 1 } else { 2 },
+            })
+        };
+        let a = prompt_hash(&argv("/a/mcp.json", "s1"), Some(&settings("k1", true)));
+        let b = prompt_hash(&argv("/b/mcp.json", "s2"), Some(&settings("k2", true)));
+        assert_eq!(a, b);
+        let c = prompt_hash(&argv("/a/mcp.json", "s1"), Some(&settings("k1", false)));
+        assert_ne!(a, c);
+        let mut other = argv("/a/mcp.json", "s1");
+        other.push("--effort".into());
+        assert_ne!(a, prompt_hash(&other, Some(&settings("k1", true))));
+    }
+
+    #[test]
+    fn claude_settings_allow_sandboxed_bash_and_forbid_commit_and_push() {
+        let native = build_claude_settings(None, SandboxMode::Native, &[], &[], None);
+        assert_eq!(native["sandbox"]["autoAllowBashIfSandboxed"], true);
+        let deny = native["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.iter().any(|d| d == "Bash(git commit:*)"));
+        assert!(deny.iter().any(|d| d == "Bash(git push:*)"));
+        assert_eq!(native["permissions"]["allow"], serde_json::json!(["Bash"]));
+
+        let host = build_claude_settings(None, SandboxMode::Host, &[], &[], None);
+        assert_eq!(host["permissions"]["allow"], serde_json::json!(["Bash"]));
+    }
+
+    #[test]
+    fn a_result_lists_the_calls_the_run_was_refused() {
+        let mut outcome = RunOutcome::default();
+        feed_stream_line(
+            Harness::Claude,
+            r#"{"type":"result","result":"x","permission_denials":[{"tool_name":"WebFetch","tool_use_id":"t1","tool_input":{"url":"https://example.com"}},{"tool_use_id":"t2"}]}"#,
+            &mut outcome,
+        );
+        assert_eq!(
+            outcome.permission_denials,
+            vec![PermissionDenial {
+                tool: "WebFetch".to_string(),
+                input: serde_json::json!({"url": "https://example.com"}),
+            }]
+        );
+    }
+}

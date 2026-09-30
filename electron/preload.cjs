@@ -3,7 +3,25 @@ const invoke =
   (channel) =>
   (...args) =>
     ipcRenderer.invoke(channel, ...args);
+// The workspace snapshot is read and flushed synchronously: restore() runs
+// before the first render, and a flush runs while the window is closing.
+const sendSync = (channel, ...args) => {
+  const reply = ipcRenderer.sendSync(channel, ...args);
+  if (reply?.error) throw new Error(reply.error);
+  return reply?.value ?? null;
+};
 contextBridge.exposeInMainWorld("bridge", {
+  workspaceStateRead: () => {
+    try {
+      return sendSync("workspace-state-read");
+    } catch {
+      return null;
+    }
+  },
+  workspaceStateWrite: invoke("workspace-state-write"),
+  workspaceStateFlush: (text) => {
+    sendSync("workspace-state-flush", text);
+  },
   agentProviders: invoke("agent-providers"),
   agentCall: invoke("agent-call"),
   agentOpenExternal: invoke("agent-open-external"),
@@ -26,6 +44,16 @@ contextBridge.exposeInMainWorld("bridge", {
     ipcRenderer.on("updates-state", listener);
     return () => ipcRenderer.removeListener("updates-state", listener);
   },
+  attentionNotify: invoke("attention-notify"),
+  attentionBadge: invoke("attention-badge"),
+  appPreferences: invoke("app-preferences"),
+  appPreferencesSet: invoke("app-preferences-set"),
+  mascotShortcutStatus: invoke("mascot-shortcut-status"),
+  onAttentionOpen: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on("attention-open", listener);
+    return () => ipcRenderer.removeListener("attention-open", listener);
+  },
   chooseDirectory: invoke("choose-directory"),
   chooseAttachments: invoke("choose-attachments"),
   pathForFile: (file) => webUtils.getPathForFile(file),
@@ -36,6 +64,32 @@ contextBridge.exposeInMainWorld("bridge", {
   terminalClose: invoke("terminal-close"),
   terminalScroll: invoke("terminal-scroll"),
   herdr: invoke("herdr"),
+  orchestrator: invoke("orchestrator"),
+  onOrchestrator: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on("orchestrator-event", listener);
+    return () => ipcRenderer.removeListener("orchestrator-event", listener);
+  },
+  orchestratorHosts: invoke("orchestrator-hosts"),
+  orchestratorPreflight: invoke("orchestrator-preflight"),
+  orchestratorHostSetup: invoke("orchestrator-host-setup"),
+  orchestratorProbe: invoke("orchestrator-probe"),
+  onOrchestratorHosts: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on("orchestrator-hosts-changed", listener);
+    return () =>
+      ipcRenderer.removeListener("orchestrator-hosts-changed", listener);
+  },
+  onOrchestratorOpen: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on("orchestrator-open", listener);
+    return () => ipcRenderer.removeListener("orchestrator-open", listener);
+  },
+  onOpenInbox: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on("open-inbox", listener);
+    return () => ipcRenderer.removeListener("open-inbox", listener);
+  },
   chat: invoke("chat"),
   chatModels: invoke("chat-models"),
   cancelChat: invoke("chat-cancel"),
@@ -78,6 +132,7 @@ contextBridge.exposeInMainWorld("bridge", {
   connectionsForward: invoke("connections-forward"),
   projectInspect: invoke("project-inspect"),
   projectPreview: invoke("project-preview"),
+  worktreeCreate: invoke("worktree-create"),
   onTerminal: (callback) => {
     const listener = (_, data) => callback(data);
     ipcRenderer.on("terminal-data", listener);

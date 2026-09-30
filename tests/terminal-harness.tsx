@@ -8,6 +8,7 @@ const calls = {
   files: [] as string[],
   closed: 0,
   drops: 0,
+  opened: [] as string[],
 };
 let output: (event: any) => void;
 let failAttachment = false;
@@ -26,6 +27,9 @@ window.bridge = {
     await new Promise((resolve) => setTimeout(resolve, 20));
     if (failAttachment) throw Error("Test attachment failed");
     return `/tmp/attachments/${name}`;
+  },
+  agentOpenExternal: async (url: string) => {
+    calls.opened.push(url);
   },
   terminalClose: async () => {
     calls.closed++;

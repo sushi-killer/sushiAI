@@ -1,0 +1,851 @@
+// Mirrors artifacts/tasks/orchestrator-mvp.md's "Types (JSON, camelCase)"
+// section exactly - the daemon (orchd, Lane A) and this file are two
+// independent renderings of the same contract, not one importing the other.
+
+export type Harness = "claude" | "codex";
+
+export type Route = {
+  id: string;
+  label: string;
+  harness: Harness;
+  model?: string;
+  effort?: string;
+  /** Claude only: routes through a custom model provider instead of the
+   * Anthropic API. */
+  profileId?: string;
+  /** 1-3. Auto review never uses a route weaker than the implementer's;
+   * unset uses a default from the model (haiku/luna/mini 1, opus 3, else 2). */
+  strength?: number;
+};
+
+export type Tier = "mechanical" | "standard" | "hard";
+
+/** One connected tool of the orchestrator chat. `server` is an MCP server
+ * definition or a `{ref}` read from the owner's own MCP config at turn time,
+ * so no secret is ever stored here. */
+export type ChatToolConfig = {
+  id: string;
+  label: string;
+  enabled: boolean;
+  server: Record<string, unknown>;
+  /** Tool name -> the owner's call on whether it only reads. */
+  overrides?: Record<string, "read" | "write">;
+};
+export type ChatToolStatus =
+  "ok" | "needs-auth" | "failed" | "unavailable" | "unchecked";
+/** What `chat.tools` knows about one connected tool. */
+export type ChatToolRow = {
+  id: string;
+  transport: "stdio" | "http" | "unknown";
+  status: ChatToolStatus;
+  reason?: string | null;
+  /** Why a Codex chat runs without it; absent when it can use it. */
+  codex?: string | null;
+  /** `kind` is what the chat does with the tool; `guess` what it would be
+   * without the owner's override. */
+  tools: { name: string; kind: "read" | "write"; guess: "read" | "write" }[];
+};
+/** A server of the owner's MCP config that is not a connected tool yet. */
+export type ChatToolServer = {
+  ref: string;
+  label: string;
+  source: string;
+  transport: "stdio" | "http";
+};
+
+export type Settings = {
+  routes: Route[];
+  /** Servers the orchestrator chat may use, each toggled in Settings. */
+  chatTools: ChatToolConfig[];
+  tiers: Record<Tier, string>;
+  /** Route id; "" turns review off, "auto" picks the cheapest route that is
+   * never weaker than the implementer (at least 2, 3 on the hard tier),
+   * preferring another harness on a tie. */
+  review: string;
+  sandbox: "native" | "host";
+  /** Claude's sandbox only: a per-domain allowlist. */
+  allowedDomains: string[];
+  /** Codex has no per-domain filter - network is all-or-nothing. */
+  codexNetwork: boolean;
+  protectedPaths: string[];
+  maxAttempts: number;
+  parallel: number;
+  /** Dollars a UTC day may spend across every repo before orchd asks (a
+   * `daily_budget` question) instead of starting a plan run or implement
+   * attempt; 0 = off. */
+  dailyBudgetUsd: number;
+  /** Start ready `next`-bucket backlog tasks by themselves while fewer than
+   * `parallel` task loops are live. */
+  autopilot: boolean;
+  /** At most this many subtasks of one parent run at once (`parallel` stays
+   * the global cap). */
+  childParallel: number;
+  /** Route id that drafts a plan (title/goal/criteria/verify) from a bare
+   * request; "" turns drafting off, so `task.create` always needs the full
+   * form instead. */
+  planner: string;
+  /** Route the orchestrator agent runs on (its chat and, with `autoAnswer`,
+   * its answers to stuck questions); "" means the standard tier's route. */
+  orchestrator: string;
+  /** The orchestrator answers a stuck agent's question before it reaches
+   * the owner, logged in the task as `"Orchestrator: ..."`. */
+  autoAnswer: boolean;
+  /** Routine questions are answered by rules and a cheap judge (at most three
+   * per task) and recorded as assumptions; `false` asks the owner every time. */
+  answerPolicy: boolean;
+  /** Experiment flags new tasks start with; `task.create` can override them. */
+  experiments: Variant;
+  /** Model id -> per-million-token prices, for harnesses (Codex) that
+   * report tokens but no cost. */
+  prices: Record<
+    string,
+    {
+      input: number;
+      cachedInput: number;
+      output: number;
+      /** Cache writes; absent = billed at the input price. */
+      cacheWrite?: number;
+    }
+  >; /** Repository-specific path fragments for `orchd ab`'s work breakdown. */
+  workBuckets?: { process: string[]; evidence: string[] };
+  /** Repo path -> landing on its default branch is allowed; repos not listed
+   * follow the daemon's global `landOnDefault`. */
+  landOnDefaultRepos?: Record<string, boolean>;
+  /** Thresholds for the evolution loop; absent in older settings. */
+  evolution?: EvolutionSettings;
+  /** Route id of the cheap read-only check of a brief's goal and criteria;
+   * "" turns the check off. Absent in older settings. */
+  briefCheckRoute?: string;
+  /** Where new task worktrees go; relative to the repo root unless absolute. */
+  worktreeRoot?: string;
+  /** Seconds one verify command may run; absent on an orchd without the
+   * setting (the daemon then uses its own default, 1200). */
+  verifyTimeoutSecs?: number;
+  /** Tasks may land on the repo's default branch (per-repo overrides in
+   * `landOnDefaultRepos`). */
+  landOnDefault?: boolean;
+  /** Shell commands run in a repo's main checkout after a task lands. */
+  afterLand?: { repo: string; run: string }[];
+  /** Commands that only run when the task's diff touches their `paths`. */
+  scopedChecks?: { repo?: string; command: string; paths: string[] }[];
+};
+
+export type EvolutionSettings = {
+  /** Earlier tasks a repo needs before per-repo baselines mean anything. */
+  minTasks: number;
+  /** Tool calls a cluster of signals must have wasted to be worth a proposal. */
+  minWastedCalls: number;
+  minWastedUsd: number;
+  maxProposals: number;
+  /** Route id that writes proposals; "" means the hard tier's route. */
+  proposerRoute: string;
+  /** Tasks after which an accepted change is judged and possibly reverted. */
+  revertAfterTasks: number;
+  /** Process-file calls in one attempt before `process_read` fires. */
+  processMinCalls?: number;
+  /** Per repo path: substrings that mark a call as reading process files. */
+  processFiles?: Record<string, string[]>;
+};
+
+export type TaskStatus =
+  | "drafting"
+  | "queued"
+  | "running"
+  | "waiting"
+  | "landing"
+  | "done"
+  | "stopped"
+  | "failed";
+
+export type Dispute = {
+  finding: string;
+  rebuttal: string;
+  evidence: string[];
+};
+
+export type QuestionKind =
+  | "attempts_failing"
+  | "review_no_verdict"
+  | "dependency_ended"
+  | "impossible"
+  | "preexisting_failure"
+  | "budget"
+  | "protected_path"
+  | "permission"
+  | "review_dispute"
+  | "plan_question"
+  | "daily_budget"
+  | "agent_question";
+
+/** The stage that asked a question. */
+export type AskedBy =
+  "brief" | "plan" | "implement" | "verify" | "review" | "advisor" | "land";
+
+export type Question = {
+  text: string;
+  options: string[];
+  /** What the question is about; the answer policy picks its rule by it. */
+  kind: QuestionKind;
+  /** Absent on a question asked before orchd recorded it. */
+  askedBy?: AskedBy;
+  /** When it was asked, ms epoch; absent like `askedBy`. */
+  askedAt?: number;
+};
+
+/** One answered question in `Task.questionHistory`. */
+export type AnsweredQuestion = {
+  question: string;
+  options: string[];
+  kind: QuestionKind;
+  askedBy?: AskedBy;
+  askedAt?: number;
+  answer: string;
+  answeredAt: number;
+  answeredBy: "owner" | "policy" | "judge" | "orchestrator";
+};
+
+export type BacklogBucket = "next" | "later";
+/** A task's place in the planning backlog, ascending `order` per bucket. */
+export type Backlog = { bucket: BacklogBucket; order: number };
+
+export type VerifyResult = {
+  command: string;
+  code: number | null;
+  tail: string;
+  ms: number;
+};
+
+export type ReviewResult = {
+  verdict: "PASS" | "FAIL";
+  findings: string[];
+  /** The findings the reviewer marked as repeating the previous attempt's. */
+  repeated?: string[];
+};
+
+export type Variant = {
+  stallTimeoutSecs: number;
+  reviewEvidence: boolean;
+  advisor: boolean;
+  loopDetect: boolean;
+  /** Route id the plan stage runs on instead of `settings.planner`. */
+  plannerRoute?: string;
+  /** Route ids the implement stage uses instead of `settings.tiers`. */
+  tierRoutes?: Partial<Record<Tier, string>>;
+  /** Dollar budget: once the task has spent it, the task waits for the
+   * owner ("raise" adds it again, "stop") before its next run. Absent or
+   * 0 = none. */
+  maxCostUsd?: number;
+  /** Dollar cap on one implement attempt: past it the run is stopped and
+   * fails with kind "budget". Absent or 0 = none. */
+  maxAttemptCostUsd?: number;
+  /** Non-blocking planner questions become assumptions instead of waiting
+   * for the owner; blocking ones are asked together. Absent = off. */
+  batchQuestions?: boolean;
+  /** The planner writes executable checks per criterion; the ones that fail
+   * on the base gate every attempt, and a held-out check is run after
+   * verify. */
+  groundedChecks?: boolean;
+  /** 2 = the first implement attempt of a hard task runs twice at once, on
+   * the tier route and on `bestOfRoute`, and the checks (then a reviewer)
+   * pick. 0/1 or absent = off. */
+  bestOf?: number;
+  /** Second candidate's route; default the first route on the other
+   * harness. */
+  bestOfRoute?: string;
+  /** A finished top-level task lands on its base branch by itself. Absent =
+   * off. */
+  land?: boolean;
+};
+
+export type LeadTouch = {
+  touched: boolean;
+  note: string;
+  at: number;
+  by: "owner" | "auto";
+};
+
+/** A choice the planner made itself (`variant.batchQuestions`). */
+export type Assumption = {
+  question: string;
+  /** The planner's recommended option. */
+  answer: string;
+  evidence: string;
+  /** `planner`, or for the answer policy `policy` (a rule) / `judge`. */
+  by: string;
+  /** The kind of question the answer policy answered. */
+  kind?: QuestionKind;
+  /** The attempt it was asked in (answer policy only). */
+  attempt?: number;
+  overturned: boolean;
+  /** What the owner answered instead, once overturned. */
+  ownerAnswer?: string;
+};
+
+export type Candidate = {
+  route: string;
+  cost: number;
+  /** Finished, changed files and every verify command exited 0. */
+  verify: boolean;
+  checks: { passed: number; failed: number };
+  picked: boolean;
+};
+
+export type FailureKind =
+  | "no_deliverable"
+  | "stall"
+  | "loop"
+  | "budget"
+  | "verify"
+  | "conflict"
+  | "heldout"
+  | "review"
+  | "evidence"
+  | "protected"
+  | "blocked"
+  | "error";
+
+export type Failure = {
+  kind: FailureKind;
+  detail: string;
+  signature: string;
+};
+
+export type Usage = { input: number; output: number; cached: number };
+
+export type AttemptStatus =
+  "running" | "passed" | "failed" | "interrupted" | "blocked";
+
+/** What a run actually used, as the harness reported it; `model` on the
+ * attempt is only the alias orchd asked for. */
+export type Fingerprint = {
+  models: string[];
+  harness: Harness;
+  harnessVersion?: string;
+  promptHash: string;
+};
+
+export type Attempt = {
+  n: number;
+  stage: "plan" | "implement" | "review";
+  routeId: string;
+  harness: Harness;
+  model: string;
+  /** Why this route was chosen - a rule name. */
+  reason: string;
+  sessionId?: string;
+  startedAt: number;
+  endedAt?: number;
+  status: AttemptStatus;
+  summary?: string;
+  /** The agent's note for the next attempt: done, tried, next. */
+  handoff?: string;
+  /** Review findings the agent disputed in its report. */
+  disputes?: Dispute[];
+  changedFiles: string[];
+  verify: VerifyResult[];
+  gateBlocks: number;
+  /** First-turn prompt tokens of a fresh Claude implement attempt. */
+  prefixTokens?: number;
+  review?: ReviewResult;
+  failure?: Failure;
+  usage?: Usage;
+  costUsd?: number;
+  /** `costUsd` was priced from the run's per-message token usage because it
+   * ended (stopped, stalled, daemon restart) before the CLI reported one. */
+  costEstimated?: boolean;
+  /** Cost of the review run(s) that reviewed this implement attempt - kept
+   * separate from `costUsd` because that field is what a later resume of
+   * the same session subtracts, and a review's cost must never join it. */
+  reviewCostUsd?: number;
+  /** Absolute paths of the images this attempt saved under artifacts/, kept
+   * in the task's run directory after the worktree is removed. */
+  evidence?: string[];
+  /** The advisor's diagnosis of this attempt's failure, shown to the next
+   * attempt. */
+  advice?: string;
+  /** Cost of the advisor run about this attempt's failure (also in the
+   * task's `costUsd`); once set, the attempt is not advised again. */
+  advisorCostUsd?: number;
+  /** Absent on an attempt from before fingerprints. */
+  fingerprint?: Fingerprint;
+  reviewFingerprint?: Fingerprint;
+  advisorFingerprint?: Fingerprint;
+  /** `variant.bestOf`: the concurrent runs of this attempt. */
+  candidates?: Candidate[];
+};
+
+export type Check = {
+  /** Index into the task's criteria. */
+  criterion: number;
+  run: string;
+  /** How the check ran on the base checkout, before any work. */
+  baseline?: "pass" | "fail" | "env";
+};
+
+/** A file the task named that lives outside git: `path` is relative to the
+ * worktree, `saved` its copy in the task's data dir, `placed` where it was put
+ * in the main working copy after landing. */
+export type Deliverable = {
+  path: string;
+  saved: string;
+  placed?: string;
+};
+
+export type Task = {
+  id: string;
+  /** Set by the app on a task of a remote host ("ssh:<id>"); absent locally. */
+  host?: string;
+  title: string;
+  goal: string;
+  criteria: string[];
+  /** Criteria the planner marked visual (a saved image is required). */
+  visualCriteria?: string[];
+  verify: string[];
+  /** Slow checks run once, after review passes and before the commit. */
+  finalVerify?: string[];
+  checks?: Check[];
+  heldOut?: Check;
+  /** The one-sentence ask a plan was drafted from, when the task started
+   * that way instead of from the full manual form. */
+  request?: string;
+  repo: string;
+  worktree: string;
+  branch: string;
+  baseSha: string;
+  /** Branch the task started from; its work is carried onto it when it moves. */
+  baseRef?: string;
+  /** Where the work started (chat, ui, mcp, cli, planner, eval, handoff). */
+  source?: string;
+  /** The commit a `variant.land` task put on its base branch. */
+  landedSha?: string;
+  /** Named files that were not committed, kept outside the worktree. */
+  deliverables?: Deliverable[];
+  /** Markdown report of a finished top-level task or graph. */
+  report?: string;
+  /** When the report was first written, ms epoch. */
+  reportAt?: number;
+  /** Whether the work needed a fix after orchd said done; absent = unknown. */
+  leadTouch?: LeadTouch;
+  /** The task whose owner mark ("Needed a fix") created this one. */
+  followUpOf?: string;
+  /** Follow-up tasks the owner's marks on this task created. */
+  followUps?: string[];
+  /** Ids of tasks that must be done before this one starts implementing. */
+  dependsOn?: string[];
+  /** Repo-relative files or directories the planner said this subtask edits;
+   * overlapping siblings run one after another. */
+  paths?: string[];
+  /** Why the task sits queued: it waits for another task's lease, e.g.
+   * `waits for "Add a" on src/x`. Gone once it starts. */
+  queueReason?: string;
+  /** The task waited for a lease; its worktree is carried onto the base head
+   * before its first attempt. */
+  waitedOnLease?: boolean;
+  /** The sibling subtask whose branch this one continues (a relay): it starts
+   * from that subtask's commit and only the chain's last link lands on the
+   * parent. */
+  relayOf?: string;
+  /** Where the relay's chain began (a commit); set once the link started. */
+  relayBase?: string;
+  /** The task this one is a part of: it branches from and lands on that
+   * task's branch. A task with children runs no attempt of its own. */
+  parent?: string;
+  status: TaskStatus;
+  tier: Tier;
+  /** The tier the planner chose; it routes the task. */
+  plannedTier?: Tier;
+  /** Set when `tier` was picked by falling back to `standard` instead of a
+   * a planner choice; the fixed-set reason (e.g. "no planner tier"). Absent
+   * when the planner picked the tier. */
+  tierFallback?: string;
+  /** Experiment flags this task runs with (an A/B arm); absent on tasks
+   * created before variants existed. */
+  variant?: Variant;
+  /** Set on tasks created by `orchd eval run`: the eval set (file stem) and
+   * the task's name in it. */
+  evalSet?: string;
+  evalName?: string;
+  question?: Question;
+  /** Every answered question, oldest first; absent when none was answered. */
+  questionHistory?: AnsweredQuestion[];
+  /** Set while the task sits in the planning backlog; `task.start` or the
+   * autopilot clears it. */
+  backlog?: Backlog;
+  /** Owner and orchestrator decisions, newest last - includes "Owner: ..."
+   * answers to a question. */
+  decisions: string[];
+  /** Questions the planner or the answer policy answered themselves. */
+  assumptions?: Assumption[];
+  /** Keys of disputed review findings a judge already ruled on. */
+  judgedFindings?: string[];
+  attempts: Attempt[];
+  costUsd: number;
+  /** Times the owner raised the `variant.maxCostUsd` budget; the budget in
+   * force is that amount times `1 + budgetRaises`. */
+  budgetRaises?: number;
+  /** The UTC day (YYYY-MM-DD) the owner said "run anyway" to the daily
+   * budget question. */
+  dailyBudgetOkDay?: string;
+  /** Hides the task from the default task list without deleting it. */
+  archived: boolean;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type TaskEvent = { event: "task"; task: Task };
+export type LogEvent = {
+  event: "log";
+  taskId: string;
+  attempt: number;
+  line: string;
+};
+/** How one turn behaves: `chat` runs the orchestrator with its task tools;
+ * `brainstorm` and `plan` only look and end with a list of proposed tasks.
+ * The owner picks it per message. */
+export type ChatMode = "chat" | "brainstorm" | "plan";
+/** A task the orchestrator proposed, read from its reply's `sushi-draft`
+ * block. */
+export type ChatDraft = {
+  title: string;
+  goal: string;
+  criteria: string[];
+  dependsOn: string[];
+  tier?: Tier;
+};
+export type ChatQuestion = { text: string; options: string[] };
+/** One of the orchestrator agent's chat sessions for a repo, kept by the
+ * daemon. `chat.get`/`chat.send` act on the current session. */
+export type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  /** The reply's prose; its draft block is taken out. */
+  text: string;
+  ts: number;
+  /** The mode the turn ran in; absent means the plain chat. */
+  mode?: ChatMode;
+  draft?: ChatDraft;
+  proposal?: ChatProposal;
+  questions?: ChatQuestion[];
+  action?: ChatAction;
+};
+export type ChatActionState =
+  "pending" | "sending" | "sent" | "failed" | "declined";
+/** A write call on a connected tool that waits for the owner's OK. It runs at
+ * most once; its state survives a reload. */
+export type ChatAction = {
+  id: string;
+  /** The connected tool's id. */
+  server: string;
+  tool: string;
+  args: Record<string, unknown>;
+  summary: string;
+  target: string;
+  state: ChatActionState;
+  error?: string;
+  result?: string;
+};
+/** A task's place in a proposal: the 1-based row of another proposed task, or
+ * the id of an existing task. */
+export type ProposalDep = number | string;
+/** One row of a reply's proposal. `taskId` is set once the row became a task
+ * and `skipped` once the owner passed on it; both survive a reload. */
+export type ProposedTask = {
+  title: string;
+  goal: string;
+  criteria: string[];
+  dependsOn: ProposalDep[];
+  tier?: Tier;
+  taskId?: string;
+  skipped?: boolean;
+};
+export type ChatProposal = { tasks: ProposedTask[] };
+/** What `chat.createProposal` returns: the proposal as recorded and the
+ * tasks this call made, by 1-based row. */
+export type ChatProposalResult = {
+  proposal: ChatProposal;
+  created: { index: number; taskId: string }[];
+};
+export type ChatThread = {
+  repo: string;
+  id: string;
+  createdAt: number;
+  /** Set from the session's first owner message; absent until then. */
+  title?: string;
+  messages: ChatMessage[];
+  busy: boolean;
+  note?: string;
+  error?: string;
+  /** The mode of the last message the owner sent; absent means chat. */
+  mode?: ChatMode;
+};
+/** A session as the session list shows it - no message bodies. */
+export type ChatSessionSummary = {
+  id: string;
+  title?: string;
+  busy: boolean;
+  /** The last message's time, or the session's creation. */
+  updatedAt?: number;
+  messageCount: number;
+};
+/** The repo's sessions and the current one. */
+export type ChatSessionList = {
+  current: string;
+  sessions: ChatSessionSummary[];
+};
+/** `thread` is the current session, whole; `current`/`sessions` are what
+ * `chat.list` would return at the same moment. */
+export type ChatEvent = {
+  event: "chat";
+  thread: ChatThread;
+} & ChatSessionList;
+
+/** One agent-to-agent (or agent-to-orchestrator) message, kept by the daemon
+ * per repo. `from`/`to` are either a task id or the literal `"orchestrator"`.
+ * `delivered` flips true once the recipient actually receives it on its next
+ * attempt/turn - until then the message is only pending. */
+export type Message = {
+  id: string;
+  repo: string;
+  from: string;
+  to: string;
+  kind: "message" | "question" | "reply";
+  text: string;
+  /** Id of the message this one answers - only set when `kind` is "reply". */
+  replyTo?: string;
+  ts: number;
+  delivered: boolean;
+  deliveredAt?: number;
+};
+/** Pushed both when a message is created and again when it flips to
+ * delivered - an upsert by id, same as `TaskEvent`. */
+export type MessageEvent = { event: "message"; message: Message };
+
+export type AuditStatus = "running" | "done" | "failed" | "stopped";
+export type AuditGrade = "good" | "weak" | "missing";
+export type AuditEffort = "small" | "medium" | "large";
+export type AuditItem = {
+  area: string;
+  grade: AuditGrade;
+  /** `path:line` references, commands run, or `unmeasured: ...`. */
+  evidence: string[];
+  recommendation: string;
+  effort: AuditEffort;
+};
+/** The agent's parsed ```sushi-audit reply, stored as `report.json`. */
+export type AuditReport = {
+  summary: string;
+  items: AuditItem[];
+  /** At most 5, most valuable for autonomous agents first. */
+  topFixes: string[];
+};
+/** One read-only `repo.audit` run, as `repo.audit.get`/`repo.audit.list`
+ * return it. `report` is null until the run is done, and stays null when
+ * the reply held no parsable report (`error` says why). */
+export type Audit = {
+  id: string;
+  repo: string;
+  routeId: string;
+  harness: Harness;
+  model: string;
+  status: AuditStatus;
+  startedAt: number;
+  endedAt?: number;
+  error?: string;
+  usage?: Usage;
+  costUsd: number;
+  /** Absent on an audit from before fingerprints. */
+  fingerprint?: Fingerprint;
+  report: AuditReport | null;
+};
+/** Pushed when an audit starts and when it ends; its progress lines are
+ * `LogEvent`s whose `taskId` is the audit id (`attempt` 0). */
+export type AuditEvent = { event: "audit"; audit: Audit };
+export type SignalKind =
+  | "loop"
+  | "discovery"
+  | "throwaway_script"
+  | "verify_signature"
+  | "review_finding"
+  | "owner_question"
+  | "process_read"
+  | "graph"
+  | "repeated_review"
+  | "preexisting";
+
+/** Where a signal's evidence is: a file relative to the data dir and a
+ * 1-based inclusive line range. */
+export type ExcerptRef = { file: string; fromLine: number; toLine: number };
+
+/** What a finished task left behind that an evolution proposal can cite. */
+export type Signal = {
+  kind: SignalKind;
+  taskId: string;
+  repo: string;
+  /** 0 for a signal about the whole task. */
+  attempt: number;
+  detail: string;
+  wastedCalls: number;
+  wastedUsd: number;
+  excerptRef: ExcerptRef;
+};
+
+export type ProposalStatus =
+  "proposed" | "approved" | "rejected" | "adopted" | "revert_suggested";
+
+/** Repo: a change to the audited repository, done as a task. Harness: a
+ * change to orchd's own settings, adopted after an A/B eval. */
+export type ProposalTrack = "repo" | "harness";
+
+export type ProposalForm =
+  | "script"
+  | "test"
+  | "lint"
+  | "doc"
+  | "command"
+  | "skill"
+  | "prompt"
+  | "gate"
+  | "routing"
+  | "default";
+
+export type ProposalCounts = { tasks: number; signals: number };
+
+/** One owner-approved standing note about a repo (`repo.notes.*`). */
+export type Note = {
+  id: string;
+  text: string;
+  source: "owner" | `proposal:${string}`;
+  createdAt: number;
+};
+
+export type Proposal = {
+  id: string;
+  clusterKey: string;
+  kind: string;
+  repo: string;
+  track: ProposalTrack;
+  form: ProposalForm;
+  change: string;
+  evidence: string;
+  metric: string;
+  test: string;
+  status: ProposalStatus;
+  createdAt: number;
+  costUsd: number;
+  fingerprint?: Fingerprint;
+  /** Harness track: the `orchd eval run` A/B command. */
+  evalCommand?: string;
+  /** Repo track, once approved: the task that carries the change. */
+  taskId?: string;
+  adoptedAt?: number;
+  before?: ProposalCounts;
+  after?: ProposalCounts;
+  /** Why it was rejected, or what regressed. */
+  reason?: string;
+};
+
+/** A proposal was stored or changed - an upsert by id. */
+export type ProposalEvent = { event: "proposal"; proposal: Proposal };
+/** Pushed over `onOrchestrator` from the daemon's one `subscribe` connection. */
+export type OrchestratorEvent = (
+  TaskEvent | LogEvent | ChatEvent | MessageEvent | AuditEvent | ProposalEvent
+) & {
+  /** Set on an event relayed from a remote host ("ssh:<id>"); absent locally. */
+  host?: string;
+};
+
+/** One host the Orchestrator panel can talk to: "local" or "ssh:<id>". */
+export type OrchestratorHost = {
+  id: string;
+  name: string;
+  state:
+    | "idle"
+    | "connecting"
+    | "installing"
+    | "building"
+    | "starting"
+    | "ready"
+    | "error";
+  detail?: string;
+  /** Whether the app keeps this host's daemon connected. */
+  enabled: boolean;
+  preflight?: Preflight | null;
+  /** `uname -sm` on the host ("Linux x86_64"), once SSH connected. */
+  platform?: string;
+  /** Whether any orchd binary was on the host when it connected. */
+  orchdInstalled?: boolean;
+};
+
+/** What a host offers orchd's routes: git and each harness CLI. */
+export type Preflight = {
+  git: boolean;
+  /** A C linker (cc or gcc), which a Rust build needs; absent on old hosts' data. */
+  cc?: boolean;
+  claude: { installed: boolean; loggedIn: boolean };
+  codex: { installed: boolean; loggedIn: boolean };
+  checkedAt: number;
+};
+
+export type TimelineStage =
+  "plan" | "implement" | "verify" | "review" | "advisor" | "final" | "wait";
+
+/** One piece of a task's time, from `task.timeline`: computed on demand from
+ * the task record and each run's events, never stored. */
+export type TimelineSegment = {
+  stage: TimelineStage;
+  attempt: number;
+  startedAt: number;
+  endedAt: number;
+  costUsd: number;
+  outcome: string;
+  failureKind?: FailureKind;
+  /** Implement attempts only: tool calls by kind. */
+  buckets?: {
+    process: number;
+    evidence: number;
+    verify: number;
+    task: number;
+    explore: number;
+  };
+};
+
+/** One recurring failure from `failures.catalogue`: every attempt whose
+ * failure has this signature, across tasks. */
+export type FailureRow = {
+  signature: string;
+  kind: FailureKind;
+  count: number;
+  tasks: { id: string; title: string }[];
+  lastSeen: number;
+  exampleDetail: string;
+  /** The task whose attempt supplied `exampleDetail` and `lastSeen`. */
+  exampleTaskId: string;
+};
+
+/** One row of `costs.summary`: what a group of model runs cost. */
+export type SpendRow = {
+  key: string;
+  keys?: string[];
+  costUsd: number;
+  runs: number;
+  tokens: { input: number; cached: number; output: number };
+  cacheHitRate: number;
+};
+
+/** `costs.summary {repo?, taskId?, sinceDays? | from?/to?, groupBy}`. */
+export type SpendSummary = {
+  rows: SpendRow[];
+  totals: Omit<SpendRow, "key" | "keys">;
+  leadTouch?: LeadTouchSummary;
+};
+
+/** Done tasks whose work needed a fix after orchd said done, over done tasks
+ * carrying a mark. */
+export type LeadTouchRate = { touched: number; marked: number; rate: number };
+
+export type LeadTouchSummary = LeadTouchRate & {
+  byRepo: (LeadTouchRate & { repo: string })[];
+  byWeek: (LeadTouchRate & { week: string })[];
+};
+
+export type SpendGroup = "stage" | "model" | "route" | "repo" | "task" | "day";

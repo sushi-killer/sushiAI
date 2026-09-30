@@ -5,6 +5,7 @@ import {
   ChevronRight,
   FolderTree,
   Globe,
+  Inbox,
   LayoutDashboard,
   LayoutList,
   MoreHorizontal,
@@ -14,7 +15,6 @@ import {
   Server,
   Settings,
   Sparkles,
-  TerminalSquare,
   Workflow,
 } from "lucide-react";
 import { Icon } from "../PanelIcon.tsx";
@@ -38,10 +38,12 @@ import {
   isHidden,
   mergedMarkerAccessibleName,
   memberLabel,
+  memberTooltip,
   mergedRowStatusKey,
   mixedRemotes,
   shouldCollapseHostMarkers,
   type MergeGroup,
+  type WorktreeTask,
 } from "./workspaceMerge.ts";
 import type { ConnectionProfile, Panel, Workspace } from "../types";
 import type { ProjectGit } from "./useProjectGit.ts";
@@ -53,9 +55,8 @@ import type { ProjectGit } from "./useProjectGit.ts";
 function primaryNav({
   currentRouteId,
   workspaces,
+  inboxCount,
   registry,
-  openDialog,
-  showWorkspace,
   toggleCoreSection,
   openExtensionTarget,
 }: {
@@ -64,16 +65,22 @@ function primaryNav({
    * as Skills and core never learns which extension is open. */
   currentRouteId: string;
   workspaces: Workspace[];
+  /** Agents needing input plus finished-and-unseen, across every host - the
+   * Inbox entry's own count, styled the same as Dashboard's. */
+  inboxCount: number;
   registry: ExtensionRegistry;
-  openDialog(name: "sessions" | "workspace"): void;
-  showWorkspace(): void;
   toggleCoreSection(section: string): void;
   openExtensionTarget(extensionId: string, targetSurfaceId: string): void;
 }) {
   const builtin = [
-    { label: "Dashboard", Glyph: LayoutDashboard, count: workspaces.length },
-    { label: "Sessions", Glyph: TerminalSquare },
+    // What waits for you, then what you run, then what you own.
+    {
+      label: "Inbox",
+      Glyph: Inbox,
+      count: inboxCount > 0 ? inboxCount : undefined,
+    },
     { label: "Routines", Glyph: Workflow },
+    { label: "Dashboard", Glyph: LayoutDashboard, count: workspaces.length },
     { label: "Extensions", Glyph: Plug },
     { label: "Skills", Glyph: Sparkles },
   ].map(({ label, Glyph, count }) => ({
@@ -82,11 +89,7 @@ function primaryNav({
     count,
     icon: <Glyph size={14} />,
     current: routeFromLegacy("Code", label).surfaceId === currentRouteId,
-    open: () => {
-      if (label !== "Sessions") return toggleCoreSection(label);
-      showWorkspace();
-      openDialog("sessions");
-    },
+    open: () => toggleCoreSection(label),
   }));
   const contributed = navigationFor(registry, "sidebar.primary").map(
     (item) => ({
@@ -148,7 +151,7 @@ export function Sidebar({
   mode,
   onWorkspace,
   currentRouteId,
-  showWorkspace,
+  inboxCount,
   toggleCoreSection,
   openDialog,
   manageWorkspace,
@@ -165,6 +168,7 @@ export function Sidebar({
   connection,
   localSocket,
   connectionProfiles,
+  worktreeTasks,
   statusByEndpoint,
   projectGit,
   workspaceGrouping,
@@ -180,9 +184,10 @@ export function Sidebar({
   /** No page is open, so the canvas is showing this workspace's panels. */
   onWorkspace: boolean;
   currentRouteId: string;
-  showWorkspace(): void;
+  /** Agents needing input plus finished-and-unseen, across every host. */
+  inboxCount: number;
   toggleCoreSection(section: string): void;
-  openDialog(name: "sessions" | "workspace"): void;
+  openDialog(name: "workspace"): void;
   manageWorkspace(workspace: Workspace): void;
   workspaces: Workspace[];
   active: Workspace;
@@ -202,6 +207,8 @@ export function Sidebar({
    * real poll status the same way an SSH group looks up its own. */
   localSocket: string;
   connectionProfiles: ConnectionProfile[];
+  /** orchd tasks, so a task's worktree is named by the task's title. */
+  worktreeTasks: WorktreeTask[];
   /** Real, current poll status per endpoint - every connected host is polled
    * independently, so this is never just the default connection's status. */
   statusByEndpoint: Record<string, string>;
@@ -329,7 +336,11 @@ export function Sidebar({
     const statusKey = mergedRowStatusKey(group, active.id);
     const live =
       groupStatus(statusKey, localSocket, statusByEndpoint) === "connected";
-    const collapse = shouldCollapseHostMarkers(group, connectionProfiles);
+    const collapse = shouldCollapseHostMarkers(
+      group,
+      connectionProfiles,
+      worktreeTasks,
+    );
     // On one machine every pane's icon would be identical noise.
     const manyHosts = new Set(group.members.map((m) => m.hostKey)).size > 1;
     const markerName = mergedMarkerAccessibleName(
@@ -337,11 +348,12 @@ export function Sidebar({
       connectionProfiles,
       localSocket,
       statusByEndpoint,
+      worktreeTasks,
     );
     const rowTitle = group.members
       .map(
         (m) =>
-          `${memberLabel(group, m, connectionProfiles)} - ${m.workspace.cwd}`,
+          `${memberTooltip(group, m, connectionProfiles, worktreeTasks)} - ${m.workspace.cwd}`,
       )
       .join("\n");
     return (
@@ -389,7 +401,14 @@ export function Sidebar({
                       {(!group.worktrees || m.hostKey !== LOCAL_GROUP) && (
                         <MarkerIcon size={10} />
                       )}
-                      {memberLabel(group, m, connectionProfiles)}
+                      <span className="tag-text">
+                        {memberLabel(
+                          group,
+                          m,
+                          connectionProfiles,
+                          worktreeTasks,
+                        )}
+                      </span>
                     </span>
                   );
                 })
@@ -404,7 +423,18 @@ export function Sidebar({
         {expanded && (
           <div className="workspace-panels">
             {group.members.flatMap((m) => {
-              const label = memberLabel(group, m, connectionProfiles);
+              const label = memberLabel(
+                group,
+                m,
+                connectionProfiles,
+                worktreeTasks,
+              );
+              const tooltip = memberTooltip(
+                group,
+                m,
+                connectionProfiles,
+                worktreeTasks,
+              );
               const offline =
                 groupStatus(m.hostKey, localSocket, statusByEndpoint) ===
                 "offline";
@@ -414,7 +444,7 @@ export function Sidebar({
                   key={`${m.workspace.id}:${p.id}`}
                   className={`${selected === p.id && m.workspace.id === active.id ? "selected" : ""} ${offline ? "offline" : ""}`}
                   onClick={() => selectHostPane(m.workspace, p)}
-                  title={`${p.title} - ${label}${offline ? " (offline)" : ""}`}
+                  title={`${p.title} - ${tooltip}${offline ? " (offline)" : ""}`}
                 >
                   <Icon kind={p.kind} agent={p.agent} />
                   <span>
@@ -423,9 +453,9 @@ export function Sidebar({
                       : p.title}
                   </span>
                   {(group.worktrees || manyHosts) && (
-                    <span className="remote-tag pane-branch">
+                    <span className="remote-tag pane-branch" title={tooltip}>
                       {manyHosts && <HostIcon size={10} />}
-                      {label}
+                      <span className="tag-text">{label}</span>
                     </span>
                   )}
                   {p.status === "working" && (
@@ -452,9 +482,8 @@ export function Sidebar({
             {primaryNav({
               currentRouteId,
               workspaces,
+              inboxCount,
               registry,
-              openDialog,
-              showWorkspace,
               toggleCoreSection,
               openExtensionTarget,
             }).map((item) => (

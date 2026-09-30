@@ -1,7 +1,8 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
-const library = import("../src/workspace/mergedLayouts.ts");
+const library = import("../src/layout.ts");
+const state = import("../src/workspaceState.ts");
 
 test("isValidLayout accepts a well-formed leaf or split tree", async () => {
   const { isValidLayout } = await library;
@@ -79,4 +80,41 @@ test("isValidLayout rejects anything that isn't a real leaf/split tree", async (
     false,
     "a malformed branch anywhere in the tree fails the whole node",
   );
+});
+
+test("the snapshot keeps valid merged-group layouts and drops malformed ones on restore", async () => {
+  const { restore } = await state;
+  const good = {
+    type: "split",
+    id: "s-1",
+    axis: "column",
+    ratio: 0.3,
+    a: { type: "leaf", id: "p-1" },
+    b: { type: "leaf", id: "p-2" },
+  };
+  const workspace = {
+    id: "w",
+    name: "w",
+    cwd: "/a",
+    panels: [],
+    layout: null,
+  };
+  const read = (mergedLayouts) => ({
+    read: () =>
+      JSON.stringify({ workspaces: [workspace], socket: "", mergedLayouts }),
+  });
+  assert.deepEqual(
+    restore(
+      read({
+        "group-a": good,
+        "group-b": { type: "split", id: "s", axis: "diagonal" },
+        "group-c": "nope",
+        "group-d": { type: "leaf" },
+      }),
+    ).mergedLayouts,
+    { "group-a": good },
+  );
+  assert.deepEqual(restore(read(undefined)).mergedLayouts, {});
+  assert.deepEqual(restore(read([good])).mergedLayouts, {});
+  assert.deepEqual(restore(read("bad")).mergedLayouts, {});
 });

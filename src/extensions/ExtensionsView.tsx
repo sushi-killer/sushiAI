@@ -11,7 +11,7 @@ const HOST_LABELS: Record<string, string> = {
   "workspace.pane": "workspace pane",
   "workspace.tab": "workspace tab",
   "dashboard.section": "Dashboard section",
-  "sessions.section": "Sessions section",
+  "sessions.section": "Inbox section",
   "skills.section": "Skills section",
   "settings.section": "Settings section",
 };
@@ -20,7 +20,7 @@ const PLACEMENT_LABELS: Record<string, string> = {
   "mode.primary": "top bar",
   "sidebar.primary": "sidebar",
   "dashboard.navigation": "Dashboard header",
-  "sessions.navigation": "Sessions header",
+  "sessions.navigation": "Inbox header",
   "skills.navigation": "Skills header",
   "panel.picker": "add-panel list",
   "workspace.toolbar.start": "toolbar, first",
@@ -160,7 +160,8 @@ export function ExtensionsView({
                 <small>{extensionSourceLabel(extension.manifest.source)}</small>
               </div>
               <div className="extension-card-actions">
-                {extension.manifest.source.kind === "builtin" ? (
+                {extension.manifest.source.kind === "builtin" &&
+                extension.canDisable !== true ? (
                   <span className="extension-toggle static">
                     <Check size={14} /> Built-in
                   </span>

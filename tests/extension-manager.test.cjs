@@ -437,3 +437,47 @@ test("an unreadable extensions folder does not stop the app", async (t) => {
     "active",
   );
 });
+
+test("the orchestrator built-in can be turned off, stays off across a restart, and Herdr still refuses", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "sushiai-extension-manager-"));
+  const orchestrator = {
+    id: "builtin.orchestrator",
+    name: "Orchestrator",
+    version: "1.0.0",
+    apiVersion: 1,
+    source: { kind: "builtin" },
+    scope: "app",
+    contributions: { surfaces: [], navigation: [], actions: [], commands: [] },
+  };
+  try {
+    const manager = new ExtensionManager({
+      dataDir: dir,
+      builtins: [HERDR_MANIFEST, orchestrator],
+    });
+    await manager.ready;
+    assert.equal(manager.isEnabled("builtin.orchestrator"), true);
+    const seen = [];
+    manager.onChange((id, enabled) => seen.push([id, enabled]));
+    await manager.setEnabled("builtin.orchestrator", false);
+    assert.deepEqual(seen, [["builtin.orchestrator", false]]);
+    await assert.rejects(
+      () => manager.setEnabled("builtin.herdr", false),
+      /cannot be disabled/,
+    );
+    const restarted = new ExtensionManager({
+      dataDir: dir,
+      builtins: [HERDR_MANIFEST, orchestrator],
+    });
+    const snapshot = await restarted.list();
+    const record = (id) =>
+      snapshot.extensions.find((entry) => entry.manifest.id === id);
+    assert.equal(record("builtin.orchestrator").status, "disabled");
+    assert.equal(record("builtin.orchestrator").canDisable, true);
+    assert.equal(record("builtin.herdr").status, "active");
+    assert.equal(record("builtin.herdr").canDisable, false);
+    await restarted.setEnabled("builtin.orchestrator", true);
+    assert.equal(restarted.isEnabled("builtin.orchestrator"), true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -7,7 +7,6 @@ export type Dialog =
   | { kind: "notifications" }
   | { kind: "updates" }
   | { kind: "routine" }
-  | { kind: "sessions" }
   | { kind: "close-session"; workspaceId: string; panelId: string }
   | { kind: "workspace-actions"; workspaceId: string };
 
@@ -23,7 +22,6 @@ export const DIALOG_META: Record<
   notifications: { label: "Notifications", className: "" },
   updates: { label: "Software updates", className: "" },
   routine: { label: "New routine", className: "" },
-  sessions: { label: "Session manager", className: "sessions-modal" },
   "close-session": { label: "Notifications", className: "" },
   "workspace-actions": {
     label: "Workspace controls",

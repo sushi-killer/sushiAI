@@ -6,6 +6,10 @@ const { scanLocalExtensions } = require("./local-extensions.cjs");
 
 const SCHEMA_VERSION = 2;
 
+/** Built-ins the owner may switch off. Every other built-in is part of the
+ * shell and is forced back on at start. */
+const DISABLEABLE_BUILTINS = new Set(["builtin.orchestrator"]);
+
 function defaultState(manifests = [], externalEnabled = false) {
   return {
     schemaVersion: SCHEMA_VERSION,
@@ -20,6 +24,12 @@ function defaultState(manifests = [], externalEnabled = false) {
       ]),
     ),
   };
+}
+
+function canDisable(manifest) {
+  return (
+    manifest.source.kind !== "builtin" || DISABLEABLE_BUILTINS.has(manifest.id)
+  );
 }
 
 function defaultLock() {
@@ -123,6 +133,7 @@ class ExtensionManager {
     this.lock = defaultLock();
     this.diagnostic = undefined;
     this.revision = 0;
+    this.listeners = new Set();
     // A failed init must not surface as an unhandled rejection: the manager is
     // built at main.cjs module scope, long before anything awaits `ready`.
     this.ready = this.init().catch((error) => {
@@ -245,6 +256,7 @@ class ExtensionManager {
       }
       if (
         manifest.source.kind === "builtin" &&
+        !canDisable(manifest) &&
         this.state.extensions[manifest.id].enabled !== true
       ) {
         this.state.extensions[manifest.id] = {
@@ -285,6 +297,17 @@ class ExtensionManager {
       ?.contributions.surfaces.find((surface) => surface.id === surfaceId);
   }
 
+  /** Synchronous, for main-process gating; false until settings are read. */
+  isEnabled(extensionId) {
+    return this.state.extensions[extensionId]?.enabled === true;
+  }
+
+  /** Calls `listener(extensionId, enabled)` after a state change is saved. */
+  onChange(listener) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
   async snapshot() {
     await this.ready;
     const records = [...this.manifests.values()].map((manifest) => {
@@ -293,6 +316,7 @@ class ExtensionManager {
       return {
         manifest,
         status: enabled ? "active" : "disabled",
+        canDisable: canDisable(manifest),
         ...(this.diagnostic && !enabled ? { error: this.diagnostic } : {}),
       };
     });
@@ -329,7 +353,7 @@ class ExtensionManager {
     if (typeof enabled !== "boolean")
       throw new Error("Extension enabled state must be boolean.");
     const manifest = this.manifests.get(extensionId);
-    if (manifest.source.kind === "builtin" && !enabled)
+    if (!enabled && !canDisable(manifest))
       throw new Error("Built-in extensions cannot be disabled.");
     if (this.diagnostic && manifest.source.kind !== "builtin" && enabled)
       throw new Error(
@@ -344,6 +368,7 @@ class ExtensionManager {
     this.revision += 1;
     this.state.revision = this.revision;
     await writeJsonAtomic(this.stateFile, this.state);
+    for (const listener of this.listeners) listener(extensionId, enabled);
     return this.snapshot();
   }
 }

@@ -9,7 +9,17 @@ const profile = await fs.mkdtemp("/tmp/sushiai-evidence-");
 const app = await electron.launch({
   args: ["."],
   cwd: root,
-  env: { ...process.env, BRIDGE_DATA_DIR: profile },
+  // An absent HERDR_SOCKET_PATH falls back to the owner's real Herdr socket
+  // (electron/ipc/app.cjs), so point it at a path that does not exist.
+  env: {
+    ...process.env,
+    SUSHIAI_TEST_WINDOW: "hidden",
+    BRIDGE_DATA_DIR: profile,
+    HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
+    // An agent started from `npm run dev` inherits this; set, the app loads
+    // the owner's dev server instead of dist/ (electron/main.cjs).
+    BRIDGE_DEV_URL: "",
+  },
 });
 const report = { pageErrors: [] };
 let sshId = null;
@@ -43,9 +53,7 @@ try {
       .locator(".connection-card.selected")
       .filter({ hasText: "Remote" })
       .waitFor({ timeout: 30000 });
-    const profiles = await page.evaluate(() =>
-      window.bridge.connectionsList(),
-    );
+    const profiles = await page.evaluate(() => window.bridge.connectionsList());
     sshId = profiles.find((item) => item.name === "Remote")?.id ?? null;
     await page.getByRole("button", { name: "Close dialog" }).click();
   }
@@ -63,11 +71,22 @@ try {
         return {
           name: name.textContent,
           gap: Math.round(
-            tag.getBoundingClientRect().left - ink.getBoundingClientRect().right,
+            tag.getBoundingClientRect().left -
+              ink.getBoundingClientRect().right,
           ),
         };
       }),
   );
+  // Proves the run was hidden: no visible or focused window, real content size.
+  report.window = await app.evaluate(({ BrowserWindow }) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    const [width, height] = win.getContentSize();
+    return {
+      isVisible: win.isVisible(),
+      isFocused: win.isFocused(),
+      contentSize: { width, height },
+    };
+  });
   await page.screenshot({ path: shot("evidence-window") });
   await page.locator(".sidebar").screenshot({ path: shot("evidence-sidebar") });
 } catch (error) {

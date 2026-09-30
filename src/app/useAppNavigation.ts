@@ -38,6 +38,13 @@ export function useAppNavigation(
     if (!ready || !hasSurface) return;
     if (shouldCloseExtension(state, hasSurface)) showWorkspace();
   }, [ready, hasSurface, state, showWorkspace]);
+  useEffect(
+    () =>
+      window.bridge?.onOpenInbox(() =>
+        dispatch({ type: "openSection", section: coreSection("Inbox") }),
+      ),
+    [],
+  );
   return {
     mode: state.mode,
     /** The open page, whoever contributed it. */

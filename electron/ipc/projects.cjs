@@ -1,3 +1,5 @@
+const { createWorktree } = require("../worktree.cjs");
+
 function registerProjectIpc({
   handle,
   getConnections,
@@ -85,6 +87,8 @@ function registerProjectIpc({
     });
     return getPreview().grant(endpoint, root, file);
   });
+
+  handle("worktree-create", (cwd, branch) => createWorktree(cwd, branch));
 }
 
 module.exports = { registerProjectIpc };

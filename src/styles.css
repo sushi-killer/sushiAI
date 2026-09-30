@@ -262,6 +262,10 @@ textarea::placeholder {
 .nav-item .count {
   margin-left: auto;
 }
+.nav-item.current .count {
+  background: #333;
+  color: #ddd;
+}
 .count {
   padding: 2px 5px;
   font-size: 10px;
@@ -450,6 +454,14 @@ textarea::placeholder {
 }
 .host-marker-group .remote-tag {
   max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The label inside a chip is what ellipsizes; the chip itself is inline-flex,
+   where text-overflow would only clip. */
+.remote-tag > .tag-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -712,6 +724,12 @@ textarea::placeholder {
 .status-dot.yellow {
   background: #e4c671;
 }
+.status-dot.red {
+  background: var(--tone-danger);
+}
+.status-dot.blue {
+  background: var(--tone-info);
+}
 .status-dot.pulse {
   animation: pulse 1.8s infinite;
 }
@@ -842,6 +860,27 @@ textarea::placeholder {
   min-height: 0;
   overflow: auto;
 }
+.terminal-ended {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+  background: var(--bg-sunken);
+}
+.terminal-ended p {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text);
+}
+.terminal-ended small {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
 .terminal-command {
   font-size: 12px;
   color: #d8d8d8;
@@ -883,7 +922,8 @@ textarea::placeholder {
   line-height: 1.8;
   margin: 0 0 23px;
 }
-.primary {
+/* The legacy button; the orchestrator's `.ui-button.primary` has its own. */
+.primary:not(.ui-button) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -898,7 +938,7 @@ textarea::placeholder {
   font-weight: 550;
   transition: background 0.15s;
 }
-.primary:hover {
+.primary:not(.ui-button):hover {
   background: #fff;
 }
 .agent-welcome .primary {
@@ -2928,7 +2968,6 @@ iframe {
 .setting-heading,
 .dialog-actions,
 .connection-card,
-.session-row,
 .form-row {
   display: flex;
   align-items: center;
@@ -3503,39 +3542,6 @@ iframe {
 .modal .ssh-form {
   gap: 12px;
 }
-.sessions-modal {
-  width: 740px;
-}
-.session-filters {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 20px;
-}
-.session-filters .catalog-search {
-  margin: 0;
-  flex: 1;
-  min-width: 160px;
-}
-.modal .catalog-search {
-  flex-direction: row;
-  align-items: center;
-  height: 38px;
-}
-.modal .catalog-search svg {
-  flex-shrink: 0;
-}
-.modal .catalog-search input {
-  min-width: 0;
-  width: 0;
-  height: 100%;
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-.modal .catalog-search:focus-within {
-  border-color: #647b9c;
-}
 .workspace-actions-modal h2 {
   padding-right: 24px;
   overflow-wrap: anywhere;
@@ -3659,86 +3665,24 @@ iframe {
   color: #777;
   font-size: 0.72rem;
 }
-
-.session-filters > select {
-  width: auto;
-  max-width: 185px;
-  font-size: 11px;
-}
-.session-select-all {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin: 16px 0 8px;
-  color: #888;
-  font-size: 11px;
-}
-.session-select-all label {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-}
 .modal input[type="checkbox"] {
   width: 13px;
   height: 13px;
   accent-color: #8aab90;
 }
-.sessions-list {
-  max-height: 330px;
-  overflow: auto;
-  border-top: 1px solid #303030;
-  border-bottom: 1px solid #303030;
-}
-.session-row {
-  padding: 10px 3px;
-  border-bottom: 1px solid #252525;
-}
-.session-row > div {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  flex-direction: column;
-  gap: 4px;
-}
-.session-row strong {
-  font-size: 12px;
-  font-weight: 500;
-}
-.session-row small {
-  font-size: 10px;
-  color: #777;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.session-row svg {
-  color: #929b91;
-}
-.session-row > button {
-  padding: 5px;
-}
-.session-close-button {
-  margin-top: 17px;
-  float: right;
-}
-.delete-confirm {
+/* The Inbox group header. */
+.inbox-group-head {
   display: flex;
   align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  margin-top: 16px;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: #888;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
-.delete-confirm p {
+.modal input.worktree-branch {
   width: 100%;
-  color: #aaa;
-  font-size: 12px;
-  line-height: 1.7;
-}
-.delete-confirm button:nth-last-child(2) {
-  margin-left: auto;
-  color: #aaa;
 }
 .is-busy {
   pointer-events: none;
@@ -4445,12 +4389,6 @@ iframe {
   }
   .workspace-more {
     opacity: 1;
-  }
-  .session-filters > select {
-    max-width: 150px;
-  }
-  .sessions-list {
-    max-height: 240px;
   }
   .brand {
     gap: 5px;

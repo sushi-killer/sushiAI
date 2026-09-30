@@ -78,7 +78,7 @@ impl Daemon {
     pub fn spawn(extra_env: &[(&str, &str)]) -> Daemon {
         let data_dir = tempfile::tempdir().unwrap();
         let socket = data_dir.path().join("orchd.sock");
-        let child = spawn_orchd_raw(data_dir.path(), &socket, extra_env);
+        let child = spawn_orchd_logged(data_dir.path(), &socket, extra_env);
         wait_for_socket(&socket);
         let token = read_control_token(data_dir.path());
         // The brief check is one more harness run: off, so tests that count
@@ -186,6 +186,45 @@ pub fn spawn_orchd_raw(data_dir: &Path, socket: &Path, extra_env: &[(&str, &str)
     OrchdChild(cmd.spawn().expect("failed to spawn orchd"))
 }
 
+/// The file a `Daemon`'s orchd writes its stdout and stderr to: next to its
+/// socket, so a request that gets no answer can say what the daemon printed.
+const DAEMON_LOG: &str = "orchd-test.log";
+
+/// Like `spawn_orchd_raw`, but output goes to `DAEMON_LOG` instead of a pipe
+/// nobody reads, which would block orchd once it fills.
+pub fn spawn_orchd_logged(
+    data_dir: &Path,
+    socket: &Path,
+    extra_env: &[(&str, &str)],
+) -> OrchdChild {
+    let log = std::fs::File::create(socket.with_file_name(DAEMON_LOG)).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_orchd"));
+    cmd.args([
+        "serve",
+        "--data",
+        data_dir.to_str().unwrap(),
+        "--socket",
+        socket.to_str().unwrap(),
+    ])
+    .stdout(log.try_clone().unwrap())
+    .stderr(log);
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    OrchdChild(cmd.spawn().expect("failed to spawn orchd"))
+}
+
+/// Why a request got no answer: the tail of the daemon's log, when there is one.
+fn no_answer(socket: &Path, method: &str) -> String {
+    let log = std::fs::read_to_string(socket.with_file_name(DAEMON_LOG)).unwrap_or_default();
+    let tail: Vec<&str> = log.lines().rev().take(40).collect();
+    let tail: Vec<&str> = tail.into_iter().rev().collect();
+    format!(
+        "orchd closed the connection without answering {method}; daemon log tail:\n{}",
+        tail.join("\n")
+    )
+}
+
 pub fn wait_for_socket(socket: &Path) {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(10) {
@@ -241,6 +280,9 @@ pub fn request_on(
     reader
         .read_line(&mut response_line)
         .expect("read response line from orchd");
+    if response_line.trim().is_empty() {
+        panic!("{}", no_answer(socket, method));
+    }
     let v: serde_json::Value =
         serde_json::from_str(response_line.trim()).expect("valid JSON response");
     if let Some(err) = v.get("error") {
@@ -286,6 +328,9 @@ pub fn raw_request_with_params(
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
+    if line.trim().is_empty() {
+        panic!("{}", no_answer(socket, method));
+    }
     serde_json::from_str(line.trim()).unwrap()
 }
 

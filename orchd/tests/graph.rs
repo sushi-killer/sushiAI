@@ -1403,7 +1403,7 @@ fn answering_stop_after_a_daemon_restart_stops_the_parent_and_its_subtasks() {
         std::thread::sleep(Duration::from_millis(50));
     }
     daemon.socket = daemon.data_dir().join("orchd2.sock");
-    daemon.child = spawn_orchd_raw(daemon.data_dir(), &daemon.socket, &env);
+    daemon.child = spawn_orchd_logged(daemon.data_dir(), &daemon.socket, &env);
     wait_for_socket(&daemon.socket);
     daemon.token = read_control_token(daemon.data_dir());
 

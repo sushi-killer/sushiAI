@@ -270,7 +270,7 @@ fn a_backlog_task_is_never_started_by_the_graph_or_recovery() {
         std::thread::sleep(Duration::from_millis(50));
     }
     daemon.socket = daemon.data_dir().join("orchd2.sock");
-    daemon.child = spawn_orchd_raw(daemon.data_dir(), &daemon.socket, &refs);
+    daemon.child = spawn_orchd_logged(daemon.data_dir(), &daemon.socket, &refs);
     wait_for_socket(&daemon.socket);
     daemon.token = read_control_token(daemon.data_dir());
     std::thread::sleep(Duration::from_millis(1500));

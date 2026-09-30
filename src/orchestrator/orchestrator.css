@@ -93,6 +93,12 @@
   color: var(--text-faint);
 }
 
+.orch-off {
+  padding: var(--gap-lg);
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
+
 /* Everything beside the rail: the narrow switcher, one view, the composer. */
 .orch-main {
   position: relative;

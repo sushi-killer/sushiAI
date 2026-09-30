@@ -215,3 +215,21 @@ test("Inbox zero always says how the day went", async () => {
     "Nothing needs you. 1 task landed today.",
   );
 });
+
+test("with the orchestrator off the Inbox holds exactly the session items and a plain zero line", async () => {
+  const { inboxItems, zeroLine } = await load();
+  const sessions = groups([row("b", "blocked"), row("w", "working")]);
+  const before = inboxItems([], [], sessions);
+  const off = inboxItems(
+    [task({ id: "q", status: "waiting" })],
+    [task({ id: "done1" })],
+    sessions,
+    false,
+  );
+  assert.deepEqual(off, before);
+  assert.ok(off.every((item) => item.source === "session"));
+  assert.equal(
+    zeroLine([task({ id: "done1", landedSha: "abc" })], Date.now(), false),
+    "Nothing needs you.",
+  );
+});

@@ -41,6 +41,7 @@ import {
 import { Icon } from "../PanelIcon.tsx";
 import { Character } from "../mascot/Character.tsx";
 import { orchestratorClientFor } from "../orchestrator/client.ts";
+import { useOrchestratorEnabled } from "../orchestrator/enabled.ts";
 import { hostOf } from "../orchestrator/hosts.ts";
 import {
   criteriaMet,
@@ -207,10 +208,11 @@ export function InboxPage({
     [fixNote, setFixNote] = useState(""),
     [idleOpen, setIdleOpen] = useState(false);
   const inFlight = useRef(false);
+  const orchestrator = useOrchestratorEnabled();
 
   const items = useMemo(
-    () => inboxItems(ownerTasks, allTasks, groups),
-    [ownerTasks, allTasks, groups],
+    () => inboxItems(ownerTasks, allTasks, groups, orchestrator),
+    [ownerTasks, allTasks, groups, orchestrator],
   );
   const blockedRows = useMemo(
     () =>
@@ -939,36 +941,42 @@ export function InboxPage({
             <span className="inbox-zero-shadow" />
           </div>
           <h2>Inbox zero</h2>
-          <p>{zeroLine(allTasks)}</p>
-          <div className="inbox-zero-actions">
-            <button
-              className="ui-button secondary"
-              onClick={() =>
-                openOrchestratorTask(
-                  latest
-                    ? { taskId: latest.id, repo: latest.repo, focus: "summary" }
-                    : { taskId: "", repo: cwd, focus: "summary" },
-                )
-              }
-            >
-              <ListChecks size={14} /> Open orchestrator
-            </button>
-            <button
-              className="ui-button ghost"
-              disabled={!landed}
-              title={landed ? undefined : "Nothing has landed yet"}
-              onClick={() =>
-                landed &&
-                openOrchestratorTask({
-                  taskId: landed.id,
-                  repo: landed.repo,
-                  focus: "report",
-                })
-              }
-            >
-              See what landed
-            </button>
-          </div>
+          <p>{zeroLine(allTasks, Date.now(), orchestrator)}</p>
+          {orchestrator && (
+            <div className="inbox-zero-actions">
+              <button
+                className="ui-button secondary"
+                onClick={() =>
+                  openOrchestratorTask(
+                    latest
+                      ? {
+                          taskId: latest.id,
+                          repo: latest.repo,
+                          focus: "summary",
+                        }
+                      : { taskId: "", repo: cwd, focus: "summary" },
+                  )
+                }
+              >
+                <ListChecks size={14} /> Open orchestrator
+              </button>
+              <button
+                className="ui-button ghost"
+                disabled={!landed}
+                title={landed ? undefined : "Nothing has landed yet"}
+                onClick={() =>
+                  landed &&
+                  openOrchestratorTask({
+                    taskId: landed.id,
+                    repo: landed.repo,
+                    focus: "report",
+                  })
+                }
+              >
+                See what landed
+              </button>
+            </div>
+          )}
           {errorLine}
         </div>
         {(running.length > 0 ||
@@ -1176,7 +1184,10 @@ export function InboxPage({
       ) : (
         <>
           <div className="inbox-filters">
-            {CHIPS.map(({ filter: value, label }) => (
+            {CHIPS.filter(
+              ({ filter: value }) =>
+                orchestrator || (value !== "decide" && value !== "land"),
+            ).map(({ filter: value, label }) => (
               <Chip
                 key={value}
                 selected={filter === value}
@@ -1208,8 +1219,12 @@ export function InboxPage({
               ["J K", "move"],
               ["1–9", "pick"],
               ["⏎", "answer"],
-              ["L", "land"],
-              ["R", "run again"],
+              ...(orchestrator
+                ? [
+                    ["L", "land"],
+                    ["R", "run again"],
+                  ]
+                : []),
               ["E", "done"],
             ].map(([key, text]) => (
               <span key={text}>

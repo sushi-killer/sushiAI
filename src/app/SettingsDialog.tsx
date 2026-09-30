@@ -13,6 +13,7 @@ import "./settings-dialog.css";
 import { RenderProfiler } from "../RenderProfiler.tsx";
 import { agentTitle } from "./agent-title.ts";
 import { errorText } from "./errors.ts";
+import { useOrchestratorEnabled } from "../orchestrator/enabled.ts";
 import { ExtensionSectionSlot } from "../extensions/ExtensionSlots.tsx";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import {
@@ -167,8 +168,15 @@ export function SettingsDialog({
       .catch((error) => notify(errorText(error)));
   }
 
-  const current =
-    SETTINGS_NAV.find((item) => item.key === settingsTab) || SETTINGS_NAV[0];
+  // Off: no Orchestration tab, and a saved one falls back to General.
+  const orchestrator = useOrchestratorEnabled();
+  const tabs = SETTINGS_NAV.filter(
+    (item) => orchestrator || item.key !== "orchestration",
+  );
+  const tab = tabs.some((item) => item.key === settingsTab)
+    ? settingsTab
+    : "general";
+  const current = tabs.find((item) => item.key === tab) || tabs[0];
 
   return (
     <div className="settings-shell">
@@ -177,12 +185,12 @@ export function SettingsDialog({
           <p className="settings-nav-eyebrow">PREFERENCES</p>
           <p className="settings-nav-title">Settings</p>
         </div>
-        {SETTINGS_NAV.map(({ key, label, icon: Icon }) => (
+        {tabs.map(({ key, label, icon: Icon }) => (
           <button
             key={key}
-            className={`settings-nav-item${settingsTab === key ? " current" : ""}`}
+            className={`settings-nav-item${tab === key ? " current" : ""}`}
             role="tab"
-            aria-selected={settingsTab === key}
+            aria-selected={tab === key}
             onClick={() => setSettingsTab(key)}
           >
             <Icon size={15} />
@@ -197,7 +205,7 @@ export function SettingsDialog({
         </div>
         <Suspense fallback={<div className="loading">Loading settings…</div>}>
           <RenderProfiler id="settings">
-            {settingsTab === "connections" ? (
+            {tab === "connections" ? (
               <ConnectionsSettings
                 endpoint={socket}
                 localSocket={system?.socketPath || ""}
@@ -248,11 +256,11 @@ export function SettingsDialog({
                   </form>
                 }
               />
-            ) : settingsTab === "providers" ? (
+            ) : tab === "providers" ? (
               <ProvidersSettings />
-            ) : settingsTab === "orchestration" ? (
+            ) : tab === "orchestration" ? (
               <OrchestratorSettings />
-            ) : settingsTab === "updates" ? (
+            ) : tab === "updates" ? (
               <UpdateSettings state={updates} />
             ) : (
               <>

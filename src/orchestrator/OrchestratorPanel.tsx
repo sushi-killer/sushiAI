@@ -3,6 +3,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type ComponentProps,
   type ReactNode,
 } from "react";
 import {
@@ -25,6 +26,7 @@ import {
   OrchestratorHostProvider,
   useOrchestratorHost,
 } from "./hostContext";
+import { useOrchestratorEnabled } from "./enabled";
 import {
   LOCAL,
   orchestratorClientFor,
@@ -982,7 +984,7 @@ function useHostAddresses(hosts: OrchestratorHost[]): Record<string, string> {
  * set up shows its setup steps instead. In a workspace opened on a host the
  * panel starts on that host and its folder; any other host asks for a repo
  * path on it. */
-export function OrchestratorPanel({
+function OrchestratorPanelBody({
   cwd,
   endpoint,
   view,
@@ -1184,4 +1186,19 @@ export function OrchestratorPanel({
       </OrchestratorHostProvider>
     </div>
   );
+}
+
+/** A saved layout can still hold an Orchestrator panel after the extension
+ * was turned off: it draws a note and makes no orchestrator call. */
+export function OrchestratorPanel(
+  props: ComponentProps<typeof OrchestratorPanelBody>,
+) {
+  const enabled = useOrchestratorEnabled();
+  if (!enabled)
+    return (
+      <div className="orch-off" role="status">
+        The orchestrator is off - turn it on in Extensions.
+      </div>
+    );
+  return <OrchestratorPanelBody {...props} />;
 }

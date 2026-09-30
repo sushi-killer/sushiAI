@@ -8,6 +8,7 @@ import {
   TerminalSquare,
 } from "lucide-react";
 import { agentTitle } from "./agent-title.ts";
+import { useOrchestratorEnabled } from "../orchestrator/enabled.ts";
 import { sessionHostOptions, type SessionHostContext } from "./sessionHosts.ts";
 import { ExtensionPanelOptions } from "../extensions/ExtensionSlots.tsx";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
@@ -54,6 +55,7 @@ export function PanelPickerDialog({
   extensionRegistry: ExtensionRegistry;
   hostContext: SessionHostContext;
 }) {
+  const orchestrator = useOrchestratorEnabled();
   const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([]);
   // Only a Herdr-backed workspace has a choice to offer.
   const herdrWorkspace = Boolean(active.herdrId) && connected;
@@ -224,30 +226,32 @@ export function PanelPickerDialog({
               icon: ListChecks,
             },
           ] as const
-        ).map((item) => (
-          <button
-            key={item.kind}
-            disabled={launchesInWorktree(item.kind) && worktreeInvalid}
-            onClick={() =>
-              addPanel(
-                item.kind,
-                undefined,
-                undefined,
-                undefined,
-                backend,
-                targetWorkspaceId,
-                launchesInWorktree(item.kind) ? worktreeArg : undefined,
-              )
-            }
-          >
-            <item.icon size={19} />
-            <div>
-              <strong>{item.title}</strong>
-              <small>{item.detail}</small>
-            </div>
-            <Plus size={15} />
-          </button>
-        ))}
+        )
+          .filter((item) => orchestrator || item.kind !== "orchestrator")
+          .map((item) => (
+            <button
+              key={item.kind}
+              disabled={launchesInWorktree(item.kind) && worktreeInvalid}
+              onClick={() =>
+                addPanel(
+                  item.kind,
+                  undefined,
+                  undefined,
+                  undefined,
+                  backend,
+                  targetWorkspaceId,
+                  launchesInWorktree(item.kind) ? worktreeArg : undefined,
+                )
+              }
+            >
+              <item.icon size={19} />
+              <div>
+                <strong>{item.title}</strong>
+                <small>{item.detail}</small>
+              </div>
+              <Plus size={15} />
+            </button>
+          ))}
         <ExtensionPanelOptions
           registry={extensionRegistry}
           onAdd={(extensionId, contributionId) =>

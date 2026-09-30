@@ -233,8 +233,9 @@ export function waitingCount(
   state: AttentionState,
   profiles: ConnectionProfile[],
   tasks: Task[] = [],
+  orchestrator = true,
 ): number {
-  let count = ownerTasks(tasks).length;
+  let count = orchestrator ? ownerTasks(tasks).length : 0;
   for (const workspace of workspaces) {
     if (isHidden(workspace.connection, profiles)) continue;
     for (const panel of workspace.panels) {

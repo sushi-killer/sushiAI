@@ -391,7 +391,7 @@ test("a different platform without cargo says how to install Rust", async (t) =>
   );
 });
 
-test("an up-to-date install is reused and quitting the app leaves the daemon running", async (t) => {
+test("an up-to-date install is reused, quitting the app leaves the remote daemon running, and a saved host connects on first use", async (t) => {
   const fx = await fixture(t);
   const first = await fx.open();
   await first.hosts.call("task.list", {}, first.id);
@@ -406,11 +406,17 @@ test("an up-to-date install is reused and quitting the app leaves the daemon run
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(alive(pid), true);
 
-  // Reopening reconnects to the enabled host on its own and shows its tasks.
+  // Reopening knows the enabled host but touches nothing until it is used.
   const second = await fx.open();
   await second.hosts.init();
-  await waitUntil(() => second.events.some((e) => e.message.event === "task"));
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal((await fx.sshCommands()).length, before);
+  assert.equal(
+    second.hosts.list().find((h) => h.id === second.id).enabled,
+    true,
+  );
   const tasks = await second.hosts.call("task.list", {}, second.id);
+  await waitUntil(() => second.events.some((e) => e.message.event === "task"));
   assert.equal(tasks[0].title, "Remote job");
   const commands = (await fx.sshCommands())
     .slice(before)

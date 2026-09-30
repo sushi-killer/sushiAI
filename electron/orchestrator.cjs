@@ -1,10 +1,11 @@
-// The orchestrator daemon (`orchd/`, Rust) outlives the app: this module only
-// finds/spawns it, speaks its NDJSON protocol, and relays its `subscribe`
-// stream to the renderer. It never stops the daemon on a normal quit - a
-// running task must survive both a window close and an app quit. The one
-// exception is a test launch (`stopDaemonOnQuit`, set from SUSHIAI_TEST_WINDOW):
-// its throwaway daemon is shut down on quit so it does not linger. orchd also
-// exits on its own when its data dir is deleted.
+// The orchestrator daemon (`orchd/`, Rust): this module finds/spawns it,
+// speaks its NDJSON protocol, and relays its `subscribe` stream to the
+// renderer. Nothing starts at launch: a daemon that is already running is
+// attached to (never spawned), and the first real request spawns one. Closing
+// the window leaves it running; quitting the app shuts down the local daemon
+// this app spawned (a test launch, `stopDaemonOnQuit`, also stops one it
+// merely found). A remote host's daemon is only disconnected, never stopped.
+// orchd also exits on its own when its data dir is deleted.
 const net = require("node:net");
 const path = require("node:path");
 const os = require("node:os");
@@ -15,6 +16,15 @@ const { createHash, randomUUID } = require("node:crypto");
 const { RemoteOrchd, localArtifacts } = require("./orchestrator-remote.cjs");
 
 const LOCAL_HOST = "local";
+const OFF_MESSAGE = "The orchestrator is off.";
+
+/** What every orchestrator request rejects with while the extension is off,
+ * so nothing spawns, connects or provisions a host. */
+function offError() {
+  const error = new Error(OFF_MESSAGE);
+  error.code = "ORCHESTRATOR_OFF";
+  return error;
+}
 
 const ORCHESTRATOR_MANIFEST = {
   id: "builtin.orchestrator",
@@ -404,6 +414,17 @@ class OrchestratorService {
     this.subscribeSocket = null;
     this.backoff = 500;
     this.closed = false;
+    // Bumped by every connect() and close(), so a subscribe loop that was
+    // mid-await when the service was closed and reopened cannot keep running
+    // beside the new one.
+    this.epoch = 0;
+    this.retryTimer = null;
+    // Whether a subscribe loop is running, whether a real request has been
+    // made (until then the loop only attaches, it never spawns), and whether
+    // this app spawned the daemon it talks to (so quit() may stop it).
+    this.looping = false;
+    this.used = false;
+    this.spawned = false;
     this.starting = null;
     this.running = null;
     // Keys of notices already raised (see #notifyTransition): a task
@@ -507,6 +528,7 @@ class OrchestratorService {
     );
     // Detached and unref'd on purpose: this process must outlive the app.
     child.unref();
+    this.spawned = true;
     for (let attempt = 0; attempt < this.spawnRetries; attempt++) {
       await this.#refreshToken();
       try {
@@ -590,6 +612,10 @@ class OrchestratorService {
     if (!ALLOWED_METHODS.has(method))
       throw new Error("Invalid orchestrator request");
     await this.#ensureRunning();
+    // The first real request starts the subscribe loop, which from then on
+    // may respawn a daemon that went away.
+    this.used = true;
+    if (!this.looping && !this.closed) this.connect();
     const sendParams =
       // A task the owner or the orchestrator agent creates gets the
       // project's own MCP servers, resolved here where the config lives.
@@ -620,24 +646,56 @@ class OrchestratorService {
     return orchdRequest(this.socketPath, "ping", {}, this.token, 2000);
   }
 
-  connect() {
+  /** Starts relaying a daemon that is already running; never spawns one and
+   * does nothing when there is none. A remote host connects on first use. */
+  async attach() {
+    if (this.remote) return;
     this.closed = false;
-    this.remote?.reopen();
-    this.#subscribeLoop();
+    const epoch = this.epoch;
+    try {
+      await this.#pingRunning();
+    } catch {
+      return;
+    }
+    if (!this.closed && epoch === this.epoch && !this.looping) this.connect();
   }
 
-  async #subscribeLoop() {
-    if (this.closed) return;
+  async #pingRunning() {
+    await this.#refreshToken();
+    return orchdRequest(this.socketPath, "ping", {}, this.token, 2000);
+  }
+
+  connect() {
+    this.closed = false;
+    this.epoch += 1;
+    clearTimeout(this.retryTimer);
+    this.remote?.reopen();
+    this.#subscribeLoop(this.epoch);
+  }
+
+  async #subscribeLoop(epoch) {
+    if (this.closed || epoch !== this.epoch) return;
+    this.looping = true;
     try {
-      await this.#ensureRunning();
+      if (this.used) await this.#ensureRunning();
+      else await this.#pingRunning();
       await this.#pushSecrets();
       await this.#subscribeOnce();
     } catch {
-      // Daemon not built / not reachable yet: retry with backoff below.
+      // Daemon not built / not reachable yet: retry with backoff below - but
+      // an attach-only loop just stops, the first real request starts it again.
+      if (!this.used) {
+        if (epoch === this.epoch) this.looping = false;
+        return;
+      }
     }
-    if (this.closed) return;
+    if (this.closed || epoch !== this.epoch) return;
     this.backoff = Math.min(this.backoff * 2, this.remote ? 60000 : 15000);
-    setTimeout(() => this.#subscribeLoop(), this.backoff).unref?.();
+    this.retryTimer = setTimeout(
+      () => this.#subscribeLoop(epoch),
+      this.backoff,
+    );
+    this.retryTimer.unref?.();
   }
 
   /** The transition detector: raises one notice per (task, question) for a
@@ -718,21 +776,25 @@ class OrchestratorService {
   }
 
   // Closes only this app's subscribe connection, never the daemon: tasks
-  // must keep running after the window (or the app) closes. The one exception
-  // is a test launch, which stops its throwaway daemon in quit() below.
+  // keep running when the window closes. quit() below is what stops one.
   close() {
     this.closed = true;
+    this.looping = false;
+    this.epoch += 1;
+    clearTimeout(this.retryTimer);
+    this.retryTimer = null;
     this.subscribeSocket?.destroy();
     this.remote?.close();
   }
 
-  // What close() does, plus - only for a test launch (`stopDaemonOnQuit`) -
-  // stopping the throwaway daemon: `shutdown`, then SIGKILL if it lingers.
+  // What close() does, plus stopping the local daemon this app spawned (or,
+  // in a test launch, any it found): `shutdown`, then SIGKILL if it lingers.
   // Never throws.
   async quit() {
     this.close();
-    // A remote daemon is never stopped by the app.
-    if (this.remote || !this.stopDaemonOnQuit) return;
+    // A remote daemon is never stopped by the app, nor one it did not spawn.
+    if (this.remote || !(this.spawned || this.stopDaemonOnQuit)) return;
+    this.spawned = false;
     try {
       await this.running?.catch(() => {});
       await this.starting?.catch(() => {});
@@ -773,8 +835,8 @@ class OrchestratorService {
 }
 
 /** Every orchd the app talks to: the local daemon plus one per SSH profile
- * the owner has used the Orchestrator on. A remote host, once enabled, is
- * reconnected on every launch so its tasks reach the badge and the Inbox. */
+ * the owner has used the Orchestrator on. A saved remote host is known at
+ * launch but connects on its first request. */
 class OrchestratorHosts {
   constructor({
     local,
@@ -783,7 +845,11 @@ class OrchestratorHosts {
     hostsFile,
     createService,
     onChange,
+    enabled = true,
   }) {
+    this.on = enabled;
+    this.connected = false;
+    this.pending = Promise.resolve();
     this.local = local;
     this.getConnections = connections;
     this.artifacts = artifacts;
@@ -801,7 +867,34 @@ class OrchestratorHosts {
     });
   }
 
-  /** Reconnects the hosts the owner enabled earlier. Never throws. */
+  /** Turns the whole orchestrator on or off without a restart. Off closes the
+   * every remote service and stops the local daemon this app spawned, exactly
+   * as on quit; on attaches to a daemon that is already running and lists the
+   * saved SSH hosts, connecting nothing else. Calls run one after another. */
+  setEnabled(value) {
+    const next = this.pending.then(async () => {
+      if (value === this.on && value === this.connected) return;
+      this.on = value;
+      if (!value) {
+        await this.quit();
+        this.services.clear();
+        this.connected = false;
+        return;
+      }
+      this.connected = true;
+      await this.local.attach();
+      await this.init();
+    });
+    this.pending = next.catch(() => {});
+    return next;
+  }
+
+  #assertOn() {
+    if (!this.on) throw offError();
+  }
+
+  /** Lists the hosts the owner enabled earlier; they connect on first use.
+   * Never throws. */
   async init() {
     if (!this.hostsFile) return;
     try {
@@ -814,6 +907,7 @@ class OrchestratorHosts {
   }
 
   #serviceFor(host, persist = true) {
+    this.#assertOn();
     if (host === LOCAL_HOST) return this.local;
     const existing = this.services.get(host);
     if (existing) return existing;
@@ -823,13 +917,13 @@ class OrchestratorHosts {
     this.services.set(host, service);
     this.enabled.add(host);
     if (persist) void this.#save().catch(() => {});
-    service.connect();
     this.onChange?.();
     return service;
   }
 
   /** Local plus every SSH profile, with what the panel shows about each. */
   list() {
+    this.#assertOn();
     const profiles = this.getConnections?.()?.list() ?? [];
     return [
       { id: LOCAL_HOST, name: "Local", state: "ready", enabled: true },
@@ -858,6 +952,7 @@ class OrchestratorHosts {
   /** A side-effect-free ping of a host already connected; never enables or
    * provisions one. */
   async probe(host = LOCAL_HOST) {
+    this.#assertOn();
     if (typeof host !== "string") throw new Error("Invalid orchestrator host");
     const service = host === LOCAL_HOST ? this.local : this.services.get(host);
     if (!service) throw new Error("The orchestrator host is not connected.");
@@ -902,6 +997,7 @@ function createOrchestratorHosts({
   spawnRetries,
   stopWaitSeconds,
   spawnIntervalMs,
+  enabled,
 }) {
   const local = new OrchestratorService({
     dataDir,
@@ -927,6 +1023,7 @@ function createOrchestratorHosts({
     artifacts,
     hostsFile,
     onChange: hostsChanged,
+    enabled,
     createService: (host) =>
       new OrchestratorService({
         host,
@@ -947,15 +1044,30 @@ function createOrchestratorHosts({
   });
 }
 
-function registerOrchestratorExtension({ handle, ...options }) {
-  const hosts = createOrchestratorHosts(options);
+/** Registers the IPC surface. Nothing connects here: `start()` (called once
+ * the connections exist) reads the extension's saved on/off state, and every
+ * later toggle from `extensions` connects or closes the orchestrator. */
+function registerOrchestratorExtension({ handle, extensions, ...options }) {
+  const hosts = createOrchestratorHosts({ ...options, enabled: false });
   handle("orchestrator", (method, params, host) =>
     hosts.call(method, params, host),
   );
   handle("orchestrator-hosts", () => hosts.list());
   handle("orchestrator-preflight", (host) => hosts.preflight(host));
   handle("orchestrator-probe", (host) => hosts.probe(host));
-  hosts.local.connect();
+  const apply = () =>
+    hosts
+      .setEnabled(extensions.isEnabled(ORCHESTRATOR_MANIFEST.id))
+      .catch(() => {});
+  let started = false;
+  extensions.onChange((id) => {
+    if (started && id === ORCHESTRATOR_MANIFEST.id) return apply();
+  });
+  hosts.start = async () => {
+    await extensions.ready;
+    started = true;
+    await apply();
+  };
   return hosts;
 }
 
@@ -965,6 +1077,7 @@ module.exports = {
   OrchestratorHosts,
   registerOrchestratorExtension,
   createOrchestratorHosts,
+  OFF_MESSAGE,
   orchdRequest,
   tagTasks,
   tagEvent,

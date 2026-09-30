@@ -74,6 +74,7 @@ export function inboxItems(
   ownerTasks: Task[],
   allTasks: Task[],
   groups: InboxGroup[],
+  orchestrator = true,
 ): Item[] {
   const out: Item[] = [];
   const task = (kind: TaskItem["kind"], t: Task, prefix: string) =>
@@ -87,8 +88,10 @@ export function inboxItems(
       at: t.updatedAt,
       task: t,
     });
-  for (const t of ownerTasks) task(ownerKind(t), t, "task");
-  for (const t of landTasks(allTasks)) task("land", t, "land");
+  if (orchestrator) {
+    for (const t of ownerTasks) task(ownerKind(t), t, "task");
+    for (const t of landTasks(allTasks)) task("land", t, "land");
+  }
   for (const group of groups) {
     if (group.key === "shells") continue;
     for (const row of group.rows)
@@ -215,7 +218,12 @@ export function diffFacts(
 
 /** The Inbox-zero line, which always says how the day went: "Nothing needs
  * you. Nothing landed today yet." when nothing landed or runs. */
-export function zeroLine(tasks: Task[], now = Date.now()): string {
+export function zeroLine(
+  tasks: Task[],
+  now = Date.now(),
+  orchestrator = true,
+): string {
+  if (!orchestrator) return "Nothing needs you.";
   const summary = inboxZeroSummary(tasks, now);
   return summary === "Nothing needs you."
     ? `${summary} Nothing landed today yet.`

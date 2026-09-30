@@ -448,3 +448,22 @@ test("the statuses Herdr really emits carry through to the Inbox groups", async 
     shell: "shells",
   });
 });
+
+test("waitingCount ignores orchd tasks while the orchestrator is off", async () => {
+  const { createAttentionState, waitingCount } = await library;
+  const tasks = [
+    {
+      id: "t1",
+      title: "T",
+      repo: "/w/app",
+      status: "waiting",
+      archived: false,
+      decisions: [],
+      attempts: [],
+      updatedAt: 1,
+    },
+  ];
+  const state = createAttentionState();
+  assert.equal(waitingCount([], state, [], tasks), 1);
+  assert.equal(waitingCount([], state, [], tasks, false), 0);
+});

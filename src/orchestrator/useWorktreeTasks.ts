@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { WorktreeTask } from "../app/workspaceMerge";
 import { orchestratorClient } from "./client";
 import { upsertTask } from "./helpers";
+import { useOrchestratorEnabled } from "./enabled";
 import type { Task } from "./types";
 
 const MAX_LOAD_ATTEMPTS = 5;
@@ -10,15 +11,22 @@ const MAX_LOAD_ATTEMPTS = 5;
  * needs to name a task's worktree. Any failure means no tasks, which is
  * today's branch labels. */
 export function useWorktreeTasks(): WorktreeTask[] {
+  const enabled = useOrchestratorEnabled();
   const [tasks, setTasks] = useState<Task[]>([]);
   useEffect(() => {
+    if (!enabled) {
+      setTasks([]);
+      return;
+    }
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     // The daemon may still be starting when the app mounts, so retry a few
     // times with a growing delay before settling on branch labels.
     const load = (attempt: number) => {
+      // A ping first: it never starts a daemon, so this is not a first use.
       orchestratorClient
-        .taskList(undefined, true)
+        .probe()
+        .then(() => orchestratorClient.taskList(undefined, true))
         .then((loaded) => {
           if (!cancelled) setTasks(loaded);
         })
@@ -37,7 +45,7 @@ export function useWorktreeTasks(): WorktreeTask[] {
       clearTimeout(timer);
       off?.();
     };
-  }, []);
+  }, [enabled]);
   return useMemo(
     () =>
       tasks.map(({ title, branch, worktree, repo, updatedAt }) => ({

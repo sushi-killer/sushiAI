@@ -58,7 +58,7 @@ flowchart TB
   attention --> macos
   wsSnap & winState --> profile
 
-  subgraph orchd["orchd daemon - Rust, outlives the app; a test-launched app stops it on quit, and it exits when its data dir is deleted"]
+  subgraph orchd["orchd daemon - Rust, started on first use (or attached if already running), stopped when the app quits, and it exits when its data dir is deleted"]
     direction LR
     proto["protocol.rs<br/>NDJSON socket + token"]
     engine["engine/<br/>task loop, gates, routing"]

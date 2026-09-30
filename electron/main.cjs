@@ -261,6 +261,7 @@ const attention = registerAttentionIpc({
 });
 orchestrator = registerOrchestratorExtension({
   handle,
+  extensions,
   send,
   notify: (notice) => attention.notifyTask(notice),
   onTask: (task) => mascot.onTask(task),
@@ -274,6 +275,10 @@ orchestrator = registerOrchestratorExtension({
   getConnections: () => connections,
   hostsFile: path.join(app.getPath("userData"), "orchestrator-hosts.json"),
   hostsChanged: () => send("orchestrator-hosts-changed"),
+});
+// Turning the orchestrator off also drops the notices it already queued.
+extensions.onChange((id, enabled) => {
+  if (id === ORCHESTRATOR_MANIFEST.id && !enabled) mascot.clear();
 });
 function validWebURL(value) {
   try {
@@ -290,7 +295,7 @@ app.whenReady().then(async () => {
     fakeSsh ? { ssh: fakeSsh } : undefined,
   );
   await connections.init();
-  await orchestrator.init();
+  await orchestrator.start();
   // Sleep/wake can drop every SSH tunnel at once - retry them all rather than
   // waiting for each one's own backoff timer to come back around.
   powerMonitor.on("resume", () => connections.retryAutoConnect());

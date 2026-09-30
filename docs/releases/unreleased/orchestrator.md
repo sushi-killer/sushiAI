@@ -4,7 +4,8 @@
 - "Done" is decided by the app, not the agent: the checks must pass and an independent read-only review must agree. The reviewer is the cheapest route at least as strong as the one that did the work, preferably on the other harness.
 - A failed attempt retries in a fresh session with the failure in its brief; repeated failures move the task to a stronger model, then ask you one question with options. Routine questions are answered for you and recorded as assumptions you can overturn; budget and protected-path questions always come to you.
 - Large requests become subtasks that land on one branch, and tasks on the same base never edit the same file at once.
-- Tasks run in the orchd background service, which keeps running after you close the window or quit sushiAI. If the `orchd` process is stopped, running tasks stay resumable and pick up with a fresh attempt when it starts again.
+- Tasks run in the orchd background service. It starts the first time something needs it (opening the Orchestrator panel, creating a task, answering from the mascot), keeps running while the window is closed to the menu bar, and stops when you quit sushiAI. A daemon that is already running is picked up at launch. Stopped tasks stay resumable and pick up with a fresh attempt next time.
+- The orchestrator can be turned off in Extensions. While it is off, sushiAI does not start or contact orchd or its SSH hosts, and the Inbox, the menu bar badge, Settings and the panel picker look and behave as they did before the orchestrator existed. The choice is remembered, and turning it back on needs no restart.
 - Agents run sandboxed (writes stay inside the task's worktree) with only the project's own MCP servers, plus tools to message sibling tasks and ask the orchestrator.
 
 ## Landing finished work
@@ -29,7 +30,7 @@
 ## Remote SSH hosts
 
 - Pick Local or any Connections profile at the top of the panel. The app installs orchd into `~/.sushiai/bin` on the host and drives it over the existing SSH connection, with no new open ports. The host can be any macOS or Linux machine: the app uploads its own build when the OS and CPU match, otherwise builds orchd there from the source it ships with, using cargo (or tells you the one command that installs Rust). On an upgrade it waits for the old daemon to stop before installing the new one.
-- A setup checklist checks git and the claude and codex CLIs and marks routes that cannot run there. The remote daemon keeps running when you quit; reopening reconnects. Tasks from every host count in the Dock badge, tray, Inbox and notices.
+- A setup checklist checks git and the claude and codex CLIs and marks routes that cannot run there. Saved hosts connect the first time they are used. A remote daemon keeps running when you quit; reopening reconnects. Tasks from every host count in the Dock badge, tray, Inbox and notices.
 
 ## Settings > Orchestration
 

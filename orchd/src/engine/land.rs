@@ -3,6 +3,9 @@ use super::*;
 /// How often a task waiting `landing` is tried again.
 const LANDING_RETRY: Duration = Duration::from_secs(120);
 const AFTER_LAND_TIMEOUT: Duration = Duration::from_secs(600);
+/// How many times a landing carries its work onto a branch that moved under
+/// it before the attempt fails.
+const MAX_RECARRIES: u32 = 3;
 
 /// Lands a finished top-level task with `variant.land` on its base branch,
 /// one task per (repo, branch) at a time: its work is carried onto the
@@ -53,77 +56,95 @@ pub(super) async fn land_on_base(
     };
 
     let finals = task.final_verify.clone();
-    match carry_and_check(
-        app,
-        task,
-        idx,
-        worktree,
-        run_dir,
-        &branch,
-        "Another task",
-        &finals,
-        cancel,
-    )
-    .await
-    {
-        Ok(true) => {
-            let (r, b) = (repo.clone(), branch.clone());
-            task.landed_sha = tokio::task::spawn_blocking(move || git::resolve_commit(&r, &b).ok())
-                .await
-                .unwrap_or(None);
-            record_landing(task).await;
-            return Landing::Landed;
+    // The branch can move between the carry (and its checks) and the move
+    // itself: someone else committed to it meanwhile. That is not the
+    // agent's failure, so carry onto the new head and try again in place,
+    // running the checks again on the new tree; only a conflict or a failing
+    // check after a re-carry becomes a failed attempt.
+    let mut recarries = 0;
+    loop {
+        let first = if recarries == 0 {
+            "Another task"
+        } else {
+            "Another commit"
+        };
+        match carry_and_check(
+            app, task, idx, worktree, run_dir, &branch, first, &finals, cancel,
+        )
+        .await
+        {
+            Ok(true) => {
+                let (r, b) = (repo.clone(), branch.clone());
+                task.landed_sha =
+                    tokio::task::spawn_blocking(move || git::resolve_commit(&r, &b).ok())
+                        .await
+                        .unwrap_or(None);
+                record_landing(task).await;
+                return Landing::Landed;
+            }
+            Ok(false) => {}
+            Err(landing) => return landing,
         }
-        Ok(false) => {}
-        Err(landing) => return landing,
-    }
 
-    let (wt, r, b, title, tid, base) = (
-        worktree.to_path_buf(),
-        repo.clone(),
-        branch.clone(),
-        task.title.clone(),
-        task.id.clone(),
-        task.base_sha.clone(),
-    );
-    let moved = tokio::task::spawn_blocking(move || {
-        git::commit(&wt, &title, &tid, attempt_n)?;
-        let sha = git::head_sha(&wt)?;
-        let moved = git::move_branch(&r, &b, &sha);
-        if !matches!(moved, Ok(git::BranchMove::Done { .. })) {
-            // Keep the work, uncommitted, for the next try to carry.
-            let _ = git::uncommit_to(&wt, &base);
-        }
-        moved.map(|m| (sha, m))
-    })
-    .await
-    .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
-    match moved {
-        Ok((sha, git::BranchMove::Done { checkout })) => {
-            task.landed_sha = Some(sha.clone());
-            task.decisions
-                .push(format!("Land: landed on {branch} at {}", short_sha(&sha)));
-            record_landing(task).await;
-            run_after_land(task, &checkout, &after_land).await;
-            Landing::Landed
-        }
-        Ok((_, git::BranchMove::Dirty { checkout })) => {
-            if task.status != TaskStatus::Landing {
+        let (wt, r, b, title, tid, base) = (
+            worktree.to_path_buf(),
+            repo.clone(),
+            branch.clone(),
+            task.title.clone(),
+            task.id.clone(),
+            task.base_sha.clone(),
+        );
+        let moved = tokio::task::spawn_blocking(move || {
+            git::commit(&wt, &title, &tid, attempt_n)?;
+            let sha = git::head_sha(&wt)?;
+            let moved = git::move_branch(&r, &b, &sha);
+            if !matches!(moved, Ok(git::BranchMove::Done { .. })) {
+                // Keep the work, uncommitted, for the next try to carry.
+                let _ = git::uncommit_to(&wt, &base);
+            }
+            moved.map(|m| (sha, m))
+        })
+        .await
+        .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
+        match moved {
+            Ok((sha, git::BranchMove::Done { checkout })) => {
+                task.landed_sha = Some(sha.clone());
+                task.decisions
+                    .push(format!("Land: landed on {branch} at {}", short_sha(&sha)));
+                record_landing(task).await;
+                run_after_land(task, &checkout, &after_land).await;
+                return Landing::Landed;
+            }
+            Ok((_, git::BranchMove::Dirty { checkout })) => {
+                if task.status != TaskStatus::Landing {
+                    task.decisions.push(format!(
+                        "Land: waiting, {} has uncommitted changes; retrying every 2 minutes and on task.start",
+                        checkout.display()
+                    ));
+                }
+                return Landing::Waiting;
+            }
+            Ok((_, git::BranchMove::Diverged)) if recarries < MAX_RECARRIES => {
+                recarries += 1;
                 task.decisions.push(format!(
-                    "Land: waiting, {} has uncommitted changes; retrying every 2 minutes and on task.start",
-                    checkout.display()
+                    "Land: {branch} moved while landing; carrying the work onto it again (try {recarries} of {MAX_RECARRIES})"
                 ));
             }
-            Landing::Waiting
+            Ok((_, git::BranchMove::Diverged)) => {
+                return Landing::Failed {
+                    kind: FailureKind::Error,
+                    detail: format!(
+                        "{branch} moved while landing, {MAX_RECARRIES} times in a row; carry the work onto it again."
+                    ),
+                };
+            }
+            Err(e) => {
+                return Landing::Failed {
+                    kind: FailureKind::Error,
+                    detail: format!("Could not land on {branch}: {e}"),
+                };
+            }
         }
-        Ok((_, git::BranchMove::Diverged)) => Landing::Failed {
-            kind: FailureKind::Error,
-            detail: format!("{branch} moved while landing; carry the work onto it again."),
-        },
-        Err(e) => Landing::Failed {
-            kind: FailureKind::Error,
-            detail: format!("Could not land on {branch}: {e}"),
-        },
     }
 }
 

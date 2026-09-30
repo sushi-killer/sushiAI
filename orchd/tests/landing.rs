@@ -503,3 +503,131 @@ fn task_land_lands_a_done_unlanded_task_and_source_is_counted() {
     assert_eq!(summary["tasksBySource"]["ui"]["tasks"], 1, "{summary}");
     daemon.shutdown_and_wait();
 }
+
+/// A land task whose final check makes another commit on the base branch
+/// each of its first two runs in the task's worktree with `pre.txt` (a carried
+/// tree): the first during the attempt's own final checks, the second while
+/// the landing re-runs them after carrying onto that commit, so the branch
+/// moves under the landing. From the third run on, the check insists the
+/// second commit's file is in the tree it runs on.
+fn land_race_task(
+    daemon: &Daemon,
+    root: &Path,
+    scratch: &Path,
+    name: &str,
+    verify: &str,
+    second_file: &str,
+    second_content: &str,
+) -> String {
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["sandbox"] = serde_json::json!("host");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    let (repo, count) = (root.display(), scratch.join("count").display().to_string());
+    let final_check = format!(
+        "case \"$PWD\" in *worktrees*) ;; *) exit 0 ;; esac; test -f pre.txt || exit 0; \
+         echo x >> '{count}'; n=$(wc -l < '{count}' | tr -d ' '); \
+         if [ \"$n\" = 1 ]; then cd '{repo}' && echo one > first.txt && git add first.txt && git commit -q -m 'owner commit one'; \
+         elif [ \"$n\" = 2 ]; then cd '{repo}' && printf '{second_content}' > '{second_file}' && git add '{second_file}' && git commit -q -m 'owner commit two'; \
+         else test -f '{second_file}'; fi"
+    );
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": root.to_str().unwrap(),
+            "title": format!("Add {name}"),
+            "goal": format!("FILE_{name}: write the file"),
+            "verify": [verify],
+            "finalVerify": [final_check],
+            "land": true,
+            "start": false,
+        }),
+    );
+    // The branch moves after the task recorded its base, so the task is
+    // carried onto it before its first attempt.
+    std::fs::write(root.join("pre.txt"), "pre\n").unwrap();
+    git_out(root, &["add", "pre.txt"]);
+    git_out(root, &["commit", "-q", "-m", "earlier landing"]);
+    let id = task["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": id}));
+    id
+}
+
+#[test]
+fn a_branch_that_moves_during_the_final_checks_is_carried_again_without_a_new_attempt() {
+    let (daemon, _scripts) = daemon();
+    let repo = repo_on_work_branch();
+    let root = repo.path();
+    let scratch = tempfile::tempdir().unwrap();
+    let id = land_race_task(
+        &daemon,
+        root,
+        scratch.path(),
+        "one",
+        "test -f one.txt",
+        "owner.txt",
+        "owner\\n",
+    );
+    let done = until_done(&daemon, &id);
+    assert_eq!(done["status"], "done", "{done}");
+    let implement: Vec<_> = done["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["stage"] == "implement")
+        .collect();
+    assert_eq!(implement.len(), 1, "{done}");
+    assert!(implement[0]["failure"].is_null(), "{done}");
+    let d = decisions(&done);
+    assert!(
+        d.contains("moved while landing; carrying the work onto it again"),
+        "{d}"
+    );
+    assert_eq!(done["landedSha"], git_out(root, &["rev-parse", "work"]));
+    let log = commits(root, "work");
+    assert_eq!(
+        log[..4],
+        [
+            "Add one",
+            "owner commit two",
+            "owner commit one",
+            "earlier landing"
+        ],
+        "{log:?}"
+    );
+    assert!(root.join("one.txt").exists() && root.join("owner.txt").exists());
+    assert_eq!(git_out(root, &["status", "--porcelain", "-uno"]), "");
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_branch_that_moves_during_the_final_checks_onto_a_conflict_still_fails_an_attempt() {
+    let (daemon, _scripts) = daemon();
+    let repo = repo_on_work_branch();
+    let root = repo.path();
+    let scratch = tempfile::tempdir().unwrap();
+    let verify = "grep -q b shared.txt && ! grep -q '<<<<<<<' shared.txt";
+    let id = land_race_task(
+        &daemon,
+        root,
+        scratch.path(),
+        "shared",
+        verify,
+        "shared.txt",
+        "a\\n",
+    );
+    let done = until_done(&daemon, &id);
+    assert_eq!(done["status"], "done", "{done}");
+    let attempts = done["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2, "{done}");
+    assert_eq!(attempts[0]["failure"]["kind"], "conflict", "{done}");
+    assert!(
+        attempts[0]["failure"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("These files conflict: shared.txt"),
+        "{done}"
+    );
+    assert!(decisions(&done).contains("moved while landing"), "{done}");
+    assert_eq!(done["landedSha"], git_out(root, &["rev-parse", "work"]));
+    daemon.shutdown_and_wait();
+}

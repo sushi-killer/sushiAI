@@ -7,6 +7,8 @@ import type { Preflight } from "./types";
 import { useOrchestratorHosts } from "./useHosts";
 import {
   errorText,
+  isDaemonMissing,
+  isPackagedInstall,
   landRepos,
   withLandRepos,
   type DefaultableSetting,
@@ -15,6 +17,7 @@ import {
   settingsDifferingFromDefaults,
 } from "./helpers";
 import { Stepper } from "./ui";
+import { formatSettingsJson, parseSettingsJson } from "./settingsJson";
 import { ConnectedTools } from "./ConnectedTools";
 import {
   applyPreset,
@@ -227,6 +230,78 @@ function DollarInput({
   );
 }
 
+/** Every settings key as JSON, so a key the panel has no control for (present
+ * or future) is still editable. Save sends the whole object through the same
+ * `settings.set` the other controls use. */
+function SettingsJsonEditor({
+  settings,
+  saving,
+  onSave,
+}: {
+  settings: Settings;
+  saving: boolean;
+  onSave(next: Settings): Promise<boolean>;
+}) {
+  const current = formatSettingsJson(settings);
+  const [draft, setDraft] = useState<string | null>(null);
+  const [problem, setProblem] = useState("");
+  const text = draft ?? current;
+  const dirty = draft !== null && draft !== current;
+  function validate() {
+    const parsed = parseSettingsJson(text);
+    setProblem(parsed.ok ? "" : parsed.error);
+    return parsed;
+  }
+  return (
+    <div className="os-block os-json">
+      <span className="os-row-desc">
+        Every setting as JSON, including keys with no control above. Saving
+        sends the whole object. Each key is documented in{" "}
+        <code>docs/orchd-settings.md</code> in the sushiAI repository.
+      </span>
+      <textarea
+        className="os-json-text"
+        aria-label="Settings JSON"
+        aria-invalid={problem ? true : undefined}
+        spellCheck={false}
+        value={text}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={validate}
+      />
+      {problem && (
+        <p className="inline-error" role="alert">
+          {problem}
+        </p>
+      )}
+      <div className="os-json-actions">
+        <button
+          type="button"
+          className="os-ghost"
+          disabled={!dirty || saving}
+          onClick={() => {
+            setDraft(null);
+            setProblem("");
+          }}
+        >
+          Revert
+        </button>
+        <button
+          type="button"
+          className="os-primary"
+          disabled={!dirty || saving}
+          onClick={async () => {
+            const parsed = validate();
+            if (!parsed.ok) return;
+            if (await onSave(parsed.settings)) setDraft(null);
+          }}
+        >
+          {saving ? "Saving…" : "Save JSON"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function RouteRow({
   route,
   chatModels,
@@ -383,6 +458,7 @@ function OrchestratorSettingsBody({
   const [saving, setSaving] = useState(false);
   const [notBuilt, setNotBuilt] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [jsonOpen, setJsonOpen] = useState(false);
   // orchd's built-in defaults; stays null on an older orchd without
   // `settings.defaults`, which just means no default markers.
   const [defaults, setDefaults] = useState<Settings | null>(null);
@@ -402,7 +478,7 @@ function OrchestratorSettingsBody({
       .catch((e) => {
         const message = errorText(e);
         setError(message);
-        setNotBuilt(message.includes("is not built"));
+        setNotBuilt(isDaemonMissing(message));
       });
     orchestratorClient
       .settingsDefaults()
@@ -412,6 +488,12 @@ function OrchestratorSettingsBody({
       });
   }, [orchestratorClient]);
 
+  if (notBuilt && isPackagedInstall(error))
+    return (
+      <p className="text-muted">
+        The orchestrator is missing from this installation — reinstall sushiAI.
+      </p>
+    );
   if (notBuilt)
     return (
       <p className="text-muted">
@@ -553,16 +635,20 @@ function OrchestratorSettingsBody({
     );
   }
 
-  async function save() {
-    if (!settings) return;
+  async function save(
+    next: Settings | undefined = settings ?? undefined,
+  ): Promise<boolean> {
+    if (!next) return false;
     setSaving(true);
     setError("");
     try {
-      const result = await orchestratorClient.settingsSet(settings);
+      const result = await orchestratorClient.settingsSet(next);
       setSettings(result);
       setSaved(result);
+      return true;
     } catch (e) {
       setError(errorText(e));
+      return false;
     } finally {
       setSaving(false);
     }
@@ -956,6 +1042,57 @@ function OrchestratorSettingsBody({
         </div>
       </div>
 
+      <SectionHead
+        title="CHECKS AND WORKTREES"
+        note="Where task work happens and how it is checked before it comes back to you."
+      />
+      {row(
+        "Cheap checks route",
+        "A read-only run that checks a brief for contradictions before the first attempt. Off skips the check.",
+        <Select
+          label="Cheap checks route"
+          value={settings.briefCheckRoute ?? ""}
+          onChange={(briefCheckRoute) => update({ briefCheckRoute })}
+        >
+          {routeOptions(<option value="">Off</option>)}
+        </Select>,
+      )}
+      {row(
+        "Worktree folder",
+        "Where new task worktrees go. A relative folder is resolved against the repo. Existing tasks keep their path.",
+        <label className="os-input os-input-wide">
+          <input
+            aria-label="Worktree folder"
+            spellCheck={false}
+            value={settings.worktreeRoot ?? ""}
+            placeholder={defaults?.worktreeRoot || ".sushiai/worktrees"}
+            onChange={(event) =>
+              update({ worktreeRoot: event.target.value || undefined })
+            }
+          />
+        </label>,
+      )}
+      {row(
+        "Verify timeout (seconds)",
+        "Stop a verify command that runs longer than this.",
+        <label className="os-input os-input-narrow">
+          <input
+            type="number"
+            min={1}
+            aria-label="Verify timeout in seconds"
+            value={settings.verifyTimeoutSecs ?? ""}
+            placeholder={String(defaults?.verifyTimeoutSecs ?? 1200)}
+            onChange={(event) =>
+              update({
+                verifyTimeoutSecs: event.target.value
+                  ? Math.max(1, Math.floor(Number(event.target.value)) || 1)
+                  : undefined,
+              })
+            }
+          />
+        </label>,
+      )}
+
       <button
         type="button"
         className="os-advanced"
@@ -1053,6 +1190,19 @@ function OrchestratorSettingsBody({
         </div>
       )}
 
+      <button
+        type="button"
+        className="os-advanced"
+        aria-expanded={jsonOpen}
+        onClick={() => setJsonOpen(!jsonOpen)}
+      >
+        <ChevronRight size={13} className={jsonOpen ? "open" : ""} />
+        Advanced — all settings as JSON
+      </button>
+      {jsonOpen && (
+        <SettingsJsonEditor settings={settings} saving={saving} onSave={save} />
+      )}
+
       {error && (
         <p className="inline-error" role="alert">
           {error}
@@ -1077,7 +1227,7 @@ function OrchestratorSettingsBody({
             type="button"
             className="os-primary"
             disabled={saving}
-            onClick={save}
+            onClick={() => void save()}
           >
             {saving ? "Saving…" : "Save"}
           </button>

@@ -292,7 +292,10 @@ test("the setup steps follow the host's state, with the elapsed build time", () 
 });
 
 test("the preflight strip lists git and each CLI, and names the routes it turns off", () => {
-  const { preflightItems, routesOff } = require("../src/orchestrator/hosts.ts");
+  const {
+    preflightItems,
+    routesFallbackNote,
+  } = require("../src/orchestrator/hosts.ts");
   const state = preflight(
     { installed: true, loggedIn: true },
     { installed: false, loggedIn: false },
@@ -302,15 +305,29 @@ test("the preflight strip lists git and each CLI, and names the routes it turns 
     { name: "claude", ok: true, note: "logged in" },
     { name: "codex", ok: false, note: "not installed" },
   ]);
-  assert.deepEqual(routesOff(state), ["Codex"]);
-  assert.deepEqual(
-    routesOff(
+  assert.equal(
+    routesFallbackNote(state, "lab"),
+    "codex is not installed on lab; its routes fall back to an installed CLI.",
+  );
+  assert.equal(
+    routesFallbackNote(
       preflight(
         { installed: true, loggedIn: false },
         { installed: true, loggedIn: true },
       ),
+      "lab",
     ),
-    ["Claude"],
+    "claude is not logged in on lab; its routes fall back to an installed CLI.",
+  );
+  assert.equal(
+    routesFallbackNote(
+      preflight(
+        { installed: true, loggedIn: true },
+        { installed: true, loggedIn: true },
+      ),
+      "lab",
+    ),
+    "",
   );
 });
 

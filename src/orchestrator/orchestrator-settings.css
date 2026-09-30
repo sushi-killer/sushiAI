@@ -364,6 +364,33 @@
 .orchestrator-settings .os-input-narrow {
   width: 86px;
 }
+.orchestrator-settings .os-input-wide {
+  width: 240px;
+}
+
+/* Advanced JSON editor. */
+.orchestrator-settings .os-json-text {
+  width: 100%;
+  min-height: 260px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-app);
+  color: var(--text);
+  font-family: "SFMono-Regular", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  white-space: pre;
+}
+.orchestrator-settings .os-json-text[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+.orchestrator-settings .os-json-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
 
 /* Collapsed Advanced. */
 .orchestrator-settings .os-advanced {

@@ -51,6 +51,7 @@ import {
   daemonDown,
   errorText,
   formatDuration,
+  isPackagedInstall,
   planDrafts,
   sortTasks,
   taskCreateParams,
@@ -601,6 +602,17 @@ function OrchestratorBody({
           : "task";
 
   function offlineBody() {
+    if (daemonState === "not-built" && isPackagedInstall(error))
+      return (
+        <div data-orchestrator-not-built>
+          <Banner
+            tone="warning"
+            title="The orchestrator is missing from this installation."
+            body="Reinstall sushiAI, then Retry."
+            action={{ label: "Retry", onClick: retry }}
+          />
+        </div>
+      );
     if (daemonState === "not-built")
       return (
         <>

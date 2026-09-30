@@ -14,6 +14,8 @@ const {
   waitForExit,
   ALLOWED_METHODS,
   NOT_BUILT,
+  NOT_INSTALLED,
+  notBuiltMessage,
   FAILED_TO_START,
 } = require("../electron/orchestrator.cjs");
 
@@ -265,6 +267,27 @@ test("call() reports the daemon as not built rather than hanging on a missing bi
     send: () => {},
   });
   await assert.rejects(service.call("ping"), new RegExp(NOT_BUILT));
+});
+
+test("a packaged app with no daemon says reinstall, not npm run build:orchd", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "orchd-pkg-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const service = new OrchestratorService({
+    dataDir: directory,
+    root: directory,
+    resourcesPath: directory,
+    packaged: true,
+    send: () => {},
+  });
+  await assert.rejects(
+    service.call("ping"),
+    (error) =>
+      error.message ===
+        "The orchestrator is missing from this installation — reinstall sushiAI." &&
+      !/build:orchd/.test(error.message),
+  );
+  assert.equal(notBuiltMessage(false), NOT_BUILT);
+  assert.equal(notBuiltMessage(true), NOT_INSTALLED);
 });
 
 test("call() reports a distinct error when a spawned daemon never answers ping (binary exists but is stuck)", async (t) => {

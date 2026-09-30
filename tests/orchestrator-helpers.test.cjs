@@ -912,6 +912,17 @@ test("landRepos and withLandRepos edit the per-repo landing list", async () => {
   assert.deepEqual(withLandRepos(undefined, []), {});
 });
 
+test("a packaged app's missing daemon counts as not built, and only it says reinstall", async () => {
+  const { daemonDown, isPackagedInstall } = await library;
+  const packaged =
+    "The orchestrator is missing from this installation — reinstall sushiAI.";
+  const source =
+    "The orchestrator daemon is not built. Run npm run build:orchd.";
+  assert.equal(daemonDown(packaged), "not-built");
+  assert.equal(isPackagedInstall(packaged), true);
+  assert.equal(isPackagedInstall(source), false);
+});
+
 test("daemonDown tells a gone daemon from a refused request", async () => {
   const { daemonDown } = await library;
   assert.equal(

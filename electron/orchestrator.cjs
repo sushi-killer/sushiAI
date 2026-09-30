@@ -141,6 +141,14 @@ const ASKED_BY = new Set([
 
 const NOT_BUILT =
   "The orchestrator daemon is not built. Run npm run build:orchd.";
+const NOT_INSTALLED =
+  "The orchestrator is missing from this installation — reinstall sushiAI.";
+
+/** A packaged app has no toolchain to build with, so a missing daemon means a
+ * broken install; only a source checkout is told to build it. */
+function notBuiltMessage(packaged) {
+  return packaged ? NOT_INSTALLED : NOT_BUILT;
+}
 const FAILED_TO_START = "The orchestrator daemon failed to start.";
 
 function orchdBinaryPath({ root, resourcesPath, packaged }) {
@@ -403,6 +411,7 @@ class OrchestratorService {
     this.remote = remote;
     this.dataDir = dataDir;
     this.socketPath = dataDir ? socketPathFor(dataDir) : null;
+    this.packaged = Boolean(packaged);
     this.binary = remote
       ? null
       : orchdBinaryPath({ root, resourcesPath, packaged });
@@ -488,7 +497,8 @@ class OrchestratorService {
       this.token = conn.token;
       return { remote: true };
     }
-    if (!existsSync(this.binary)) throw new Error(NOT_BUILT);
+    if (!existsSync(this.binary))
+      throw new Error(notBuiltMessage(this.packaged));
     await this.#refreshToken();
     try {
       const ping = await orchdRequest(
@@ -1106,5 +1116,7 @@ module.exports = {
   waitForExit,
   ALLOWED_METHODS,
   NOT_BUILT,
+  NOT_INSTALLED,
+  notBuiltMessage,
   FAILED_TO_START,
 };

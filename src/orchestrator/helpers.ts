@@ -827,13 +827,29 @@ export function unreadChatCount(
     .length;
 }
 
+/** The main process says the daemon binary is absent in one of two ways: a
+ * source checkout ("is not built") or a packaged app ("is missing from this
+ * installation"). */
+export function isDaemonMissing(message: string): boolean {
+  return (
+    message.includes("is not built") ||
+    message.includes("is missing from this installation")
+  );
+}
+
+/** Whether the missing daemon is a packaged app's broken install (reinstall)
+ * rather than an unbuilt source checkout (`npm run build:orchd`). */
+export function isPackagedInstall(message: string): boolean {
+  return message.includes("is missing from this installation");
+}
+
 /** Whether an RPC error means the daemon itself is gone (not built, failed
  * to start, the socket refused or dropped the call), as opposed to the
  * daemon refusing one request. */
 export function daemonDown(
   message: string,
 ): "not-built" | "unavailable" | null {
-  if (message.includes("is not built")) return "not-built";
+  if (isDaemonMissing(message)) return "not-built";
   return /failed to start|did not respond|disconnected before responding|ECONNREFUSED|ENOENT|ECONNRESET|EPIPE/.test(
     message,
   )

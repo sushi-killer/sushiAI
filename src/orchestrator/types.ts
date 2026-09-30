@@ -113,6 +113,21 @@ export type Settings = {
   landOnDefaultRepos?: Record<string, boolean>;
   /** Thresholds for the evolution loop; absent in older settings. */
   evolution?: EvolutionSettings;
+  /** Route id of the cheap read-only check of a brief's goal and criteria;
+   * "" turns the check off. Absent in older settings. */
+  briefCheckRoute?: string;
+  /** Where new task worktrees go; relative to the repo root unless absolute. */
+  worktreeRoot?: string;
+  /** Seconds one verify command may run; absent on an orchd without the
+   * setting (the daemon then uses its own default, 1200). */
+  verifyTimeoutSecs?: number;
+  /** Tasks may land on the repo's default branch (per-repo overrides in
+   * `landOnDefaultRepos`). */
+  landOnDefault?: boolean;
+  /** Shell commands run in a repo's main checkout after a task lands. */
+  afterLand?: { repo: string; run: string }[];
+  /** Commands that only run when the task's diff touches their `paths`. */
+  scopedChecks?: { repo?: string; command: string; paths: string[] }[];
 };
 
 export type EvolutionSettings = {

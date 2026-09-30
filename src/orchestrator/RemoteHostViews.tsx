@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Check, RefreshCw, X } from "lucide-react";
 import {
   preflightItems,
-  routesOff,
+  routesFallbackNote,
   setupSteps,
   type SetupSeen,
   type SetupStep,
@@ -32,11 +32,6 @@ function PreflightRow({ preflight }: { preflight: Preflight }) {
   );
 }
 
-function offLine(preflight: Preflight): string {
-  const off = routesOff(preflight);
-  return off.length === 0 ? "" : `${off.join(" and ")} routes`;
-}
-
 /** Home's one-line preflight strip on a remote host (Figma "Home · remote
  * host"): git, claude and codex, and which routes that turns off there. */
 export function PreflightStrip({
@@ -46,16 +41,12 @@ export function PreflightStrip({
   hostName: string;
   preflight: Preflight;
 }) {
-  const off = offLine(preflight);
+  const off = routesFallbackNote(preflight, hostName);
   return (
     <div className="orch-preflight-strip" aria-label={`On ${hostName}`}>
       <PreflightRow preflight={preflight} />
       <span className="orch-preflight-spacer" />
-      {off && (
-        <span className="orch-preflight-off">
-          {off} are off on {hostName}
-        </span>
-      )}
+      {off && <span className="orch-preflight-off">{off}</span>}
     </div>
   );
 }
@@ -123,7 +114,7 @@ export function RemoteSetup({
   const setup: SetupSeen = { states: seen.states, elapsedMs, address };
   const steps = setupSteps(host, setup);
   const preflight = host.preflight;
-  const off = preflight ? routesOff(preflight) : [];
+  const off = preflight ? routesFallbackNote(preflight, host.name) : "";
   return (
     <div className="orch-view-scroll orch-setup">
       <div className="orch-setup-head">
@@ -156,13 +147,7 @@ export function RemoteSetup({
           <div className="orch-setup-preflight-row">
             <PreflightRow preflight={preflight} />
           </div>
-          {off.length > 0 && (
-            <p className="orch-setup-preflight-note">
-              {off.join(" and ")} routes stay off on {host.name} until{" "}
-              {off.map((name) => name.toLowerCase()).join(" and ")}{" "}
-              {off.length > 1 ? "are" : "is"} installed and logged in.
-            </p>
-          )}
+          {off && <p className="orch-setup-preflight-note">{off}</p>}
         </div>
       )}
       <div className="orch-setup-actions">

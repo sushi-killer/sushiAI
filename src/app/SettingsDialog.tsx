@@ -348,24 +348,29 @@ export function SettingsDialog({
                       </em>
                     </span>
                   </label>
-                  <label className="setting-check">
-                    <input
-                      type="checkbox"
-                      checked={appPreferences.desktopMascot}
-                      disabled={!appPreferences.notifications}
-                      onChange={(event) =>
-                        setAppPreference("desktopMascot", event.target.checked)
-                      }
-                    />
-                    <span>
-                      Desktop mascot
-                      <em>
-                        Shows orchestrator task notices as a mascot in the
-                        corner of your screen. Off sends a native notification
-                        instead.
-                      </em>
-                    </span>
-                  </label>
+                  {orchestrator && (
+                    <label className="setting-check">
+                      <input
+                        type="checkbox"
+                        checked={appPreferences.desktopMascot}
+                        disabled={!appPreferences.notifications}
+                        onChange={(event) =>
+                          setAppPreference(
+                            "desktopMascot",
+                            event.target.checked,
+                          )
+                        }
+                      />
+                      <span>
+                        Desktop mascot
+                        <em>
+                          Shows orchestrator task notices as a mascot in the
+                          corner of your screen. Off sends a native notification
+                          instead.
+                        </em>
+                      </span>
+                    </label>
+                  )}
                   <label className="setting-check">
                     <input
                       type="checkbox"

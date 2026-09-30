@@ -350,12 +350,20 @@ export function preflightItems(preflight: Preflight): PreflightItem[] {
   ];
 }
 
-/** The harnesses whose routes a host cannot run, capitalised for a line such
- * as "Codex routes are off on lab"; empty when every route can run. */
-export function routesOff(preflight: Preflight): string[] {
+/** What a host missing a harness means: orchd falls back to an installed CLI
+ * for those routes. "codex is not installed on lab; its routes fall back to an
+ * installed CLI."; empty when every route can run. */
+export function routesFallbackNote(
+  preflight: Preflight,
+  hostName: string,
+): string {
   return (["claude", "codex"] as const)
     .filter((name) => !(preflight[name].installed && preflight[name].loggedIn))
-    .map((name) => name[0].toUpperCase() + name.slice(1));
+    .map(
+      (name) =>
+        `${name} is not ${preflight[name].installed ? "logged in" : "installed"} on ${hostName}; its routes fall back to an installed CLI.`,
+    )
+    .join(" ");
 }
 
 /** Tasks a host counts as running in the selector: started work, not the

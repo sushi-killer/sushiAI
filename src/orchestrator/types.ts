@@ -20,8 +20,43 @@ export type Route = {
 
 export type Tier = "mechanical" | "standard" | "hard";
 
+/** One connected tool of the orchestrator chat. `server` is an MCP server
+ * definition or a `{ref}` read from the owner's own MCP config at turn time,
+ * so no secret is ever stored here. */
+export type ChatToolConfig = {
+  id: string;
+  label: string;
+  enabled: boolean;
+  server: Record<string, unknown>;
+  /** Tool name -> the owner's call on whether it only reads. */
+  overrides?: Record<string, "read" | "write">;
+};
+export type ChatToolStatus =
+  "ok" | "needs-auth" | "failed" | "unavailable" | "unchecked";
+/** What `chat.tools` knows about one connected tool. */
+export type ChatToolRow = {
+  id: string;
+  transport: "stdio" | "http" | "unknown";
+  status: ChatToolStatus;
+  reason?: string | null;
+  /** Why a Codex chat runs without it; absent when it can use it. */
+  codex?: string | null;
+  /** `kind` is what the chat does with the tool; `guess` what it would be
+   * without the owner's override. */
+  tools: { name: string; kind: "read" | "write"; guess: "read" | "write" }[];
+};
+/** A server of the owner's MCP config that is not a connected tool yet. */
+export type ChatToolServer = {
+  ref: string;
+  label: string;
+  source: string;
+  transport: "stdio" | "http";
+};
+
 export type Settings = {
   routes: Route[];
+  /** Servers the orchestrator chat may use, each toggled in Settings. */
+  chatTools: ChatToolConfig[];
   tiers: Record<Tier, string>;
   /** Route id; "" turns review off, "auto" picks the cheapest route that is
    * never weaker than the implementer (at least 2, 3 on the hard tier),
@@ -457,6 +492,23 @@ export type ChatMessage = {
   draft?: ChatDraft;
   proposal?: ChatProposal;
   questions?: ChatQuestion[];
+  action?: ChatAction;
+};
+export type ChatActionState =
+  "pending" | "sending" | "sent" | "failed" | "declined";
+/** A write call on a connected tool that waits for the owner's OK. It runs at
+ * most once; its state survives a reload. */
+export type ChatAction = {
+  id: string;
+  /** The connected tool's id. */
+  server: string;
+  tool: string;
+  args: Record<string, unknown>;
+  summary: string;
+  target: string;
+  state: ChatActionState;
+  error?: string;
+  result?: string;
 };
 /** A task's place in a proposal: the 1-based row of another proposed task, or
  * the id of an existing task. */

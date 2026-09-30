@@ -117,6 +117,12 @@ fn shutdown_kills_a_live_orchestrator_chat_turn_s_child() {
     let script = fake_harness_script(scripts_dir.path(), "fake-claude-chat.sh", &body);
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
 
+    // The connected tools are on by default and probing an http one runs the
+    // fake harness too; this test is about the turn's own child.
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["chatTools"] = serde_json::json!([]);
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
     let repo = tempfile::tempdir().unwrap();
     daemon.request(
         "chat.send",

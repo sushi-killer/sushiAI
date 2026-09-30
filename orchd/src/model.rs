@@ -188,6 +188,63 @@ pub struct Settings {
     /// Commands that only run when the task's diff touches their `paths`.
     #[serde(default = "default_scoped_checks")]
     pub scoped_checks: Vec<ScopedCheck>,
+    /// MCP servers the orchestrator chat may use, each toggled in Settings.
+    #[serde(default = "default_chat_tools")]
+    pub chat_tools: Vec<ChatToolConfig>,
+}
+
+/// One connected tool of the orchestrator chat. `server` is an MCP server
+/// definition (`{command, args, env}` or `{type: "http", url}`) or a
+/// reference read at turn time, so no secret ever lands in these settings:
+/// `{"ref": "claude-json:<name>"}` names an entry of `~/.claude.json`
+/// `mcpServers`, `{"ref": "plugin:<plugin>/<server>"}` a server of an
+/// installed Claude Code plugin.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatToolConfig {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub enabled: bool,
+    pub server: serde_json::Value,
+    /// Per-tool override of the read/write guess: tool name -> "read" | "write".
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub overrides: std::collections::BTreeMap<String, String>,
+}
+
+fn default_chat_tools() -> Vec<ChatToolConfig> {
+    let tool = |id: &str, label: &str, server: serde_json::Value| ChatToolConfig {
+        id: id.to_string(),
+        label: label.to_string(),
+        enabled: true,
+        server,
+        overrides: Default::default(),
+    };
+    vec![
+        tool(
+            "google-sheets",
+            "Google Sheets",
+            serde_json::json!({"ref": "claude-json:google-sheets-main"}),
+        ),
+        tool(
+            "openviking",
+            "OpenViking",
+            serde_json::json!({"ref": "plugin:openviking-memory/openviking"}),
+        ),
+        tool(
+            "slack",
+            "Slack",
+            serde_json::json!({"ref": "plugin:slack/slack"}),
+        ),
+        // The claude.ai Asana connector is not loadable next to
+        // `--strict-mcp-config`; this is the vendor's own server, signed in
+        // with its own OAuth.
+        tool(
+            "asana",
+            "Asana",
+            serde_json::json!({"type": "http", "url": "https://mcp.asana.com/v2/mcp"}),
+        ),
+    ]
 }
 
 /// One `settings.scopedChecks` entry: a command that is skipped unless a
@@ -506,6 +563,7 @@ impl Default for Settings {
             after_land: vec![],
             scoped_checks: default_scoped_checks(),
             autopilot: false,
+            chat_tools: default_chat_tools(),
         }
     }
 }

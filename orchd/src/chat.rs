@@ -5,6 +5,7 @@
 //! session id carries a session's conversation from turn to turn. A repo has
 //! one live turn at most, and it always belongs to the `current` session.
 
+use super::chat_tools;
 use super::*;
 use serde::Serialize;
 
@@ -96,6 +97,42 @@ pub struct ChatMessage {
     /// The tool calls the orchestrator made while writing this reply.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ChatTool>,
+    /// The write call the orchestrator proposed in this reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<ChatAction>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ActionState {
+    Pending,
+    Sending,
+    Sent,
+    Failed,
+    Declined,
+}
+
+/// A write call on a connected tool that waits for the owner's OK, read from a
+/// `sushi-action` block. It runs at most once; `noted` says the orchestrator
+/// was told how it ended.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatAction {
+    pub id: String,
+    /// The connected tool's id.
+    pub server: String,
+    pub tool: String,
+    pub args: serde_json::Value,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub target: String,
+    pub state: ActionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub noted: bool,
 }
 
 /// One tool call of a reply: the tool's name without the orchd server prefix
@@ -290,16 +327,16 @@ struct ParsedReply {
 
 /// Byte span of the block [`crate::brief::last_fenced_block`] reads: from its
 /// opening marker through its closing fence or tag.
-fn draft_block_span(text: &str) -> Option<(usize, usize)> {
-    let fence = "```sushi-draft";
-    let open_tag = "<sushi-draft>";
-    let fence_at = text.rfind(fence);
-    let tag_at = text.rfind(open_tag);
+fn block_span(text: &str, tag: &str) -> Option<(usize, usize)> {
+    let fence = format!("```{tag}");
+    let open_tag = format!("<{tag}>");
+    let fence_at = text.rfind(&fence);
+    let tag_at = text.rfind(&open_tag);
     if tag_at.is_some() && (fence_at.is_none() || tag_at > fence_at) {
         let start = tag_at?;
         let content = start + open_tag.len();
-        let close = "</sushi-draft>";
-        return Some((start, content + text[content..].find(close)? + close.len()));
+        let close = format!("</{tag}>");
+        return Some((start, content + text[content..].find(&close)? + close.len()));
     }
     let start = fence_at?;
     let after_open = start + fence.len();
@@ -332,7 +369,7 @@ fn parse_reply(reply: &str) -> ParsedReply {
     let Ok(block) = serde_json::from_str::<DraftBlock>(&body) else {
         return verbatim();
     };
-    let Some((start, end)) = draft_block_span(reply) else {
+    let Some((start, end)) = block_span(reply, "sushi-draft") else {
         return verbatim();
     };
     let mut draft = block.draft;
@@ -487,6 +524,19 @@ impl ChatStore {
     fn mark_busy(&mut self, repo: &str, turns: &HashMap<String, CancelToken>) {
         let live = turns.contains_key(repo);
         for session in &mut self.sessions {
+            // A send that no turn is running any more was cut short by a
+            // restart: whether the call went out is unknown, so never redo it.
+            if !live {
+                for action in session
+                    .messages
+                    .iter_mut()
+                    .filter_map(|m| m.action.as_mut())
+                    .filter(|a| a.state == ActionState::Sending)
+                {
+                    action.state = ActionState::Failed;
+                    action.error = Some("Interrupted: it is unknown whether this was sent.".into());
+                }
+            }
             session.busy = live && session.id == self.current;
             if !session.busy {
                 session.note = None;
@@ -693,6 +743,7 @@ fn push(session: &mut ChatSession, role: &str, text: &str, mode: ChatMode) {
         proposal: None,
         questions: Vec::new(),
         tools: Vec::new(),
+        action: None,
     });
     let excess = session.messages.len().saturating_sub(MAX_MESSAGES);
     session.messages.drain(..excess);
@@ -1049,6 +1100,7 @@ pub async fn handle_send(
     if let Some(mcp) = params.get("mcp") {
         session.task_mcp = Some(mcp.clone());
     }
+    let notes = take_action_notes(&mut session);
     push(&mut session, "user", &text, mode);
     session.mode = mode;
     session.error = None;
@@ -1064,6 +1116,7 @@ pub async fn handle_send(
         Some((_, questions)) => format!("{text}\n\n---\n\n{QUESTIONS_INTRO}\n\n{questions}"),
         None => text,
     };
+    let prompt = format!("{notes}{prompt}");
     let app = app.arc();
     tokio::spawn(async move {
         run_turn(
@@ -1078,6 +1131,41 @@ pub async fn handle_send(
         .await;
     });
     Ok(json!({}))
+}
+
+/// What became of the write calls the orchestrator proposed, for its next
+/// turn: it cannot see the owner's OK card. Each call is reported once.
+fn take_action_notes(session: &mut ChatSession) -> String {
+    let mut notes = Vec::new();
+    for action in session
+        .messages
+        .iter_mut()
+        .filter_map(|m| m.action.as_mut())
+        .filter(|a| !a.noted)
+    {
+        let what = format!("{} ({}: {})", action.summary, action.server, action.tool);
+        let note = match action.state {
+            ActionState::Sent => format!(
+                "The owner approved {what} and it ran. Result: {}",
+                action.result.as_deref().unwrap_or("none")
+            ),
+            ActionState::Failed => format!(
+                "The owner approved {what} but it failed: {}",
+                action.error.as_deref().unwrap_or("unknown error")
+            ),
+            ActionState::Declined => {
+                format!("The owner declined {what}. Do not propose it again unless asked.")
+            }
+            _ => continue,
+        };
+        action.noted = true;
+        notes.push(note);
+    }
+    if notes.is_empty() {
+        String::new()
+    } else {
+        format!("[Connected tools]\n{}\n\n---\n\n", notes.join("\n"))
+    }
 }
 
 /// Starts a turn for the questions tasks sent the orchestrator in `repo`,
@@ -1148,6 +1236,7 @@ fn claude_argv(
     settings_path: &Path,
     session: Option<&str>,
     mode: ChatMode,
+    connected: &chat_tools::TurnTools,
 ) -> Vec<String> {
     let offered: &[&str] = if mode.read_only() {
         &crate::mcp::READ_ONLY_TOOLS
@@ -1157,8 +1246,10 @@ fn claude_argv(
     let tools = offered
         .iter()
         .map(|t| format!("mcp__{SERVER}__{t}"))
+        .chain(connected.allowed.iter().cloned())
         .collect::<Vec<_>>()
         .join(",");
+    let prompt = format!("{}{}", mode.prompt(), connected.prompt);
     let mut argv: Vec<String> = [
         "-p",
         "--output-format",
@@ -1170,7 +1261,7 @@ fn claude_argv(
         "--tools",
         "Read,Grep,Glob",
         "--append-system-prompt",
-        mode.prompt(),
+        &prompt,
         "--strict-mcp-config",
         "--mcp-config",
     ]
@@ -1205,6 +1296,7 @@ fn codex_argv(
     server: &serde_json::Value,
     session: Option<&str>,
     mode: ChatMode,
+    connected: &chat_tools::TurnTools,
 ) -> Vec<String> {
     let mut argv: Vec<String> = match session {
         // `resume` takes neither `-C` nor `--sandbox`; the cwd is set on the
@@ -1232,9 +1324,10 @@ fn codex_argv(
     argv.push("-c".into());
     argv.push(format!(
         "developer_instructions={}",
-        toml(&json!(mode.prompt()))
+        toml(&json!(format!("{}{}", mode.prompt(), connected.prompt)))
     ));
     argv.extend(harness::codex_mcp_flags(SERVER, server));
+    argv.extend(chat_tools::codex_flags(connected));
     if let Some(model) = &route.model {
         argv.push("-m".into());
         argv.push(model.clone());
@@ -1248,14 +1341,91 @@ fn codex_argv(
 }
 
 /// Adds the agent's reply, in the mode of the turn, to the session.
-fn apply_reply(thread: &mut ChatSession, reply: &str, tools: Vec<ChatTool>, mode: ChatMode) {
-    let parsed = parse_reply(reply);
+fn apply_reply(
+    thread: &mut ChatSession,
+    reply: &str,
+    tools: Vec<ChatTool>,
+    mode: ChatMode,
+    proposable: &dyn Fn(&str, &str) -> bool,
+) {
+    let (reply, action) = take_action(reply, proposable);
+    let parsed = parse_reply(&reply);
     push(thread, "assistant", &parsed.text, mode);
     let message = thread.messages.last_mut().expect("just pushed");
     message.draft = parsed.draft;
     message.proposal = parsed.proposal;
     message.questions = parsed.questions;
     message.tools = tools;
+    message.action = action;
+}
+
+#[derive(Deserialize)]
+struct ActionBlock {
+    server: String,
+    tool: String,
+    #[serde(default)]
+    args: serde_json::Value,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    target: String,
+}
+
+/// The reply without its `sushi-action` block, and the pending action the
+/// block proposed. A block that does not parse, or names a call
+/// `proposable` refuses (an unknown service, a read tool), is no action: the
+/// reply stays as it is.
+fn take_action(
+    reply: &str,
+    proposable: &dyn Fn(&str, &str) -> bool,
+) -> (String, Option<ChatAction>) {
+    let untouched = || (reply.to_string(), None);
+    let Some(body) = crate::brief::last_fenced_block(reply, "sushi-action") else {
+        return untouched();
+    };
+    let Ok(block) = serde_json::from_str::<ActionBlock>(&body) else {
+        return untouched();
+    };
+    let Some((start, end)) = block_span(reply, "sushi-action") else {
+        return untouched();
+    };
+    let args = match block.args {
+        serde_json::Value::Null => json!({}),
+        args if args.is_object() => args,
+        _ => return untouched(),
+    };
+    if !proposable(&block.server, &block.tool) {
+        return untouched();
+    }
+    let summary = one_line(block.summary.trim());
+    let before = reply[..start].trim_end();
+    let after = reply[end..].trim_start();
+    let mut text = [before, after]
+        .iter()
+        .filter(|part| !part.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if text.is_empty() {
+        text = if summary.is_empty() {
+            format!("{}: {}", block.server, block.tool)
+        } else {
+            summary.clone()
+        };
+    }
+    let action = ChatAction {
+        id: uuid::Uuid::new_v4().to_string(),
+        server: block.server,
+        tool: block.tool,
+        args,
+        summary,
+        target: one_line(block.target.trim()),
+        state: ActionState::Pending,
+        error: None,
+        result: None,
+        noted: false,
+    };
+    (text, Some(action))
 }
 
 const TOOL_PREFIX: &str = "mcp__sushiai-orchestrator__";
@@ -1410,14 +1580,24 @@ async fn run_turn(
             .map(|_| file)
     });
     let server = mcp_server(app, task_mcp_file.as_deref(), mode);
+    let settings = app.settings.read().unwrap().clone();
+    // A question turn answers a task, not the owner: it gets no connected tools.
+    let connected = match &turn {
+        Turn::Owner(_) => chat_tools::for_turn(app, &settings).await,
+        Turn::Questions(_) => chat_tools::TurnTools::default(),
+    };
     let session = thread.session_id.clone();
     let key_path = dir.join("key");
     let argv = match route.harness {
         Harness::Claude => {
             let mcp_config = dir.join("mcp.json");
-            let _ = store::write_json_atomic(&mcp_config, &json!({"mcpServers": {SERVER: server}}));
+            let mut servers = serde_json::Map::new();
+            for (key, def) in &connected.servers {
+                servers.insert(key.clone(), def.clone());
+            }
+            servers.insert(SERVER.to_string(), server);
+            let _ = store::write_json_atomic(&mcp_config, &json!({"mcpServers": servers}));
             let settings_path = dir.join("settings.json");
-            let settings = app.settings.read().unwrap().clone();
             write_readonly_claude_settings_with_profile(
                 &route,
                 app,
@@ -1432,9 +1612,10 @@ async fn run_turn(
                 &settings_path,
                 session.as_deref(),
                 mode,
+                &connected,
             )
         }
-        Harness::Codex => codex_argv(&route, &repo, &server, session.as_deref(), mode),
+        Harness::Codex => codex_argv(&route, &repo, &server, session.as_deref(), mode, &connected),
     };
 
     let (result, tools) = match run(app, &repo, &mut thread, &route, &argv, &text, &cancel).await {
@@ -1459,7 +1640,9 @@ async fn run_turn(
                 &turn,
             ) {
                 (Some(reply), _, Turn::Owner(mode)) => {
-                    apply_reply(&mut thread, &reply, tools, *mode);
+                    apply_reply(&mut thread, &reply, tools, *mode, &|server, tool| {
+                        chat_tools::proposable(app, &settings, server, tool)
+                    });
                 }
                 (Some(reply), _, Turn::Questions(ids)) => {
                     messages::reply_where_unanswered(app, ids, &reply)
@@ -1554,6 +1737,7 @@ async fn run(
             line = out.next_line(), if !out_done => match line {
                 Ok(Some(l)) => {
                     append_line(&events, &l);
+                    chat_tools::note_init(app, &l);
                     keep_tools(
                         &mut tools,
                         tools_in_line(app, repo, harness_kind, &l, &mut seen_items),
@@ -1590,6 +1774,117 @@ async fn run(
     Ok((outcome, tools))
 }
 
+fn message_id_param(params: &serde_json::Value) -> Result<String, String> {
+    params
+        .get("messageId")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "messageId is required".to_string())
+}
+
+fn pending_action<'a>(
+    session: &'a mut ChatSession,
+    message_id: &str,
+) -> Result<&'a mut ChatAction, String> {
+    let action = session
+        .messages
+        .iter_mut()
+        .find(|m| m.id == message_id)
+        .and_then(|m| m.action.as_mut())
+        .ok_or("no such action")?;
+    if action.state != ActionState::Pending {
+        return Err(format!("the action is already {:?}", action.state).to_lowercase());
+    }
+    Ok(action)
+}
+
+/// Runs the write call the orchestrator proposed, once, with the owner's OK.
+/// The call takes the repo's turn slot, so nothing else can rewrite the
+/// session while it runs; `args` replaces the proposed arguments (Edit).
+pub async fn handle_action_send(
+    app: &App,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let repo = repo_param(&params)?;
+    let message_id = message_id_param(&params)?;
+    let edited = match params.get("args") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(args) if args.is_object() => Some(args.clone()),
+        Some(_) => return Err("args must be an object".to_string()),
+    };
+    let (mut session, action) = {
+        let mut turns = app.chat_turns.lock().unwrap();
+        if turns.contains_key(&repo) {
+            return Err(BUSY.to_string());
+        }
+        let mut session = read_store(app, &repo).current().clone();
+        let action = pending_action(&mut session, &message_id)?;
+        if let Some(args) = edited {
+            action.args = args;
+        }
+        action.state = ActionState::Sending;
+        let action = action.clone();
+        turns.insert(repo.clone(), CancelToken::new());
+        (session, action)
+    };
+    save(app, &repo, &session);
+    let app = app.arc();
+    tokio::spawn(async move {
+        let settings = app.settings.read().unwrap().clone();
+        let outcome = match settings.chat_tools.iter().find(|c| c.id == action.server) {
+            Some(cfg) => chat_tools::execute(&app, cfg, &action.tool, &action.args).await,
+            None => Err("the connected tool was removed from Settings".to_string()),
+        };
+        let slot = session
+            .messages
+            .iter_mut()
+            .find(|m| m.id == message_id)
+            .and_then(|m| m.action.as_mut())
+            .expect("the message was in the session a moment ago");
+        let text = match outcome {
+            Ok(result) => {
+                slot.state = ActionState::Sent;
+                let done = format!("Sent: {}.", slot.summary);
+                let result = result.trim().to_string();
+                slot.result = Some(truncate_chars(&result, 2000));
+                if result.is_empty() {
+                    done
+                } else {
+                    format!("{done}\n\n{}", truncate_chars(&result, 2000))
+                }
+            }
+            Err(error) => {
+                slot.state = ActionState::Failed;
+                slot.error = Some(truncate_chars(&error, 2000));
+                format!(
+                    "Could not send: {}.\n\n{}",
+                    slot.summary,
+                    truncate_chars(&error, 2000)
+                )
+            }
+        };
+        push(&mut session, "assistant", &text, ChatMode::Chat);
+        finish_turn(&app, &repo, &session);
+    });
+    Ok(json!({}))
+}
+
+/// The owner's "Don't send": recorded, and told to the orchestrator on its
+/// next turn.
+pub async fn handle_action_decline(
+    app: &App,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let repo = repo_param(&params)?;
+    let message_id = message_id_param(&params)?;
+    let chats = change_idle(app, &repo, |chats| {
+        let action = pending_action(chats.current_mut(), &message_id)?;
+        action.state = ActionState::Declined;
+        Ok(())
+    })?;
+    Ok(chats.thread_json())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1614,6 +1909,7 @@ mod tests {
             Path::new("/d/settings.json"),
             Some("sess"),
             ChatMode::Chat,
+            &chat_tools::TurnTools::default(),
         );
         let at = |flag: &str| argv[argv.iter().position(|a| a == flag).unwrap() + 1].clone();
         assert_eq!(at("--tools"), "Read,Grep,Glob");
@@ -1635,6 +1931,7 @@ mod tests {
             &server,
             None,
             ChatMode::Chat,
+            &chat_tools::TurnTools::default(),
         );
         assert_eq!(&fresh[..2], &["exec".to_string(), "--json".to_string()]);
         assert!(fresh
@@ -1648,6 +1945,7 @@ mod tests {
             &server,
             Some("t1"),
             ChatMode::Chat,
+            &chat_tools::TurnTools::default(),
         );
         assert_eq!(
             &resumed[..3],
@@ -2178,7 +2476,13 @@ mod tests {
 
         let mut session = load(&app, &repo).current().clone();
         push(&mut session, "user", "status?", ChatMode::Chat);
-        apply_reply(&mut session, "It is running.", tools, ChatMode::Chat);
+        apply_reply(
+            &mut session,
+            "It is running.",
+            tools,
+            ChatMode::Chat,
+            &|_, _| false,
+        );
         let message = serde_json::to_value(session.messages.last().unwrap()).unwrap();
         assert_eq!(
             message["tools"],
@@ -2299,7 +2603,13 @@ mod tests {
         );
 
         let mut session = ChatSession::default();
-        apply_reply(&mut session, "plain", Vec::new(), ChatMode::Chat);
+        apply_reply(
+            &mut session,
+            "plain",
+            Vec::new(),
+            ChatMode::Chat,
+            &|_, _| false,
+        );
         let value = serde_json::to_value(session.messages.last().unwrap()).unwrap();
         assert!(value.get("tools").is_none());
     }
@@ -2325,6 +2635,7 @@ mod tests {
                     Path::new("/d/settings.json"),
                     session,
                     mode,
+                    &chat_tools::TurnTools::default(),
                 );
                 let at =
                     |flag: &str| claude[claude.iter().position(|a| a == flag).unwrap() + 1].clone();
@@ -2340,7 +2651,14 @@ mod tests {
                 assert_eq!(claude.contains(&"--resume".to_string()), session.is_some());
 
                 let server = json!({"command": "/o", "args": ["mcp", "--read-only"]});
-                let codex = codex_argv(&route(Harness::Codex), "/repo", &server, session, mode);
+                let codex = codex_argv(
+                    &route(Harness::Codex),
+                    "/repo",
+                    &server,
+                    session,
+                    mode,
+                    &chat_tools::TurnTools::default(),
+                );
                 assert!(codex.contains(&format!("developer_instructions={}", json!(prompt))));
                 assert!(!codex.contains(&format!("developer_instructions={}", json!(ROLE))));
             }

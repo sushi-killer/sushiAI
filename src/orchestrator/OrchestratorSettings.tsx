@@ -13,6 +13,7 @@ import {
   settingsDifferingFromDefaults,
 } from "./helpers";
 import { Stepper } from "./ui";
+import { ConnectedTools } from "./ConnectedTools";
 import {
   applyPreset,
   countChanges,
@@ -794,6 +795,16 @@ function OrchestratorSettingsBody({
           defaultMarker("orchestrator"),
         )}
       </div>
+
+      <SectionHead
+        title="CONNECTED TOOLS"
+        note="Services the orchestrator chat can look things up in. A change waits for your OK in the chat."
+      />
+      <ConnectedTools
+        tools={settings.chatTools ?? []}
+        savedTools={saved.chatTools ?? []}
+        onChange={(chatTools) => update({ chatTools })}
+      />
 
       <SectionHead
         title="SAFETY & LIMITS"

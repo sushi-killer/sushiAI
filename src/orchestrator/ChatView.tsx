@@ -47,6 +47,7 @@ import type {
 import { RichText } from "../agents/AgentsView";
 import { Composer, OrchestratorRouteChip } from "./Composer";
 import { ProposalCard } from "./ProposalCard";
+import { ToolConfirm } from "./ToolConfirm";
 import { Chip, Tag } from "./ui";
 import "./chat.css";
 
@@ -214,6 +215,14 @@ function OrchestratorTurn({
               Send answers
             </button>
           </div>
+        )}
+        {message.action && (
+          <ToolConfirm
+            cwd={cwd}
+            messageId={message.id}
+            action={message.action}
+            disabled={busy}
+          />
         )}
         {message.proposal && (
           <ProposalCard

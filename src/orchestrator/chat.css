@@ -657,3 +657,94 @@
   color: var(--text-faint);
   font-size: var(--text-sm);
 }
+
+/* Orch/ToolConfirm: a write call that waits for the owner's OK. */
+.ochat-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-pane);
+  border-radius: 10px;
+  background: var(--bg-raised);
+}
+.ochat-confirm.pending,
+.ochat-confirm.sending {
+  border-color: var(--tone-warning);
+}
+.ochat-confirm-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ochat-confirm-title {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ochat-confirm-target {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.ochat-confirm-tool {
+  margin: 0;
+  color: var(--text-muted);
+  font-family: monospace;
+  font-size: var(--text-sm);
+}
+.ochat-confirm-payload,
+.ochat-confirm-edit {
+  max-height: 180px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--line-divider);
+  border-radius: var(--radius-md);
+  background: var(--bg-app);
+  color: var(--text);
+  font-family: monospace;
+  font-size: var(--text-sm);
+  line-height: 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ochat-confirm-edit {
+  min-height: 96px;
+  resize: vertical;
+}
+.ochat-confirm-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-divider);
+}
+.ochat-confirm-foot .ui-button {
+  height: 26px;
+  padding: 0 12px;
+  font-size: var(--text-sm);
+}
+.ochat-confirm-hint {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+.ochat-confirm-outcome {
+  margin: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-divider);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.ochat-confirm-outcome.sent {
+  color: var(--tone-ok);
+}
+.ochat-confirm-outcome.failed {
+  color: var(--tone-danger);
+}

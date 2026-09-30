@@ -48,6 +48,10 @@ flowchart TB
     side["git.rs (worktrees, commit)<br/>messages.rs (merging)"]
     store[("data dir<br/>tasks/, runs/, settings.json,<br/>costs.jsonl, chats/, audits/,<br/>evolution/ (signals.jsonl, detected.jsonl,<br/>proposals/)")]
     mcp["orchd mcp<br/>task_* tools, stdio"]
+    chatTools["engine/chat_tools.rs<br/>connected MCP servers, OK-card writes"]
+    owner[("owner's MCP config<br/>~/.claude.json, plugins")]
+    chat --> chatTools
+    chatTools -->|read at turn time| owner
     proto --> engine & chat & audit & insights & evolution & costs
     engine --> side
     engine -->|task done or failed| evolution

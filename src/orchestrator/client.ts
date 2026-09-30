@@ -5,6 +5,8 @@
 import type {
   BacklogBucket,
   ChatMode,
+  ChatToolRow,
+  ChatToolServer,
   ChatProposalResult,
   ChatSessionList,
   ChatThread,
@@ -135,6 +137,26 @@ export function orchestratorClientFor(host: string = LOCAL) {
         messageId,
         ...params,
       }),
+    /** The connected tools' status and tools; `refresh` looks at each enabled
+     * server again instead of trusting the last look. */
+    chatTools: (refresh = false) =>
+      call<{ tools: ChatToolRow[] }>("chat.tools", refresh ? { refresh } : {}),
+    /** Servers of the owner's MCP config that are not connected tools yet. */
+    chatToolServers: () =>
+      call<{ servers: ChatToolServer[] }>("chat.toolServers"),
+    /** Runs a proposed write call once; `args` replaces the proposed ones. */
+    chatActionSend: (
+      repo: string,
+      messageId: string,
+      args?: Record<string, unknown>,
+    ) =>
+      call<Record<string, never>>("chat.actionSend", {
+        repo,
+        messageId,
+        ...(args ? { args } : {}),
+      }),
+    chatActionDecline: (repo: string, messageId: string) =>
+      call<ChatThread>("chat.actionDecline", { repo, messageId }),
     messageList: (repo: string) => call<Message[]>("message.list", { repo }),
     messageSend: (params: {
       from: string;

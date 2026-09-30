@@ -37,6 +37,7 @@ mod backlog;
 mod base_check;
 mod best_of;
 mod brief_check;
+mod chat_tools;
 mod cost;
 mod criteria;
 mod decision;
@@ -609,6 +610,10 @@ impl App {
             "chat.switch" => chat::handle_switch(self, params).await,
             "chat.clear" => chat::handle_clear(self, params).await,
             "chat.createProposal" => chat::handle_create_proposal(self, params).await,
+            "chat.tools" => chat_tools::handle_tools(self, params).await,
+            "chat.toolServers" => chat_tools::handle_tool_servers(self, params).await,
+            "chat.actionSend" => chat::handle_action_send(self, params).await,
+            "chat.actionDecline" => chat::handle_action_decline(self, params).await,
             "peer.list" => messages::handle_peers(self, params).await,
             "message.send" => messages::handle_send(self, params).await,
             "message.inbox" => messages::handle_inbox(self, params).await,

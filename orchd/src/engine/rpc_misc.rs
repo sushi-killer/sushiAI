@@ -93,6 +93,15 @@ impl App {
             return Err("dailyBudgetUsd must be a finite number, 0 or more".to_string());
         }
         p.settings.experiments.check()?;
+        let mut tool_ids = std::collections::HashSet::new();
+        for tool in &p.settings.chat_tools {
+            if tool.id.trim().is_empty() || !tool_ids.insert(tool.id.as_str()) {
+                return Err("chatTools ids must be unique and not empty".to_string());
+            }
+            if !tool.server.is_object() {
+                return Err("a chat tool's server must be an object".to_string());
+            }
+        }
         p.settings.experiments.check_routes(&p.settings.routes)?;
         self.store
             .save_settings(&p.settings)

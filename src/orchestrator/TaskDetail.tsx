@@ -30,6 +30,7 @@ import { RichText } from "../agents/AgentsView";
 import { TaskCostLine, TaskTimeline } from "./TaskInsights";
 import {
   acceptanceHeading,
+  canOpenPr,
   followUpLabel,
   headerFacts,
   questionSource,
@@ -524,6 +525,10 @@ export function TaskDetail({
   const orchestratorClient = useOrchestratorClient();
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [noting, setNoting] = useState(false);
+  const [prForm, setPrForm] = useState<{
+    title: string;
+    branch: string;
+  } | null>(null);
   const [note, setNote] = useState("");
   const children = childrenOf(tasks, selected.id);
   const parentTask = selected.parent
@@ -618,6 +623,30 @@ export function TaskDetail({
                   Land
                 </button>
               )}
+            {canOpenPr(selected) && (
+              <button
+                className="ui-button secondary"
+                disabled={busy}
+                onClick={() =>
+                  setPrForm({ title: selected.title, branch: selected.branch })
+                }
+              >
+                Open PR
+              </button>
+            )}
+            {selected.prUrl && (
+              <button
+                className="ui-button secondary"
+                title={selected.prUrl}
+                onClick={() =>
+                  void window.bridge
+                    ?.agentOpenExternal(selected.prUrl as string)
+                    .catch(() => {})
+                }
+              >
+                View PR
+              </button>
+            )}
             {done && (
               <>
                 <button
@@ -732,6 +761,58 @@ export function TaskDetail({
               Cancel
             </button>
           </form>
+        )}
+        {prForm && canOpenPr(selected) && (
+          <form
+            className="td-inline-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const { title, branch } = prForm;
+              // The form closes only on success; a failure keeps the input.
+              act(async () => {
+                const task = await orchestratorClient.taskPr(
+                  selected.id,
+                  title.trim(),
+                  branch.trim(),
+                );
+                setPrForm(null);
+                return task;
+              });
+            }}
+          >
+            <input
+              value={prForm.title}
+              onChange={(event) =>
+                setPrForm({ ...prForm, title: event.target.value })
+              }
+              placeholder="PR title"
+              aria-label="PR title"
+              autoFocus
+            />
+            <input
+              value={prForm.branch}
+              onChange={(event) =>
+                setPrForm({ ...prForm, branch: event.target.value })
+              }
+              placeholder="Remote branch"
+              aria-label="Remote branch"
+            />
+            <button className="ui-button primary" type="submit" disabled={busy}>
+              Push and open PR
+            </button>
+            <button
+              className="ui-button secondary"
+              type="button"
+              onClick={() => setPrForm(null)}
+            >
+              Cancel
+            </button>
+          </form>
+        )}
+        {prForm && canOpenPr(selected) && prForm.branch.startsWith("task/") && (
+          <p className="td-facts">
+            Your repo may expect a branch name like feature/&lt;slug&gt;.
+          </p>
         )}
         {(parentTask || waitsFor.length > 0 || selected.queueReason) && (
           <p className="td-facts">

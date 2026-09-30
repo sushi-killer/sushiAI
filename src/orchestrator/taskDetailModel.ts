@@ -391,3 +391,15 @@ export function reportBody(report: string): string {
 export function followUpLabel(title: string): string {
   return /^follow-up\b/i.test(title) ? title : `Follow-up: ${title}`;
 }
+
+/** Whether the owner can open a pull request for the task: a finished,
+ * unarchived top-level task whose work is not already landed. */
+export function canOpenPr(task: Task): boolean {
+  return (
+    task.status === "done" &&
+    !task.parent &&
+    !task.archived &&
+    !task.landedSha &&
+    !task.prUrl
+  );
+}

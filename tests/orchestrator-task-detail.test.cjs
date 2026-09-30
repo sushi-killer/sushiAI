@@ -215,3 +215,16 @@ test("a follow-up link never doubles its prefix", async () => {
   assert.equal(followUpLabel("Follow-up: Fix totals"), "Follow-up: Fix totals");
   assert.equal(followUpLabel("Fix totals"), "Follow-up: Fix totals");
 });
+
+test("canOpenPr is true only for a finished, unarchived, unlanded top-level task without a PR", async () => {
+  const { canOpenPr } = await model;
+  assert.equal(canOpenPr(task({ status: "done" })), true);
+  assert.equal(canOpenPr(task({ status: "running" })), false);
+  assert.equal(canOpenPr(task({ status: "done", parent: "p" })), false);
+  assert.equal(canOpenPr(task({ status: "done", archived: true })), false);
+  assert.equal(canOpenPr(task({ status: "done", landedSha: "abc" })), false);
+  assert.equal(
+    canOpenPr(task({ status: "done", prUrl: "https://example.test/pull/1" })),
+    false,
+  );
+});

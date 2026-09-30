@@ -458,7 +458,13 @@ test("task.create proceeds without mcp when the project has no readable MCP conf
 test("settings.set pushes a full-replace secrets.set: each route's resolved profile env", async (t) => {
   const settings = {
     routes: [
-      { id: "r1", label: "Sonnet", harness: "claude", profileId: "prof-1" },
+      {
+        id: "r1",
+        label: "Sonnet",
+        harness: "claude",
+        profileId: "prof-1",
+        accountId: "account-1",
+      },
       { id: "r2", label: "Codex", harness: "codex" },
     ],
   };
@@ -474,6 +480,10 @@ test("settings.set pushes a full-replace secrets.set: each route's resolved prof
         if (id !== "prof-1") throw new Error("Model profile not found.");
         return { settings: { ANTHROPIC_MODEL: "x" }, key: "prof-key" };
       },
+      resolveClaudeAccount: async (id) => {
+        if (id !== "account-1") throw new Error("Claude account not found.");
+        return { kind: "subscription", value: "account-token" };
+      },
       // The old apiKeyHelper staging path must not be touched anymore.
       stageSettings: async () => {
         throw new Error("stageSettings should not be called");
@@ -485,6 +495,9 @@ test("settings.set pushes a full-replace secrets.set: each route's resolved prof
   assert.ok(secretsCall, "secrets.set was pushed");
   assert.deepEqual(secretsCall.params, {
     profiles: { "prof-1": { env: { ANTHROPIC_MODEL: "x" }, key: "prof-key" } },
+    accounts: {
+      "account-1": { kind: "subscription", value: "account-token" },
+    },
   });
 });
 
@@ -509,7 +522,7 @@ test("secrets.set is always pushed, even to clear it: no profiles means profiles
     secretsCall,
     "a full replace is pushed even when everything clears",
   );
-  assert.deepEqual(secretsCall.params, { profiles: {} });
+  assert.deepEqual(secretsCall.params, { profiles: {}, accounts: {} });
 });
 
 test("connect() relays subscribe events and raises one notice per (task, question)", async (t) => {

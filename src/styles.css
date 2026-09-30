@@ -3595,6 +3595,132 @@ iframe {
   display: grid;
   gap: 12px;
 }
+.project-mcp-tab {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+}
+.project-mcp-heading,
+.project-mcp-actions,
+.project-mcp-card,
+.project-mcp-editor > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.project-mcp-heading {
+  justify-content: space-between;
+  align-items: flex-start;
+}
+.project-mcp-heading h2,
+.project-mcp-subheading {
+  margin: 0;
+}
+.project-mcp-heading p,
+.project-mcp-count {
+  margin: 4px 0 0;
+  color: #929292;
+  font-size: 0.78rem;
+}
+.project-mcp-actions {
+  flex: 0 0 auto;
+}
+.project-mcp-import {
+  position: relative;
+  overflow: hidden;
+}
+.project-mcp-import input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.project-mcp-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.project-mcp-card {
+  min-height: 54px;
+  padding: 8px 12px;
+  border: 1px solid #303030;
+  border-radius: 9px;
+  background: #171717;
+}
+.project-mcp-list-secondary .project-mcp-card {
+  border-style: dashed;
+  background: transparent;
+}
+.project-mcp-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  background: #202020;
+  color: #a3a3a3;
+  font-size: 0.68rem;
+}
+.project-mcp-info {
+  display: grid;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+.project-mcp-info strong {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.project-mcp-info strong small {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: #292929;
+  color: #aaa;
+  font-size: 0.62rem;
+  font-weight: 400;
+}
+.project-mcp-info > span,
+.project-mcp-info > small {
+  overflow: hidden;
+  color: #808080;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-mcp-info > small[role="alert"],
+.project-mcp-error {
+  color: #ff9c91;
+}
+.project-mcp-badge {
+  color: #91c587;
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+.project-mcp-subheading {
+  margin-top: 10px;
+  color: #858585;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.project-mcp-editor {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #303030;
+  border-radius: 8px;
+}
+.project-mcp-editor textarea {
+  min-height: 90px;
+  resize: vertical;
+  font-family: var(--font-mono);
+}
+.project-mcp-editor > div {
+  justify-content: flex-end;
+}
 .workspace-controls-heading {
   display: flex;
   align-items: flex-start;

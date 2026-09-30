@@ -576,9 +576,9 @@ export function App() {
               localSocket={system?.socketPath || ""}
               connectionProfiles={connectionProfiles}
               statusByEndpoint={statusByEndpoint}
-              onCreate={async (...args) => {
-                if (await ws.createWorkspace(...args)) closeDialog();
-              }}
+              onCreate={(...args) => ws.createWorkspace(...args)}
+              onStart={() => (closeDialog(), openPanelPicker())}
+              onClose={closeDialog}
             />
           ) : dialog.kind === "routine" ? (
             <RoutineDialog

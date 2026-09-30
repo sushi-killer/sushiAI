@@ -135,6 +135,8 @@ contextBridge.exposeInMainWorld("bridge", {
   connectionsDisconnect: invoke("connections-disconnect"),
   connectionsForward: invoke("connections-forward"),
   projectInspect: invoke("project-inspect"),
+  projectSourceInspect: invoke("projects:source-inspect"),
+  projectLocalCreate: invoke("projects:local-create"),
   projectsList: invoke("projects:list"),
   projectsGet: invoke("projects:get"),
   projectsUpsert: invoke("projects:upsert"),

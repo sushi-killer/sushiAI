@@ -639,6 +639,18 @@ export interface Bridge {
     options: Record<string, unknown>,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic inspection result, callers narrow it themselves
   ): Promise<any>;
+  projectLocalCreate(input: {
+    url?: string;
+    cwd: string;
+    branch?: string;
+    empty?: boolean;
+  }): Promise<{ cwd: string }>;
+  projectSourceInspect(url: string): Promise<{
+    branch: string;
+    envExample: string;
+    mcp: string;
+    lockFile: string;
+  }>;
   projectPreview(
     endpoint: string | undefined,
     root: string,

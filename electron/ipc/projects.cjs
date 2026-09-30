@@ -1,3 +1,8 @@
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
+const execFileAsync = promisify(execFile);
 const { createWorktree } = require("../worktree.cjs");
 const {
   hostProbeScript,
@@ -20,6 +25,92 @@ function registerProjectIpc({
   };
 
   if (projects) {
+    handle("projects:source-inspect", async (url) => {
+      if (typeof url !== "string" || !url.trim())
+        throw new Error("Enter a git URL.");
+      const remote = url.trim();
+      const { stdout } = await execFileAsync(
+        "git",
+        ["ls-remote", "--symref", remote, "HEAD"],
+        { timeout: 30000, maxBuffer: 1024 * 1024 },
+      );
+      const branch =
+        stdout.match(/^ref: refs\/heads\/(.+)\tHEAD$/m)?.[1] || "main";
+      const directory = await fs.mkdtemp(
+        path.join(require("node:os").tmpdir(), "sushiai-project-source-"),
+      );
+      try {
+        await execFileAsync(
+          "git",
+          [
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            branch,
+            "--",
+            remote,
+            directory,
+          ],
+          {
+            timeout: 2 * 60 * 1000,
+            maxBuffer: 1024 * 1024,
+          },
+        );
+        const read = async (file) => {
+          try {
+            return await fs.readFile(path.join(directory, file), "utf8");
+          } catch (error) {
+            if (error?.code === "ENOENT") return "";
+            throw error;
+          }
+        };
+        const envExample = await read(".env.example");
+        const mcp = await read(".mcp.json");
+        let lockFile = "";
+        for (const file of [
+          "package-lock.json",
+          "pnpm-lock.yaml",
+          "yarn.lock",
+          "bun.lock",
+          "bun.lockb",
+          "Cargo.lock",
+          "uv.lock",
+          "poetry.lock",
+          "Pipfile.lock",
+          "Gemfile.lock",
+          "composer.lock",
+          "go.sum",
+        ]) {
+          try {
+            await fs.access(path.join(directory, file));
+            lockFile = file;
+            break;
+          } catch {}
+        }
+        return { branch, envExample, mcp, lockFile };
+      } finally {
+        await fs.rm(directory, { recursive: true, force: true });
+      }
+    });
+    handle("projects:local-create", async ({ url, cwd, branch, empty }) => {
+      if (typeof cwd !== "string" || !path.isAbsolute(cwd))
+        throw new Error("Choose an absolute project folder.");
+      if (empty) {
+        await fs.mkdir(cwd, { recursive: true });
+        await execFileAsync("git", ["init", cwd]);
+      } else {
+        if (typeof url !== "string" || !url.trim())
+          throw new Error("Enter a git URL.");
+        await fs.mkdir(path.dirname(cwd), { recursive: true });
+        await execFileAsync("git", ["clone", "--", url.trim(), cwd], {
+          timeout: 15 * 60 * 1000,
+        });
+        if (branch && branch !== "main")
+          await execFileAsync("git", ["-C", cwd, "checkout", branch]);
+      }
+      return { cwd };
+    });
     handle("projects:list", () => projects.list());
     handle("projects:get", (id) => projects.get(id));
     handle("projects:upsert", (project) => projects.upsert(project));

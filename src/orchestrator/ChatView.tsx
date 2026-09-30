@@ -10,13 +10,14 @@ import {
   SquareTerminal,
 } from "lucide-react";
 import { useOrchestratorClient, useOrchestratorHost } from "./hostContext";
-import { enterKind, eventKind, type KindedList } from "./chatKinds";
 import { hostOf } from "./hosts";
 import {
   groupSessions,
   matchesQuery,
   isUnread,
+  composerPlaceholder,
   lastMessageText,
+  modeLabel,
   sessionTime,
   taskRefs,
 } from "./chatModel";
@@ -31,6 +32,8 @@ import {
 } from "./helpers";
 import type {
   ChatMessage,
+  ChatMode,
+  ChatSessionList,
   ChatSessionSummary,
   ChatThread,
   Message,
@@ -39,6 +42,7 @@ import type {
 } from "./types";
 import { RichText } from "../agents/AgentsView";
 import { Composer, OrchestratorRouteChip } from "./Composer";
+import { ProposalCard } from "./ProposalCard";
 import { Chip, Tag } from "./ui";
 import "./chat.css";
 
@@ -47,6 +51,12 @@ const STARTERS = [
   "Why did the last task fail?",
   "Land everything that passed review",
 ];
+
+/** Under the starters of an empty chat: what the other two modes are for. */
+const MODE_HINTS = [
+  ["Brainstorm", "talk an idea through, one question at a time"],
+  ["Plan", "split a goal into small tasks you can create in one click"],
+] as const;
 
 /** "Orchestrator · claude-sonnet": the route the chat runs on, by model. */
 function routeLabel(settings: Settings): string {
@@ -106,24 +116,71 @@ function Avatar() {
 }
 
 function OrchestratorTurn({
+  cwd,
   message,
+  nextUser,
   tasks,
   maxAttempts,
+  busy,
   onOpenTask,
+  onPick,
 }: {
+  cwd: string;
   message: ChatMessage;
+  /** The owner's next message, to mark the option they picked. */
+  nextUser: string | undefined;
   tasks: Task[];
   maxAttempts?: number;
+  busy: boolean;
   onOpenTask?: (id: string) => void;
+  onPick: (option: string, mode: ChatMode) => void;
 }) {
   const refs = taskRefs(message.text, tasks);
+  const label = modeLabel(message.mode);
+  // orchd falls back to the question as the reply's text when the reply was
+  // only a block; that question is not shown twice.
+  const questions = (message.questions ?? []).filter(
+    (q) => q.text !== message.text || q.options.length > 0,
+  );
   return (
     <div className="ochat-orch">
       <Avatar />
       <div className="ochat-orch-col">
+        {label && <span className="ochat-mode-label">{label}</span>}
         <div className="ochat-orch-text">
           <RichText text={message.text} />
         </div>
+        {questions.map((question) => (
+          <div key={question.text} className="ochat-question">
+            {question.text !== message.text && (
+              <p className="ochat-question-text">{question.text}</p>
+            )}
+            {question.options.length > 0 && (
+              <div className="ochat-question-opts">
+                {question.options.map((option) => (
+                  <Chip
+                    key={option}
+                    selected={nextUser === option}
+                    disabled={busy}
+                    onClick={() => onPick(option, message.mode ?? "chat")}
+                  >
+                    {option}
+                  </Chip>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+        {message.proposal && (
+          <ProposalCard
+            cwd={cwd}
+            message={message}
+            proposal={message.proposal}
+            tasks={tasks}
+            disabled={busy}
+            onOpenTask={onOpenTask}
+          />
+        )}
         {refs.map((task) => (
           <TaskRefCard
             key={task.id}
@@ -202,6 +259,8 @@ function Conversation({
   error,
   settings,
   tasks,
+  mode,
+  onModeChange,
   onRouteChange,
   onOpenTask,
   onSend,
@@ -212,9 +271,11 @@ function Conversation({
   error: string;
   settings: Settings | null;
   tasks: Task[];
+  mode: ChatMode;
+  onModeChange: (mode: ChatMode) => void;
   onRouteChange: (routeId: string) => void;
   onOpenTask?: (id: string) => void;
-  onSend: (text: string) => Promise<boolean>;
+  onSend: (text: string, mode: ChatMode) => Promise<boolean>;
   onClear: () => void;
 }) {
   const orchestratorClient = useOrchestratorClient();
@@ -230,7 +291,7 @@ function Conversation({
   function submit() {
     const text = draft.trim();
     if (!text || busy) return;
-    void onSend(text).then((sent) => sent && setDraft(""));
+    void onSend(text, mode).then((sent) => sent && setDraft(""));
   }
   const shownError = error || thread?.error;
   const empty = messages.length === 0 && !busy;
@@ -256,15 +317,22 @@ function Conversation({
                 <Chip
                   key={text}
                   disabled={!thread}
-                  onClick={() => void onSend(text)}
+                  onClick={() => void onSend(text, mode)}
                 >
                   {text}
                 </Chip>
               ))}
             </div>
+            <ul className="ochat-mode-hints">
+              {MODE_HINTS.map(([name, hint]) => (
+                <li key={name}>
+                  <strong>{name}</strong> {hint}
+                </li>
+              ))}
+            </ul>
           </div>
         ) : (
-          messages.map((message) =>
+          messages.map((message, i) =>
             message.role === "user" ? (
               <div key={message.id} className="ochat-you">
                 <div className="ochat-bubble">{message.text}</div>
@@ -272,10 +340,16 @@ function Conversation({
             ) : (
               <OrchestratorTurn
                 key={message.id}
+                cwd={cwd}
                 message={message}
+                nextUser={
+                  messages.slice(i + 1).find((m) => m.role === "user")?.text
+                }
                 tasks={tasks}
                 maxAttempts={settings?.maxAttempts}
+                busy={busy}
                 onOpenTask={onOpenTask}
+                onPick={(option, replyMode) => void onSend(option, replyMode)}
               />
             ),
           )
@@ -303,11 +377,13 @@ function Conversation({
           value={draft}
           onChange={setDraft}
           onSubmit={submit}
-          placeholder="Ask the orchestrator…"
+          placeholder={composerPlaceholder(mode, messages)}
           ariaLabel="Message the orchestrator"
           sendLabel="Send message"
           disabled={!thread}
           sending={busy}
+          mode={mode}
+          onModeChange={onModeChange}
           onStop={() => void orchestratorClient.chatCancel(cwd)}
           route={
             settings && (
@@ -520,7 +596,7 @@ function Sessions({
   onPick,
   onMessages,
 }: {
-  list: KindedList | null;
+  list: ChatSessionList | null;
   current: string | undefined;
   /** Last message per session id, for the sessions this view loaded. */
   previews: Record<string, string>;
@@ -627,7 +703,8 @@ function Sessions({
 /** The Chat view: the conversation (or the agent messages) in the centre and
  * this repo's chat sessions on the right. Stays mounted while hidden so a
  * half-typed message survives a look at a task; becoming visible reloads the
- * chat kind's current session (Brainstorm's sessions are a kind of their own). */
+ * current session. `start` (a new `n` each time) opens a new session with a
+ * mode selected, e.g. the Plan page's Brainstorm button. */
 export function ChatView({
   cwd,
   kind,
@@ -635,6 +712,7 @@ export function ChatView({
   tasks,
   pendingMessages,
   onRouteChange,
+  start,
   onShow,
   onOpenTask,
 }: {
@@ -645,13 +723,17 @@ export function ChatView({
   tasks: Task[];
   pendingMessages: number;
   onRouteChange: (routeId: string) => void;
+  start?: { mode: ChatMode; n: number };
   onShow: (kind: "chat" | "messages") => void;
   onOpenTask?: (id: string) => void;
 }) {
   const orchestratorClient = useOrchestratorClient();
   const host = useOrchestratorHost();
   const [thread, setThread] = useState<ChatThread | null>(null);
-  const [list, setList] = useState<KindedList | null>(null);
+  const [list, setList] = useState<ChatSessionList | null>(null);
+  const [mode, setMode] = useState<ChatMode>("chat");
+  // A mode asked for before its session exists (chatNew is still on its way).
+  const wanted = useRef<ChatMode | null>(null);
   const [error, setError] = useState("");
   const visible = kind !== null;
   const [previews, setPreviews] = useState<Record<string, string>>({});
@@ -675,7 +757,6 @@ export function ChatView({
       if (
         hostOf(event) !== host ||
         event.event !== "chat" ||
-        eventKind(event) !== "chat" ||
         event.thread.repo !== cwd
       )
         return;
@@ -689,11 +770,14 @@ export function ChatView({
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
-    enterKind(cwd, "chat", orchestratorClient)
-      .then((entered) => {
+    Promise.all([
+      orchestratorClient.chatGet(cwd),
+      orchestratorClient.chatList(cwd),
+    ])
+      .then(([loaded, sessions]) => {
         if (cancelled) return;
-        setThread(entered.thread);
-        setList(entered.list);
+        setThread(loaded);
+        setList(sessions);
         setError("");
       })
       .catch((e) => !cancelled && setError(errorText(e)));
@@ -702,6 +786,29 @@ export function ChatView({
     };
   }, [cwd, visible, orchestratorClient]);
 
+  // The composer restores the session's last mode when it is opened.
+  const threadId = thread?.id;
+  const threadMode = thread?.mode;
+  useEffect(() => {
+    setMode(wanted.current ?? threadMode ?? "chat");
+    wanted.current = null;
+    // Only a different session changes the mode; the mode of a reply that
+    // arrives in the same session is the one already selected.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadId]);
+  const startedAt = useRef(start?.n ?? 0);
+  useEffect(() => {
+    if (!start || start.n === startedAt.current) return;
+    startedAt.current = start.n;
+    if (thread && thread.messages.length === 0 && !thread.busy) {
+      setMode(start.mode);
+      return;
+    }
+    wanted.current = start.mode;
+    change(orchestratorClient.chatNew(cwd));
+    // `start` is the trigger; the thread it acts on is the current one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [start?.n]);
   function change(request: Promise<ChatThread>) {
     setError("");
     request
@@ -711,10 +818,10 @@ export function ChatView({
       })
       .catch((e) => setError(errorText(e)));
   }
-  function send(text: string): Promise<boolean> {
+  function send(text: string, sendMode: ChatMode): Promise<boolean> {
     setError("");
     return orchestratorClient
-      .chatSend(cwd, text)
+      .chatSend(cwd, text, sendMode)
       .then(() => true)
       .catch((e) => {
         setError(errorText(e));
@@ -731,6 +838,8 @@ export function ChatView({
           error={error}
           settings={settings}
           tasks={tasks}
+          mode={mode}
+          onModeChange={setMode}
           onRouteChange={onRouteChange}
           onOpenTask={onOpenTask}
           onSend={send}

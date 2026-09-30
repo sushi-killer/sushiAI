@@ -14,10 +14,15 @@ use serde::Serialize;
 /// work itself; this text explains why.
 const ROLE: &str = "You are the owner's task orchestrator in sushiAI. You never change files or run commands yourself: every piece of work becomes an orchd task through the sushiai-orchestrator tools, which run it in an isolated worktree, verify it and report back. Follow that server's instructions. You are not woken up between turns, so never promise to watch or report later: say the task is in the Orchestrator panel. Reply in the owner's language, briefly. In text meant for the owner, refer to a task by its title, never by its id, a bare id prefix such as '8ec68f8c', or a run id.\n\nWhen you propose a task for the owner to confirm, or need the owner to choose between options, end your reply with one ```sushi-draft block holding JSON: {\"title\": \"...\", \"goal\": \"...\", \"criteria\": [\"...\"], \"dependsOn\": [\"task ids\"], \"tier\": \"mechanical|standard|hard\", \"questions\": [{\"text\": \"...\", \"options\": [\"...\"]}]}. A block may carry only questions (leave out the title) when you just need an answer. Keep the prose above the block short: the app shows the draft and the questions as cards.";
 
-/// The brainstorm agent's prompt, in place of [`ROLE`]. Its MCP bridge is
-/// read-only (`orchd mcp --read-only`), so it could not create tasks even if
-/// it tried; this text says what it is for.
-const BRAINSTORM: &str = "You help the owner of sushiAI refine a feature idea before it becomes a task. Ask the owner exactly one focused question per reply, with 2-4 answer options. You never create, start, stop, amend or answer tasks, and you never change files or run commands: you may read the repository and look at existing tasks, settings and notes through the read-only sushiai-orchestrator tools. Reply in the owner's language, briefly. In text meant for the owner, refer to a task by its title, never by its id, a bare id prefix such as '8ec68f8c', or a run id.\n\nEnd every reply with one ```sushi-draft block holding JSON: {\"title\": \"...\", \"goal\": \"...\", \"criteria\": [\"acceptance criterion\"], \"dependsOn\": [\"task ids\"], \"tier\": \"mechanical|standard|hard\", \"questions\": [{\"text\": \"the one question\", \"options\": [\"2-4 answers\"]}]}. The block holds the current draft (title, goal, acceptance criteria, dependsOn, your best guess of the tier) plus that one question. Keep the prose above the block short: the app shows the draft and the question as cards.";
+/// The Brainstorm mode's prompt, in place of [`ROLE`]: it adapts obra/superpowers
+/// `skills/brainstorming` (MIT, see THIRD_PARTY_NOTICES.md). Its tools are
+/// read-only, so it could not create tasks even if it tried; this text says
+/// what it is for.
+const BRAINSTORM: &str = "You are the owner's thinking partner in sushiAI, in brainstorm mode: turn a rough idea into an agreed design before any task exists. First look at what is already there (the repository and existing tasks, through the read-only tools). Then discover the intent: ask exactly one focused question per reply, with 2-4 answer options, never a list of questions. When the picture is clear, write your understanding back in a few lines and, when the choice matters, weigh 2-3 approaches with a recommendation. Once the owner agrees on the design, propose the tasks that build it. You never create, start, stop, amend or answer tasks and never change files or run commands: the owner creates tasks from your proposal. Reply in the owner's language, briefly. In text meant for the owner, refer to a task by its title, never by its id, a bare id prefix such as '8ec68f8c', or a run id.\n\nEnd a reply that asks or proposes with one ```sushi-draft block holding JSON. While you are asking: {\"questions\": [{\"text\": \"the one question\", \"options\": [\"2-4 answers\"]}]}. Once the design is agreed: {\"tasks\": [{\"title\": \"...\", \"goal\": \"...\", \"criteria\": [\"acceptance criterion\"], \"dependsOn\": [1, \"existing task id\"], \"tier\": \"mechanical|standard|hard\"}]}; a dependsOn entry is the 1-based number of another task in the same list or the id of an existing task. Keep the prose above the block short: the app shows the questions as chips and the tasks as a card.";
+
+/// The Plan mode's prompt: it adapts obra/superpowers `skills/writing-plans`
+/// (MIT, see THIRD_PARTY_NOTICES.md). Read-only tools, like [`BRAINSTORM`].
+const PLAN: &str = "You are the owner's planner in sushiAI, in plan mode: split the owner's goal into small, ordered tasks that can each be verified on its own. Look at the repository and existing tasks first (read-only tools). Every task has a goal, acceptance criteria that name how each is checked (a command, a test, a screenshot), its dependencies and a guess of its tier; order them so each builds on the ones before it and keep them independent where you can. Ask a single focused question only when the goal is ambiguous; otherwise plan straight away. You never create, start, stop, amend or answer tasks and never change files or run commands: the owner creates tasks from your plan. Reply in the owner's language, briefly. In text meant for the owner, refer to a task by its title, never by its id, a bare id prefix such as '8ec68f8c', or a run id.\n\nEnd the reply with one ```sushi-draft block holding JSON: {\"tasks\": [{\"title\": \"...\", \"goal\": \"...\", \"criteria\": [\"acceptance criterion and how it is checked\"], \"dependsOn\": [1, \"existing task id\"], \"tier\": \"mechanical|standard|hard\"}]}; a dependsOn entry is the 1-based number of another task in the same list or the id of an existing task. When you must ask instead, the block is {\"questions\": [{\"text\": \"...\", \"options\": [\"2-4 answers\"]}]}. Keep the prose above the block short: the app shows the tasks as a card.";
 
 const SERVER: &str = "sushiai-orchestrator";
 const MAX_MESSAGES: usize = 200;
@@ -27,6 +32,46 @@ const MAX_TEXT: usize = 20_000;
 const MAX_TITLE: usize = 60;
 const BUSY: &str = "the orchestrator is still answering";
 
+/// How one turn behaves: which prompt and which tools it gets. The owner picks
+/// it per message inside one conversation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatMode {
+    #[default]
+    Chat,
+    Brainstorm,
+    Plan,
+}
+
+impl ChatMode {
+    /// The optional `mode` parameter: absent means the plain chat.
+    fn param(params: &serde_json::Value) -> Result<Self, String> {
+        match params.get("mode") {
+            None | Some(serde_json::Value::Null) => Ok(ChatMode::Chat),
+            Some(v) => serde_json::from_value(v.clone())
+                .map_err(|_| "mode must be \"chat\", \"brainstorm\" or \"plan\"".to_string()),
+        }
+    }
+
+    fn is_chat(&self) -> bool {
+        *self == ChatMode::Chat
+    }
+
+    fn prompt(self) -> &'static str {
+        match self {
+            ChatMode::Chat => ROLE,
+            ChatMode::Brainstorm => BRAINSTORM,
+            ChatMode::Plan => PLAN,
+        }
+    }
+
+    /// Brainstorm and Plan only look: they hand the owner a proposal instead
+    /// of creating tasks.
+    fn read_only(self) -> bool {
+        !self.is_chat()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
@@ -34,9 +79,17 @@ pub struct ChatMessage {
     pub role: String,
     pub text: String,
     pub ts: i64,
+    /// The mode the turn ran in (on the owner's message and on the reply to
+    /// it); absent means the plain chat.
+    #[serde(default, skip_serializing_if = "ChatMode::is_chat")]
+    pub mode: ChatMode,
     /// The task the orchestrator proposed in this reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<ChatDraft>,
+    /// The list of tasks the orchestrator proposed in this reply, and what the
+    /// owner did with each row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<ChatProposal>,
     /// Choices the orchestrator asked the owner to make in this reply.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub questions: Vec<ChatQuestion>,
@@ -70,6 +123,135 @@ pub struct ChatDraft {
     pub tier: Option<Tier>,
 }
 
+/// What a proposed task waits for: the 1-based position of another task in the
+/// same list, or the id of an existing task.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ProposalDep {
+    Index(usize),
+    Id(String),
+}
+
+/// One row of a proposal. `task_id` is set once the row became a task,
+/// `skipped` once the owner passed on it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposedTask {
+    pub title: String,
+    #[serde(default)]
+    pub goal: String,
+    #[serde(default, deserialize_with = "crate::brief::lenient_criteria")]
+    pub criteria: Vec<String>,
+    #[serde(default, deserialize_with = "lenient_deps")]
+    pub depends_on: Vec<ProposalDep>,
+    #[serde(default, deserialize_with = "crate::brief::lenient_tier")]
+    pub tier: Option<Tier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ChatProposal {
+    pub tasks: Vec<ProposedTask>,
+}
+
+impl<'de> Deserialize<'de> for ProposalDep {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        match serde_json::Value::deserialize(d)? {
+            serde_json::Value::Number(n) => n
+                .as_u64()
+                .map(|n| ProposalDep::Index(n as usize))
+                .ok_or_else(|| D::Error::custom("bad index")),
+            // A model may quote the number; task ids are never all digits.
+            serde_json::Value::String(s) => {
+                let s = s.trim();
+                match s.parse::<usize>() {
+                    Ok(n) => Ok(ProposalDep::Index(n)),
+                    Err(_) if !s.is_empty() => Ok(ProposalDep::Id(s.to_string())),
+                    Err(_) => Err(D::Error::custom("empty dependency")),
+                }
+            }
+            _ => Err(D::Error::custom("bad dependency")),
+        }
+    }
+}
+
+fn lenient_deps<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ProposalDep>, D::Error> {
+    let v: Option<Vec<serde_json::Value>> = Deserialize::deserialize(d).unwrap_or(None);
+    let mut deps: Vec<ProposalDep> = Vec::new();
+    for dep in v
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|d| serde_json::from_value::<ProposalDep>(d).ok())
+    {
+        if !deps.contains(&dep) {
+            deps.push(dep);
+        }
+    }
+    Ok(deps)
+}
+
+impl ChatProposal {
+    /// The `tasks` list of a `sushi-draft` block. Any row that is not a task
+    /// with a title, an index dependency that points outside the list or at
+    /// itself, or a dependency cycle drops the whole list.
+    fn parse(value: &serde_json::Value) -> Option<ChatProposal> {
+        let rows = value.as_array().filter(|rows| !rows.is_empty())?;
+        let mut tasks = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut task = serde_json::from_value::<ProposedTask>(row.clone()).ok()?;
+            task.title = task.title.trim().to_string();
+            if task.title.is_empty() {
+                return None;
+            }
+            task.goal = task.goal.trim().to_string();
+            task.task_id = None;
+            task.skipped = false;
+            tasks.push(task);
+        }
+        let proposal = ChatProposal { tasks };
+        proposal.acyclic().then_some(proposal)
+    }
+
+    /// The 0-based rows a row depends on, `None` for an index out of range or
+    /// pointing at the row itself.
+    fn row_deps(&self, row: usize) -> Option<Vec<usize>> {
+        let mut deps = Vec::new();
+        for dep in &self.tasks[row].depends_on {
+            if let ProposalDep::Index(n) = dep {
+                if *n == 0 || *n > self.tasks.len() || *n - 1 == row {
+                    return None;
+                }
+                deps.push(*n - 1);
+            }
+        }
+        Some(deps)
+    }
+
+    fn acyclic(&self) -> bool {
+        let all: Vec<usize> = (0..self.tasks.len()).collect();
+        self.order(&all).is_some()
+    }
+
+    /// The given rows so that every row follows the rows it depends on (among
+    /// the given ones); `None` on a bad index or a cycle.
+    fn order(&self, rows: &[usize]) -> Option<Vec<usize>> {
+        let mut ordered = Vec::new();
+        let mut left = rows.to_vec();
+        while !left.is_empty() {
+            let ready = left.iter().position(|&row| {
+                self.row_deps(row)
+                    .is_some_and(|deps| deps.iter().all(|d| !left.contains(d)))
+            })?;
+            ordered.push(left.remove(ready));
+        }
+        Some(ordered)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ChatQuestion {
     pub text: String,
@@ -83,6 +265,8 @@ struct DraftBlock {
     draft: ChatDraft,
     #[serde(default, deserialize_with = "lenient_questions")]
     questions: Vec<ChatQuestion>,
+    #[serde(default)]
+    tasks: Option<serde_json::Value>,
 }
 
 fn lenient_questions<'de, D: serde::Deserializer<'de>>(
@@ -100,6 +284,7 @@ fn lenient_questions<'de, D: serde::Deserializer<'de>>(
 struct ParsedReply {
     text: String,
     draft: Option<ChatDraft>,
+    proposal: Option<ChatProposal>,
     questions: Vec<ChatQuestion>,
 }
 
@@ -131,11 +316,14 @@ fn draft_block_span(text: &str) -> Option<(usize, usize)> {
 }
 
 /// Reads the reply's last `sushi-draft` block. A block that does not parse,
-/// or holds neither a title nor a question, is no block: the text stays as is.
+/// or holds no title, no question and no valid task list, is no block: the
+/// text stays as is. A malformed task list alone is dropped, the rest of the
+/// block still counts.
 fn parse_reply(reply: &str) -> ParsedReply {
     let verbatim = || ParsedReply {
         text: reply.to_string(),
         draft: None,
+        proposal: None,
         questions: Vec::new(),
     };
     let Some(body) = crate::brief::last_fenced_block(reply, "sushi-draft") else {
@@ -149,7 +337,8 @@ fn parse_reply(reply: &str) -> ParsedReply {
     };
     let mut draft = block.draft;
     draft.title = draft.title.trim().to_string();
-    if draft.title.is_empty() && block.questions.is_empty() {
+    let proposal = block.tasks.as_ref().and_then(ChatProposal::parse);
+    if draft.title.is_empty() && block.questions.is_empty() && proposal.is_none() {
         return verbatim();
     }
     let before = reply[..start].trim_end();
@@ -160,55 +349,20 @@ fn parse_reply(reply: &str) -> ParsedReply {
         _ => after.to_string(),
     };
     if text.trim().is_empty() {
-        text = if draft.title.is_empty() {
-            block.questions[0].text.clone()
-        } else {
+        text = if !draft.title.is_empty() {
             draft.title.clone()
+        } else if let Some(question) = block.questions.first() {
+            question.text.clone()
+        } else {
+            let count = proposal.as_ref().map_or(0, |p| p.tasks.len());
+            format!("{count} proposed tasks")
         };
     }
     ParsedReply {
         text,
         draft: (!draft.title.is_empty()).then_some(draft),
+        proposal,
         questions: block.questions,
-    }
-}
-
-/// What a session is for: the orchestrator chat, or a brainstorm that refines
-/// a feature idea into a task draft.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ChatKind {
-    #[default]
-    Chat,
-    Brainstorm,
-}
-
-impl ChatKind {
-    const ALL: [ChatKind; 2] = [ChatKind::Chat, ChatKind::Brainstorm];
-
-    /// The optional `kind` parameter: absent means the orchestrator chat.
-    fn param(params: &serde_json::Value) -> Result<Self, String> {
-        match params.get("kind") {
-            None | Some(serde_json::Value::Null) => Ok(ChatKind::Chat),
-            Some(v) => serde_json::from_value(v.clone())
-                .map_err(|_| "kind must be \"chat\" or \"brainstorm\"".to_string()),
-        }
-    }
-
-    fn prompt(self) -> &'static str {
-        match self {
-            ChatKind::Chat => ROLE,
-            ChatKind::Brainstorm => BRAINSTORM,
-        }
-    }
-
-    /// The key of this kind's live turn in `chat_turns`. A chat turn keeps the
-    /// bare repo path; a repo path never starts with the brainstorm prefix.
-    fn turn_key(self, repo: &str) -> String {
-        match self {
-            ChatKind::Chat => repo.to_string(),
-            ChatKind::Brainstorm => format!("brainstorm:{repo}"),
-        }
     }
 }
 
@@ -217,8 +371,6 @@ impl ChatKind {
 #[serde(rename_all = "camelCase")]
 pub struct ChatSession {
     pub id: String,
-    #[serde(default)]
-    pub kind: ChatKind,
     /// When the session was created, in ms.
     #[serde(default)]
     pub created_at: i64,
@@ -244,20 +396,15 @@ pub struct ChatSession {
     /// creates for the same repo get it (`ORCHD_TASK_MCP`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_mcp: Option<serde_json::Value>,
-    /// The latest task the orchestrator proposed, until the owner acts on it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub draft: Option<ChatDraft>,
+    /// The mode of the last message the owner sent; the composer restores it.
+    #[serde(default, skip_serializing_if = "ChatMode::is_chat")]
+    pub mode: ChatMode,
 }
 
 impl ChatSession {
     fn new() -> Self {
-        Self::of(ChatKind::Chat)
-    }
-
-    fn of(kind: ChatKind) -> Self {
         ChatSession {
             id: uuid::Uuid::new_v4().to_string(),
-            kind,
             created_at: now_ms(),
             ..Default::default()
         }
@@ -269,15 +416,14 @@ impl ChatSession {
 }
 
 /// A repo's chat sessions, kept in `chats/<hash>.json`. `chat.get` and
-/// `chat.send` act on `current` (the chat kind) or `brainstorm_current`; each
-/// pointer always names a session of its own kind.
+/// `chat.send` act on `current`, which always names a session. A store written
+/// before modes may carry a `brainstormCurrent` pointer and `kind` fields; they
+/// are ignored, so its brainstorm sessions read as ordinary chat sessions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatStore {
     pub repo: String,
     pub current: String,
-    #[serde(default)]
-    pub brainstorm_current: String,
     pub sessions: Vec<ChatSession>,
 }
 
@@ -304,7 +450,6 @@ struct LegacyThread {
 #[serde(rename_all = "camelCase")]
 struct SessionSummary {
     id: String,
-    kind: ChatKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
     busy: bool,
@@ -318,68 +463,42 @@ impl ChatStore {
         ChatStore {
             repo: repo.to_string(),
             current: session.id.clone(),
-            brainstorm_current: String::new(),
             sessions: vec![session],
         }
     }
 
-    fn pointer(&self, kind: ChatKind) -> &str {
-        match kind {
-            ChatKind::Chat => &self.current,
-            ChatKind::Brainstorm => &self.brainstorm_current,
-        }
-    }
-
-    fn set_pointer(&mut self, kind: ChatKind, id: String) {
-        match kind {
-            ChatKind::Chat => self.current = id,
-            ChatKind::Brainstorm => self.brainstorm_current = id,
-        }
-    }
-
-    fn current(&self, kind: ChatKind) -> &ChatSession {
-        let id = self.pointer(kind);
+    fn current(&self) -> &ChatSession {
         self.sessions
             .iter()
-            .find(|s| s.id == id)
-            .expect("parse_store keeps each pointer at a session of its kind")
+            .find(|s| s.id == self.current)
+            .expect("parse_store keeps the pointer at a session")
     }
 
-    fn current_mut(&mut self, kind: ChatKind) -> &mut ChatSession {
-        let id = self.pointer(kind).to_string();
+    fn current_mut(&mut self) -> &mut ChatSession {
+        let id = self.current.clone();
         self.sessions
             .iter_mut()
             .find(|s| s.id == id)
-            .expect("parse_store keeps each pointer at a session of its kind")
+            .expect("parse_store keeps the pointer at a session")
     }
 
-    /// Marks each kind's current session busy while that kind's turn is live;
-    /// a note only means something on a live turn.
+    /// Marks the current session busy while a turn is live; a note only means
+    /// something on a live turn.
     fn mark_busy(&mut self, repo: &str, turns: &HashMap<String, CancelToken>) {
-        let live = |kind: ChatKind| turns.contains_key(&kind.turn_key(repo));
-        let (chat, brainstorm) = (
-            (live(ChatKind::Chat), self.current.clone()),
-            (live(ChatKind::Brainstorm), self.brainstorm_current.clone()),
-        );
+        let live = turns.contains_key(repo);
         for session in &mut self.sessions {
-            let (live, current) = match session.kind {
-                ChatKind::Chat => &chat,
-                ChatKind::Brainstorm => &brainstorm,
-            };
-            session.busy = *live && session.id == *current;
+            session.busy = live && session.id == self.current;
             if !session.busy {
                 session.note = None;
             }
         }
     }
 
-    fn summaries(&self, kind: ChatKind) -> Vec<SessionSummary> {
+    fn summaries(&self) -> Vec<SessionSummary> {
         self.sessions
             .iter()
-            .filter(|s| s.kind == kind)
             .map(|s| SessionSummary {
                 id: s.id.clone(),
-                kind: s.kind,
                 title: s.title.clone(),
                 busy: s.busy,
                 updated_at: s.updated_at(),
@@ -388,16 +507,15 @@ impl ChatStore {
             .collect()
     }
 
-    /// The kind's current session as `chat.get` returns it: the session plus
-    /// its repo.
-    fn thread_json(&self, kind: ChatKind) -> serde_json::Value {
-        let mut value = serde_json::to_value(self.current(kind)).unwrap_or_default();
+    /// The current session as `chat.get` returns it: the session plus its repo.
+    fn thread_json(&self) -> serde_json::Value {
+        let mut value = serde_json::to_value(self.current()).unwrap_or_default();
         value["repo"] = json!(self.repo);
         value
     }
 
-    fn list_json(&self, kind: ChatKind) -> serde_json::Value {
-        json!({"current": self.pointer(kind), "sessions": self.summaries(kind)})
+    fn list_json(&self) -> serde_json::Value {
+        json!({"current": self.current, "sessions": self.summaries()})
     }
 }
 
@@ -414,7 +532,7 @@ fn title_for(text: &str) -> String {
 
 /// The repo's store from its file's text: the current shape, else a legacy
 /// thread wrapped into one chat session, else one empty session; either way
-/// each kind ends up with a session and a pointer to one of its own. The flag says
+/// the store ends up with a session and a pointer to one. The flag says
 /// the result differs from what's on disk and should be written back.
 fn parse_store(repo: &str, text: Option<&str>) -> (ChatStore, bool) {
     let parsed = text.and_then(|t| serde_json::from_str::<ChatStore>(t).ok());
@@ -441,7 +559,6 @@ fn parse_store(repo: &str, text: Option<&str>) -> (ChatStore, bool) {
             Some(ChatStore {
                 repo: repo.to_string(),
                 current: session.id.clone(),
-                brainstorm_current: String::new(),
                 sessions: vec![session],
             })
         })
@@ -456,27 +573,13 @@ fn parse_store(repo: &str, text: Option<&str>) -> (ChatStore, bool) {
             changed = true;
         }
     }
-    for kind in ChatKind::ALL {
-        let named = |chats: &ChatStore| {
-            chats
-                .sessions
-                .iter()
-                .any(|s| s.kind == kind && s.id == chats.pointer(kind))
-        };
-        if named(&chats) {
-            continue;
-        }
-        let last = chats.sessions.iter().rfind(|s| s.kind == kind);
-        let id = match last {
-            Some(session) => session.id.clone(),
-            None => {
-                let session = ChatSession::of(kind);
-                let id = session.id.clone();
-                chats.sessions.push(session);
-                id
-            }
-        };
-        chats.set_pointer(kind, id);
+    if !chats.sessions.iter().any(|s| s.id == chats.current) {
+        chats.current = chats
+            .sessions
+            .last()
+            .expect("checked non-empty above")
+            .id
+            .clone();
         changed = true;
     }
     chats.repo = repo.to_string();
@@ -484,13 +587,8 @@ fn parse_store(repo: &str, text: Option<&str>) -> (ChatStore, bool) {
 }
 
 /// Where a repo's turns keep their MCP config, settings and event log.
-fn turn_dir(app: &App, repo: &str, kind: ChatKind) -> PathBuf {
-    let dir = app.data_dir.join("chats").join(simple_hash(repo));
-    match kind {
-        ChatKind::Chat => dir,
-        // Its own files, so a brainstorm and a chat turn never share a key.
-        ChatKind::Brainstorm => dir.join("brainstorm"),
-    }
+fn turn_dir(app: &App, repo: &str) -> PathBuf {
+    app.data_dir.join("chats").join(simple_hash(repo))
 }
 
 fn store_path(app: &App, repo: &str) -> PathBuf {
@@ -519,12 +617,11 @@ fn load(app: &App, repo: &str) -> ChatStore {
     chats
 }
 
-fn broadcast(app: &App, chats: &ChatStore, kind: ChatKind) {
+fn broadcast(app: &App, chats: &ChatStore) {
     let _ = app.events_tx.send(Event::Chat {
-        kind,
-        thread: Box::new(chats.thread_json(kind)),
-        current: chats.pointer(kind).to_string(),
-        sessions: Box::new(serde_json::to_value(chats.summaries(kind)).unwrap_or_default()),
+        thread: Box::new(chats.thread_json()),
+        current: chats.current.clone(),
+        sessions: Box::new(serde_json::to_value(chats.summaries()).unwrap_or_default()),
     });
 }
 
@@ -544,7 +641,7 @@ fn write_session(app: &App, repo: &str, session: &ChatSession, end_turn: bool) {
     let chats = {
         let mut turns = app.chat_turns.lock().unwrap();
         if end_turn {
-            turns.remove(&session.kind.turn_key(repo));
+            turns.remove(repo);
         }
         let mut chats = read_store(app, repo);
         match chats.sessions.iter_mut().find(|s| s.id == session.id) {
@@ -555,22 +652,21 @@ fn write_session(app: &App, repo: &str, session: &ChatSession, end_turn: bool) {
         let _ = store::write_json_atomic(&store_path(app, repo), &chats);
         chats
     };
-    broadcast(app, &chats, session.kind);
+    broadcast(app, &chats);
 }
 
 /// Applies `change` to the repo's store, saves and broadcasts it - refused
-/// while a turn of that kind is live, since that turn belongs to the kind's
-/// current session and moving its pointer under it would orphan the reply. Holding `chat_turns`
+/// while a turn is live, since that turn belongs to the current session and
+/// moving its pointer under it would orphan the reply. Holding `chat_turns`
 /// throughout keeps a turn from starting halfway through.
 fn change_idle(
     app: &App,
     repo: &str,
-    kind: ChatKind,
     change: impl FnOnce(&mut ChatStore) -> Result<(), String>,
 ) -> Result<ChatStore, String> {
     let chats = {
         let turns = app.chat_turns.lock().unwrap();
-        if turns.contains_key(&kind.turn_key(repo)) {
+        if turns.contains_key(repo) {
             return Err(BUSY.to_string());
         }
         let mut chats = read_store(app, repo);
@@ -579,11 +675,11 @@ fn change_idle(
         store::write_json_atomic(&store_path(app, repo), &chats).map_err(|e| e.to_string())?;
         chats
     };
-    broadcast(app, &chats, kind);
+    broadcast(app, &chats);
     Ok(chats)
 }
 
-fn push(session: &mut ChatSession, role: &str, text: &str) {
+fn push(session: &mut ChatSession, role: &str, text: &str, mode: ChatMode) {
     if role == "user" && session.title.is_none() {
         session.title = Some(title_for(text));
     }
@@ -592,7 +688,9 @@ fn push(session: &mut ChatSession, role: &str, text: &str) {
         role: role.to_string(),
         text: truncate_chars(text, MAX_TEXT),
         ts: now_ms(),
+        mode,
         draft: None,
+        proposal: None,
         questions: Vec::new(),
         tools: Vec::new(),
     });
@@ -613,8 +711,7 @@ pub(super) fn repo_param(params: &serde_json::Value) -> Result<String, String> {
 
 pub async fn handle_get(app: &App, params: serde_json::Value) -> Result<serde_json::Value, String> {
     let repo = repo_param(&params)?;
-    let kind = ChatKind::param(&params)?;
-    Ok(load(app, &repo).thread_json(kind))
+    Ok(load(app, &repo).thread_json())
 }
 
 pub async fn handle_list(
@@ -622,22 +719,19 @@ pub async fn handle_list(
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let repo = repo_param(&params)?;
-    let kind = ChatKind::param(&params)?;
-    Ok(load(app, &repo).list_json(kind))
+    Ok(load(app, &repo).list_json())
 }
 
-/// Starts an empty session of the given kind (default `chat`) and makes it
-/// that kind's current one; the other kind's pointer stays.
+/// Starts an empty session and makes it the current one.
 pub async fn handle_new(app: &App, params: serde_json::Value) -> Result<serde_json::Value, String> {
     let repo = repo_param(&params)?;
-    let kind = ChatKind::param(&params)?;
-    let chats = change_idle(app, &repo, kind, |chats| {
-        let session = ChatSession::of(kind);
-        chats.set_pointer(kind, session.id.clone());
+    let chats = change_idle(app, &repo, |chats| {
+        let session = ChatSession::new();
+        chats.current = session.id.clone();
         chats.sessions.push(session);
         Ok(())
     })?;
-    Ok(chats.thread_json(kind))
+    Ok(chats.thread_json())
 }
 
 pub async fn handle_switch(
@@ -645,23 +739,22 @@ pub async fn handle_switch(
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let repo = repo_param(&params)?;
-    let kind = ChatKind::param(&params)?;
     let id = params
         .get("id")
         .and_then(|v| v.as_str())
         .ok_or("id is required")?
         .to_string();
-    let chats = change_idle(app, &repo, kind, |chats| {
-        if !chats.sessions.iter().any(|s| s.id == id && s.kind == kind) {
+    let chats = change_idle(app, &repo, |chats| {
+        if !chats.sessions.iter().any(|s| s.id == id) {
             return Err("no such chat session".to_string());
         }
-        chats.set_pointer(kind, id);
+        chats.current = id;
         Ok(())
     })?;
-    Ok(chats.thread_json(kind))
+    Ok(chats.thread_json())
 }
 
-/// Empties the kind's current session and forgets its harness session, so the
+/// Empties the current session and forgets its harness session, so the
 /// next reply carries no prior context. The title goes too: it named a message
 /// that is gone.
 pub async fn handle_clear(
@@ -669,44 +762,226 @@ pub async fn handle_clear(
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let repo = repo_param(&params)?;
-    let kind = ChatKind::param(&params)?;
-    let chats = change_idle(app, &repo, kind, |chats| {
-        let session = chats.current_mut(kind);
+    let chats = change_idle(app, &repo, |chats| {
+        let session = chats.current_mut();
         session.messages.clear();
         session.title = None;
         session.session_id = None;
         session.error = None;
-        session.draft = None;
+        session.mode = ChatMode::Chat;
         Ok(())
     })?;
-    Ok(chats.thread_json(kind))
+    Ok(chats.thread_json())
 }
 
-/// Drops the kind's current session's proposed task; its messages stay.
-pub async fn handle_clear_draft(
+/// Serialises `chat.createProposal`, so a double click cannot create a row twice.
+static PROPOSAL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// A list of 1-based row numbers from a request, deduplicated.
+fn row_numbers(value: &serde_json::Value, len: usize) -> Result<Vec<usize>, String> {
+    let list = value
+        .as_array()
+        .ok_or("indices must be a list of row numbers")?;
+    let mut rows: Vec<usize> = Vec::new();
+    for n in list {
+        let n = n
+            .as_u64()
+            .map(|n| n as usize)
+            .filter(|n| (1..=len).contains(n))
+            .ok_or_else(|| format!("row numbers run from 1 to {len}"))?;
+        if !rows.contains(&(n - 1)) {
+            rows.push(n - 1);
+        }
+    }
+    Ok(rows)
+}
+
+/// The proposal row `messageId` carries, with the session it lives in.
+fn find_proposal(chats: &ChatStore, message_id: &str) -> Result<(String, ChatProposal), String> {
+    chats
+        .sessions
+        .iter()
+        .find_map(|s| {
+            let message = s.messages.iter().find(|m| m.id == message_id)?;
+            Some((s.id.clone(), message.proposal.clone()))
+        })
+        .ok_or_else(|| "no such chat message".to_string())
+        .and_then(|(session, proposal)| {
+            Ok((
+                session,
+                proposal.ok_or_else(|| "that message proposes no tasks".to_string())?,
+            ))
+        })
+}
+
+/// Creates `rows` (0-based, dependencies first) as tasks, recording each new
+/// task's id on its row as soon as it exists.
+async fn create_rows(
+    app: &App,
+    repo: &str,
+    proposal: &mut ChatProposal,
+    rows: &[usize],
+    backlog: bool,
+    task_mcp: Option<&serde_json::Value>,
+    created: &mut Vec<serde_json::Value>,
+) -> Result<(), String> {
+    for &row in rows {
+        let task = &proposal.tasks[row];
+        let depends_on: Vec<String> = task
+            .depends_on
+            .iter()
+            .filter_map(|dep| match dep {
+                ProposalDep::Index(n) => proposal.tasks[*n - 1].task_id.clone(),
+                ProposalDep::Id(id) => Some(id.clone()),
+            })
+            .collect();
+        let mut params = json!({
+            "repo": repo,
+            "title": task.title,
+            "goal": if task.goal.is_empty() { &task.title } else { &task.goal },
+            "criteria": task.criteria,
+            "dependsOn": depends_on,
+            "source": "chat",
+            "start": !backlog,
+        });
+        if backlog {
+            params["backlog"] = json!({"bucket": "next"});
+        }
+        if let Some(mcp) = task_mcp {
+            params["mcp"] = mcp.clone();
+        }
+        let made = app.handle_task_create(params).await?;
+        let id = made["id"]
+            .as_str()
+            .ok_or("task.create returned no id")?
+            .to_string();
+        created.push(json!({"index": row + 1, "taskId": id}));
+        proposal.tasks[row].task_id = Some(id);
+        proposal.tasks[row].skipped = false;
+    }
+    Ok(())
+}
+
+/// Turns the chosen rows of a reply's proposal into tasks, dependencies
+/// first, and records what happened on the message: each created row keeps its
+/// task id, the rows the owner passed on read as skipped. Rows that already
+/// became tasks are left alone, so asking twice creates nothing twice.
+///
+/// Params: `repo`, `messageId`, `indices` (1-based rows to create),
+/// `backlog` (park them in the plan backlog instead of starting them) and
+/// `skip` (1-based rows to record as skipped; every other unresolved row
+/// without it).
+pub async fn handle_create_proposal(
     app: &App,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let repo = repo_param(&params)?;
-    let kind = ChatKind::param(&params)?;
-    // `id` names the session the draft came from; the current one without it.
-    let id = params
-        .get("id")
+    let message_id = params
+        .get("messageId")
         .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let chats = change_idle(app, &repo, kind, |chats| {
-        let session = match &id {
-            Some(id) => chats
-                .sessions
-                .iter_mut()
-                .find(|s| s.id == *id && s.kind == kind)
-                .ok_or_else(|| "no such chat session".to_string())?,
-            None => chats.current_mut(kind),
-        };
-        session.draft = None;
-        Ok(())
-    })?;
-    Ok(chats.thread_json(kind))
+        .ok_or("messageId is required")?
+        .to_string();
+    let backlog = params
+        .get("backlog")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let _one_at_a_time = PROPOSAL_LOCK.lock().await;
+    // Holding the turn slot keeps a turn from starting and writing its own
+    // copy of the session over the rows recorded here.
+    {
+        let mut turns = app.chat_turns.lock().unwrap();
+        if turns.contains_key(&repo) {
+            return Err(BUSY.to_string());
+        }
+        turns.insert(repo.clone(), CancelToken::new());
+    }
+    let outcome = create_proposal(app, &repo, &message_id, &params, backlog).await;
+    app.chat_turns.lock().unwrap().remove(&repo);
+    let (chats, created) = outcome?;
+    broadcast(app, &chats);
+    let (_, proposal) = find_proposal(&chats, &message_id)?;
+    Ok(json!({"proposal": proposal, "created": created}))
+}
+
+async fn create_proposal(
+    app: &App,
+    repo: &str,
+    message_id: &str,
+    params: &serde_json::Value,
+    backlog: bool,
+) -> Result<(ChatStore, Vec<serde_json::Value>), String> {
+    let chats = load(app, repo);
+    let (session_id, mut proposal) = find_proposal(&chats, message_id)?;
+    let len = proposal.tasks.len();
+    let chosen = row_numbers(params.get("indices").ok_or("indices is required")?, len)?;
+    let passed = match params.get("skip") {
+        Some(skip) => row_numbers(skip, len)?,
+        None => (0..len).filter(|row| !chosen.contains(row)).collect(),
+    };
+    let todo: Vec<usize> = chosen
+        .iter()
+        .copied()
+        .filter(|&row| proposal.tasks[row].task_id.is_none())
+        .collect();
+    let ordered = proposal
+        .order(&todo)
+        .ok_or("the proposed tasks depend on each other in a loop")?;
+    for &row in &ordered {
+        for dep in proposal.row_deps(row).unwrap_or_default() {
+            if proposal.tasks[dep].task_id.is_none() && !todo.contains(&dep) {
+                return Err(format!(
+                    "\"{}\" depends on \"{}\", which is not created or selected",
+                    proposal.tasks[row].title, proposal.tasks[dep].title
+                ));
+            }
+        }
+    }
+    let task_mcp = chats
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .and_then(|s| s.task_mcp.clone());
+    let mut created = Vec::new();
+    let made = create_rows(
+        app,
+        repo,
+        &mut proposal,
+        &ordered,
+        backlog,
+        task_mcp.as_ref(),
+        &mut created,
+    )
+    .await;
+    if made.is_ok() {
+        for (row, task) in proposal.tasks.iter_mut().enumerate() {
+            if task.task_id.is_none() {
+                task.skipped = passed.contains(&row) && !chosen.contains(&row);
+            }
+        }
+    }
+    // Whatever was created is recorded, even when a later row failed.
+    let chats = {
+        let turns = app.chat_turns.lock().unwrap();
+        let mut chats = read_store(app, repo);
+        if let Some(message) = chats
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == session_id)
+            .and_then(|s| s.messages.iter_mut().find(|m| m.id == message_id))
+        {
+            message.proposal = Some(proposal);
+        }
+        chats.mark_busy(repo, &turns);
+        store::write_json_atomic(&store_path(app, repo), &chats).map_err(|e| e.to_string())?;
+        chats
+    };
+    match made {
+        Ok(()) => Ok((chats, created)),
+        Err(error) => {
+            broadcast(app, &chats);
+            Err(error)
+        }
+    }
 }
 
 pub async fn handle_cancel(
@@ -714,8 +989,7 @@ pub async fn handle_cancel(
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let repo = repo_param(&params)?;
-    let kind = ChatKind::param(&params)?;
-    if let Some(cancel) = app.chat_turns.lock().unwrap().get(&kind.turn_key(&repo)) {
+    if let Some(cancel) = app.chat_turns.lock().unwrap().get(&repo) {
         cancel.cancel();
     }
     Ok(json!({}))
@@ -725,7 +999,7 @@ pub async fn handle_cancel(
 /// meanwhile (their message ids). A question turn leaves the chat's messages
 /// alone; its reply goes back to the tasks instead.
 enum Turn {
-    Owner,
+    Owner(ChatMode),
     Questions(Vec<String>),
 }
 
@@ -733,27 +1007,21 @@ const QUESTIONS_INTRO: &str = "Tasks asked you the questions below while they ke
 const QUESTION_TURN_REPLY: &str =
     "Your final message is sent back to each task you did not answer that way.";
 
-/// Claims the repo's turn slot for `kind` and loads that kind's current
-/// session, starting a fresh harness session when the orchestrator's route
+/// Claims the repo's turn slot and loads the current session, starting a fresh harness session when the orchestrator's route
 /// changed since the session's last turn.
-fn begin_turn(
-    app: &App,
-    repo: &str,
-    kind: ChatKind,
-) -> Result<(ChatSession, Route, CancelToken), String> {
+fn begin_turn(app: &App, repo: &str) -> Result<(ChatSession, Route, CancelToken), String> {
     let settings = app.settings.read().unwrap().clone();
     let route =
         orchestrator_route(&settings).ok_or("no route is configured for the orchestrator")?;
     let cancel = CancelToken::new();
     {
         let mut turns = app.chat_turns.lock().unwrap();
-        let key = kind.turn_key(repo);
-        if turns.contains_key(&key) {
+        if turns.contains_key(repo) {
             return Err(BUSY.to_string());
         }
-        turns.insert(key, cancel.clone());
+        turns.insert(repo.to_string(), cancel.clone());
     }
-    let mut session = load(app, repo).current(kind).clone();
+    let mut session = load(app, repo).current().clone();
     // A harness session belongs to one harness; switching routes starts fresh.
     if session.route_id.as_deref() != Some(route.id.as_str()) {
         session.session_id = None;
@@ -774,20 +1042,21 @@ pub async fn handle_send(
         .filter(|t| !t.is_empty())
         .ok_or("text is required")?
         .to_string();
-    let kind = ChatKind::param(&params)?;
-    let (mut session, route, cancel) = begin_turn(app, &repo, kind)?;
-    if let (ChatKind::Chat, Some(mcp)) = (kind, params.get("mcp")) {
+    let mode = ChatMode::param(&params)?;
+    let (mut session, route, cancel) = begin_turn(app, &repo)?;
+    if let Some(mcp) = params.get("mcp") {
         session.task_mcp = Some(mcp.clone());
     }
-    push(&mut session, "user", &text);
+    push(&mut session, "user", &text, mode);
+    session.mode = mode;
     session.error = None;
     save(app, &repo, &session);
     // Questions waiting for the orchestrator ride along with the owner's
-    // message; the chat shows only what the owner wrote. A brainstorm never
-    // answers task questions.
-    let waiting = match kind {
-        ChatKind::Chat => messages::take_for_orchestrator(app, &repo),
-        ChatKind::Brainstorm => None,
+    // message; the chat shows only what the owner wrote. Brainstorm and Plan
+    // turns never answer task questions.
+    let waiting = match mode {
+        ChatMode::Chat => messages::take_for_orchestrator(app, &repo),
+        _ => None,
     };
     let prompt = match waiting {
         Some((_, questions)) => format!("{text}\n\n---\n\n{QUESTIONS_INTRO}\n\n{questions}"),
@@ -795,19 +1064,28 @@ pub async fn handle_send(
     };
     let app = app.arc();
     tokio::spawn(async move {
-        run_turn(&app, repo, session, route, prompt, cancel, Turn::Owner).await;
+        run_turn(
+            &app,
+            repo,
+            session,
+            route,
+            prompt,
+            cancel,
+            Turn::Owner(mode),
+        )
+        .await;
     });
     Ok(json!({}))
 }
 
 /// Starts a turn for the questions tasks sent the orchestrator in `repo`,
-/// in the owner's current chat session (never a brainstorm). A turn already running picks
+/// in the owner's current chat session, in the plain chat mode. A turn already running picks
 /// them up when it ends; with no route configured they wait for one.
 pub(super) fn wake(app: &App, repo: &str) {
     if !Path::new(repo).is_dir() || !messages::has_pending_for_orchestrator(app, repo) {
         return;
     }
-    let Ok((session, route, cancel)) = begin_turn(app, repo, ChatKind::Chat) else {
+    let Ok((session, route, cancel)) = begin_turn(app, repo) else {
         return;
     };
     let Some((ids, questions)) = messages::take_for_orchestrator(app, repo) else {
@@ -839,7 +1117,7 @@ pub(super) fn orchestrator_route(settings: &Settings) -> Option<Route> {
     find(&settings.orchestrator).or_else(|| find(settings.tiers.get(&Tier::Standard)?))
 }
 
-fn mcp_server(app: &App, task_mcp_file: Option<&Path>, kind: ChatKind) -> serde_json::Value {
+fn mcp_server(app: &App, task_mcp_file: Option<&Path>, mode: ChatMode) -> serde_json::Value {
     let mut server = json!({
         "command": app.orchd_path,
         "args": [
@@ -850,7 +1128,7 @@ fn mcp_server(app: &App, task_mcp_file: Option<&Path>, kind: ChatKind) -> serde_
             app.socket_path.to_string_lossy(),
         ],
     });
-    if kind == ChatKind::Brainstorm {
+    if mode.read_only() {
         server["args"]
             .as_array_mut()
             .expect("args is an array")
@@ -867,11 +1145,12 @@ fn claude_argv(
     mcp_config: &Path,
     settings_path: &Path,
     session: Option<&str>,
-    kind: ChatKind,
+    mode: ChatMode,
 ) -> Vec<String> {
-    let offered: &[&str] = match kind {
-        ChatKind::Chat => &crate::mcp::ORCHESTRATOR_TOOLS,
-        ChatKind::Brainstorm => &crate::mcp::READ_ONLY_TOOLS,
+    let offered: &[&str] = if mode.read_only() {
+        &crate::mcp::READ_ONLY_TOOLS
+    } else {
+        &crate::mcp::ORCHESTRATOR_TOOLS
     };
     let tools = offered
         .iter()
@@ -889,7 +1168,7 @@ fn claude_argv(
         "--tools",
         "Read,Grep,Glob",
         "--append-system-prompt",
-        kind.prompt(),
+        mode.prompt(),
         "--strict-mcp-config",
         "--mcp-config",
     ]
@@ -923,7 +1202,7 @@ fn codex_argv(
     repo: &str,
     server: &serde_json::Value,
     session: Option<&str>,
-    kind: ChatKind,
+    mode: ChatMode,
 ) -> Vec<String> {
     let mut argv: Vec<String> = match session {
         // `resume` takes neither `-C` nor `--sandbox`; the cwd is set on the
@@ -951,7 +1230,7 @@ fn codex_argv(
     argv.push("-c".into());
     argv.push(format!(
         "developer_instructions={}",
-        toml(&json!(kind.prompt()))
+        toml(&json!(mode.prompt()))
     ));
     argv.extend(harness::codex_mcp_flags(SERVER, server));
     if let Some(model) = &route.model {
@@ -966,15 +1245,13 @@ fn codex_argv(
     argv
 }
 
-/// Adds the agent's reply to the session and keeps its draft current.
-fn apply_reply(thread: &mut ChatSession, reply: &str, tools: Vec<ChatTool>) {
+/// Adds the agent's reply, in the mode of the turn, to the session.
+fn apply_reply(thread: &mut ChatSession, reply: &str, tools: Vec<ChatTool>, mode: ChatMode) {
     let parsed = parse_reply(reply);
-    push(thread, "assistant", &parsed.text);
-    if parsed.draft.is_some() {
-        thread.draft = parsed.draft.clone();
-    }
+    push(thread, "assistant", &parsed.text, mode);
     let message = thread.messages.last_mut().expect("just pushed");
     message.draft = parsed.draft;
+    message.proposal = parsed.proposal;
     message.questions = parsed.questions;
     message.tools = tools;
 }
@@ -1116,18 +1393,21 @@ async fn run_turn(
     cancel: CancelToken,
     turn: Turn,
 ) {
-    let kind = thread.kind;
-    let dir = turn_dir(app, &repo, kind);
+    let mode = match &turn {
+        Turn::Owner(mode) => *mode,
+        Turn::Questions(_) => ChatMode::Chat,
+    };
+    let dir = turn_dir(app, &repo);
     let _ = std::fs::create_dir_all(&dir);
-    // A brainstorm never creates tasks, so it has no task MCP to hand on.
-    let task_mcp = thread.task_mcp.as_ref().filter(|_| kind == ChatKind::Chat);
+    // Brainstorm and Plan never create tasks, so they have no task MCP to hand on.
+    let task_mcp = thread.task_mcp.as_ref().filter(|_| !mode.read_only());
     let task_mcp_file = task_mcp.and_then(|mcp| {
         let file = dir.join("task-mcp.json");
         store::write_json_atomic(&file, &json!({"repo": repo, "mcp": mcp}))
             .ok()
             .map(|_| file)
     });
-    let server = mcp_server(app, task_mcp_file.as_deref(), kind);
+    let server = mcp_server(app, task_mcp_file.as_deref(), mode);
     let session = thread.session_id.clone();
     let key_path = dir.join("key");
     let argv = match route.harness {
@@ -1149,10 +1429,10 @@ async fn run_turn(
                 &mcp_config,
                 &settings_path,
                 session.as_deref(),
-                kind,
+                mode,
             )
         }
-        Harness::Codex => codex_argv(&route, &repo, &server, session.as_deref(), kind),
+        Harness::Codex => codex_argv(&route, &repo, &server, session.as_deref(), mode),
     };
 
     let (result, tools) = match run(app, &repo, &mut thread, &route, &argv, &text, &cancel).await {
@@ -1176,8 +1456,8 @@ async fn run_turn(
                 outcome.error,
                 &turn,
             ) {
-                (Some(reply), _, Turn::Owner) => {
-                    apply_reply(&mut thread, &reply, tools);
+                (Some(reply), _, Turn::Owner(mode)) => {
+                    apply_reply(&mut thread, &reply, tools, *mode);
                 }
                 (Some(reply), _, Turn::Questions(ids)) => {
                     messages::reply_where_unanswered(app, ids, &reply)
@@ -1185,18 +1465,18 @@ async fn run_turn(
                 (None, Some(error), _) => {
                     // A session the CLI no longer knows fails every resume.
                     thread.session_id = None;
-                    if matches!(turn, Turn::Owner) {
+                    if matches!(turn, Turn::Owner(_)) {
                         thread.error = Some(truncate_chars(&error, 2000));
                     }
                 }
-                (None, None, Turn::Owner) => {
+                (None, None, Turn::Owner(_)) => {
                     thread.error = Some("The orchestrator gave no reply.".into())
                 }
                 (None, None, Turn::Questions(_)) => {}
             }
         }
-        (Err(RunError::Cancelled), Turn::Owner) => thread.error = Some("Stopped.".into()),
-        (Err(RunError::Io(error)), Turn::Owner) => thread.error = Some(error),
+        (Err(RunError::Cancelled), Turn::Owner(_)) => thread.error = Some("Stopped.".into()),
+        (Err(RunError::Io(error)), Turn::Owner(_)) => thread.error = Some(error),
         (Err(_), Turn::Questions(_)) => {}
     }
     finish_turn(app, &repo, &thread);
@@ -1256,7 +1536,7 @@ async fn run(
     let stderr = child.stderr.take().expect("piped stderr");
     let mut out = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(stdout));
     let mut err = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(stderr));
-    let events = turn_dir(app, repo, thread.kind).join("events.jsonl");
+    let events = turn_dir(app, repo).join("events.jsonl");
     let mut outcome = harness::RunOutcome::default();
     let mut stderr_tail = String::new();
     let mut tools = Vec::new();
@@ -1331,7 +1611,7 @@ mod tests {
             Path::new("/d/mcp.json"),
             Path::new("/d/settings.json"),
             Some("sess"),
-            ChatKind::Chat,
+            ChatMode::Chat,
         );
         let at = |flag: &str| argv[argv.iter().position(|a| a == flag).unwrap() + 1].clone();
         assert_eq!(at("--tools"), "Read,Grep,Glob");
@@ -1352,7 +1632,7 @@ mod tests {
             "/repo",
             &server,
             None,
-            ChatKind::Chat,
+            ChatMode::Chat,
         );
         assert_eq!(&fresh[..2], &["exec".to_string(), "--json".to_string()]);
         assert!(fresh
@@ -1365,7 +1645,7 @@ mod tests {
             "/repo",
             &server,
             Some("t1"),
-            ChatKind::Chat,
+            ChatMode::Chat,
         );
         assert_eq!(
             &resumed[..3],
@@ -1402,9 +1682,9 @@ mod tests {
 
     /// Writes `session` into the repo's store as a finished turn would.
     fn converse(app: &App, repo: &str, text: &str, harness_session: &str) {
-        let mut session = load(app, repo).current(ChatKind::Chat).clone();
-        push(&mut session, "user", text);
-        push(&mut session, "assistant", "ok");
+        let mut session = load(app, repo).current().clone();
+        push(&mut session, "user", text, ChatMode::Chat);
+        push(&mut session, "assistant", "ok", ChatMode::Chat);
         session.session_id = Some(harness_session.to_string());
         save(app, repo, &session);
     }
@@ -1482,7 +1762,7 @@ mod tests {
         assert!(cleared.get("sessionId").is_none());
         assert!(cleared.get("title").is_none());
         let chats = load(&app, &repo);
-        assert_eq!(chats.summaries(ChatKind::Chat).len(), 2);
+        assert_eq!(chats.summaries().len(), 2);
         let other = chats.sessions.iter().find(|s| s.id == kept).unwrap();
         assert_eq!(other.messages.len(), 2);
         assert_eq!(other.session_id.as_deref(), Some("harness-1"));
@@ -1517,19 +1797,19 @@ mod tests {
             assert_eq!(result.unwrap_err(), BUSY);
         }
         let chats = load(&app, &repo);
-        assert_eq!(chats.summaries(ChatKind::Chat).len(), 2);
+        assert_eq!(chats.summaries().len(), 2);
         assert_eq!(chats.current, second);
-        assert_eq!(chats.current(ChatKind::Chat).messages.len(), 2);
+        assert_eq!(chats.current().messages.len(), 2);
 
         // The turn's final save frees the slot in the same step, so the reply
         // lands in the session it belongs to and the same requests go through.
-        let mut reply = chats.current(ChatKind::Chat).clone();
-        push(&mut reply, "assistant", "done");
+        let mut reply = chats.current().clone();
+        push(&mut reply, "assistant", "done", ChatMode::Chat);
         finish_turn(&app, &repo, &reply);
         assert!(!app.chat_turns.lock().unwrap().contains_key(&repo));
         let chats = load(&app, &repo);
-        assert_eq!(chats.current(ChatKind::Chat).messages.len(), 3);
-        assert!(!chats.current(ChatKind::Chat).busy);
+        assert_eq!(chats.current().messages.len(), 3);
+        assert!(!chats.current().busy);
         handle_switch(&app, json!({"repo": repo, "id": first}))
             .await
             .unwrap();
@@ -1586,14 +1866,11 @@ mod tests {
         let (app, _dir, repo) = test_app();
         converse(&app, &repo, "first chat", "harness-1");
         let created = handle_new(&app, json!({"repo": repo})).await.unwrap();
-        let (session, route, _cancel) = begin_turn(&app, &repo, ChatKind::Chat).unwrap();
+        let (session, route, _cancel) = begin_turn(&app, &repo).unwrap();
         assert_eq!(json!(session.id), created["id"]);
         assert_eq!(session.session_id, None);
         assert_eq!(session.route_id.as_deref(), Some(route.id.as_str()));
-        assert_eq!(
-            begin_turn(&app, &repo, ChatKind::Chat).err(),
-            Some(BUSY.to_string())
-        );
+        assert_eq!(begin_turn(&app, &repo).err(), Some(BUSY.to_string()));
     }
 
     #[test]
@@ -1606,16 +1883,15 @@ mod tests {
         let (fresh, changed) =
             parse_store("/r", Some(r#"{"repo":"/r","current":"x","sessions":[]}"#));
         assert!(changed);
-        let chat_sessions = || fresh.sessions.iter().filter(|s| s.kind == ChatKind::Chat);
-        assert_eq!(chat_sessions().count(), 1);
-        assert_eq!(fresh.current, chat_sessions().next().unwrap().id);
+        assert_eq!(fresh.sessions.len(), 1);
+        assert_eq!(fresh.current, fresh.sessions[0].id);
     }
 
     #[test]
     fn a_session_keeps_its_latest_messages_only() {
         let mut thread = ChatSession::default();
         for i in 0..(MAX_MESSAGES + 5) {
-            push(&mut thread, "user", &i.to_string());
+            push(&mut thread, "user", &i.to_string(), ChatMode::Chat);
         }
         assert_eq!(thread.messages.len(), MAX_MESSAGES);
         assert_eq!(thread.messages[0].text, "5");
@@ -1710,202 +1986,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clearing_the_draft_keeps_messages_and_other_sessions_and_is_refused_while_busy() {
-        let (app, _dir, repo) = test_app();
-        let draft = ChatDraft {
-            title: "T".into(),
-            ..Default::default()
-        };
-        converse(&app, &repo, "first", "h1");
-        let first = load(&app, &repo).current.clone();
-        let mut session = load(&app, &repo).current(ChatKind::Chat).clone();
-        session.draft = Some(draft.clone());
-        save(&app, &repo, &session);
-        handle_new(&app, json!({"repo": repo})).await.unwrap();
-        converse(&app, &repo, "second", "h2");
-        let mut session = load(&app, &repo).current(ChatKind::Chat).clone();
-        session.draft = Some(draft.clone());
-        save(&app, &repo, &session);
-
-        app.chat_turns
-            .lock()
-            .unwrap()
-            .insert(repo.clone(), CancelToken::new());
-        let busy = handle_clear_draft(&app, json!({"repo": repo})).await;
-        assert_eq!(busy.unwrap_err(), BUSY);
-        assert!(load(&app, &repo).current(ChatKind::Chat).draft.is_some());
-        app.chat_turns.lock().unwrap().remove(&repo);
-
-        let thread = handle_clear_draft(&app, json!({"repo": repo}))
-            .await
-            .unwrap();
-        assert!(thread.get("draft").is_none());
-        assert_eq!(thread["messages"].as_array().unwrap().len(), 2);
-        let chats = load(&app, &repo);
-        assert!(chats.current(ChatKind::Chat).draft.is_none());
-        let other = chats.sessions.iter().find(|s| s.id == first).unwrap();
-        assert_eq!(other.draft, Some(draft.clone()));
-
-        // With an id, the named session loses its draft, not the current one.
-        let mut session = load(&app, &repo).current(ChatKind::Chat).clone();
-        session.draft = Some(draft.clone());
-        save(&app, &repo, &session);
-        handle_clear_draft(&app, json!({"repo": repo, "id": first}))
-            .await
-            .unwrap();
-        let chats = load(&app, &repo);
-        assert_eq!(chats.current(ChatKind::Chat).draft, Some(draft));
-        let other = chats.sessions.iter().find(|s| s.id == first).unwrap();
-        assert!(other.draft.is_none());
-        let unknown = handle_clear_draft(&app, json!({"repo": repo, "id": "nope"})).await;
-        assert_eq!(unknown.unwrap_err(), "no such chat session");
-    }
-
-    fn bs() -> serde_json::Value {
-        json!("brainstorm")
-    }
-
-    #[tokio::test]
-    async fn a_new_session_has_the_asked_kind_and_a_brainstorm_starts_empty() {
-        let (app, _dir, repo) = test_app();
-        converse(&app, &repo, "chat", "harness-1");
-        let brainstorm = handle_new(&app, json!({"repo": repo, "kind": "brainstorm"}))
-            .await
-            .unwrap();
-        assert_eq!(brainstorm["kind"], "brainstorm");
-        assert_eq!(brainstorm["messages"], json!([]));
-        assert!(brainstorm.get("sessionId").is_none());
-        let chat = handle_new(&app, json!({"repo": repo})).await.unwrap();
-        assert_eq!(chat["kind"], "chat");
-        assert!(chat.get("sessionId").is_none());
-        assert!(handle_new(&app, json!({"repo": repo, "kind": "x"}))
-            .await
-            .is_err());
-    }
-
-    fn ids(list: &serde_json::Value) -> Vec<String> {
-        list["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|s| s["id"].as_str().unwrap().to_string())
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn each_kind_lists_its_own_sessions_and_keeps_its_own_pointer() {
-        let (app, _dir, repo) = test_app();
-        let chat_first = handle_get(&app, json!({"repo": repo})).await.unwrap();
-        let b1 = handle_get(&app, json!({"repo": repo, "kind": "brainstorm"}))
-            .await
-            .unwrap();
-        assert_eq!(b1["kind"], "brainstorm");
-        let b2 = handle_new(&app, json!({"repo": repo, "kind": "brainstorm"}))
-            .await
-            .unwrap();
-        let chat_list = handle_list(&app, json!({"repo": repo})).await.unwrap();
-        let bs_list = handle_list(&app, json!({"repo": repo, "kind": "brainstorm"}))
-            .await
-            .unwrap();
-        assert_eq!(chat_list["current"], chat_first["id"]);
-        assert_eq!(ids(&chat_list), vec![chat_first["id"].as_str().unwrap()]);
-        assert_eq!(bs_list["current"], b2["id"]);
-        assert_eq!(
-            ids(&bs_list),
-            vec![b1["id"].as_str().unwrap(), b2["id"].as_str().unwrap()]
-        );
-        handle_switch(
-            &app,
-            json!({"repo": repo, "kind": "brainstorm", "id": b1["id"]}),
-        )
-        .await
-        .unwrap();
-        let chat2 = handle_new(&app, json!({"repo": repo})).await.unwrap();
-        let bs_list = handle_list(&app, json!({"repo": repo, "kind": bs()}))
-            .await
-            .unwrap();
-        let chat_list = handle_list(&app, json!({"repo": repo, "kind": "chat"}))
-            .await
-            .unwrap();
-        assert_eq!(bs_list["current"], b1["id"]);
-        assert_eq!(chat_list["current"], chat2["id"]);
-        assert_eq!(ids(&chat_list).len(), 2);
-        let got = handle_get(&app, json!({"repo": repo, "kind": "brainstorm"}))
-            .await
-            .unwrap();
-        assert_eq!(got["id"], b1["id"]);
-    }
-
-    #[tokio::test]
-    async fn switching_to_a_session_of_the_other_kind_is_refused() {
-        let (app, _dir, repo) = test_app();
-        let chat = handle_get(&app, json!({"repo": repo})).await.unwrap();
-        let brainstorm = handle_get(&app, json!({"repo": repo, "kind": "brainstorm"}))
-            .await
-            .unwrap();
-        let as_chat = handle_switch(&app, json!({"repo": repo, "id": brainstorm["id"]})).await;
-        assert_eq!(as_chat.unwrap_err(), "no such chat session");
-        let as_brainstorm = handle_switch(
-            &app,
-            json!({"repo": repo, "kind": "brainstorm", "id": chat["id"]}),
-        )
-        .await;
-        assert!(as_brainstorm.is_err());
-        let chats = load(&app, &repo);
-        assert_eq!(chats.current, chat["id"].as_str().unwrap());
-        assert_eq!(chats.brainstorm_current, brainstorm["id"].as_str().unwrap());
-    }
-
-    #[tokio::test]
-    async fn stores_written_before_kinds_read_back_as_chat_with_an_empty_brainstorm() {
-        let (app, _dir, repo) = test_app();
-        let path = store_path(&app, &repo);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let old = json!({
-            "repo": repo,
-            "current": "b",
-            "sessions": [
-                {"id": "a", "messages": []},
-                {"id": "b", "messages": [{"id": "m", "role": "user", "text": "hi", "ts": 5}]},
-            ],
-        });
-        std::fs::write(&path, old.to_string()).unwrap();
-        let list = handle_list(&app, json!({"repo": repo})).await.unwrap();
-        assert_eq!(list["current"], "b");
-        assert_eq!(ids(&list), vec!["a", "b"]);
-        assert!(list["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|s| s["kind"] == "chat"));
-        let brainstorm = handle_list(&app, json!({"repo": repo, "kind": "brainstorm"}))
-            .await
-            .unwrap();
-        assert_eq!(brainstorm["sessions"].as_array().unwrap().len(), 1);
-        assert_ne!(brainstorm["current"], "a");
-        assert_ne!(brainstorm["current"], "b");
-        assert_eq!(brainstorm["sessions"][0]["messageCount"], 0);
-
-        // A legacy single-thread file too: one chat session, no migrated brainstorm.
-        std::fs::write(
-            &path,
-            json!({"repo": repo, "messages": [{"id": "a", "role": "user", "text": "Old", "ts": 9}]})
-                .to_string(),
-        )
-        .unwrap();
-        let chat = handle_list(&app, json!({"repo": repo})).await.unwrap();
-        assert_eq!(chat["sessions"].as_array().unwrap().len(), 1);
-        assert_eq!(chat["sessions"][0]["kind"], "chat");
-        assert_eq!(chat["sessions"][0]["updatedAt"], 9);
-        let brainstorm = handle_list(&app, json!({"repo": repo, "kind": "brainstorm"}))
-            .await
-            .unwrap();
-        assert_eq!(brainstorm["sessions"][0]["messageCount"], 0);
-        assert_ne!(brainstorm["current"], chat["current"]);
-    }
-
-    #[tokio::test]
-    async fn summaries_carry_kind_timestamps_and_counts_but_no_bodies() {
+    async fn summaries_carry_timestamps_and_counts_but_no_bodies() {
         let (app, _dir, repo) = test_app();
         let empty = handle_list(&app, json!({"repo": repo})).await.unwrap();
         assert!(empty["sessions"][0]["updatedAt"].as_i64().unwrap() > 0);
@@ -1913,162 +1994,11 @@ mod tests {
         let list = handle_list(&app, json!({"repo": repo})).await.unwrap();
         let thread = handle_get(&app, json!({"repo": repo})).await.unwrap();
         let summary = &list["sessions"][0];
-        assert_eq!(summary["kind"], "chat");
         assert_eq!(summary["title"], "Hello there");
         assert_eq!(summary["busy"], false);
         assert_eq!(summary["messageCount"], 2);
         assert_eq!(summary["updatedAt"], thread["messages"][1]["ts"]);
         assert!(summary.get("messages").is_none());
-    }
-
-    #[test]
-    fn a_brainstorm_turn_carries_its_own_prompt_and_only_read_only_tools() {
-        let claude = claude_argv(
-            &route(Harness::Claude),
-            Path::new("/d/mcp.json"),
-            Path::new("/d/settings.json"),
-            None,
-            ChatKind::Brainstorm,
-        );
-        let at = |flag: &str| claude[claude.iter().position(|a| a == flag).unwrap() + 1].clone();
-        assert_eq!(at("--append-system-prompt"), BRAINSTORM);
-        assert_ne!(BRAINSTORM, ROLE);
-        let tools = at("--allowedTools");
-        let expected: Vec<String> = crate::mcp::READ_ONLY_TOOLS
-            .iter()
-            .map(|t| format!("mcp__{SERVER}__{t}"))
-            .collect();
-        assert_eq!(tools.split(',').collect::<Vec<_>>(), expected);
-        for tool in [
-            "task_create",
-            "task_start",
-            "task_stop",
-            "task_amend",
-            "task_answer",
-        ] {
-            assert!(!tools.contains(tool), "{tool}");
-        }
-        let server = json!({"command": "/o", "args": ["mcp", "--read-only"]});
-        let codex = codex_argv(
-            &route(Harness::Codex),
-            "/repo",
-            &server,
-            None,
-            ChatKind::Brainstorm,
-        );
-        let instructions = format!("developer_instructions={}", json!(BRAINSTORM));
-        assert!(codex.contains(&instructions));
-        assert!(!codex.contains(&format!("developer_instructions={}", json!(ROLE))));
-    }
-
-    #[test]
-    fn a_brainstorm_bridge_is_launched_read_only_and_the_chat_bridge_is_not() {
-        let (app, _dir, _repo) = {
-            let dir = tempfile::tempdir().unwrap();
-            let app = App::new(dir.path().join("d"), dir.path().join("s"), "orchd".into()).unwrap();
-            (app, dir, ())
-        };
-        let brainstorm = mcp_server(&app, None, ChatKind::Brainstorm);
-        assert!(brainstorm["args"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("--read-only")));
-        let chat = mcp_server(&app, None, ChatKind::Chat);
-        assert!(!chat["args"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("--read-only")));
-    }
-
-    #[test]
-    fn the_brainstorm_prompt_asks_one_question_and_never_touches_tasks() {
-        for needle in [
-            "exactly one focused question",
-            "2-4 answer options",
-            "never create, start, stop, amend or answer tasks",
-            "End every reply with one ```sushi-draft block",
-            "dependsOn",
-            "acceptance criteri",
-            "tier",
-            "questions",
-        ] {
-            assert!(BRAINSTORM.contains(needle), "{needle}");
-        }
-    }
-
-    #[tokio::test]
-    async fn a_brainstorm_reply_updates_only_its_own_sessions_draft() {
-        let (app, _dir, repo) = test_app();
-        let chat_draft = ChatDraft {
-            title: "Chat task".into(),
-            ..Default::default()
-        };
-        let mut chat = load(&app, &repo).current(ChatKind::Chat).clone();
-        chat.draft = Some(chat_draft.clone());
-        save(&app, &repo, &chat);
-
-        let mut session = load(&app, &repo).current(ChatKind::Brainstorm).clone();
-        push(&mut session, "user", "an idea");
-        apply_reply(
-            &mut session,
-            &format!(
-                "Which one?\n{}",
-                block(
-                    r#"{"title":"Idea","goal":"G","questions":[{"text":"Q?","options":["a","b"]}]}"#
-                )
-            ),
-            Vec::new(),
-        );
-        finish_turn(&app, &repo, &session);
-        let got = handle_get(&app, json!({"repo": repo, "kind": "brainstorm"}))
-            .await
-            .unwrap();
-        assert_eq!(got["draft"]["title"], "Idea");
-        assert_eq!(got["messages"][1]["questions"][0]["text"], "Q?");
-        let chat = handle_get(&app, json!({"repo": repo})).await.unwrap();
-        assert_eq!(chat["draft"]["title"], "Chat task");
-    }
-
-    #[tokio::test]
-    async fn a_brainstorm_turn_and_a_chat_turn_never_block_each_other() {
-        let (app, _dir, repo) = test_app();
-        app.chat_turns
-            .lock()
-            .unwrap()
-            .insert(ChatKind::Brainstorm.turn_key(&repo), CancelToken::new());
-        let chat_list = handle_list(&app, json!({"repo": repo})).await.unwrap();
-        assert_eq!(chat_list["sessions"][0]["busy"], false);
-        let bs_list = handle_list(&app, json!({"repo": repo, "kind": "brainstorm"}))
-            .await
-            .unwrap();
-        assert_eq!(bs_list["sessions"][0]["busy"], true);
-        handle_new(&app, json!({"repo": repo})).await.unwrap();
-        let chat = handle_get(&app, json!({"repo": repo})).await.unwrap();
-        handle_switch(&app, json!({"repo": repo, "id": chat["id"]}))
-            .await
-            .unwrap();
-        handle_clear(&app, json!({"repo": repo})).await.unwrap();
-        assert!(begin_turn(&app, &repo, ChatKind::Chat).is_ok());
-        assert_eq!(
-            begin_turn(&app, &repo, ChatKind::Brainstorm).err(),
-            Some(BUSY.to_string())
-        );
-        assert_eq!(
-            handle_new(&app, json!({"repo": repo, "kind": "brainstorm"}))
-                .await
-                .unwrap_err(),
-            BUSY
-        );
-        // A chat turn does not make the brainstorm refuse the reverse.
-        app.chat_turns
-            .lock()
-            .unwrap()
-            .remove(&ChatKind::Brainstorm.turn_key(&repo));
-        assert!(
-            handle_clear(&app, json!({"repo": repo, "kind": "brainstorm"}))
-                .await
-                .is_ok()
-        );
     }
 
     const CLAUDE_TASK_GET: &str = r##"{"type":"assistant","message":{"model":"claude-opus-5-5","id":"msg_011CfNVcnvh4Z3JFfM2rvWjU","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_018JzSDbZMnWxhb9CbN7KP8P","name":"mcp__sushiai-orchestrator__task_get","input":{"id":"eb6845cb-12d8-44a5-8e37-ad577410ae22"},"caller":{"type":"direct"}}],"container":null,"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":2,"cache_creation_input_tokens":1093,"cache_read_input_tokens":15516,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":1093},"output_tokens":8,"service_tier":"standard","inference_geo":"not_available"},"input_transformations":[],"diagnostics":null,"context_management":null},"parent_tool_use_id":null,"session_id":"7c0af684-01e9-4264-8072-13b0dfee9284","uuid":"ecd1d7e9-6b54-438f-b970-222c42648ba8","timestamp":"2026-09-24T15:23:12.434Z","request_id":"req_011CfNVcnRg3KH9QGyJ5yp1U","wire_tool_inputs":{"toolu_018JzSDbZMnWxhb9CbN7KP8P":{"id":"eb6845cb-12d8-44a5-8e37-ad577410ae22"}},"tool_use_meta":[{"id":"toolu_018JzSDbZMnWxhb9CbN7KP8P","display_name":"Task Get","server_display_name":"sushiai-orchestrator"}]}"##;
@@ -2166,9 +2096,9 @@ mod tests {
         let tools = tools_of(&app, &repo, Harness::Claude, &[CLAUDE_TASK_GET]);
         assert_eq!(tools, vec![tool("task_get", "Keep the tool calls")]);
 
-        let mut session = load(&app, &repo).current(ChatKind::Chat).clone();
-        push(&mut session, "user", "status?");
-        apply_reply(&mut session, "It is running.", tools);
+        let mut session = load(&app, &repo).current().clone();
+        push(&mut session, "user", "status?", ChatMode::Chat);
+        apply_reply(&mut session, "It is running.", tools, ChatMode::Chat);
         let message = serde_json::to_value(session.messages.last().unwrap()).unwrap();
         assert_eq!(
             message["tools"],
@@ -2289,18 +2219,161 @@ mod tests {
         );
 
         let mut session = ChatSession::default();
-        apply_reply(&mut session, "plain", Vec::new());
+        apply_reply(&mut session, "plain", Vec::new(), ChatMode::Chat);
         let value = serde_json::to_value(session.messages.last().unwrap()).unwrap();
         assert!(value.get("tools").is_none());
     }
 
     #[test]
     fn both_prompts_say_to_name_tasks_by_title_and_the_draft_still_takes_ids() {
-        for prompt in [ROLE, BRAINSTORM] {
+        for prompt in [ROLE, BRAINSTORM, PLAN] {
             assert!(prompt.contains("refer to a task by its title, never by its id"));
             assert!(prompt.contains("'8ec68f8c'"));
         }
         assert!(ROLE.contains("dependsOn"));
         assert!(ROLE.contains("\"dependsOn\": [\"task ids\"]"));
+    }
+
+    #[test]
+    fn brainstorm_and_plan_turns_carry_their_prompt_and_only_read_only_tools() {
+        for (mode, prompt) in [(ChatMode::Brainstorm, BRAINSTORM), (ChatMode::Plan, PLAN)] {
+            assert_ne!(prompt, ROLE);
+            for session in [None, Some("sess")] {
+                let claude = claude_argv(
+                    &route(Harness::Claude),
+                    Path::new("/d/mcp.json"),
+                    Path::new("/d/settings.json"),
+                    session,
+                    mode,
+                );
+                let at =
+                    |flag: &str| claude[claude.iter().position(|a| a == flag).unwrap() + 1].clone();
+                assert_eq!(at("--append-system-prompt"), prompt);
+                let expected: Vec<String> = crate::mcp::READ_ONLY_TOOLS
+                    .iter()
+                    .map(|t| format!("mcp__{SERVER}__{t}"))
+                    .collect();
+                assert_eq!(
+                    at("--allowedTools").split(',').collect::<Vec<_>>(),
+                    expected
+                );
+                assert_eq!(claude.contains(&"--resume".to_string()), session.is_some());
+
+                let server = json!({"command": "/o", "args": ["mcp", "--read-only"]});
+                let codex = codex_argv(&route(Harness::Codex), "/repo", &server, session, mode);
+                assert!(codex.contains(&format!("developer_instructions={}", json!(prompt))));
+                assert!(!codex.contains(&format!("developer_instructions={}", json!(ROLE))));
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_chat_mode_gets_a_writing_bridge() {
+        let (app, _dir, _repo) = test_app();
+        let has_read_only = |mode| {
+            mcp_server(&app, None, mode)["args"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("--read-only"))
+        };
+        assert!(!has_read_only(ChatMode::Chat));
+        assert!(has_read_only(ChatMode::Brainstorm));
+        assert!(has_read_only(ChatMode::Plan));
+    }
+
+    #[test]
+    fn the_mode_prompts_say_what_they_are_for() {
+        for needle in [
+            "exactly one focused question",
+            "2-4 answer options",
+            "weigh 2-3 approaches",
+            "never create, start, stop, amend or answer tasks",
+            "\"tasks\"",
+            "dependsOn",
+        ] {
+            assert!(BRAINSTORM.contains(needle), "{needle}");
+        }
+        for needle in [
+            "small, ordered tasks",
+            "how each is checked",
+            "tier",
+            "never create, start, stop, amend or answer tasks",
+            "\"tasks\"",
+        ] {
+            assert!(PLAN.contains(needle), "{needle}");
+        }
+    }
+
+    #[test]
+    fn a_task_list_reads_index_and_id_dependencies_and_a_bad_list_is_dropped() {
+        let ok = parse_reply(&block(
+            r#"{"tasks":[{"title":"A"},{"title":"B","dependsOn":[1,"abc-def","1"," 1 "],"tier":"hard"}]}"#,
+        ));
+        let proposal = ok.proposal.unwrap();
+        assert_eq!(ok.text, "2 proposed tasks");
+        assert_eq!(
+            proposal.tasks[1].depends_on,
+            vec![ProposalDep::Index(1), ProposalDep::Id("abc-def".into())]
+        );
+        assert_eq!(proposal.tasks[1].tier, Some(Tier::Hard));
+        for bad in [
+            r#"{"tasks":[]}"#,
+            r#"{"tasks":"soon"}"#,
+            r#"{"tasks":[{"goal":"no title"}]}"#,
+            r#"{"tasks":[{"title":"A","dependsOn":[2]}]}"#,
+            r#"{"tasks":[{"title":"A","dependsOn":[1]}]}"#,
+            r#"{"tasks":[{"title":"A","dependsOn":[2]},{"title":"B","dependsOn":[1]}]}"#,
+        ] {
+            let parsed = parse_reply(&format!("Words.\n{}", block(bad)));
+            assert!(parsed.proposal.is_none(), "{bad}");
+            assert!(parsed.text.starts_with("Words."), "{bad}");
+        }
+        // A bad list beside a question keeps the question and the prose.
+        let mixed = parse_reply(&format!(
+            "Words.\n{}",
+            block(r#"{"tasks":"x","questions":[{"text":"Q?","options":["a","b"]}]}"#)
+        ));
+        assert!(mixed.proposal.is_none());
+        assert_eq!(mixed.text, "Words.");
+        assert_eq!(mixed.questions.len(), 1);
+    }
+
+    #[test]
+    fn proposals_order_dependencies_first() {
+        let proposal = ChatProposal::parse(&json!([
+            {"title": "A", "dependsOn": [2]},
+            {"title": "B", "dependsOn": [3]},
+            {"title": "C"},
+        ]))
+        .unwrap();
+        assert_eq!(proposal.order(&[0, 1, 2]), Some(vec![2, 1, 0]));
+        assert_eq!(proposal.order(&[0, 1]), Some(vec![1, 0]));
+    }
+
+    #[test]
+    fn a_store_from_before_modes_loads_its_brainstorm_sessions_as_chat_sessions() {
+        let old = json!({
+            "repo": "/r",
+            "current": "a",
+            "brainstormCurrent": "b",
+            "sessions": [
+                {"id": "a", "kind": "chat", "messages": []},
+                {"id": "b", "kind": "brainstorm", "draft": {"title": "T"}, "messages": [
+                    {"id": "m", "role": "user", "text": "idea", "ts": 5},
+                    {"id": "n", "role": "assistant", "text": "which?", "ts": 6,
+                     "draft": {"title": "T"}, "questions": [{"text": "Q?", "options": ["x"]}]},
+                ]},
+            ],
+        })
+        .to_string();
+        let (chats, _) = parse_store("/r", Some(&old));
+        assert_eq!(chats.current, "a");
+        assert_eq!(chats.sessions.len(), 2);
+        let brainstorm = &chats.sessions[1];
+        assert_eq!(brainstorm.messages.len(), 2);
+        assert_eq!(brainstorm.messages[1].questions.len(), 1);
+        assert_eq!(brainstorm.mode, ChatMode::Chat);
+        let thread = chats.thread_json();
+        assert!(thread.get("kind").is_none());
     }
 }

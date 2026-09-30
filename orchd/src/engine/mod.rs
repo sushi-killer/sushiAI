@@ -608,7 +608,7 @@ impl App {
             "chat.new" => chat::handle_new(self, params).await,
             "chat.switch" => chat::handle_switch(self, params).await,
             "chat.clear" => chat::handle_clear(self, params).await,
-            "chat.clearDraft" => chat::handle_clear_draft(self, params).await,
+            "chat.createProposal" => chat::handle_create_proposal(self, params).await,
             "peer.list" => messages::handle_peers(self, params).await,
             "message.send" => messages::handle_send(self, params).await,
             "message.inbox" => messages::handle_inbox(self, params).await,

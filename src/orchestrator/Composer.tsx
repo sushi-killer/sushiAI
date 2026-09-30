@@ -1,12 +1,15 @@
 import type { ReactNode, Ref } from "react";
 import { ArrowUp, Sparkles, Square } from "lucide-react";
 import { ChipPicker } from "../ChipPicker";
-import type { Settings } from "./types";
+import { CHAT_MODES } from "./chatModel";
+import type { ChatMode, Settings } from "./types";
 
 /** Pane/Composer: the one input at the bottom of the orchestrator - a new
  * task on Home, a message in Chat. The caller owns the draft and decides
  * what a send does; `route` is the picker (or label) left in the bar, and
- * `extra` anything else that belongs there (the base branch). */
+ * `extra` anything else that belongs there (the base branch). `mode` and
+ * `onModeChange` add the Chat / Brainstorm / Plan switch, only for the
+ * orchestrator chat. */
 export function Composer({
   value,
   onChange,
@@ -19,6 +22,8 @@ export function Composer({
   onStop,
   route,
   extra,
+  mode,
+  onModeChange,
   host = "Local CLI",
   inputRef,
 }: {
@@ -34,6 +39,8 @@ export function Composer({
   onStop?: () => void;
   route?: ReactNode;
   extra?: ReactNode;
+  mode?: ChatMode;
+  onModeChange?: (mode: ChatMode) => void;
   host?: string;
   inputRef?: Ref<HTMLTextAreaElement>;
 }) {
@@ -65,6 +72,16 @@ export function Composer({
         }}
       />
       <div className="orch-composer-bar">
+        {mode && onModeChange && (
+          <>
+            <ModeSwitch
+              mode={mode}
+              disabled={disabled}
+              onChange={onModeChange}
+            />
+            <span className="orch-composer-divider" aria-hidden />
+          </>
+        )}
         {route}
         <span className="orch-composer-host">{host}</span>
         {extra}
@@ -90,6 +107,34 @@ export function Composer({
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Orch/ModeSwitch: what the next message is for - talk, brainstorm or plan. */
+function ModeSwitch({
+  mode,
+  disabled,
+  onChange,
+}: {
+  mode: ChatMode;
+  disabled: boolean;
+  onChange: (mode: ChatMode) => void;
+}) {
+  return (
+    <div className="orch-modeswitch" role="group" aria-label="Message mode">
+      {CHAT_MODES.map((m) => (
+        <button
+          key={m.value}
+          type="button"
+          className={mode === m.value ? "selected" : undefined}
+          aria-pressed={mode === m.value}
+          disabled={disabled}
+          onClick={() => onChange(m.value)}
+        >
+          {m.label}
+        </button>
+      ))}
     </div>
   );
 }

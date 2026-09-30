@@ -73,7 +73,6 @@ fn a_draft_block_is_stripped_and_lands_on_the_message_and_the_thread() {
         reply["questions"],
         json!([{"text": "Which?", "options": ["A", "B"]}])
     );
-    assert_eq!(thread["draft"], reply["draft"]);
     // The owner's own message carries neither.
     let first = &thread["messages"][0];
     assert!(first.get("draft").is_none() && first.get("questions").is_none());
@@ -82,21 +81,19 @@ fn a_draft_block_is_stripped_and_lands_on_the_message_and_the_thread() {
 #[test]
 fn a_malformed_block_and_a_questions_only_block_leave_the_thread_draft_alone() {
     let (daemon, _s, _r, repo) = spawn();
-    let drafted = say(&daemon, &repo, "zzdraft");
+    say(&daemon, &repo, "zzdraft");
     let thread = say(&daemon, &repo, "zzbad");
     assert_eq!(
         last(&thread)["text"],
         "Oops.\n```sushi-draft\n{not json\n```"
     );
     assert!(last(&thread).get("draft").is_none());
-    assert_eq!(thread["draft"], drafted["draft"]);
 
     let thread = say(&daemon, &repo, "zzask");
     let reply = last(&thread);
     assert_eq!(reply["text"], "Pick one.");
     assert!(reply.get("draft").is_none());
     assert_eq!(reply["questions"][0]["text"], "A or B?");
-    assert_eq!(thread["draft"], drafted["draft"]);
 
     let plain = say(&daemon, &repo, "hello");
     assert_eq!(last(&plain)["text"], "Plain reply.");
@@ -104,21 +101,12 @@ fn a_malformed_block_and_a_questions_only_block_leave_the_thread_draft_alone() {
 }
 
 #[test]
-fn clear_draft_keeps_messages_and_clear_removes_the_draft() {
+fn clearing_the_chat_removes_its_messages_and_drafts() {
     let (daemon, _s, _r, repo) = spawn();
     say(&daemon, &repo, "zzdraft");
-    let thread = daemon.request("chat.clearDraft", json!({"repo": repo}));
-    assert!(thread.get("draft").is_none());
-    assert_eq!(thread["messages"].as_array().unwrap().len(), 2);
-    let again = daemon.request("chat.get", json!({"repo": repo}));
-    assert!(again.get("draft").is_none());
-    assert_eq!(last(&again)["draft"]["title"], "Ship it");
-
-    let thread = say(&daemon, &repo, "zzdraft");
-    assert!(thread["draft"]["title"].is_string());
     let cleared = daemon.request("chat.clear", json!({"repo": repo}));
-    assert!(cleared.get("draft").is_none());
     assert_eq!(cleared["messages"], json!([]));
+    assert!(cleared.get("draft").is_none());
 }
 
 #[test]

@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { Tone } from "../helpers";
 
 /** Control/Tag: a small toned pill, with a leading dot unless `dot` is off
- * (a plain label such as Brainstorm). */
+ * (a plain label). */
 export function Tag({
   tone,
   dot = true,

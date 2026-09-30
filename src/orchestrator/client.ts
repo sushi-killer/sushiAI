@@ -4,7 +4,8 @@
 // a method string or cast a result themselves.
 import type {
   BacklogBucket,
-  ChatKind,
+  ChatMode,
+  ChatProposalResult,
   ChatSessionList,
   ChatThread,
   FailureRow,
@@ -111,28 +112,28 @@ export function orchestratorClientFor(host: string = LOCAL) {
       call<Record<string, never>>("task.delete", { id }),
     taskArchive: (id: string) => call<Task>("task.archive", { id }),
     taskUnarchive: (id: string) => call<Task>("task.unarchive", { id }),
-    // Every chat method acts on one kind's sessions; `chat` when omitted.
-    chatGet: (repo: string, kind: ChatKind = "chat") =>
-      call<ChatThread>("chat.get", { repo, kind }),
-    chatSend: (repo: string, text: string, kind: ChatKind = "chat") =>
-      call<Record<string, never>>("chat.send", { repo, text, kind }),
-    chatCancel: (repo: string, kind: ChatKind = "chat") =>
-      call<Record<string, never>>("chat.cancel", { repo, kind }),
-    chatList: (repo: string, kind: ChatKind = "chat") =>
-      call<ChatSessionList>("chat.list", { repo, kind }),
-    chatNew: (repo: string, kind: ChatKind = "chat") =>
-      call<ChatThread>("chat.new", { repo, kind }),
-    chatSwitch: (repo: string, id: string, kind: ChatKind = "chat") =>
-      call<ChatThread>("chat.switch", { repo, id, kind }),
-    chatClear: (repo: string, kind: ChatKind = "chat") =>
-      call<ChatThread>("chat.clear", { repo, kind }),
-    /** Drops a session's draft and keeps its messages: session `id`, or the
-     * kind's current one. Returns the kind's current session. */
-    chatClearDraft: (repo: string, kind: ChatKind = "chat", id?: string) =>
-      call<ChatThread>("chat.clearDraft", {
+    chatGet: (repo: string) => call<ChatThread>("chat.get", { repo }),
+    chatSend: (repo: string, text: string, mode: ChatMode = "chat") =>
+      call<Record<string, never>>("chat.send", { repo, text, mode }),
+    chatCancel: (repo: string) =>
+      call<Record<string, never>>("chat.cancel", { repo }),
+    chatList: (repo: string) => call<ChatSessionList>("chat.list", { repo }),
+    chatNew: (repo: string) => call<ChatThread>("chat.new", { repo }),
+    chatSwitch: (repo: string, id: string) =>
+      call<ChatThread>("chat.switch", { repo, id }),
+    chatClear: (repo: string) => call<ChatThread>("chat.clear", { repo }),
+    /** Makes tasks of a reply's proposal rows (1-based `indices`), or parks
+     * them in the plan backlog with `backlog`. `skip` names the rows to
+     * record as skipped; without it every other open row is. */
+    chatCreateProposal: (
+      repo: string,
+      messageId: string,
+      params: { indices: number[]; skip?: number[]; backlog?: boolean },
+    ) =>
+      call<ChatProposalResult>("chat.createProposal", {
         repo,
-        kind,
-        ...(id ? { id } : {}),
+        messageId,
+        ...params,
       }),
     messageList: (repo: string) => call<Message[]>("message.list", { repo }),
     messageSend: (params: {

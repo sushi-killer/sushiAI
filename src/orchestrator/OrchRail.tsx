@@ -190,7 +190,7 @@ export function OrchRail({
         <NavRow
           icon={<ListTodo size={14} />}
           label="Plan"
-          selected={is("plan") || is("brainstorm")}
+          selected={is("plan")}
           trailing={planCount || ""}
           onClick={() => onOpen({ kind: "plan" })}
         />

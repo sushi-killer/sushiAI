@@ -1,84 +1,182 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
-const kinds = import("../src/orchestrator/chatKinds.ts");
+const client = import("../src/orchestrator/client.ts");
 const model = import("../src/orchestrator/chatModel.ts");
 
 const REPO = "/repo";
 
-/** A client whose chat calls answer like orchd's chat.rs: one current
- * session per kind, summaries carrying their kind. */
-function fakeClient() {
-  const calls = [];
-  const sessions = {
-    chat: [
-      { id: "c1", kind: "chat", busy: false, updatedAt: 1, messageCount: 2 },
-    ],
-    brainstorm: [
-      {
-        id: "b1",
-        kind: "brainstorm",
-        busy: false,
-        updatedAt: 1,
-        messageCount: 0,
-      },
-    ],
-  };
-  const thread = (kind) => ({
-    repo: REPO,
-    id: sessions[kind][0].id,
-    kind,
-    createdAt: 1,
-    messages: [],
-    busy: false,
-  });
-  return {
-    calls,
-    chatGet: async (repo, kind) => {
-      calls.push(["chat.get", repo, kind]);
-      return thread(kind);
+const proposal = {
+  tasks: [
+    { title: "Add the table", goal: "g", criteria: ["a", "b"], dependsOn: [] },
+    {
+      title: "Use the table",
+      goal: "g",
+      criteria: ["c"],
+      dependsOn: [1, "t9"],
+      tier: "hard",
     },
-    chatList: async (repo, kind) => {
-      calls.push(["chat.list", repo, kind]);
-      return { current: sessions[kind][0].id, sessions: sessions[kind] };
-    },
-  };
-}
+    { title: "Document it", goal: "g", criteria: [], dependsOn: [2] },
+  ],
+};
 
-test("entering a kind asks orchd for that kind's current session and list", async () => {
-  const k = await kinds;
-  const client = fakeClient();
-  const { thread, list } = await k.enterKind(REPO, "brainstorm", client);
-  assert.equal(thread.id, "b1");
-  assert.equal(thread.kind, "brainstorm");
-  assert.deepEqual(
-    list.sessions.map((s) => s.id),
-    ["b1"],
-  );
-  assert.deepEqual(client.calls.map((c) => c[2]).sort(), [
-    "brainstorm",
-    "brainstorm",
-  ]);
+test("the chat client sends the mode with a message and creates proposals by row", async () => {
+  const { orchestratorClientFor } = await client;
+  const calls = [];
+  globalThis.window = {
+    bridge: {
+      orchestrator: async (method, params) => {
+        calls.push([method, params]);
+        return {};
+      },
+    },
+  };
+  try {
+    const c = orchestratorClientFor("local");
+    await c.chatSend(REPO, "hi");
+    await c.chatSend(REPO, "an idea", "brainstorm");
+    await c.chatCreateProposal(REPO, "m1", {
+      indices: [1, 2],
+      skip: [3],
+      backlog: true,
+    });
+    await c.chatGet(REPO);
+    assert.deepEqual(calls, [
+      ["chat.send", { repo: REPO, text: "hi", mode: "chat" }],
+      ["chat.send", { repo: REPO, text: "an idea", mode: "brainstorm" }],
+      [
+        "chat.createProposal",
+        {
+          repo: REPO,
+          messageId: "m1",
+          indices: [1, 2],
+          skip: [3],
+          backlog: true,
+        },
+      ],
+      ["chat.get", { repo: REPO }],
+    ]);
+  } finally {
+    delete globalThis.window;
+  }
 });
 
-test("isOfKind reads the kind orchd put on the summary", async () => {
-  const k = await kinds;
-  const list = {
-    current: "b1",
-    sessions: [
-      {
-        id: "b1",
-        kind: "brainstorm",
-        busy: false,
-        updatedAt: 1,
-        messageCount: 0,
-      },
+test("a reply's mode label is its mode's name, none for the plain chat", async () => {
+  const { modeLabel, CHAT_MODES } = await model;
+  assert.deepEqual(
+    CHAT_MODES.map((m) => m.label),
+    ["Chat", "Brainstorm", "Plan"],
+  );
+  assert.equal(modeLabel(undefined), "");
+  assert.equal(modeLabel("chat"), "");
+  assert.equal(modeLabel("brainstorm"), "Brainstorm");
+  assert.equal(modeLabel("plan"), "Plan");
+});
+
+test("the placeholder follows the mode, and a brainstorm that asked is answered", async () => {
+  const { composerPlaceholder } = await model;
+  assert.equal(composerPlaceholder("chat", []), "Ask the orchestrator…");
+  assert.equal(composerPlaceholder("plan", []), "Describe the goal to plan…");
+  assert.equal(composerPlaceholder("brainstorm", []), "Describe an idea…");
+  const asked = [
+    { role: "user", mode: "brainstorm" },
+    {
+      role: "assistant",
+      mode: "brainstorm",
+      questions: [{ text: "Who?", options: ["a", "b"] }],
+    },
+  ];
+  assert.equal(
+    composerPlaceholder("brainstorm", asked),
+    "Answer, or push back on the list…",
+  );
+  // A chat-mode reply with questions does not count as a brainstorm asking.
+  assert.equal(
+    composerPlaceholder("brainstorm", [
+      { role: "assistant", questions: [{ text: "?", options: [] }] },
+    ]),
+    "Describe an idea…",
+  );
+});
+
+test("a proposal row's meta reads tier, criteria and what it waits for", async () => {
+  const { proposalMeta } = await model;
+  const tasks = [{ id: "t9", title: "Existing task" }];
+  assert.equal(proposalMeta(proposal.tasks[0], proposal, tasks), "2 criteria");
+  assert.equal(
+    proposalMeta(proposal.tasks[1], proposal, tasks),
+    "hard · 1 criterion · after Add the table, Existing task",
+  );
+  assert.equal(
+    proposalMeta(proposal.tasks[2], proposal, tasks),
+    "0 criteria · after Use the table",
+  );
+  // An unknown existing task is left out rather than shown as an id.
+  assert.equal(
+    proposalMeta(proposal.tasks[1], proposal, []),
+    "hard · 1 criterion · after Add the table",
+  );
+});
+
+test("row states, the footer count and the create request", async () => {
+  const { initialChecks, rowState, proposalSelection, proposalRequest } =
+    await model;
+  const p = {
+    tasks: [
+      { ...proposal.tasks[0], taskId: "made" },
+      { ...proposal.tasks[1], skipped: true },
+      proposal.tasks[2],
     ],
   };
-  assert.equal(k.isOfKind(list, "b1", "brainstorm"), true);
-  assert.equal(k.isOfKind(list, "b1", "chat"), false);
-  assert.equal(k.isOfKind(list, "unknown", "chat"), true);
-  assert.equal(k.isOfKind(null, "unknown", "brainstorm"), false);
+  assert.deepEqual(initialChecks(p), [true, false, true]);
+  const checked = initialChecks(p);
+  assert.deepEqual(
+    p.tasks.map((t, i) => rowState(t, checked[i])),
+    ["created", "skipped", "open"],
+  );
+  // Unchecking an open row reads as skipped before anything is sent.
+  assert.equal(rowState(p.tasks[2], false), "skipped");
+  assert.deepEqual(proposalSelection(p, checked), { create: [3], skip: [2] });
+  assert.deepEqual(proposalRequest(p, checked), {
+    indices: [3],
+    skip: [2],
+    backlog: false,
+  });
+  assert.deepEqual(proposalRequest(p, checked, { backlog: true }), {
+    indices: [3],
+    skip: [2],
+    backlog: true,
+  });
+  // One row's Create leaves the other checked rows open.
+  const fresh = { tasks: proposal.tasks };
+  assert.deepEqual(proposalRequest(fresh, [true, true, false], { row: 2 }), {
+    indices: [2],
+    skip: [3],
+    backlog: false,
+  });
+  assert.equal(
+    proposalRequest({ tasks: [{ ...proposal.tasks[0], taskId: "x" }] }, [true]),
+    null,
+  );
+});
+
+test("the footer button counts the checked rows that are not tasks yet", async () => {
+  const { createLabel } = await model;
+  assert.equal(createLabel(1), "Create 1 task");
+  assert.equal(createLabel(3), "Create 3 tasks");
+  assert.equal(createLabel(0), "Create 0 tasks");
+});
+
+test("only the orchestrator chat passes a mode to its composer", () => {
+  const fs = require("node:fs");
+  const dir = `${__dirname}/../src/orchestrator/`;
+  const withMode = fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith(".tsx"))
+    .filter((f) => /\bonModeChange=/.test(fs.readFileSync(dir + f, "utf8")));
+  assert.deepEqual(withMode.sort(), ["ChatView.tsx"]);
+  assert.ok(!fs.existsSync(dir + "BrainstormView.tsx"));
+  assert.ok(!fs.existsSync(dir + "chatKinds.ts"));
 });
 
 test("sessions group newest first by updatedAt into TODAY and EARLIER", async () => {
@@ -131,12 +229,6 @@ test("search matches any given field, case-insensitively", async () => {
   assert.ok(matchesQuery("", "x"));
   assert.ok(matchesQuery("EXPORT", "Why did export fail?", undefined));
   assert.ok(!matchesQuery("spend", "Why did export fail?", "It failed"));
-});
-
-test("an older daemon's chat event without a kind is a chat event", async () => {
-  const { eventKind } = await kinds;
-  assert.equal(eventKind({ event: "chat" }), "chat");
-  assert.equal(eventKind({ event: "chat", kind: "brainstorm" }), "brainstorm");
 });
 
 test("sessions without updatedAt sort last and never produce NaN", async () => {

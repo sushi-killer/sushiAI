@@ -1,6 +1,12 @@
-// Pure helpers for the Chat and Brainstorm views: session list grouping and
-// times, and task references in a reply.
-import type { Task } from "./types";
+// Pure helpers for the Chat view: session list grouping and times, task
+// references in a reply, the modes and the proposed-task card.
+import type {
+  ChatMessage,
+  ChatMode,
+  ChatProposal,
+  ProposedTask,
+  Task,
+} from "./types";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -115,4 +121,115 @@ export function isUnread(
 ): boolean {
   const at = timeOf(session);
   return at !== null && at > (seenAt ?? since);
+}
+
+export const CHAT_MODES: { value: ChatMode; label: string }[] = [
+  { value: "chat", label: "Chat" },
+  { value: "brainstorm", label: "Brainstorm" },
+  { value: "plan", label: "Plan" },
+];
+
+/** The label above a reply: the mode's name, nothing for the plain chat. */
+export function modeLabel(mode: ChatMode | undefined): string {
+  return (
+    CHAT_MODES.find((m) => m.value === mode && m.value !== "chat")?.label ?? ""
+  );
+}
+
+/** The composer's placeholder for the selected mode. A brainstorm that has
+ * asked or proposed something is answered, not started. */
+export function composerPlaceholder(
+  mode: ChatMode,
+  messages: Pick<ChatMessage, "role" | "mode" | "questions" | "proposal">[],
+): string {
+  if (mode === "plan") return "Describe the goal to plan…";
+  if (mode === "chat") return "Ask the orchestrator…";
+  const asked = messages.some(
+    (m) =>
+      m.role === "assistant" &&
+      m.mode === "brainstorm" &&
+      ((m.questions?.length ?? 0) > 0 || m.proposal),
+  );
+  return asked ? "Answer, or push back on the list…" : "Describe an idea…";
+}
+
+/** "hard · 2 criteria · after Add the schema": what a proposal row shows
+ * under its title. A dependency is another row's title, or an existing
+ * task's. */
+export function proposalMeta(
+  task: ProposedTask,
+  proposal: ChatProposal,
+  tasks: Pick<Task, "id" | "title">[],
+): string {
+  const after = task.dependsOn
+    .map((dep) =>
+      typeof dep === "number"
+        ? proposal.tasks[dep - 1]?.title
+        : tasks.find((t) => t.id === dep)?.title,
+    )
+    .filter(Boolean);
+  const n = task.criteria.length;
+  return [
+    task.tier,
+    `${n} ${n === 1 ? "criterion" : "criteria"}`,
+    after.length ? `after ${after.join(", ")}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+export type ProposalRowState = "created" | "skipped" | "open";
+
+/** A row is created once it has a task, skipped once passed on (or unchecked
+ * here), else open. */
+export function rowState(
+  task: ProposedTask,
+  checked: boolean,
+): ProposalRowState {
+  if (task.taskId) return "created";
+  return task.skipped || !checked ? "skipped" : "open";
+}
+
+/** The 1-based rows a create call acts on: the checked rows that are not
+ * tasks yet, and the unchecked ones to record as skipped. */
+export function proposalSelection(
+  proposal: ChatProposal,
+  checked: boolean[],
+): { create: number[]; skip: number[] } {
+  const create: number[] = [];
+  const skip: number[] = [];
+  proposal.tasks.forEach((task, i) => {
+    if (task.taskId) return;
+    (checked[i] ? create : skip).push(i + 1);
+  });
+  return { create, skip };
+}
+
+/** A card's checkboxes at first sight: every row not passed on or created. */
+export function initialChecks(proposal: ChatProposal): boolean[] {
+  return proposal.tasks.map((task) => !task.skipped);
+}
+
+/** "Create 3 tasks": what the footer's main button says. */
+export function createLabel(count: number): string {
+  return `Create ${count} ${count === 1 ? "task" : "tasks"}`;
+}
+
+/** The `chat.createProposal` params for a click: one row's Create (`row`,
+ * 1-based) or the footer's buttons (every checked row), parked in the plan
+ * with `backlog`. Unchecked rows are recorded as skipped either way; `null`
+ * when nothing would be created. */
+export function proposalRequest(
+  proposal: ChatProposal,
+  checked: boolean[],
+  { row, backlog = false }: { row?: number; backlog?: boolean } = {},
+): { indices: number[]; skip: number[]; backlog: boolean } | null {
+  const { create, skip } = proposalSelection(proposal, checked);
+  const indices = row === undefined ? create : [row];
+  if (!indices.length) return null;
+  return {
+    indices,
+    skip: skip.filter((n) => !indices.includes(n)),
+    backlog,
+  };
 }

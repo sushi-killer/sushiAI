@@ -95,7 +95,7 @@ pub const TASK_TOOLS: [&str; 4] = [
     "ask_orchestrator",
 ];
 
-/// What a brainstorm agent gets (`--read-only`): looking, never changing.
+/// What a Brainstorm or Plan turn gets (`--read-only`): looking, never changing.
 pub const READ_ONLY_TOOLS: [&str; 4] = ["task_list", "task_get", "settings_get", "repo_notes_list"];
 
 /// What the orchestrator agent gets: every tool below.
@@ -401,7 +401,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
 
 /// The bridge's scope: the whole orchestrator surface, one task's messaging
 /// only (`--task <id>`), where every message is sent as that task, or the
-/// read-only tools of a brainstorm (`--read-only`).
+/// read-only tools of a Brainstorm or Plan turn (`--read-only`).
 struct Bridge {
     socket: PathBuf,
     token: String,

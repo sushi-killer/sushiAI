@@ -168,29 +168,6 @@ test("meta pluralises criteria", async () => {
   );
 });
 
-test("draftCreateParams resolves dependencies and parks an unstarted draft", async () => {
-  const { draftCreateParams } = await model;
-  const tasks = [task({ id: "t9", title: "Lease table" })];
-  const draft = {
-    title: "T",
-    goal: "",
-    criteria: ["c"],
-    dependsOn: ["lease table", "unknown"],
-  };
-  assert.deepEqual(draftCreateParams(draft, tasks, false), {
-    title: "T",
-    goal: "T",
-    criteria: ["c"],
-    dependsOn: ["t9"],
-    source: "brainstorm",
-    start: false,
-    backlog: { bucket: "next" },
-  });
-  const started = draftCreateParams(draft, tasks, true);
-  assert.equal(started.start, true);
-  assert.equal("backlog" in started, false);
-});
-
 test("planOnly keeps a stopped zero-attempt task that needs the owner on the rail", async () => {
   const { planOnly } = await model;
   const draft = task({ id: "draft" });

@@ -591,6 +591,36 @@
 .orch-composer-route-icon {
   color: var(--text-muted);
 }
+.orch-modeswitch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--bg-control);
+}
+.orch-modeswitch button {
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 5px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.orch-modeswitch button:hover:not(:disabled) {
+  color: var(--text);
+}
+.orch-modeswitch button.selected {
+  background: var(--bg-selected);
+  color: var(--text);
+  font-weight: 500;
+}
+.orch-composer-divider {
+  align-self: stretch;
+  width: 1px;
+  margin: 4px 0;
+  background: var(--line-divider);
+}
 .orch-composer-route-static {
   cursor: default;
 }

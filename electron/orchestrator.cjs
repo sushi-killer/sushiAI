@@ -59,7 +59,7 @@ const ALLOWED_METHODS = new Set([
   "chat.new",
   "chat.switch",
   "chat.clear",
-  "chat.clearDraft",
+  "chat.createProposal",
   "message.list",
   "message.send",
   "evolution.run",

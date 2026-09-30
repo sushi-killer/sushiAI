@@ -516,76 +516,134 @@
   white-space: nowrap;
   flex-shrink: 0;
 }
-/* Brainstorm: [conversation + composer] | draft panel (236px, full height). */
-.ochat-bs-main {
+
+/* Modes: the label over a reply, the hints of an empty chat, questions. */
+.ochat-mode-label {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  line-height: 13px;
+}
+.ochat-mode-hints {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 6px 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 15px;
+  list-style: none;
+}
+.ochat-mode-hints strong {
+  color: var(--text);
+  font-weight: 500;
+}
+.ochat-question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ochat-question-text {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-md);
+  line-height: 16px;
+}
+.ochat-question-opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Orch/ProposalCard: the tasks a Brainstorm or Plan reply proposed. */
+.ochat-proposal {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-pane);
+  border-radius: 10px;
+  background: var(--bg-raised);
+}
+.ochat-proposal-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ochat-proposal-title {
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.ochat-proposal-from {
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+.ochat-proposal-rows {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ochat-proposal-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line-divider);
+}
+.ochat-proposal-row input[type="checkbox"] {
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+.ochat-proposal-body {
   display: flex;
   flex-direction: column;
   flex: 1;
+  gap: 2px;
   min-width: 0;
-  min-height: 0;
 }
-.brainstorm-convo.ochat-bs-empty {
-  align-items: center;
-  justify-content: center;
-}
-.ochat-bs .brainstorm-head-title {
-  min-width: 0;
+.ochat-proposal-name {
   overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-md);
+  line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ochat-bs-note {
-  padding-left: 2px;
-}
-.ochat-bs-menu-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 27px;
-  padding: 0 8px 0 10px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: var(--text-sm);
-  font-weight: 500;
-}
-.ochat-bs-menu-btn svg {
-  color: var(--text-muted);
-}
-.ochat-bs-menu-btn:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-/* Over an active session it is a quiet switcher, not an action. */
-.brainstorm-head .ochat-bs-menu-btn {
-  border-color: transparent;
-  color: var(--text-muted);
-  font-weight: 400;
-}
-.ochat-bs-menu-wrap .ochat-menu {
-  left: 50%;
-  right: auto;
-  transform: translateX(-50%);
-}
-.brainstorm-head .ochat-bs-menu-wrap .ochat-menu {
-  left: auto;
-  right: 0;
-  transform: none;
-}
-.ochat-draft .draft-title {
-  overflow-wrap: anywhere;
-}
-.ochat-draft-empty {
-  margin: 0;
+.ochat-proposal-meta {
+  overflow: hidden;
   color: var(--text-faint);
   font-size: var(--text-sm);
-  line-height: 15px;
+  line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.ochat-draft-acts {
+.ochat-proposal-row.skipped .ochat-proposal-name {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+.ochat-proposal-skipped {
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+.ochat-proposal-row .ui-button {
+  height: 24px;
+  padding: 0 10px;
+  font-size: var(--text-sm);
+}
+.ochat-proposal-foot {
   display: flex;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-divider);
 }
-.ochat-draft-acts .ui-button {
-  flex: 1;
-  min-width: 0;
-  padding: 0 8px;
+.ochat-proposal-hint {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
 }

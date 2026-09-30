@@ -1,9 +1,8 @@
-// Pure model behind the Plan and Brainstorm views: which drafts sit where,
-// how the backlog reorders, and how a brainstorm draft becomes a task. No
-// React, no I/O.
+// Pure model behind the Plan view: which drafts sit where, how the backlog
+// reorders. No React, no I/O.
 import { dependencyTitles, planDrafts } from "./helpers.ts";
 import { needsOwner } from "./ownerAttention.ts";
-import type { BacklogBucket, ChatDraft, Task } from "./types.ts";
+import type { BacklogBucket, Task } from "./types.ts";
 
 export type PlanItem = {
   task: Task;
@@ -129,38 +128,4 @@ export function autopilotNext(model: PlanModel): Task | undefined {
  * waiting on anything. */
 export function readyDrafts(model: PlanModel): Task[] {
   return model.next.filter((i) => i.ready).map((i) => i.task);
-}
-
-// ---- Brainstorm ----------------------------------------------------------
-
-/** Resolves a draft's dependencies (task ids, or titles) to ids of listed
- * tasks; unknown ones drop. */
-export function dependencyIds(draft: ChatDraft, tasks: Task[]): string[] {
-  const ids: string[] = [];
-  for (const ref of draft.dependsOn) {
-    const found = tasks.find(
-      (t) => t.id === ref || t.title.toLowerCase() === ref.toLowerCase(),
-    );
-    if (found && !ids.includes(found.id)) ids.push(found.id);
-  }
-  return ids;
-}
-
-/** `task.create` params for a brainstorm draft: `start` false parks it at
- * the end of the NEXT backlog, where the autopilot can pick it up. */
-export function draftCreateParams(
-  draft: ChatDraft,
-  tasks: Task[],
-  start: boolean,
-) {
-  const dependsOn = dependencyIds(draft, tasks);
-  return {
-    title: draft.title,
-    goal: draft.goal || draft.title,
-    ...(draft.criteria.length ? { criteria: draft.criteria } : {}),
-    ...(dependsOn.length ? { dependsOn } : {}),
-    source: "brainstorm",
-    start,
-    ...(start ? {} : { backlog: { bucket: "next" as const } }),
-  };
 }

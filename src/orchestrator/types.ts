@@ -430,10 +430,10 @@ export type LogEvent = {
   attempt: number;
   line: string;
 };
-/** What a chat session is for: the orchestrator chat, or a brainstorm that
- * refines a feature idea into a task draft. Every `chat.*` method takes an
- * optional `kind`; without it it means `chat`. */
-export type ChatKind = "chat" | "brainstorm";
+/** How one turn behaves: `chat` runs the orchestrator with its task tools;
+ * `brainstorm` and `plan` only look and end with a list of proposed tasks.
+ * The owner picks it per message. */
+export type ChatMode = "chat" | "brainstorm" | "plan";
 /** A task the orchestrator proposed, read from its reply's `sushi-draft`
  * block. */
 export type ChatDraft = {
@@ -445,20 +445,43 @@ export type ChatDraft = {
 };
 export type ChatQuestion = { text: string; options: string[] };
 /** One of the orchestrator agent's chat sessions for a repo, kept by the
- * daemon. `chat.get`/`chat.send` act on the kind's current session. */
+ * daemon. `chat.get`/`chat.send` act on the current session. */
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   /** The reply's prose; its draft block is taken out. */
   text: string;
   ts: number;
+  /** The mode the turn ran in; absent means the plain chat. */
+  mode?: ChatMode;
   draft?: ChatDraft;
+  proposal?: ChatProposal;
   questions?: ChatQuestion[];
+};
+/** A task's place in a proposal: the 1-based row of another proposed task, or
+ * the id of an existing task. */
+export type ProposalDep = number | string;
+/** One row of a reply's proposal. `taskId` is set once the row became a task
+ * and `skipped` once the owner passed on it; both survive a reload. */
+export type ProposedTask = {
+  title: string;
+  goal: string;
+  criteria: string[];
+  dependsOn: ProposalDep[];
+  tier?: Tier;
+  taskId?: string;
+  skipped?: boolean;
+};
+export type ChatProposal = { tasks: ProposedTask[] };
+/** What `chat.createProposal` returns: the proposal as recorded and the
+ * tasks this call made, by 1-based row. */
+export type ChatProposalResult = {
+  proposal: ChatProposal;
+  created: { index: number; taskId: string }[];
 };
 export type ChatThread = {
   repo: string;
   id: string;
-  kind: ChatKind;
   createdAt: number;
   /** Set from the session's first owner message; absent until then. */
   title?: string;
@@ -466,32 +489,27 @@ export type ChatThread = {
   busy: boolean;
   note?: string;
   error?: string;
-  /** The latest task the orchestrator proposed, until the owner acts on it
-   * (`chat.clearDraft`). */
-  draft?: ChatDraft;
+  /** The mode of the last message the owner sent; absent means chat. */
+  mode?: ChatMode;
 };
 /** A session as the session list shows it - no message bodies. */
 export type ChatSessionSummary = {
   id: string;
-  kind: ChatKind;
   title?: string;
   busy: boolean;
-  /** The last message's time, or the session's creation; absent from a
-   * daemon older than session kinds. */
+  /** The last message's time, or the session's creation. */
   updatedAt?: number;
   messageCount: number;
 };
-/** One kind's sessions and that kind's current one. */
+/** The repo's sessions and the current one. */
 export type ChatSessionList = {
   current: string;
   sessions: ChatSessionSummary[];
 };
-/** `thread` is the kind's current session, whole; `current`/`sessions` are
- * what `chat.list {kind}` would return at the same moment. */
+/** `thread` is the current session, whole; `current`/`sessions` are what
+ * `chat.list` would return at the same moment. */
 export type ChatEvent = {
   event: "chat";
-  /** Absent from a daemon older than session kinds: its only kind is chat. */
-  kind?: ChatKind;
   thread: ChatThread;
 } & ChatSessionList;
 

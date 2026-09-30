@@ -23,7 +23,6 @@ mod report;
 mod store;
 mod timeline;
 
-use engine::chat;
 use std::path::{Path, PathBuf};
 
 fn main() {

@@ -60,15 +60,16 @@ import {
 } from "./helpers";
 import { needsOwner } from "./ownerAttention";
 import { upsertProposal } from "./improvementsModel";
-import type { ChatMessage, Message, Proposal, Settings, Task } from "./types";
+import type {
+  ChatMessage,
+  ChatMode,
+  Message,
+  Proposal,
+  Settings,
+  Task,
+} from "./types";
 import { Banner, Tag } from "./ui";
 import { OrchRail } from "./OrchRail";
-import {
-  eventKind,
-  isOfKind,
-  listSessions,
-  type KindedList,
-} from "./chatKinds";
 import { Composer, OrchestratorRouteChip, TaskRouteLabel } from "./Composer";
 import { TaskDetail } from "./TaskDetail";
 import { HomeView } from "./HomeView";
@@ -76,7 +77,6 @@ import { ChatView } from "./ChatView";
 import { ImprovementsView } from "./Improvements";
 import { AnalyticsView } from "./Analytics";
 import { PlanView } from "./PlanView";
-import { BrainstormView } from "./BrainstormView";
 
 type DaemonState = DaemonReach;
 
@@ -151,14 +151,12 @@ const VIEW_NAMES: Record<Exclude<View["kind"], "task">, string> = {
   messages: "Chat",
   improvements: "Improvements",
   analytics: "Analytics",
-  brainstorm: "Brainstorm",
   archive: "Archive",
 };
 
 function viewIcon(kind: View["kind"]) {
   switch (kind) {
     case "plan":
-    case "brainstorm":
       return <ListTodo size={14} />;
     case "chat":
     case "messages":
@@ -222,10 +220,9 @@ function OrchestratorBody({
   // Messages segment can show a pending count before it is ever opened.
   const [messages, setMessages] = useState<Message[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  // The session the messages above belong to, and the repo's session list:
-  // only a plain chat's replies count as "new" on the rail, not a brainstorm's.
-  const [chatThreadId, setChatThreadId] = useState("");
-  const [chatSessions, setChatSessions] = useState<KindedList | null>(null);
+  // Asks the chat for a new session with a mode selected (the Plan page's
+  // Brainstorm button); `n` changes on every ask.
+  const [chatStart, setChatStart] = useState<{ mode: ChatMode; n: number }>();
   const [chatSeen, setChatSeen] = useState<number | null>(() =>
     readChatSeen(cwd),
   );
@@ -326,12 +323,7 @@ function OrchestratorBody({
           return;
         }
         if (event.event === "chat") {
-          // A brainstorm's replies are its own; only the plain chat feeds
-          // the rail's "new" count.
-          if (eventKind(event) === "chat" && event.thread.repo === cwd) {
-            setChatMessages(event.thread.messages);
-            setChatThreadId(event.thread.id);
-          }
+          if (event.thread.repo === cwd) setChatMessages(event.thread.messages);
           return;
         }
         if (event.event === "proposal") {
@@ -357,11 +349,7 @@ function OrchestratorBody({
       .then((thread) => {
         if (cancelled) return;
         setChatMessages(thread.messages);
-        setChatThreadId(thread.id);
       })
-      .catch(() => {});
-    listSessions(cwd, "chat", orchestratorClient)
-      .then((list) => !cancelled && setChatSessions(list))
       .catch(() => {});
     orchestratorClient
       .evolutionList(cwd)
@@ -393,12 +381,8 @@ function OrchestratorBody({
       writeChatSeen(cwd, latestChat);
     }
   }, [cwd, chatMessages.length, chatSeen, chatOpen, latestChat]);
-  const chatIsChat =
-    !chatThreadId || isOfKind(chatSessions, chatThreadId, "chat");
   const chatNew =
-    chatSeen === null || chatOpen || !chatIsChat
-      ? 0
-      : unreadChatCount(chatMessages, chatSeen);
+    chatSeen === null || chatOpen ? 0 : unreadChatCount(chatMessages, chatSeen);
 
   useEffect(() => {
     if (focusComposer) composerRef.current?.focus();
@@ -603,10 +587,7 @@ function OrchestratorBody({
       : null;
   // Figma has no composer on Improvements or Analytics.
   const composerMode: "task" | "plan" | "ask" | null =
-    chatKind ||
-    current.kind === "brainstorm" ||
-    current.kind === "improvements" ||
-    current.kind === "analytics"
+    chatKind || current.kind === "improvements" || current.kind === "analytics"
       ? null
       : current.kind === "task"
         ? "ask"
@@ -711,22 +692,13 @@ function OrchestratorBody({
             act={act}
             onSettings={updateSettings}
             onOpen={(id) => open({ kind: "task", id })}
-            onBrainstorm={() => open({ kind: "brainstorm" })}
-          />
-        );
-      case "brainstorm":
-        return (
-          <BrainstormView
-            cwd={cwd}
-            tasks={live.tasks}
-            onCreated={(task) =>
-              setLive((old) => ({
-                ...old,
-                tasks: upsertTask(old.tasks, task),
-              }))
-            }
-            onOpenTask={(id) => open({ kind: "task", id })}
-            onPlan={() => open({ kind: "plan" })}
+            onBrainstorm={() => {
+              setChatStart((old) => ({
+                mode: "brainstorm",
+                n: (old?.n ?? 0) + 1,
+              }));
+              open({ kind: "chat" });
+            }}
           />
         );
       case "archive":
@@ -854,6 +826,7 @@ function OrchestratorBody({
           tasks={tasks}
           pendingMessages={pendingMessages}
           onRouteChange={setOrchestratorRoute}
+          start={chatStart}
           onShow={(kind) => open({ kind })}
         />
         {!chatKind && mainView()}

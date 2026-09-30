@@ -135,10 +135,7 @@ function DraftGroup({
   onOpen: (id: string) => void;
 }) {
   const { task, children } = item;
-  const sub =
-    task.source === "brainstorm"
-      ? `from a brainstorm · split into ${children.length}`
-      : `split into ${children.length}`;
+  const sub = `split into ${children.length}`;
   return (
     <div className="plan-card plan-group">
       <div className="plan-row">

@@ -417,6 +417,7 @@ impl App {
         socket_path: PathBuf,
         orchd_path: String,
     ) -> std::io::Result<Arc<App>> {
+        crate::prompts::set_data_dir(&data_dir);
         let store = Store::new(&data_dir)?;
         let settings = store.load_settings()?;
         let (events_tx, _) = broadcast::channel(1024);

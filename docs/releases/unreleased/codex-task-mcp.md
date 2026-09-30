@@ -1,3 +1,3 @@
 ## Orchestrator
 
-- Tasks that run on Codex now get the MCP servers attached to the task itself (for example a design tool), not only orchd's messages server. Connected tools and the repository's own `.mcp.json` stay Claude-only, because Codex has no hook that asks you before a tool writes.
+- A task that runs on Codex can now use an MCP server attached to the task (for example a design tool): mark it `"codex": true` in the task's `mcp`. Only marked servers reach Codex, never the orchestrator's own bridge, because Codex has no hook that asks you before a tool writes; Claude runs keep getting every task, connected and repository server with writes gated as before.

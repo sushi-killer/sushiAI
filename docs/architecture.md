@@ -74,6 +74,10 @@ flowchart TB
     mcp["orchd mcp<br/>task_* tools, stdio"]
     chatTools["engine/chat_tools.rs<br/>connected MCP servers, OK-card writes"]
     mcpConfig[("owner's MCP config<br/>~/.claude.json, plugins")]
+    prompts[("prompts/orchestrator.yaml<br/>+ data dir prompts.yaml override")]
+    skill[("~/.claude, ~/.codex, ~/.agents skills<br/>sushiai-orchestrator (serve --install-skill)")]
+    chat & mcp -->|prompts| prompts
+    engine -->|installs| skill
     chat --> chatTools
     chatTools -->|read at turn time| mcpConfig
     proto --> engine & chat & audit & insights & evolution & costs

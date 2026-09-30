@@ -548,7 +548,15 @@ class OrchestratorService {
     if (this.closed) throw new Error("orchestrator closed");
     const child = spawn(
       this.binary,
-      ["--data", this.dataDir, "--socket", this.socketPath],
+      // The owner's own daemon installs the sushiai-orchestrator skill; a
+      // test launch never writes into the owner's home.
+      [
+        "--data",
+        this.dataDir,
+        "--socket",
+        this.socketPath,
+        ...(this.stopDaemonOnQuit ? [] : ["--install-skill"]),
+      ],
       {
         detached: true,
         stdio: "ignore",

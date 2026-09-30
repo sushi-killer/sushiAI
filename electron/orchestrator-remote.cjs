@@ -117,7 +117,7 @@ function installPlan(info, want) {
 }
 
 function startScript() {
-  const run = `"${REMOTE_BIN}/orchd" serve --data "$d" --socket "$d/orchd.sock" >>"$d/orchd.log" 2>&1 </dev/null &`;
+  const run = `"${REMOTE_BIN}/orchd" serve --data "$d" --socket "$d/orchd.sock" --install-skill >>"$d/orchd.log" 2>&1 </dev/null &`;
   return `${REMOTE_PATH}
 d="${REMOTE_DATA}"
 mkdir -p "$d"

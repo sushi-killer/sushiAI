@@ -16,7 +16,7 @@ Terminal symbol fallback: Symbols Nerd Font Mono, Nerd Fonts v3.4.0 (https://git
 
 # Prompt attribution
 
-The orchestrator chat's Brainstorm and Plan mode prompts (`orchd/src/chat.rs`) adapt the `brainstorming` and `writing-plans` skills from obra/superpowers (https://github.com/obra/superpowers), licensed under the MIT License. Copyright (c) 2025 Jesse Vincent.
+The orchestrator chat's Brainstorm and Plan mode prompts (`orchd/prompts/orchestrator.yaml`) adapt the `brainstorming` and `writing-plans` skills from obra/superpowers (https://github.com/obra/superpowers), licensed under the MIT License. Copyright (c) 2025 Jesse Vincent.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 

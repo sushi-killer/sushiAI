@@ -721,6 +721,7 @@ pub(super) async fn run_task_loop(
         );
 
         let network_allowed = settings.codex_network;
+        let codex_mcp = tools.codex_servers(&messages_server);
         let req = harness::RunRequest {
             harness: route.harness,
             worktree: &worktree,
@@ -732,7 +733,7 @@ pub(super) async fn run_task_loop(
             mcp_config: Some(&mcp_path),
             settings_path: Some(&settings_path),
             network_allowed,
-            codex_mcp: Some((messages::SERVER, &messages_server)),
+            codex_mcp: &codex_mcp,
             images: &[],
             repo_settings: true,
         };

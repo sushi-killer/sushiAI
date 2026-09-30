@@ -252,3 +252,24 @@ fn a_message_without_a_proposal_or_an_unknown_one_is_refused() {
         assert!(error.contains("no such chat message") || error.contains("proposes no tasks"));
     }
 }
+
+#[test]
+fn a_prompts_yaml_in_the_data_dir_overrides_a_mode_prompt_on_the_next_turn() {
+    let env = spawn();
+    env.say("zzplan please", Some("plan"));
+    assert!(flag_value(&env.argv(), "--append-system-prompt").contains("plan mode"));
+
+    std::fs::write(
+        env.daemon.data_dir.path().join("prompts.yaml"),
+        "# owner override\nplan: |\n  You plan like a pirate.\n",
+    )
+    .unwrap();
+    env.say("zzplan again", Some("plan"));
+    assert_eq!(
+        flag_value(&env.argv(), "--append-system-prompt"),
+        "You plan like a pirate."
+    );
+    // Keys it leaves out keep their defaults.
+    env.say("hello", None);
+    assert!(flag_value(&env.argv(), "--append-system-prompt").contains("task orchestrator"));
+}

@@ -19,6 +19,9 @@ const result = spawnSync(
     "orchd/Cargo.toml",
     "orchd/Cargo.lock",
     "orchd/src",
+    // `include_str!` targets outside src/ (tests/orchd-src-pack.test.cjs).
+    "orchd/prompts",
+    "orchd/skills",
   ],
   { stdio: "inherit", env: { ...process.env, COPYFILE_DISABLE: "1" } },
 );

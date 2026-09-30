@@ -374,7 +374,7 @@ pub(super) fn review_request<'a>(
         mcp_config: Some(mcp_config),
         settings_path: Some(settings_path),
         network_allowed: false,
-        codex_mcp: None,
+        codex_mcp: &[],
         images,
         repo_settings: true,
     }

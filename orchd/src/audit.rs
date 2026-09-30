@@ -315,7 +315,7 @@ mod tests {
                 mcp_config: Some(&mcp),
                 settings_path: Some(&settings_path),
                 network_allowed: false,
-                codex_mcp: None,
+                codex_mcp: &[],
                 images: &[],
                 repo_settings: false,
             });

@@ -9,22 +9,6 @@ use super::chat_tools;
 use super::*;
 use serde::Serialize;
 
-/// The orchestrator agent's role, handed to Claude as an appended system
-/// prompt and to Codex as developer instructions. The tools it gets (read
-/// only, plus the orchd MCP bridge) are what actually keep it from doing the
-/// work itself; this text explains why.
-const ROLE: &str = "You are the owner's task orchestrator in sushiAI. You never change files or run commands yourself: every piece of work becomes an orchd task through the sushiai-orchestrator tools, which run it in an isolated worktree, verify it and report back. Follow that server's instructions. Ask the owner only what only the owner can decide: scope, money, destructive or outward-facing actions, or a choice between designs that changes what gets built. Settle everything else with a sensible default, say in one line which you chose, and go on. You are not woken up between turns, so never promise to watch or report later: say the task is in the Orchestrator panel. Reply briefly, in the language of the owner's latest message, never another one. In text meant for the owner, refer to a task by its title, never by its id, a bare id prefix such as '8ec68f8c', or a run id.\n\nWhen you propose a task for the owner to confirm, or need the owner to choose between options, end your reply with one ```sushi-draft block holding JSON: {\"title\": \"...\", \"goal\": \"...\", \"criteria\": [\"...\"], \"dependsOn\": [\"task ids\"], \"tier\": \"mechanical|standard|hard\", \"questions\": [{\"text\": \"...\", \"options\": [\"...\"]}]}. A block may carry only questions (leave out the title) when you just need an answer. Keep the prose above the block short: the app shows the draft and the questions as cards.";
-
-/// The Brainstorm mode's prompt, in place of [`ROLE`]: it adapts obra/superpowers
-/// `skills/brainstorming` (MIT, see THIRD_PARTY_NOTICES.md). Its tools are
-/// read-only, so it could not create tasks even if it tried; this text says
-/// what it is for.
-const BRAINSTORM: &str = "You are the owner's thinking partner in sushiAI, in brainstorm mode: turn a rough idea into an agreed design before any task exists. First look at what is already there (the repository and existing tasks, through the read-only tools). Then settle what the idea leaves open: whatever the repository, the existing tasks or a sensible default already answers, decide yourself and state the assumption in one line so the owner can overrule it. Ask only what only the owner can decide and what changes the design, exactly one focused question per reply, with 2-4 answer options, never a list of questions; once nothing like that is left, stop asking. When the picture is clear, write your understanding back in a few lines and, when the choice matters, weigh 2-3 approaches with a recommendation. Once the owner agrees on the design, propose the tasks that build it. You never create, start, stop, amend or answer tasks and never change files or run commands: the owner creates tasks from your proposal. Reply briefly, in the language of the owner's latest message, never another one. In text meant for the owner, refer to a task by its title, never by its id, a bare id prefix such as '8ec68f8c', or a run id.\n\nEnd a reply that asks or proposes with one ```sushi-draft block holding JSON. While you are asking: {\"questions\": [{\"text\": \"the one question\", \"options\": [\"2-4 answers\"]}]}. Once the design is agreed: {\"feature\": \"short name of what the tasks build together\", \"tasks\": [{\"title\": \"...\", \"goal\": \"...\", \"criteria\": [\"acceptance criterion\"], \"dependsOn\": [1, \"existing task id\"], \"tier\": \"mechanical|standard|hard\"}]}; a dependsOn entry is the 1-based number of another task in the same list or the id of an existing task. Tasks created together from one list become parts of one feature on one branch. Keep the prose above the block short: the app shows the questions as chips and the tasks as a card.";
-
-/// The Plan mode's prompt: it adapts obra/superpowers `skills/writing-plans`
-/// (MIT, see THIRD_PARTY_NOTICES.md). Read-only tools, like [`BRAINSTORM`].
-const PLAN: &str = "You are the owner's planner in sushiAI, in plan mode: split the owner's goal into small, ordered tasks that can each be verified on its own. Look at the repository and existing tasks first (read-only tools). Every task has a goal, acceptance criteria that name how each is checked (a command, a test, a screenshot), its dependencies and a guess of its tier; order them so each builds on the ones before it and keep them independent where you can. Ask a single focused question only when the goal is ambiguous; otherwise plan straight away. You never create, start, stop, amend or answer tasks and never change files or run commands: the owner creates tasks from your plan. Reply briefly, in the language of the owner's latest message, never another one. In text meant for the owner, refer to a task by its title, never by its id, a bare id prefix such as '8ec68f8c', or a run id.\n\nEnd the reply with one ```sushi-draft block holding JSON: {\"feature\": \"short name of what the tasks build together\", \"tasks\": [{\"title\": \"...\", \"goal\": \"...\", \"criteria\": [\"acceptance criterion and how it is checked\"], \"dependsOn\": [1, \"existing task id\"], \"tier\": \"mechanical|standard|hard\"}]}; a dependsOn entry is the 1-based number of another task in the same list or the id of an existing task. Tasks created together from one list become parts of one feature on one branch. When you must ask instead, the block is {\"questions\": [{\"text\": \"...\", \"options\": [\"2-4 answers\"]}]}. Keep the prose above the block short: the app shows the tasks as a card.";
-
 const SERVER: &str = "sushiai-orchestrator";
 const MAX_MESSAGES: usize = 200;
 const MAX_TEXT: usize = 20_000;
@@ -58,12 +42,13 @@ impl ChatMode {
         *self == ChatMode::Chat
     }
 
-    fn prompt(self) -> &'static str {
-        match self {
-            ChatMode::Chat => ROLE,
-            ChatMode::Brainstorm => BRAINSTORM,
-            ChatMode::Plan => PLAN,
-        }
+    /// This mode's prompt (`prompts/orchestrator.yaml`, overridable).
+    fn prompt(self) -> String {
+        crate::prompts::get(match self {
+            ChatMode::Chat => "chat",
+            ChatMode::Brainstorm => "brainstorm",
+            ChatMode::Plan => "plan",
+        })
     }
 
     /// Brainstorm and Plan only look: they hand the owner a proposal instead
@@ -2147,7 +2132,10 @@ mod tests {
         );
         assert!(at("--allowedTools").contains("mcp__sushiai-orchestrator__orchestrator_reply"));
         assert!(!at("--allowedTools").contains("task_delete"));
-        assert_eq!(at("--append-system-prompt"), ROLE);
+        assert_eq!(
+            at("--append-system-prompt"),
+            crate::prompts::default("chat")
+        );
         assert!(!argv.iter().any(|a| a == "acceptEdits"));
     }
 
@@ -2965,20 +2953,27 @@ mod tests {
 
     #[test]
     fn both_prompts_say_to_name_tasks_by_title_and_the_draft_still_takes_ids() {
-        for prompt in [ROLE, BRAINSTORM, PLAN] {
+        for prompt in [
+            crate::prompts::default("chat"),
+            crate::prompts::default("brainstorm"),
+            crate::prompts::default("plan"),
+        ] {
             assert!(prompt.contains("refer to a task by its title, never by its id"));
             assert!(prompt.contains("'8ec68f8c'"));
         }
-        assert!(ROLE.contains("dependsOn"));
-        assert!(ROLE.contains("only the owner can decide"));
-        assert!(PLAN.contains("language of the owner's latest message"));
-        assert!(ROLE.contains("\"dependsOn\": [\"task ids\"]"));
+        assert!(crate::prompts::default("chat").contains("dependsOn"));
+        assert!(crate::prompts::default("chat").contains("only the owner can decide"));
+        assert!(crate::prompts::default("plan").contains("language of the owner's latest message"));
+        assert!(crate::prompts::default("chat").contains("\"dependsOn\": [\"task ids\"]"));
     }
 
     #[test]
     fn brainstorm_and_plan_turns_carry_their_prompt_and_only_read_only_tools() {
-        for (mode, prompt) in [(ChatMode::Brainstorm, BRAINSTORM), (ChatMode::Plan, PLAN)] {
-            assert_ne!(prompt, ROLE);
+        for (mode, prompt) in [
+            (ChatMode::Brainstorm, crate::prompts::default("brainstorm")),
+            (ChatMode::Plan, crate::prompts::default("plan")),
+        ] {
+            assert_ne!(prompt, crate::prompts::default("chat"));
             for session in [None, Some("sess")] {
                 let claude = claude_argv(
                     &route(Harness::Claude),
@@ -3011,7 +3006,10 @@ mod tests {
                     &chat_tools::TurnTools::default(),
                 );
                 assert!(codex.contains(&format!("developer_instructions={}", json!(prompt))));
-                assert!(!codex.contains(&format!("developer_instructions={}", json!(ROLE))));
+                assert!(!codex.contains(&format!(
+                    "developer_instructions={}",
+                    json!(crate::prompts::default("chat"))
+                )));
             }
         }
     }
@@ -3042,7 +3040,10 @@ mod tests {
             "\"tasks\"",
             "dependsOn",
         ] {
-            assert!(BRAINSTORM.contains(needle), "{needle}");
+            assert!(
+                crate::prompts::default("brainstorm").contains(needle),
+                "{needle}"
+            );
         }
         for needle in [
             "small, ordered tasks",
@@ -3051,7 +3052,7 @@ mod tests {
             "never create, start, stop, amend or answer tasks",
             "\"tasks\"",
         ] {
-            assert!(PLAN.contains(needle), "{needle}");
+            assert!(crate::prompts::default("plan").contains(needle), "{needle}");
         }
     }
 

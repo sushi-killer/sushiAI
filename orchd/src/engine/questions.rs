@@ -102,7 +102,7 @@ pub(super) async fn owner_accepts(
         mcp_config: Some(&mcp_path),
         settings_path: Some(&settings_path),
         network_allowed: false,
-        codex_mcp: None,
+        codex_mcp: &[],
         images: &[],
         repo_settings: true,
     };
@@ -291,7 +291,7 @@ async fn run_triage(
         mcp_config: Some(&mcp_path),
         settings_path: Some(&settings_path),
         network_allowed: false,
-        codex_mcp: None,
+        codex_mcp: &[],
         images: &[],
         repo_settings: true,
     };

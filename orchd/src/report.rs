@@ -156,7 +156,17 @@ fn push_criteria(out: &mut String, task: &Task, facts: &Facts, used: &mut HashSe
     }
 }
 
-fn attempts_line(task: &Task) -> String {
+/// `"<title>: "` when a report covers several tasks; a single-task report
+/// already carries its title in the heading.
+fn owner_prefix(task: &Task, many: bool) -> String {
+    if many {
+        format!("{}: ", task.title)
+    } else {
+        String::new()
+    }
+}
+
+fn attempts_line(task: &Task, many: bool) -> String {
     let attempts: Vec<_> = task
         .attempts
         .iter()
@@ -173,8 +183,8 @@ fn attempts_line(task: &Task) -> String {
         .filter(|a| a.status == AttemptStatus::Failed)
         .count();
     let mut line = format!(
-        "- {}: {} attempt{}",
-        task.title,
+        "- {}{} attempt{}",
+        owner_prefix(task, many),
         attempts.len(),
         if attempts.len() == 1 { "" } else { "s" }
     );
@@ -286,6 +296,7 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
         out.push('\n');
     }
 
+    let many = graph.len() > 1;
     out.push_str("## Assumptions and automatic answers\n\n");
     let mut any = false;
     for task in graph {
@@ -306,8 +317,10 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
                 "overturnable with `task.overturn`".to_string()
             };
             out.push_str(&format!(
-                "- {}: {} -> {} ({who}; {state})\n",
-                task.title, a.question, a.answer
+                "- {}{} -> {} ({who}; {state})\n",
+                owner_prefix(task, many),
+                a.question,
+                a.answer
             ));
         }
     }
@@ -335,7 +348,7 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
 
     out.push_str("\n## Attempts\n\n");
     for task in graph {
-        out.push_str(&attempts_line(task));
+        out.push_str(&attempts_line(task, many));
     }
 
     out.push_str("\n## Follow-ups\n\n");
@@ -351,11 +364,11 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
             .filter(|h| !h.is_empty());
         if let Some(h) = handoff {
             any = true;
-            out.push_str(&format!("- {}: {h}\n", task.title));
+            out.push_str(&format!("- {}{h}\n", owner_prefix(task, many)));
         }
         for f in &task.brief_check.follow_ups {
             any = true;
-            out.push_str(&format!("- {}: {f}\n", task.title));
+            out.push_str(&format!("- {}{f}\n", owner_prefix(task, many)));
         }
     }
     if !any {

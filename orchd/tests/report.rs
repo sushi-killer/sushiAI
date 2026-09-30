@@ -172,6 +172,10 @@ fn lead_touch_is_set_and_cleared_by_the_owner_and_a_rewritten_landing_marks_it_b
         .as_str()
         .unwrap()
         .contains("landed on `work`"));
+    // A single-task report names its task in the heading, not on each line.
+    let report = done["report"].as_str().unwrap();
+    assert!(!report.contains("Add landed:"), "{report}");
+    assert!(report.contains("\n- 1 attempt"), "{report}");
     assert!(done["leadTouch"].is_null(), "{done}");
 
     // A clean landing stays unmarked.

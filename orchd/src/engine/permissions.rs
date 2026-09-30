@@ -154,6 +154,17 @@ pub(super) fn task_tools(
     }
 }
 
+/// A key in a task's server definition that also hands the server to Codex.
+const CODEX_MARK: &str = "codex";
+
+fn without_mark(def: &serde_json::Value) -> serde_json::Value {
+    let mut def = def.clone();
+    if let Some(obj) = def.as_object_mut() {
+        obj.remove(CODEX_MARK);
+    }
+    def
+}
+
 impl TaskTools {
     /// The run's `mcp.json` content: the project's servers, the connected
     /// tools, the task's own (which win over both), then `messages_server`.
@@ -166,10 +177,34 @@ impl TaskTools {
             servers.entry(key.clone()).or_insert_with(|| def.clone());
         }
         for (key, def) in &self.task {
-            servers.insert(key.clone(), def.clone());
+            servers.insert(key.clone(), without_mark(def));
         }
         servers.insert(messages::SERVER.to_string(), messages_server.clone());
         json!({"mcpServers": servers})
+    }
+
+    /// The servers a Codex run gets: the task's own that carry
+    /// `"codex": true` (the task's `mcp.json` also holds the app's snapshot
+    /// of every configured server, so only a marked one was meant for
+    /// Codex) and `messages_server`. Codex has no hook that asks the owner
+    /// before a write, so nothing reaches it unmarked, and never the
+    /// orchestrator's own bridge.
+    pub fn codex_servers(
+        &self,
+        messages_server: &serde_json::Value,
+    ) -> Vec<(String, serde_json::Value)> {
+        let mut servers: Vec<(String, serde_json::Value)> = self
+            .task
+            .iter()
+            .filter(|(key, def)| {
+                def.get(CODEX_MARK) == Some(&json!(true))
+                    && key.as_str() != messages::SERVER
+                    && key.as_str() != "sushiai-orchestrator"
+            })
+            .map(|(key, def)| (key.clone(), without_mark(def)))
+            .collect();
+        servers.push((messages::SERVER.to_string(), messages_server.clone()));
+        servers
     }
 
     /// `permissions.allow` entries for the run: read tools of the connected
@@ -967,7 +1002,16 @@ mod tests {
                 ("p".to_string(), json!({"command": "p"})),
             ]
             .into(),
-            task: [("t".to_string(), json!({"command": "t"}))].into(),
+            task: [
+                ("t".to_string(), json!({"command": "t", "codex": true})),
+                // The app's snapshot of a configured server: Claude-only.
+                ("p".to_string(), json!({"command": "p"})),
+                (
+                    "sushiai-orchestrator".to_string(),
+                    json!({"command": "o", "codex": true}),
+                ),
+            ]
+            .into(),
             granted: vec!["mcp__a__send".into(), "mcp__a__get".into()],
         };
         assert_eq!(tools.allowed(), vec!["mcp__a__get", "mcp__a__send"]);
@@ -976,7 +1020,18 @@ mod tests {
         // The repo's own definition of a server wins over the connected one.
         assert_eq!(servers["a"]["command"], "project");
         assert!(servers.contains_key("p") && servers.contains_key("t"));
+        assert!(servers["t"].get("codex").is_none());
         assert_eq!(servers[messages::SERVER]["command"], "messages");
+        // Codex gets only the task's own servers and the messages server:
+        // it has no hook to ask the owner before a connected tool writes.
+        let codex: Vec<String> = tools
+            .codex_servers(&json!({"command": "messages"}))
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(codex, vec!["t".to_string(), messages::SERVER.to_string()]);
+        let t = &tools.codex_servers(&json!({}))[0].1;
+        assert!(t.get("codex").is_none());
         let block = tools_block(&tools, false);
         assert!(
             block.contains("a: read tools get; write tools send"),

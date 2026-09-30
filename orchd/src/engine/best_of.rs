@@ -327,6 +327,7 @@ where
     let events_a = run_dir.join("events.jsonl");
     let events_b = run_dir_b.join("events.jsonl");
     let variant = task.variant();
+    let codex_mcp_b = tools_b.codex_servers(&prep.messages_server);
     let req_b = harness::RunRequest {
         harness: b_route.harness,
         worktree: &wt_b,
@@ -338,7 +339,7 @@ where
         mcp_config: Some(&prep.mcp_path),
         settings_path: Some(&prep.settings_path),
         network_allowed: settings.codex_network,
-        codex_mcp: Some((messages::SERVER, &prep.messages_server)),
+        codex_mcp: &codex_mcp_b,
         images: &[],
         repo_settings: true,
     };

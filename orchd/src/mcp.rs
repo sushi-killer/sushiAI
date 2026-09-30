@@ -23,82 +23,6 @@ use std::path::{Path, PathBuf};
 /// behavior of its own to gate on.
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
-/// The orchestrator-agent role handed to the client in `initialize`'s
-/// `instructions` field -- this IS the system prompt for whatever harness
-/// attaches orchd as an MCP server.
-const INSTRUCTIONS: &str = "\
-You are the owner's task orchestrator. Turn a request into tasks tracked by \
-orchd -- don't write the code yourself.
-
-- Ask the owner only what only the owner can decide (scope, money, \
-destructive or outward-facing actions, a choice between designs that changes \
-what gets built), one precise question at a time. Settle everything else \
-with a sensible default and say in one line which you chose.
-- A task must change files. Work that only moves git history or only checks \
-something (cherry-picking, creating a branch, running CI) fails as \"No \
-files changed\": give the owner the exact command instead of a task.
-- Prefer task_create with {repo, request, start: true}: the planner drafts \
-title/goal/criteria/verify for you. Use the full {repo, title, goal, \
-criteria, verify} form only when the owner already specified it.
-- A task branches from the repo's current HEAD; pass `base` to start it \
-from another branch (e.g. the feature branch the owner is working on).
-- The planner splits a request too large for one session into subtasks on \
-its own. To build such a graph by hand, create a parent task, then its \
-parts with `parent` set to its id: each part branches from the parent's \
-branch and lands there once done, and the parent is done when every part \
-has landed. Give a part `dependsOn` (task ids) when it builds on another \
-part; it starts only after those are done. Keep parts that edit the same \
-file in one task. Several tasks for one feature belong under one parent, so \
-the feature ships as one branch.
-- To plan without starting, create a top-level task with `backlog` \
-{bucket: \"next\" | \"later\"}; task_backlog {id, bucket} moves an unstarted \
-one between the buckets or out of the backlog (null). The autopilot starts \
-`next` tasks in order; the parts of a backlogged parent wait with it.
-- Use task_list / task_get to check on progress instead of guessing.
-- When a task is `waiting`, answer it yourself with task_answer if the repo \
-or the task's own context already answers the question. Otherwise bring \
-the owner one precise question with concrete options.
-- Never answer a permission question (\"Allow ... for this task?\") with Allow \
-once or Always for this repo: which tools and paths a task may use is the \
-owner's call, as is every write to an outside service.
-- Never answer \"approve\" for a protected-path decision or for committing \
-an attempt the review gave no verdict on, and never call task_stop, on the \
-owner's behalf -- these are the owner's call to make.
-- Never delete tasks; this tool intentionally cannot.
-- Tasks ask you questions without stopping (ask_orchestrator). One reaches \
-you marked as a task's question with its message id: answer it with \
-orchestrator_reply {question, text}. inbox_read shows everything sent to you.
-- peer_send {to, text} messages a task and peer_list {repo} lists a \
-repository's tasks. A task reads a message on its next attempt; the attempt \
-it is running is never interrupted.
-- task_report {id} returns the markdown report of a finished top-level task \
-or graph; task_lead_touch {id, touched, note} records whether a done task's \
-work needed a fix after orchd said done. Mark it only when you or the owner \
-really had to fix the work.
-- repo_audit {repo} starts a read-only audit of how ready a repository is \
-for autonomous agent work. It runs in the background: give the owner the \
-audit id it returns.
-- evolution_run clusters the signals finished tasks left behind and starts \
-read-only proposer runs for the clusters worth acting on. Call it only when \
-the owner asks: nothing proposes on its own. It returns at once \
-with the clusters it started; proposals appear in the owner's evolution list, \
-and the owner approves them. Never approve, reject or adopt one yourself.
-- Repo notes are the owner's standing guidance for a repo, shown to the \
-planner in every plan brief. repo_notes_list shows them; add one with \
-repo_notes_add only when the owner asks, and remove one with \
-repo_notes_remove only when the owner asks.
-";
-
-/// The role handed to a task agent attached through `orchd mcp --task`.
-const TASK_INSTRUCTIONS: &str = "\
-You are one of several task agents working in the same repository, \
-coordinated by orchd. peer_list shows the other tasks, peer_send messages \
-one of them, inbox_read shows what was sent to you, and ask_orchestrator \
-asks the owner's orchestrator a question without stopping your work. \
-Replies and messages reach you with your next attempt's brief, so keep \
-working meanwhile.
-";
-
 /// What a task agent gets (`--task`): only messaging, always as itself.
 pub const TASK_TOOLS: [&str; 4] = [
     // In `tool_specs` order, so a task's tools/list reads the same way.
@@ -200,6 +124,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "dependsOn": {"type": "array", "items": {"type": "string"}, "description": "Ids of tasks in this repo that must be done before this one starts; it starts on its own once they are. A cycle is rejected."},
                     "parent": {"type": "string", "description": "Id of the task this one is a part of: it branches from the parent's branch and lands there when done. The parent runs no implement attempt of its own; a task that already has a running loop is rejected as a parent."},
                     "start": {"type": "boolean", "description": "Start right away (default true); false leaves the task stopped for review."},
+                    "mcp": {"type": "object", "properties": {"mcpServers": {"type": "object"}}, "description": "MCP servers for this task's runs, {\"mcpServers\": {name: {command, args, env} | {url}}}. Claude runs get them with every write asking the owner. A Codex run gets only a server marked \"codex\": true, and nothing gates its writes, so mark only a server the task may use freely and say in the goal what it must not change."},
                     "backlog": {"type": "object", "properties": {"bucket": {"type": "string", "enum": ["next", "later"]}, "order": {"type": "integer"}}, "required": ["bucket"], "description": "Park the task in the plan backlog instead of starting it. Not for a subtask: its parent's place decides."},
                 },
                 "required": ["repo"],
@@ -528,8 +453,14 @@ fn handle_initialize(bridge: &Bridge, params: &Value) -> Value {
         .and_then(|v| v.as_str())
         .unwrap_or(PROTOCOL_VERSION);
     let (name, instructions) = match bridge.task {
-        Some(_) => ("sushiai-messages", TASK_INSTRUCTIONS),
-        None => ("sushiai-orchestrator", INSTRUCTIONS),
+        Some(_) => (
+            "sushiai-messages",
+            crate::prompts::get("mcp_task_instructions"),
+        ),
+        None => (
+            "sushiai-orchestrator",
+            crate::prompts::get("mcp_instructions"),
+        ),
     };
     json!({
         "protocolVersion": protocol_version,
@@ -744,6 +675,7 @@ pub fn run(args: &[String]) -> i32 {
         return 2;
     };
     let data_dir = PathBuf::from(data_dir_arg);
+    crate::prompts::set_data_dir(&data_dir);
     let socket = socket_arg
         .map(PathBuf::from)
         .unwrap_or_else(|| data_dir.join("orchd.sock"));

@@ -18,8 +18,10 @@ mod hook;
 mod loop_detect;
 mod mcp;
 mod model;
+mod prompts;
 mod protocol;
 mod report;
+mod skill;
 mod store;
 mod timeline;
 
@@ -171,6 +173,7 @@ async fn run_hook_inner(
 async fn run_serve(args: &[String]) -> i32 {
     let mut data_dir_arg: Option<String> = None;
     let mut socket_arg: Option<String> = None;
+    let mut install_skill = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -181,6 +184,10 @@ async fn run_serve(args: &[String]) -> i32 {
             "--socket" if i + 1 < args.len() => {
                 socket_arg = Some(args[i + 1].clone());
                 i += 2;
+            }
+            "--install-skill" => {
+                install_skill = true;
+                i += 1;
             }
             _ => i += 1,
         }
@@ -207,6 +214,13 @@ async fn run_serve(args: &[String]) -> i32 {
     if let Err(e) = std::fs::write(&pidfile, std::process::id().to_string()) {
         eprintln!("orchd: cannot write pidfile: {e}");
         return 1;
+    }
+    if install_skill {
+        if let (Some(home), Ok(orchd)) = (std::env::var_os("HOME"), std::env::current_exe()) {
+            if skill::allowed(&orchd) {
+                skill::install(Path::new(&home), &orchd, &data_dir);
+            }
+        }
     }
 
     let orchd_path = std::env::current_exe()

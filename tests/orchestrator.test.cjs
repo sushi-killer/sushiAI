@@ -269,6 +269,28 @@ test("call() reports the daemon as not built rather than hanging on a missing bi
   await assert.rejects(service.call("ping"), new RegExp(NOT_BUILT));
 });
 
+test("a binary that cannot be spawned is a failed start, not an uncaught error", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "orchd-nospawn-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const service = new OrchestratorService({
+    dataDir: directory,
+    root: directory,
+    resourcesPath: directory,
+    packaged: false,
+    send: () => {},
+    spawnRetries: 2,
+    spawnIntervalMs: 10,
+  });
+  // Exists, so it passes the "not built" check, but exec finds no interpreter.
+  service.binary = path.join(directory, "orchd");
+  await fs.writeFile(service.binary, "#!/nonexistent/interpreter\n", {
+    mode: 0o755,
+  });
+  service.socketPath = path.join(directory, "orchd.sock");
+  t.after(() => service.close());
+  await assert.rejects(service.call("ping"), /failed to start/);
+});
+
 test("a packaged app with no daemon says reinstall, not npm run build:orchd", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "orchd-pkg-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

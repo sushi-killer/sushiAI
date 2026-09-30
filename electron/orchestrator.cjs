@@ -557,10 +557,15 @@ class OrchestratorService {
           : process.env,
       },
     );
+    // A binary that vanished (a removed install or data dir) is reported by
+    // the ping loop below as a failed start, never as an uncaught error that
+    // would take down the main process.
+    child.once("error", () => {});
     // Detached and unref'd on purpose: this process must outlive the app.
     child.unref();
     this.spawned = true;
     for (let attempt = 0; attempt < this.spawnRetries; attempt++) {
+      if (this.closed) throw new Error("orchestrator closed");
       await this.#refreshToken();
       try {
         return await orchdRequest(

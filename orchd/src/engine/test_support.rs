@@ -19,6 +19,7 @@ pub(super) fn test_app() -> (Arc<App>, tempfile::TempDir) {
         "orchd".to_string(),
     )
     .unwrap();
+    app.assume_harnesses_installed();
     (app, dir)
 }
 

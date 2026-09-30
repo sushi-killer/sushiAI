@@ -113,6 +113,16 @@ impl App {
             .unwrap_or(false)
     }
 
+    /// Unit tests run against fake harnesses, not whatever CLIs this machine
+    /// happens to have installed.
+    #[cfg(test)]
+    pub(crate) fn assume_harnesses_installed(&self) {
+        let mut cache = self.harness_avail.lock().unwrap();
+        for h in HARNESSES {
+            cache.insert(h, true);
+        }
+    }
+
     /// A spawn found no binary although the probe did: trust the spawn.
     pub(super) fn mark_harness_missing(&self, harness: Harness) {
         self.harness_avail.lock().unwrap().insert(harness, false);

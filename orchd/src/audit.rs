@@ -289,6 +289,7 @@ mod tests {
             "orchd".to_string(),
         )
         .unwrap();
+        app.assume_harnesses_installed();
         (app, dir)
     }
 

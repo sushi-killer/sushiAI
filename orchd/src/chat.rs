@@ -2079,6 +2079,7 @@ mod tests {
             "orchd".to_string(),
         )
         .unwrap();
+        app.assume_harnesses_installed();
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         (app, dir, repo.to_string_lossy().to_string())

@@ -14,10 +14,22 @@ const {
   RUSTUP_COMMAND,
 } = require("../electron/orchestrator-remote.cjs");
 
+// A platform other than this machine's, so the host needs a build, not an
+// upload, on any runner (a Linux x86_64 CI box included).
+const FOREIGN =
+  require("node:child_process")
+    .execFileSync("uname", ["-sm"])
+    .toString()
+    .trim() === "Linux x86_64"
+    ? "Linux aarch64"
+    : "Linux x86_64";
+
 const TOOLS = [
   "cat",
   "mkdir",
   "tar",
+  // GNU tar execs gzip for -z; macOS tar has it built in.
+  "gzip",
   "mv",
   "cp",
   "chmod",
@@ -273,7 +285,7 @@ test("same platform: uploads the local binary, starts it detached and connects w
 });
 
 test("a different platform builds from the source with cargo on the host", async (t) => {
-  const fx = await fixture(t, { platform: "Linux x86_64", cargo: true });
+  const fx = await fixture(t, { platform: FOREIGN, cargo: true });
   const { hosts, id } = await fx.open();
   const tasks = await hosts.call("task.list", {}, id);
   assert.equal(tasks[0].id, "remote-task-1");
@@ -290,7 +302,7 @@ test("a different platform builds from the source with cargo on the host", async
 });
 
 test("a packaged app builds a Linux host from its bundled source tarball", async (t) => {
-  const fx = await fixture(t, { platform: "Linux x86_64", cargo: true });
+  const fx = await fixture(t, { platform: FOREIGN, cargo: true });
   const { hosts, id } = await fx.open({ packaged: true });
   // No "no orchd source" error: the tarball is the source.
   const tasks = await hosts.call("task.list", {}, id);
@@ -321,7 +333,7 @@ test("a packaged app builds a Linux host from its bundled source tarball", async
 });
 
 test("a packaged app without cargo on a Linux host still says how to install Rust", async (t) => {
-  const fx = await fixture(t, { platform: "Linux x86_64", cargo: false });
+  const fx = await fixture(t, { platform: FOREIGN, cargo: false });
   const { hosts, id } = await fx.open({ packaged: true });
   await assert.rejects(
     hosts.call("task.list", {}, id),
@@ -348,7 +360,7 @@ async function rejectedNeedsRust(fx) {
 
 test("one button installs Rust with curl, builds with ~/.cargo/bin/cargo and starts orchd", async (t) => {
   const fx = await fixture(t, {
-    platform: "Linux x86_64",
+    platform: FOREIGN,
     downloader: "curl",
     cc: true,
   });
@@ -379,7 +391,7 @@ test("one button installs Rust with curl, builds with ~/.cargo/bin/cargo and sta
 
 test("one button falls back to wget when the host has no curl", async (t) => {
   const fx = await fixture(t, {
-    platform: "Linux x86_64",
+    platform: FOREIGN,
     downloader: "wget",
   });
   const { hosts, id } = await rejectedNeedsRust(fx);
@@ -392,7 +404,7 @@ test("one button falls back to wget when the host has no curl", async (t) => {
 });
 
 test("one button says so when the host has neither curl nor wget, and Retry runs it again", async (t) => {
-  const fx = await fixture(t, { platform: "Linux x86_64" });
+  const fx = await fixture(t, { platform: FOREIGN });
   const { hosts, id } = await rejectedNeedsRust(fx);
   await assert.rejects(
     hosts.setup(id),
@@ -430,7 +442,7 @@ test("the upload plan never shows or runs the Rust install", async (t) => {
 
 test("one button leaves an existing cargo alone", async (t) => {
   const fx = await fixture(t, {
-    platform: "Linux x86_64",
+    platform: FOREIGN,
     cargo: true,
     downloader: "curl",
   });
@@ -444,7 +456,7 @@ test("one button leaves an existing cargo alone", async (t) => {
 });
 
 test("the one-button setup rejects local and unknown hosts", async (t) => {
-  const fx = await fixture(t, { platform: "Linux x86_64" });
+  const fx = await fixture(t, { platform: FOREIGN });
   const { hosts } = await fx.open();
   await assert.rejects(hosts.setup("local"), /Invalid orchestrator host/);
   await assert.rejects(hosts.setup("ssh:nope"));
@@ -509,7 +521,7 @@ test("an upgrade fails clearly, without recording the new hash, when the old dae
 });
 
 test("a different platform without cargo says how to install Rust", async (t) => {
-  const fx = await fixture(t, { platform: "Linux aarch64", cargo: false });
+  const fx = await fixture(t, { platform: FOREIGN, cargo: false });
   const { hosts, id } = await fx.open();
   await assert.rejects(
     hosts.call("task.list", {}, id),
@@ -521,7 +533,7 @@ test("a different platform without cargo says how to install Rust", async (t) =>
   assert.equal(failed.state, "error");
   // The probe's facts and the preflight reach the setup card even though
   // orchd never started.
-  assert.equal(failed.platform, "Linux aarch64");
+  assert.equal(failed.platform, FOREIGN);
   assert.equal(failed.orchdInstalled, false);
   for (
     let i = 0;

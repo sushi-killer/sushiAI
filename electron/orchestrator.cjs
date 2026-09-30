@@ -241,14 +241,14 @@ function isStalePing(ping, actualBinaryMtimeMs, staleForMs = 0) {
   return !(ping.running > 0) || staleForMs >= STALE_DEFER_MS;
 }
 
-/** Polls `killFn` (default: a zero-signal `kill`, which throws once the pid
- * is gone) until the process exits or `timeoutMs` passes. Best-effort: never
- * rejects, since a stuck old process just means the next call retries. */
 // Task statuses (orchd/src/model.rs TaskStatus) that need no daemon; every
 // other one (drafting, queued, running, waiting, landing) does. An archived
 // task never needs one.
 const FINISHED_STATUSES = new Set(["done", "failed", "stopped"]);
 
+/** Polls `killFn` (default: a zero-signal `kill`, which throws once the pid
+ * is gone) until the process exits or `timeoutMs` passes. Best-effort: never
+ * rejects, since a stuck old process just means the next call retries. */
 async function waitForExit(
   pid,
   {
@@ -1151,7 +1151,8 @@ function registerOrchestratorExtension({ handle, extensions, ...options }) {
     await extensions.ready;
     started = true;
     await apply();
-    if (hosts.on && (await hosts.local.hasPendingTasks()))
+    // Re-check the switch after the scan: it may have been turned off meanwhile.
+    if (hosts.on && (await hosts.local.hasPendingTasks()) && hosts.on)
       await hosts.local.resume().catch(() => {});
   };
   return hosts;

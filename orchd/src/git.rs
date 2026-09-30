@@ -893,6 +893,28 @@ pub fn numstat(repo: &Path, from: &str, to: &str) -> Result<Vec<NumstatEntry>, G
         .collect())
 }
 
+/// Sums numstat entries; a binary file (no line counts) is a file with no
+/// lines.
+pub fn fold_numstat(entries: &[NumstatEntry]) -> crate::model::DiffStat {
+    crate::model::DiffStat {
+        files: entries.len() as u32,
+        added: entries.iter().map(|e| e.1.unwrap_or(0)).sum(),
+        removed: entries.iter().map(|e| e.2.unwrap_or(0)).sum(),
+    }
+}
+
+/// The stat of `git diff --numstat <from> <to>`.
+pub fn range_stat(repo: &Path, from: &str, to: &str) -> Result<crate::model::DiffStat, GitError> {
+    Ok(fold_numstat(&numstat(repo, from, to)?))
+}
+
+/// The worktree's tracked plus untracked, non-ignored content against
+/// `base`: the same tree `worktree_tree` snapshots, diffed with numstat.
+pub fn worktree_diff_stat(worktree: &Path, base: &str) -> Result<crate::model::DiffStat, GitError> {
+    let tree = worktree_tree(worktree)?;
+    range_stat(worktree, base, &tree)
+}
+
 /// `<short sha> <subject>` of each commit in `from..to`, newest first.
 pub fn log_subjects(repo: &Path, from: &str, to: &str) -> Result<Vec<String>, GitError> {
     let range = format!("{from}..{to}");
@@ -1112,6 +1134,24 @@ pub fn delete_branch(repo_root: &Path, branch: &str, task_id: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fold_numstat_counts_binary_files_as_files_without_lines() {
+        let stat = fold_numstat(&[
+            ("a.rs".into(), Some(3), Some(1)),
+            ("logo.png".into(), None, None),
+            ("b.rs".into(), Some(2), Some(0)),
+        ]);
+        assert_eq!(
+            stat,
+            crate::model::DiffStat {
+                files: 3,
+                added: 5,
+                removed: 1
+            }
+        );
+        assert_eq!(fold_numstat(&[]), crate::model::DiffStat::default());
+    }
+
     use super::*;
     use std::process::Command as StdCommand;
 

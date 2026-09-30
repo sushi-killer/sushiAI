@@ -50,12 +50,37 @@ fn follow_up_request(task: &Task, note: &str) -> String {
 
 /// Git facts about the work of a finished task: its landing commit, else the
 /// commits its branch holds over the base it started from.
-fn gather_facts(task: &Task) -> Facts {
-    let repo = Path::new(&task.repo);
-    let (from, to) = match &task.landed_sha {
+/// What the task changed: the landing commit against its parent once landed,
+/// else its branch against its base.
+fn task_range(task: &Task) -> (String, String) {
+    match &task.landed_sha {
         Some(sha) => (format!("{sha}^"), sha.clone()),
         None => (task.base_sha.clone(), task.branch.clone()),
-    };
+    }
+}
+
+/// `task.diff_stat` from git as it stands now; unchanged when git cannot
+/// tell (the branch or the commit is gone).
+pub(super) async fn refresh_diff_stat(task: &mut Task) {
+    let (from, to) = task_range(task);
+    let repo = PathBuf::from(&task.repo);
+    let stat = tokio::task::spawn_blocking(move || git::range_stat(&repo, &from, &to).ok())
+        .await
+        .unwrap_or(None);
+    if stat.is_some() {
+        task.diff_stat = stat;
+    }
+}
+
+/// Stamps a landing: `landed_at` now, and the diff stat of what landed.
+pub(super) async fn record_landing(task: &mut Task) {
+    task.landed_at = Some(now_ms());
+    refresh_diff_stat(task).await;
+}
+
+fn gather_facts(task: &Task) -> Facts {
+    let repo = Path::new(&task.repo);
+    let (from, to) = task_range(task);
     let mut facts = Facts {
         commits: git::log_subjects(repo, &from, &to).unwrap_or_default(),
         files: git::numstat(repo, &from, &to).unwrap_or_default(),

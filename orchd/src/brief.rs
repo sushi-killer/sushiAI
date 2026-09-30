@@ -834,6 +834,7 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
         findings,
         repeated,
         severities: severities.clone(),
+        criteria: Vec::new(),
     };
     let mut any_unmet = false;
     // Any reply that rules on criteria, asked for or not: a PASS that marks
@@ -847,20 +848,24 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
         .flatten()
     {
         let met = met_of(c);
-        if met == Some(true) {
-            continue;
-        }
         let name = c
             .get("criterion")
             .and_then(|x| x.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| c.to_string());
-        let evidence = c
+        let evidence_text = c
             .get("evidence")
             .and_then(|x| x.as_str())
-            .filter(|e| !e.trim().is_empty())
-            .map(|e| format!(" ({e})"))
-            .unwrap_or_default();
+            .filter(|e| !e.trim().is_empty());
+        result.criteria.push(crate::model::CriterionRuling {
+            criterion: name.clone(),
+            met,
+            evidence: evidence_text.map(str::to_string),
+        });
+        if met == Some(true) {
+            continue;
+        }
+        let evidence = evidence_text.map(|e| format!(" ({e})")).unwrap_or_default();
         if met == Some(false) {
             result
                 .findings
@@ -1858,6 +1863,8 @@ mod tests {
             worktree_removed: false,
             visual_criteria: vec![],
             landed_sha: None,
+            landed_at: None,
+            diff_stat: None,
             report: None,
             report_at: None,
             lead_touch: None,
@@ -1950,6 +1957,8 @@ mod tests {
             review_fingerprint: None,
             advisor_fingerprint: None,
             candidates: vec![],
+            criteria_results: vec![],
+            diff_stat: None,
         }
     }
 
@@ -2141,6 +2150,8 @@ mod tests {
             review_fingerprint: None,
             advisor_fingerprint: None,
             candidates: vec![],
+            criteria_results: vec![],
+            diff_stat: None,
         });
         let brief = build_brief(&task, "", "");
         assert!(
@@ -2219,6 +2230,7 @@ mod tests {
             findings: vec!["P1: a.rs:1 - null check missing".into()],
             repeated: Vec::new(),
             severities: Vec::new(),
+            criteria: Vec::new(),
         });
         let mut second = first.clone();
         second.n = 2;
@@ -2235,6 +2247,48 @@ mod tests {
             "{two}"
         );
         assert!(two.contains("\"repeat\":true"), "{two}");
+    }
+
+    #[test]
+    fn parse_review_keeps_every_criterion_ruling_as_data() {
+        let text = "```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[],\"criteria\":[{\"criterion\":\"A works\",\"met\":true,\"evidence\":\"read a.rs\"},{\"criterion\":\"B works\",\"met\":false},{\"criterion\":\"C works\",\"met\":null,\"evidence\":\"  \"}]}\n```";
+        let (r, recorded_as_pass) = parse_review_with_rule(text).unwrap();
+        assert_eq!(
+            r.criteria,
+            vec![
+                crate::model::CriterionRuling {
+                    criterion: "A works".into(),
+                    met: Some(true),
+                    evidence: Some("read a.rs".into()),
+                },
+                crate::model::CriterionRuling {
+                    criterion: "B works".into(),
+                    met: Some(false),
+                    evidence: None,
+                },
+                crate::model::CriterionRuling {
+                    criterion: "C works".into(),
+                    met: None,
+                    evidence: None,
+                },
+            ]
+        );
+        // The verdict and findings are what they were before rulings were kept.
+        assert!(!recorded_as_pass);
+        assert_eq!(r.verdict, crate::model::Verdict::Fail);
+        assert_eq!(
+            r.findings,
+            vec!["Unmet criterion: B works", "Not checked by review: C works"]
+        );
+        let json = serde_json::to_value(&r).unwrap();
+        assert!(json["criteria"][2]["met"].is_null());
+        assert!(json["criteria"][1].get("evidence").is_none());
+        let plain =
+            parse_review("```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```").unwrap();
+        assert!(serde_json::to_value(&plain)
+            .unwrap()
+            .get("criteria")
+            .is_none());
     }
 
     #[test]
@@ -2389,6 +2443,8 @@ mod tests {
             review_fingerprint: None,
             advisor_fingerprint: None,
             candidates: vec![],
+            criteria_results: vec![],
+            diff_stat: None,
         });
         let brief = build_triage_brief(
             &task,
@@ -3238,6 +3294,8 @@ mod tests {
             review_fingerprint: None,
             advisor_fingerprint: None,
             candidates: vec![],
+            criteria_results: vec![],
+            diff_stat: None,
         };
         attempt.changed_files = vec!["a.txt".into()];
         dep.attempts.push(attempt);

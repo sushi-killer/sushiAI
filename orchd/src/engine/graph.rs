@@ -700,6 +700,7 @@ pub(super) async fn land_on_parent(
                     "Land: committed on {} for \"{}\" to continue from",
                     task.branch, next.title
                 ));
+                record_landing(task).await;
                 Landing::Landed
             }
             Err(e) => Landing::Failed {
@@ -754,7 +755,10 @@ pub(super) async fn land_on_parent(
     )
     .await
     {
-        Ok(true) => return Landing::Landed,
+        Ok(true) => {
+            record_landing(task).await;
+            return Landing::Landed;
+        }
         Ok(false) => {}
         Err(landing) => return landing,
     }
@@ -782,6 +786,7 @@ pub(super) async fn land_on_parent(
         Ok(sha) => {
             task.decisions
                 .push(format!("Land: landed on {branch} at {}", short_sha(&sha)));
+            record_landing(task).await;
             Landing::Landed
         }
         Err(e) => failed(

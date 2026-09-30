@@ -1084,6 +1084,13 @@ pub struct Task {
     /// The commit a `variant.land` task put on its base branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landed_sha: Option<String>,
+    /// When the task landed (ms since epoch), set beside `landed_sha`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landed_at: Option<i64>,
+    /// The task's branch against its base (the landing commit against its
+    /// parent once landed); refreshed after each implement attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_stat: Option<DiffStat>,
     /// The markdown report of a finished top-level task (`report.rs`), also
     /// kept in `<data>/tasks/<id>/report.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1296,6 +1303,21 @@ pub struct ReviewResult {
     /// none; findings past the end (criterion rulings) have none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub severities: Vec<Option<u8>>,
+    /// The reviewer's ruling on each criterion it named, `met: true` too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub criteria: Vec<CriterionRuling>,
+}
+
+/// One criterion ruling of a review: `met` is `None` when the reviewer could
+/// not check it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CriterionRuling {
+    pub criterion: String,
+    #[serde(default)]
+    pub met: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
 }
 
 /// Image extensions an evidence screenshot may have, with their MIME types.
@@ -1580,6 +1602,43 @@ pub struct Attempt {
     /// single run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<Candidate>,
+    /// Where each task criterion stands after this implement attempt: one
+    /// entry per criterion, recomputed after its checks and each review.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub criteria_results: Vec<CriterionResult>,
+    /// The worktree against the task's base when the attempt ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_stat: Option<DiffStat>,
+}
+
+/// Files changed and lines added and removed; a binary file counts as a
+/// file with no lines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffStat {
+    pub files: u32,
+    pub added: u64,
+    pub removed: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CriterionStatus {
+    Met,
+    Pending,
+    Failing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CriterionResult {
+    /// Index into `task.criteria`.
+    pub criterion: usize,
+    /// The criterion's text when the result was computed.
+    pub text: String,
+    pub status: CriterionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
 }
 
 /// One of the concurrent runs of a best-of attempt.
@@ -1861,6 +1920,8 @@ mod tests {
             worktree_removed: false,
             visual_criteria: vec![],
             landed_sha: None,
+            landed_at: None,
+            diff_stat: None,
             report: None,
             report_at: None,
             lead_touch: None,
@@ -2100,6 +2161,8 @@ mod tests {
             worktree_removed: false,
             visual_criteria: vec![],
             landed_sha: None,
+            landed_at: None,
+            diff_stat: None,
             report: None,
             report_at: None,
             lead_touch: None,
@@ -2158,6 +2221,8 @@ mod tests {
             worktree_removed: false,
             visual_criteria: flagged.iter().map(|c| c.to_string()).collect(),
             landed_sha: None,
+            landed_at: None,
+            diff_stat: None,
             report: None,
             report_at: None,
             lead_touch: None,
@@ -2242,6 +2307,8 @@ mod tests {
             worktree_removed: false,
             visual_criteria: vec![],
             landed_sha: None,
+            landed_at: None,
+            diff_stat: None,
             report: None,
             report_at: None,
             lead_touch: None,

@@ -302,7 +302,13 @@ fn strip_evidence(finding: &str) -> &str {
 
 /// The criterion an "Unmet criterion: ..." finding is about.
 fn criterion_of(task: &Task, finding: &str) -> Option<usize> {
-    let rest = canon(finding.strip_prefix("Unmet criterion:")?);
+    criterion_index(task, finding.strip_prefix("Unmet criterion:")?)
+}
+
+/// The criterion a plain piece of text (a reviewer's ruling, the tail of an
+/// "Unmet criterion:" finding) names.
+pub(super) fn criterion_index(task: &Task, text: &str) -> Option<usize> {
+    let rest = canon(text);
     if rest.is_empty() {
         return None;
     }

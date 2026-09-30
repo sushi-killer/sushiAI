@@ -630,9 +630,12 @@ pub(super) async fn run_task_loop(
             review_fingerprint: None,
             advisor_fingerprint: None,
             candidates: vec![],
+            criteria_results: vec![],
+            diff_stat: None,
         };
         task.attempts.push(attempt);
         let idx = task.attempts.len() - 1;
+        refresh_criteria_results(&mut task, idx);
         task.status = TaskStatus::Running;
         task.updated_at = now_ms();
         let _ = app.store.save_task(&task);
@@ -835,6 +838,7 @@ pub(super) async fn run_task_loop(
             })
             .await
             .unwrap_or_default();
+            record_diff_stat(&mut task, idx, &worktree, &base_sha).await;
             match fail_and_continue(
                 &app,
                 &task_id,
@@ -868,6 +872,7 @@ pub(super) async fn run_task_loop(
             })
             .await
             .unwrap_or_default();
+            record_diff_stat(&mut task, idx, &worktree, &base_sha).await;
             match fail_and_continue(
                 &app,
                 &task_id,
@@ -959,6 +964,7 @@ pub(super) async fn run_task_loop(
         .await
         .unwrap_or_default();
         task.attempts[idx].changed_files = changed.clone();
+        record_diff_stat(&mut task, idx, &worktree, &base_sha).await;
 
         if task.variant().grounded_checks {
             if let Some(claim) = brief::parse_impossible(&final_text, task.criteria.len()) {
@@ -1158,6 +1164,7 @@ pub(super) async fn run_task_loop(
                     .await
                     .unwrap_or_default();
                     task.attempts[idx].changed_files = changed.clone();
+                    record_diff_stat(&mut task, idx, &worktree, &base_sha).await;
                     if changed.is_empty() {
                         // The base already holds this work: nothing left to commit.
                         task.decisions.push(format!(
@@ -1419,6 +1426,7 @@ pub(super) async fn run_task_loop(
                     failure = detail.map(|d| (FailureKind::Heldout, d));
                 }
             }
+            refresh_criteria_results(&mut task, idx);
             if let Some((kind, detail)) = failure {
                 match fail_and_continue(
                     &app,
@@ -1825,6 +1833,7 @@ pub(super) async fn run_task_loop(
                                 findings: vec![format!("Another attempt was asked for: {answer}")],
                                 repeated: Vec::new(),
                                 severities: Vec::new(),
+                                criteria: Vec::new(),
                             });
                             break;
                         }
@@ -1864,6 +1873,7 @@ pub(super) async fn run_task_loop(
             }
         }
         task.attempts[idx].review = review_result.clone();
+        refresh_criteria_results(&mut task, idx);
 
         if let Some(r) = &review_result {
             if r.verdict == Verdict::Fail {
@@ -1938,6 +1948,18 @@ pub(super) async fn run_task_loop(
             }
             Tail::Return => return,
         }
+    }
+}
+
+/// Records the worktree's diff against `base` on the attempt and the task.
+async fn record_diff_stat(task: &mut Task, idx: usize, worktree: &Path, base: &str) {
+    let (wt, base) = (worktree.to_path_buf(), base.to_string());
+    let stat = tokio::task::spawn_blocking(move || git::worktree_diff_stat(&wt, &base).ok())
+        .await
+        .unwrap_or(None);
+    if stat.is_some() {
+        task.attempts[idx].diff_stat = stat;
+        task.diff_stat = stat;
     }
 }
 
@@ -2357,6 +2379,7 @@ pub(super) async fn finish_attempt(
     match commit_res {
         Ok(Ok(())) => {
             git::delete_wip_ref(worktree, task_id);
+            refresh_diff_stat(task).await;
             task.attempts[idx].status = AttemptStatus::Passed;
             task.attempts[idx].ended_at = Some(now_ms());
             task.status = TaskStatus::Done;

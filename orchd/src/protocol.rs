@@ -269,6 +269,8 @@ mod tests {
             worktree_removed: false,
             visual_criteria: vec![],
             landed_sha: None,
+            landed_at: None,
+            diff_stat: None,
             report: None,
             report_at: None,
             lead_touch: None,

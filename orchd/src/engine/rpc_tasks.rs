@@ -1,5 +1,8 @@
 use super::*;
 
+/// The most lines `task.log` returns: the last ones.
+const TASK_LOG_MAX_LINES: usize = 10_000;
+
 /// Everything `create_task_record` needs for a new task.
 pub(super) struct NewTask {
     pub(super) id: String,
@@ -108,6 +111,91 @@ impl App {
         Ok(serde_json::json!({
             "dataUrl": format!("data:{mime};base64,{}", base64(&bytes)),
         }))
+    }
+
+    /// `task.log {id, attempt, stage}` -> `{lines, truncated}`: the stored
+    /// run of a finished attempt's `plan`, `implement`, `review` or `advisor`
+    /// stage, replayed into the same lines the live `log` event carried.
+    pub(super) async fn handle_task_log(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            id: String,
+            attempt: u32,
+            stage: String,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        validate_task_id(&self.store, &p.id)?;
+        let task = self
+            .store
+            .load_task(&p.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        // A plan attempt and the first implement attempt can share a number:
+        // the stage tells them apart.
+        let wanted = if p.stage == "plan" {
+            Stage::Plan
+        } else {
+            Stage::Implement
+        };
+        if !matches!(
+            p.stage.as_str(),
+            "plan" | "implement" | "review" | "advisor"
+        ) {
+            return Err(format!(
+                "unknown stage {}: plan, implement, review or advisor",
+                p.stage
+            ));
+        }
+        let attempt = match task
+            .attempts
+            .iter()
+            .find(|a| a.n == p.attempt && a.stage == wanted)
+        {
+            Some(a) => a,
+            None if task.attempts.iter().any(|a| a.n == p.attempt) => {
+                return Err(format!("attempt {} has no {} stage", p.attempt, p.stage));
+            }
+            None => return Err(format!("attempt {} not found", p.attempt)),
+        };
+        if attempt.status == AttemptStatus::Running {
+            return Err("the attempt is still running".to_string());
+        }
+        let run_dir = self.store.run_dir(&p.id, p.attempt);
+        let fingerprint_harness =
+            |f: &Option<Fingerprint>| f.as_ref().map_or(attempt.harness, |f| f.harness);
+        let (path, harness) = match p.stage.as_str() {
+            "plan" => (run_dir.join("plan").join("events.jsonl"), attempt.harness),
+            "implement" => (run_dir.join("events.jsonl"), attempt.harness),
+            "review" => (
+                run_dir.join("review").join("events.jsonl"),
+                fingerprint_harness(&attempt.review_fingerprint),
+            ),
+            _ => (
+                run_dir.join("advisor").join("events.jsonl"),
+                fingerprint_harness(&attempt.advisor_fingerprint),
+            ),
+        };
+        let (lines, truncated) = tokio::task::spawn_blocking(move || {
+            let bytes =
+                std::fs::read(&path).map_err(|_| "no stored log for this stage".to_string())?;
+            let text = String::from_utf8_lossy(&bytes);
+            let mut outcome = harness::RunOutcome::default();
+            let mut lines: Vec<String> = text
+                .lines()
+                .filter_map(|l| harness::feed_stream_line(harness, l, &mut outcome))
+                .collect();
+            let truncated = lines.len() > TASK_LOG_MAX_LINES;
+            if truncated {
+                lines.drain(..lines.len() - TASK_LOG_MAX_LINES);
+            }
+            Ok::<_, String>((lines, truncated))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        Ok(json!({"lines": lines, "truncated": truncated}))
     }
 
     pub(super) async fn handle_task_create(
@@ -447,6 +535,8 @@ impl App {
             worktree_removed: false,
             visual_criteria: vec![],
             landed_sha: None,
+            landed_at: None,
+            diff_stat: None,
             report: None,
             report_at: None,
             lead_touch: None,

@@ -559,6 +559,7 @@ mod tests {
             findings: findings.iter().map(|f| f.to_string()).collect(),
             repeated: Vec::new(),
             severities: Vec::new(),
+            criteria: Vec::new(),
         });
         a
     }

@@ -38,6 +38,7 @@ mod base_check;
 mod best_of;
 mod brief_check;
 mod cost;
+mod criteria;
 mod decision;
 mod finding_judge;
 mod graph;
@@ -70,6 +71,7 @@ use base_check::*;
 use best_of::*;
 use brief_check::*;
 use cost::*;
+use criteria::*;
 use decision::*;
 use finding_judge::*;
 use graph::*;
@@ -79,6 +81,7 @@ use leases::*;
 use lines::*;
 use plan::*;
 use questions::*;
+use reports::*;
 use review::*;
 use routing::*;
 use rpc_tasks::*;
@@ -596,6 +599,7 @@ impl App {
                 crate::timeline::timeline_json(&self.store, id)
             }
             "task.evidence" => self.handle_task_evidence(params).await,
+            "task.log" => self.handle_task_log(params).await,
             "failures.catalogue" => crate::timeline::catalogue_json(&self.store, &params),
             "chat.get" => chat::handle_get(self, params).await,
             "chat.send" => chat::handle_send(self, params).await,

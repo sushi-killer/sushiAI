@@ -70,6 +70,7 @@ pub(super) async fn land_on_base(
             task.landed_sha = tokio::task::spawn_blocking(move || git::resolve_commit(&r, &b).ok())
                 .await
                 .unwrap_or(None);
+            record_landing(task).await;
             return Landing::Landed;
         }
         Ok(false) => {}
@@ -101,6 +102,7 @@ pub(super) async fn land_on_base(
             task.landed_sha = Some(sha.clone());
             task.decisions
                 .push(format!("Land: landed on {branch} at {}", short_sha(&sha)));
+            record_landing(task).await;
             run_after_land(task, &checkout, &after_land).await;
             Landing::Landed
         }

@@ -4,6 +4,48 @@ const { quote } = require("../connections.cjs");
 const { openHerdrStream, detectAgent } = require("../terminal-stream.cjs");
 const { terminalEnvironment } = require("../terminal-text.cjs");
 const { storeTerminalAttachment } = require("../terminal-attachments.cjs");
+const { spawn } = require("node:child_process");
+
+function remoteEnvPayload(env) {
+  return Object.entries(env || {})
+    .map(([name, value]) => `export ${name}=${quote(value)}`)
+    .join("\n");
+}
+
+function remoteEnvBootstrap(cwd, command, envPath, tokenPath = null) {
+  const envSetup = envPath
+    ? `trap 'rm -f ${quote(envPath)}${tokenPath ? ` ${quote(tokenPath)}` : ""}' EXIT HUP INT TERM; . ${quote(envPath)}; rm -f ${quote(envPath)};`
+    : "";
+  const tokenSetup = tokenPath
+    ? `exec 3<${quote(tokenPath)}; rm -f ${quote(tokenPath)}; export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3;`
+    : "";
+  const shell = `${envSetup} ${tokenSetup} cd ${quote(cwd)} && exec ${command ? quote(command) : '"${SHELL:-/bin/sh}" -l'}`;
+  return {
+    shell,
+  };
+}
+
+function uploadRemoteFile(binary, args, payload) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(binary, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let output = "";
+    let error = "";
+    proc.stdout.setEncoding("utf8");
+    proc.stderr.setEncoding("utf8");
+    proc.stdout.on("data", (chunk) => (output += chunk));
+    proc.stderr.on("data", (chunk) => (error += chunk));
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      if (code !== 0) return reject(new Error(error || `ssh exited ${code}`));
+      resolve(output.trim());
+    });
+    proc.stdin.end(payload);
+  });
+}
+
+function remoteFileCommand() {
+  return 'umask 077; f=$(mktemp); cat > "$f"; chmod 600 "$f"; printf \'%s\' "$f"';
+}
 
 function claudeFdLaunch(binary, tokenPath) {
   return {
@@ -72,6 +114,7 @@ function registerTerminalIpc({
           exited: terminals.get(panelId).exited,
         };
       const connections = getConnections();
+      let remoteEnvBootstrapData;
       if (herdrId) {
         id(herdrId);
         if (terminalPending.has(panelId)) {
@@ -125,11 +168,53 @@ function registerTerminalIpc({
       let args = command ? [] : ["-l"];
       if (remote) {
         binary = "/usr/bin/ssh";
+        const projectEnv =
+          projects && projectId
+            ? await projects.environmentFor(projectId, "agent", endpoint)
+            : {};
+        let subscriptionToken = null;
+        const trustedProjectHost = projectId
+          ? (await projects?.get(projectId))?.hosts?.[endpoint]?.trusted
+          : false;
+        if (
+          trustedProjectHost &&
+          claudeAccountId &&
+          command === "claude" &&
+          stageClaudeAccount
+        ) {
+          const staged = await stageClaudeAccount(claudeAccountId);
+          if (staged.kind === "subscription" && staged.tokenPath) {
+            subscriptionToken = await fs.readFile(staged.tokenPath, "utf8");
+            await fs.unlink(staged.tokenPath).catch(() => {});
+          }
+        }
+        const sshArgs = [...connections.args(remote), "-T", remote.host];
+        const envPayload = remoteEnvPayload(projectEnv);
+        const envPath = envPayload
+          ? await uploadRemoteFile(
+              binary,
+              [...sshArgs, remoteFileCommand()],
+              envPayload,
+            )
+          : null;
+        const tokenPath = subscriptionToken
+          ? await uploadRemoteFile(
+              binary,
+              [...sshArgs, remoteFileCommand()],
+              subscriptionToken,
+            )
+          : null;
+        remoteEnvBootstrapData = remoteEnvBootstrap(
+          cwd,
+          command,
+          envPath,
+          tokenPath,
+        );
         args = [
           ...connections.args(remote),
           "-tt",
           remote.host,
-          `export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; cd ${quote(cwd)} && exec ${command ? quote(command) : '"${SHELL:-/bin/sh}" -l'}`,
+          `export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; ${remoteEnvBootstrapData.shell}`,
         ];
       }
       if (!binary)
@@ -287,4 +372,11 @@ function registerTerminalIpc({
   };
 }
 
-module.exports = { registerTerminalIpc, claudeFdLaunch };
+module.exports = {
+  registerTerminalIpc,
+  claudeFdLaunch,
+  remoteEnvBootstrap,
+  remoteEnvPayload,
+  uploadRemoteFile,
+  remoteFileCommand,
+};

@@ -532,6 +532,48 @@ test("secrets.set is always pushed, even to clear it: no profiles means profiles
   });
 });
 
+test("remote orchd receives only trusted project values and project MCP config", async (t) => {
+  const { socketPath, directory, calls } = await fixtureServer(t, {
+    ping: () => ({}),
+    "settings.get": () => ({ routes: [] }),
+    "secrets.set": () => ({}),
+    "task.create": (params) => params,
+  });
+  const host = "ssh:devbox-id";
+  const project = { id: "project-1", mcp: { lookup: { command: "lookup" } } };
+  const service = await serviceAgainst(t, socketPath, directory, {
+    host,
+    remote: {
+      ensure: async () => ({ socketPath, token: "test-token" }),
+      reopen() {},
+      close() {},
+    },
+    getProjects: () => ({
+      get: async (id) => (id === project.id ? project : null),
+      agentEnvironments: async (target) =>
+        target === host ? { [project.id]: { PROJECT_KEY: "invented" } } : {},
+      mcpEnvironments: async (target) =>
+        target === host
+          ? { [project.id]: { LOOKUP_TOKEN: "invented-mcp" } }
+          : {},
+    }),
+  });
+  const result = await service.call("task.create", {
+    repo: "/home/user/sushiai/demo",
+    projectId: project.id,
+    title: "remote task",
+  });
+  assert.equal(result.projectId, project.id);
+  assert.deepEqual(result.mcp.mcpServers, project.mcp);
+  const secrets = calls.find((call) => call.method === "secrets.set");
+  assert.deepEqual(secrets.params, {
+    profiles: {},
+    accounts: {},
+    projects: { [project.id]: { PROJECT_KEY: "invented" } },
+    projectMcp: { [project.id]: { LOOKUP_TOKEN: "invented-mcp" } },
+  });
+});
+
 test("connect() relays subscribe events and raises one notice per (task, question)", async (t) => {
   const { socketPath, directory, hasSubscriber, pushEvent } =
     await fixtureServer(t, {

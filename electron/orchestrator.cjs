@@ -598,10 +598,14 @@ class OrchestratorService {
 
   async #withMcp(params) {
     // The project's .mcp.json lives on this machine; a remote repo path has none here.
-    if (this.remote || typeof params?.repo !== "string") return params;
+    if (typeof params?.repo !== "string") return params;
     if (this.getProjects) {
       try {
-        const project = await this.getProjects().resolveDirectory(params.repo);
+        const project = params.projectId
+          ? await this.getProjects().get(params.projectId)
+          : this.remote
+            ? null
+            : await this.getProjects().resolveDirectory(params.repo);
         if (project) {
           params = { ...params, projectId: project.id };
           if (Object.keys(project.mcp || {}).length) {
@@ -631,9 +635,7 @@ class OrchestratorService {
    * `profiles` is every route's resolved model-profile env + key. Nothing
    * is staged to disk - `resolveEnv` hands the env map and key back in memory. */
   async #pushSecrets() {
-    // API keys never leave this machine: a remote daemon uses the harness
-    // logins already on its host.
-    if (this.remote || !this.getModelProviders) return;
+    if (!this.getProjects && (this.remote || !this.getModelProviders)) return;
     let settings;
     try {
       settings = await orchdRequest(
@@ -646,7 +648,10 @@ class OrchestratorService {
     } catch {
       return;
     }
-    const providers = this.getModelProviders();
+    // Provider and subscription credentials stay on this machine. Project
+    // values are resolved per host, which enforces the explicit trust grant.
+    const providers =
+      !this.remote && this.getModelProviders ? this.getModelProviders() : null;
     const profileIds = [
       ...new Set(
         (settings?.routes || [])
@@ -656,7 +661,7 @@ class OrchestratorService {
     ];
     const profiles = {};
     const accounts = {};
-    for (const id of profileIds) {
+    for (const id of providers ? profileIds : []) {
       try {
         const { settings: env, key } = await providers.resolveEnv(id);
         profiles[id] = { env, key };
@@ -665,11 +670,13 @@ class OrchestratorService {
         // to the tier's plain route, per the profile-fallback contract.
       }
     }
-    for (const id of new Set(
-      (settings?.routes || [])
-        .map((route) => route.accountId)
-        .filter((id) => typeof id === "string" && id),
-    )) {
+    for (const id of providers
+      ? new Set(
+          (settings?.routes || [])
+            .map((route) => route.accountId)
+            .filter((id) => typeof id === "string" && id),
+        )
+      : []) {
       try {
         accounts[id] = await providers.resolveClaudeAccount(id);
       } catch {
@@ -684,12 +691,12 @@ class OrchestratorService {
         accounts,
         projects: this.getProjects
           ? await this.getProjects()
-              .agentEnvironments()
+              .agentEnvironments(this.remote ? this.host : "local")
               .catch(() => ({}))
           : {},
         projectMcp: this.getProjects
           ? await this.getProjects()
-              .mcpEnvironments()
+              .mcpEnvironments(this.remote ? this.host : "local")
               .catch(() => ({}))
           : {},
       },
@@ -1176,7 +1183,7 @@ function createOrchestratorHosts({
         send,
         notify,
         onTask,
-        getProjects: undefined,
+        getProjects,
         remote: new RemoteOrchd({
           connections: getConnections(),
           endpoint: host,

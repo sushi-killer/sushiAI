@@ -297,20 +297,20 @@ class Projects {
     }
   }
 
-  async agentEnvironments() {
+  async agentEnvironments(host = "local") {
     const projects = await this.#read(this.projectsFile);
     const output = {};
     for (const project of Object.values(projects)) {
-      output[project.id] = await this.environmentFor(project.id, "agent");
+      output[project.id] = await this.environmentFor(project.id, "agent", host);
     }
     return output;
   }
 
-  async mcpEnvironments() {
+  async mcpEnvironments(host = "local") {
     const projects = await this.#read(this.projectsFile);
     const output = {};
     for (const project of Object.values(projects)) {
-      output[project.id] = await this.environmentFor(project.id, "mcp");
+      output[project.id] = await this.environmentFor(project.id, "mcp", host);
     }
     return output;
   }

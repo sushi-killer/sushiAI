@@ -35,6 +35,7 @@ flowchart TB
       extMgr["extensions/*<br/>manifest validator"]
       herdrIpc["herdr.cjs, connections.cjs"]
       remoteSvc["orchestrator-remote.cjs<br/>install, start, forward, preflight<br/>per SSH profile"]
+      projectStore[("projects.json + project-secrets.json<br/>metadata + safeStorage values")]
       attention["attention.cjs<br/>tray, Dock badge, notifications,<br/>close-to-menu-bar, app preferences"]
       mascotSvc["mascot.cjs<br/>mascot window, notice queue,<br/>mascot-* IPC, presenting watch"]
       winState["window-state.cjs<br/>bounds, display, maximized"]
@@ -43,6 +44,7 @@ flowchart TB
     end
     orchPanel <--> preload <--> orchSvc
     orchSvc --> remoteSvc --> herdrIpc
+    projectStore -->|trusted host values over forwarded socket;<br/>SSH terminal values via one-shot stdin file| remoteOrchd
     inbox -->|attention-badge, attention-notify| preload --> attention
     wsState <-->|workspace-state-read / -flush sendSync,<br/>-write invoke| preload <--> wsSnap
     orchSvc -->|task notice| attention
@@ -113,6 +115,7 @@ flowchart TB
   side --> repo
   herdrIpc <--> herdr
   remoteSvc <-->|shared ssh master,<br/>forwarded orchd.sock + token| remoteOrchd[("orchd on an SSH host<br/>detached, outlives the app")]
+  remoteOrchd -->|task agent env + project MCP| taskAgent
 ```
 
 ## 2. Task lifecycle

@@ -34,6 +34,7 @@ import {
 } from "../workspace/worktree.ts";
 import type {
   ClaudeAccount,
+  CodexAccount,
   ModelProfile,
   PanelKind,
   Project,
@@ -138,6 +139,10 @@ export function PanelPickerDialog({
   const [starting, setStarting] = useState<string | null>(null);
   const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([]);
   const [claudeAccounts, setClaudeAccounts] = useState<ClaudeAccount[]>([]);
+  const [codexAccounts, setCodexAccounts] = useState<CodexAccount[]>([]);
+  const [selectedCodexAccountId, setSelectedCodexAccountId] = useState("");
+  const codexTouched = useRef(false);
+  const [codexMenu, setCodexMenu] = useState(false);
   // Only a Herdr-backed workspace has a choice to offer.
   const herdrWorkspace = Boolean(active.herdrId) && connected;
   const [backend, setBackend] = useState<"herdr" | "local">("herdr");
@@ -158,6 +163,10 @@ export function PanelPickerDialog({
       .catch(() => {});
     window.bridge?.modelProfilesList().then(setModelProfiles);
     window.bridge?.claudeAccountsList().then(setClaudeAccounts);
+    window.bridge
+      ?.codexAccountsList()
+      .then(setCodexAccounts)
+      .catch(() => {});
   }, []);
   useEffect(() => {
     let live = true;
@@ -177,6 +186,8 @@ export function PanelPickerDialog({
         // The project's own account is the default for a new session.
         if (!accountTouched.current)
           setSelectedClaudeAccountId(found?.sessions.claudeAccount || "");
+        if (!codexTouched.current)
+          setSelectedCodexAccountId(found?.sessions.codexAccount || "");
       })
       .catch(() => live && setProject(null));
     return () => {
@@ -310,7 +321,13 @@ export function PanelPickerDialog({
           : undefined,
         // "" is a deliberate "none": the host's own login, not the
         // project's account.
-        agent === "claude" ? selectedClaudeAccountId : undefined,
+        agent === "claude"
+          ? selectedClaudeAccountId
+          : agent === "codex" && codexTouched.current
+            ? selectedCodexAccountId
+            : // Untouched: the main process applies the project's account,
+              // and the host's login when that one cannot run.
+              undefined,
         backend,
         targetWorkspaceId,
         worktreeArg,
@@ -322,6 +339,7 @@ export function PanelPickerDialog({
       backend,
       modelProfiles,
       selectedClaudeAccountId,
+      selectedCodexAccountId,
       selectedModelProfileId,
       targetWorkspaceId,
       worktreeArg,
@@ -500,6 +518,15 @@ export function PanelPickerDialog({
   );
   const keys = claudeAccounts.filter((item) => item.kind === "apiKey");
   const remoteNote = targetIsSsh ? launchLabel : "";
+  const codexAccount = codexAccounts.find(
+    (item) => item.id === selectedCodexAccountId,
+  );
+  const codexLabel = codexAccount?.label || "Signed-in account";
+  const pickCodex = (id: string) => {
+    codexTouched.current = true;
+    setSelectedCodexAccountId(id);
+    setCodexMenu(false);
+  };
 
   if (starting && setupProfile && project)
     return (
@@ -836,6 +863,79 @@ export function PanelPickerDialog({
                           onClick={() => openSettings("providers")}
                         >
                           Add a subscription or a key in Settings → Providers
+                        </button>
+                      </div>
+                    )}
+                  </span>
+                )}
+                {agent === "codex" && (
+                  <span className="pk-account">
+                    <button
+                      type="button"
+                      className={`picker-account-chip${codexMenu ? " open" : ""}`}
+                      aria-haspopup="menu"
+                      aria-expanded={codexMenu}
+                      aria-label={`Codex account: ${codexLabel}`}
+                      onClick={() => setCodexMenu((open) => !open)}
+                    >
+                      {codexLabel}
+                      <ChevronDown size={11} aria-hidden />
+                    </button>
+                    {codexMenu && (
+                      <div
+                        className="picker-account-menu"
+                        role="menu"
+                        aria-label="Codex runs as"
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            event.stopPropagation();
+                            setCodexMenu(false);
+                          }
+                        }}
+                      >
+                        <div className="pk-menu-group">Codex runs as</div>
+                        {codexAccounts.map((item) => (
+                          <button
+                            key={item.id}
+                            role="menuitemradio"
+                            aria-checked={selectedCodexAccountId === item.id}
+                            className="pk-menu-item"
+                            onClick={() =>
+                              pickCodex(
+                                selectedCodexAccountId === item.id
+                                  ? ""
+                                  : item.id,
+                              )
+                            }
+                          >
+                            <span className="pk-text">
+                              <strong>{item.label}</strong>
+                              <small
+                                className={item.signedIn ? "" : "is-warning"}
+                              >
+                                {!item.signedIn
+                                  ? "Not signed in · sign in from Settings first"
+                                  : remoteNote
+                                    ? item.mode === "chatgpt"
+                                      ? `Login copied to ${remoteNote} for this session · may ask to sign in again later`
+                                      : `Key sent to ${remoteNote} for this session`
+                                    : `${item.mode === "apiKey" ? "API key" : "ChatGPT"}${item.detail ? ` · ${item.detail}` : ""}`}
+                              </small>
+                            </span>
+                            {selectedCodexAccountId === item.id && (
+                              <Check size={12} aria-hidden />
+                            )}
+                          </button>
+                        ))}
+                        {codexAccounts.length > 0 && (
+                          <div className="pk-menu-rule" />
+                        )}
+                        <button
+                          role="menuitem"
+                          className="pk-menu-foot"
+                          onClick={() => openSettings("providers")}
+                        >
+                          Add a Codex account in Settings → Providers
                         </button>
                       </div>
                     )}

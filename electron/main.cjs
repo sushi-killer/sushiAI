@@ -24,6 +24,7 @@ const { manageSkill } = require("./skills-manager.cjs");
 const { ClaudeMcp } = require("./claude-mcp.cjs");
 const { ClaudePlugins } = require("./claude-plugins.cjs");
 const { ModelProviders } = require("./model-providers.cjs");
+const { CodexAccounts } = require("./codex-accounts.cjs");
 const { Projects } = require("./projects.cjs");
 const { AgentRegistry } = require("./agents/registry.cjs");
 const { HermesProvider } = require("./agents/hermes-provider.cjs");
@@ -101,6 +102,10 @@ agents.register(
 const modelProviders = new ModelProviders({
   userDataDir: app.getPath("userData"),
   safeStorage,
+});
+const codexAccounts = new CodexAccounts({
+  userDataDir: app.getPath("userData"),
+  codexBinary: () => executable("codex"),
 });
 const projects = new Projects({
   userDataDir: app.getPath("userData"),
@@ -200,6 +205,10 @@ const terminalIpc = registerTerminalIpc({
     id(accountId);
     return modelProviders.resolveClaudeAccount(accountId);
   },
+  resolveCodexAccount: (accountId) => {
+    id(accountId);
+    return codexAccounts.resolve(accountId);
+  },
   resolveModel: (profileId) => {
     id(profileId);
     return modelProviders.resolveEnv(profileId);
@@ -229,6 +238,7 @@ registerAppIpc({
   claudeMcp,
   claudePlugins,
   modelProviders,
+  codexAccounts,
   executable,
   scanLocalSkills,
   manageSkill,

@@ -3315,18 +3315,27 @@ iframe {
 .claude-accounts > .muted {
   font-size: 11px;
 }
-.claude-account-row {
+/* A form row: outranks `.modal form`, which stacks a form as a column. */
+.providers-settings .claude-account-row {
   display: grid;
-  grid-template-columns:
-    minmax(100px, 1fr) minmax(90px, auto) minmax(150px, 2fr)
-    auto auto;
+  margin-top: 0;
+  grid-template-columns: 120px 160px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
   padding: 8px 0;
   border-top: 1px solid #333;
 }
+.providers-settings .codex-account-row {
+  grid-template-columns: 120px 160px minmax(0, 1fr) auto auto auto;
+}
 .claude-account-row > strong {
   font-size: 11px;
+}
+.claude-account-row > strong,
+.claude-account-row > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .claude-account-row > span {
   font-size: 10px;

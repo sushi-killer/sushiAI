@@ -14,6 +14,7 @@ function registerAppIpc({
   claudeMcp,
   claudePlugins,
   modelProviders,
+  codexAccounts,
   executable,
   scanLocalSkills,
   manageSkill,
@@ -194,6 +195,12 @@ function registerAppIpc({
   handle("claude-accounts-delete", (id) =>
     modelProviders.deleteClaudeAccount(id),
   );
+  handle("codex-accounts-list", () => codexAccounts.list());
+  handle("codex-accounts-add", (label) => codexAccounts.add(label));
+  handle("codex-accounts-login", (id, apiKey) =>
+    codexAccounts.login(id, apiKey),
+  );
+  handle("codex-accounts-delete", (id) => codexAccounts.remove(id));
   handle("providers-upsert", (input) => modelProviders.upsertProvider(input));
   handle("providers-delete", (providerId) =>
     modelProviders.deleteProvider(providerId),

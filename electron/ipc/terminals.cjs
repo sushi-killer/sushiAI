@@ -9,6 +9,7 @@ const {
   projectForFolder,
   sessionEnvPrefix,
   sessionAccountId,
+  codexAccountFor,
   accountLaunch,
   CODEX_SESSION,
   localCodexAuth,
@@ -105,6 +106,7 @@ function registerTerminalIpc({
   stageModelSettings,
   stageClaudeAccount,
   resolveClaudeAccount,
+  resolveCodexAccount,
   resolveModel,
   codexAuth = localCodexAuth,
   projects,
@@ -114,8 +116,16 @@ function registerTerminalIpc({
   // are handed over as a one-shot file whose sourcing is typed into the pane.
   handle(
     "project-session-env",
-    async ({ endpoint, cwd, claudeAccountId, agent, modelProfileId }) => {
+    async ({
+      endpoint,
+      cwd,
+      claudeAccountId,
+      codexAccountId,
+      agent,
+      modelProfileId,
+    }) => {
       if (claudeAccountId) id(claudeAccountId);
+      if (codexAccountId) id(codexAccountId);
       if (modelProfileId) id(modelProfileId);
       const connections = getConnections();
       const sshFor = (host) => {
@@ -140,10 +150,18 @@ function registerTerminalIpc({
               () => {},
             ),
           resolveAccount: resolveClaudeAccount,
+          resolveCodexAccount,
           resolveModel,
           codexAuth,
         },
-        { endpoint, cwd, claudeAccountId, agent, modelProfileId },
+        {
+          endpoint,
+          cwd,
+          claudeAccountId,
+          codexAccountId,
+          agent,
+          modelProfileId,
+        },
       );
     },
   );
@@ -182,9 +200,11 @@ function registerTerminalIpc({
       herdrId,
       modelProfileId,
       claudeAccountId,
+      codexAccountId,
       projectId,
     }) => {
       id(panelId);
+      if (codexAccountId) id(codexAccountId);
       if (terminals.has(panelId))
         return {
           history: terminals.get(panelId).history,
@@ -267,12 +287,24 @@ function registerTerminalIpc({
           command === "claude" && !modelProfileId
             ? sessionAccountId(ownProject, sendToHost, claudeAccountId)
             : undefined;
-        // Codex on the local login, for this session only (CODEX_SESSION).
+        // Codex as the picked or the project's account, else on the local
+        // login on a host with none, for this session only (CODEX_SESSION).
         let launchShell = "";
         if (command === "codex" && !withheld) {
-          const auth = await codexAuth();
+          const account = await codexAccountFor(
+            resolveCodexAccount,
+            sessionAccountId(
+              ownProject,
+              sendToHost,
+              codexAccountId,
+              "codexAccount",
+            ),
+            codexAccountId,
+          );
+          const auth = account?.auth || (await codexAuth());
           if (auth) {
             projectEnv.SUSHIAI_CODEX_AUTH = auth;
+            if (account) projectEnv.SUSHIAI_CODEX_FORCE = "1";
             launchShell = CODEX_SESSION;
           }
         }
@@ -342,6 +374,19 @@ function registerTerminalIpc({
       let accountTokenPath;
       const project =
         !remote && projects ? await projects.resolveDirectory(cwd) : null;
+      const codexAccount =
+        command === "codex" && !remote
+          ? await codexAccountFor(
+              resolveCodexAccount,
+              sessionAccountId(
+                projectId && projects ? await projects.get(projectId) : project,
+                true,
+                codexAccountId,
+                "codexAccount",
+              ),
+              codexAccountId,
+            )
+          : null;
       if (claudeAccountId && command === "claude" && !remote) {
         const staged = await stageClaudeAccount(claudeAccountId);
         accountSettingsPath = staged.settingsPath;
@@ -373,6 +418,7 @@ function registerTerminalIpc({
             ...(!remote && projects && (projectId || project?.id)
               ? await projects.environmentFor(projectId || project.id, "agent")
               : {}),
+            ...(codexAccount ? { CODEX_HOME: codexAccount.home } : {}),
           },
         });
       } catch (error) {

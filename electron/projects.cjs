@@ -249,6 +249,7 @@ class Projects {
       },
       sessions: {
         claudeAccount: input.sessions?.claudeAccount,
+        codexAccount: input.sessions?.codexAccount,
         backend: input.sessions?.backend,
       },
       targets: Array.isArray(input.targets) ? input.targets.map(String) : [],

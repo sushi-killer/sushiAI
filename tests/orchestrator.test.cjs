@@ -500,6 +500,7 @@ test("settings.set pushes a full-replace secrets.set: each route's resolved prof
     },
     projects: {},
     projectMcp: {},
+    projectRepos: {},
   });
 });
 
@@ -529,6 +530,7 @@ test("secrets.set is always pushed, even to clear it: no profiles means profiles
     accounts: {},
     projects: {},
     projectMcp: {},
+    projectRepos: {},
   });
 });
 
@@ -574,6 +576,7 @@ test("remote orchd receives only trusted project values and project MCP config",
     accounts: {},
     projects: { [project.id]: { PROJECT_KEY: "invented" } },
     projectMcp: { [project.id]: { LOOKUP_TOKEN: "invented-mcp" } },
+    projectRepos: {},
   });
 });
 
@@ -957,6 +960,7 @@ test("a real project store delivers values and MCP to a remote orchd only once t
   const host = "ssh:devbox-id";
   const project = await projects.upsert({
     name: "Demo",
+    targets: [host],
     mcp: { mcpServers: { lookup: { command: "lookup" } } },
     env: [
       { name: "PROJECT_KEY", secret: true, availableTo: ["setup", "agent"] },
@@ -1044,6 +1048,8 @@ async function sendRig(t) {
   const host = "ssh:devbox-id";
   const project = await projects.upsert({
     name: "Mine",
+    git: { url: "git@example.test:acme/mine.git" },
+    targets: [host],
     env: [{ name: "KEY", secret: true, availableTo: ["setup", "agent"] }],
   });
   await projects.setSecret(project.id, "KEY", "invented-mine");
@@ -1122,4 +1128,51 @@ test("switching sending off empties the daemon's copy at once, and switching it 
   assert.deepEqual(lastSecrets().projects[project.id] ?? {}, {});
   await projects.setHostWithheld(project.id, host, false);
   await settled((s) => s.projects[project.id]?.KEY === "invented-mine");
+});
+
+test("a task started in a folder without naming its project still gets that project's values, and an edit reaches the host at once", async (t) => {
+  const { projects, host, project, service, fixture, lastSecrets } =
+    await sendRig(t);
+  await projects.attach({
+    remote: "git@example.test:acme/mine.git",
+    endpoint: host,
+    cwd: "/home/user/sushiai/mine",
+    name: "Mine",
+  });
+  // The agent's own task.create names no project: the folder says which.
+  const made = await service.call("task.create", {
+    repo: "/home/user/sushiai/mine",
+    title: "from chat",
+  });
+  assert.equal(made.projectId, project.id);
+  assert.equal(
+    lastSecrets().projectRepos["/home/user/sushiai/mine"],
+    project.id,
+  );
+  // An edit in Project settings is pushed without waiting for a task.
+  const pushes = () =>
+    fixture.calls.filter((call) => call.method === "secrets.set").length;
+  const before = pushes();
+  await projects.setSecret(project.id, "KEY", "changed-value");
+  await waitUntil(
+    () =>
+      pushes() > before &&
+      lastSecrets().projects[project.id]?.KEY === "changed-value",
+    { timeout: 4000 },
+  );
+});
+
+test("a host gets only the projects that run on it", async (t) => {
+  const { projects, host, project } = await sendRig(t);
+  const stranger = await projects.upsert({
+    name: "Stranger",
+    env: [{ name: "OTHER", secret: true }],
+  });
+  await projects.setSecret(stranger.id, "OTHER", "not-for-this-host");
+  const sent = await projects.agentEnvironments(host);
+  assert.deepEqual(Object.keys(sent), [project.id]);
+  assert.deepEqual(
+    Object.keys(await projects.agentEnvironments("local")).sort(),
+    [project.id, stranger.id].sort(),
+  );
 });

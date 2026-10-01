@@ -10,6 +10,7 @@ const MESSAGES = {
   cloned: "Cloned",
   updated: "Updated",
   current: "Checkout up to date",
+  "skipped:not-asked": "Checkout found",
   "skipped:local-changes": "Kept the checkout · local changes",
   "skipped:different-remote": "Kept the checkout · other remote",
   "skipped:fetch-failed": "Kept the checkout · fetch failed",

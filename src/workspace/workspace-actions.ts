@@ -273,3 +273,22 @@ export function retitleTerminal(
         : panel.title,
   };
 }
+
+/** The Herdr workspace a project already has on a host: the one at its path,
+ * or the one a start just made (before the host's listing catches up). A
+ * session for the project is one more panel in it, never another workspace. */
+export function findHostWorkspace(
+  workspaces: Workspace[],
+  defaultEndpoint: string,
+  endpoint: string,
+  cwd: string,
+  madeId?: string,
+): Workspace | undefined {
+  return workspaces.find(
+    (w) =>
+      w.herdrId &&
+      !isVanished(w) &&
+      (w.connection || defaultEndpoint) === endpoint &&
+      (w.cwd === cwd || w.id === madeId),
+  );
+}

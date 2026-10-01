@@ -1,0 +1,152 @@
+// Project values reach sessions through the entry points the renderer really
+// uses: a terminal opened with only a folder (it sends no project id), and a
+// Herdr pane that is typed a prefix. The fake host shows what it received.
+const { test } = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const { registerTerminalIpc } = require("../electron/ipc/terminals.cjs");
+const { makeHost, makeStore } = require("./helpers/fake-host.cjs");
+
+const SECRET = "invented-session-secret";
+
+async function rig(t, { attach = true, withheld = false } = {}) {
+  const host = await makeHost(t, {
+    bin: { mktemp: '#!/bin/sh\nexec /usr/bin/mktemp "$HOME/tmp.XXXXXX"\n' },
+  });
+  const { projects } = await makeStore(t);
+  const project = await projects.upsert({
+    name: "App",
+    git: { url: "git@example.test:acme/app.git", defaultBranch: "main" },
+    env: [
+      { name: "APP_TOKEN", secret: true },
+      { name: "PLAIN", secret: false },
+    ],
+  });
+  await projects.setSecret(project.id, "APP_TOKEN", SECRET);
+  await projects.setSecret(project.id, "PLAIN", "visible");
+  const cwd = path.join(host.home, "code", "app");
+  await fs.mkdir(cwd, { recursive: true });
+  if (attach)
+    await projects.attach({
+      remote: project.git.url,
+      endpoint: host.endpoint,
+      cwd,
+      name: "App",
+    });
+  if (withheld) await projects.setHostWithheld(project.id, host.endpoint, true);
+  const spawned = [];
+  const handlers = new Map();
+  registerTerminalIpc({
+    handle: (channel, callback) => handlers.set(channel, callback),
+    send: () => {},
+    app: {},
+    pty: {
+      spawn: (binary, args) => {
+        spawned.push([binary, ...args]);
+        return { onData: () => {}, onExit: () => {} };
+      },
+    },
+    getConnections: () => host.connections,
+    executable: (name) => `/usr/bin/${name}`,
+    directory: () => {},
+    id: () => {},
+    terminals: new Map(),
+    terminalPending: new Map(),
+    stageModelSettings: async () => "",
+    stageClaudeAccount: async () => ({}),
+    projects,
+    sshBinary: host.ssh,
+  });
+  return { host, projects, project, cwd, handlers, spawned };
+}
+
+const left = async (host) =>
+  (await fs.readdir(host.home)).filter((name) => name.startsWith("tmp."));
+
+test("a terminal opened with only a folder still gets the project's values on the host", async (t) => {
+  const { host, cwd, handlers, spawned } = await rig(t);
+  // Exactly what the renderer sends: no projectId.
+  await handlers.get("terminal-open")({
+    panelId: "p1",
+    cwd,
+    command: "claude",
+    endpoint: host.endpoint,
+  });
+  // The values went up as a file and the ssh command only sources it.
+  const files = await left(host);
+  assert.equal(files.length, 1);
+  const text = await fs.readFile(path.join(host.home, files[0]), "utf8");
+  assert.match(text, new RegExp(`APP_TOKEN='${SECRET}'`));
+  assert.equal(JSON.stringify(spawned).includes(SECRET), false);
+});
+
+test("a folder the project is known by through its remote gets values too", async (t) => {
+  const { host, projects, project, cwd, handlers } = await rig(t, {
+    attach: false,
+  });
+  // The folder is a real checkout of the project's repository.
+  const { execFileSync } = require("node:child_process");
+  execFileSync("git", ["init", "-q", "-b", "main", cwd]);
+  execFileSync("git", ["-C", cwd, "remote", "add", "origin", project.git.url]);
+  await handlers.get("terminal-open")({
+    panelId: "p2",
+    cwd,
+    command: "claude",
+    endpoint: host.endpoint,
+  });
+  assert.equal((await left(host)).length, 1);
+  assert.ok(projects);
+});
+
+test("a host switched off for the project gets no file from a terminal", async (t) => {
+  const { host, cwd, handlers } = await rig(t, { withheld: true });
+  await handlers.get("terminal-open")({
+    panelId: "p3",
+    cwd,
+    command: "claude",
+    endpoint: host.endpoint,
+  });
+  assert.deepEqual(await left(host), []);
+});
+
+test("a Herdr pane is typed a prefix that sources the values once and leaves no file", async (t) => {
+  const { host, cwd, handlers } = await rig(t);
+  const { prefix } = await handlers.get("project-session-env")({
+    endpoint: host.endpoint,
+    cwd,
+  });
+  // The text typed into the pane holds no value.
+  assert.equal(prefix.includes(SECRET), false);
+  assert.equal((await left(host)).length, 1);
+  // What the pane's shell does with it: the values are in its environment ...
+  await host.connections.exec(
+    host.endpoint,
+    `${prefix}printf '%s|%s' "$APP_TOKEN" "$PLAIN" > "$HOME/seen"`,
+  );
+  assert.equal(
+    await fs.readFile(path.join(host.home, "seen"), "utf8"),
+    `${SECRET}|visible`,
+  );
+  // ... and the file is gone.
+  assert.deepEqual(await left(host), []);
+});
+
+test("a Herdr pane on a host switched off, or in a folder with no project, is typed nothing", async (t) => {
+  const off = await rig(t, { withheld: true });
+  assert.deepEqual(
+    await off.handlers.get("project-session-env")({
+      endpoint: off.host.endpoint,
+      cwd: off.cwd,
+    }),
+    { prefix: "" },
+  );
+  const none = await rig(t, { attach: false });
+  assert.deepEqual(
+    await none.handlers.get("project-session-env")({
+      endpoint: none.host.endpoint,
+      cwd: none.cwd,
+    }),
+    { prefix: "" },
+  );
+});

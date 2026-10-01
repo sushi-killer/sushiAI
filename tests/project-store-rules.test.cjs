@@ -173,3 +173,38 @@ test("two projects with one name get two folders on a host", async (t) => {
     ["my-app", "my-app-2", "my-app-3"],
   );
 });
+
+test("creating a project twice from one repository is one project", async (t) => {
+  const { projects } = await makeStore(t);
+  const first = await projects.upsert({
+    name: "App",
+    git: { url: "git@example.test:acme/app.git", defaultBranch: "main" },
+  });
+  // The same repository spelled another way, from another window or a double
+  // click: the same project, with what it already has.
+  const again = await projects.upsert({
+    name: "App copy",
+    git: { url: "https://example.test/acme/app", defaultBranch: "main" },
+  });
+  assert.equal(again.id, first.id);
+  assert.equal(again.name, "App");
+  assert.equal((await projects.list()).length, 1);
+  // A different repository is a different project.
+  const other = await projects.upsert({
+    name: "Other",
+    git: { url: "git@example.test:acme/other.git", defaultBranch: "main" },
+  });
+  assert.notEqual(other.id, first.id);
+  // Concurrent creates of one repository still make one.
+  const both = await Promise.all([
+    projects.upsert({
+      name: "N",
+      git: { url: "git@example.test:acme/new.git" },
+    }),
+    projects.upsert({
+      name: "N",
+      git: { url: "git@example.test:acme/new.git" },
+    }),
+  ]);
+  assert.equal(both[0].id, both[1].id);
+});

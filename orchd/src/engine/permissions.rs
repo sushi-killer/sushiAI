@@ -142,7 +142,15 @@ pub(super) fn task_tools(
             off.push((cfg.id.clone(), cfg.label.clone()));
         }
     }
-    let env = task.project_id.as_ref().map_or_else(HashMap::new, |id| {
+    let project_id = task.project_id.clone().or_else(|| {
+        app.secrets
+            .read()
+            .unwrap()
+            .repo_projects
+            .get(&task.repo)
+            .cloned()
+    });
+    let env = project_id.as_ref().map_or_else(HashMap::new, |id| {
         let secrets = app.secrets.read().unwrap();
         let mut env = secrets.projects.get(id).cloned().unwrap_or_default();
         env.extend(secrets.project_mcp.get(id).cloned().unwrap_or_default());

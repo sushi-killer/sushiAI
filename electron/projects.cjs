@@ -64,6 +64,8 @@ class Projects {
     // `onSendChange(host)` lets whoever holds values for a host replace them
     // when the owner turns sending to it off (or on again).
     this.onSendChange = null;
+    // Anything a project holds was written: the daemons' copies are refreshed.
+    this.onChange = null;
   }
 
   /** Every SSH host the owner added gets a project's values: adding the host
@@ -95,7 +97,19 @@ class Projects {
   #write(file, value) {
     const operation = this.writeQueue.then(() => atomicWriteJson(file, value));
     this.writeQueue = operation.catch(() => {});
+    // Whatever the project holds changed: every host's copy is refreshed
+    // soon, not only at the next task.
+    void operation.then(
+      () => this.#changed(),
+      () => {},
+    );
     return operation;
+  }
+
+  #changed() {
+    clearTimeout(this.changeTimer);
+    this.changeTimer = setTimeout(() => this.onChange?.(), 250);
+    this.changeTimer.unref?.();
   }
 
   async #read(file) {
@@ -173,9 +187,19 @@ class Projects {
     if (!input || typeof input !== "object" || !String(input.name || "").trim())
       throw new Error("Project name is required.");
     const projects = await this.#read(this.projectsFile);
+    assertRemote(input.git?.url);
+    // A project made again from a repository that already has one is that
+    // project (the same repository is one project, like attach): creating
+    // twice, or from a second window, never makes a duplicate.
+    const sameKey = normalizeRemote(input.git?.url);
+    if (input.id === undefined && sameKey) {
+      const same = Object.values(projects).find(
+        (item) => normalizeRemote(item.git?.url) === sameKey,
+      );
+      if (same) input = { ...input, id: same.id, name: same.name };
+    }
     if (input.id !== undefined && !this.#own(projects, input.id))
       throw new Error("Unknown project.");
-    assertRemote(input.git?.url);
     const id = typeof input.id === "string" ? input.id : randomUUID();
     // Variables and MCP servers of an existing project change only through
     // updateEnv and updateMcp, which read the stored state under the lock: a
@@ -191,7 +215,9 @@ class Projects {
       name: String(input.name).trim().slice(0, 200),
       git: {
         url: String(input.git?.url || ""),
-        defaultBranch: String(input.git?.defaultBranch || "main"),
+        // Empty means "whatever the remote's own default is": a clone then
+        // takes no --branch (a repository whose default is not main works).
+        defaultBranch: String(input.git?.defaultBranch ?? ""),
       },
       env: env
         .map((entry) => ({
@@ -563,7 +589,7 @@ class Projects {
             ),
             projects,
           ),
-          git: { url, defaultBranch: "main" },
+          git: { url, defaultBranch: "" },
           env: [],
           mcp: {},
           setup: { install: "", check: "" },
@@ -765,10 +791,23 @@ class Projects {
     return this.resolveFolder({ endpoint: "local", cwd: directory });
   }
 
+  /** Whether a project lives on a host: it has a folder there, or the host
+   * was one of its targets. A host never gets values of a project it does not
+   * run. This Mac runs all of them. */
+  #onHost(project, host) {
+    return (
+      host === "local" ||
+      (project.folders || []).some((folder) => folder.endpoint === host) ||
+      (project.targets || []).includes(host) ||
+      !!project.hosts?.[host]
+    );
+  }
+
   async agentEnvironments(host = "local") {
     const projects = await this.#read(this.projectsFile);
     const output = {};
     for (const project of Object.values(projects)) {
+      if (!this.#onHost(project, host)) continue;
       output[project.id] = await this.environmentFor(project.id, "agent", host);
     }
     return output;
@@ -778,8 +817,21 @@ class Projects {
     const projects = await this.#read(this.projectsFile);
     const output = {};
     for (const project of Object.values(projects)) {
+      if (!this.#onHost(project, host)) continue;
       output[project.id] = await this.environmentFor(project.id, "mcp", host);
     }
+    return output;
+  }
+
+  /** Folder path -> project id on a host, so a task started in a folder
+   * without naming its project (the orchestrator agent's own) still gets that
+   * project's values. */
+  async repoProjects(host = "local") {
+    const projects = await this.#read(this.projectsFile);
+    const output = {};
+    for (const project of Object.values(projects))
+      for (const folder of project.folders || [])
+        if (folder.endpoint === host) output[folder.cwd] = project.id;
     return output;
   }
 

@@ -153,8 +153,15 @@
   margin-right: -32px;
   padding: 0 32px 24px 0;
   overflow-y: auto;
-  /* The page fades at its foot: a cut-off caption reads as scrolling. */
-  mask-image: linear-gradient(to bottom, black calc(100% - 28px), transparent);
+  /* The page fades at its head and foot: a cut-off row reads as scrolling,
+   never as overlapping the title. */
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    black 14px,
+    black calc(100% - 28px),
+    transparent
+  );
   scrollbar-color: var(--line) transparent;
   scrollbar-width: thin;
 }
@@ -178,6 +185,14 @@
   color: var(--danger);
   font-size: var(--text-sm);
   line-height: 15px;
+}
+.pd-empty-row {
+  margin: 0;
+  padding: 28px 14px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 18px;
+  text-align: center;
 }
 .pd-empty {
   margin: 20px 0 0;

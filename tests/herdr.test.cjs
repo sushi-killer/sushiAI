@@ -104,3 +104,105 @@ test("herdr pane input validates the pane id before it reaches the socket", asyn
       `pane_id ${JSON.stringify(paneId)} is refused`,
     );
 });
+
+test("a pane or workspace Herdr no longer has: closing it is fine, anything else says so plainly", async (t) => {
+  const net = require("node:net");
+  const os = require("node:os");
+  const fs = require("node:fs/promises");
+  const path = require("node:path");
+  const {
+    registerHerdrExtension,
+    GONE_MESSAGE,
+  } = require("../electron/extensions/builtin-herdr.cjs");
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "herdr-gone-"));
+  const socketPath = path.join(dir, "h.sock");
+  const server = net.createServer((socket) => {
+    socket.on("data", (chunk) => {
+      const { id, method } = JSON.parse(String(chunk).split("\n")[0]);
+      const what = method.startsWith("pane") ? "pane p9" : "workspace w5";
+      socket.write(
+        JSON.stringify({ id, error: { message: `${what} not found` } }) + "\n",
+      );
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  let call;
+  registerHerdrExtension({
+    handle: (_channel, callback) => (call = callback),
+    getConnections: () => ({ socket: async () => socketPath }),
+    id: (value) => String(value),
+  });
+  // Closing what is already closed is closed.
+  assert.deepEqual(
+    await call("local", "workspace.close", { workspace_id: "w5" }),
+    {
+      gone: true,
+    },
+  );
+  assert.deepEqual(await call("local", "pane.close", { pane_id: "p9" }), {
+    gone: true,
+  });
+  // Anything else gets a plain sentence, never the raw "wN not found".
+  for (const [method, params] of [
+    ["pane.send_input", { pane_id: "p9", text: "x", keys: [] }],
+    ["pane.split", { workspace_id: "w5" }],
+  ])
+    await assert.rejects(call("local", method, params), (error) => {
+      assert.equal(error.message, GONE_MESSAGE);
+      return true;
+    });
+});
+
+test("a session for a project on a host reuses its workspace, and an IPC wrapper is stripped", async () => {
+  const { findHostWorkspace } =
+    await import("../src/workspace/workspace-actions.ts");
+  const { errorText, isGone } = await import("../src/app/errors.ts");
+  const ws = (id, connection, cwd, herdrId = "h") => ({
+    id,
+    connection,
+    cwd,
+    herdrId,
+    panels: [],
+  });
+  const list = [
+    ws("a", "ssh:lab", "/srv/app"),
+    ws("b", "ssh:devbox", "/srv/app"),
+    ws("c", "ssh:lab", "/srv/other"),
+  ];
+  // Same host and path: the same workspace, every time.
+  assert.equal(findHostWorkspace(list, "local", "ssh:lab", "/srv/app").id, "a");
+  // Another host has its own workspace; a new path has none yet.
+  assert.equal(
+    findHostWorkspace(list, "local", "ssh:devbox", "/srv/app").id,
+    "b",
+  );
+  assert.equal(
+    findHostWorkspace(list, "local", "ssh:lab", "/srv/new"),
+    undefined,
+  );
+  // A workspace Herdr no longer lists (all its panes ended) is not reused.
+  const gone = ws("g", "ssh:lab", "/srv/gone");
+  gone.panels = [{ herdrId: "p", ended: true }];
+  assert.equal(
+    findHostWorkspace([gone], "local", "ssh:lab", "/srv/gone"),
+    undefined,
+  );
+  // One just made is found by id before the host's listing shows its path.
+  assert.equal(
+    findHostWorkspace(list, "local", "ssh:lab", "/srv/new", "c").id,
+    "c",
+  );
+  const wrapped = new Error(
+    "Error invoking remote method 'herdr': Error: That session is no longer open on the host.",
+  );
+  assert.equal(
+    errorText(wrapped),
+    "That session is no longer open on the host.",
+  );
+  assert.equal(isGone(wrapped), true);
+  assert.equal(isGone(new Error("boom")), false);
+});

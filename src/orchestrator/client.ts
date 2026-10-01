@@ -86,6 +86,7 @@ export function orchestratorClientFor(host: string = LOCAL) {
         base?: string;
         start?: boolean;
         source?: string;
+        projectId?: string;
         dependsOn?: string[];
         /** Parks the task in the planning backlog instead of starting it. */
         backlog?: { bucket: BacklogBucket; order?: number };

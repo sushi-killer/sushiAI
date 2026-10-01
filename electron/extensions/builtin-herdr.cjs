@@ -13,6 +13,12 @@ const HERDR_MANIFEST = {
   contributions: { surfaces: [], navigation: [], actions: [], commands: [] },
 };
 
+/** Herdr says a pane or workspace is not there (closed, Herdr restarted, a
+ * stale id kept in app state). */
+const GONE = /\b(?:pane|workspace|worktree|tab)\b[^\n]*\bnot found\b/i;
+const CLOSING = new Set(["pane.close", "workspace.close"]);
+const GONE_MESSAGE = "That session is no longer open on the host.";
+
 function registerHerdrExtension({ handle, getConnections, id }) {
   const inputQueues = new Map();
   const allowedMethods = new Set([
@@ -60,8 +66,19 @@ function registerHerdrExtension({ handle, getConnections, id }) {
         if (inputQueues.get(queueKey) === next) inputQueues.delete(queueKey);
       }
     }
-    return request(socketPath, method, herdrLaunchParams(method, params));
+    try {
+      return await request(
+        socketPath,
+        method,
+        herdrLaunchParams(method, params),
+      );
+    } catch (error) {
+      if (!GONE.test(error?.message ?? "")) throw error;
+      // Closing what is already closed is closed: not an error.
+      if (CLOSING.has(method)) return { gone: true };
+      throw Object.assign(new Error(GONE_MESSAGE), { code: "HERDR_GONE" });
+    }
   });
 }
 
-module.exports = { HERDR_MANIFEST, registerHerdrExtension };
+module.exports = { HERDR_MANIFEST, registerHerdrExtension, GONE_MESSAGE };

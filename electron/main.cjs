@@ -196,6 +196,8 @@ const terminalIpc = registerTerminalIpc({
   stageModelSettings,
   stageClaudeAccount,
   projects,
+  // The test harness runs a fake ssh (see SUSHIAI_TEST_SSH above).
+  sshBinary: (testMode.hidden && process.env.SUSHIAI_TEST_SSH) || undefined,
 });
 const chatIpc = registerChatIpc({
   handle,

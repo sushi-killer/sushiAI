@@ -205,6 +205,9 @@ struct Secrets {
     accounts: HashMap<String, AccountSecret>,
     projects: HashMap<String, HashMap<String, String>>,
     project_mcp: HashMap<String, HashMap<String, String>>,
+    /// Repo path -> project id, for a task made without one (the agent's own
+    /// `task.create`): its project's values still reach it.
+    repo_projects: HashMap<String, String>,
 }
 
 struct TaskControl {

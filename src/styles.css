@@ -398,7 +398,11 @@ textarea::placeholder {
   text-overflow: ellipsis;
 }
 .workspace-name .remote-tag {
-  flex: none;
+  /* A long label (an orchestrator task's branch) shrinks and ellipsizes
+     before the name does, like the pane rows' chips. */
+  flex: 0 1 auto;
+  max-width: 45%;
+  min-width: 0;
   margin-left: calc(var(--gap-xs) - 8px);
 }
 .workspace-name .host-marker-group .remote-tag {

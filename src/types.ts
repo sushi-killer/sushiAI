@@ -412,6 +412,11 @@ export interface Bridge {
   chooseDirectory(): Promise<string | null>;
   chooseAttachments(): Promise<string[]>;
   pathForFile(file: File): string;
+  /** What to type into a Herdr pane so the project's values reach its shell. */
+  projectSessionEnv(options: {
+    endpoint: string;
+    cwd: string;
+  }): Promise<{ prefix: string }>;
   terminalOpen(options: {
     panelId: string;
     cwd: string;
@@ -686,10 +691,17 @@ export interface Bridge {
     host: string,
     cwd?: string,
   ): Promise<ProjectHostReadiness>;
+  /** Cheap check before a start: the project is on the host and installed. */
+  projectHostReady(
+    id: string,
+    host: string,
+  ): Promise<{ ready: boolean; path?: string; reason?: string }>;
   projectHostPrepare(
     id: string,
     host: string,
     useHostLogin?: boolean,
+    /** `pull: false` leaves an existing checkout's history alone. */
+    options?: { pull?: boolean },
   ): Promise<
     | {
         ok: true;

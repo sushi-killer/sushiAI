@@ -484,6 +484,7 @@ test("a prepare that times out is a timeout in the step it was in, not a clone f
       connections: {
         exec: async (_endpoint, command) => {
           if (command.includes("ABSENT")) return "ABSENT\n";
+          if (command.includes("FOUND=")) return "";
           throw timedOut(stderr);
         },
       },

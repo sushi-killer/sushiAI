@@ -26,13 +26,14 @@ export function PrepareAndStart({
   onStart(path: string): Promise<boolean>;
   onCancel(): void;
 }) {
-  const [phase, setPhase] = useState<"running" | "failed" | "unstarted">(
-    "running",
-  );
+  const [phase, setPhase] = useState<
+    "checking" | "running" | "failed" | "unstarted"
+  >("checking");
   const [failure, setFailure] = useState<PrepareFailure | null>(null);
   const [editToken, setEditToken] = useState(false);
   const [tokenDraft, setTokenDraft] = useState("");
   const [prepared, setPrepared] = useState("");
+  const [found, setFound] = useState(false);
   // A host the owner switched off for this project gets no value.
   const noSecrets = !!project.hosts?.[endpoint]?.withheld;
   const gone = useRef(false);
@@ -51,8 +52,12 @@ export function PrepareAndStart({
   async function run(useHostLogin = false) {
     if (!window.bridge) return;
     setFailure(null);
-    setPhase("running");
+    setPhase("checking");
     const outcome = await prepareAndStart({
+      onPreparing: (info) => {
+        setFound(info.found);
+        setPhase("running");
+      },
       bridge: window.bridge,
       projectId: project.id,
       endpoint,
@@ -98,7 +103,12 @@ export function PrepareAndStart({
   const eyebrow = `${hostName} · first run of ${project.name}`;
   return (
     <div className="pk-prepare">
-      {phase === "unstarted" ? (
+      {phase === "checking" ? (
+        <div className="orch-prep" role="status">
+          <div className="orch-prep-eyebrow">{eyebrow}</div>
+          <h2>{`Starting on ${hostName}`}</h2>
+        </div>
+      ) : phase === "unstarted" ? (
         <div className="orch-prep" role="alert">
           <div className="orch-prep-eyebrow">{eyebrow}</div>
           <h2>{`Prepared ${hostName}, but the session could not start`}</h2>
@@ -132,6 +142,7 @@ export function PrepareAndStart({
           failure={failure}
           noSecrets={noSecrets}
           session
+          found={found}
           eyebrow={eyebrow}
           editToken={editToken}
           tokenDraft={tokenDraft}

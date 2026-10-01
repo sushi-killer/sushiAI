@@ -288,7 +288,10 @@ export function ProjectMcpServersTab({
   // A server the project imported from the repo's .mcp.json is its own now:
   // it is not listed a second time as coming from the repo.
   const repoServers = also.repo.filter((item) => !(item.name in ownServers));
-  const otherServers = also.personal;
+  // A server the project has by that name is its own row, with its uses.
+  const otherServers = also.personal.filter(
+    (item) => !(item.name in ownServers),
+  );
   const disabledNames =
     (project.mcp as { disabledMcpServers?: string[] }).disabledMcpServers || [];
   return (
@@ -402,6 +405,11 @@ export function ProjectMcpServersTab({
                 <span className="pd-server-line">
                   <Highlighted text={serverLine(server)} />
                 </span>
+                {usesText(usage.servers[claudeToolName(serverName)] ?? 0) ? (
+                  <span className="pd-server-line plain">
+                    {usesText(usage.servers[claudeToolName(serverName)] ?? 0)}
+                  </span>
+                ) : null}
                 {invalid.length ? (
                   <span
                     className="pd-server-line pd-server-error plain"
@@ -429,7 +437,10 @@ export function ProjectMcpServersTab({
           <p className="pd-empty">No project MCP servers yet.</p>
         ) : null}
       </div>
-      <h3 className="pd-group-label">Also in this project</h3>
+      {repoServers.length + otherServers.length + also.plugins.length ||
+      remote ? (
+        <h3 className="pd-group-label">Also in this project</h3>
+      ) : null}
       <div className="pd-servers">
         {repoServers.map((server) => (
           <article className="pd-server other" key={`repo:${server.name}`}>

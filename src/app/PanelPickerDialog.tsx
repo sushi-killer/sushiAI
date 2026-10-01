@@ -13,11 +13,7 @@ import {
 import { agentTitle } from "./agent-title.ts";
 import { Icon } from "../PanelIcon.tsx";
 import { openSettings } from "./openSettings.ts";
-import {
-  checkoutPath,
-  readPrepareTimes,
-  tildePath as tilde,
-} from "../projectPrepare.ts";
+import { checkoutPath, tildePath as tilde } from "../projectPrepare.ts";
 import { useOrchestratorEnabled } from "../orchestrator/enabled.ts";
 import {
   launchTarget,
@@ -312,7 +308,11 @@ export function PanelPickerDialog({
               (profile) => profile.id === selectedModelProfileId,
             )
           : undefined,
-        agent === "claude" ? selectedClaudeAccountId || undefined : undefined,
+        // A Herdr session runs under the host's own Claude login: an account
+        // chosen for local sessions does not apply to it.
+        agent === "claude" && !(targetWorkspace.herdrId && backend === "herdr")
+          ? selectedClaudeAccountId || undefined
+          : undefined,
         backend,
         targetWorkspaceId,
         worktreeArg,
@@ -325,6 +325,7 @@ export function PanelPickerDialog({
       modelProfiles,
       selectedClaudeAccountId,
       selectedModelProfileId,
+      targetWorkspace.herdrId,
       targetWorkspaceId,
       worktreeArg,
       worktreeInvalid,
@@ -443,9 +444,14 @@ export function PanelPickerDialog({
         return { text: `${launchLabel} is unreachable`, tone: "warning" };
       if (!matrix) return { text: "Checking…" };
       if (agent === "claude" || agent === "codex")
-        return matrix.clis[agent].installed
-          ? { text: `Ready on ${launchLabel}` }
-          : { text: `Not installed on ${launchLabel}`, tone: "warning" };
+        return !matrix.clis[agent].installed
+          ? { text: `Not installed on ${launchLabel}`, tone: "warning" }
+          : matrix.clis[agent].loggedIn
+            ? { text: `Ready on ${launchLabel}` }
+            : {
+                text: `Not signed in on ${launchLabel} · sign in there once`,
+                tone: "warning",
+              };
       return { text: "Ready" };
     }
     return system?.agents.find((a) => a.name === agent)?.path
@@ -475,13 +481,7 @@ export function PanelPickerDialog({
           ? `${tilde(targetWorkspace.cwd, system?.home)} · not cloned yet`
           : `${checkoutPath(targetCheck)} · ${
               targetCheck.setup.stale
-                ? `reinstalls first, ${targetCheck.setup.lockFile || "the lock file"} changed${(() => {
-                    const seconds = readPrepareTimes(
-                      project?.id ?? "",
-                      targetWorkspace.connection ?? "",
-                    )?.find((step) => step.id === "install")?.seconds;
-                    return seconds === undefined ? "" : ` (~${seconds} s)`;
-                  })()}`
+                ? `${targetCheck.setup.lockFile || "the lock file"} changed since the last install · Prepare it in Project settings → Hosts`
                 : "ready"
             }`;
   const setupProfile = setupHosts.find((item) => item.id === setupPick);
@@ -749,11 +749,23 @@ export function PanelPickerDialog({
                             <span className="pk-text">
                               <strong>{item.label}</strong>
                               <small
-                                className={item.hasValue ? "" : "is-warning"}
+                                className={
+                                  targetIsSsh
+                                    ? matrix?.clis.claude.loggedIn
+                                      ? ""
+                                      : "is-warning"
+                                    : item.hasValue
+                                      ? ""
+                                      : "is-warning"
+                                }
                               >
-                                {item.hasValue
-                                  ? `Subscription · logged in on ${launchLabel}`
-                                  : `Subscription · not logged in on ${launchLabel} · logs in on first run`}
+                                {targetIsSsh
+                                  ? matrix?.clis.claude.loggedIn
+                                    ? `Uses Claude's own login on ${launchLabel}`
+                                    : `Claude is not signed in on ${launchLabel} · sign in there once`
+                                  : item.hasValue
+                                    ? "Subscription · logged in"
+                                    : "Subscription · not logged in · logs in on first run"}
                               </small>
                             </span>
                             {selectedClaudeAccountId === item.id &&

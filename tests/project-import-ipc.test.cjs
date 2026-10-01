@@ -225,7 +225,7 @@ test("a source scanned before its project exists keeps secret values in main", a
   );
   const created = await call("projects:upsert", {
     name: "New",
-    git: { url: REMOTE },
+    git: { url: "git@example.test:acme/new.git" },
     env: scan.variables.map(({ name, secret: flag, availableTo }) => ({
       name,
       secret: flag,

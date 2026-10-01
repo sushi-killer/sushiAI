@@ -474,7 +474,7 @@ export function ProjectEnvironmentTab({
               />
             ))}
             {!project.env.length && !adding && (
-              <p className="pd-empty pd-row">
+              <p className="pd-empty-row">
                 No variables yet. Add one, or drop a .env file below.
               </p>
             )}

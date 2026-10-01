@@ -5,6 +5,10 @@ const { openHerdrStream, detectAgent } = require("../terminal-stream.cjs");
 const { terminalEnvironment } = require("../terminal-text.cjs");
 const { storeTerminalAttachment } = require("../terminal-attachments.cjs");
 const { spawn } = require("node:child_process");
+const {
+  projectForFolder,
+  sessionEnvPrefix,
+} = require("../project-session.cjs");
 
 function remoteEnvPayload(env) {
   return Object.entries(env || {})
@@ -91,6 +95,34 @@ function registerTerminalIpc({
   projects,
   sshBinary = "/usr/bin/ssh",
 }) {
+  // A Herdr pane starts a shell the app does not launch: the values it needs
+  // are handed over as a one-shot file whose sourcing is typed into the pane.
+  handle("project-session-env", async ({ endpoint, cwd }) => {
+    const connections = getConnections();
+    const sshFor = (host) => {
+      const remote = connections.get(host);
+      return { remote, args: [...connections.args(remote), "-T", remote.host] };
+    };
+    const prefix = await sessionEnvPrefix(
+      {
+        projects,
+        connections,
+        upload: (host, payload) =>
+          uploadRemoteFile(
+            sshBinary,
+            [...sshFor(host).args, remoteFileCommand()],
+            payload,
+          ),
+        remove: (host, file) =>
+          removeRemoteFiles(sshBinary, sshFor(host).args, [file]).catch(
+            () => {},
+          ),
+      },
+      { endpoint, cwd },
+    );
+    return { prefix };
+  });
+
   const detectionTimer = setInterval(() => {
     for (const [panelId, entry] of terminals) {
       if (entry.exited || entry.source !== "pty") continue;
@@ -185,13 +217,18 @@ function registerTerminalIpc({
       let args = command ? [] : ["-l"];
       if (remote) {
         binary = sshBinary;
+        // The renderer may not know the project: the folder says which it is.
+        const ownProject =
+          projectId ||
+          (await projectForFolder({ projects, connections }, endpoint, cwd))
+            ?.id;
         const projectEnv =
-          projects && projectId
-            ? await projects.environmentFor(projectId, "agent", endpoint)
+          projects && ownProject
+            ? await projects.environmentFor(ownProject, "agent", endpoint)
             : {};
         let subscriptionToken = null;
-        const sendToHost = projectId
-          ? await projects?.sendsValues(projectId, endpoint)
+        const sendToHost = ownProject
+          ? await projects?.sendsValues(ownProject, endpoint)
           : false;
         if (
           sendToHost &&

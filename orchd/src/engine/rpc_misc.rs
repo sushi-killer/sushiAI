@@ -132,6 +132,8 @@ impl App {
             projects: HashMap<String, HashMap<String, String>>,
             #[serde(default, rename = "projectMcp")]
             project_mcp: HashMap<String, HashMap<String, String>>,
+            #[serde(default, rename = "projectRepos")]
+            repo_projects: HashMap<String, String>,
         }
         let p: P = serde_json::from_value(params).unwrap_or_default();
         let mut secrets = self.secrets.write().unwrap();
@@ -140,6 +142,7 @@ impl App {
             accounts: p.accounts,
             projects: p.projects,
             project_mcp: p.project_mcp,
+            repo_projects: p.repo_projects,
         };
         Ok(json!({}))
     }

@@ -100,7 +100,16 @@ pub(super) async fn run_harness(
         .load_task(task_id)
         .ok()
         .flatten()
-        .and_then(|task| task.project_id)
+        .and_then(|task| {
+            task.project_id.or_else(|| {
+                app.secrets
+                    .read()
+                    .unwrap()
+                    .repo_projects
+                    .get(&task.repo)
+                    .cloned()
+            })
+        })
         .map_or_else(
             || {
                 (

@@ -18,6 +18,7 @@ const { remoteUrl } = require("../git-remote.cjs");
 const { slugOf } = require("../project-slug.cjs");
 const {
   hostProbeScript,
+  FIND_CHECKOUTS_SH,
   readiness,
   prepareScript,
   prepareSteps,
@@ -56,6 +57,84 @@ function registerProjectIpc({
           root: cwd,
         })
         .then((info) => String(info?.remote || ""));
+    // Where a project lives on a host, in order: a folder of its own already
+    // known there, the standard folder, a checkout of the same repository
+    // found in the usual places, and only then a clone. An existing checkout
+    // is used where it is, never copied. `where` is "" for the standard
+    // folder (present, or to be cloned); `refusal` says why nothing may go
+    // into it.
+    const locate = async (project, host) => {
+      const slug = slugOf(project);
+      const wanted = normalizeRemote(project.git?.url);
+      const probe = (expr) =>
+        connections()
+          .exec(
+            host,
+            `t=${expr}; if [ ! -e "$t" ]; then echo ABSENT; elif [ -e "$t/.git" ]; then o=$(cd "$t" && ${REMOTE_URL_SH}) && echo "ORIGIN=$o" || echo NOORIGIN; else echo NOTREPO; fi`,
+            { timeout: 30000 },
+          )
+          .then((out) => out.trim().split("\n").pop() || "")
+          .catch(() => "");
+      const matches = (state) =>
+        state.startsWith("ORIGIN=") &&
+        normalizeRemote(state.slice("ORIGIN=".length)) === wanted;
+      const shq = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
+      let where = "";
+      let others = 0;
+      for (const folder of (await projects.folders(project.id)).filter(
+        (item) => item.endpoint === host && item.cwd.startsWith("/"),
+      ))
+        if (!where && matches(await probe(shq(folder.cwd)))) where = folder.cwd;
+      const standard = await probe(`"$HOME/sushiai/${slug}"`);
+      if (!where && !matches(standard)) {
+        let found;
+        try {
+          found = await connections().exec(host, FIND_CHECKOUTS_SH, {
+            timeout: 30000,
+          });
+        } catch {
+          return {
+            refusal:
+              "Could not look for an existing checkout on this host, so nothing was cloned.",
+          };
+        }
+        const copies = [
+          ...new Set(
+            found
+              .split("\n")
+              .filter((line) => line.startsWith("FOUND="))
+              .map((line) => line.slice(6).split("\t"))
+              .filter(([, url]) => normalizeRemote(url) === wanted)
+              .map(([dir]) => dir),
+          ),
+        ].sort();
+        where = copies[0] ?? "";
+        others = Math.max(0, copies.length - 1);
+      }
+      if (!where) {
+        if (standard === "NOTREPO")
+          return {
+            refusal: `~/sushiai/${slug} on this host is not a git checkout, so nothing was installed there.`,
+          };
+        if (standard === "NOORIGIN")
+          return {
+            refusal: `~/sushiai/${slug} on this host is a git folder without an origin, so nothing was installed there.`,
+          };
+        if (standard.startsWith("ORIGIN=") && !matches(standard))
+          return {
+            refusal: `~/sushiai/${slug} on this host is a checkout of a different repository (${standard.slice("ORIGIN=".length)}).`,
+          };
+        if (standard !== "ABSENT" && !matches(standard))
+          return {
+            refusal: `Could not look at ~/sushiai/${slug} on this host, so nothing was sent.`,
+          };
+      }
+      return { where, others, present: !!where || matches(standard) };
+    };
+    // What a start asks first: is the project already there and installed?
+    // Remembered briefly per project and host; a prepare forgets it.
+    const readyCache = new Map();
+    const READY_TTL = 30000;
     handle("projects:source-inspect", async (url) => {
       if (typeof url !== "string" || !url.trim())
         throw new Error("Enter a git URL.");
@@ -227,6 +306,11 @@ function registerProjectIpc({
         throw new Error("Invalid project host.");
       const project = await projects.get(id);
       if (!project) throw new Error("Unknown project.");
+      // A checkout the project already has on this host (wherever it is) is
+      // what is checked, not the standard folder.
+      cwd ??= (await projects.folders(id)).find(
+        (item) => item.endpoint === host && item.cwd.startsWith("/"),
+      )?.cwd;
       const output = await connections().exec(
         host,
         hostProbeScript(cwd, project.name, project),
@@ -236,135 +320,170 @@ function registerProjectIpc({
       );
       return readiness({ output, project: { ...project, host }, cwd });
     });
-    // A host the owner switched off for this project gets no value at all:
-    // it clones with its own git login and installs without values.
-    handle("projects:host:prepare", async (id, host, useHostLogin = false) => {
+    handle("projects:host:ready", async (id, host) => {
       if (typeof host !== "string" || !host.startsWith("ssh:"))
         throw new Error("Invalid project host.");
-      const noSecrets = !(await projects.sendsValues(id, host));
-      const stored = await projects.get(id);
-      if (!stored) throw new Error("Unknown project.");
-      if (!stored.git?.url)
-        throw new Error(
-          "This project has no git remote, so a host has nothing to clone. Add a remote to the folder first.",
-        );
-      // Without secrets the check step (which needs them) does not run.
-      const project = noSecrets
-        ? { ...stored, setup: { ...stored.setup, check: "" } }
-        : stored;
-      // The clone token is GIT_TOKEN, or GITHUB_TOKEN when that is what the
-      // project already keeps.
-      const tokenEntry =
-        project.env.find((entry) => entry.name === "GIT_TOKEN") ||
-        project.env.find((entry) => entry.name === "GITHUB_TOKEN");
-      const token =
-        noSecrets || useHostLogin || !tokenEntry
-          ? ""
-          : await projects.secretForHost(id, tokenEntry.name, host);
-      // A folder at the standard path that belongs to another repository is
-      // never reused: nothing is installed there and no secret goes near it.
-      const slug = slugOf(project);
-      const refuse = (message) => ({
-        ok: false,
-        stage: "clone",
-        message,
-        steps: prepareSteps(project, "", "clone"),
-      });
-      // Only an absent folder or a checkout of this very repository is used.
-      const state = await connections()
-        .exec(
-          host,
-          `t="$HOME/sushiai/${slug}"; if [ ! -e "$t" ]; then echo ABSENT; elif [ -e "$t/.git" ]; then o=$(cd "$t" && ${REMOTE_URL_SH}) && echo "ORIGIN=$o" || echo NOORIGIN; else echo NOTREPO; fi`,
-          { timeout: 30000 },
-        )
-        .then((out) => out.trim().split("\n").pop() || "")
-        .catch(() => "");
-      if (state === "NOTREPO")
-        return refuse(
-          `~/sushiai/${slug} on this host is not a git checkout, so nothing was installed there.`,
-        );
-      if (state === "NOORIGIN")
-        return refuse(
-          `~/sushiai/${slug} on this host is a git folder without an origin, so nothing was installed there.`,
-        );
-      if (state.startsWith("ORIGIN=")) {
-        const present = state.slice("ORIGIN=".length);
-        if (normalizeRemote(present) !== normalizeRemote(project.git?.url))
-          return refuse(
-            `~/sushiai/${slug} on this host is a checkout of a different repository (${present}).`,
-          );
-      } else if (state !== "ABSENT")
-        return refuse(
-          `Could not look at ~/sushiai/${slug} on this host, so nothing was sent.`,
-        );
-      // The clone token goes in on its own; the rest of the setup variables
-      // reach the install and check steps over stdin.
-      const setupEnv = noSecrets
-        ? {}
-        : await projects.environmentFor(id, "setup", host);
-      if (tokenEntry) delete setupEnv[tokenEntry.name];
-      const prepared = prepareScript(project, token, setupEnv);
-      try {
-        const output = await connections().exec(host, prepared.script, {
-          input: prepared.input,
-          timeout: 15 * 60 * 1000,
-        });
-        const path =
-          output.match(/^SUSHIAI_PREPARED=(.+)$/m)?.[1] || prepared.path;
-        const pull =
-          output.match(/^SUSHIAI_PULL=(.+)$/m)?.[1]?.trim() || "current";
-        return {
-          ok: true,
-          path,
+      const key = `${id}|${host}`;
+      const hit = readyCache.get(key);
+      if (hit && Date.now() - hit.at < READY_TTL) return hit.result;
+      const project = await projects.get(id);
+      if (!project?.git?.url) return { ready: false, reason: "no-remote" };
+      const found = await locate(project, host).catch(() => ({
+        refusal: "unreachable",
+      }));
+      let result = {
+        ready: false,
+        reason: found.refusal ? "refused" : "absent",
+      };
+      if (!found.refusal && found.present) {
+        const output = await connections()
+          .exec(
+            host,
+            hostProbeScript(found.where || undefined, project.name, project),
+            {
+              timeout: 40000,
+            },
+          )
+          .catch(() => "");
+        const state = readiness({
           output,
-          pull,
-          message: pullMessage(pull),
-          steps: prepareSteps(project, output),
-        };
-      } catch (error) {
-        const timedOut = !!error?.timedOut;
-        // A timeout carries what the host had printed by then.
-        const text = timedOut
-          ? String(error.stderr || "")
-          : error instanceof Error
-            ? error.message
-            : String(error);
-        // The script says last which step it was in; noise cannot push that
-        // out of the tail the transport keeps. Failing that, the last step it
-        // started. With neither, the step after the last one that finished:
-        // a clone that finished is never blamed.
-        const failedAt = [...text.matchAll(/^SUSHIAI_FAILED=(\w+)$/gm)];
-        const stages = [...text.matchAll(/^SUSHIAI_STAGE=(\w+)$/gm)];
-        const finished = [...text.matchAll(/^SUSHIAI_STEP=(\w+):/gm)].map(
-          (match) => match[1],
-        );
-        const planned = prepareSteps(project, "", "clone").map(
-          (step) => step.id,
-        );
-        const next = planned.find((id) => !finished.includes(id));
-        const failed =
-          failedAt.at(-1)?.[1] ??
-          stages.at(-1)?.[1] ??
-          (finished.includes("clone") ? (next ?? "check") : "clone");
-        const stage = failed === "clone" ? "clone" : "setup";
-        // Only a clone's 401 or 403 is about the git token; npm's is not, and
-        // neither is a timeout.
-        const status =
-          stage === "clone" && !timedOut
-            ? text.match(/\b(401|403)\b/)?.[1]
-            : undefined;
-        return {
-          ok: false,
-          stage,
-          timedOut: timedOut || undefined,
-          status: status ? Number(status) : undefined,
-          message: timedOut
-            ? `Timed out after 15 minutes during ${failed}.`
-            : text,
-          steps: prepareSteps(project, text, failed),
-        };
+          project: { ...project, host },
+          cwd: found.where || undefined,
+        });
+        result = state.checkout.ok
+          ? state.setup.stale
+            ? { ready: false, reason: "install-stale" }
+            : { ready: true, path: state.checkout.path }
+          : { ready: false, reason: "absent" };
       }
+      if (result.ready || result.reason === "install-stale")
+        readyCache.set(key, { at: Date.now(), result });
+      return result;
     });
+    // A host the owner switched off for this project gets no value at all:
+    // it clones with its own git login and installs without values.
+    handle(
+      "projects:host:prepare",
+      async (id, host, useHostLogin = false, options = {}) => {
+        if (typeof host !== "string" || !host.startsWith("ssh:"))
+          throw new Error("Invalid project host.");
+        readyCache.delete(`${id}|${host}`);
+        const noSecrets = !(await projects.sendsValues(id, host));
+        const stored = await projects.get(id);
+        if (!stored) throw new Error("Unknown project.");
+        if (!stored.git?.url)
+          throw new Error(
+            "This project has no git remote, so a host has nothing to clone. Add a remote to the folder first.",
+          );
+        // Without secrets the check step (which needs them) does not run.
+        const project = noSecrets
+          ? { ...stored, setup: { ...stored.setup, check: "" } }
+          : stored;
+        // The clone token is GIT_TOKEN, or GITHUB_TOKEN when that is what the
+        // project already keeps.
+        const tokenEntry =
+          project.env.find((entry) => entry.name === "GIT_TOKEN") ||
+          project.env.find((entry) => entry.name === "GITHUB_TOKEN");
+        const token =
+          noSecrets || useHostLogin || !tokenEntry
+            ? ""
+            : await projects.secretForHost(id, tokenEntry.name, host);
+        // A folder at the standard path that belongs to another repository is
+        // never reused: nothing is installed there and no secret goes near it.
+        const refuse = (message) => ({
+          ok: false,
+          stage: "clone",
+          message,
+          steps: prepareSteps(project, "", "clone"),
+        });
+        const located = await locate(project, host);
+        if (located.refusal) return refuse(located.refusal);
+        const { where, others } = located;
+        // The clone token goes in on its own; the rest of the setup variables
+        // reach the install and check steps over stdin.
+        const setupEnv = noSecrets
+          ? {}
+          : await projects.environmentFor(id, "setup", host);
+        if (tokenEntry) delete setupEnv[tokenEntry.name];
+        const prepared = prepareScript(project, token, setupEnv, where, {
+          pull: options?.pull,
+        });
+        try {
+          const output = await connections().exec(host, prepared.script, {
+            input: prepared.input,
+            timeout: 15 * 60 * 1000,
+          });
+          const path =
+            output.match(/^SUSHIAI_PREPARED=(.+)$/m)?.[1] || prepared.path;
+          const pull =
+            output.match(/^SUSHIAI_PULL=(.+)$/m)?.[1]?.trim() || "current";
+          // Remember where it lives on this host, so the next start finds it
+          // at once.
+          if (path.startsWith("/"))
+            await projects
+              .attach({
+                remote: project.git.url,
+                endpoint: host,
+                cwd: path,
+                name: project.name,
+              })
+              .catch(() => {});
+          return {
+            ok: true,
+            path,
+            output,
+            pull,
+            message: where
+              ? `${pullMessage(pull)} · non-standard path${others ? ` · ${others} other ${others === 1 ? "copy" : "copies"} found` : ""}`
+              : pullMessage(pull),
+            nonStandard: where ? true : undefined,
+            steps: prepareSteps(project, output),
+          };
+        } catch (error) {
+          const timedOut = !!error?.timedOut;
+          // A timeout carries what the host had printed by then.
+          const text = timedOut
+            ? String(error.stderr || "")
+            : error instanceof Error
+              ? error.message
+              : String(error);
+          // The script says last which step it was in; noise cannot push that
+          // out of the tail the transport keeps. Failing that, the last step it
+          // started. With neither, the step after the last one that finished:
+          // a clone that finished is never blamed.
+          const failedAt = [...text.matchAll(/^SUSHIAI_FAILED=(\w+)$/gm)];
+          const stages = [...text.matchAll(/^SUSHIAI_STAGE=(\w+)$/gm)];
+          const finished = [...text.matchAll(/^SUSHIAI_STEP=(\w+):/gm)].map(
+            (match) => match[1],
+          );
+          const planned = prepareSteps(project, "", "clone").map(
+            (step) => step.id,
+          );
+          const next = planned.find((id) => !finished.includes(id));
+          const failed =
+            failedAt.at(-1)?.[1] ??
+            stages.at(-1)?.[1] ??
+            (finished.includes("clone") ? (next ?? "check") : "clone");
+          const stage = failed === "clone" ? "clone" : "setup";
+          // Only a clone's 401 or 403 is about the git token; npm's is not, and
+          // neither is a timeout.
+          const status =
+            stage === "clone" && !timedOut
+              ? text.match(/\b(401|403)\b/)?.[1]
+              : undefined;
+          return {
+            ok: false,
+            stage,
+            timedOut: timedOut || undefined,
+            status: status ? Number(status) : undefined,
+            message: timedOut
+              ? `Timed out after 15 minutes during ${failed}.`
+              : text,
+            steps: prepareSteps(project, text, failed),
+          };
+        }
+      },
+    );
     handle("projects:env:review-text", async (id, text) => {
       if (typeof text !== "string") throw new Error("Choose a .env file.");
       const entries = parseEnv(text);

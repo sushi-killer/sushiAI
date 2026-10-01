@@ -101,6 +101,8 @@ function planRows(
     noSecrets?: boolean;
     /** A session start (the + picker), not a task run. */
     session?: boolean;
+    /** The checkout is already on the host: nothing is cloned. */
+    found?: boolean;
   } = {},
 ): Row[] {
   const slug = repoSlug(project.git?.url || project.name);
@@ -123,7 +125,7 @@ function planRows(
       ? undefined
       : `${mode === "plan" ? "~" : ""}${clock(value)}`;
   };
-  const cloned = ready?.checkout.ok;
+  const cloned = ready?.checkout.ok || options.found;
   const clis = ready?.clis;
   const connected: Row = {
     mark: "done",
@@ -159,8 +161,12 @@ function planRows(
   const rows: Row[] = [
     connected,
     {
-      mark: stateOf("clone"),
-      title: cloned ? `Update ${slug}` : `Clone ${slug}`,
+      mark: options.found ? "done" : stateOf("clone"),
+      title: options.found
+        ? "Checkout found"
+        : cloned
+          ? `Update ${slug}`
+          : `Clone ${slug}`,
       sub:
         mode === "failed" && failure
           ? (cloneFailure({
@@ -171,7 +177,9 @@ function planRows(
               status: failure.status,
               message: failure.message,
             }) ?? firstLine(failure.message))
-          : `${cloned ? "at" : "into"} ${path}, using ${token}`,
+          : options.found
+            ? `at ${path} · nothing to clone`
+            : `${cloned ? "at" : "into"} ${path}, using ${token}`,
       right: seconds("clone"),
     },
   ];
@@ -254,6 +262,7 @@ export function PrepareProgress({
   onCancel,
   noSecrets = false,
   session = false,
+  found = false,
   eyebrow,
 }: {
   project: Project;
@@ -262,6 +271,8 @@ export function PrepareProgress({
   noSecrets?: boolean;
   /** The + picker's session start: no task-run rows. */
   session?: boolean;
+  /** The checkout is already on the host (only the install is missing). */
+  found?: boolean;
   /** A line above the title (host and project). */
   eyebrow?: string;
   /** `uname -sm` of the host. */
@@ -290,7 +301,7 @@ export function PrepareProgress({
     failure ? "failed" : "running",
     failure ?? undefined,
     [platform, address].filter(Boolean).join(" · "),
-    { noSecrets, session },
+    { noSecrets, session, found },
   );
   let extra: ReactNode = null;
   if (failure) {

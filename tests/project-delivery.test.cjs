@@ -99,8 +99,12 @@ test("a host that was just added gets the values with no question asked", async 
   assert.equal(await exists(path.join(host.home, "check-ran")), true);
 });
 
-function fakeBridge(log, { prepare } = {}) {
+function fakeBridge(log, { prepare, ready } = {}) {
   return {
+    projectHostReady: async (...args) => {
+      log.push(["ready", ...args]);
+      return ready ?? { ready: false };
+    },
     projectHostPrepare: async (...args) => {
       log.push(["prepare", ...args]);
       return (
@@ -139,7 +143,7 @@ test("the picker's flow retries as asked, and never starts a session nobody wait
   }
   // The retry that uses the host's own git login says so.
   assert.deepEqual(
-    log.map((entry) => entry[3]),
+    log.filter((entry) => entry[0] === "prepare").map((entry) => entry[3]),
     [false, true],
   );
   assert.deepEqual(started, []);
@@ -152,6 +156,20 @@ test("the picker's flow retries as asked, and never starts a session nobody wait
   });
   assert.equal(outcome.kind, "started");
   assert.deepEqual(started, ["~/sushiai/app"]);
+  // A host that is ready starts at once: no prepare runs at all.
+  log = [];
+  started.length = 0;
+  outcome = await prepareAndStart({
+    ...base,
+    bridge: fakeBridge(log, { ready: { ready: true, path: "/srv/app" } }),
+    start: async (path) => started.push(path) > 0,
+  });
+  assert.equal(outcome.kind, "started");
+  assert.deepEqual(started, ["/srv/app"]);
+  assert.equal(
+    log.some((entry) => entry[0] === "prepare"),
+    false,
+  );
   // Walking away after the prepare: no session.
   started.length = 0;
   outcome = await prepareAndStart({
@@ -174,6 +192,7 @@ test("the picker's flow retries as asked, and never starts a session nobody wait
   outcome = await prepareAndStart({
     ...base,
     bridge: {
+      projectHostReady: async () => ({ ready: false }),
       projectHostPrepare: async () => {
         throw new Error("ssh dropped");
       },

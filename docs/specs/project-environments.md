@@ -21,10 +21,12 @@ variants are archived there.
 
 ## Decisions (owner, 2026-09-30)
 
-- **D1 · Secrets leave this Mac: decided.** Only to hosts the owner trusted explicitly, once per
-  host and project, revocable. Values travel only in orchd memory or a one-shot 0600 file that is
-  deleted right after it is sourced. Today no key reaches a remote host by design
-  (`electron/orchestrator.cjs:605`); S9 changes that for trusted hosts only.
+- **D1 · Secrets leave this Mac: decided (revised 2026-10-01).** To every SSH host the owner
+  added: adding the host is the consent, so there is no consent screen and no per-host approval.
+  The one control is "Don't send secrets to this host" (Project settings → Hosts, off by default,
+  `hosts[host].withheld`); with it on the host gets no value of that project and its daemon drops
+  what it holds. Values travel only in orchd memory, on the prepare script's stdin or in a
+  one-shot 0600 file deleted right after it is sourced, and never to Herdr panes.
 - **D2 · Core changes: approved.** The owner started this feature knowing every lane touches
   `src/app/*`, `electron/*` or orchd.
 - D3 · Project description in the app only (proposed) vs also a committable
@@ -53,7 +55,7 @@ team project file (D3). An extension carrying secrets: this is core, not the man
 
 - **M1 · Local** (S1–S7): project, settings dialog, env/secrets/MCP injection, V4 popup,
   multi-subscription. Useful on its own on this Mac.
-- **M2 · Remote** (S8–S10): hosts, trust, delivery, prepare/clone, Run on.
+- **M2 · Remote** (S8–S10): hosts, the don't-send switch, delivery, prepare/clone, Run on.
 - **M3 · New project** (S11), then **S12** docs, evidence and release on every milestone.
 
 All sub-tasks are parts of one orchd feature and land on its branch; the feature ships as one PR
@@ -134,32 +136,34 @@ network{allowedDomains}, sessions{claudeAccount, backend}, targets[]`) in `src/t
 - **Accept:** two sessions on two accounts run side by side locally; `env` inside the session does
   not show the token; an orchd task uses the route's account; tests for fd passing.
 
-### S8 · Hosts and trust (depends on S1) — M2
+### S8 · Hosts (depends on S1) — M2
 
 - Hosts tab: readiness matrix (checkout, setup, CLIs, MCP, secrets) from the existing preflight
   (`electron/orchestrator-remote.cjs:87`) plus a checkout check against the project remote;
-  trusted / not trusted; per-host overrides; Revoke trust.
+  gets secrets / no secrets; per-host overrides; the "Don't send secrets to this host" switch.
 - `~/sushiai` is created on first connect; a non-standard checkout is detected and flagged.
-- **Accept:** matrix states covered by tests with a fake ssh; revoke stops the next run from
-  getting values; screenshots saved and compared with the design concept.
+- **Accept:** matrix states covered by tests with a fake ssh; the switch stops the next run from
+  getting values and empties the host's orchd copy; screenshots saved and compared with the design concept.
 
 ### S9 · Remote delivery (depends on S5, S8)
 
-- Remote orchd gets `secrets.set` for trusted hosts only (drop the "never leave this machine"
-  branch for trusted hosts). SSH terminals get a one-shot 0600 env file over stdin (and the fd
+- Remote orchd gets `secrets.set` for every host except those switched off for the project (drop
+  the "never leave this machine" branch). SSH terminals get a one-shot 0600 env file over stdin (and the fd
   for a subscription token), deleted after sourcing. Project MCP reaches remote tasks.
-- **Accept:** live run on a remote SSH host: the agent sees the env, the host has no file left behind, an
-  untrusted host gets nothing; `docs/architecture.md` arrow updated.
+- **Accept:** live run on a remote SSH host: the agent sees the env, the host has no file left behind, a
+  host switched off gets nothing; `docs/architecture.md` arrow updated.
 
 ### S10 · Prepare a host and Run on (depends on S8, S9)
 
 - Prepare: clone into `~/sushiai/<slug>` (`GIT_ASKPASS` with the project's git token, or the
   host's own login), install when the lock-file hash changes, optional check.
-- Orchestrator composer "Run on" menu with readiness (`src/orchestrator/HostSelect.tsx`); first
-  run on a host = consent with the steps and the secret list; a failure screen with actions (Try
-  again, use the host's git login, edit token).
+- Orchestrator composer "Run on" menu with readiness (`src/orchestrator/HostSelect.tsx`); a
+  host that is ready starts at once (a cheap readiness probe, no Prepare); Prepare shows its steps
+  only when something is missing, uses an existing checkout of the repository where it is and clones
+  only when there is none; a failure screen has actions (Try again, use the host's git login, edit
+  token).
 - **Accept:** a fresh host goes from "not cloned" to a running task in one flow; a 403 clone
-  shows the failure screen and sends nothing; screenshots saved and compared with the design concept.
+  shows the failure screen and says what reached the host; screenshots saved and compared with the design concept.
 
 ### S11 · New project flow (depends on S1, S3, S8; remote clone uses S10) — M3
 

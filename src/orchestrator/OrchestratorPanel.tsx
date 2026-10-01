@@ -112,11 +112,12 @@ async function createTask(
   text: string,
   base: string,
   start: boolean,
+  projectId?: string,
 ): Promise<Task> {
   try {
     return await orchestratorClient.taskCreate(
       cwd,
-      taskCreateParams({ request: text, start, source: "ui" }, base),
+      taskCreateParams({ request: text, start, source: "ui", projectId }, base),
     );
   } catch (e) {
     if (!errorText(e).includes("planner is disabled")) throw e;
@@ -128,6 +129,7 @@ async function createTask(
           goal: text,
           start,
           source: "ui",
+          projectId,
         },
         base,
       ),
@@ -190,6 +192,7 @@ function OrchestratorBody({
   onDaemon,
   view: savedView,
   onViewChange,
+  onChooseLocal,
 }: {
   cwd: string;
   hosts: OrchestratorHost[];
@@ -204,6 +207,8 @@ function OrchestratorBody({
   view?: OrchestratorView;
   /** Reports the view after each change so it can be saved on the panel. */
   onViewChange(view: OrchestratorView | undefined): void;
+  /** Switches the panel itself to This Mac (the Run on menu offers it). */
+  onChooseLocal(): void;
 }) {
   const orchestratorClient = useOrchestratorClient();
   const host = useOrchestratorHost();
@@ -577,19 +582,31 @@ function OrchestratorBody({
           throw new Error(
             "This folder is not linked to a project with a Git remote.",
           );
-        setPrepareBusy(true);
-        const prepared = await window.bridge!.projectHostPrepare(
-          project.id,
-          runHost,
-          useHostLogin,
-        );
-        setPrepareBusy(false);
-        if (!prepared.ok) {
-          setPrepareFailure(prepared);
-          return;
+        // A host that already has the project, installed, takes the task at
+        // once; Prepare runs only when something is missing.
+        const ready = useHostLogin
+          ? { ready: false }
+          : await window
+              .bridge!.projectHostReady(project.id, runHost)
+              .catch(() => ({ ready: false, path: undefined }));
+        if ("path" in ready && ready.ready && ready.path) {
+          targetCwd = ready.path;
+        } else {
+          setPrepareBusy(true);
+          const prepared = await window.bridge!.projectHostPrepare(
+            project.id,
+            runHost,
+            useHostLogin,
+            { pull: false },
+          );
+          setPrepareBusy(false);
+          if (!prepared.ok) {
+            setPrepareFailure(prepared);
+            return;
+          }
+          targetCwd = prepared.path;
+          rememberPrepareTimes(project.id, runHost, prepared.steps);
         }
-        targetCwd = prepared.path;
-        rememberPrepareTimes(project.id, runHost, prepared.steps);
         targetClient = orchestratorClientFor(runHost);
       }
       const task = await createTask(
@@ -598,6 +615,7 @@ function OrchestratorBody({
         text,
         baseBranchDraft,
         start,
+        project?.id,
       );
       setLive((old) => ({ ...old, tasks: upsertTask(old.tasks, task) }));
       setTaskDraft("");
@@ -1054,7 +1072,11 @@ function OrchestratorBody({
                         readiness={runReadiness}
                         project={project}
                         cwd={cwd}
-                        onChange={setRunHost}
+                        onChange={(next) =>
+                          next === "local" && host !== "local"
+                            ? onChooseLocal()
+                            : setRunHost(next)
+                        }
                       />
                     )}
                   </>
@@ -1372,6 +1394,7 @@ function OrchestratorPanelBody({
           onDaemon={onDaemon}
           view={savedHost === host || !savedHost ? view : undefined}
           onViewChange={onViewChange}
+          onChooseLocal={() => choose({ host: "local" })}
         />
       </OrchestratorHostProvider>
     </div>

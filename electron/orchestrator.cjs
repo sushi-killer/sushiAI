@@ -604,7 +604,10 @@ class OrchestratorService {
         const project = params.projectId
           ? await this.getProjects().get(params.projectId)
           : this.remote
-            ? null
+            ? await this.getProjects().resolveFolder({
+                endpoint: this.host,
+                cwd: params.repo,
+              })
             : await this.getProjects().resolveDirectory(params.repo);
         if (project) {
           params = { ...params, projectId: project.id };
@@ -711,6 +714,15 @@ class OrchestratorService {
         projectMcp: this.getProjects
           ? await this.getProjects()
               .mcpEnvironments(this.remote ? this.host : "local")
+              .catch(() => ({}))
+          : {},
+        projectRepos: this.getProjects
+          ? await Promise.resolve(
+              this.getProjects().repoProjects?.(
+                this.remote ? this.host : "local",
+              ),
+            )
+              .then((map) => map ?? {})
               .catch(() => ({}))
           : {},
       },
@@ -1054,6 +1066,15 @@ class OrchestratorHosts {
     return this.services.get(host)?.refreshSecrets();
   }
 
+  /** What the projects hold changed: every daemon this app talks to is told. */
+  refreshAllSecrets() {
+    return Promise.all(
+      [this.local, ...this.services.values()].map((service) =>
+        service?.refreshSecrets?.(),
+      ),
+    );
+  }
+
   /** Lists the hosts the owner enabled earlier; they connect on first use.
    * Never throws. */
   async init() {
@@ -1219,7 +1240,11 @@ function createOrchestratorHosts({
   // When sending to a host is switched off or on, its daemon's copy of the
   // project values is replaced.
   const projects = getProjects?.();
-  if (projects) projects.onSendChange = (host) => hosts.refreshSecrets(host);
+  if (projects) {
+    projects.onSendChange = (host) => hosts.refreshSecrets(host);
+    // An edit in Project settings reaches every host's daemon at once.
+    projects.onChange = () => hosts.refreshAllSecrets();
+  }
   return hosts;
 }
 

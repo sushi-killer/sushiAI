@@ -83,7 +83,6 @@ export function RunOnSelect({
             role="menuitemradio"
             aria-checked={value === "local"}
             className={`orch-host-option${value === "local" ? " selected" : ""}`}
-            disabled={currentHost !== "local"}
             onClick={() => {
               onChange("local");
               setOpen(false);

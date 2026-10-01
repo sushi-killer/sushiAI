@@ -321,8 +321,11 @@ export function WorkspaceDialog({
       [endpoint]: { ...current[endpoint], ...next },
     }));
 
+  const creating = useRef(false);
   async function createProject() {
-    if (!window.bridge || busy) return;
+    // A second click before the first has rendered must not start a second one.
+    if (!window.bridge || busy || creating.current) return;
+    creating.current = true;
     setBusy(true);
     setError("");
     setStep("creating");
@@ -346,7 +349,10 @@ export function WorkspaceDialog({
       const remoteUrl = source === "git" ? url.trim() : url.trim();
       const project = await window.bridge.projectsUpsert({
         name: name.trim() || "New project",
-        git: { url: remoteUrl, defaultBranch: branch || "main" },
+        git: {
+          url: remoteUrl,
+          defaultBranch: source === "folder" ? "" : branch,
+        },
         env: variables.map(({ name: key, secret, availableTo }) => ({
           name: key,
           secret,
@@ -391,11 +397,14 @@ export function WorkspaceDialog({
           let checkoutSeconds: number | undefined;
           let installSeconds: number | undefined;
           let installError = "";
+          // The folder name the project was given when it was made, never one
+          // derived again from the name typed here.
+          const folderName = project.slug || projectSlug(name);
           let target = host.local
-            ? localPathFor(host)
+            ? localPathFor(host, folderName)
             : reuseFolder
               ? cwd
-              : `~/sushiai/${projectSlug(name)}`;
+              : `~/sushiai/${folderName}`;
           if (
             host.local &&
             (source === "git" ||
@@ -535,6 +544,7 @@ export function WorkspaceDialog({
       setStep("environment");
     } finally {
       setBusy(false);
+      creating.current = false;
     }
   }
 

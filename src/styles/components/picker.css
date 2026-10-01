@@ -1,0 +1,492 @@
+/* The new-session picker (Figma "Add panel · V4"). Sizes are the concept's
+ * own; colours are tokens. */
+
+.modal-backdrop:has(.pk) {
+  background: var(--scrim);
+  backdrop-filter: none;
+}
+.modal.command-modal {
+  width: 640px;
+  max-width: calc(100vw - 48px);
+  padding: 22px 24px 16px;
+  border-color: var(--line);
+  border-radius: 16px;
+  background: var(--bg-dialog);
+}
+/* The account menu hangs below the Claude Code row, past the dialog's edge. */
+.modal.command-modal {
+  overflow: visible;
+}
+@media (max-height: 640px) {
+  .modal.command-modal {
+    overflow: auto;
+  }
+}
+.command-modal > .modal-close {
+  top: 33px;
+  right: 24px;
+  width: 15px;
+  height: 15px;
+  color: var(--text-muted);
+}
+.command-modal > .modal-close svg {
+  width: 15px;
+  height: 15px;
+}
+
+.pk {
+  display: flex;
+  flex-direction: column;
+  color: var(--text);
+  font-size: var(--text-md);
+}
+.pk-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-right: 25px;
+}
+.pk-head-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.pk-eyebrow {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  line-height: 12px;
+  text-transform: uppercase;
+}
+.pk .pk-head h2 {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 22px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pk-env {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 14px;
+}
+
+/* Where the session starts: host, backend, worktree. */
+.pk-where {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 16px;
+}
+.pk-hosts {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.pk-host {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 29px;
+  padding: 6px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-control);
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 15px;
+  white-space: nowrap;
+}
+.pk-host:hover {
+  color: var(--text);
+}
+.pk-host.selected {
+  border-color: var(--line-selected);
+  background: var(--bg-selected);
+  color: var(--text);
+  font-weight: 500;
+}
+.pk-backend {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-app);
+}
+.pk-backend button {
+  padding: 4px 10px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 15px;
+}
+.pk-backend button:hover {
+  color: var(--text);
+}
+.pk-backend button.selected {
+  background: var(--bg-selected);
+  color: var(--text);
+  font-weight: 500;
+}
+.pk .pk-worktree {
+  position: relative;
+  display: flex;
+  flex: none;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin-left: 12px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 15px;
+  cursor: pointer;
+}
+.pk .pk-worktree.on {
+  color: var(--text);
+}
+.pk .pk-worktree input {
+  position: absolute;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+}
+.pk-box {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-control);
+  color: var(--accent-ink);
+}
+.pk-worktree.on .pk-box {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.pk-worktree input:focus-visible + .pk-box {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.pk-info {
+  margin: 8px 0 0;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pk-worktree-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.pk-worktree-line .pk-info {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+.pk-error {
+  color: var(--danger);
+}
+.pk-branch {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  max-width: 60%;
+  height: 23px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-app);
+  color: var(--text-muted);
+}
+.pk .pk-branch input {
+  width: auto;
+  min-width: 40px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  field-sizing: content;
+  font-size: 11.5px;
+  line-height: 14px;
+  outline: none;
+}
+.pk-branch:focus-within {
+  border-color: var(--focus);
+}
+
+/* The two lists. */
+.pk-lists {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: start;
+  gap: 16px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-divider);
+}
+.pk-agents,
+.pk-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.pk-label {
+  padding: 0 10px 6px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  line-height: 12px;
+  text-transform: uppercase;
+}
+.pk-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 10px;
+  border-radius: 9px;
+}
+.pk-row:hover {
+  background: var(--bg-hover);
+}
+.pk-row.focused {
+  border: 1px solid var(--line-selected);
+  background: var(--bg-selected);
+}
+.pk-row-main {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  text-align: left;
+}
+/* The whole row is the button; the account chip and the key sit above it. */
+.pk-row-main::after {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  content: "";
+}
+.pk-row-main:focus-visible::after {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+.pk-row-main:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.pk-glyph,
+.pk-icon {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  color: var(--text-muted);
+}
+.pk-glyph {
+  font-size: 15px;
+  line-height: 18px;
+}
+.pk-glyph.claude {
+  color: var(--accent-amber);
+}
+.pk-glyph.gemini {
+  color: var(--accent-violet);
+}
+.pk-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.pk-text strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 500;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pk-text small {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  line-height: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pk-text small.is-warning {
+  color: var(--tone-warning);
+}
+.pk-kbd {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 19px;
+  height: 16px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-count);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 10.5px;
+  line-height: 12px;
+}
+
+/* The account a Claude Code session runs as. */
+.pk-account {
+  position: relative;
+  z-index: 1;
+  flex: none;
+}
+.picker-account-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-control);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+.picker-account-chip:hover {
+  color: var(--text);
+}
+.picker-account-chip.open,
+.picker-account-chip:focus-visible {
+  border-color: var(--focus);
+  outline: none;
+}
+.picker-account-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  width: 312px;
+  padding: 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-popover);
+}
+.pk-menu-group {
+  padding: 8px 10px 4px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  line-height: 12px;
+  text-transform: uppercase;
+}
+.pk-menu-group:first-child {
+  padding: 6px 10px;
+}
+.pk-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  text-align: left;
+}
+.pk-menu-item:hover,
+.pk-menu-item[aria-checked="true"] {
+  background: var(--bg-selected);
+}
+.pk-menu-item .pk-text {
+  gap: 2px;
+}
+.pk-menu-item .pk-text strong {
+  font-size: 12.5px;
+  line-height: 15px;
+}
+.pk-menu-item svg {
+  flex: none;
+  color: var(--text-muted);
+}
+.pk-menu-rule {
+  height: 1px;
+  background: var(--line-divider);
+}
+.pk-menu-foot {
+  padding: 8px 10px 6px;
+  color: var(--tone-info);
+  font-size: var(--text-xs);
+  line-height: 13px;
+  text-align: left;
+}
+.pk-menu-foot:hover {
+  text-decoration: underline;
+}
+
+.pk-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-divider);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 14px;
+}
+.pk-foot > span:first-child {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pk-foot-text {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  line-height: 13px;
+}
+.pk .is-busy {
+  pointer-events: none;
+  opacity: 0.5;
+}

@@ -47,6 +47,21 @@ function remoteFileCommand() {
   return 'umask 077; f=$(mktemp); cat > "$f"; chmod 600 "$f"; printf \'%s\' "$f"';
 }
 
+/** Deletes uploaded secret files from a host, best effort: a session that
+ * never started must not leave them behind. */
+async function removeRemoteFiles(binary, args, paths) {
+  const files = paths.filter(Boolean);
+  if (!files.length) return;
+  const quoted = files.map(
+    (path) => `'${String(path).replaceAll("'", "'\\''")}'`,
+  );
+  await uploadRemoteFile(
+    binary,
+    [...args, `rm -f ${quoted.join(" ")}`],
+    "",
+  ).catch(() => {});
+}
+
 function claudeFdLaunch(binary, tokenPath) {
   return {
     binary: "/bin/sh",
@@ -74,6 +89,7 @@ function registerTerminalIpc({
   stageModelSettings,
   stageClaudeAccount,
   projects,
+  sshBinary = "/usr/bin/ssh",
 }) {
   const detectionTimer = setInterval(() => {
     for (const [panelId, entry] of terminals) {
@@ -162,12 +178,13 @@ function registerTerminalIpc({
         !["claude", "codex", "gemini", "cursor-agent"].includes(command)
       )
         throw new Error("Unsupported agent");
+      let remoteCleanup = async () => {};
       let binary = command
         ? executable(command)
         : process.env.SHELL || "/bin/zsh";
       let args = command ? [] : ["-l"];
       if (remote) {
-        binary = "/usr/bin/ssh";
+        binary = sshBinary;
         const projectEnv =
           projects && projectId
             ? await projects.environmentFor(projectId, "agent", endpoint)
@@ -197,13 +214,21 @@ function registerTerminalIpc({
               envPayload,
             )
           : null;
-        const tokenPath = subscriptionToken
-          ? await uploadRemoteFile(
-              binary,
-              [...sshArgs, remoteFileCommand()],
-              subscriptionToken,
-            )
-          : null;
+        let tokenPath = null;
+        try {
+          tokenPath = subscriptionToken
+            ? await uploadRemoteFile(
+                binary,
+                [...sshArgs, remoteFileCommand()],
+                subscriptionToken,
+              )
+            : null;
+        } catch (error) {
+          await removeRemoteFiles(binary, sshArgs, [envPath]);
+          throw error;
+        }
+        remoteCleanup = () =>
+          removeRemoteFiles(binary, sshArgs, [envPath, tokenPath]);
         remoteEnvBootstrapData = remoteEnvBootstrap(
           cwd,
           command,
@@ -244,18 +269,26 @@ function registerTerminalIpc({
         modelSettingsPath = await stageModelSettings(modelProfileId);
         args = [...args, "--settings", modelSettingsPath];
       }
-      const proc = pty.spawn(binary, args, {
-        name: "xterm-256color",
-        cols: Math.max(10, Math.min(500, cols)),
-        rows: Math.max(3, Math.min(300, rows)),
-        cwd: remote ? os.homedir() : cwd,
-        env: {
-          ...terminalEnvironment(),
-          ...(projects && (projectId || project?.id)
-            ? await projects.environmentFor(projectId || project.id, "agent")
-            : {}),
-        },
-      });
+      let proc;
+      try {
+        proc = pty.spawn(binary, args, {
+          name: "xterm-256color",
+          cols: Math.max(10, Math.min(500, cols)),
+          rows: Math.max(3, Math.min(300, rows)),
+          cwd: remote ? os.homedir() : cwd,
+          env: {
+            ...terminalEnvironment(),
+            // A remote session's project values travel over ssh, never in
+            // the local pty's environment (ssh could forward them).
+            ...(!remote && projects && (projectId || project?.id)
+              ? await projects.environmentFor(projectId || project.id, "agent")
+              : {}),
+          },
+        });
+      } catch (error) {
+        await remoteCleanup();
+        throw error;
+      }
       const entry = {
         proc,
         history: "",
@@ -282,6 +315,8 @@ function registerTerminalIpc({
       });
       proc.onExit(({ exitCode }) => {
         entry.exited = true;
+        // ssh can end before the remote shell ever reached its own cleanup.
+        void remoteCleanup();
         if (
           entry.modelSettingsPath ||
           entry.accountSettingsPath ||
@@ -378,5 +413,6 @@ module.exports = {
   remoteEnvBootstrap,
   remoteEnvPayload,
   uploadRemoteFile,
+  removeRemoteFiles,
   remoteFileCommand,
 };

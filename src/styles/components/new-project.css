@@ -1,0 +1,754 @@
+/* The New project flow (Figma "New project"). Sizes are the concept's own;
+ * colours are tokens. */
+
+.modal-backdrop:has(.np) {
+  background: var(--scrim);
+  backdrop-filter: none;
+}
+.modal.np-dialog {
+  width: 640px;
+  max-width: calc(100vw - 48px);
+  padding: 22px 24px 18px;
+  overflow: visible;
+  border-color: var(--line);
+  border-radius: 16px;
+  background: var(--bg-dialog);
+}
+.np-dialog > .modal-close {
+  top: 23px;
+  right: 24px;
+  width: 15px;
+  height: 15px;
+  color: var(--text-muted);
+}
+.np-dialog > .modal-close svg {
+  width: 15px;
+  height: 15px;
+}
+@media (max-height: 720px) {
+  .modal.np-dialog {
+    overflow: auto;
+  }
+}
+
+.np {
+  display: flex;
+  flex-direction: column;
+  color: var(--text);
+  font-size: var(--text-md);
+}
+.np-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 16px;
+  padding-right: 25px;
+}
+.np .np-head h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 22px;
+}
+.np-head p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 15px;
+}
+.np-head.ready {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+.np-ok {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--tone-ok-bg);
+  color: var(--tone-ok);
+}
+.np-head + .np-step,
+.np-head + .np-cards {
+  margin-top: 2px;
+}
+
+/* Steps. */
+.np-step {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 18px;
+  margin-top: 10px;
+  opacity: 0.5;
+}
+.np-step.current {
+  opacity: 1;
+}
+.np-body + .np-step {
+  margin-top: 0;
+}
+.np-step strong {
+  font-size: var(--text-md);
+  font-weight: 600;
+  line-height: 16px;
+}
+.np-n {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 13px;
+}
+/* Only the last step, the one that creates the project, is lit. */
+.np-step.current.last .np-n {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.np-done {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 35px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line-divider);
+}
+.np-done + .np-step {
+  margin-top: 14px;
+}
+.np-check {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--tone-ok-bg);
+  color: var(--tone-ok);
+}
+.np-done strong {
+  color: var(--text-muted);
+  font-size: var(--text-md);
+  font-weight: 500;
+  line-height: 16px;
+}
+.np-done-summary {
+  flex: 1;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.np-edit {
+  color: var(--tone-info);
+  font-size: var(--text-sm);
+  line-height: 15px;
+}
+.np-edit:hover {
+  text-decoration: underline;
+}
+.np-body {
+  display: flex;
+  flex-direction: column;
+  margin: 10px 0 8px;
+}
+.np-body:has(.np-hosts) {
+  margin-top: 8px;
+  margin-bottom: 18px;
+}
+
+/* Source. */
+.np-tabs {
+  display: flex;
+  align-self: flex-start;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg-app);
+}
+.np-tabs button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 7px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 15px;
+}
+.np-tabs button:hover {
+  color: var(--text);
+}
+.np-tabs button.selected {
+  background: var(--bg-selected);
+  color: var(--text);
+  font-weight: 500;
+}
+.np-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-app);
+  color: var(--text-faint);
+}
+.np-field:focus-within {
+  border-color: var(--focus);
+}
+.np-field > svg {
+  flex: none;
+}
+.np .np-field input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 15px;
+  outline: none;
+}
+.np-field input::placeholder,
+.np .np-input::placeholder {
+  color: var(--text-faint);
+}
+.np-choose {
+  height: 18px;
+  margin: -2px -6px -2px 0;
+  padding: 0 8px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.np-rows {
+  display: flex;
+  flex-direction: column;
+}
+.np-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.np-name > span {
+  flex: none;
+  min-width: 34px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 15px;
+}
+.np-rows .np-name:first-child {
+  margin-top: 10px;
+}
+.np .np-input {
+  flex: 1;
+  min-width: 0;
+  height: 33px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-app);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 15px;
+}
+.np .np-input:focus-visible {
+  outline: none;
+  border-color: var(--focus);
+}
+.np-hint {
+  margin: 6px 0 0;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 14px;
+}
+.np-error {
+  margin: 8px 0 0;
+  color: var(--danger);
+  font-size: var(--text-sm);
+  line-height: 15px;
+}
+
+/* Hosts. */
+.np-hosts {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+.np .np-host {
+  position: relative;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line-divider);
+  color: var(--text);
+  cursor: pointer;
+}
+.np .np-host:last-child {
+  border-bottom: 0;
+  min-height: 47px;
+}
+.np .np-host input {
+  position: absolute;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+}
+.np-box {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-control);
+  color: var(--accent-ink);
+}
+.np-host.on .np-box {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.np-host input:focus-visible + .np-box {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.np-host-name {
+  color: var(--text-muted);
+  font-size: var(--text-md);
+  font-weight: 500;
+  line-height: 16px;
+}
+.np-host.on .np-host-name {
+  color: var(--text);
+}
+.np-host small {
+  flex: 1;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  line-height: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.np-host .ui-tag {
+  margin-left: auto;
+}
+
+/* Environment. */
+.np-caption {
+  margin: 0 0 6px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  line-height: 12px;
+  text-transform: uppercase;
+}
+.np-caption-runs {
+  margin-top: 14px;
+}
+.np-table {
+  /* Visible, so the account menu can hang past the table's edge. */
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+.np-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 33px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line-divider);
+  font-size: var(--text-sm);
+}
+.np-row:last-child {
+  border-bottom: 0;
+}
+
+.np-lock {
+  flex: none;
+  color: var(--text-faint);
+}
+.np-row-name {
+  flex: none;
+  width: 190px;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.np-row-label {
+  flex: none;
+  width: 110px;
+  color: var(--text-muted);
+  line-height: 15px;
+}
+.np-row-value {
+  flex: 1;
+  overflow: hidden;
+  color: var(--text);
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.np-row-hint {
+  flex: 1;
+  color: var(--text-faint);
+  line-height: 15px;
+}
+.np-row > .np-input {
+  height: 27px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  line-height: 13px;
+}
+.np-hint .np-link,
+.np-link {
+  color: var(--text-faint);
+  font: inherit;
+}
+.np-hint .np-link {
+  line-height: 14px;
+}
+.np-row .np-input {
+  color: var(--text-muted);
+}
+.np .np-row .np-input:focus-visible {
+  color: var(--text);
+}
+.np-link:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+.np-link.muted {
+  color: var(--text-muted);
+}
+.np-hint:has(.np-link) {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.np-plain {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 6px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 13px;
+}
+.np-select-wrap {
+  position: relative;
+  flex: none;
+}
+.np-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 200px;
+  height: 29px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-app);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 15px;
+  text-align: left;
+}
+.np-select > span {
+  flex: 1;
+}
+.np-select > svg {
+  color: var(--text-muted);
+}
+.np-select.open,
+.np-select:focus-visible {
+  border-color: var(--focus);
+  outline: none;
+}
+.np-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: -2px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  width: 292px;
+  padding: 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-popover);
+}
+.np-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  text-align: left;
+}
+.np-menu-item > span {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.np-menu-item strong {
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 15px;
+}
+.np-menu-item small {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  line-height: 13px;
+}
+.np-menu-item small.is-warning {
+  color: var(--tone-warning);
+}
+.np-menu-item:hover,
+.np-menu-item[aria-checked="true"] {
+  background: var(--bg-selected);
+}
+.np-menu-item svg {
+  flex: none;
+  color: var(--text-muted);
+}
+.np-menu-rule {
+  height: 1px;
+  background: var(--line-divider);
+}
+.np-menu-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 6px;
+  color: var(--tone-info);
+  font-size: var(--text-sm);
+  line-height: 15px;
+  text-align: left;
+}
+.np-menu-add:hover {
+  text-decoration: underline;
+}
+
+/* Footer. */
+.np-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-divider);
+}
+.np-footer.after-steps {
+  margin-top: 10px;
+}
+.np-footer.after-table {
+  margin-top: 8px;
+}
+.np-footer.after-hosts {
+  margin-top: 24px;
+}
+.np-note {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 14px;
+}
+.np-footer .ui-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+/* Creating. */
+.np-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.np-card {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+.np-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-raised);
+}
+.np-card-head > svg {
+  flex: none;
+  color: var(--text-muted);
+}
+.np-card-head strong {
+  font-size: var(--text-md);
+  font-weight: 600;
+  line-height: 16px;
+}
+.np-card-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.np-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-top: 1px solid var(--line-divider);
+  font-size: var(--text-sm);
+  line-height: 15px;
+}
+.np-mark {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+}
+.np-progress.done .np-mark {
+  border-color: transparent;
+  background: var(--tone-ok);
+}
+.np-progress.working .np-mark {
+  border-color: var(--tone-warning);
+}
+.np-progress.failed .np-mark {
+  border-color: transparent;
+  background: var(--danger);
+}
+.np-progress-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.np-progress.pending .np-progress-label {
+  color: var(--text-faint);
+}
+.np-progress-time {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  line-height: 13px;
+}
+.np-footer.after-cards {
+  margin-top: 16px;
+}
+
+/* Ready. */
+.np-summary {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+.np-sum-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line-divider);
+  font-size: var(--text-sm);
+  line-height: 15px;
+}
+.np-sum-row:last-child {
+  border-bottom: 0;
+}
+.np-sum-row > span:first-child {
+  flex: none;
+  width: 96px;
+  color: var(--text-muted);
+}
+.np-sum-row > strong {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.np-sum-row.secrets {
+  padding: 9px 12px;
+}
+.np-fill {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line-divider);
+}
+.np-fill > .ui-button {
+  align-self: flex-end;
+}
+.np .np-fill label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.np .np-fill label > span {
+  flex: none;
+  width: 190px;
+}
+
+/* Paths, addresses and values are set in the mono face, as in the concept. */
+.np-host small,
+.np .np-field input[aria-label="Git URL"],
+.np .np-row .np-input,
+.np .np-row .np-input::placeholder {
+  font-family: var(--font-mono);
+}
+
+.np .np-field input[aria-label="Git URL"]::placeholder {
+  font-family: var(--font-sans);
+}

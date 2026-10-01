@@ -160,11 +160,36 @@ export type Project = {
     { trusted?: boolean; overrides?: Record<string, unknown> }
   >;
 };
+/** One step of preparing a host: what it is, how it went, and how long. */
+export type ProjectPrepareStep = {
+  id: "clone" | "install" | "check";
+  state: "done" | "failed" | "pending";
+  seconds?: number;
+};
+/** What an import added: names and flags, never values. */
+export type ProjectImportResult = {
+  project: Project;
+  addedVariables: { name: string; secret: boolean }[];
+  addedServers: string[];
+};
 export type ProjectHostReadiness = {
+  /** `uname -sm` of the host, e.g. "Linux x86_64". */
+  platform?: string;
   checkout: { ok: boolean; path: string; nonStandard: boolean };
-  setup: { ok: boolean; configured: boolean };
+  setup: {
+    ok: boolean;
+    configured: boolean;
+    /** The next run reinstalls: the lock file changed since the last install. */
+    stale?: boolean;
+    lockFile?: string;
+  };
   clis: import("./orchestrator/types.ts").Preflight;
-  mcp: { ok: boolean; count: number };
+  mcp: {
+    ok: boolean;
+    count: number;
+    /** Enabled stdio servers whose command the host does not have. */
+    missing?: { name: string; command: string }[];
+  };
   secrets: { ok: boolean; count: number };
   trusted: boolean;
 };
@@ -585,8 +610,26 @@ export interface Bridge {
   connectionsForward(endpoint: string, url: string): Promise<string>;
   projectsList(): Promise<Project[]>;
   projectsGet(id: string): Promise<Project | null>;
-  projectsUpsert(project: Partial<Project>): Promise<Project>;
+  projectsUpsert(
+    project: Partial<Project> & { importToken?: string },
+  ): Promise<Project>;
   projectsDelete(id: string): Promise<void>;
+  /** Variables change through these, on the stored state, never by saving a
+   * whole project: a stale copy cannot overwrite what an import added. */
+  projectEnvUpdate(
+    id: string,
+    change: { set?: Project["env"]; remove?: string[] },
+  ): Promise<Project>;
+  /** Stores the clone token, adding a GIT_TOKEN variable when none exists. */
+  projectGitTokenSet(id: string, value: string): Promise<Project>;
+  projectMcpUpdate(
+    id: string,
+    change: {
+      set?: Record<string, Record<string, unknown>>;
+      remove?: string[];
+      disabled?: string[];
+    },
+  ): Promise<Project>;
   projectSecretSet(
     id: string,
     name: string,
@@ -619,18 +662,64 @@ export interface Bridge {
     host: string,
     useHostLogin?: boolean,
   ): Promise<
-    | { ok: true; path: string; output: string }
+    | {
+        ok: true;
+        path: string;
+        output: string;
+        pull: string;
+        message: string;
+        steps: ProjectPrepareStep[];
+      }
     | {
         ok: false;
         stage: "clone" | "setup";
+        /** The 15 minute limit ran out; nothing says the host refused. */
+        timedOut?: boolean;
         status?: number;
         message: string;
+        steps: ProjectPrepareStep[];
       }
   >;
-  projectEnvImportReview(
+  /** Parses a `.env` file the owner chose and says, per variable, whether it
+   * is a secret and how it compares with what the project already has. */
+  projectEnvReviewText(
     id: string,
-    entries: { name: string; value: string }[],
-  ): Promise<{ name: string; status: "exists" | "differs" | "new" | "same" }[]>;
+    text: string,
+  ): Promise<
+    {
+      name: string;
+      value: string;
+      secret: boolean;
+      status: "exists" | "differs" | "new" | "same";
+    }[]
+  >;
+  /** Whether each variable name looks like a secret (the one classifier). */
+  projectEnvClassify(names: string[]): Promise<boolean[]>;
+  /** Reads a local checkout's .env files, .mcp.json and Claude config into
+   * the project, adding what is missing. Values stay in the main process. */
+  projectImportLocal(id: string, cwd: string): Promise<ProjectImportResult>;
+  projectImportMcpText(id: string, text: string): Promise<ProjectImportResult>;
+  /** Reads a source before its project exists. Secret values are held in the
+   * main process under `token`; pass it to `projectsUpsert` as `importToken`. */
+  projectScanSource(input: {
+    endpoint?: string;
+    root?: string;
+    local?: boolean;
+    example?: string;
+    mcp?: string;
+  }): Promise<{
+    token: string;
+    /** The install command the source's lock file implies, or empty. */
+    install: string;
+    servers: Record<string, Record<string, unknown>>;
+    variables: {
+      name: string;
+      secret: boolean;
+      availableTo?: string[];
+      value?: string;
+      held?: boolean;
+    }[];
+  }>;
   projectsResolve(
     remote: string | { remote: string; endpoint?: string },
   ): Promise<Project | null>;
@@ -644,12 +733,18 @@ export interface Bridge {
     cwd: string;
     branch?: string;
     empty?: boolean;
-  }): Promise<{ cwd: string }>;
+  }): Promise<{ cwd: string; pull: string; message: string }>;
+  projectLocalInstall(
+    id: string,
+    cwd: string,
+  ): Promise<{ ran: boolean; seconds: number }>;
   projectSourceInspect(url: string): Promise<{
     branch: string;
     envExample: string;
     mcp: string;
     lockFile: string;
+    /** The install command that lock file implies, or empty. */
+    install: string;
   }>;
   projectPreview(
     endpoint: string | undefined,

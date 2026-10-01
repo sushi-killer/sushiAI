@@ -1,33 +1,55 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
+  ChevronDown,
   FolderOpen,
   GitBranch,
+  Lock,
   LoaderCircle,
+  Play,
   Plus,
-  X,
+  Server,
 } from "lucide-react";
 import type { ClaudeAccount, ConnectionProfile } from "./types";
-import { isSecretEnvName, parseEnv } from "./projectEnv";
+import { Tag, Toggle } from "./orchestrator/ui";
+import { openSettings } from "./app/openSettings";
+import {
+  DoneRow,
+  HostProgress,
+  StepFooter,
+  StepHead,
+  type HostStep,
+} from "./NewProjectParts";
+import {
+  localTarget,
+  projectSlug,
+  rememberPrepareTimes,
+  repoSlug,
+  tildePath,
+} from "./projectPrepare";
 
 type Source = "git" | "folder" | "empty";
 type Step = "source" | "hosts" | "environment" | "creating" | "ready";
 type Host = { endpoint: string; label: string; cwd: string; local: boolean };
-type Variable = { name: string; value: string; secret: boolean };
+type Variable = {
+  name: string;
+  value: string;
+  secret: boolean;
+  /** The main process holds this secret's value from the source. */
+  held?: boolean;
+  availableTo?: string[];
+};
+type HostResult = {
+  state: "queued" | "working" | "ready" | "failed";
+  detail: string;
+  steps: HostStep[];
+};
 
-function slug(value: string) {
-  return (
-    value
-      .toLowerCase()
-      .trim()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "") || "project"
-  );
-}
-
-function decodeFile(file: { base64?: string }) {
-  return file.base64 ? atob(file.base64) : "";
-}
+const SOURCES: [Source, string, typeof GitBranch][] = [
+  ["git", "Git repository", GitBranch],
+  ["folder", "Folder on a host", FolderOpen],
+  ["empty", "Empty", Plus],
+];
 
 export function WorkspaceDialog({
   defaultCwd,
@@ -87,33 +109,69 @@ export function WorkspaceDialog({
   const [homeDir, setHomeDir] = useState("");
   const [name, setName] = useState("");
   const [branch, setBranch] = useState("main");
+  const [sourceRead, setSourceRead] = useState(false);
+  const [reading, setReading] = useState(false);
+  const [recent, setRecent] = useState<string[]>([]);
   const [selectedHosts, setSelectedHosts] = useState<string[]>(() =>
     [activeEndpoint || localSocket].filter(Boolean),
   );
   const [variables, setVariables] = useState<Variable[]>([]);
   const [plainCount, setPlainCount] = useState(0);
+  const [showPlain, setShowPlain] = useState(false);
   const [mcp, setMcp] = useState<Record<string, unknown>>({});
+  const [mcpOn, setMcpOn] = useState(true);
+  const [scanToken, setScanToken] = useState("");
+  /** A git source already has a checkout on This Mac. */
+  const [localFound, setLocalFound] = useState(false);
   const [install, setInstall] = useState("");
   const [accountId, setAccountId] = useState("");
+  const [accountMenu, setAccountMenu] = useState(false);
   const [accounts, setAccounts] = useState<ClaudeAccount[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [results, setResults] = useState<
-    Record<string, { state: string; detail: string }>
-  >({});
+  const [results, setResults] = useState<Record<string, HostResult>>({});
+  const [filling, setFilling] = useState(false);
+  const [projectRef, setProjectRef] = useState("");
+  const [fills, setFills] = useState<Record<string, string>>({});
   const localHost = hosts.find((host) => host.local);
   const selected = hosts.filter((host) =>
     selectedHosts.includes(host.endpoint),
   );
-  const projectCwd =
-    source === "folder"
-      ? cwd
-      : `${homeDir || localHost?.cwd.replace(/\/[^/]*$/, "") || "~"}/sushiai/${slug(name)}`;
+  const localHome = homeDir || localHost?.cwd.replace(/\/[^/]*$/, "") || "~";
+  /** Where the project is, or will be, on a host that is This Mac. A folder
+   * chosen on another host is not a path here, so This Mac gets its own. */
+  const localPathFor = (host: Host, projectName = name) =>
+    localTarget({
+      reuseFolder: source === "folder" && folderEndpoint === host.endpoint,
+      cwd,
+      home: localHome,
+      name: projectName,
+    });
+  const accountRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     window.bridge
       ?.claudeAccountsList()
-      .then(setAccounts)
+      .then((list) => {
+        setAccounts(list);
+        // Only an account that is ready to use (a saved token) is chosen for
+        // the owner; otherwise the host's own login stays the default.
+        setAccountId(
+          (current) => current || list.find((item) => item.hasValue)?.id || "",
+        );
+      })
+      .catch(() => {});
+    window.bridge
+      ?.projectsList()
+      .then((projects) =>
+        setRecent(
+          projects
+            .map((project) => repoSlug(project.git.url))
+            .filter(Boolean)
+            .slice(-2)
+            .reverse(),
+        ),
+      )
       .catch(() => {});
     if (localSocket)
       window.bridge
@@ -121,166 +179,185 @@ export function WorkspaceDialog({
         .then((info) => setHomeDir(info.home))
         .catch(() => {});
   }, [localSocket]);
+  useEffect(() => {
+    if (!accountMenu) return;
+    const close = (event: MouseEvent) => {
+      if (!accountRef.current?.contains(event.target as Node))
+        setAccountMenu(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [accountMenu]);
 
   async function chooseFolder() {
     const host = hosts.find((item) => item.endpoint === folderEndpoint);
     if (!host?.local) return;
     const chosen = await window.bridge?.chooseDirectory();
-    if (chosen) setCwd(chosen);
+    if (chosen) {
+      setCwd(chosen);
+      setSourceRead(false);
+    }
   }
 
-  async function inspectSource() {
+  async function importFromHost(
+    endpoint: string | undefined,
+    root: string,
+    base: { example?: string; mcp?: string },
+  ) {
+    // The main process reads the files and keeps secret values; this gets
+    // names, flags and the values of plain variables only.
+    const scan = await window.bridge?.projectScanSource({
+      endpoint,
+      root,
+      local: !!hosts.find((host) => host.endpoint === endpoint)?.local,
+      example: base.example,
+      mcp: base.mcp,
+    });
+    if (!scan) return;
+    const vars = scan.variables.map((item) => ({
+      name: item.name,
+      value: item.value ?? "",
+      secret: item.secret,
+      held: item.held,
+      availableTo: item.availableTo,
+    }));
+    setVariables(vars);
+    setPlainCount(vars.filter((item) => !item.secret).length);
+    setMcp(scan.servers);
+    setScanToken(scan.token);
+    // Only a folder source detects its install here; a git source reads it
+    // from the repository itself.
+    if (scan.install && root === cwd) setInstall(scan.install);
+  }
+
+  /** Reads what the source offers: its branch, .env.example, .mcp.json and
+   * lock file. Resolves once the answers are in state. */
+  async function readSource() {
     setError("");
     if (source === "git" && !url.trim()) throw new Error("Enter a git URL.");
     if (source === "folder" && !cwd.trim())
       throw new Error("Choose a project folder.");
-    if (!name.trim())
-      setName(
-        source === "folder"
-          ? cwd.split("/").filter(Boolean).at(-1) || "New project"
-          : source === "git"
-            ? url
-                .split(/[/:]/)
-                .filter(Boolean)
-                .at(-1)
-                ?.replace(/\.git$/, "") || "New project"
-            : "New project",
-      );
-    if (source === "git") {
-      const info = await window.bridge?.projectSourceInspect(url.trim());
-      if (info) {
-        setBranch(info.branch);
-        const entries = parseEnv(info.envExample);
-        setVariables(
-          entries.map((entry) => ({
-            name: entry.name,
-            secret: isSecretEnvName(entry.name),
-            value: isSecretEnvName(entry.name) ? "" : entry.value,
-          })),
-        );
-        setPlainCount(
-          entries.filter((entry) => !isSecretEnvName(entry.name)).length,
-        );
-        if (info.mcp) {
-          try {
-            setMcp(JSON.parse(info.mcp).mcpServers || {});
-          } catch {
-            setMcp({});
-          }
+    const derived =
+      source === "folder"
+        ? cwd.split("/").filter(Boolean).at(-1) || "New project"
+        : source === "git"
+          ? url
+              .split(/[/:]/)
+              .filter(Boolean)
+              .at(-1)
+              ?.replace(/\.git$/, "") || "New project"
+          : "New project";
+    const label = name.trim() || derived;
+    if (!name.trim()) setName(derived);
+    setReading(true);
+    try {
+      if (source === "git") {
+        const info = await window.bridge?.projectSourceInspect(url.trim());
+        if (info) {
+          setBranch(info.branch);
+          const checkout = localTarget({
+            reuseFolder: false,
+            cwd,
+            home: localHome,
+            name: label,
+          });
+          const exists =
+            !!localSocket &&
+            !!(await window.bridge
+              ?.projectInspect(localSocket, {
+                operation: "git_remote",
+                root: checkout,
+              })
+              .then((found) => found?.remote)
+              .catch(() => null));
+          setLocalFound(exists);
+          await importFromHost(exists ? localSocket : undefined, checkout, {
+            example: info.envExample,
+            mcp: info.mcp,
+          });
+          if (info.install) setInstall(info.install);
         }
-        const installs: Record<string, string> = {
-          "package-lock.json": "npm ci",
-          "pnpm-lock.yaml": "pnpm install --frozen-lockfile",
-          "yarn.lock": "yarn install --frozen-lockfile",
-          "bun.lock": "bun install --frozen-lockfile",
-          "bun.lockb": "bun install --frozen-lockfile",
-          "Cargo.lock": "cargo build",
-          "uv.lock": "uv sync --locked",
-          "poetry.lock": "poetry install",
-          "Pipfile.lock": "pipenv sync",
-          "Gemfile.lock": "bundle install",
-          "composer.lock": "composer install",
-          "go.sum": "go mod download",
-        };
-        if (info.lockFile) setInstall(installs[info.lockFile] || "");
       }
-    }
-    if (source === "folder") {
-      const endpoint = folderEndpoint;
-      const info = await window.bridge
-        ?.projectInspect(endpoint, { operation: "git_remote", root: cwd })
-        .catch(() => null);
-      if (info?.remote) setUrl(info.remote);
-      for (const file of [
-        ".env.example",
-        ".mcp.json",
-        "package-lock.json",
-        "pnpm-lock.yaml",
-        "yarn.lock",
-        "bun.lock",
-        "bun.lockb",
-        "Cargo.lock",
-        "uv.lock",
-        "poetry.lock",
-        "Gemfile.lock",
-        "go.sum",
-      ]) {
-        const read = await window.bridge
-          ?.projectInspect(endpoint, {
-            operation: "read",
-            root: cwd,
-            path: file,
-          })
+      if (source === "folder") {
+        const endpoint = folderEndpoint;
+        const info = await window.bridge
+          ?.projectInspect(endpoint, { operation: "git_remote", root: cwd })
           .catch(() => null);
-        if (!read?.base64) continue;
-        if (file === ".env.example") {
-          const parsed = parseEnv(decodeFile(read));
-          setVariables(
-            parsed.map((entry) => ({
-              name: entry.name,
-              secret: isSecretEnvName(entry.name),
-              value: isSecretEnvName(entry.name) ? "" : entry.value,
-            })),
-          );
-          setPlainCount(
-            parsed.filter((entry) => !isSecretEnvName(entry.name)).length,
-          );
-        } else if (file === ".mcp.json") {
-          try {
-            setMcp(JSON.parse(decodeFile(read)).mcpServers || {});
-          } catch {
-            setMcp({});
-          }
-        } else if (file.endsWith("lock") || file.endsWith("lockb")) {
-          const commands: Record<string, string> = {
-            "package-lock.json": "npm ci",
-            "pnpm-lock.yaml": "pnpm install --frozen-lockfile",
-            "yarn.lock": "yarn install --frozen-lockfile",
-            "bun.lock": "bun install --frozen-lockfile",
-            "bun.lockb": "bun install --frozen-lockfile",
-            "Cargo.lock": "cargo build",
-            "uv.lock": "uv sync --locked",
-            "poetry.lock": "poetry install",
-            "Gemfile.lock": "bundle install",
-            "go.sum": "go mod download",
-          };
-          setInstall(commands[file] || "");
-          break;
-        }
+        if (info?.remote) setUrl(info.remote);
+        await importFromHost(endpoint, cwd, {});
       }
+      setSourceRead(true);
+    } finally {
+      setReading(false);
     }
-    setStep("hosts");
   }
+
+  /** Reads the source without leaving the step, so the repository's branch
+   * and name appear as soon as a URL is pasted. */
+  function previewSource() {
+    if (sourceRead || reading || busy) return;
+    if (source !== "git" || !url.trim()) return;
+    void readSource().catch((reason) =>
+      setError(reason instanceof Error ? reason.message : String(reason)),
+    );
+  }
+
+  async function continueFromSource() {
+    try {
+      if (!sourceRead) await readSource();
+      setStep("hosts");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  const patchHost = (endpoint: string, next: Partial<HostResult>) =>
+    setResults((current) => ({
+      ...current,
+      [endpoint]: { ...current[endpoint], ...next },
+    }));
 
   async function createProject() {
     if (!window.bridge || busy) return;
     setBusy(true);
     setError("");
     setStep("creating");
-    const init = Object.fromEntries(
-      selected.map((host) => [
-        host.endpoint,
-        { state: "queued", detail: host.cwd },
-      ]),
+    const setup = install.trim();
+    const initial = (host: Host): HostResult => ({
+      state: "queued",
+      detail: host.cwd,
+      steps: [
+        { label: "Checkout", state: "pending" },
+        ...(setup ? [{ label: setup, state: "pending" as const }] : []),
+        {
+          label: host.local ? "Environment" : "Secrets",
+          state: "pending" as const,
+        },
+      ],
+    });
+    setResults(
+      Object.fromEntries(selected.map((h) => [h.endpoint, initial(h)])),
     );
-    setResults(init);
     try {
       const remoteUrl = source === "git" ? url.trim() : url.trim();
       const project = await window.bridge.projectsUpsert({
         name: name.trim() || "New project",
         git: { url: remoteUrl, defaultBranch: branch || "main" },
-        env: variables.map(({ name: key, secret }) => ({
+        env: variables.map(({ name: key, secret, availableTo }) => ({
           name: key,
           secret,
-          availableTo: ["setup", "agent"],
+          // MCP-only secrets stay out of agent shells and installs.
+          availableTo: availableTo ?? ["setup", "agent"],
         })),
-        mcp,
+        mcp: mcpOn ? { mcpServers: mcp } : {},
+        importToken: scanToken || undefined,
         setup: { install, check: "" },
         sessions: {
           claudeAccount: accountId || undefined,
           backend: selected.some((host) => !host.local) ? "herdr" : "local",
         },
       });
+      setProjectRef(project.id);
       for (const item of variables) {
         if (item.value)
           await window.bridge.projectSecretSet(
@@ -289,20 +366,32 @@ export function WorkspaceDialog({
             item.value,
           );
       }
-      const workspaces: { host: Host; cwd: string }[] = [];
+      let opened = false;
       for (const host of selected) {
-        setResults((current) => ({
-          ...current,
-          [host.endpoint]: { state: "working", detail: host.cwd },
-        }));
+        const began = Date.now();
+        const seconds = () => Math.round((Date.now() - began) / 1000);
+        const stepsOf = (states: HostStep["state"][], label: string) =>
+          initial(host).steps.map((item, index) => ({
+            ...item,
+            state: states[index] ?? "pending",
+            ...(index === 0 ? { label } : {}),
+          }));
+        patchHost(host.endpoint, {
+          state: "working",
+          steps: stepsOf(["working"], "Checkout"),
+        });
         try {
           const reuseFolder =
             source === "folder" && folderEndpoint === host.endpoint;
-          let target = reuseFolder
-            ? cwd
-            : host.local
-              ? projectCwd
-              : `~/sushiai/${slug(name)}`;
+          let note = "";
+          let checkoutSeconds: number | undefined;
+          let installSeconds: number | undefined;
+          let installError = "";
+          let target = host.local
+            ? localPathFor(host)
+            : reuseFolder
+              ? cwd
+              : `~/sushiai/${projectSlug(name)}`;
           if (
             host.local &&
             (source === "git" ||
@@ -313,12 +402,13 @@ export function WorkspaceDialog({
               throw new Error(
                 "This folder has no git remote to copy to This Mac.",
               );
-            await window.bridge.projectLocalCreate({
+            const made = await window.bridge.projectLocalCreate({
               url: remoteUrl,
               cwd: target,
               branch,
               empty: source === "empty",
             });
+            note = made.message;
           } else if (!host.local && !reuseFolder) {
             if (source === "folder" && !remoteUrl)
               throw new Error(
@@ -336,6 +426,12 @@ export function WorkspaceDialog({
             if (!prepared.ok)
               throw new Error(prepared.message || "Host setup failed.");
             target = prepared.path;
+            note = prepared.message;
+            rememberPrepareTimes(project.id, host.endpoint, prepared.steps);
+            for (const step of prepared.steps ?? []) {
+              if (step.id === "clone") checkoutSeconds = step.seconds;
+              if (step.id === "install") installSeconds = step.seconds;
+            }
           } else if (!host.local && source === "folder" && reuseFolder) {
             await window.bridge.projectHostTrust(
               project.id,
@@ -343,35 +439,80 @@ export function WorkspaceDialog({
               true,
             );
           }
-          workspaces.push({ host, cwd: target });
-          setResults((current) => ({
-            ...current,
-            [host.endpoint]: { state: "ready", detail: target },
-          }));
+          const label =
+            note || (reuseFolder ? "Checkout found" : "Checkout ready");
+          if (host.local && setup) {
+            patchHost(host.endpoint, {
+              steps: stepsOf(["done", "working"], label),
+            });
+            checkoutSeconds = seconds();
+            try {
+              const ran = await window.bridge.projectLocalInstall(
+                project.id,
+                target,
+              );
+              if (ran.ran) installSeconds = ran.seconds;
+            } catch (reason) {
+              installError =
+                reason instanceof Error ? reason.message : String(reason);
+            }
+          }
+          const done = stepsOf(["done", "done", "done"], label).map(
+            (item, index, all) => ({
+              ...item,
+              ...(index === 0 && checkoutSeconds !== undefined
+                ? { seconds: checkoutSeconds }
+                : {}),
+              ...(setup && index === 1
+                ? {
+                    ...(installSeconds !== undefined
+                      ? { seconds: installSeconds }
+                      : {}),
+                    ...(installError ? { state: "failed" as const } : {}),
+                  }
+                : {}),
+              ...(!setup && index === Math.min(1, all.length - 2)
+                ? { seconds: checkoutSeconds ?? seconds() }
+                : {}),
+            }),
+          );
+          patchHost(host.endpoint, {
+            state: "ready",
+            detail:
+              installError ||
+              (host.local
+                ? tildePath(target, homeDir)
+                : target.replace(/^.*?\/sushiai\//, "~/sushiai/")),
+            steps: done,
+          });
+          if (!opened) {
+            // The first host that is ready gets the workspace; the others
+            // keep going behind it.
+            opened = true;
+            const created = await onCreate(
+              project.name,
+              target,
+              project.sessions.backend || "local",
+              "shell",
+              host.local ? undefined : host.endpoint,
+            );
+            if (!created)
+              throw new Error(
+                "Project files were created, but the workspace could not open.",
+              );
+          }
         } catch (reason) {
-          setResults((current) => ({
-            ...current,
-            [host.endpoint]: {
-              state: "failed",
-              detail: reason instanceof Error ? reason.message : String(reason),
-            },
-          }));
+          patchHost(host.endpoint, {
+            state: "failed",
+            detail: reason instanceof Error ? reason.message : String(reason),
+            steps: initial(host).steps.map((item, index) => ({
+              ...item,
+              state: index === 0 ? "failed" : "pending",
+            })),
+          });
         }
       }
-      if (!workspaces.length)
-        throw new Error("No host finished creating the project.");
-      const first = workspaces[0];
-      const created = await onCreate(
-        project.name,
-        first.cwd,
-        project.sessions.backend || "local",
-        "shell",
-        first.host.local ? undefined : first.host.endpoint,
-      );
-      if (!created)
-        throw new Error(
-          "Project files were created, but the workspace could not open.",
-        );
+      if (!opened) throw new Error("No host finished creating the project.");
       setStep("ready");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -381,180 +522,380 @@ export function WorkspaceDialog({
     }
   }
 
-  const stepIndex = ["source", "hosts", "environment"].indexOf(step);
-  return (
-    <div className="new-project-flow">
-      <button
-        className="new-project-close"
-        aria-label="Close"
-        onClick={onClose}
-      >
-        <X size={16} />
-      </button>
-      <h2>
-        {step === "creating"
-          ? `Creating ${name || "project"}`
-          : step === "ready"
-            ? `${name || "Project"} is ready`
-            : "New project"}
-      </h2>
-      {step !== "creating" && step !== "ready" && (
-        <div className="new-project-steps">
-          {["Source", "Hosts", "Environment"].map((label, index) => (
-            <button
-              key={label}
-              className={
-                stepIndex === index
-                  ? "active"
-                  : stepIndex > index
-                    ? "complete"
-                    : ""
+  async function saveFills() {
+    if (!window.bridge || !projectRef) return;
+    for (const [key, value] of Object.entries(fills))
+      if (value) await window.bridge.projectSecretSet(projectRef, key, value);
+    setVariables((current) =>
+      current.map((item) =>
+        fills[item.name] ? { ...item, value: fills[item.name] } : item,
+      ),
+    );
+    setFills({});
+    setFilling(false);
+  }
+
+  const sourceName = name.trim() || "New project";
+  const slugOf = repoSlug(url);
+  const sourceSummary = [source === "git" ? sourceName : "", slugOf, branch]
+    .filter(Boolean)
+    .join(" · ");
+  const hostsSummary = selected.map((host) => host.label).join(", ");
+  const [maskedAt, setMaskedAt] = useState(-1);
+  const empties = variables.filter(
+    (item) => item.secret && !item.value && !item.held,
+  );
+  const secretsAll = variables.filter((item) => item.secret);
+  const account = accounts.find((item) => item.id === accountId);
+  const hostTag = (
+    host: Host,
+  ): { label: string; tone: "ok" | "neutral" | "danger" } => {
+    if (!host.local && statusByEndpoint[host.endpoint] !== "connected")
+      return { label: "offline", tone: "danger" };
+    // The folder source lives on one host; a git source on This Mac may
+    // already have been cloned there.
+    const found =
+      source === "folder"
+        ? folderEndpoint === host.endpoint
+        : host.local && source === "git" && localFound;
+    return found
+      ? { label: "found", tone: "ok" }
+      : {
+          label: host.local && source === "empty" ? "new" : "clones",
+          tone: "neutral",
+        };
+  };
+  /** What the host is doing now, from the step that is under way. */
+  const workingLabel = (steps: HostStep[], local: boolean) => {
+    // A remote host prepares in one call, so the step under way is not known.
+    if (!local) return "preparing";
+    const at = steps.findIndex((item) => item.state === "working");
+    return at === 0 ? "checking out" : at > 0 ? "installing" : "setting up";
+  };
+  const pathOf = (host: Host) =>
+    host.local
+      ? tildePath(localPathFor(host), homeDir)
+      : `~/sushiai/${projectSlug(name || "project")}`;
+
+  if (step === "creating") {
+    const entries = selected.map((host) => ({
+      host,
+      result: results[host.endpoint],
+    }));
+    const readyHosts = entries.filter((e) => e.result?.state === "ready");
+    const waiting = entries.filter(
+      (e) =>
+        e.result && e.result.state !== "ready" && e.result.state !== "failed",
+    );
+    const failed = entries.filter((e) => e.result?.state === "failed");
+    const target = readyHosts[0];
+    return (
+      <div className="np">
+        <header className="np-head">
+          <h2>{`Creating ${sourceName}`}</h2>
+          <p>Continues in the background if you close this.</p>
+        </header>
+        <div className="np-cards">
+          {entries.map(({ host, result }) => (
+            <HostProgress
+              key={host.endpoint}
+              icon={
+                host.local ? (
+                  <FolderOpen size={14} aria-hidden />
+                ) : (
+                  <Server size={14} aria-hidden />
+                )
               }
-              onClick={() => {
-                if (index < stepIndex)
-                  setStep(["source", "hosts", "environment"][index] as Step);
-              }}
-            >
-              <i>{stepIndex > index ? <Check size={12} /> : index + 1}</i>
-              {label}
-            </button>
+              name={host.label}
+              path={result?.state === "failed" ? result.detail : pathOf(host)}
+              tag={
+                result?.state === "ready"
+                  ? { label: "ready", tone: "ok" }
+                  : result?.state === "failed"
+                    ? { label: "failed", tone: "danger" }
+                    : result?.state === "working"
+                      ? {
+                          label: workingLabel(result.steps, host.local),
+                          tone: "warning",
+                        }
+                      : { label: "queued", tone: "neutral" }
+              }
+              steps={result?.steps || []}
+            />
           ))}
         </div>
+        <StepFooter
+          className="after-cards"
+          note={
+            failed.length
+              ? `${failed.map((e) => e.host.label).join(", ")} failed.`
+              : waiting.length && target
+                ? `${target.host.label} is ready. ${waiting.map((e) => e.host.label).join(" and ")} joins when its install finishes.`
+                : "Setting up your hosts…"
+          }
+        >
+          <button className="ui-button ghost" onClick={onClose}>
+            Close
+          </button>
+          <button
+            className="ui-button primary"
+            disabled={!target}
+            onClick={onClose}
+          >
+            {target ? (
+              waiting.length ? (
+                <LoaderCircle size={14} className="spinning" aria-hidden />
+              ) : (
+                <Play size={14} aria-hidden />
+              )
+            ) : (
+              <LoaderCircle size={14} className="spinning" aria-hidden />
+            )}
+            {`Open on ${target?.host.label || "…"}`}
+          </button>
+        </StepFooter>
+      </div>
+    );
+  }
+
+  if (step === "ready")
+    return (
+      <div className="np">
+        <header className="np-head ready">
+          <span className="np-ok">
+            <Check size={14} aria-hidden />
+          </span>
+          <h2>{`${sourceName} is ready`}</h2>
+        </header>
+        <div className="np-summary">
+          {selected.map((host) => {
+            const result = results[host.endpoint];
+            return (
+              <div className="np-sum-row" key={host.endpoint}>
+                <span>{host.label}</span>
+                <strong>{result?.detail}</strong>
+                <Tag tone={result?.state === "failed" ? "danger" : "ok"}>
+                  {result?.state === "failed" ? "failed" : "ready"}
+                </Tag>
+              </div>
+            );
+          })}
+          <div className="np-sum-row">
+            <span>Environment</span>
+            <strong>
+              {`${variables.length} variables · ${mcpOn ? Object.keys(mcp).length : 0} MCP ${Object.keys(mcp).length === 1 ? "server" : "servers"}`}
+            </strong>
+          </div>
+          {secretsAll.length > 0 && (
+            <div className="np-sum-row secrets">
+              <span>Secrets</span>
+              <strong>{`${empties.length} of ${secretsAll.length} empty`}</strong>
+              {empties.length > 0 && (
+                <button
+                  className="ui-button secondary"
+                  onClick={() => setFilling((open) => !open)}
+                >
+                  Fill now
+                </button>
+              )}
+            </div>
+          )}
+          {filling && (
+            <div className="np-fill">
+              {empties.map((item) => (
+                <label key={item.name}>
+                  <span>{item.name}</span>
+                  <input
+                    className="np-input"
+                    type="password"
+                    placeholder="paste value"
+                    value={fills[item.name] || ""}
+                    onChange={(event) =>
+                      setFills({ ...fills, [item.name]: event.target.value })
+                    }
+                  />
+                </label>
+              ))}
+              <button
+                className="ui-button primary"
+                onClick={() => void saveFills()}
+              >
+                Save secrets
+              </button>
+            </div>
+          )}
+          <div className="np-sum-row">
+            <span>Claude Code</span>
+            <strong>{account?.label || "Default"}</strong>
+          </div>
+        </div>
+        <StepFooter note="Change any of this later in Project settings">
+          <button className="ui-button ghost" onClick={onClose}>
+            Done
+          </button>
+          <button className="ui-button primary" onClick={onStart}>
+            <Play size={14} aria-hidden /> Start a session
+          </button>
+        </StepFooter>
+      </div>
+    );
+
+  const plainVars = variables.filter((item) => !item.secret);
+  const pastSource = step === "hosts" || step === "environment";
+  return (
+    <div className="np">
+      <header className="np-head">
+        <h2>New project</h2>
+      </header>
+      {pastSource ? (
+        <DoneRow
+          title="Source"
+          summary={sourceSummary}
+          onEdit={() => setStep("source")}
+        />
+      ) : (
+        <StepHead n={1} title="Source" current />
+      )}
+      {step === "environment" && (
+        <DoneRow
+          title="Hosts"
+          summary={hostsSummary}
+          onEdit={() => setStep("hosts")}
+        />
       )}
       {step === "source" && (
-        <section className="new-project-pane">
-          <div className="new-project-tabs">
-            {(
-              [
-                ["git", "Git repository"],
-                ["folder", "Folder on a host"],
-                ["empty", "Empty"],
-              ] as [Source, string][]
-            ).map(([kind, label]) => (
+        <section className="np-body">
+          <div className="np-tabs" role="tablist" aria-label="Source">
+            {SOURCES.map(([kind, label, Icon]) => (
               <button
                 key={kind}
+                role="tab"
+                aria-selected={source === kind}
                 className={source === kind ? "selected" : ""}
-                onClick={() => setSource(kind)}
+                onClick={() => {
+                  setSource(kind);
+                  setSourceRead(false);
+                }}
               >
+                <Icon size={13} aria-hidden />
                 {label}
               </button>
             ))}
           </div>
           {source === "git" && (
-            <label className="new-project-field">
-              <GitBranch size={14} />
+            <div className="np-field">
+              <GitBranch size={13} aria-hidden />
               <input
                 autoFocus
-                placeholder="Paste a git URL — git@github.com:... or https://..."
+                aria-label="Git URL"
+                placeholder="Paste a git URL — git@github.com:… or https://…"
                 value={url}
-                onChange={(event) => setUrl(event.target.value)}
-              />
-            </label>
-          )}
-          {source === "folder" && (
-            <label className="new-project-field">
-              <span>Host</span>
-              <select
-                value={folderEndpoint}
                 onChange={(event) => {
-                  setFolderEndpoint(event.target.value);
-                  setSelectedHosts((current) =>
-                    current.includes(event.target.value)
-                      ? current
-                      : [...current, event.target.value],
-                  );
+                  setUrl(event.target.value);
+                  setSourceRead(false);
                 }}
-              >
-                {hosts.map((host) => (
-                  <option key={host.endpoint} value={host.endpoint}>
-                    {host.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+                onPaste={() => setTimeout(previewSource, 0)}
+                onBlur={previewSource}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void continueFromSource();
+                }}
+              />
+              {reading && (
+                <LoaderCircle size={13} className="spinning" aria-hidden />
+              )}
+              {sourceRead && (
+                <Tag tone="neutral" dot={false}>
+                  {branch}
+                </Tag>
+              )}
+            </div>
           )}
           {source === "folder" && (
-            <label className="new-project-field">
-              <FolderOpen size={14} />
-              <input
-                placeholder="/Users/you/project"
-                value={cwd}
-                onChange={(event) => setCwd(event.target.value)}
-              />
-              <button
-                onClick={chooseFolder}
-                type="button"
-                disabled={
-                  !hosts.find((host) => host.endpoint === folderEndpoint)?.local
-                }
-              >
-                <FolderOpen size={15} />
-              </button>
-            </label>
+            <div className="np-rows">
+              <div className="np-name">
+                <span>Host</span>
+                <select
+                  className="np-input"
+                  aria-label="Host"
+                  value={folderEndpoint}
+                  onChange={(event) => {
+                    setFolderEndpoint(event.target.value);
+                    setSourceRead(false);
+                    setSelectedHosts((current) =>
+                      current.includes(event.target.value)
+                        ? current
+                        : [...current, event.target.value],
+                    );
+                  }}
+                >
+                  {hosts.map((host) => (
+                    <option key={host.endpoint} value={host.endpoint}>
+                      {host.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="np-field">
+                <FolderOpen size={13} aria-hidden />
+                <input
+                  aria-label="Folder"
+                  placeholder="/Users/you/project"
+                  value={cwd}
+                  onChange={(event) => {
+                    setCwd(event.target.value);
+                    setSourceRead(false);
+                  }}
+                />
+                <button
+                  className="ui-button ghost np-choose"
+                  onClick={chooseFolder}
+                  type="button"
+                  disabled={
+                    !hosts.find((host) => host.endpoint === folderEndpoint)
+                      ?.local
+                  }
+                >
+                  Choose…
+                </button>
+              </div>
+            </div>
           )}
           {source === "empty" && (
-            <p className="new-project-hint">
-              Start with an empty git repository at ~/sushiai/
-              {slug(name || "project")}.
+            <p className="np-hint">
+              {`Start with an empty git repository at ~/sushiai/${projectSlug(name || "project")}.`}
             </p>
           )}
-          {(source === "git" || source === "empty") && (
-            <label className="new-project-field">
+          {(sourceRead || source !== "git") && (
+            <div className="np-name">
               <span>Name</span>
               <input
+                className="np-input"
+                aria-label="Name"
                 placeholder="Project name"
                 value={name}
                 onChange={(event) => setName(event.target.value)}
               />
-            </label>
-          )}
-          {source === "folder" && (
-            <label className="new-project-field">
-              <span>Name</span>
-              <input
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-              />
-            </label>
-          )}
-          {source === "git" && (
-            <label className="new-project-field">
-              <span>Branch</span>
-              <input
-                value={branch}
-                onChange={(event) => setBranch(event.target.value)}
-              />
-            </label>
+            </div>
           )}
           {error && (
-            <p className="new-project-error" role="alert">
+            <p className="np-error" role="alert">
               {error}
             </p>
           )}
-          <footer>
-            <span>
-              {source === "folder"
-                ? "Reads repository settings from this folder"
-                : "Reads branch, .env.example, .mcp.json and lock file"}
-            </span>
-            <button
-              className="primary"
-              onClick={() =>
-                void inspectSource().catch((reason) => setError(String(reason)))
-              }
-            >
-              Continue
-            </button>
-          </footer>
         </section>
       )}
+      {step === "hosts" && <StepHead n={2} title="Hosts" current />}
       {step === "hosts" && (
-        <section className="new-project-pane">
-          <div className="new-project-hosts">
+        <section className="np-body">
+          <div className="np-hosts">
             {hosts.map((host) => {
               const checked = selectedHosts.includes(host.endpoint);
+              const tag = hostTag(host);
               return (
-                <label key={host.endpoint} className="new-project-host">
+                <label
+                  key={host.endpoint}
+                  className={`np-host${checked ? " on" : ""}`}
+                >
                   <input
                     type="checkbox"
                     checked={checked}
@@ -566,75 +907,70 @@ export function WorkspaceDialog({
                       )
                     }
                   />
-                  <span>{host.label}</span>
-                  <small>
-                    {host.local
-                      ? source === "folder"
-                        ? cwd
-                        : projectCwd
-                      : `~/sushiai/${slug(name || "project")}`}
-                  </small>
-                  <i>
-                    {host.local
-                      ? source === "folder"
-                        ? "found"
-                        : "local"
-                      : statusByEndpoint[host.endpoint] === "connected"
-                        ? source === "folder"
-                          ? "found"
-                          : "clones"
-                        : "offline"}
-                  </i>
+                  <span className="np-box" aria-hidden>
+                    {checked && <Check size={11} strokeWidth={3} />}
+                  </span>
+                  <span className="np-host-name">{host.label}</span>
+                  {checked && <small>{pathOf(host)}</small>}
+                  {checked && <Tag tone={tag.tone}>{tag.label}</Tag>}
                 </label>
               );
             })}
           </div>
           {error && (
-            <p className="new-project-error" role="alert">
+            <p className="np-error" role="alert">
               {error}
             </p>
           )}
-          <footer>
-            <span>
-              Creates on{" "}
-              {selected.map((host) => host.label).join(" and ") ||
-                "no hosts selected"}
-            </span>
-            <div>
-              <button onClick={() => setStep("source")}>Back</button>
-              <button
-                className="primary"
-                disabled={!selected.length}
-                onClick={() => setStep("environment")}
-              >
-                Continue
-              </button>
-            </div>
-          </footer>
         </section>
       )}
+      {step !== "environment" && step !== "hosts" && (
+        <StepHead n={2} title="Hosts" current={false} />
+      )}
+      {step === "environment" && <StepHead n={3} title="Environment" current />}
+      {step !== "environment" && (
+        <StepHead n={3} title="Environment" current={false} />
+      )}
       {step === "environment" && (
-        <section className="new-project-pane">
-          <label className="new-project-field">
-            <span>Name</span>
-            <input
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="Project name"
-            />
-          </label>
-          <div className="new-project-caption">SECRETS · FROM .ENV.EXAMPLE</div>
-          <div className="new-project-vars">
+        <section className="np-body">
+          <div className="np-caption">
+            {`Secrets · from ${source === "git" ? ".env.example" : ".env files"}`}
+          </div>
+          <div className="np-table">
+            {secretsAll.length === 0 && (
+              <div className="np-row">
+                <span className="np-row-label">
+                  No secrets found in .env files
+                </span>
+              </div>
+            )}
             {variables
               .map((item, index) => ({ item, index }))
               .filter(({ item }) => item.secret)
               .map(({ item, index }) => (
-                <label key={item.name}>
-                  <span>♙ {item.name}</span>
+                <div className="np-row" key={`${item.name}:${index}`}>
+                  <Lock size={12} aria-hidden className="np-lock" />
+                  <span className="np-row-name">{item.name}</span>
                   <input
-                    type="password"
-                    placeholder="paste value or leave empty"
-                    value={item.value}
+                    className="np-input"
+                    type={
+                      item.value && maskedAt !== index ? "text" : "password"
+                    }
+                    onFocus={() => setMaskedAt(index)}
+                    onBlur={() => setMaskedAt(-1)}
+                    aria-label={`${item.name || "New secret"} value`}
+                    placeholder={
+                      item.held
+                        ? "kept from the source · type to replace"
+                        : index === secretsAll.length - 1
+                          ? "paste value or leave empty"
+                          : "paste value"
+                    }
+                    value={
+                      item.value && maskedAt !== index
+                        ? `•••••••• …${item.value.slice(-4)}`
+                        : item.value
+                    }
                     onChange={(event) =>
                       setVariables((current) =>
                         current.map((variable, at) =>
@@ -645,142 +981,234 @@ export function WorkspaceDialog({
                       )
                     }
                   />
-                </label>
+                </div>
               ))}
-            {!variables.some((item) => item.secret) && (
-              <p>No secrets found in .env.example</p>
-            )}
-            <button
-              onClick={() =>
-                setVariables((current) => [
-                  ...current,
-                  { name: "", value: "", secret: true },
-                ])
-              }
-            >
-              <Plus size={13} /> Add a secret
-            </button>
           </div>
           {plainCount > 0 && (
-            <p className="new-project-hint">
-              {plainCount} plain variables are filled from .env.example · show
+            <p className="np-hint">
+              <span>{`${plainCount} plain variables are filled from ${source === "git" ? ".env.example" : ".env files"}`}</span>
+              <span aria-hidden>·</span>
+              <button
+                className="np-link"
+                type="button"
+                onClick={() => setShowPlain((open) => !open)}
+              >
+                {showPlain ? "hide" : "show"}
+              </button>
             </p>
           )}
-          <div className="new-project-caption">RUNS WITH</div>
-          <label className="new-project-field">
-            <span>MCP servers</span>
-            <input value={Object.keys(mcp).join(", ") || "None"} readOnly />
-          </label>
-          <label className="new-project-field">
-            <span>Install</span>
-            <input
-              value={install}
-              placeholder="Install command (optional)"
-              onChange={(event) => setInstall(event.target.value)}
-            />
-          </label>
-          <label className="new-project-field">
-            <span>Claude Code</span>
-            <select
-              value={accountId}
-              onChange={(event) => setAccountId(event.target.value)}
-            >
-              <option value="">Default for new sessions</option>
-              {accounts.map((account) => (
-                <option key={account.id} value={account.id}>
-                  {account.label}
-                </option>
+          {showPlain && (
+            <div className="np-plain">
+              {plainVars.map((item) => (
+                <span key={item.name}>
+                  {item.name}
+                  {item.value ? `=${item.value}` : ""}
+                </span>
               ))}
-            </select>
-          </label>
+            </div>
+          )}
+          <div className="np-caption np-caption-runs">Runs with</div>
+          <div className="np-table">
+            <div className="np-row">
+              <span className="np-row-label">MCP servers</span>
+              <span className="np-row-value">
+                {Object.keys(mcp).join(", ") || "None"}
+              </span>
+              <Toggle
+                checked={mcpOn && Object.keys(mcp).length > 0}
+                disabled={!Object.keys(mcp).length}
+                label="Add MCP servers to the project"
+                onChange={setMcpOn}
+              />
+            </div>
+            <div className="np-row">
+              <span className="np-row-label">Install</span>
+              <input
+                className="np-input"
+                aria-label="Install command"
+                value={install}
+                placeholder="Install command (optional)"
+                onChange={(event) => setInstall(event.target.value)}
+              />
+            </div>
+            <div className="np-row">
+              <span className="np-row-label">Claude Code</span>
+              <span className="np-row-hint">default for new sessions</span>
+              <div className="np-select-wrap" ref={accountRef}>
+                <button
+                  type="button"
+                  className={`np-select${accountMenu ? " open" : ""}`}
+                  aria-haspopup="menu"
+                  aria-expanded={accountMenu}
+                  aria-label={`Claude Code account: ${account?.label || "Default"}`}
+                  onClick={() => setAccountMenu((open) => !open)}
+                >
+                  <span>{account?.label || "Default"}</span>
+                  <ChevronDown size={12} aria-hidden />
+                </button>
+                {accountMenu && (
+                  <div
+                    className="np-menu"
+                    role="menu"
+                    aria-label="Claude Code account"
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        event.stopPropagation();
+                        setAccountMenu(false);
+                      }
+                    }}
+                  >
+                    {(accounts.length
+                      ? accounts
+                      : [
+                          {
+                            id: "",
+                            label: "Default",
+                            kind: "default",
+                            hasValue: false,
+                          } as Pick<
+                            ClaudeAccount,
+                            "id" | "label" | "hasValue"
+                          > & { kind: string },
+                        ]
+                    ).map((item) => (
+                      <button
+                        key={item.id || "default"}
+                        role="menuitemradio"
+                        aria-checked={accountId === item.id}
+                        className="np-menu-item"
+                        onClick={() => {
+                          // Choosing the chosen account again goes back to
+                          // the host's own login.
+                          setAccountId(accountId === item.id ? "" : item.id);
+                          setAccountMenu(false);
+                        }}
+                      >
+                        <span>
+                          <strong>{item.label}</strong>
+                          <small
+                            className={
+                              item.kind === "subscription" && !item.hasValue
+                                ? "is-warning"
+                                : undefined
+                            }
+                          >
+                            {item.id === ""
+                              ? "the signed-in account on each host"
+                              : item.kind === "subscription"
+                                ? item.hasValue
+                                  ? `subscription · on ${selected.map((host) => (host.local ? "This Mac" : host.label)).join(" and ")}`
+                                  : `subscription · ${
+                                      selected
+                                        .filter((host) => !host.local)
+                                        .map((host) => host.label)
+                                        .join(", ") || "this host"
+                                    } logs in on first run`
+                                : "API key from Providers"}
+                          </small>
+                        </span>
+                        {accountId === item.id && (
+                          <Check size={12} aria-hidden />
+                        )}
+                      </button>
+                    ))}
+                    <div className="np-menu-rule" />
+                    <button
+                      role="menuitem"
+                      className="np-menu-add"
+                      onClick={() => openSettings("providers")}
+                    >
+                      <Plus size={13} aria-hidden /> Add a subscription · claude
+                      setup-token
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
           {error && (
-            <p className="new-project-error" role="alert">
+            <p className="np-error" role="alert">
               {error}
             </p>
           )}
-          <footer>
-            <span>
-              {variables.filter((item) => !item.value).length} secrets empty —
-              fill them now or later
-            </span>
-            <div>
-              <button onClick={() => setStep("hosts")}>Back</button>
-              <button
-                className="primary"
-                disabled={busy}
-                onClick={() => void createProject()}
-              >
-                {busy ? "Creating…" : "Create project"}
-              </button>
-            </div>
-          </footer>
         </section>
       )}
-      {step === "creating" && (
-        <section className="new-project-pane">
-          <p className="new-project-hint">
-            Continues in the background if you close this.
-          </p>
-          {selected.map((host) => {
-            const result = results[host.endpoint];
-            return (
-              <div className="new-project-progress" key={host.endpoint}>
-                <strong>
-                  {result?.state === "working" ? (
-                    <LoaderCircle size={14} className="spinning" />
-                  ) : result?.state === "ready" ? (
-                    <Check size={14} />
-                  ) : (
-                    <i />
-                  )}
-                  {host.label}
-                </strong>
-                <span>{result?.detail || host.cwd}</span>
-                <small>{result?.state || "queued"}</small>
-              </div>
-            );
-          })}
-          <footer>
-            <span>Setup continues when you close this window</span>
-            <button onClick={onClose}>Close</button>
-          </footer>
-        </section>
+      {step === "source" && (
+        <StepFooter
+          className="after-steps"
+          note={
+            sourceRead || source !== "git" ? (
+              source === "folder" ? (
+                "Reads repository settings from this folder"
+              ) : (
+                "Read from the repo: branch, .env.example, .mcp.json, lock file"
+              )
+            ) : recent.length > 0 ? (
+              <>
+                Recent:{" "}
+                {recent.map((item, index) => (
+                  <span key={item}>
+                    {index > 0 && " · "}
+                    <button
+                      type="button"
+                      className="np-link muted"
+                      onClick={() => setUrl(`git@github.com:${item}.git`)}
+                    >
+                      {item}
+                    </button>
+                  </span>
+                ))}
+              </>
+            ) : (
+              "Reads branch, .env.example, .mcp.json and lock file"
+            )
+          }
+        >
+          <button className="ui-button ghost" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            className="ui-button primary"
+            disabled={reading || (source === "git" && !url.trim()) || busy}
+            onClick={() => void continueFromSource()}
+          >
+            Continue
+          </button>
+        </StepFooter>
       )}
-      {step === "ready" && (
-        <section className="new-project-pane">
-          <div className="new-project-summary">
-            {selected.map((host) => (
-              <div className="new-project-progress" key={host.endpoint}>
-                <strong>{host.label}</strong>
-                <span>{results[host.endpoint]?.detail}</span>
-                <small>{results[host.endpoint]?.state}</small>
-              </div>
-            ))}
-            <div className="new-project-progress">
-              <strong>Environment</strong>
-              <span>
-                {variables.length} variables · {Object.keys(mcp).length} MCP
-                servers
-              </span>
-            </div>
-            <div className="new-project-progress">
-              <strong>Claude Code</strong>
-              <span>
-                {accounts.find((account) => account.id === accountId)?.label ||
-                  "Default"}
-              </span>
-            </div>
-          </div>
-          <footer>
-            <span>Change any of this later in Project settings</span>
-            <div>
-              <button onClick={onClose}>Done</button>
-              <button className="primary" onClick={onStart}>
-                Start a session
-              </button>
-            </div>
-          </footer>
-        </section>
+      {step === "hosts" && (
+        <StepFooter
+          className="after-hosts"
+          note={`Creates on ${hostsSummary.replace(/, ([^,]*)$/, " and $1") || "no hosts selected"}`}
+        >
+          <button className="ui-button ghost" onClick={() => setStep("source")}>
+            Back
+          </button>
+          <button
+            className="ui-button primary"
+            disabled={!selected.length}
+            onClick={() => setStep("environment")}
+          >
+            Continue
+          </button>
+        </StepFooter>
+      )}
+      {step === "environment" && (
+        <StepFooter
+          className="after-table"
+          note={`${empties.length} secrets empty — fill them now or later`}
+        >
+          <button className="ui-button ghost" onClick={() => setStep("hosts")}>
+            Back
+          </button>
+          <button
+            className="ui-button primary"
+            disabled={busy}
+            onClick={() => void createProject()}
+          >
+            {busy ? "Creating…" : "Create project"}
+          </button>
+        </StepFooter>
       )}
     </div>
   );

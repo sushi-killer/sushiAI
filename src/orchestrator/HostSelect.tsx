@@ -9,23 +9,31 @@ import {
 } from "lucide-react";
 import { hostStatus, LOCAL_HOST, type DaemonReach } from "./hosts";
 import type { OrchestratorHost } from "./types";
-import type { ProjectHostReadiness } from "../types";
+import type { Project, ProjectHostReadiness } from "../types";
+import { openProjectSettings } from "../app/openSettings";
 
 export function RunOnSelect({
   hosts,
   currentHost,
   value,
   readiness,
+  project,
+  cwd,
   onChange,
 }: {
   hosts: OrchestratorHost[];
   currentHost: string;
   value: string;
   readiness: Record<string, ProjectHostReadiness>;
+  project?: Project | null;
+  /** The folder the project is open in; the link to its settings needs it. */
+  cwd?: string;
   onChange(host: string): void;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  // The menu starts 12px left of the trigger, within the composer's frame.
+  const [menuLeft, setMenuLeft] = useState(0);
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -45,16 +53,30 @@ export function RunOnSelect({
         aria-label={`Run on: ${label}`}
         aria-haspopup="menu"
         aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
+        onClick={(event) => {
+          const frame = event.currentTarget.closest(".orch-composer");
+          if (frame)
+            setMenuLeft(
+              event.currentTarget.getBoundingClientRect().left -
+                frame.getBoundingClientRect().left -
+                12,
+            );
+          setOpen((current) => !current);
+        }}
       >
-        Run on · {label} <ChevronDown size={12} aria-hidden />
+        {project ? `${project.name} · on ${label}` : `Run on · ${label}`}{" "}
+        <ChevronDown size={12} aria-hidden />
       </button>
       {open && (
         <div
           className="orch-host-menu orch-run-on-menu"
           role="menu"
           aria-label="Run on"
+          style={{ left: menuLeft }}
         >
+          <div className="orch-run-on-title">
+            {`Run ${project?.name || "project"} on`}
+          </div>
           <button
             type="button"
             role="menuitemradio"
@@ -66,40 +88,88 @@ export function RunOnSelect({
               setOpen(false);
             }}
           >
-            <HostIcon id="local" /> <span>This Mac</span>
+            <HostIcon id="local" />
+            <span className="orch-host-text">
+              <span className="orch-host-name">This Mac</span>
+              <span className="orch-host-detail">
+                {project
+                  ? `ready · ${project.env.length} variables · ${Object.keys((project.mcp as { mcpServers?: object }).mcpServers ?? {}).length} MCP servers`
+                  : "checking project"}
+              </span>
+            </span>
+            <span className="ui-dot ui-tone-ok" aria-hidden />
+            {value === "local" && (
+              <Check size={12} aria-hidden className="orch-host-check" />
+            )}
           </button>
           {hosts
             .filter((host) => host.id.startsWith("ssh:"))
-            .map((host) => (
+            .map((host) => {
+              const ready = readiness[host.id];
+              const reinstall = ready?.checkout.ok && ready.setup.stale;
+              const tone = !ready
+                ? "neutral"
+                : !ready.checkout.ok
+                  ? "danger"
+                  : reinstall || !ready.trusted
+                    ? "warning"
+                    : "ok";
+              return (
+                <button
+                  key={host.id}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={value === host.id}
+                  className={`orch-host-option${value === host.id ? " selected" : ""}`}
+                  onClick={() => {
+                    onChange(host.id);
+                    setOpen(false);
+                  }}
+                >
+                  <HostIcon id={host.id} />
+                  <span className="orch-host-text">
+                    <span className="orch-host-name">{host.name}</span>
+                    <span className="orch-host-detail">
+                      {!ready
+                        ? host.state === "ready"
+                          ? "checking project"
+                          : "connect to prepare"
+                        : !ready.checkout.ok
+                          ? "not cloned · clones, installs, asks to trust"
+                          : reinstall
+                            ? `reinstalls first — ${ready.setup.lockFile || "lock file"} changed`
+                            : ready.trusted
+                              ? "ready"
+                              : "ready · asks to trust first"}
+                    </span>
+                  </span>
+                  <span className={`ui-dot ui-tone-${tone}`} aria-hidden />
+                  {value === host.id && (
+                    <Check size={12} aria-hidden className="orch-host-check" />
+                  )}
+                </button>
+              );
+            })}
+          <div className="orch-run-on-foot">
+            Same variables, secrets and MCP servers on every host.
+            {cwd && (
               <button
-                key={host.id}
                 type="button"
-                role="menuitemradio"
-                aria-checked={value === host.id}
-                className={`orch-host-option${value === host.id ? " selected" : ""}`}
+                role="menuitem"
+                className="orch-run-on-link"
                 onClick={() => {
-                  onChange(host.id);
                   setOpen(false);
+                  openProjectSettings(
+                    cwd,
+                    "Hosts",
+                    currentHost.startsWith("ssh:") ? currentHost : undefined,
+                  );
                 }}
               >
-                <HostIcon id={host.id} />
-                <span className="orch-host-text">
-                  <span className="orch-host-name">{host.name}</span>
-                  <span className="orch-host-detail">
-                    {host.state === "ready"
-                      ? "Connected"
-                      : "Connect to prepare"}
-                    {readiness[host.id]
-                      ? ` · ${readiness[host.id].checkout.ok ? "Project ready" : "Not cloned"} · ${readiness[host.id].trusted ? "Trusted" : "Trust required"}`
-                      : " · Checking project"}
-                  </span>
-                </span>
-                <span
-                  className={`ui-dot ui-tone-${host.state === "ready" ? "ok" : "muted"}`}
-                  aria-hidden
-                />
+                Project settings → Hosts
               </button>
-            ))}
+            )}
+          </div>
         </div>
       )}
     </div>

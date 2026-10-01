@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Plus, Upload } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Plus } from "lucide-react";
 import type {
   ClaudeMcpServer,
   ClaudePlugin,
+  ConnectionProfile,
   Project,
   SkillCatalogItem,
 } from "./types";
+import { Tag, Toggle } from "./orchestrator/ui";
+import { ProjectPage } from "./ProjectPage";
 import {
   groupAlsoInProject,
-  importedMcpServers,
   mcpVariableReferences,
   unknownMcpVariables,
   type ProjectMcpServer,
@@ -19,7 +21,10 @@ type Props = {
   cwd: string;
   endpoint?: string;
   remote: boolean;
-  onChange: (project: Project) => Promise<void>;
+  /** SSH hosts to ask which servers cannot start there. */
+  hosts?: ConnectionProfile[];
+  /** Replaces the dialog's project with a fresher one (after an import). */
+  onProject: (project: Project) => void;
 };
 
 function serversOf(project: Project): Record<string, ProjectMcpServer> {
@@ -47,12 +52,46 @@ function usageFor(
   );
 }
 
+const MARKS: Record<string, string> = { github: "GH", postgres: "PG" };
+function markOf(name: string): string {
+  return MARKS[name.toLowerCase()] || name.slice(0, 1).toUpperCase();
+}
+
+/** `npx server-github · KEY=${VAR}` or `https://… · Authorization: Bearer
+ * ${VAR}`: what the server runs or reaches, then the variables it is given. */
+function serverLine(server: ProjectMcpServer): string {
+  const run =
+    server.url ||
+    [server.command, ...(server.args || [])].filter(Boolean).join(" ");
+  const variables = Object.entries(server.env || {}).map(
+    ([key, value]) => `${key}=${value}`,
+  );
+  const headers = Object.entries(server.headers || {}).map(
+    ([key, value]) => `${key}: ${value}`,
+  );
+  return [run, ...variables, ...headers].filter(Boolean).join(" · ");
+}
+
+/** The text with every `${VAR}` reference in the accent colour. */
+function Highlighted({ text }: { text: string }) {
+  return (
+    <>
+      {text
+        .split(/(\$\{[A-Za-z_][A-Za-z0-9_]*\})/)
+        .map((part, index) =>
+          part.startsWith("${") ? <b key={index}>{part}</b> : part,
+        )}
+    </>
+  );
+}
+
 export function ProjectMcpServersTab({
   project,
   cwd,
   endpoint,
   remote,
-  onChange,
+  hosts = [],
+  onProject,
 }: Props) {
   const [servers, setServers] = useState<ClaudeMcpServer[]>([]);
   const [plugins, setPlugins] = useState<ClaudePlugin[]>([]);
@@ -62,6 +101,38 @@ export function ProjectMcpServersTab({
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const autoImported = useRef(false);
+  // Server name -> what a host lacks to run it, from each host's own check.
+  const [needs, setNeeds] = useState<Record<string, string[]>>({});
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all(
+      hosts.map(async (host) => {
+        try {
+          const check = await window.bridge?.projectHostCheck(
+            project.id,
+            `ssh:${host.id}`,
+          );
+          return (check?.mcp.missing ?? []).map(
+            (item) =>
+              [item.name, `needs ${item.command} on ${host.name}`] as const,
+          );
+        } catch {
+          return [];
+        }
+      }),
+    ).then((found) => {
+      if (cancelled) return;
+      const next: Record<string, string[]> = {};
+      for (const [serverName, text] of found.flat())
+        (next[serverName] ||= []).push(text);
+      setNeeds(next);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [hosts, project.id, project.mcp]);
+  const importInput = useRef<HTMLInputElement>(null);
   const ownServers = useMemo(() => serversOf(project), [project]);
   const unknown = useMemo(
     () => unknownMcpVariables(ownServers, project.env),
@@ -91,11 +162,40 @@ export function ProjectMcpServersTab({
     void load();
   }, [load]);
 
+  // First open with no project MCP servers: adopt the local checkout's
+  // .mcp.json and ~/.claude.json entry once. Literal secrets become ${VAR}
+  // references with a matching secret variable.
+  useEffect(() => {
+    if (remote || !window.bridge || autoImported.current) return;
+    autoImported.current = true;
+    const flag = `sushiai.autoImport.mcp.${project.id}`;
+    if (Object.keys(ownServers).length || localStorage.getItem(flag)) return;
+    const bridge = window.bridge;
+    void (async () => {
+      try {
+        localStorage.setItem(flag, "1");
+        const result = await bridge.projectImportLocal(project.id, cwd);
+        onProject(result.project);
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      }
+    })();
+  }, [project, ownServers, cwd, remote, onProject]);
+
   async function save(next: Record<string, ProjectMcpServer>) {
     setBusy(true);
     setError("");
     try {
-      await onChange({ ...project, mcp: { ...project.mcp, mcpServers: next } });
+      const set = Object.fromEntries(
+        Object.entries(next).filter(
+          ([name, server]) =>
+            JSON.stringify(ownServers[name]) !== JSON.stringify(server),
+        ),
+      );
+      const remove = Object.keys(ownServers).filter((name) => !(name in next));
+      onProject(
+        await window.bridge!.projectMcpUpdate(project.id, { set, remove }),
+      );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -107,10 +207,11 @@ export function ProjectMcpServersTab({
     setBusy(true);
     setError("");
     try {
-      await onChange({
-        ...project,
-        mcp: { ...project.mcp, disabledMcpServers },
-      });
+      onProject(
+        await window.bridge!.projectMcpUpdate(project.id, {
+          disabled: disabledMcpServers,
+        }),
+      );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -119,10 +220,16 @@ export function ProjectMcpServersTab({
   }
 
   async function importFile(file?: File) {
-    if (!file) return;
+    if (!file || !window.bridge) return;
     try {
-      const parsed = importedMcpServers(JSON.parse(await file.text()));
-      await save({ ...ownServers, ...parsed });
+      onProject(
+        (
+          await window.bridge.projectImportMcpText(
+            project.id,
+            await file.text(),
+          )
+        ).project,
+      );
     } catch (reason) {
       setError(
         reason instanceof Error
@@ -184,81 +291,119 @@ export function ProjectMcpServersTab({
   const also = groupAlsoInProject(servers, plugins);
   const repoServers = also.repo;
   const otherServers = also.personal;
+  const disabledNames =
+    (project.mcp as { disabledMcpServers?: string[] }).disabledMcpServers || [];
   return (
-    <section className="project-mcp-tab">
-      <header className="project-mcp-heading">
-        <div>
-          <h2>MCP servers</h2>
-          <p>
-            Every run on every host gets these servers. Tokens are ${"${VAR}"}{" "}
-            references to Environment.
-          </p>
-        </div>
-        <div className="project-mcp-actions">
-          <label className="secondary project-mcp-import">
-            <Upload size={13} /> Import .mcp.json
-            <input
-              type="file"
-              accept=".json,application/json"
-              onChange={(event) => void importFile(event.target.files?.[0])}
-            />
-          </label>
-          <button className="primary" onClick={() => setAdding(true)}>
-            <Plus size={14} /> Add server
-          </button>
-        </div>
-      </header>
-      <p className="project-mcp-count">
-        {Object.keys(ownServers).length} servers · {secretReferences} use
-        {secretReferences === 1 ? "s" : " secrets"}
-      </p>
+    <ProjectPage
+      title="MCP servers"
+      subtitle="Every run on every host gets these servers. Tokens are ${VAR} references to Environment."
+    >
+      <div className="pd-toolbar">
+        <span>
+          {`${Object.keys(ownServers).length} servers · ${secretReferences} use${secretReferences === 1 ? "s" : " secrets"}`}
+        </span>
+        <button
+          className="ui-button secondary"
+          onClick={() => importInput.current?.click()}
+        >
+          Import .mcp.json
+        </button>
+        <input
+          ref={importInput}
+          type="file"
+          accept=".json,application/json"
+          aria-label="Import .mcp.json file"
+          hidden
+          onChange={(event) => {
+            void importFile(event.target.files?.[0]);
+            event.target.value = "";
+          }}
+        />
+        <button className="ui-button primary" onClick={() => setAdding(true)}>
+          <Plus size={14} aria-hidden /> Add server
+        </button>
+      </div>
       {error ? (
-        <p role="alert" className="settings-error">
+        <p role="alert" className="pd-alert">
           {error}
         </p>
       ) : null}
       {unknown.length ? (
-        <p role="alert" className="project-mcp-error">
+        <p role="alert" className="pd-alert">
           Unknown Environment variable{unknown.length === 1 ? "" : "s"}:{" "}
           {unknown.map((key) => "${" + key + "}").join(", ")}
         </p>
       ) : null}
-      <div className="project-mcp-list">
+      {adding ? (
+        <div className="pd-editor">
+          <input
+            className="pd-input"
+            aria-label="Server name"
+            placeholder="Server name"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+          />
+          <textarea
+            className="pd-input"
+            aria-label="Server definition"
+            placeholder={'{"command":"npx","args":[]}'}
+            value={definition}
+            onChange={(event) => setDefinition(event.target.value)}
+          />
+          <div className="pd-editor-actions">
+            <button
+              className="ui-button ghost"
+              onClick={() => setAdding(false)}
+            >
+              Cancel
+            </button>
+            <button
+              className="ui-button primary"
+              disabled={busy}
+              onClick={() => void addServer()}
+            >
+              Save server
+            </button>
+          </div>
+        </div>
+      ) : null}
+      <div className="pd-servers">
         {Object.entries(ownServers).map(([serverName, server]) => {
           const invalid = unknownMcpVariables(server, project.env);
-          const disabled = (
-            (project.mcp as { disabledMcpServers?: string[] })
-              .disabledMcpServers || []
-          ).includes(serverName);
+          const disabled = disabledNames.includes(serverName);
           return (
-            <article className="project-mcp-card" key={serverName}>
-              <div className="project-mcp-icon">
-                {serverName.slice(0, 2).toUpperCase()}
-              </div>
-              <div className="project-mcp-info">
-                <strong>{serverName}</strong>
-                <span>
-                  {server.url ||
-                    [server.command, ...(server.args || [])]
-                      .filter(Boolean)
-                      .join(" ")}
+            <article className="pd-server" key={serverName}>
+              <div className="pd-server-mark">{markOf(serverName)}</div>
+              <div className="pd-server-text">
+                <div className="pd-server-head">
+                  <strong>{serverName}</strong>
+                  <Tag tone="neutral" dot={false}>
+                    {server.url ? "http" : "stdio"}
+                  </Tag>
+                  {(needs[serverName] ?? []).map((text) => (
+                    <Tag key={text} tone="warning">
+                      {text}
+                    </Tag>
+                  ))}
+                </div>
+                <span className="pd-server-line">
+                  <Highlighted text={serverLine(server)} />
                 </span>
                 {invalid.length ? (
-                  <small role="alert">
+                  <span
+                    className="pd-server-line pd-server-error plain"
+                    role="alert"
+                  >
                     Unknown: {invalid.map((key) => "${" + key + "}").join(", ")}
-                  </small>
+                  </span>
                 ) : null}
               </div>
-              <input
-                type="checkbox"
-                aria-label={`${serverName} server`}
+              <Toggle
                 checked={!disabled}
+                label={`${serverName} server`}
                 disabled={busy}
                 onChange={() => {
-                  const next = new Set(
-                    (project.mcp as { disabledMcpServers?: string[] })
-                      .disabledMcpServers || [],
-                  );
+                  const next = new Set(disabledNames);
                   if (disabled) next.delete(serverName);
                   else next.add(serverName);
                   void setDisabledServers([...next].sort());
@@ -268,97 +413,80 @@ export function ProjectMcpServersTab({
           );
         })}
         {!Object.keys(ownServers).length ? (
-          <div className="workspace-control-empty">
-            No project MCP servers yet.
-          </div>
+          <p className="pd-empty">No project MCP servers yet.</p>
         ) : null}
       </div>
-      {adding ? (
-        <div className="project-mcp-editor">
-          <input
-            aria-label="Server name"
-            placeholder="Server name"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-          />
-          <textarea
-            aria-label="Server definition"
-            placeholder={'{"command":"npx","args":[]}'}
-            value={definition}
-            onChange={(event) => setDefinition(event.target.value)}
-          />
-          <div>
-            <button className="secondary" onClick={() => setAdding(false)}>
-              Cancel
-            </button>
-            <button
-              className="primary"
-              disabled={busy}
-              onClick={() => void addServer()}
-            >
-              Save server
-            </button>
-          </div>
-        </div>
-      ) : null}
-      <h3 className="project-mcp-subheading">Also in this project</h3>
-      <div className="project-mcp-list project-mcp-list-secondary">
+      <h3 className="pd-group-label">Also in this project</h3>
+      <div className="pd-servers">
         {repoServers.map((server) => (
-          <article className="project-mcp-card" key={`repo:${server.name}`}>
-            <div className="project-mcp-info">
-              <strong>
-                {server.name}
-                <small>.mcp.json</small>
-              </strong>
-              <span>Every host gets it through the repo.</span>
+          <article className="pd-server other" key={`repo:${server.name}`}>
+            <div className="pd-server-text">
+              <div className="pd-server-head">
+                <strong>{server.name}</strong>
+                <Tag tone="neutral" dot={false}>
+                  .mcp.json
+                </Tag>
+              </div>
+              <span className="pd-server-line plain">
+                Every host has it through the repo.
+              </span>
             </div>
-            <span className="project-mcp-badge">● from repo</span>
+            <Tag tone="ok">from repo</Tag>
           </article>
         ))}
         {otherServers.map((server) => (
-          <article className="project-mcp-card" key={`server:${server.name}`}>
-            <div className="project-mcp-info">
-              <strong>
-                {server.name}
-                <small>~/.claude.json</small>
-              </strong>
-              <span>Your Claude config on this Mac</span>
+          <article className="pd-server other" key={`server:${server.name}`}>
+            <div className="pd-server-text">
+              <div className="pd-server-head">
+                <strong>{server.name}</strong>
+                <Tag tone="neutral" dot={false}>
+                  ~/.claude.json
+                </Tag>
+              </div>
+              <span className="pd-server-line plain">
+                Your Claude config on this Mac
+              </span>
             </div>
-            <input
-              type="checkbox"
-              aria-label={`${server.name} server`}
+            <Toggle
               checked={!server.disabled}
+              label={`${server.name} server`}
               disabled={busy}
               onChange={() => void toggleServer(server)}
             />
           </article>
         ))}
         {also.plugins.map((plugin) => (
-          <article className="project-mcp-card" key={`plugin:${plugin.name}`}>
-            <div className="project-mcp-info">
-              <strong>
-                {plugin.name}
-                <small>plugin</small>
-              </strong>
-              <span>
-                Claude plugin · {usageFor(plugin, skills, cwd)} uses in 30 days
+          <article className="pd-server other" key={`plugin:${plugin.name}`}>
+            <div className="pd-server-text">
+              <div className="pd-server-head">
+                <strong>{plugin.name}</strong>
+                <Tag tone="neutral" dot={false}>
+                  plugin
+                </Tag>
+              </div>
+              <span className="pd-server-line plain">
+                {(() => {
+                  const uses = usageFor(plugin, skills, cwd);
+                  return uses > 0
+                    ? `Claude plugin · ${uses} ${uses === 1 ? "use" : "uses"} in 30 days`
+                    : "Claude plugin";
+                })()}
               </span>
             </div>
-            <input
-              type="checkbox"
-              aria-label={`${plugin.name} plugin`}
+            <Toggle
               checked={!plugin.disabled}
+              label={`${plugin.name} plugin`}
               disabled={busy}
               onChange={() => void toggleServer({ ...plugin, kind: "Plugin" })}
             />
           </article>
         ))}
         {remote ? (
-          <div className="workspace-control-empty">
+          <p className="pd-empty">
             Claude plugins and personal settings are shown on this Mac.
-          </div>
+          </p>
         ) : null}
       </div>
-    </section>
+    </ProjectPage>
   );
 }

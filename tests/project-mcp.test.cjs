@@ -2,7 +2,6 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   groupAlsoInProject,
-  importedMcpServers,
   unknownMcpVariables,
 } = require("../src/projectMcp.ts");
 
@@ -14,12 +13,6 @@ test("project MCP variables are checked against Environment names", () => {
   assert.deepEqual(unknownMcpVariables(servers, [{ name: "GITHUB_TOKEN" }]), [
     "UNKNOWN_KEY",
   ]);
-});
-
-test(".mcp.json import accepts its mcpServers object and rejects invalid shapes", () => {
-  const servers = { docs: { command: "npx", args: ["docs-mcp"] } };
-  assert.deepEqual(importedMcpServers({ mcpServers: servers }), servers);
-  assert.throws(() => importedMcpServers({}), /mcpServers object/);
 });
 
 test("Also in this project keeps repo config read-only and personal sources separate", () => {

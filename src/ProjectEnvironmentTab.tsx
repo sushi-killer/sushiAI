@@ -1,38 +1,114 @@
+import { importChanges } from "./projectEnvImport.ts";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Lock, Plus, Upload, X } from "lucide-react";
-import type { Project } from "./types";
-import {
-  displayedEnvValue,
-  isSecretEnvName,
-  parseEnv,
-  type ParsedEnvEntry,
-} from "./projectEnv";
+import { Lock, Plus, X } from "lucide-react";
+import type { ConnectionProfile, Project } from "./types";
+import { Banner, Tag, Toggle } from "./orchestrator/ui";
+import type { Tone } from "./orchestrator/helpers";
+import { ProjectPage } from "./ProjectPage";
 
-type ReviewEntry = ParsedEnvEntry & {
+type Status = "new" | "exists" | "same" | "differs";
+type Choice = "import" | "override" | "skip";
+type ReviewEntry = {
+  name: string;
+  value: string;
   secret: boolean;
-  status: string;
-  selected: boolean;
-  override: boolean;
-  overrideHost: string;
+  status: Status;
+  choice: Choice;
 };
+type Env = Project["env"][number];
+
+const AVAILABLE: Record<string, string> = {
+  "setup,agent": "setup + agent",
+  agent: "agent",
+  setup: "setup only",
+  mcp: "MCP only",
+};
+const DEFAULT_AVAILABLE = "setup,agent";
+
+/** `••••••••••••  …q7Xa`: the dots stand for the hidden value and the tail is
+ * the hint the secure storage kept. */
+/** Dots for a hidden value, then its last characters set apart. */
+function Masked({ hint, dots }: { hint: string | undefined; dots: number }) {
+  const tail = (hint || "").replace(/^[•…\s]+/, "");
+  return (
+    <>
+      {"•".repeat(dots)}
+      {tail && <span className="pd-mask-tail">{`…${tail}`}</span>}
+    </>
+  );
+}
+
+function defaultChoice(status: Status): Choice {
+  return status === "new" || status === "differs" ? "import" : "skip";
+}
+
+/** What the result tag of one review row says, and how it is toned. */
+function resultOf(
+  entry: ReviewEntry,
+  hostName: string,
+): { label: string; tone: Tone } {
+  if (entry.choice === "override")
+    return { label: `override · ${hostName}`, tone: "info" };
+  if (entry.status === "new")
+    return entry.choice === "import"
+      ? { label: entry.secret ? "new secret" : "new", tone: "ok" }
+      : { label: "skipped", tone: "neutral" };
+  if (entry.status === "differs")
+    return entry.choice === "import"
+      ? { label: "differs · replace?", tone: "warning" }
+      : { label: "differs · keep", tone: "neutral" };
+  if (entry.choice === "import")
+    return { label: "will replace", tone: "warning" };
+  return {
+    label: entry.status === "same" ? "same value" : "exists · keep",
+    tone: "neutral",
+  };
+}
 
 export function ProjectEnvironmentTab({
+  project,
+  setProject,
   gitRemote,
   projectName,
+  cwd,
+  remote = false,
+  targets = [],
 }: {
+  /** The dialog owns the project: every tab reads and replaces this one. */
+  project: Project | null;
+  setProject(project: Project | null): void;
   gitRemote: string;
   projectName: string;
+  cwd?: string;
+  remote?: boolean;
+  targets?: ConnectionProfile[];
 }) {
-  const [project, setProject] = useState<Project | null>(null);
   const [error, setError] = useState("");
   const [review, setReview] = useState<ReviewEntry[] | null>(null);
   const [fileName, setFileName] = useState("");
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [adding, setAdding] = useState<{ name: string; value: string } | null>(
+    null,
+  );
+  const [addingSecret, setAddingSecret] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const addingName = adding?.name.trim() ?? "";
+  // The main process decides what looks like a secret; this only asks.
+  useEffect(() => {
+    if (!addingName || !window.bridge) return setAddingSecret(false);
+    let live = true;
+    void window.bridge
+      .projectEnvClassify([addingName])
+      .then(([secret]) => live && setAddingSecret(!!secret));
+    return () => {
+      live = false;
+    };
+  }, [addingName]);
+  const autoImported = useRef(false);
 
   const load = useCallback(async () => {
-    if (!window.bridge || !gitRemote) return;
+    if (!window.bridge || !gitRemote || project) return;
     try {
       let found = await window.bridge.projectsResolve(gitRemote);
       if (!found)
@@ -44,36 +120,59 @@ export function ProjectEnvironmentTab({
     } catch (reason) {
       setError(String(reason));
     }
-  }, [gitRemote, projectName]);
+  }, [gitRemote, projectName, project, setProject]);
   useEffect(() => {
     void load();
   }, [load]);
+
+  // First open of a project with an empty Environment: bring in the local
+  // checkout's .env files once. Nothing exists yet, so nothing can conflict;
+  // a later import still goes through the review dialog.
+  useEffect(() => {
+    if (!project || !cwd || remote || !window.bridge || autoImported.current)
+      return;
+    autoImported.current = true;
+    const flag = `sushiai.autoImport.env.${project.id}`;
+    if (project.env.length || localStorage.getItem(flag)) return;
+    const bridge = window.bridge;
+    void (async () => {
+      try {
+        localStorage.setItem(flag, "1");
+        const result = await bridge.projectImportLocal(project.id, cwd);
+        setProject(result.project);
+      } catch (reason) {
+        setError(String(reason));
+      }
+    })();
+  }, [project, cwd, remote, setProject]);
+
+  const hostName = (key: string) =>
+    key === "local"
+      ? "This Mac"
+      : targets.find((host) => `ssh:${host.id}` === key)?.name ||
+        key.replace(/^ssh:/, "");
+  const firstHost = targets.find((host) => !host.hidden);
+  const overrideHost =
+    (project?.targets || []).find((host) => host !== "local") ||
+    (firstHost ? `ssh:${firstHost.id}` : "local");
 
   async function readFile(file?: File) {
     if (!file) return;
     setError("");
     try {
-      const parsed = parseEnv(await file.text());
-      if (!parsed.length)
-        throw new Error("No environment variables found in this file.");
+      if (!project || !window.bridge) return;
       setBusy(true);
-      const statuses =
-        project && window.bridge
-          ? await window.bridge.projectEnvImportReview(project.id, parsed)
-          : [];
+      const reviewed = await window.bridge.projectEnvReviewText(
+        project.id,
+        await file.text(),
+      );
+      if (!reviewed.length)
+        throw new Error("No environment variables found in this file.");
       setReview(
-        parsed.map((entry) => {
-          const status =
-            statuses.find((item) => item.name === entry.name)?.status || "new";
-          return {
-            ...entry,
-            status,
-            secret: isSecretEnvName(entry.name),
-            selected: status === "new",
-            override: false,
-            overrideHost: "local",
-          };
-        }),
+        reviewed.map((entry) => ({
+          ...entry,
+          choice: defaultChoice(entry.status as Status),
+        })),
       );
       setFileName(file.name);
     } catch (reason) {
@@ -88,32 +187,17 @@ export function ProjectEnvironmentTab({
     setBusy(true);
     setError("");
     try {
-      const imported = review.filter((entry) => entry.selected);
-      const env = [...project.env];
+      const imported = review.filter((entry) => entry.choice !== "skip");
+      // Start from what is stored now, not from this tab's copy.
+      const fresh = (await window.bridge.projectsGet(project.id)) ?? project;
+      const set = importChanges(fresh.env, imported, overrideHost);
+      const updated = await window.bridge.projectEnvUpdate(fresh.id, { set });
       for (const entry of imported) {
-        const existing = env.find((item) => item.name === entry.name);
-        if (entry.override && existing) {
-          existing.hosts = [
-            ...new Set([...(existing.hosts || []), entry.overrideHost]),
-          ];
-          existing.secret ||= entry.secret;
-        } else if (existing) {
-          existing.secret = entry.secret;
-        } else {
-          env.push({
-            name: entry.name,
-            secret: entry.secret,
-            availableTo: ["setup", "agent"],
-          });
-        }
-      }
-      const updated = await window.bridge.projectsUpsert({ ...project, env });
-      for (const entry of imported) {
-        if (entry.override)
+        if (entry.choice === "override")
           await window.bridge.projectHostSecretSet(
             updated.id,
             entry.name,
-            entry.overrideHost,
+            overrideHost,
             entry.value,
           );
         else
@@ -133,160 +217,293 @@ export function ProjectEnvironmentTab({
     }
   }
 
-  async function updateMetadata(nextEnv: Project["env"]) {
+  async function updateEnv(change: {
+    set?: Project["env"];
+    remove?: string[];
+  }) {
     if (!project || !window.bridge) return;
-    const updated = await window.bridge.projectsUpsert({
-      ...project,
-      env: nextEnv,
-    });
-    setProject(updated);
+    setProject(await window.bridge.projectEnvUpdate(project.id, change));
   }
 
   async function addVariable() {
-    const name = window.prompt("Variable name");
-    if (!name?.trim() || !project) return;
-    const value = window.prompt(`Value for ${name}`);
-    if (value === null) return;
-    const secret = isSecretEnvName(name.trim());
-    const updated = await window.bridge!.projectsUpsert({
-      ...project,
-      env: [
-        ...project.env,
-        { name: name.trim(), secret, availableTo: ["setup", "agent"] },
-      ],
-    });
-    if (value)
-      await window.bridge!.projectSecretSet(updated.id, name.trim(), value);
-    setProject(await window.bridge!.projectsGet(updated.id));
+    if (!adding || !project || !window.bridge) return;
+    const name = adding.name.trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      setError("A variable name is letters, digits and underscores.");
+      return;
+    }
+    if (project.env.some((entry) => entry.name === name)) {
+      setError(`${name} already exists.`);
+      return;
+    }
+    setError("");
+    try {
+      const [secret] = await window.bridge.projectEnvClassify([name]);
+      const updated = await window.bridge.projectEnvUpdate(project.id, {
+        set: [{ name, secret, availableTo: ["setup", "agent"] }],
+      });
+      if (adding.value)
+        await window.bridge.projectSecretSet(updated.id, name, adding.value);
+      setProject(await window.bridge.projectsGet(updated.id));
+      setAdding(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
   }
 
-  return (
-    <section className="project-environment">
-      <header className="project-environment-heading">
-        <div>
-          <h2>Environment</h2>
-          <p>
-            Variables and secrets every host gets. Secret values stay in secure
-            storage.
-          </p>
-        </div>
-        <div>
+  const fileInputEl = (
+    <input
+      ref={fileInput}
+      type="file"
+      accept=".env,text/plain"
+      hidden
+      onChange={(event) => {
+        void readFile(event.target.files?.[0]);
+        event.target.value = "";
+      }}
+    />
+  );
+
+  if (review)
+    return (
+      <ProjectPage
+        title="Import .env"
+        subtitle="Review before saving. Nothing is stored until you confirm, and the file itself is never kept."
+      >
+        {fileInputEl}
+        <div className="pd-toolbar">
+          <span>
+            {fileName} · {review.length} keys
+          </span>
           <button
-            className="secondary"
-            disabled={!project}
+            className="ui-button ghost"
             onClick={() => fileInput.current?.click()}
           >
-            <Upload size={13} /> Import .env
-          </button>
-          <button className="primary" onClick={() => void addVariable()}>
-            <Plus size={14} /> Add variable
+            Choose another file
           </button>
         </div>
-      </header>
-      <input
-        ref={fileInput}
-        type="file"
-        accept=".env,text/plain"
-        hidden
-        onChange={(event) => {
-          void readFile(event.target.files?.[0]);
-          event.target.value = "";
-        }}
-      />
+        {error && (
+          <p role="alert" className="pd-alert">
+            {error}
+          </p>
+        )}
+        <div
+          className="pd-table pd-import"
+          role="table"
+          aria-label="Import review"
+        >
+          <div className="pd-row head" role="row">
+            <span role="columnheader">Key</span>
+            <span role="columnheader">Value</span>
+            <span role="columnheader">Secret</span>
+            <span role="columnheader">Result</span>
+          </div>
+          {review.map((entry, index) => {
+            const result = resultOf(entry, hostName(overrideHost));
+            const patch = (next: Partial<ReviewEntry>) =>
+              setReview(
+                review.map((item, at) =>
+                  at === index ? { ...item, ...next } : item,
+                ),
+              );
+            const cycle: Choice =
+              entry.status === "differs" && entry.choice === "import"
+                ? overrideHost === "local"
+                  ? "skip"
+                  : "override"
+                : entry.choice === "override"
+                  ? "skip"
+                  : entry.choice === "skip"
+                    ? "import"
+                    : "skip";
+            return (
+              <div className="pd-row" role="row" key={entry.name}>
+                <span className="pd-cell pd-mono" role="cell">
+                  {entry.name}
+                </span>
+                <span
+                  className={`pd-cell pd-mono ${entry.secret ? "pd-faint" : "pd-muted"}`}
+                  role="cell"
+                >
+                  {entry.secret ? (
+                    <Masked hint={entry.value.slice(-4)} dots={8} />
+                  ) : (
+                    entry.value
+                  )}
+                </span>
+                <span className="pd-flex" role="cell">
+                  <Toggle
+                    checked={entry.secret}
+                    label={`${entry.name} is secret`}
+                    onChange={(secret) => patch({ secret })}
+                  />
+                </span>
+                <span className="pd-flex" role="cell">
+                  <button
+                    type="button"
+                    aria-label={`${entry.name}: ${result.label}`}
+                    title="Click to change what happens to this key"
+                    onClick={() => patch({ choice: cycle })}
+                  >
+                    <Tag tone={result.tone}>{result.label}</Tag>
+                  </button>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+        <Banner
+          tone="info"
+          title={`${review.filter((entry) => entry.secret).length} keys look like secrets, so they are marked as secrets.`}
+          body="Names that look like tokens, keys, passwords or DSNs. Switch one off if it is not a secret; its value is then shown in plain text."
+        />
+        <div className="pd-import-actions">
+          <p>
+            {review.find((entry) => entry.status === "differs")
+              ? `${review.find((entry) => entry.status === "differs")!.name} differs from the saved value. Import it as an override for one host instead?`
+              : "Review the selected keys before importing."}
+          </p>
+          <button
+            className="ui-button ghost"
+            onClick={() => {
+              setReview(null);
+              setFileName("");
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            className="ui-button primary"
+            disabled={
+              busy ||
+              !project ||
+              !review.some((entry) => entry.choice !== "skip")
+            }
+            onClick={() => void saveImport()}
+          >
+            {busy
+              ? "Importing…"
+              : `Import ${review.filter((entry) => entry.choice !== "skip").length} keys`}
+          </button>
+        </div>
+      </ProjectPage>
+    );
+
+  const keychain = /Mac/i.test(navigator.platform || navigator.userAgent)
+    ? "the macOS Keychain"
+    : "secure storage";
+  return (
+    <ProjectPage
+      title="Environment"
+      subtitle={`Variables and secrets every host gets. Secret values stay in ${keychain}.`}
+    >
+      {fileInputEl}
+      <div className="pd-toolbar">
+        <span>
+          {project
+            ? `${project.env.length} variables · ${project.env.filter((entry) => entry.secret).length} secrets`
+            : ""}
+        </span>
+        <button
+          className="ui-button secondary"
+          disabled={!project}
+          onClick={() => fileInput.current?.click()}
+        >
+          Import .env
+        </button>
+        <button
+          className="ui-button primary"
+          disabled={!project}
+          onClick={() => setAdding({ name: "", value: "" })}
+        >
+          <Plus size={14} aria-hidden /> Add variable
+        </button>
+      </div>
       {error && (
-        <p role="alert" className="settings-error">
+        <p role="alert" className="pd-alert">
           {error}
         </p>
       )}
       {project ? (
         <>
-          <p className="settings-muted">
-            {project.env.length} variables ·{" "}
-            {project.env.filter((entry) => entry.secret).length} secrets
-          </p>
-          <div className="workspace-scroll">
-            <table className="project-env-table">
-              <thead>
-                <tr>
-                  <th>Key</th>
-                  <th>Value</th>
-                  <th>Available to</th>
-                  <th>Hosts</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {project.env.map((entry) => (
-                  <tr key={entry.name}>
-                    <td>
-                      {entry.secret && <Lock size={12} />}
-                      <code>{entry.name}</code>
-                    </td>
-                    <td>
-                      {entry.secret && entry.hasValue ? (
-                        <span className="env-masked">
-                          {displayedEnvValue("", true, entry.hint)}
-                        </span>
-                      ) : (
-                        <span>{entry.hint || "Not set"}</span>
-                      )}
-                    </td>
-                    <td>
-                      <select
-                        aria-label={`${entry.name} available to`}
-                        value={(entry.availableTo || ["setup", "agent"]).join(
-                          ",",
-                        )}
-                        onChange={(event) =>
-                          void updateMetadata(
-                            project.env.map((item) =>
-                              item.name === entry.name
-                                ? {
-                                    ...item,
-                                    availableTo: event.target.value.split(","),
-                                  }
-                                : item,
-                            ),
-                          )
-                        }
-                      >
-                        <option value="setup,agent">setup + agent</option>
-                        <option value="agent">agent</option>
-                        <option value="setup">setup only</option>
-                        <option value="mcp">MCP only</option>
-                      </select>
-                    </td>
-                    <td>
-                      {entry.hosts?.length ? (
-                        <span className="env-override">
-                          Override · {entry.hosts.join(", ")}
-                        </span>
-                      ) : (
-                        "all"
-                      )}
-                    </td>
-                    <td>
-                      <button
-                        className="icon-button"
-                        aria-label={`Remove ${entry.name}`}
-                        onClick={() =>
-                          void updateMetadata(
-                            project.env.filter(
-                              (item) => item.name !== entry.name,
-                            ),
-                          )
-                        }
-                      >
-                        <X size={13} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="pd-table pd-env" role="table" aria-label="Variables">
+            <div className="pd-row head" role="row">
+              <span />
+              <span role="columnheader">Key</span>
+              <span role="columnheader">Value</span>
+              <span role="columnheader">Available to</span>
+              <span role="columnheader">Hosts</span>
+            </div>
+            {adding && (
+              <form
+                className="pd-row pd-adding"
+                role="row"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void addVariable();
+                }}
+              >
+                <span />
+                <input
+                  className="pd-input pd-mono"
+                  aria-label="Variable name"
+                  placeholder="NAME"
+                  autoFocus
+                  value={adding.name}
+                  onChange={(event) =>
+                    setAdding({ ...adding, name: event.target.value })
+                  }
+                />
+                <input
+                  className="pd-input pd-mono"
+                  aria-label="Variable value"
+                  type={addingSecret ? "password" : "text"}
+                  placeholder="value"
+                  value={adding.value}
+                  onChange={(event) =>
+                    setAdding({ ...adding, value: event.target.value })
+                  }
+                />
+                <button className="ui-button primary" type="submit">
+                  Add
+                </button>
+                <button
+                  className="ui-button ghost"
+                  type="button"
+                  onClick={() => setAdding(null)}
+                >
+                  Cancel
+                </button>
+              </form>
+            )}
+            {project.env.map((entry) => (
+              <EnvRow
+                key={entry.name}
+                entry={entry}
+                hostName={hostName}
+                overrideValue={
+                  (entry.hosts ?? [])
+                    .map(
+                      (host) => project.hosts?.[host]?.overrides?.[entry.name],
+                    )
+                    .find((value) => value !== undefined) as string | undefined
+                }
+                onAvailable={(value) =>
+                  void updateEnv({
+                    set: [{ ...entry, availableTo: value.split(",") }],
+                  })
+                }
+                onRemove={() => void updateEnv({ remove: [entry.name] })}
+              />
+            ))}
+            {!project.env.length && !adding && (
+              <p className="pd-empty pd-row">
+                No variables yet. Add one, or drop a .env file below.
+              </p>
+            )}
           </div>
           <div
-            className={`project-env-drop${dragging ? " dragging" : ""}`}
+            className={`pd-drop${dragging ? " dragging" : ""}`}
             onDragOver={(event) => {
               event.preventDefault();
               setDragging(true);
@@ -305,209 +522,116 @@ export function ProjectEnvironmentTab({
               void readFile(event.dataTransfer.files[0]);
             }}
           >
-            Drop a .env file here. Keys named *_TOKEN, *_KEY or *_SECRET come in
-            as secrets.
+            Drop a .env file here. Names that look like tokens, keys, passwords
+            or DSNs come in as secrets.
           </div>
-          <p className="workspace-note">
-            Setup only values are available to install steps. MCP only values
-            are referenced by MCP servers, not the agent.
+          <p className="pd-note">
+            {
+              "Setup only — the install step can use it; the agent never receives it (private registry). MCP only — reaches an MCP server through ${VAR}; never in the agent’s environment."
+            }
           </p>
         </>
       ) : (
-        <p className="settings-muted">
+        <p className="pd-empty">
           {gitRemote
             ? "Loading project environment…"
             : "Set a git remote to attach this workspace to a project."}
         </p>
       )}
-      {review && (
-        <div className="project-env-review-backdrop">
-          <section
-            className="project-env-review"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="env-import-title"
+    </ProjectPage>
+  );
+}
+
+function EnvRow({
+  entry,
+  hostName,
+  overrideValue,
+  onAvailable,
+  onRemove,
+}: {
+  entry: Env;
+  hostName(key: string): string;
+  /** The value this variable has on its host when it has no base value. */
+  overrideValue?: string;
+  onAvailable(value: string): void;
+  onRemove(): void;
+}) {
+  const availableTo = (entry.availableTo || ["setup", "agent"]).join(",");
+  const special = availableTo === "setup" || availableTo === "mcp";
+  const label = AVAILABLE[availableTo] || availableTo.replace(",", " + ");
+  const overrides = entry.hosts || [];
+  return (
+    <div className="pd-row" role="row">
+      <span className="pd-cell lock" role="cell">
+        {entry.secret && <Lock size={13} aria-hidden />}
+      </span>
+      <span className="pd-cell pd-mono key" role="cell">
+        {entry.name}
+      </span>
+      <span
+        className={`pd-cell pd-mono ${entry.secret ? "pd-faint" : "pd-muted"}`}
+        role="cell"
+      >
+        {entry.secret ? (
+          entry.hasValue ? (
+            <Masked hint={entry.hint} dots={12} />
+          ) : (
+            "Not set"
+          )
+        ) : entry.hasValue ? (
+          entry.hint || "Set"
+        ) : overrides.length ? (
+          (overrideValue ?? `${hostName(overrides[0])} override`)
+        ) : (
+          "Not set"
+        )}
+      </span>
+      <span className="pd-cell" role="cell">
+        <span className="pd-avail">
+          {special ? (
+            <Tag tone="info" dot={false}>
+              {label}
+            </Tag>
+          ) : (
+            label
+          )}
+          <select
+            aria-label={`${entry.name} available to`}
+            value={AVAILABLE[availableTo] ? availableTo : DEFAULT_AVAILABLE}
+            onChange={(event) => onAvailable(event.target.value)}
           >
-            <button
-              className="icon-button project-env-review-close"
-              aria-label="Close import review"
-              onClick={() => setReview(null)}
-            >
-              <X size={14} />
-            </button>
-            <h2 id="env-import-title">Import .env</h2>
-            <p>
-              Review before saving. Nothing is stored until you confirm, and the
-              file itself is never kept.
-            </p>
-            <div className="project-env-review-file">
-              <span>
-                {fileName} · {review.length} keys
-              </span>
-              <button
-                className="text-button"
-                onClick={() => fileInput.current?.click()}
-              >
-                Choose another file
-              </button>
-            </div>
-            <div className="workspace-scroll">
-              <table className="project-env-table">
-                <thead>
-                  <tr>
-                    <th>Key</th>
-                    <th>Value</th>
-                    <th>Secret</th>
-                    <th>Result</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {review.map((entry, index) => (
-                    <tr key={entry.name}>
-                      <td>
-                        <code>{entry.name}</code>
-                      </td>
-                      <td>{displayedEnvValue(entry.value, entry.secret)}</td>
-                      <td>
-                        <input
-                          type="checkbox"
-                          checked={entry.secret}
-                          aria-label={`${entry.name} is secret`}
-                          onChange={(event) =>
-                            setReview(
-                              review.map((item, i) =>
-                                i === index
-                                  ? { ...item, secret: event.target.checked }
-                                  : item,
-                              ),
-                            )
-                          }
-                        />
-                      </td>
-                      <td>
-                        <label>
-                          <input
-                            type="checkbox"
-                            checked={entry.selected}
-                            onChange={(event) =>
-                              setReview(
-                                review.map((item, i) =>
-                                  i === index
-                                    ? {
-                                        ...item,
-                                        selected: event.target.checked,
-                                      }
-                                    : item,
-                                ),
-                              )
-                            }
-                          />
-                          <span className={`env-import-status ${entry.status}`}>
-                            {entry.status === "same"
-                              ? "same value"
-                              : entry.status === "exists"
-                                ? "exists · keep"
-                                : entry.status === "differs"
-                                  ? "differs · replace?"
-                                  : entry.secret
-                                    ? "new secret"
-                                    : "new"}
-                          </span>
-                        </label>
-                        {entry.status === "differs" && (
-                          <div className="env-override-choice">
-                            <label>
-                              <input
-                                type="checkbox"
-                                checked={entry.override}
-                                onChange={(event) =>
-                                  setReview(
-                                    review.map((item, i) =>
-                                      i === index
-                                        ? {
-                                            ...item,
-                                            override: event.target.checked,
-                                            selected: true,
-                                          }
-                                        : item,
-                                    ),
-                                  )
-                                }
-                              />
-                              import as override
-                            </label>
-                            {entry.override && (
-                              <select
-                                aria-label={`${entry.name} override host`}
-                                value={entry.overrideHost}
-                                onChange={(event) =>
-                                  setReview(
-                                    review.map((item, i) =>
-                                      i === index
-                                        ? {
-                                            ...item,
-                                            overrideHost: event.target.value,
-                                          }
-                                        : item,
-                                    ),
-                                  )
-                                }
-                              >
-                                <option value="local">This Mac</option>
-                                {(project?.targets || [])
-                                  .filter((host) => host !== "local")
-                                  .map((host) => (
-                                    <option key={host} value={host}>
-                                      {host}
-                                    </option>
-                                  ))}
-                              </select>
-                            )}
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="env-import-secret-note">
-              <Lock size={14} />
-              <div>
-                <strong>
-                  {review.filter((entry) => entry.secret).length} keys look like
-                  secrets, so they are marked as secrets.
-                </strong>
-                <span>
-                  Names ending in _TOKEN, _KEY or _SECRET. Switch one off if it
-                  is not a secret; its value is then shown in plain text.
-                </span>
-              </div>
-            </div>
-            <footer className="project-env-review-footer">
-              <p>
-                {review.some((entry) => entry.status === "differs")
-                  ? "A variable differs from the saved value. Import it as an override for one host instead?"
-                  : "Review the selected keys before importing."}
-              </p>
-              <button className="secondary" onClick={() => setReview(null)}>
-                Cancel
-              </button>
-              <button
-                className="primary"
-                disabled={
-                  busy || !project || !review.some((entry) => entry.selected)
-                }
-                onClick={() => void saveImport()}
-              >
-                {busy
-                  ? "Importing…"
-                  : `Import ${review.filter((entry) => entry.selected).length} keys`}
-              </button>
-            </footer>
-          </section>
-        </div>
-      )}
-    </section>
+            <option value="setup,agent">setup + agent</option>
+            <option value="agent">agent</option>
+            <option value="setup">setup only</option>
+            <option value="mcp">MCP only</option>
+          </select>
+        </span>
+      </span>
+      <span className="pd-cell pd-faint" role="cell">
+        {overrides.length ? (
+          <span title={overrides.map(hostName).join(", ")}>
+            <Tag tone="warning" dot={false}>
+              {entry.hasValue
+                ? overrides.length === 1
+                  ? "1 override"
+                  : `${overrides.length} overrides`
+                : // No base value: the variable exists only on these hosts.
+                  overrides.length === 1
+                  ? `${hostName(overrides[0])} only`
+                  : `${overrides.length} hosts only`}
+            </Tag>
+          </span>
+        ) : (
+          "all"
+        )}
+      </span>
+      <button
+        className="pd-row-remove"
+        aria-label={`Remove ${entry.name}`}
+        onClick={onRemove}
+      >
+        <X size={12} aria-hidden />
+      </button>
+    </div>
   );
 }

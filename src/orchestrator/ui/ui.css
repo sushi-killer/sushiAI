@@ -52,6 +52,51 @@
   background: var(--bg-hover);
 }
 
+/* Control/Toggle: a checkbox drawn as a switch (32x18, 14px knob). Inside a
+ * dialog the generic `.modal input` rules would restyle it, so the same
+ * values are restated with enough weight to win there. */
+.ui-toggle,
+.modal input.ui-toggle[type="checkbox"] {
+  position: relative;
+  flex: none;
+  width: 32px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: var(--bg-count);
+  appearance: none;
+  cursor: pointer;
+}
+.ui-toggle::before {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  content: "";
+  transition: transform 0.12s ease;
+}
+.ui-toggle:checked,
+.modal input.ui-toggle[type="checkbox"]:checked {
+  background: var(--accent);
+}
+.ui-toggle:checked::before {
+  background: var(--accent-ink);
+  transform: translateX(14px);
+}
+.ui-toggle:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.ui-toggle:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
 /* Control/Count. */
 .ui-count {
   display: inline-flex;

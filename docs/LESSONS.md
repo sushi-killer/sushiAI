@@ -26,15 +26,17 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 
 ## Open
 
-## 2026-09-30 — Parallel lane worktrees filled the disk
-Root cause: each `.claude/worktrees/agent-*` lane built its own `orchd/target`; ten lanes left 262 MB free.
-Rule: delete a lane's `orchd/target` once it is merged; check `df` before more lanes.
+## 2026-10-01 — "0 unexplained diffs" hid real defects
+
+Root cause: the implementer's own diff tolerances excused layout rows, and two reverted fixes stayed green.
+Rule: a fresh critic reads Figma and app PNGs side by side; revert each fix once in a scratch copy and see its test go red.
 
 ## Promoted
 
-- 2026-09-30 orchd defaults carried this repo's desktop smoke and one owner's MCP servers to every repo → defaults stay empty; repo specifics live in settings. `scoped_checks_and_chat_tools_default_to_none`.
-- 2026-09-30 A hook `allow` did not open `.claude/**` to a headless `claude -p` (also not a `Write(.claude/**)` rule or `updatedInput`; checked on 2.1.285) → an allowed write goes to `.orchd-staging/` and is copied in before verify. `an_allowed_write_under_claude_goes_through_staging_and_lands_before_verify`.
-- 2026-09-30 A connected MCP server that worked in `claude` failed under `--strict-mcp-config` (Slack's OAuth is keyed by the plugin name) → keep a plugin server's Claude Code name and probe with a real run. `chat_tools::server_key`.
+- 2026-09-30 Lane worktrees each built `orchd/target`, 262 MB left → delete it after merge.
+- 2026-09-30 orchd defaults leaked repo specifics to every repo → defaults stay empty. `scoped_checks_and_chat_tools_default_to_none`.
+- 2026-09-30 A hook `allow` did not open `.claude/**` to headless `claude -p` → write to `.orchd-staging/`, copy in before verify. `an_allowed_write_under_claude_goes_through_staging_and_lands_before_verify`.
+- 2026-09-30 A plugin MCP server failed under `--strict-mcp-config` (OAuth keyed by plugin name) → keep its Claude Code name. `chat_tools::server_key`.
 - 2026-09-29 A kill lost the whole workspace snapshot (Chromium had not committed localStorage) → durable state goes in `workspace-state.json`, atomically.
 - 2026-09-30 A preselected answer plus global Enter sent answers the owner never picked → Enter needs an explicit pick or typed text. `enterAnswer` in `ownerAttention.ts`.
 - 2026-09-29 Contradicting criteria cost three attempts → cross-check criteria before launch.

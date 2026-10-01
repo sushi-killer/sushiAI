@@ -71,7 +71,7 @@ try {
     .getByRole("tab", { name: "One", exact: true })
     .waitFor({ state: "detached" });
   await page.keyboard.press("Meta+t");
-  await page.locator(".panel-picker-v4").waitFor();
+  await page.locator(".pk").waitFor();
   console.log(
     "PASS: previous/next tab, maximize, close tab and add-session shortcuts",
   );

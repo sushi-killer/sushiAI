@@ -176,6 +176,21 @@ class ClaudeMcp {
     };
   }
 
+  /** Server definitions a project can adopt: the repo's `.mcp.json` plus this
+   * project's own entry in `~/.claude.json` (which wins on a duplicate name).
+   * User-scope servers are personal and never imported. */
+  async importable(cwd) {
+    const state = await this.load(cwd);
+    const servers = {};
+    for (const source of [state.projectFile, state.project])
+      for (const [name, definition] of Object.entries(
+        mapObject(source.mcpServers),
+      ))
+        if (definition && typeof definition === "object")
+          servers[name] = definition;
+    return { cwd: state.root, servers };
+  }
+
   /** `{mcpServers: {name: definition}}` for `claude --mcp-config`: every
    * enabled server, resolved from whichever source `listEntries` already
    * picked for it. Reuses `load`/`listEntries` rather than re-deriving

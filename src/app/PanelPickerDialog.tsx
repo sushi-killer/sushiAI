@@ -1,16 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Check,
+  ChevronDown,
   FolderOpen,
+  GitBranch,
   Globe,
-  ListChecks,
-  Plus,
+  Lock,
+  ListTodo,
   Sparkles,
   TerminalSquare,
 } from "lucide-react";
 import { agentTitle } from "./agent-title.ts";
+import { Icon } from "../PanelIcon.tsx";
+import { openProjectSettings, openSettings } from "./openSettings.ts";
+import {
+  checkoutPath,
+  readPrepareTimes,
+  tildePath as tilde,
+} from "../projectPrepare.ts";
 import { useOrchestratorEnabled } from "../orchestrator/enabled.ts";
 import { sessionHostOptions, type SessionHostContext } from "./sessionHosts.ts";
-import { ExtensionPanelOptions } from "../extensions/ExtensionSlots.tsx";
+import {
+  ExtensionIcon,
+  extensionPanelOptions,
+} from "../extensions/ExtensionSlots.tsx";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import {
   launchesInWorktree,
@@ -21,48 +34,58 @@ import type {
   ClaudeAccount,
   ModelProfile,
   PanelKind,
+  Project,
+  ProjectHostReadiness,
   System,
   Workspace,
 } from "../types";
 
 const AGENTS = ["claude", "codex", "gemini", "cursor-agent"];
+const GLYPHS: Record<string, string> = {
+  claude: "✳",
+  codex: "✺",
+  gemini: "✦",
+  "cursor-agent": "⌘",
+};
 const TOOLS = [
   {
-    key: "a",
+    key: "t",
     kind: "terminal",
     title: "Terminal",
-    detail: "A real shell in your project",
+    detail: "A shell in the project",
     icon: TerminalSquare,
   },
   {
-    key: "s",
+    key: "f",
     kind: "files",
     title: "Files & Git",
-    detail: "Explore code, images and changes",
+    detail: "Code, images, changes",
     icon: FolderOpen,
   },
   {
-    key: "d",
+    key: "b",
     kind: "browser",
     title: "Browser",
-    detail: "Your local app or any website",
+    detail: "Local app or any site",
     icon: Globe,
   },
   {
-    key: "f",
+    key: "h",
     kind: "chat",
     title: "Thread",
-    detail: "Talk to Claude Code or Codex",
+    detail: "Talk to an agent",
     icon: Sparkles,
   },
   {
-    key: "g",
+    key: "o",
     kind: "orchestrator",
     title: "Orchestrator",
     detail: "Tasks carried to done",
-    icon: ListChecks,
+    icon: ListTodo,
   },
 ] as const;
+
+type Tone = "ok" | "warning" | "danger";
 
 /** Model profiles are this dialog's business only, so they load when it opens
  * and the picked profile resets with it. Same for the session-host pick
@@ -109,12 +132,12 @@ export function PanelPickerDialog({
   const [backend, setBackend] = useState<"herdr" | "local">("herdr");
   const [selectedModelProfileId, setSelectedModelProfileId] = useState("");
   const [selectedClaudeAccountId, setSelectedClaudeAccountId] = useState("");
-  const [projectName, setProjectName] = useState(active.name);
-  const [environmentCount, setEnvironmentCount] = useState(0);
-  const [projectId, setProjectId] = useState("");
-  const [hostReadiness, setHostReadiness] = useState<Record<string, string>>(
-    {},
-  );
+  const accountTouched = useRef(false);
+  const [accountMenu, setAccountMenu] = useState(false);
+  const [project, setProject] = useState<Project | null>(null);
+  const [hostChecks, setHostChecks] = useState<
+    Record<string, ProjectHostReadiness | "checking" | "unreachable">
+  >({});
   const agentButtons = useRef<(HTMLButtonElement | null)[]>([]);
   const [focusedAgent, setFocusedAgent] = useState(0);
   useEffect(() => {
@@ -125,9 +148,7 @@ export function PanelPickerDialog({
     let live = true;
     const remote = hostContext.projectGit[active.id]?.remote;
     if (!remote || !window.bridge) {
-      setProjectId("");
-      setProjectName(active.name);
-      setEnvironmentCount(0);
+      setProject(null);
       return;
     }
     window.bridge
@@ -135,22 +156,19 @@ export function PanelPickerDialog({
         remote,
         endpoint: active.connection || "local",
       })
-      .then((project) => {
+      .then((found) => {
         if (!live) return;
-        setProjectId(project?.id || "");
-        setProjectName(project?.name || active.name);
-        setEnvironmentCount(project?.env.length || 0);
+        setProject(found);
+        // The project's own account is the default for a new session.
+        if (!accountTouched.current)
+          setSelectedClaudeAccountId(found?.sessions.claudeAccount || "");
       })
-      .catch(() => {
-        if (!live) return;
-        setProjectId("");
-        setProjectName(active.name);
-        setEnvironmentCount(0);
-      });
+      .catch(() => live && setProject(null));
     return () => {
       live = false;
     };
-  }, [active.connection, active.id, active.name, hostContext.projectGit]);
+  }, [active.connection, active.id, hostContext.projectGit]);
+  const projectId = project?.id || "";
   // Empty outside a merge group (D3): the picker then targets `active` alone,
   // exactly as it always has.
   const hostOptions = useMemo(
@@ -159,9 +177,6 @@ export function PanelPickerDialog({
   );
   const [hostId, setHostId] = useState(active.id);
   const targetWorkspaceId = hostOptions.length ? hostId : undefined;
-  const launchLabel =
-    hostOptions.find((option) => option.workspaceId === hostId)?.label ||
-    active.name;
   // The launch host, resolved the same way addPanel resolves it - the picker
   // shows worktree choices for whichever workspace a session would actually
   // start in, not always the active one.
@@ -169,52 +184,60 @@ export function PanelPickerDialog({
     (targetWorkspaceId &&
       hostContext.workspaces.find((w) => w.id === targetWorkspaceId)) ||
     active;
+  const hostName = (workspace: Workspace) =>
+    workspace.connection?.startsWith("ssh:")
+      ? hostContext.connectionProfiles.find(
+          (profile) => `ssh:${profile.id}` === workspace.connection,
+        )?.name || "SSH host"
+      : "This Mac";
+  const hosts = (
+    hostOptions.length
+      ? hostOptions
+      : [{ workspaceId: active.id, label: hostName(active) }]
+  ).map((option) => ({
+    ...option,
+    label: option.label.replace(/^Local\b/, "This Mac"),
+    workspace:
+      hostContext.workspaces.find((w) => w.id === option.workspaceId) || active,
+  }));
+  const launchLabel = hostName(targetWorkspace);
   useEffect(() => {
     let live = true;
-    const sshHosts = (
-      hostOptions.length
-        ? hostOptions
-        : [{ workspaceId: active.id, label: active.name }]
-    )
-      .map((option) =>
-        hostContext.workspaces.find((w) => w.id === option.workspaceId),
-      )
-      .filter((workspace): workspace is Workspace =>
-        Boolean(workspace?.connection?.startsWith("ssh:")),
-      );
-    for (const workspace of sshHosts) {
-      setHostReadiness((current) => ({
-        ...current,
-        [workspace.id]: "Checking…",
-      }));
+    const remote = hosts
+      .map((host) => host.workspace)
+      .filter((workspace) => workspace.connection?.startsWith("ssh:"));
+    for (const workspace of remote) {
+      setHostChecks((current) => ({ ...current, [workspace.id]: "checking" }));
       if (!window.bridge || !projectId) {
-        setHostReadiness((current) => ({
+        setHostChecks((current) => ({
           ...current,
-          [workspace.id]: "Unreachable",
+          [workspace.id]: "unreachable",
         }));
         continue;
       }
       window.bridge
         .projectHostCheck(projectId, workspace.connection!, workspace.cwd)
-        .then(() => {
+        .then((matrix) => {
           if (live)
-            setHostReadiness((current) => ({
+            setHostChecks((current) => ({
               ...current,
-              [workspace.id]: "Ready",
+              [workspace.id]: matrix,
             }));
         })
         .catch(() => {
           if (live)
-            setHostReadiness((current) => ({
+            setHostChecks((current) => ({
               ...current,
-              [workspace.id]: "Unreachable",
+              [workspace.id]: "unreachable",
             }));
         });
     }
     return () => {
       live = false;
     };
-  }, [active.id, active.name, hostOptions, hostContext.workspaces, projectId]);
+    // `hosts` is rebuilt every render; its identity is the member workspaces.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active.id, hostOptions, hostContext.workspaces, projectId]);
   const targetIsSsh = Boolean(targetWorkspace.connection?.startsWith("ssh:"));
   const canHerdrWorktree =
     Boolean(targetWorkspace.herdrId) && connected && backend === "herdr";
@@ -268,6 +291,20 @@ export function PanelPickerDialog({
       adding,
     ],
   );
+  const extensionTools = extensionPanelOptions(extensionRegistry);
+  const tools = TOOLS.filter(
+    (item) => orchestrator || item.kind !== "orchestrator",
+  );
+  // An extension's tool takes the first letter of its label that no other
+  // tool already owns.
+  const taken = new Set<string>(tools.map((item) => item.key));
+  const extensionKeys = extensionTools.map((item) => {
+    const key = [...item.label.toLowerCase()].find(
+      (letter) => /[a-z0-9]/.test(letter) && !taken.has(letter),
+    );
+    if (key) taken.add(key);
+    return key;
+  });
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (
@@ -288,13 +325,14 @@ export function PanelPickerDialog({
         setFocusedAgent(index);
         agentButtons.current[index]?.focus();
       } else if (event.key === "Enter") {
-        if (target !== document.body && !target?.closest(".picker-agent-list"))
-          return;
+        if (target !== document.body && !target?.closest(".pk-agents")) return;
         event.preventDefault();
         launchAgent(AGENTS[focusedAgent]);
       } else {
-        const tool = TOOLS.find((item) => item.key === event.key.toLowerCase());
-        if (tool && (orchestrator || tool.kind !== "orchestrator")) {
+        const letter = event.key.toLowerCase();
+        const tool = tools.find((item) => item.key === letter);
+        const at = extensionKeys.indexOf(letter);
+        if (tool) {
           if (launchesInWorktree(tool.kind) && worktreeInvalid) return;
           event.preventDefault();
           addPanel(
@@ -307,177 +345,408 @@ export function PanelPickerDialog({
             targetWorkspaceId,
             launchesInWorktree(tool.kind) ? worktreeArg : undefined,
           );
+        } else if (at >= 0) {
+          event.preventDefault();
+          addExtensionPanel(
+            extensionTools[at].extensionId,
+            extensionTools[at].surfaceId,
+            targetWorkspaceId,
+          );
         }
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+    // `tools` and `extensionKeys` are rebuilt from `orchestrator` and the
+    // registry, which are listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     focusedAgent,
     orchestrator,
+    extensionRegistry,
     backend,
     targetWorkspaceId,
     worktreeArg,
     worktreeInvalid,
     addPanel,
+    addExtensionPanel,
     launchAgent,
     adding,
   ]);
+
+  const targetCheck = hostChecks[targetWorkspace.id];
+  const matrix =
+    targetCheck && targetCheck !== "checking" && targetCheck !== "unreachable"
+      ? targetCheck
+      : undefined;
+  const hostTone = (workspace: Workspace): Tone => {
+    if (!workspace.connection?.startsWith("ssh:")) return "ok";
+    const check = hostChecks[workspace.id];
+    if (!check || check === "checking") return "warning";
+    if (check === "unreachable" || !check.checkout.ok) return "danger";
+    return check.setup.configured && !check.setup.stale ? "ok" : "warning";
+  };
+  // SSH hosts the picker knows but that have no workspace for this project:
+  // shown, not launchable, so a host that is not set up is visible too.
+  const shownConnections = new Set(
+    hosts.map((host) => host.workspace.connection),
+  );
+  const setupHosts = hostContext.connectionProfiles.filter(
+    (profile) => !shownConnections.has(`ssh:${profile.id}`),
+  );
+  /** What a coding agent is on the launch host. */
+  const agentDetail = (agent: string): { text: string; tone?: Tone } => {
+    if (targetIsSsh) {
+      if (targetCheck === "unreachable")
+        return { text: `${launchLabel} is unreachable`, tone: "warning" };
+      if (!matrix) return { text: "Checking…" };
+      if (agent === "claude" || agent === "codex")
+        return matrix.clis[agent].installed
+          ? { text: `Ready on ${launchLabel}` }
+          : { text: `Not installed on ${launchLabel}`, tone: "warning" };
+      return { text: "Ready" };
+    }
+    return system?.agents.find((a) => a.name === agent)?.path
+      ? { text: agent === "claude" ? `Ready on ${launchLabel}` : "Ready" }
+      : { text: "CLI required", tone: "warning" };
+  };
+  const secrets = project?.env.filter((entry) => entry.secret).length ?? 0;
+  const servers = Object.keys(
+    (project?.mcp as { mcpServers?: object } | undefined)?.mcpServers ?? {},
+  ).length;
+  const account = claudeAccounts.find(
+    (item) => item.id === selectedClaudeAccountId,
+  );
+  const profile = modelProfiles.find(
+    (item) => item.id === selectedModelProfileId,
+  );
+  const accountLabel = profile?.label || account?.label || "Signed-in account";
+  // Where the checkout is and what the next run does first. A remote path is
+  // shown from the host's own home, never the local one.
+  const info = !targetIsSsh
+    ? tilde(targetWorkspace.cwd, system?.home)
+    : !targetCheck || targetCheck === "checking"
+      ? `${tilde(targetWorkspace.cwd, system?.home)} · checking the host…`
+      : targetCheck === "unreachable"
+        ? `${tilde(targetWorkspace.cwd, system?.home)} · host unreachable`
+        : !targetCheck.checkout.ok
+          ? `${tilde(targetWorkspace.cwd, system?.home)} · not cloned yet`
+          : `${checkoutPath(targetCheck)} · ${
+              targetCheck.setup.stale
+                ? `reinstalls first, ${targetCheck.setup.lockFile || "the lock file"} changed${(() => {
+                    const seconds = readPrepareTimes(
+                      project?.id ?? "",
+                      targetWorkspace.connection ?? "",
+                    )?.find((step) => step.id === "install")?.seconds;
+                    return seconds === undefined ? "" : ` (~${seconds} s)`;
+                  })()}`
+                : "ready"
+            }`;
+  const slug = branch.replace(/\//g, "-");
+  // A remote worktree is shown from that host's home, not this Mac's.
+  const shownParent =
+    targetIsSsh && matrix
+      ? checkoutPath(matrix).replace(/\/[^/]*$/, "")
+      : tilde(targetWorkspace.cwd.replace(/\/[^/]*$/, ""), system?.home);
+  const base = targetWorkspace.cwd.split("/").pop() || "";
+  const pick = (next: { account?: string; profile?: string }) => {
+    accountTouched.current = true;
+    setSelectedClaudeAccountId(next.account || "");
+    setSelectedModelProfileId(next.profile || "");
+    setAccountMenu(false);
+  };
+  const subscriptions = claudeAccounts.filter(
+    (item) => item.kind === "subscription",
+  );
+  const keys = claudeAccounts.filter((item) => item.kind === "apiKey");
+  const remoteNote = targetIsSsh ? launchLabel : "";
+
   return (
-    <div className="panel-picker-v4">
-      <div className="picker-project-head">
-        <div>
-          <span className="dialog-eyebrow">NEW SESSION</span>
-          <h2>{projectName}</h2>
+    <div className="pk">
+      <header className="pk-head">
+        <div className="pk-head-text">
+          <span className="pk-eyebrow">New session</span>
+          <h2>{project?.name || active.name}</h2>
         </div>
-        <span className="picker-environment-pill">
-          <span /> Environment · {environmentCount}
-        </span>
-      </div>
-      <p>Choose where to start, then pick an agent or tool.</p>
-      {(hostOptions.length > 0 || herdrWorkspace) && (
-        <section className="picker-host-row">
-          <div className="picker-section-label">HOST</div>
-          <div
-            className="panel-backend"
-            role="radiogroup"
-            aria-label="Launch on"
-          >
-            {(hostOptions.length
-              ? hostOptions
-              : [{ workspaceId: active.id, label: active.name }]
-            ).map((option) => (
+        {project && (
+          <span className="pk-env">
+            <Lock size={12} aria-hidden />
+            {`${project.env.length} variables · ${secrets} secrets · ${servers} MCP`}
+          </span>
+        )}
+      </header>
+      <section className="pk-where">
+        <div className="pk-hosts" role="radiogroup" aria-label="Launch on">
+          {hosts.map((host) => (
+            <button
+              key={host.workspaceId}
+              role="radio"
+              aria-checked={hostId === host.workspaceId}
+              className={`pk-host${hostId === host.workspaceId ? " selected" : ""}`}
+              onClick={() => setHostId(host.workspaceId)}
+            >
+              <span className={`ui-dot ui-tone-${hostTone(host.workspace)}`} />
+              {host.label}
+            </button>
+          ))}
+          {setupHosts.map((profile) => (
+            <button
+              key={profile.id}
+              role="radio"
+              aria-checked={false}
+              className="pk-host"
+              title={`${project?.name || "This project"} is not set up on ${profile.name}. Prepare it in Project settings, Hosts.`}
+              onClick={() => {
+                if (project)
+                  openProjectSettings(active.cwd, "Hosts", active.connection);
+              }}
+            >
+              <span className="ui-dot ui-tone-danger" />
+              {profile.name}
+            </button>
+          ))}
+        </div>
+        {herdrWorkspace && (
+          <div className="pk-backend" role="group" aria-label="Session backend">
+            {(
+              [
+                ["herdr", "Herdr"],
+                ["local", "Local"],
+              ] as const
+            ).map(([value, label]) => (
               <button
-                key={option.workspaceId}
-                role="radio"
-                aria-checked={hostId === option.workspaceId}
-                className={hostId === option.workspaceId ? "selected" : ""}
-                onClick={() => setHostId(option.workspaceId)}
+                key={value}
+                className={backend === value ? "selected" : ""}
+                aria-pressed={backend === value}
+                onClick={() => setBackend(value)}
               >
-                {option.label}
-                <small className="host-readiness">
-                  <span
-                    className={
-                      hostContext.workspaces
-                        .find((w) => w.id === option.workspaceId)
-                        ?.connection?.startsWith("ssh:") &&
-                      hostReadiness[option.workspaceId] !== "Ready"
-                        ? "is-pending"
-                        : ""
-                    }
-                  />
-                  {hostContext.workspaces
-                    .find((w) => w.id === option.workspaceId)
-                    ?.connection?.startsWith("ssh:")
-                    ? hostReadiness[option.workspaceId] || "Checking…"
-                    : "Ready"}
-                </small>
+                {label}
               </button>
             ))}
           </div>
-          {herdrWorkspace && (
-            <div
-              className="panel-backend picker-backend"
-              role="group"
-              aria-label="Session backend"
-            >
-              {(
-                [
-                  ["herdr", "Herdr"],
-                  ["local", "Local"],
-                ] as const
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  className={backend === value ? "selected" : ""}
-                  aria-pressed={backend === value}
-                  onClick={() => setBackend(value)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          )}
-        </section>
-      )}
-      {canWorktree && (
-        <div className="picker-checkout-line">
-          <label className="picker-worktree-check">
+        )}
+        {canWorktree && (
+          <label className={`pk-worktree${wantsWorktree ? " on" : ""}`}>
             <input
               type="checkbox"
               checked={wantsWorktree}
               onChange={(event) =>
                 setCheckout(event.target.checked ? "worktree" : "current")
               }
-            />{" "}
+            />
+            <span className="pk-box" aria-hidden>
+              {wantsWorktree && <Check size={11} strokeWidth={3} />}
+            </span>
             New worktree
           </label>
-          {wantsWorktree && (
-            <div className="picker-branch-field">
-              <span>{targetWorkspace.cwd}</span>
-              <input
-                className="worktree-branch"
-                aria-label="Branch"
-                value={branch}
-                onChange={(event) => setBranch(event.target.value)}
-                placeholder="feature/my-change"
-              />
-            </div>
-          )}
-          {branchError && <small className="inline-error">{branchError}</small>}
+        )}
+      </section>
+      {wantsWorktree ? (
+        <div className="pk-worktree-line">
+          <span className="pk-branch">
+            <GitBranch size={12} aria-hidden />
+            <input
+              aria-label="Branch"
+              value={branch}
+              onChange={(event) => setBranch(event.target.value)}
+              placeholder="feature/my-change"
+            />
+          </span>
+          <span className="pk-info">
+            {branchError ? (
+              <span className="pk-error">{branchError}</span>
+            ) : (
+              `from ${hostContext.projectGit[targetWorkspace.id]?.branch || project?.git.defaultBranch || "main"} · ${shownParent}/${base}-${slug}`
+            )}
+          </span>
         </div>
+      ) : (
+        <p className="pk-info">{info}</p>
       )}
-      <div className={`picker-lists ${adding ? "is-busy" : ""}`}>
-        <section className="picker-agent-list">
-          <div className="picker-list-heading">
-            <span>AGENTS</span>
-            <small>Choose one to start</small>
-          </div>
-          <div className="agent-options">
-            {AGENTS.map((agent, index) => (
-              <button
+      <div className={`pk-lists${adding ? " is-busy" : ""}`}>
+        <section className="pk-agents" aria-label="Coding agents">
+          <div className="pk-label">Coding agents</div>
+          {AGENTS.map((agent, index) => {
+            const detail = agentDetail(agent);
+            return (
+              <div
                 key={agent}
-                ref={(element) => {
-                  agentButtons.current[index] = element;
-                }}
-                className={focusedAgent === index ? "is-focused" : ""}
-                disabled={adding || worktreeInvalid}
-                onFocus={() => setFocusedAgent(index)}
-                onClick={() => launchAgent(agent)}
+                className={`pk-row${focusedAgent === index ? " focused" : ""}`}
               >
-                <kbd>{index + 1}</kbd>
-                <span
-                  className={agent === "claude" ? "agent-star" : "agent-logo"}
+                <button
+                  ref={(element) => {
+                    agentButtons.current[index] = element;
+                  }}
+                  className="pk-row-main"
+                  disabled={adding || worktreeInvalid}
+                  onFocus={() => setFocusedAgent(index)}
+                  onClick={() => launchAgent(agent)}
                 >
-                  {agent === "claude"
-                    ? "✳"
-                    : agent === "codex"
-                      ? "✺"
-                      : agent === "gemini"
-                        ? "✦"
-                        : "⌘"}
-                </span>
-                <span>{agentTitle(agent)}</span>
-                <small>
-                  {system?.agents.find((a) => a.name === agent)?.path
-                    ? "Installed"
-                    : "CLI required"}
-                </small>
-              </button>
-            ))}
-          </div>
+                  <span
+                    className={`pk-glyph${agent === "claude" ? " claude" : agent === "gemini" ? " gemini" : ""}`}
+                    aria-hidden
+                  >
+                    {agent === "claude" ? (
+                      <Icon kind="agent" agent="claude" size={17} />
+                    ) : (
+                      GLYPHS[agent]
+                    )}
+                  </span>
+                  <span className="pk-text">
+                    <strong>{agentTitle(agent)}</strong>
+                    <small className={detail.tone ? `is-${detail.tone}` : ""}>
+                      {detail.text}
+                    </small>
+                  </span>
+                </button>
+                {agent === "claude" && (
+                  <span className="pk-account">
+                    <button
+                      type="button"
+                      className={`picker-account-chip${accountMenu ? " open" : ""}`}
+                      aria-haspopup="menu"
+                      aria-expanded={accountMenu}
+                      aria-label={`Claude Code account: ${accountLabel}`}
+                      onClick={() => setAccountMenu((open) => !open)}
+                    >
+                      {accountLabel}
+                      <ChevronDown size={11} aria-hidden />
+                    </button>
+                    {accountMenu && (
+                      <div
+                        className="picker-account-menu"
+                        role="menu"
+                        aria-label="Claude Code runs as"
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            event.stopPropagation();
+                            setAccountMenu(false);
+                          }
+                        }}
+                      >
+                        <div className="pk-menu-group">Claude Code runs as</div>
+                        {subscriptions.map((item) => (
+                          <button
+                            key={item.id}
+                            role="menuitemradio"
+                            aria-checked={
+                              selectedClaudeAccountId === item.id &&
+                              !selectedModelProfileId
+                            }
+                            className="pk-menu-item"
+                            onClick={() =>
+                              pick(
+                                selectedClaudeAccountId === item.id
+                                  ? {}
+                                  : { account: item.id },
+                              )
+                            }
+                          >
+                            <span className="pk-text">
+                              <strong>{item.label}</strong>
+                              <small
+                                className={item.hasValue ? "" : "is-warning"}
+                              >
+                                {item.hasValue
+                                  ? `Subscription · logged in on ${launchLabel}`
+                                  : `Subscription · not logged in on ${launchLabel} · logs in on first run`}
+                              </small>
+                            </span>
+                            {selectedClaudeAccountId === item.id &&
+                              !selectedModelProfileId && (
+                                <Check size={12} aria-hidden />
+                              )}
+                          </button>
+                        ))}
+                        {(keys.length > 0 || modelProfiles.length > 0) && (
+                          <>
+                            <div className="pk-menu-rule" />
+                            <div className="pk-menu-group">
+                              API keys from Providers
+                            </div>
+                          </>
+                        )}
+                        {keys.map((item) => (
+                          <button
+                            key={item.id}
+                            role="menuitemradio"
+                            aria-checked={
+                              selectedClaudeAccountId === item.id &&
+                              !selectedModelProfileId
+                            }
+                            className="pk-menu-item"
+                            onClick={() =>
+                              pick(
+                                selectedClaudeAccountId === item.id
+                                  ? {}
+                                  : { account: item.id },
+                              )
+                            }
+                          >
+                            <span className="pk-text">
+                              <strong>{item.label}</strong>
+                              <small>
+                                {remoteNote
+                                  ? `Key sent to ${remoteNote} like a project secret`
+                                  : `API key${item.hint ? ` · ${item.hint}` : ""}`}
+                              </small>
+                            </span>
+                            {selectedClaudeAccountId === item.id &&
+                              !selectedModelProfileId && (
+                                <Check size={12} aria-hidden />
+                              )}
+                          </button>
+                        ))}
+                        {modelProfiles.map((item) => (
+                          <button
+                            key={item.id}
+                            role="menuitemradio"
+                            aria-checked={selectedModelProfileId === item.id}
+                            className="pk-menu-item"
+                            onClick={() =>
+                              pick(
+                                selectedModelProfileId === item.id
+                                  ? {}
+                                  : { profile: item.id },
+                              )
+                            }
+                          >
+                            <span className="pk-text">
+                              <strong>{item.label}</strong>
+                              <small>
+                                {remoteNote
+                                  ? `Custom model · key sent to ${remoteNote}`
+                                  : "Custom model"}
+                              </small>
+                            </span>
+                            {selectedModelProfileId === item.id && (
+                              <Check size={12} aria-hidden />
+                            )}
+                          </button>
+                        ))}
+                        <div className="pk-menu-rule" />
+                        <button
+                          role="menuitem"
+                          className="pk-menu-foot"
+                          onClick={() => openSettings("providers")}
+                        >
+                          Add a subscription or a key in Settings → Providers
+                        </button>
+                      </div>
+                    )}
+                  </span>
+                )}
+                <kbd className="pk-kbd">{index + 1}</kbd>
+              </div>
+            );
+          })}
         </section>
-        <section className="picker-tool-list">
-          <div className="picker-list-heading">
-            <span>TOOLS</span>
-            <small>Open alongside your work</small>
-          </div>
-          <div className="panel-options">
-            {TOOLS.filter(
-              (item) => orchestrator || item.kind !== "orchestrator",
-            ).map((item) => (
+        <section className="pk-tools" aria-label="Tools">
+          <div className="pk-label">Tools</div>
+          {tools.map((item) => (
+            <div className="pk-row" key={item.kind}>
               <button
-                key={item.kind}
+                className="pk-row-main"
                 disabled={
                   adding || (launchesInWorktree(item.kind) && worktreeInvalid)
                 }
@@ -494,92 +763,55 @@ export function PanelPickerDialog({
                   )
                 }
               >
-                <kbd>{item.key}</kbd>
-                <item.icon size={18} />
-                <div>
+                <item.icon size={17} aria-hidden className="pk-icon" />
+                <span className="pk-text">
                   <strong>{item.title}</strong>
                   <small>{item.detail}</small>
-                </div>
-                <Plus size={15} />
+                </span>
               </button>
-            ))}
-            <ExtensionPanelOptions
-              registry={extensionRegistry}
-              onAdd={(extensionId, contributionId) =>
-                !adding &&
-                addExtensionPanel(
-                  extensionId,
-                  contributionId,
-                  targetWorkspaceId,
-                )
-              }
-            />
-          </div>
+              <kbd className="pk-kbd">{item.key.toUpperCase()}</kbd>
+            </div>
+          ))}
+          {extensionTools.map((item, index) => (
+            <div className="pk-row" key={item.key}>
+              <button
+                className="pk-row-main"
+                disabled={adding}
+                onClick={() =>
+                  addExtensionPanel(
+                    item.extensionId,
+                    item.surfaceId,
+                    targetWorkspaceId,
+                  )
+                }
+              >
+                <span className="pk-icon">
+                  <ExtensionIcon icon={item.icon} size={17} />
+                </span>
+                <span className="pk-text">
+                  <strong>{item.label}</strong>
+                  <small>{item.description}</small>
+                </span>
+              </button>
+              {extensionKeys[index] && (
+                <kbd className="pk-kbd">
+                  {extensionKeys[index]!.toUpperCase()}
+                </kbd>
+              )}
+            </div>
+          ))}
         </section>
       </div>
-      {modelProfiles.length > 0 && (
-        <label className="agent-model-picker">
-          Claude Code · Custom model
-          <select
-            value={selectedModelProfileId}
-            onChange={(event) => {
-              setSelectedModelProfileId(event.target.value);
-              if (event.target.value) setSelectedClaudeAccountId("");
-            }}
-          >
-            <option value="">Automatic (Anthropic)</option>
-            {modelProfiles.map((profile) => (
-              <option key={profile.id} value={profile.id}>
-                {profile.label}
-              </option>
-            ))}
-          </select>
-          <small>Pick a model, then click Claude Code above.</small>
-        </label>
-      )}
-      {claudeAccounts.length > 0 && (
-        <label className="agent-model-picker">
-          Claude account
-          <select
-            value={selectedClaudeAccountId}
-            onChange={(event) => {
-              setSelectedClaudeAccountId(event.target.value);
-              if (event.target.value) setSelectedModelProfileId("");
-            }}
-          >
-            <option value="">Use signed-in account</option>
-            {claudeAccounts
-              .filter((account) => account.hasValue)
-              .map((account) => (
-                <option key={account.id} value={account.id}>
-                  {account.label}
-                  {account.hint ? ` · ${account.hint}` : ""}
-                </option>
-              ))}
-          </select>
-          <small>Applies to the next Claude Code session.</small>
-        </label>
-      )}
-      <div className="dialog-footer">
+      <footer className="pk-foot">
         <span>
-          {!wantsWorktree ? (
-            <>
-              Launches in <strong>{launchLabel}</strong>
-            </>
-          ) : worktreeInvalid ? null : (
-            // Only a terminal or an agent gets the worktree; the other panels
-            // are views of the project and open where they always did.
-            <>
-              Terminal and agents launch in a new worktree on{" "}
-              <strong>{branch}</strong>
-            </>
-          )}
+          {wantsWorktree && !worktreeInvalid
+            ? `${agentTitle(AGENTS[focusedAgent])} on ${launchLabel} in a new worktree on ${branch}`
+            : `${agentTitle(AGENTS[focusedAgent])} on ${launchLabel}${project ? ", with this project’s variables, secrets and MCP servers" : ""}`}
         </span>
-        <span className="picker-shortcuts">
-          <kbd>1–4</kbd> agents <kbd>a/s/d/f/g</kbd> tools <kbd>↵</kbd> start{" "}
-          <kbd>esc</kbd> close
-        </span>
-      </div>
+        <kbd className="pk-kbd">⏎</kbd>
+        <span className="pk-foot-text">start</span>
+        <kbd className="pk-kbd">esc</kbd>
+      </footer>
     </div>
   );
 }

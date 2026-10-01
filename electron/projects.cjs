@@ -19,6 +19,13 @@ function normalizeRemote(url) {
     .toLowerCase();
 }
 
+/** A git remote is a URL or a path, never an option: `--upload-pack=...` would
+ * make git run a command. Every place that hands a user URL to git checks. */
+function assertRemote(url) {
+  if (typeof url === "string" && url.trim().startsWith("-"))
+    throw new Error("A git URL cannot start with a dash.");
+}
+
 async function atomicWriteJson(file, value) {
   await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
@@ -34,6 +41,8 @@ async function atomicWriteJson(file, value) {
   }
 }
 
+const STAGES = ["setup", "agent", "mcp"];
+
 function hint(value) {
   return value.length >= 12 ? `••••${value.slice(-4)}` : "••••";
 }
@@ -44,6 +53,24 @@ class Projects {
     this.secretsFile = path.join(userDataDir, "project-secrets.json");
     this.safeStorage = safeStorage;
     this.writeQueue = Promise.resolve();
+    this.lock = Promise.resolve();
+  }
+
+  /** Runs read-modify-write operations on the project list one at a time,
+   * so two of them can never both start from the same stale copy. */
+  #locked(operation) {
+    const run = this.lock.then(operation);
+    this.lock = run.catch(() => {});
+    return run;
+  }
+
+  /** The project stored under `id`, or undefined. Ids come from the
+   * renderer: only an own key of the stored map counts, so "__proto__" or
+   * "constructor" can never reach Object.prototype or a built-in. */
+  #own(projects, id) {
+    return typeof id === "string" && Object.hasOwn(projects, id)
+      ? projects[id]
+      : undefined;
   }
 
   #write(file, value) {
@@ -86,27 +113,59 @@ class Projects {
 
   async get(id) {
     const projects = await this.#read(this.projectsFile);
-    if (!projects[id]) return null;
-    return this.#withHints(projects[id], await this.#read(this.secretsFile));
+    const project = this.#own(projects, id);
+    if (!project) return null;
+    return this.#withHints(project, await this.#read(this.secretsFile));
   }
 
   #withHints(project, secrets) {
     const safe = this.#public(project);
     safe.env = safe.env.map((entry) => {
       const stored = secrets[`${project.id}:${entry.name}`];
-      return { ...entry, hasValue: !!stored, hint: stored?.hint };
+      return {
+        ...entry,
+        hasValue: !!stored,
+        hint: stored ? this.#shown(stored, entry.secret) : undefined,
+      };
     });
     return safe;
   }
 
-  async upsert(input) {
+  /** What a stored value shows: a plain variable as it is, a secret only as
+   * a mask. Decided now, from the current flag, never from what was stored. */
+  #shown(stored, secret) {
+    if (secret && /^••••/.test(stored.hint || "")) return stored.hint;
+    try {
+      const value = this.safeStorage.decryptString(
+        Buffer.from(stored.ct, "base64"),
+      );
+      return secret ? hint(value) : value.slice(0, 200);
+    } catch {
+      return secret ? "••••" : undefined;
+    }
+  }
+
+  upsert(input) {
+    return this.#locked(() => this.#upsert(input));
+  }
+
+  async #upsert(input) {
     if (!input || typeof input !== "object" || !String(input.name || "").trim())
       throw new Error("Project name is required.");
     const projects = await this.#read(this.projectsFile);
-    if (typeof input.id === "string" && !projects[input.id])
+    if (input.id !== undefined && !this.#own(projects, input.id))
       throw new Error("Unknown project.");
+    assertRemote(input.git?.url);
     const id = typeof input.id === "string" ? input.id : randomUUID();
-    const env = Array.isArray(input.env) ? input.env : [];
+    // Variables and MCP servers of an existing project change only through
+    // updateEnv and updateMcp, which read the stored state under the lock: a
+    // stale copy of the project must not be able to overwrite an import.
+    const existing = this.#own(projects, id);
+    const env = existing
+      ? existing.env || []
+      : Array.isArray(input.env)
+        ? input.env
+        : [];
     const project = {
       id,
       name: String(input.name).trim().slice(0, 200),
@@ -126,8 +185,11 @@ class Projects {
             : undefined,
         }))
         .filter((entry) => entry.name),
-      mcp:
-        input.mcp && typeof input.mcp === "object" && !Array.isArray(input.mcp)
+      mcp: existing
+        ? existing.mcp || {}
+        : input.mcp &&
+            typeof input.mcp === "object" &&
+            !Array.isArray(input.mcp)
           ? input.mcp
           : {},
       setup: {
@@ -144,10 +206,10 @@ class Projects {
         backend: input.sessions?.backend,
       },
       targets: Array.isArray(input.targets) ? input.targets.map(String) : [],
-      hosts: projects[id]?.hosts ?? {},
+      hosts: existing?.hosts ?? {},
     };
     const previousNames = new Set(
-      (projects[id]?.env || []).map((entry) => entry.name),
+      (existing?.env || []).map((entry) => entry.name),
     );
     const nextNames = new Set(project.env.map((entry) => entry.name));
     await this.#write(this.projectsFile, { ...projects, [id]: project });
@@ -163,72 +225,267 @@ class Projects {
     return this.#withHints(project, await this.#read(this.secretsFile));
   }
 
-  async delete(id) {
-    const projects = await this.#read(this.projectsFile);
-    delete projects[id];
-    await this.#write(this.projectsFile, projects);
-    const secrets = await this.#read(this.secretsFile);
-    for (const key of Object.keys(secrets))
-      if (key.startsWith(`${id}:`)) delete secrets[key];
-    await this.#write(this.secretsFile, secrets);
+  /** Adds, changes or removes variables on fresh stored state. A secret made
+   * plain loses its stored value: it was never meant to be shown, so it is
+   * never handed back; the user enters it again. */
+  updateEnv(id, { set = [], remove = [] } = {}) {
+    return this.#locked(async () => {
+      if (!Array.isArray(set) || !Array.isArray(remove))
+        throw new Error("Variable changes must be lists.");
+      const projects = await this.#read(this.projectsFile);
+      const project = this.#own(projects, id);
+      if (!project) throw new Error("Unknown project.");
+      const env = [...(project.env || [])];
+      const dropped = new Set(remove.map(String));
+      for (const item of set) {
+        const name = String(item?.name || "");
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+          throw new Error(
+            "A variable name is letters, digits and underscores.",
+          );
+        if (
+          Array.isArray(item.availableTo) &&
+          !item.availableTo.every((stage) => STAGES.includes(stage))
+        )
+          throw new Error("A variable is available to setup, agent or mcp.");
+        const at = env.findIndex((entry) => entry.name === name);
+        const next = {
+          name,
+          secret: !!item.secret,
+          availableTo: Array.isArray(item.availableTo)
+            ? item.availableTo.map(String)
+            : at >= 0
+              ? env[at].availableTo
+              : ["setup", "agent"],
+          hosts: Array.isArray(item.hosts)
+            ? item.hosts.map(String)
+            : at >= 0
+              ? env[at].hosts
+              : undefined,
+        };
+        if (at < 0) env.push(next);
+        else {
+          if (env[at].secret && !next.secret) dropped.add(name);
+          env[at] = next;
+        }
+      }
+      project.env = env.filter(
+        (entry) =>
+          !dropped.has(entry.name) ||
+          set.some((item) => item?.name === entry.name),
+      );
+      await this.#write(this.projectsFile, projects);
+      const secrets = await this.#read(this.secretsFile);
+      for (const name of dropped)
+        for (const key of Object.keys(secrets))
+          if (key === `${id}:${name}` || key.startsWith(`${id}:${name}@`))
+            delete secrets[key];
+      await this.#write(this.secretsFile, secrets);
+      return this.#withHints(project, secrets);
+    });
   }
 
-  async setSecret(id, name, value) {
-    const projects = await this.#read(this.projectsFile);
-    if (!projects[id]) throw new Error("Unknown project.");
-    if (!(projects[id].env || []).some((entry) => entry.name === name))
-      throw new Error("Unknown project variable.");
-    return this.#setEncryptedValue(id, `${name}`, value);
+  /** Adds, replaces or removes MCP servers (and sets which are disabled) on
+   * fresh stored state. `variables` are secrets the servers now refer to. */
+  updateMcp(id, { set = {}, remove = [], disabled, variables = [] } = {}) {
+    return this.#locked(async () => {
+      if (
+        !set ||
+        typeof set !== "object" ||
+        Array.isArray(set) ||
+        !Array.isArray(remove) ||
+        !Array.isArray(variables) ||
+        [...Object.keys(set), ...remove].some((name) => name === "__proto__")
+      )
+        throw new Error("Invalid MCP server change.");
+      const projects = await this.#read(this.projectsFile);
+      const project = this.#own(projects, id);
+      if (!project) throw new Error("Unknown project.");
+      const servers = { ...(project.mcp?.mcpServers || {}) };
+      for (const name of remove) delete servers[String(name)];
+      Object.assign(servers, set);
+      project.mcp = {
+        ...(project.mcp || {}),
+        mcpServers: servers,
+        ...(Array.isArray(disabled)
+          ? { disabledMcpServers: disabled.map(String) }
+          : {}),
+      };
+      const have = new Set((project.env || []).map((entry) => entry.name));
+      const added = variables.filter((entry) => !have.has(entry.name));
+      project.env = [
+        ...(project.env || []),
+        ...added.map((entry) => ({
+          name: entry.name,
+          secret: true,
+          availableTo: entry.availableTo || ["mcp"],
+        })),
+      ];
+      await this.#write(this.projectsFile, projects);
+      for (const entry of added)
+        await this.#setEncryptedValue(id, entry.name, entry.value);
+      return this.#withHints(project, await this.#read(this.secretsFile));
+    });
+  }
+
+  /** Adds imported variables and MCP servers to a project, never replacing
+   * or removing anything it already has: names that exist are left alone.
+   * Values are stored here; the caller gets names and flags back, no values. */
+  mergeImport(id, { variables = [], servers = {} } = {}) {
+    return this.#locked(async () => {
+      const projects = await this.#read(this.projectsFile);
+      const project = this.#own(projects, id);
+      if (!project) throw new Error("Unknown project.");
+      const have = new Set((project.env || []).map((entry) => entry.name));
+      const added = [];
+      for (const entry of variables) {
+        const name = String(entry.name);
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || have.has(name)) continue;
+        have.add(name);
+        project.env = [
+          ...(project.env || []),
+          {
+            name,
+            secret: !!entry.secret,
+            availableTo: Array.isArray(entry.availableTo)
+              ? entry.availableTo
+              : ["setup", "agent"],
+          },
+        ];
+        added.push({ ...entry, name });
+      }
+      const known = { ...(project.mcp?.mcpServers || {}) };
+      const addedServers = [];
+      for (const [name, definition] of Object.entries(servers))
+        if (!Object.hasOwn(known, name)) {
+          known[name] = definition;
+          addedServers.push(name);
+        }
+      if (addedServers.length)
+        project.mcp = { ...(project.mcp || {}), mcpServers: known };
+      await this.#write(this.projectsFile, projects);
+      for (const entry of added)
+        if (entry.value)
+          await this.#setEncryptedValue(id, entry.name, entry.value);
+      return {
+        project: this.#withHints(project, await this.#read(this.secretsFile)),
+        addedVariables: added.map(({ name, secret }) => ({
+          name,
+          secret: !!secret,
+        })),
+        addedServers,
+      };
+    });
+  }
+
+  delete(id) {
+    return this.#locked(async () => {
+      const projects = await this.#read(this.projectsFile);
+      if (!this.#own(projects, id)) return;
+      delete projects[id];
+      await this.#write(this.projectsFile, projects);
+      const secrets = await this.#read(this.secretsFile);
+      for (const key of Object.keys(secrets))
+        if (key.startsWith(`${id}:`)) delete secrets[key];
+      await this.#write(this.secretsFile, secrets);
+    });
+  }
+
+  setSecret(id, name, value) {
+    return this.#locked(async () => {
+      const projects = await this.#read(this.projectsFile);
+      const project = this.#own(projects, id);
+      if (!project) throw new Error("Unknown project.");
+      if (!(project.env || []).some((entry) => entry.name === name))
+        throw new Error("Unknown project variable.");
+      return this.#setEncryptedValue(id, `${name}`, value);
+    });
+  }
+
+  /** Stores the token a clone uses. A project that keeps none yet gets a
+   * GIT_TOKEN variable (setup only) first, so there is always somewhere for
+   * it to go. */
+  setGitToken(id, value) {
+    return this.#locked(async () => {
+      if (typeof value !== "string" || !value.trim())
+        throw new Error("Enter a token.");
+      const projects = await this.#read(this.projectsFile);
+      const project = this.#own(projects, id);
+      if (!project) throw new Error("Unknown project.");
+      let entry = (project.env || []).find((item) => item.name === "GIT_TOKEN");
+      entry ||= (project.env || []).find(
+        (item) => item.name === "GITHUB_TOKEN",
+      );
+      if (!entry) {
+        entry = { name: "GIT_TOKEN", secret: true, availableTo: ["setup"] };
+        project.env = [...(project.env || []), entry];
+        await this.#write(this.projectsFile, projects);
+      }
+      await this.#setEncryptedValue(id, entry.name, value);
+      return this.#withHints(project, await this.#read(this.secretsFile));
+    });
   }
 
   async #setEncryptedValue(id, key, value) {
     if (typeof value !== "string") throw new Error("Enter a string value.");
     const projects = await this.#read(this.projectsFile);
-    if (!projects[id]) throw new Error("Unknown project.");
+    const owner = this.#own(projects, id);
+    if (!owner) throw new Error("Unknown project.");
     if (!this.safeStorage?.isEncryptionAvailable?.())
       throw new Error("Secure storage is unavailable.");
     if (this.safeStorage.getSelectedStorageBackend?.() === "basic_text")
       throw new Error("Secure storage is unavailable.");
     const secrets = await this.#read(this.secretsFile);
+    const entry = (owner.env || []).find(
+      (item) => item.name === key.split("@")[0],
+    );
     secrets[`${id}:${key}`] = {
       v: 1,
       ct: this.safeStorage.encryptString(value).toString("base64"),
+      // Only ever the masked form on disk: whether a value may be shown is
+      // decided from the variable's current secret flag when it is read.
       hint: hint(value),
     };
     await this.#write(this.secretsFile, secrets);
-    return { hasValue: true, hint: hint(value) };
+    return {
+      hasValue: true,
+      hint: entry && !entry.secret ? value.slice(0, 200) : hint(value),
+    };
   }
 
-  async setHostSecret(id, name, host, value) {
+  setHostSecret(id, name, host, value) {
     if (
       typeof host !== "string" ||
       (host !== "local" && !host.startsWith("ssh:"))
     )
       throw new Error("Invalid project host.");
-    const projects = await this.#read(this.projectsFile);
-    const project = projects[id];
-    if (!project) throw new Error("Unknown project.");
-    if (!(project.env || []).some((entry) => entry.name === name))
-      throw new Error("Unknown project variable.");
-    return this.#setEncryptedValue(id, `${name}@${host}`, value);
+    return this.#locked(async () => {
+      const projects = await this.#read(this.projectsFile);
+      const project = this.#own(projects, id);
+      if (!project) throw new Error("Unknown project.");
+      if (!(project.env || []).some((entry) => entry.name === name))
+        throw new Error("Unknown project variable.");
+      return this.#setEncryptedValue(id, `${name}@${host}`, value);
+    });
   }
 
-  async clearSecret(id, name) {
-    const secrets = await this.#read(this.secretsFile);
-    for (const key of Object.keys(secrets))
-      if (key === `${id}:${name}` || key.startsWith(`${id}:${name}@`))
-        delete secrets[key];
-    await this.#write(this.secretsFile, secrets);
+  clearSecret(id, name) {
+    return this.#locked(async () => {
+      const secrets = await this.#read(this.secretsFile);
+      for (const key of Object.keys(secrets))
+        if (key === `${id}:${name}` || key.startsWith(`${id}:${name}@`))
+          delete secrets[key];
+      await this.#write(this.secretsFile, secrets);
+    });
   }
 
   async reviewEnvImport(id, entries) {
     const projects = await this.#read(this.projectsFile);
-    if (!projects[id]) throw new Error("Unknown project.");
+    const project = this.#own(projects, id);
+    if (!project) throw new Error("Unknown project.");
     const secrets = await this.#read(this.secretsFile);
     return entries.map(({ name, value }) => {
-      const existing = (projects[id].env || []).find(
-        (entry) => entry.name === name,
-      );
+      const existing = (project.env || []).find((entry) => entry.name === name);
       if (!existing) return { name, status: "new" };
       const stored = secrets[`${id}:${name}`];
       let previous;
@@ -326,37 +583,41 @@ class Projects {
     }
   }
 
-  async setHostTrust(id, host, trusted) {
+  setHostTrust(id, host, trusted) {
     if (typeof host !== "string" || !host.startsWith("ssh:"))
       throw new Error("Invalid project host.");
-    const projects = await this.#read(this.projectsFile);
-    const project = projects[id];
-    if (!project) throw new Error("Unknown project.");
-    project.hosts ||= {};
-    project.hosts[host] = {
-      ...project.hosts[host],
-      trusted: !!trusted,
-    };
-    await this.#write(this.projectsFile, projects);
-    return { trusted: !!trusted };
+    return this.#locked(async () => {
+      const projects = await this.#read(this.projectsFile);
+      const project = this.#own(projects, id);
+      if (!project) throw new Error("Unknown project.");
+      project.hosts ||= {};
+      project.hosts[host] = {
+        ...project.hosts[host],
+        trusted: !!trusted,
+      };
+      await this.#write(this.projectsFile, projects);
+      return { trusted: !!trusted };
+    });
   }
 
-  async setHostOverrides(id, host, overrides) {
+  setHostOverrides(id, host, overrides) {
     if (typeof host !== "string" || !host.startsWith("ssh:"))
       throw new Error("Invalid project host.");
     if (!overrides || typeof overrides !== "object" || Array.isArray(overrides))
       throw new Error("Host overrides must be an object.");
-    const projects = await this.#read(this.projectsFile);
-    const project = projects[id];
-    if (!project) throw new Error("Unknown project.");
-    project.hosts ||= {};
-    project.hosts[host] = {
-      ...project.hosts[host],
-      overrides,
-      trusted: !!project.hosts[host]?.trusted,
-    };
-    await this.#write(this.projectsFile, projects);
-    return project.hosts[host].overrides;
+    return this.#locked(async () => {
+      const projects = await this.#read(this.projectsFile);
+      const project = this.#own(projects, id);
+      if (!project) throw new Error("Unknown project.");
+      project.hosts ||= {};
+      project.hosts[host] = {
+        ...project.hosts[host],
+        overrides,
+        trusted: !!project.hosts[host]?.trusted,
+      };
+      await this.#write(this.projectsFile, projects);
+      return project.hosts[host].overrides;
+    });
   }
 
   async resolve(remote) {
@@ -374,4 +635,4 @@ class Projects {
   }
 }
 
-module.exports = { Projects, normalizeRemote, atomicWriteJson };
+module.exports = { Projects, normalizeRemote, assertRemote, atomicWriteJson };

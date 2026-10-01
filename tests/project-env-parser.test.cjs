@@ -1,10 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  displayedEnvValue,
   parseEnv,
-  isSecretEnvName,
-} = require("../src/projectEnv.ts");
+  isSecretName,
+  isSecretValue,
+  isSecret,
+} = require("../electron/project-import.cjs");
 
 test("parses export prefixes, comments, quoted values, multiline strings and equals signs", () => {
   const parsed = parseEnv(`
@@ -25,17 +26,40 @@ URL=https://example.test/path?a=b=c
   ]);
 });
 
-test("marks token, key and secret suffixes", () => {
-  assert.equal(isSecretEnvName("API_TOKEN"), true);
-  assert.equal(isSecretEnvName("SIGNING_KEY"), true);
-  assert.equal(isSecretEnvName("DATABASE_SECRET"), true);
-  assert.equal(isSecretEnvName("TOKEN_NAME"), false);
+test("one classifier: names that carry credentials, whatever the spelling", () => {
+  for (const name of [
+    "API_TOKEN",
+    "SIGNING_KEY",
+    "DATABASE_SECRET",
+    "DB_PASSWORD",
+    "SECRET_KEY_BASE",
+    "TOKEN",
+    "SENTRY_DSN",
+    "Authorization",
+    "apiKey",
+    "AWS_SESSION_TOKEN",
+    "TLS_PRIVATE_KEY",
+  ])
+    assert.equal(isSecretName(name), true, name);
+  for (const name of [
+    "NODE_ENV",
+    "PORT",
+    "DATABASE_URL",
+    "KEYBOARD",
+    "LOG_LEVEL",
+  ])
+    assert.equal(isSecretName(name), false, name);
 });
 
-test("masks imported secrets in the review display", () => {
-  const secret = "invented-secret-value";
-  const shown = displayedEnvValue(secret, isSecretEnvName("API_TOKEN"));
-  assert.match(shown, /•/);
-  assert.equal(shown.includes(secret), false);
-  assert.equal(displayedEnvValue("plain", false), "plain");
+test("a value that carries a credential is a secret under any name", () => {
+  assert.equal(
+    isSecretValue("postgres://app:invented-pass@db.example.test/app"),
+    true,
+  );
+  assert.equal(isSecretValue("postgres://db.example.test/app"), false);
+  assert.equal(
+    isSecret("DATABASE_URL", "postgres://app:invented-pass@db/x"),
+    true,
+  );
+  assert.equal(isSecret("DATABASE_URL", "postgres://db/x"), false);
 });

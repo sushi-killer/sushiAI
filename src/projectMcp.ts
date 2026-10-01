@@ -3,6 +3,7 @@ export type ProjectMcpServer = {
   args?: string[];
   url?: string;
   env?: Record<string, string>;
+  headers?: Record<string, string>;
 };
 
 export function mcpVariableReferences(value: unknown): string[] {
@@ -25,15 +26,6 @@ export function unknownMcpVariables(
 ): string[] {
   const names = new Set(environment.map((entry) => entry.name));
   return mcpVariableReferences(value).filter((name) => !names.has(name));
-}
-
-export function importedMcpServers(value: unknown) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new Error("The .mcp.json file must contain a JSON object.");
-  const servers = (value as { mcpServers?: unknown }).mcpServers;
-  if (!servers || typeof servers !== "object" || Array.isArray(servers))
-    throw new Error("The .mcp.json file must contain an mcpServers object.");
-  return servers as Record<string, ProjectMcpServer>;
 }
 
 export function groupAlsoInProject<T extends { source: string }, P>(

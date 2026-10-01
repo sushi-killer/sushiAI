@@ -8,6 +8,8 @@ const {
   remoteEnvBootstrap,
   remoteEnvPayload,
   remoteFileCommand,
+  removeRemoteFiles,
+  uploadRemoteFile,
 } = require("../electron/ipc/terminals.cjs");
 const { Projects } = require("../electron/projects.cjs");
 
@@ -123,4 +125,44 @@ test("subscription token reaches the remote agent through its inherited fd", asy
     },
   );
   assert.equal(output.trim(), "invented-subscription-token");
+});
+
+test("a session that never started leaves no secret file on the host", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "fake-ssh-clean-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const home = path.join(root, "home");
+  await fs.mkdir(home);
+  const config = path.join(root, "ssh.json");
+  await fs.writeFile(
+    config,
+    JSON.stringify({
+      home,
+      bin: process.env.PATH,
+      log: path.join(root, "log"),
+    }),
+  );
+  process.env.FAKE_SSH_CONFIG = config;
+  t.after(() => delete process.env.FAKE_SSH_CONFIG);
+  const args = [
+    path.join(__dirname, "fixtures/fake-ssh.cjs"),
+    "-T",
+    "user@devbox",
+  ];
+  const uploaded = await uploadRemoteFile(
+    process.execPath,
+    [...args, remoteFileCommand()],
+    "invented-secret",
+  );
+  const other = await uploadRemoteFile(
+    process.execPath,
+    [...args, remoteFileCommand()],
+    "invented-token",
+  );
+  assert.equal(await fs.readFile(uploaded, "utf8"), "invented-secret");
+  await removeRemoteFiles(process.execPath, args, [uploaded, null, other]);
+  await assert.rejects(fs.access(uploaded));
+  await assert.rejects(fs.access(other));
+  // Nothing to remove, or a path that is already gone, is not an error.
+  await removeRemoteFiles(process.execPath, args, []);
+  await removeRemoteFiles(process.execPath, args, [uploaded]);
 });

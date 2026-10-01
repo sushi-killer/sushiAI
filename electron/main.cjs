@@ -164,6 +164,7 @@ registerProjectIpc({
   handle,
   getConnections: () => connections,
   getPreview: () => preview,
+  getClaudeMcp: () => claudeMcp,
   terminals,
   terminalPending,
   projects,

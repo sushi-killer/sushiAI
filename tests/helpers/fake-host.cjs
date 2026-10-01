@@ -8,7 +8,7 @@ const { execFileSync } = require("node:child_process");
 const { Connections } = require("../../electron/connections.cjs");
 
 const TOOLS =
-  "cat mkdir tar mv cp chmod rm uname kill nohup sleep dirname setsid git sed shasum sha256sum mktemp find head tr cut printf env sh ls grep awk timeout date base64 touch test cksum python3".split(
+  "cat mkdir tar mv cp chmod rm uname kill nohup sleep dirname setsid git sed shasum sha256sum mktemp find head tr cut printf env sh ls grep awk timeout date base64 touch test cksum python3 ssh ssh-keygen ssh-keyscan ln rmdir".split(
     " ",
   );
 

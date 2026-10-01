@@ -17,10 +17,8 @@ Root cause: ...
 Rule: ...
 ```
 
-While an entry is still open, amend it in place with a dated `Update:` line
-instead of rewriting it, so its history stays visible. The moment it's
-promoted, compress it to one line in the index below - the git history under
-this file's own path keeps the discarded detail, `Update:` trail included.
+Amend open entries with a dated `Update:` line. When promoted, compress to
+one index line; git history keeps the detail and updates.
 
 ## Open
 
@@ -32,6 +30,8 @@ Rule: try Herdr setup on a Linux or SSH host; never stop a server you didn't sta
 ## Promoted
 
 - 2026-10-01 Herdr 0.8.2 closes linked sessions with the primary's last pane when confirmation is disabled → inspect membership and detach first. `herdr-pane-close.test.cjs` and isolated daemon evidence.
+- 2026-10-01 Prepare lost SSH recovery between callers → preserve structured failures; reuse recovery UI. `GitRecovery` and `project-git-ssh.test.cjs`.
+
 - 2026-10-01 "0 unexplained diffs" hid defects → a fresh critic compares Figma and app PNGs; revert each fix once to see its test fail. `design-critic`.
 - 2026-09-30 Lane worktrees each built `orchd/target`, 262 MB left → delete it after merge.
 - 2026-09-30 orchd defaults leaked repo specifics to every repo → defaults stay empty. `scoped_checks_and_chat_tools_default_to_none`.

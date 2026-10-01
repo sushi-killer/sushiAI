@@ -203,6 +203,90 @@ test("the picker's flow retries as asked, and never starts a session nobody wait
   assert.match(outcome.failure.message, /ssh dropped/);
 });
 
+test("an SSH recovery retry preserves its URL and failure context before starting a session", async () => {
+  const { prepareAndStart } = await import("../src/projectDeliver.ts");
+  const git = {
+    kind: "host-key",
+    transport: "ssh",
+    url: "ssh://git@example.test:2222/acme/app.git",
+  };
+  const calls = [];
+  const failure = {
+    ok: false,
+    stage: "clone",
+    message: "Host key verification failed",
+    git,
+  };
+  let starts = 0;
+  const options = {
+    projectId: "p",
+    endpoint: "ssh:devbox",
+    useHostLogin: false,
+    gitUrl: git.url,
+    isGone: () => false,
+    start: async () => {
+      starts++;
+      return true;
+    },
+    bridge: {
+      projectHostReady: async () => ({ ready: true, path: "/srv/app" }),
+      projectHostPrepare: async (...args) => {
+        calls.push(args);
+        return failure;
+      },
+    },
+  };
+  const outcome = await prepareAndStart(options);
+  assert.deepEqual(outcome, { kind: "failed", failure });
+  assert.deepEqual(calls, [
+    ["p", "ssh:devbox", false, { pull: false, gitUrl: git.url }],
+  ]);
+  assert.equal(starts, 0);
+});
+
+test("SSH recovery advice identifies access, trust, network and branch failures", async () => {
+  const { sentLine, advice, cloneFailure } =
+    await import("../src/orchestrator/prepareCopy.ts");
+  const input = {
+    hostName: "devbox",
+    repo: "acme/app",
+    token: "GIT_TOKEN",
+    noSecrets: false,
+    stage: "clone",
+    status: 403,
+    message: "SSH failed",
+    git: {
+      kind: "auth",
+      transport: "ssh",
+      url: "git@example.test:acme/app.git",
+    },
+  };
+  assert.match(sentLine(input), /SSH used the remote host’s keys/);
+  assert.doesNotMatch(sentLine(input), /GIT_TOKEN/);
+  assert.match(advice(input), /public SSH key/);
+  assert.doesNotMatch(advice(input), /Give the token read access/);
+  assert.match(cloneFailure(input), /SSH: repository access/);
+  assert.match(
+    advice({ ...input, git: { ...input.git, kind: "host-key" } }),
+    /fingerprint/,
+  );
+  assert.match(
+    advice({ ...input, git: { ...input.git, kind: "network" } }),
+    /SSH port/,
+  );
+  assert.match(
+    advice({ ...input, git: { ...input.git, kind: "branch" } }),
+    /branch/,
+  );
+  assert.match(
+    cloneFailure({
+      ...input,
+      git: { ...input.git, kind: "host-key", changed: true },
+    }),
+    /key changed/,
+  );
+});
+
 test("failure screens say what was and was not sent", async () => {
   const { sentLine, advice, cloneFailure } =
     await import("../src/orchestrator/prepareCopy.ts");

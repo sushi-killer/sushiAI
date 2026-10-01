@@ -180,6 +180,14 @@ export type Project = {
     { withheld?: boolean; overrides?: Record<string, unknown> }
   >;
 };
+export type ProjectGitFailure = {
+  kind: "auth" | "host-key" | "network" | "branch" | "path" | "other";
+  transport: "https" | "ssh";
+  url: string;
+  sshUrl?: string;
+  changed?: boolean;
+};
+
 /** One step of preparing a host: what it is, how it went, and how long. */
 export type ProjectPrepareStep = {
   id: "clone" | "install" | "check";
@@ -729,12 +737,32 @@ export interface Bridge {
     id: string,
     host: string,
   ): Promise<{ ready: boolean; path?: string; reason?: string }>;
+  projectHostGitKey(
+    id: string,
+    host: string,
+  ): Promise<{ publicKey: string; fingerprint: string }>;
+  projectHostGitCopyKey(
+    id: string,
+    host: string,
+  ): Promise<{ publicKey: string; fingerprint: string }>;
+  projectHostGitValidate(id: string, host: string, url: string): Promise<void>;
+  projectHostGitScan(
+    id: string,
+    host: string,
+    url: string,
+  ): Promise<{
+    scanId: string;
+    host: string;
+    fingerprints: string[];
+    changed?: boolean;
+  }>;
+  projectHostGitTrust(id: string, host: string, scanId: string): Promise<void>;
   projectHostPrepare(
     id: string,
     host: string,
     useHostLogin?: boolean,
     /** `pull: false` leaves an existing checkout's history alone. */
-    options?: { pull?: boolean },
+    options?: { pull?: boolean; gitUrl?: string },
   ): Promise<
     | {
         ok: true;
@@ -750,6 +778,7 @@ export interface Bridge {
         /** The 15 minute limit ran out; nothing says the host refused. */
         timedOut?: boolean;
         status?: number;
+        git?: ProjectGitFailure;
         message: string;
         steps: ProjectPrepareStep[];
       }

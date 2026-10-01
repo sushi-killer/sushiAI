@@ -90,14 +90,20 @@ export function HostProgress({
   tag,
   steps,
   retry,
+  children,
 }: {
   icon: ReactNode;
   name: string;
   path: string;
   tag: { label: string; tone: Tone };
   steps: HostStep[];
-  /** The clone was refused for lack of access: the host's own git login may work. */
-  retry?: { label: string; onRetry(): void };
+  retry?: {
+    label: string;
+    note?: string;
+    disabled?: boolean;
+    onRetry(): void;
+  };
+  children?: ReactNode;
 }) {
   return (
     <section className="np-card" aria-label={name}>
@@ -118,18 +124,18 @@ export function HostProgress({
       ))}
       {retry && (
         <div className="np-retry">
-          <span className="np-retry-text">
-            The clone was refused. The host’s own git login may have access.
-          </span>
+          {retry.note && <span className="np-retry-text">{retry.note}</span>}
           <button
             type="button"
             className="ui-button secondary"
+            disabled={retry.disabled}
             onClick={retry.onRetry}
           >
             {retry.label}
           </button>
         </div>
       )}
+      {children}
     </section>
   );
 }

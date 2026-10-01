@@ -10,8 +10,16 @@ import {
   Plus,
   Server,
 } from "lucide-react";
-import type { ClaudeAccount, ConnectionProfile } from "./types";
+import type {
+  Bridge,
+  ClaudeAccount,
+  ConnectionProfile,
+  Project,
+  ProjectGitFailure,
+} from "./types";
 import { Tag, Toggle } from "./orchestrator/ui";
+import { GitRecovery } from "./orchestrator/GitRecovery";
+import { inspectProjectSource } from "./projectSource";
 import { openSettings } from "./app/openSettings";
 import {
   DoneRow,
@@ -43,11 +51,11 @@ type HostResult = {
   state: "queued" | "working" | "ready" | "failed";
   detail: string;
   steps: HostStep[];
-  /** Names of the values the host may receive once the owner says OK. */
-  /** The clone was refused (403) and a git token exists: the host's own git
-   * login may do better. */
+  path?: string;
+  git?: ProjectGitFailure;
   retry?: boolean;
 };
+type PrepareResult = Awaited<ReturnType<Bridge["projectHostPrepare"]>>;
 
 const SOURCES: [Source, string, typeof GitBranch][] = [
   ["git", "Git repository", GitBranch],
@@ -112,8 +120,12 @@ export function WorkspaceDialog({
   );
   const [homeDir, setHomeDir] = useState("");
   const [name, setName] = useState("");
-  const [branch, setBranch] = useState("main");
+  const nameEdited = useRef(false);
+  const [branch, setBranch] = useState("");
+  const branchEdited = useRef(false);
+  const [sourceNotice, setSourceNotice] = useState("");
   const [sourceRead, setSourceRead] = useState(false);
+  const sourceGeneration = useRef(0);
   const [reading, setReading] = useState(false);
   const [recent, setRecent] = useState<string[]>([]);
   const [selectedHosts, setSelectedHosts] = useState<string[]>(() =>
@@ -137,6 +149,10 @@ export function WorkspaceDialog({
   const [filling, setFilling] = useState(false);
   const [projectRef, setProjectRef] = useState("");
   const [fills, setFills] = useState<Record<string, string>>({});
+  const createdProject = useRef<Project | null>(null);
+  const workspaceOpened = useRef(false);
+  const workspaceOpening = useRef(false);
+  const retrying = useRef(false);
   const localHost = hosts.find((host) => host.local);
   const selected = hosts.filter((host) =>
     selectedHosts.includes(host.endpoint),
@@ -196,48 +212,45 @@ export function WorkspaceDialog({
   async function chooseFolder() {
     const host = hosts.find((item) => item.endpoint === folderEndpoint);
     if (!host?.local) return;
+    const generation = sourceGeneration.current;
     const chosen = await window.bridge?.chooseDirectory();
-    if (chosen) {
+    if (generation !== sourceGeneration.current) return;
+    if (chosen && chosen !== cwd) {
+      resetSource();
       setCwd(chosen);
-      setSourceRead(false);
+      setUrl("");
     }
   }
 
-  async function importFromHost(
-    endpoint: string | undefined,
-    root: string,
-    base: { example?: string; mcp?: string },
-  ) {
-    // The main process reads the files and keeps secret values; this gets
-    // names, flags and the values of plain variables only.
-    const scan = await window.bridge?.projectScanSource({
-      endpoint,
-      root,
-      local: !!hosts.find((host) => host.endpoint === endpoint)?.local,
-      example: base.example,
-      mcp: base.mcp,
-    });
-    if (!scan) return;
-    const vars = scan.variables.map((item) => ({
-      name: item.name,
-      value: item.value ?? "",
-      secret: item.secret,
-      held: item.held,
-      availableTo: item.availableTo,
-    }));
-    setVariables(vars);
-    setPlainCount(vars.filter((item) => !item.secret).length);
-    setMcp(scan.servers);
-    setScanToken(scan.token);
-    // Only a folder source detects its install here; a git source reads it
-    // from the repository itself.
-    if (scan.install && root === cwd) setInstall(scan.install);
+  function resetSource() {
+    sourceGeneration.current += 1;
+    setSourceRead(false);
+    setReading(false);
+    setSourceNotice("");
+    setVariables([]);
+    setPlainCount(0);
+    setShowPlain(false);
+    setMcp({});
+    setMcpOn(true);
+    setScanToken("");
+    setInstall("");
+    setLocalFound(false);
+    setBranch("");
+    branchEdited.current = false;
+    if (!nameEdited.current) setName("");
+    setError("");
+    setFills({});
+    setFilling(false);
   }
 
   /** Reads what the source offers: its branch, .env.example, .mcp.json and
    * lock file. Resolves once the answers are in state. */
   async function readSource() {
+    if (!window.bridge) return false;
+    const generation = ++sourceGeneration.current;
+    const current = () => generation === sourceGeneration.current;
     setError("");
+    setSourceNotice("");
     if (source === "git" && !url.trim()) throw new Error("Enter a git URL.");
     if (source === "folder" && !cwd.trim())
       throw new Error("Choose a project folder.");
@@ -255,44 +268,45 @@ export function WorkspaceDialog({
     if (!name.trim()) setName(derived);
     setReading(true);
     try {
-      if (source === "git") {
-        const info = await window.bridge?.projectSourceInspect(url.trim());
-        if (info) {
-          setBranch(info.branch);
-          const checkout = localTarget({
-            reuseFolder: false,
-            cwd,
-            home: localHome,
-            name: label,
-          });
-          const exists =
-            !!localSocket &&
-            !!(await window.bridge
-              ?.projectInspect(localSocket, {
-                operation: "git_remote",
-                root: checkout,
-              })
-              .then((found) => found?.remote)
-              .catch(() => null));
-          setLocalFound(exists);
-          await importFromHost(exists ? localSocket : undefined, checkout, {
-            example: info.envExample,
-            mcp: info.mcp,
-          });
-          if (info.install) setInstall(info.install);
-        }
-      }
-      if (source === "folder") {
-        const endpoint = folderEndpoint;
-        const info = await window.bridge
-          ?.projectInspect(endpoint, { operation: "git_remote", root: cwd })
-          .catch(() => null);
-        if (info?.remote) setUrl(info.remote);
-        await importFromHost(endpoint, cwd, {});
-      }
+      const info = await inspectProjectSource(
+        window.bridge,
+        {
+          source,
+          url: url.trim(),
+          cwd,
+          name: label,
+          home: localHome,
+          localSocket,
+          folderEndpoint,
+          folderLocal: !!hosts.find((host) => host.endpoint === folderEndpoint)
+            ?.local,
+        },
+        current,
+      );
+      if (!current() || !info) return false;
+      const vars = info.variables.map((item) => ({
+        name: item.name,
+        value: item.value ?? "",
+        secret: item.secret,
+        held: item.held,
+        availableTo: item.availableTo,
+      }));
+      setVariables(vars);
+      setPlainCount(vars.filter((item) => !item.secret).length);
+      setMcp(info.servers);
+      setScanToken(info.token);
+      setInstall(info.install);
+      setLocalFound(info.localFound);
+      setSourceNotice(info.notice);
+      if (!branchEdited.current) setBranch(info.branch);
+      if (source === "folder") setUrl(info.remote);
       setSourceRead(true);
+      return true;
+    } catch (reason) {
+      if (!current()) return false;
+      throw reason;
     } finally {
-      setReading(false);
+      if (current()) setReading(false);
     }
   }
 
@@ -308,7 +322,7 @@ export function WorkspaceDialog({
 
   async function continueFromSource() {
     try {
-      if (!sourceRead) await readSource();
+      if (!sourceRead && !(await readSource())) return;
       setStep("hosts");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -320,6 +334,77 @@ export function WorkspaceDialog({
       ...current,
       [endpoint]: { ...current[endpoint], ...next },
     }));
+
+  function hostSteps(host: Host, setup = install.trim()): HostStep[] {
+    return [
+      { label: "Checkout", state: "pending" },
+      ...(setup ? [{ label: setup, state: "pending" as const }] : []),
+      { label: host.local ? "Environment" : "Secrets", state: "pending" },
+    ];
+  }
+
+  function failedPreparation(
+    host: Host,
+    prepared: Extract<PrepareResult, { ok: false }>,
+    setup = install.trim(),
+  ): HostResult {
+    const clone = prepared.steps.find((item) => item.id === "clone");
+    const setupStep = prepared.steps.find((item) => item.id === "install");
+    return {
+      state: "failed",
+      detail: prepared.message || "Host setup failed.",
+      git: prepared.git,
+      retry:
+        prepared.stage === "clone" &&
+        prepared.status === 403 &&
+        variables.some(
+          (item) =>
+            ["GIT_TOKEN", "GITHUB_TOKEN"].includes(item.name) &&
+            (item.value || item.held),
+        ),
+      steps: hostSteps(host, setup).map((item, index) => {
+        const step =
+          index === 0 ? clone : setup && index === 1 ? setupStep : undefined;
+        return {
+          ...item,
+          state:
+            step?.state ??
+            (index === 0
+              ? prepared.stage === "clone"
+                ? "failed"
+                : "done"
+              : setup && index === 1 && prepared.stage === "setup"
+                ? "failed"
+                : "pending"),
+          ...(step?.seconds !== undefined ? { seconds: step.seconds } : {}),
+        };
+      }),
+    };
+  }
+
+  async function openWorkspace(host: Host, target: string) {
+    if (workspaceOpened.current) return true;
+    if (workspaceOpening.current || !createdProject.current) return false;
+    workspaceOpening.current = true;
+    try {
+      const project = createdProject.current;
+      const created = await onCreate(
+        project.name,
+        target,
+        project.sessions.backend || "local",
+        "shell",
+        host.local ? undefined : host.endpoint,
+      );
+      if (!created)
+        throw new Error(
+          "Project files were created, but the workspace could not open.",
+        );
+      workspaceOpened.current = true;
+      return true;
+    } finally {
+      workspaceOpening.current = false;
+    }
+  }
 
   const creating = useRef(false);
   async function createProject() {
@@ -333,14 +418,7 @@ export function WorkspaceDialog({
     const initial = (host: Host): HostResult => ({
       state: "queued",
       detail: host.cwd,
-      steps: [
-        { label: "Checkout", state: "pending" },
-        ...(setup ? [{ label: setup, state: "pending" as const }] : []),
-        {
-          label: host.local ? "Environment" : "Secrets",
-          state: "pending" as const,
-        },
-      ],
+      steps: hostSteps(host, setup),
     });
     setResults(
       Object.fromEntries(selected.map((h) => [h.endpoint, initial(h)])),
@@ -368,6 +446,7 @@ export function WorkspaceDialog({
         },
       });
       setProjectRef(project.id);
+      createdProject.current = project;
       for (const item of variables) {
         if (item.value)
           await window.bridge.projectSecretSet(
@@ -376,7 +455,7 @@ export function WorkspaceDialog({
             item.value,
           );
       }
-      let opened = false;
+      let failed = false;
       for (const host of selected) {
         const began = Date.now();
         const seconds = () => Math.round((Date.now() - began) / 1000);
@@ -431,11 +510,14 @@ export function WorkspaceDialog({
               project.id,
               host.endpoint,
             );
-            if (!prepared.ok)
-              throw Object.assign(
-                new Error(prepared.message || "Host setup failed."),
-                { status: prepared.status },
+            if (!prepared.ok) {
+              failed = true;
+              patchHost(
+                host.endpoint,
+                failedPreparation(host, prepared, setup),
               );
+              continue;
+            }
             target = prepared.path;
             note = prepared.message;
             rememberPrepareTimes(project.id, host.endpoint, prepared.steps);
@@ -495,6 +577,7 @@ export function WorkspaceDialog({
             };
           patchHost(host.endpoint, {
             state: "ready",
+            path: target,
             detail:
               installError ||
               (host.local
@@ -502,32 +585,22 @@ export function WorkspaceDialog({
                 : target.replace(/^.*?\/sushiai\//, "~/sushiai/")),
             steps: done,
           });
-          if (!opened) {
+          if (!workspaceOpened.current) {
             // The first host that is ready gets the workspace; the others
             // keep going behind it.
-            opened = true;
-            const created = await onCreate(
-              project.name,
-              target,
-              project.sessions.backend || "local",
-              "shell",
-              host.local ? undefined : host.endpoint,
-            );
-            if (!created)
-              throw new Error(
-                "Project files were created, but the workspace could not open.",
+            try {
+              await openWorkspace(host, target);
+            } catch (reason) {
+              setError(
+                reason instanceof Error ? reason.message : String(reason),
               );
+            }
           }
         } catch (reason) {
-          const refused = (reason as { status?: number })?.status === 403;
+          failed = true;
           patchHost(host.endpoint, {
-            retry:
-              refused &&
-              variables.some(
-                (item) =>
-                  ["GIT_TOKEN", "GITHUB_TOKEN"].includes(item.name) &&
-                  (item.value || item.held),
-              ),
+            retry: false,
+            git: undefined,
             state: "failed",
             detail: reason instanceof Error ? reason.message : String(reason),
             steps: initial(host).steps.map((item, index) => ({
@@ -537,8 +610,7 @@ export function WorkspaceDialog({
           });
         }
       }
-      if (!opened) throw new Error("No host finished creating the project.");
-      setStep("ready");
+      if (!failed && workspaceOpened.current) setStep("ready");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       setStep("environment");
@@ -548,35 +620,108 @@ export function WorkspaceDialog({
     }
   }
 
-  /** The clone was refused: prepare again with the host's own git login. */
-  async function retryWithHostLogin(host: Host) {
-    if (!window.bridge || !projectRef) return;
+  async function retryPreparation(
+    host: Host,
+    gitUrl?: string,
+    useHostLogin = false,
+  ) {
+    const project = createdProject.current;
+    if (
+      !window.bridge ||
+      !project ||
+      busy ||
+      creating.current ||
+      retrying.current
+    )
+      return;
+    retrying.current = true;
+    setBusy(true);
+    setError("");
     patchHost(host.endpoint, {
       retry: false,
       state: "working",
       detail: host.cwd,
+      steps: hostSteps(host, project.setup.install).map((item, index) => ({
+        ...item,
+        state: index === 0 ? "working" : "pending",
+      })),
     });
     try {
       const prepared = await window.bridge.projectHostPrepare(
-        projectRef,
+        project.id,
         host.endpoint,
-        true,
+        useHostLogin,
+        gitUrl ? { gitUrl } : undefined,
       );
-      if (!prepared.ok) throw new Error(prepared.message);
+      if (!prepared.ok) {
+        patchHost(
+          host.endpoint,
+          failedPreparation(host, prepared, project.setup.install),
+        );
+        return;
+      }
+      rememberPrepareTimes(project.id, host.endpoint, prepared.steps);
+      const clone = prepared.steps.find((item) => item.id === "clone");
+      const setupStep = prepared.steps.find((item) => item.id === "install");
       patchHost(host.endpoint, {
         state: "ready",
+        path: prepared.path,
+        git: undefined,
         detail: prepared.path.replace(/^.*?\/sushiai\//, "~/sushiai/"),
-        steps: [
-          { label: prepared.message || "Checkout ready", state: "done" },
-          { label: "Secrets · sent while a run is going", state: "done" },
-        ],
+        steps: hostSteps(host, project.setup.install).map(
+          (item, index, all) => {
+            const step =
+              index === 0
+                ? clone
+                : project.setup.install && index === 1
+                  ? setupStep
+                  : undefined;
+            return {
+              ...item,
+              state: "done",
+              ...(index === 0
+                ? { label: prepared.message || "Checkout ready" }
+                : {}),
+              ...(index === all.length - 1 &&
+              variables.some(
+                (variable) =>
+                  variable.secret || variable.value || variable.held,
+              )
+                ? { label: "Secrets · sent while a run is going" }
+                : {}),
+              ...(step?.seconds !== undefined ? { seconds: step.seconds } : {}),
+            };
+          },
+        ),
       });
+      try {
+        await openWorkspace(host, prepared.path);
+        if (
+          workspaceOpened.current &&
+          selected.every(
+            (item) =>
+              item.endpoint === host.endpoint ||
+              results[item.endpoint]?.state === "ready",
+          )
+        )
+          setStep("ready");
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      }
     } catch (reason) {
       patchHost(host.endpoint, {
         state: "failed",
-        retry: true,
+        retry: useHostLogin,
+        git: undefined,
         detail: reason instanceof Error ? reason.message : String(reason),
+        steps: hostSteps(host, project.setup.install).map((item, index) => ({
+          ...item,
+          state: index === 0 ? "failed" : "pending",
+        })),
       });
+    } finally {
+      setBusy(false);
+      retrying.current = false;
     }
   }
 
@@ -651,7 +796,13 @@ export function WorkspaceDialog({
       <div className="np">
         <header className="np-head">
           <h2>{`Creating ${sourceName}`}</h2>
-          <p>Continues in the background if you close this.</p>
+          <p>
+            {busy
+              ? "Continues in the background if you close this."
+              : failed.length
+                ? "Fix repository access here, then retry the host."
+                : "Your hosts are ready."}
+          </p>
         </header>
         <div className="np-cards">
           {entries.map(({ host, result }) => (
@@ -680,16 +831,47 @@ export function WorkspaceDialog({
               }
               steps={result?.steps || []}
               retry={
-                result?.retry
+                result?.state === "failed" && !host.local
                   ? {
-                      label: `Use ${host.label}’s git login`,
-                      onRetry: () => void retryWithHostLogin(host),
+                      label: result.retry
+                        ? `Use ${host.label}’s git login`
+                        : "Retry preparation",
+                      note: result.retry
+                        ? "The saved token was refused. The host’s own git login may have access."
+                        : undefined,
+                      disabled: busy,
+                      onRetry: () =>
+                        void retryPreparation(
+                          host,
+                          !result.retry && result.git?.transport === "ssh"
+                            ? result.git.url
+                            : undefined,
+                          result.retry,
+                        ),
                     }
                   : undefined
               }
-            />
+            >
+              {result?.state === "failed" &&
+                result.git &&
+                ["auth", "network", "host-key"].includes(result.git.kind) && (
+                  <GitRecovery
+                    key={`${projectRef}:${host.endpoint}:${result.git.url}`}
+                    projectId={projectRef}
+                    endpoint={host.endpoint}
+                    failure={result.git}
+                    disabled={busy}
+                    onRetry={(gitUrl) => void retryPreparation(host, gitUrl)}
+                  />
+                )}
+            </HostProgress>
           ))}
         </div>
+        {error && (
+          <p className="np-error" role="alert">
+            {error}
+          </p>
+        )}
         <StepFooter
           className="after-cards"
           note={
@@ -697,16 +879,37 @@ export function WorkspaceDialog({
               ? `${failed.map((e) => e.host.label).join(", ")} failed.`
               : waiting.length && target
                 ? `${target.host.label} is ready. ${waiting.map((e) => e.host.label).join(" and ")} joins when its install finishes.`
-                : "Setting up your hosts…"
+                : target
+                  ? `${target.host.label} is ready.`
+                  : "Setting up your hosts…"
           }
         >
           <button className="ui-button ghost" onClick={onClose}>
             Close
           </button>
+          {!busy && !workspaceOpened.current && (
+            <button
+              className="ui-button ghost"
+              onClick={() => setStep("environment")}
+            >
+              Edit settings
+            </button>
+          )}
           <button
             className="ui-button primary"
-            disabled={!target}
-            onClick={onClose}
+            disabled={!target || busy}
+            onClick={() => {
+              if (!target?.result?.path) return;
+              void openWorkspace(target.host, target.result.path)
+                .then((opened) => {
+                  if (opened) onClose();
+                })
+                .catch((reason) =>
+                  setError(
+                    reason instanceof Error ? reason.message : String(reason),
+                  ),
+                );
+            }}
           >
             {target ? (
               waiting.length ? (
@@ -813,6 +1016,7 @@ export function WorkspaceDialog({
       <header className="np-head">
         <h2>New project</h2>
       </header>
+      {pastSource && sourceNotice && <p className="np-hint">{sourceNotice}</p>}
       {pastSource ? (
         <DoneRow
           title="Source"
@@ -839,8 +1043,11 @@ export function WorkspaceDialog({
                 aria-selected={source === kind}
                 className={source === kind ? "selected" : ""}
                 onClick={() => {
+                  if (kind !== source) {
+                    resetSource();
+                    setUrl("");
+                  }
                   setSource(kind);
-                  setSourceRead(false);
                 }}
               >
                 <Icon size={13} aria-hidden />
@@ -857,10 +1064,9 @@ export function WorkspaceDialog({
                 placeholder="Paste a git URL — git@github.com:… or https://…"
                 value={url}
                 onChange={(event) => {
+                  resetSource();
                   setUrl(event.target.value);
-                  setSourceRead(false);
                 }}
-                onPaste={() => setTimeout(previewSource, 0)}
                 onBlur={previewSource}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") void continueFromSource();
@@ -871,7 +1077,7 @@ export function WorkspaceDialog({
               )}
               {sourceRead && (
                 <Tag tone="neutral" dot={false}>
-                  {branch}
+                  {branch || "default branch"}
                 </Tag>
               )}
             </div>
@@ -885,8 +1091,9 @@ export function WorkspaceDialog({
                   aria-label="Host"
                   value={folderEndpoint}
                   onChange={(event) => {
+                    resetSource();
                     setFolderEndpoint(event.target.value);
-                    setSourceRead(false);
+                    setUrl("");
                     setSelectedHosts((current) =>
                       current.includes(event.target.value)
                         ? current
@@ -908,8 +1115,9 @@ export function WorkspaceDialog({
                   placeholder="/Users/you/project"
                   value={cwd}
                   onChange={(event) => {
+                    resetSource();
                     setCwd(event.target.value);
-                    setSourceRead(false);
+                    setUrl("");
                   }}
                 />
                 <button
@@ -939,10 +1147,29 @@ export function WorkspaceDialog({
                 aria-label="Name"
                 placeholder="Project name"
                 value={name}
-                onChange={(event) => setName(event.target.value)}
+                onChange={(event) => {
+                  nameEdited.current = true;
+                  setName(event.target.value);
+                }}
               />
             </div>
           )}
+          {source === "git" && sourceRead && (
+            <div className="np-name">
+              <span>Branch</span>
+              <input
+                className="np-input"
+                aria-label="Branch"
+                placeholder="Repository default (optional)"
+                value={branch}
+                onChange={(event) => {
+                  branchEdited.current = true;
+                  setBranch(event.target.value);
+                }}
+              />
+            </div>
+          )}
+          {sourceNotice && <p className="np-hint">{sourceNotice}</p>}
           {error && (
             <p className="np-error" role="alert">
               {error}
@@ -1218,7 +1445,10 @@ export function WorkspaceDialog({
                     <button
                       type="button"
                       className="np-link muted"
-                      onClick={() => setUrl(`git@github.com:${item}.git`)}
+                      onClick={() => {
+                        resetSource();
+                        setUrl(`git@github.com:${item}.git`);
+                      }}
                     >
                       {item}
                     </button>

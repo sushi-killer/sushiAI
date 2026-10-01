@@ -17,6 +17,9 @@
 .modal.command-modal {
   overflow: visible;
 }
+.modal.command-modal:has(.pk-prepare) {
+  overflow: auto;
+}
 @media (max-height: 640px) {
   .modal.command-modal {
     overflow: auto;

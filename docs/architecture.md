@@ -36,6 +36,7 @@ flowchart TB
       herdrIpc["herdr.cjs, connections.cjs"]
       remoteSvc["orchestrator-remote.cjs<br/>install, start, forward, preflight<br/>per SSH profile"]
       projectStore[("projects.json + project-secrets.json<br/>metadata + safeStorage values")]
+      gitSsh["project-git-ssh.cjs<br/>public key + Git server trust recovery"]
       attention["attention.cjs<br/>tray, Dock badge, notifications,<br/>close-to-menu-bar, app preferences"]
       mascotSvc["mascot.cjs<br/>mascot window, notice queue,<br/>mascot-* IPC, presenting watch"]
       winState["window-state.cjs<br/>bounds, display, maximized"]
@@ -46,6 +47,8 @@ flowchart TB
     orchSvc --> remoteSvc --> herdrIpc
     projectStore -->|host values over forwarded socket;<br/>SSH terminal values via one-shot stdin file| remoteOrchd
     projectStore -->|"prepare: clone + install over ssh,<br/>values on stdin (none for a host switched off)"| remoteHost[("SSH host ~/sushiai/slug")]
+    ipc --> gitSsh
+    gitSsh -->|key stays on host;<br/>public key and fingerprints to UI| remoteHost
     inbox -->|attention-badge, attention-notify| preload --> attention
     wsState <-->|workspace-state-read / -flush sendSync,<br/>-write invoke| preload <--> wsSnap
     orchSvc -->|task notice| attention

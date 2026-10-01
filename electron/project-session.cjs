@@ -30,7 +30,7 @@ function envPayload(env) {
 }
 
 /** Codex signs in through `auth.json` in its home. A host with no login of
- * its own gets this Mac's, the way Codex's docs sign in a headless machine;
+ * its own gets the local one, the way Codex's docs sign in a headless machine;
  * a host that has one keeps it. The file goes over ssh stdin, never argv. */
 const SEED_CODEX =
   'd="${CODEX_HOME:-$HOME/.codex}"; [ -s "$d/auth.json" ] && exit 0; umask 077; mkdir -p "$d" && cat > "$d/auth.json.tmp" && mv "$d/auth.json.tmp" "$d/auth.json"';
@@ -75,7 +75,7 @@ function remoteModelLaunch(settings) {
 
 /** What to type into a Herdr pane so the project's values and the session's
  * Claude account are in its shell: they go into a one-shot 0600 file (on the
- * host, over ssh stdin; here for This Mac), and the text typed only sources
+ * host, over ssh stdin; here for the local machine), and the text typed only sources
  * and removes that file, so no value is ever in the text, the pane's history
  * or argv. Empty when there is nothing to send. */
 async function sessionEnvPrefix(

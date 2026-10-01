@@ -580,8 +580,8 @@ export function PanelPickerDialog({
             <button
               key={host.workspaceId}
               role="radio"
-              aria-checked={hostId === host.workspaceId}
-              className={`pk-host${hostId === host.workspaceId ? " selected" : ""}`}
+              aria-checked={!setupPick && hostId === host.workspaceId}
+              className={`pk-host${!setupPick && hostId === host.workspaceId ? " selected" : ""}`}
               onClick={() => {
                 setSetupPick("");
                 setHostId(host.workspaceId);

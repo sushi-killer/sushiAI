@@ -166,7 +166,7 @@ test("a session for a project on a host reuses its workspace, and an IPC wrapper
     connection,
     cwd,
     herdrId,
-    panels: [],
+    panels: [{ herdrId: "live" }],
   });
   const list = [
     ws("a", "ssh:lab", "/srv/app"),

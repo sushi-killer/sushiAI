@@ -360,7 +360,7 @@ export function useWorkspaces({
   }
   /** What a Herdr pane is typed first: the project's values and the
    * agent's sign-in (the Claude account picked, else the project's own; this
-   * Mac's Codex login on a host without one; a remote custom model's key).
+   * local Codex login on a host without one; a remote custom model's key).
    * A picked account or model that cannot be sent is an error; anything else
    * missing just sends nothing. */
   async function sessionPrefix(

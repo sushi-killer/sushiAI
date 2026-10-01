@@ -16,6 +16,7 @@ const {
 const { normalizeRemote, assertRemote } = require("../projects.cjs");
 const { remoteUrl } = require("../git-remote.cjs");
 const { slugOf } = require("../project-slug.cjs");
+const { setupHost, setupSummary } = require("../host-setup.cjs");
 const {
   hostProbeScript,
   FIND_CHECKOUTS_SH,
@@ -744,8 +745,25 @@ function registerProjectIpc({
     await connections().delete(endpoint);
   });
   handle("connections-connect", async (endpoint) => {
-    await connections().socket(endpoint);
-    if (endpoint?.startsWith("ssh:")) {
+    const remote = endpoint?.startsWith("ssh:");
+    try {
+      await connections().socket(endpoint);
+      // Anything else a session needs that the host lacks comes in behind.
+      if (remote) void setupHost(connections(), endpoint).catch(() => {});
+    } catch (error) {
+      if (!remote) throw error;
+      // A fresh server has no Herdr: set the host up, then connect again. A
+      // host ssh cannot reach fails the setup too, with the first error.
+      const states = await setupHost(connections(), endpoint).catch(() => {
+        throw error;
+      });
+      if (!["running", "started"].includes(states.server))
+        throw new Error(
+          `Couldn't set up the host: ${setupSummary(states) || "nothing ran"}.`,
+        );
+      await connections().socket(endpoint);
+    }
+    if (remote) {
       await connections().exec(endpoint, 'mkdir -p "$HOME/sushiai"\n');
       await connections().setAutoConnect(endpoint, true);
     }

@@ -183,7 +183,7 @@ export function reconcileHerdrWorkspaces(
     }
     // A workspace keeps the folder it was opened at: a pane that `cd`s
     // elsewhere does not move it to another project. A remote host's
-    // workspace never falls back to this Mac's home.
+    // workspace never falls back to the local home.
     const cwd =
       (old?.cwd && old.cwd !== systemHome ? old.cwd : "") ||
       remotePanes.find((pane) => pane.cwd)?.cwd ||

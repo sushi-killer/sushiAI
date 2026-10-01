@@ -213,7 +213,7 @@ test("a host switched off for the project gets no Claude account either", async 
   );
 });
 
-test("a host with no Codex login gets this Mac's, a host with one keeps it", async (t) => {
+test("a host with no Codex login gets the local one, a host with one keeps it", async (t) => {
   const { seedCodexLogin } = require("../electron/project-session.cjs");
   const { host } = await rig(t, { attach: false });
   const local = path.join(host.root, "local-codex");

@@ -69,11 +69,14 @@ export function reopenInSlot(
   };
 }
 
-/** True for a Herdr workspace whose host no longer lists it: it has Herdr
- * panes and every one of them is ended. */
+/** True for a Herdr workspace whose host no longer lists it: none of its
+ * Herdr panes is live. Herdr closes a workspace with its last pane, so one
+ * left with no panes at all (its last session closed) is gone too. */
 export function isVanished(workspace: Workspace): boolean {
-  const herdr = workspace.panels.filter((panel) => panel.herdrId);
-  return herdr.length > 0 && herdr.every((panel) => panel.ended);
+  return (
+    Boolean(workspace.herdrId) &&
+    !workspace.panels.some((panel) => panel.herdrId && !panel.ended)
+  );
 }
 
 /** The workspace that currently owns a panel id, wherever it lives - not

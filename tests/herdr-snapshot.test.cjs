@@ -393,17 +393,17 @@ test("a workspace rebound to a new Herdr id adopts it and keeps its panels", asy
 
 test("a dropped workspace is removed once the host has a live one at the same folder", async () => {
   const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
-  const host = "ssh:lab";
+  const host = "ssh:host-a";
   const first = reconcileHerdrWorkspaces(
     [],
     snap(
       [
-        { workspace_id: "w5", label: "n8n" },
-        { workspace_id: "w7", label: "herald" },
+        { workspace_id: "w5", label: "app" },
+        { workspace_id: "w7", label: "docs" },
       ],
       [
-        pane("p1", "w5", { cwd: "/srv/n8n" }),
-        pane("p2", "w7", { cwd: "/srv/herald" }),
+        pane("p1", "w5", { cwd: "/srv/app" }),
+        pane("p2", "w7", { cwd: "/srv/docs" }),
       ],
     ),
     host,
@@ -412,18 +412,18 @@ test("a dropped workspace is removed once the host has a live one at the same fo
   const next = reconcileHerdrWorkspaces(
     first,
     snap(
-      [{ workspace_id: "w9", label: "n8n" }],
-      [pane("p3", "w9", { cwd: "/srv/n8n" })],
+      [{ workspace_id: "w9", label: "app" }],
+      [pane("p3", "w9", { cwd: "/srv/app" })],
     ),
     host,
   );
   assert.deepEqual(
     next.map((workspace) => workspace.id),
-    ["herdr:ssh:lab:w7", "herdr:ssh:lab:w9"],
+    ["herdr:ssh:host-a:w7", "herdr:ssh:host-a:w9"],
   );
 });
 
-test("a workspace keeps its folder when a pane cds away, and a remote one never gets this Mac's home", async () => {
+test("a workspace keeps its folder when a pane cds away, and a remote one never gets the local home", async () => {
   const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
   const first = reconcileHerdrWorkspaces(
     [],
@@ -431,8 +431,8 @@ test("a workspace keeps its folder when a pane cds away, and a remote one never 
       [{ workspace_id: "w1", label: "App" }],
       [pane("p1", "w1", { cwd: "/srv/app" })],
     ),
-    "ssh:lab",
-    "/Users/me",
+    "ssh:host-a",
+    "/local/home",
   );
   const moved = reconcileHerdrWorkspaces(
     first,
@@ -440,15 +440,15 @@ test("a workspace keeps its folder when a pane cds away, and a remote one never 
       [{ workspace_id: "w1", label: "App" }],
       [pane("p1", "w1", { cwd: "/tmp" })],
     ),
-    "ssh:lab",
-    "/Users/me",
+    "ssh:host-a",
+    "/local/home",
   );
   assert.equal(moved[0].cwd, "/srv/app");
   const unknown = reconcileHerdrWorkspaces(
     [],
     snap([{ workspace_id: "w2", label: "New" }], [pane("p2", "w2")]),
-    "ssh:lab",
-    "/Users/me",
+    "ssh:host-a",
+    "/local/home",
   );
   assert.equal(unknown[0].cwd, "");
 });

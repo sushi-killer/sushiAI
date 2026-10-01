@@ -29,6 +29,7 @@ const { AgentRegistry } = require("./agents/registry.cjs");
 const { HermesProvider } = require("./agents/hermes-provider.cjs");
 const { registerProjectIpc } = require("./ipc/projects.cjs");
 const { registerTerminalIpc } = require("./ipc/terminals.cjs");
+const { setupHost, setupSummary } = require("./host-setup.cjs");
 const { registerChatIpc } = require("./ipc/chat.cjs");
 const { registerAppIpc } = require("./ipc/app.cjs");
 const { registerExtensionIpc } = require("./ipc/extensions.cjs");
@@ -319,6 +320,15 @@ app.whenReady().then(async () => {
     fakeSsh ? { ssh: fakeSsh } : undefined,
   );
   await connections.init();
+  // The local machine gets what sessions need (Herdr running, Claude Code, Codex) on
+  // its own; a test run never installs anything.
+  if (!testMode.test)
+    void setupHost(connections, "local")
+      .then((states) => {
+        const summary = setupSummary(states);
+        if (summary) console.log(`Environment: ${summary}`);
+      })
+      .catch((error) => console.error("Environment setup failed:", error));
   await orchestrator.start();
   // Sleep/wake can drop every SSH tunnel at once - retry them all rather than
   // waiting for each one's own backoff timer to come back around.

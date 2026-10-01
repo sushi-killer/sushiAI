@@ -161,6 +161,17 @@ test("ending the last local worktree session removes only that workspace", async
   assert.deepEqual(removeClosedSessions([local, project], new Set(["local"])), [
     project,
   ]);
+  const keptDirty = {
+    ...(await workspace([panel("dirty", "terminal")])),
+    localWorktree: true,
+  };
+  const afterFailedCleanup = removeClosedSessions(
+    [keptDirty],
+    new Set(["dirty"]),
+    new Set([keptDirty.id]),
+  );
+  assert.equal(afterFailedCleanup.length, 1);
+  assert.deepEqual(afterFailedCleanup[0].panels, []);
   assert.equal(
     removeClosedSessions(
       [{ ...local, localWorktree: undefined }],

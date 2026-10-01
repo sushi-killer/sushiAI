@@ -7,6 +7,11 @@ import { disposeTerminal } from "../TerminalPanel.tsx";
 import { errorText } from "../app/errors.ts";
 import { agentTitle } from "../app/agent-title.ts";
 import { normalizeRemote } from "../app/useProjectGit.ts";
+import type { ProjectGit } from "../app/useProjectGit.ts";
+import {
+  closeBeforeWorktreeRemoval,
+  type WorktreeCleanupRequest,
+} from "../app/worktreeCleanup.ts";
 import {
   closedProjectId,
   forgetProject as removeClosedProject,
@@ -81,6 +86,10 @@ export function useWorkspaces({
     saved?.closedProjects || [],
   );
   const active = workspaces.find((w) => w.id === activeId) || workspaces[0];
+  const projectGitRef = useRef<Record<string, ProjectGit>>({});
+  const setProjectGit = useCallback((next: Record<string, ProjectGit>) => {
+    projectGitRef.current = next;
+  }, []);
   const activeRef = useRef(active);
   const workspacesRef = useRef(workspaces);
   activeRef.current = active;
@@ -89,11 +98,7 @@ export function useWorkspaces({
   const dragIdRef = useRef(dragId);
   zoomedRef.current = zoomed;
   dragIdRef.current = dragId;
-  // The active workspace's merge group (flat mode only), kept in a ref
-  // rather than a hook parameter: it depends on git identity data (see
-  // useProjectGit) fetched from App, which in turn needs this hook's own
-  // `active` workspace - App assigns it here, synchronously, right after
-  // calling this hook each render (src/workspace/mergedLayouts.ts).
+  // The active merge group supplies member panes to selection and canvas operations.
   const groupRef = useRef<GroupCanvasContext | undefined>(undefined);
 
   useEffect(() => {
@@ -593,29 +598,49 @@ export function useWorkspaces({
     return run;
   }
   const endSessions = useCallback(
-    async (items: { workspace: Workspace; panel: Panel }[]) => {
+    async (
+      items: { workspace: Workspace; panel: Panel }[],
+      cleanup?: WorktreeCleanupRequest,
+    ) => {
       const closed = new Set<string>(),
+        keptWorktrees = new Set<string>(),
         errors: string[] = [];
       for (const { workspace, panel } of items) {
-        try {
-          if (panel.herdrId) {
-            if (!panel.ended)
-              await window.bridge!.herdr(
-                workspace.connection || socket,
-                "pane.close",
-                { pane_id: panel.herdrId },
-              );
-          } else await window.bridge?.terminalClose(panel.id);
-          if (panel.busy) await window.bridge?.cancelChat(panel.id);
-          await window.bridge?.terminalClose(panel.id);
-          disposeTerminal(panel.id);
-          closed.add(panel.id);
-        } catch (error) {
-          errors.push(panel.title + ": " + errorText(error));
+        const outcome = await closeBeforeWorktreeRemoval(
+          async () => {
+            if (panel.herdrId) {
+              if (!panel.ended)
+                await window.bridge!.herdr(
+                  workspace.connection || socket,
+                  "pane.close",
+                  { pane_id: panel.herdrId },
+                );
+            } else await window.bridge?.terminalClose(panel.id);
+            if (panel.busy) await window.bridge?.cancelChat(panel.id);
+            await window.bridge?.terminalClose(panel.id);
+            disposeTerminal(panel.id);
+          },
+          cleanup?.panel.id === panel.id
+            ? async () =>
+                window.bridge?.projectInspect(cleanup.workspace.connection, {
+                  operation: "git_worktree_remove",
+                  root: cleanup.checkout,
+                  branch: cleanup.branch,
+                })
+            : undefined,
+        );
+        if (!outcome.closed) {
+          errors.push(panel.title + ": " + errorText(outcome.closeError));
+          continue;
+        }
+        closed.add(panel.id);
+        if ("cleanupError" in outcome) {
+          errors.push(`Worktree kept: ${errorText(outcome.cleanupError)}`);
+          if (cleanup?.panel.id === panel.id) keptWorktrees.add(workspace.id);
         }
       }
       setWorkspaces((list) => {
-        const remaining = removeClosedSessions(list, closed);
+        const remaining = removeClosedSessions(list, closed, keptWorktrees);
         return remaining.length ? remaining : [initialWorkspace()];
       });
       if (zoomedRef.current && closed.has(zoomedRef.current)) setZoomed(null);
@@ -635,7 +660,7 @@ export function useWorkspaces({
       const panel = owner?.panels.find((item) => item.id === panelId);
       if (!owner || !panel) return;
       if (owner.localWorktree && launchesInWorktree(panel.kind)) {
-        void endSessions([{ workspace: owner, panel }]);
+        confirmClose({ workspace: owner, panel });
         return;
       }
       if (panel.herdrId && !panel.ended) {
@@ -643,6 +668,11 @@ export function useWorkspaces({
           owner.panels.filter((item) => item.herdrId && !item.ended).length ===
           1
         ) {
+          const git = projectGitRef.current[owner.id];
+          if (!git || git.linkedWorktree) {
+            confirmClose({ workspace: owner, panel });
+            return;
+          }
           void endSessions([{ workspace: owner, panel }]);
           return;
         }
@@ -846,7 +876,14 @@ export function useWorkspaces({
       endpoint,
       herdr: Boolean(workspace.herdrId),
       closedAt: Date.now(),
-      git: { remote: "", commonDir: "", checkout: "", subdir: "", branch: "" },
+      git: {
+        remote: "",
+        commonDir: "",
+        checkout: "",
+        linkedWorktree: false,
+        subdir: "",
+        branch: "",
+      },
     };
     setClosedProjects((list) => rememberProject(list, entry));
     window.bridge
@@ -862,6 +899,7 @@ export function useWorkspaces({
               remote: normalizeRemote(result?.remote || ""),
               commonDir: result?.commonDir || "",
               checkout: result?.checkout || "",
+              linkedWorktree: result?.linkedWorktree || false,
               subdir: result?.subdir || "",
               branch: result?.branch || "",
             },
@@ -913,6 +951,7 @@ export function useWorkspaces({
   return {
     workspaces,
     active,
+    setProjectGit,
     activeId,
     selected,
     zoomed,

@@ -15,6 +15,7 @@ const {
   herdrWorkspaceKey,
   launchesInWorktree,
 } = require("../src/workspace/worktree.ts");
+const cleanupLibrary = import("../src/app/worktreeCleanup.ts");
 const {
   worktreeBranchError: worktreeBranchErrorMain,
   worktreePath,
@@ -81,6 +82,149 @@ test("suggestWorktreeBranch formats a fixed local date as sushi/YYYYMMDD-HHmm", 
     suggestWorktreeBranch(new Date(2026, 11, 31, 23, 59, 0)),
     "sushi/20261231-2359",
   );
+});
+
+test("worktree cleanup is offered only for a linked checkout with no other panes", async () => {
+  const { worktreeCleanupTarget } = await cleanupLibrary;
+  const session = { id: "p1", kind: "agent", title: "Agent" };
+  const other = { id: "p2", kind: "terminal", title: "Shell" };
+  const chat = { id: "p3", kind: "chat", title: "Thread" };
+  const workspace = {
+    id: "w1",
+    cwd: "/repo-feature",
+    panels: [session],
+  };
+  const git = {
+    remote: "example.invalid/repo",
+    commonDir: "/repo/.git",
+    checkout: "/repo-feature",
+    linkedWorktree: true,
+    subdir: "",
+    branch: "feature/task",
+  };
+
+  assert.deepEqual(
+    worktreeCleanupTarget(workspace, session, [workspace], { w1: git }),
+    { checkout: "/repo-feature", branch: "feature/task", blocked: false },
+  );
+  const occupied = { ...workspace, panels: [session, other] };
+  assert.equal(
+    worktreeCleanupTarget(occupied, session, [occupied], { w1: git }).blocked,
+    true,
+  );
+  const chatOccupied = { ...workspace, panels: [session, chat] };
+  assert.equal(
+    worktreeCleanupTarget(chatOccupied, session, [chatOccupied], { w1: git })
+      .blocked,
+    true,
+    "a chat thread can still depend on the worktree checkout",
+  );
+  const localSocketWorkspace = {
+    ...workspace,
+    id: "w2",
+    connection: "/tmp/herdr.sock",
+    panels: [other],
+  };
+  assert.equal(
+    worktreeCleanupTarget(
+      workspace,
+      session,
+      [workspace, localSocketWorkspace],
+      { w1: git, w2: git },
+    ).blocked,
+    true,
+    "all local socket spellings refer to the same host",
+  );
+  assert.equal(
+    worktreeCleanupTarget(workspace, session, [workspace], {
+      w1: { ...git, linkedWorktree: false },
+    }),
+    null,
+    "the main checkout has no delete option",
+  );
+});
+
+test("worktree removal waits for the session close to succeed", async () => {
+  const { closeBeforeWorktreeRemoval } = await cleanupLibrary;
+  let removals = 0;
+  const failed = await closeBeforeWorktreeRemoval(
+    async () => {
+      throw new Error("close failed");
+    },
+    async () => {
+      removals += 1;
+    },
+  );
+  assert.equal(failed.closed, false);
+  assert.match(failed.closeError.message, /close failed/);
+  assert.equal(removals, 0);
+
+  const closed = await closeBeforeWorktreeRemoval(
+    async () => {},
+    async () => {
+      removals += 1;
+    },
+  );
+  assert.equal(closed.closed, true);
+  assert.equal(removals, 1);
+});
+
+test("a delete choice applies only to the branch and checkout that were checked", async () => {
+  const { isWorktreeCleanupSelected, worktreeCleanupRequestKey } =
+    await cleanupLibrary;
+  const target = {
+    checkout: "/repo-feature",
+    branch: "feature/a",
+    blocked: false,
+  };
+  const branchB = { ...target, branch: "feature/b" };
+  const choice = {
+    requestKey: worktreeCleanupRequestKey(undefined, target),
+    checked: true,
+    manual: false,
+  };
+
+  assert.equal(
+    isWorktreeCleanupSelected(
+      choice,
+      worktreeCleanupRequestKey(undefined, target),
+    ),
+    true,
+  );
+  assert.equal(
+    isWorktreeCleanupSelected(
+      choice,
+      worktreeCleanupRequestKey(undefined, branchB),
+    ),
+    false,
+  );
+});
+
+test("worktree cleanup defaults on only for a merged and closed pull request", async () => {
+  const { isMergedAndClosedPullRequest } = await cleanupLibrary;
+  assert.equal(
+    isMergedAndClosedPullRequest({
+      state: "CLOSED",
+      mergedAt: "2026-10-01T00:00:00Z",
+    }),
+    true,
+  );
+  assert.equal(
+    isMergedAndClosedPullRequest({ state: "CLOSED", mergedAt: null }),
+    false,
+  );
+  assert.equal(
+    isMergedAndClosedPullRequest({ state: "CLOSED", mergedAt: "" }),
+    false,
+  );
+  assert.equal(
+    isMergedAndClosedPullRequest({
+      state: "OPEN",
+      mergedAt: "2026-10-01T00:00:00Z",
+    }),
+    false,
+  );
+  assert.equal(isMergedAndClosedPullRequest(undefined), false);
 });
 
 test("worktreeCreateParams builds the Herdr worktree.create payload", () => {

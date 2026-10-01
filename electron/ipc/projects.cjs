@@ -882,6 +882,8 @@ function registerProjectIpc({
         "branches",
         "git_overview",
         "git_remote",
+        "git_pr_status",
+        "git_worktree_remove",
         "checkout",
       ].includes(options?.operation)
     )

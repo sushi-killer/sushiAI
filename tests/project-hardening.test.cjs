@@ -85,6 +85,48 @@ test("a git URL that is an option never reaches git as one", async (t) => {
   assert.equal(await exists(marker), false);
 });
 
+test("project inspection exposes only the explicit worktree cleanup operations", async (t) => {
+  const { projects } = await makeStore(t);
+  const received = [];
+  const call = registerHandlers({
+    projects,
+    connections: {
+      inspect: async (endpoint, options) => {
+        received.push({ endpoint, options });
+        return { state: "CLOSED", mergedAt: "2026-10-01T00:00:00Z" };
+      },
+    },
+    claudeMcp: {},
+  });
+
+  assert.deepEqual(
+    await call("project-inspect", "ssh:devbox", {
+      operation: "git_pr_status",
+      root: "/repo-feature",
+      branch: "feature/task",
+    }),
+    { state: "CLOSED", mergedAt: "2026-10-01T00:00:00Z" },
+  );
+  assert.deepEqual(received, [
+    {
+      endpoint: "ssh:devbox",
+      options: {
+        operation: "git_pr_status",
+        root: "/repo-feature",
+        branch: "feature/task",
+      },
+    },
+  ]);
+  assert.throws(
+    () =>
+      call("project-inspect", undefined, {
+        operation: "git_worktree_remove;anything",
+        root: "/repo-feature",
+      }),
+    /Unknown project operation/,
+  );
+});
+
 test("a noisy install that fails with a 403 is still an install failure", async (t) => {
   const { host, project, call } = await setup(t, {
     bin: {

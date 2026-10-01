@@ -205,6 +205,7 @@ test("restore accepts only a well-formed closedProjects array", async () => {
       remote: "example.test/team/app",
       commonDir: "/home/dev/app/.git",
       checkout: "/home/dev/app",
+      linkedWorktree: false,
       subdir: "",
       branch: "main",
     },

@@ -31,6 +31,7 @@ import type { ExtensionRegistry } from "../extensions/registry.ts";
 import { codePanels } from "../workspaceState.ts";
 import {
   LOCAL_GROUP,
+  computeHostMergeGroups,
   computeMergeGroups,
   groupKey,
   groupLabel,
@@ -171,6 +172,8 @@ export function Sidebar({
   worktreeTasks,
   statusByEndpoint,
   projectGit,
+  readyWorkspaceIds,
+  hydratedHostKeys,
   workspaceGrouping,
   setWorkspaceGrouping,
   openSettings,
@@ -215,6 +218,8 @@ export function Sidebar({
   /** Each workspace's git identity - remote, shared git dir, checkout and
    * branch - which decides when two workspaces are one project. */
   projectGit: Record<string, ProjectGit>;
+  readyWorkspaceIds: ReadonlySet<string>;
+  hydratedHostKeys: ReadonlySet<string>;
   /** "grouped" sections workspaces under a collapsible host header; "flat"
    * is a single list with a small tag naming a remote workspace's host. */
   workspaceGrouping: "grouped" | "flat";
@@ -555,7 +560,13 @@ export function Sidebar({
                       .includes(workspaceQuery.toLowerCase()) &&
                     !isHidden(w.connection, connectionProfiles),
                 );
-                const mixed = mixedRemotes(visible, projectGit);
+                const readyVisible = visible.filter(
+                  (w) =>
+                    readyWorkspaceIds.has(w.id) &&
+                    hydratedHostKeys.has(groupKey(w.connection)),
+                );
+                const checking = readyVisible.length < visible.length;
+                const mixed = mixedRemotes(readyVisible, projectGit);
                 const filtering = workspaceQuery.trim().length > 0;
                 if (workspaceGrouping === "flat") {
                   // A search that matches nothing used to render an empty
@@ -568,21 +579,24 @@ export function Sidebar({
                           : "No open workspaces yet."}
                       </p>
                     );
-                  // UX1: the list never waits on remotes and never reshuffles
-                  // once they arrive - a merged row takes the position of its
-                  // topmost member in this same order, and merging only ever
-                  // removes the rows below it (`consumed`), never inserts or
-                  // reorders one.
+                  if (!readyVisible.length)
+                    return (
+                      <p className="workspace-group-empty">
+                        Checking workspaces…
+                      </p>
+                    );
+                  // A host's first rows wait for every checkout identity on
+                  // that host; later checkouts stay hidden until inspected.
                   const mergeGroups = computeMergeGroups(
-                    visible,
+                    readyVisible,
                     projectGit,
                     connectionProfiles,
                   );
                   const consumed = new Set<string>();
                   const nameCount = new Map<string, number>();
-                  for (const w of visible)
+                  for (const w of readyVisible)
                     nameCount.set(w.name, (nameCount.get(w.name) ?? 0) + 1);
-                  return visible.map((w) => {
+                  const rows = readyVisible.map((w) => {
                     if (consumed.has(w.id)) return null;
                     const group = mergeGroups.get(w.id);
                     if (group) {
@@ -607,6 +621,16 @@ export function Sidebar({
                       mixed.has(projectGit[w.id]?.remote ?? ""),
                     );
                   });
+                  return (
+                    <>
+                      {rows}
+                      {checking && (
+                        <p className="workspace-group-empty">
+                          Checking workspaces…
+                        </p>
+                      )}
+                    </>
+                  );
                 }
                 // Every group a connected, visible host owns shows up here
                 // even with zero workspaces right now - a live, empty
@@ -630,6 +654,11 @@ export function Sidebar({
                           groupLabel(b, connectionProfiles),
                         ),
                 );
+                const hostMergeGroups = computeHostMergeGroups(
+                  readyVisible,
+                  projectGit,
+                  connectionProfiles,
+                );
                 return keys.map((key) => {
                   const members = groups.get(key)!;
                   const label = groupLabel(key, connectionProfiles);
@@ -640,6 +669,25 @@ export function Sidebar({
                   );
                   const live = status === "connected";
                   const collapsed = collapsedGroups.has(key);
+                  const consumed = new Set<string>();
+                  const readyMembers = readyVisible.filter(
+                    (workspace) => groupKey(workspace.connection) === key,
+                  );
+                  const workspaceRows = readyMembers.map((w) => {
+                    if (consumed.has(w.id)) return null;
+                    const group = hostMergeGroups.get(w.id);
+                    if (group) {
+                      for (const member of group.members)
+                        consumed.add(member.workspace.id);
+                      return renderMergedRow(group);
+                    }
+                    return renderRow(
+                      w,
+                      live,
+                      undefined,
+                      mixed.has(projectGit[w.id]?.remote ?? ""),
+                    );
+                  });
                   return (
                     <div className="workspace-group" key={key}>
                       <button
@@ -683,14 +731,18 @@ export function Sidebar({
                                   : "Not connected."}
                             </p>
                           )}
-                          {members.map((w) =>
-                            renderRow(
-                              w,
-                              live,
-                              undefined,
-                              mixed.has(projectGit[w.id]?.remote ?? ""),
-                            ),
+                          {members.length > 0 && readyMembers.length === 0 && (
+                            <p className="workspace-group-empty">
+                              Checking workspaces…
+                            </p>
                           )}
+                          {workspaceRows}
+                          {readyMembers.length > 0 &&
+                            readyMembers.length < members.length && (
+                              <p className="workspace-group-empty">
+                                Checking workspaces…
+                              </p>
+                            )}
                         </div>
                       )}
                     </div>

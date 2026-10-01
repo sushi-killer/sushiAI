@@ -9,6 +9,11 @@ import {
 } from "react";
 import type { Workspace } from "../types";
 import type { SessionHostContext } from "./sessionHosts.ts";
+import {
+  projectGitRequestKey,
+  readyProjectGitHostKeys,
+  readyProjectGitWorkspaceIds,
+} from "./projectGitReadiness.ts";
 
 /** Turns the many equivalent spellings of the same git remote
  * (`git@host:org/repo.git`, `ssh://git@host/org/repo`, `https://host/org/repo/`)
@@ -37,6 +42,7 @@ export type ProjectGit = {
   remote: string;
   commonDir: string;
   checkout: string;
+  linkedWorktree: boolean;
   subdir: string;
   branch: string;
 };
@@ -44,6 +50,7 @@ const NO_GIT: ProjectGit = {
   remote: "",
   commonDir: "",
   checkout: "",
+  linkedWorktree: false,
   subdir: "",
   branch: "",
 };
@@ -51,18 +58,36 @@ const NO_GIT: ProjectGit = {
 function inspectInto(
   workspace: Pick<Workspace, "id" | "cwd" | "connection">,
   setProjectGit: Dispatch<SetStateAction<Record<string, ProjectGit>>>,
+  settle: (
+    workspace: Pick<Workspace, "id" | "cwd" | "connection">,
+    key: string,
+  ) => boolean | null,
+  finished: () => void = () => {},
 ) {
-  if (!window.bridge) return;
+  const key = projectGitRequestKey(workspace);
+  if (!window.bridge) {
+    const wasSettled = settle(workspace, key);
+    if (wasSettled !== null)
+      setProjectGit((current) =>
+        wasSettled && current[workspace.id]
+          ? current
+          : { ...current, [workspace.id]: NO_GIT },
+      );
+    finished();
+    return;
+  }
   window.bridge
     .projectInspect(workspace.connection, {
       operation: "git_remote",
       root: workspace.cwd,
     })
     .then((result) => {
+      if (settle(workspace, key) === null) return;
       const next: ProjectGit = {
         remote: normalizeRemote(result?.remote || ""),
         commonDir: result?.commonDir || "",
         checkout: result?.checkout || "",
+        linkedWorktree: result?.linkedWorktree || false,
         subdir: result?.subdir || "",
         branch: result?.branch || "",
       };
@@ -73,13 +98,16 @@ function inspectInto(
       );
     })
     // A failed refresh keeps what an earlier read already knew.
-    .catch(() =>
+    .catch(() => {
+      const wasSettled = settle(workspace, key);
+      if (wasSettled === null) return;
       setProjectGit((current) =>
-        current[workspace.id]
+        wasSettled && current[workspace.id]
           ? current
           : { ...current, [workspace.id]: NO_GIT },
-      ),
-    );
+      );
+    })
+    .finally(finished);
 }
 
 /** Fetches each workspace's git identity once per id+cwd, so the sidebar can
@@ -87,19 +115,52 @@ function inspectInto(
  * The branch is the one field that changes under a running workspace, so the
  * active workspace - where a checkout actually gets switched - is re-read on
  * a slow timer instead of every workspace on every poll. */
-export function useProjectGit(workspaces: Workspace[], activeId: string) {
+export function useProjectGit(
+  workspaces: Workspace[],
+  activeId: string,
+  onProjectGitChange?: (projectGit: Record<string, ProjectGit>) => void,
+) {
   const [projectGit, setProjectGit] = useState<Record<string, ProjectGit>>({});
-  const requested = useRef(new Set<string>());
+  const [settledKeys, setSettledKeys] = useState<Record<string, string>>({});
+  const settledKeysRef = useRef(settledKeys);
+  const currentKeys = new Map(
+    workspaces.map((workspace) => [
+      workspace.id,
+      projectGitRequestKey(workspace),
+    ]),
+  );
+  const currentKeysRef = useRef(currentKeys);
+  currentKeysRef.current = currentKeys;
+  settledKeysRef.current = settledKeys;
+  const settle = useCallback(
+    (workspace: Pick<Workspace, "id" | "cwd" | "connection">, key: string) => {
+      if (currentKeysRef.current.get(workspace.id) !== key) return null;
+      const wasSettled = settledKeysRef.current[workspace.id] === key;
+      if (!wasSettled) {
+        const next = { ...settledKeysRef.current, [workspace.id]: key };
+        settledKeysRef.current = next;
+        setSettledKeys(next);
+      }
+      return wasSettled;
+    },
+    [],
+  );
+  const requested = useRef(new Map<string, string>());
   useEffect(() => {
-    if (!window.bridge) return;
     for (const w of workspaces) {
       if (!w.cwd) continue;
-      const key = `${w.id}:${w.cwd}`;
-      if (requested.current.has(key)) continue;
-      requested.current.add(key);
-      inspectInto(w, setProjectGit);
+      const key = projectGitRequestKey(w);
+      if (
+        settledKeysRef.current[w.id] === key ||
+        requested.current.get(w.id) === key
+      )
+        continue;
+      requested.current.set(w.id, key);
+      inspectInto(w, setProjectGit, settle, () => {
+        if (requested.current.get(w.id) === key) requested.current.delete(w.id);
+      });
     }
-  }, [workspaces]);
+  }, [workspaces, settledKeys, settle]);
   const active = workspaces.find((w) => w.id === activeId);
   const activeCwd = active?.cwd;
   const activeConnection = active?.connection;
@@ -111,12 +172,49 @@ export function useProjectGit(workspaces: Workspace[], activeId: string) {
       connection: activeConnection,
     };
     const timer = setInterval(
-      () => inspectInto(workspace, setProjectGit),
+      () => inspectInto(workspace, setProjectGit, settle),
       15000,
     );
     return () => clearInterval(timer);
-  }, [activeId, activeCwd, activeConnection]);
-  return projectGit;
+  }, [activeId, activeCwd, activeConnection, settle]);
+  const readyWorkspaceIds = useMemo(
+    () => readyProjectGitWorkspaceIds(workspaces, settledKeys),
+    [workspaces, settledKeys],
+  );
+  const readyHostKeys = useMemo(
+    () => readyProjectGitHostKeys(workspaces, settledKeys),
+    [workspaces, settledKeys],
+  );
+  const currentProjectGit = useMemo(
+    () =>
+      Object.fromEntries(
+        workspaces
+          .filter(
+            (workspace) => readyWorkspaceIds.has(workspace.id) && workspace.cwd,
+          )
+          .flatMap((workspace) =>
+            projectGit[workspace.id]
+              ? [[workspace.id, projectGit[workspace.id]]]
+              : [],
+          ),
+      ),
+    [workspaces, readyWorkspaceIds, projectGit],
+  );
+  useEffect(
+    () => onProjectGitChange?.(currentProjectGit),
+    [currentProjectGit, onProjectGitChange],
+  );
+  const [hydratedHostKeys, setHydratedHostKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
+  useEffect(() => {
+    setHydratedHostKeys((current) => {
+      const next = new Set(current);
+      for (const host of readyHostKeys) next.add(host);
+      return next.size === current.size ? current : next;
+    });
+  }, [readyHostKeys]);
+  return { projectGit: currentProjectGit, readyWorkspaceIds, hydratedHostKeys };
 }
 
 /** What the "+" picker is handed about hosts: the workspaces and their git

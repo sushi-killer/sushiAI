@@ -330,7 +330,7 @@ test("a workspace missing from the snapshot stays with every Herdr pane ended", 
         { workspace_id: "w1", label: "One" },
         { workspace_id: "w2", label: "Two" },
       ],
-      [pane("a"), pane("b", "w2")],
+      [pane("a", "w1", { cwd: "/one" }), pane("b", "w2", { cwd: "/two" })],
     ),
     "local",
   );
@@ -389,4 +389,66 @@ test("a workspace rebound to a new Herdr id adopts it and keeps its panels", asy
       ["herdr:local:a", true],
     ],
   );
+});
+
+test("a dropped workspace is removed once the host has a live one at the same folder", async () => {
+  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
+  const host = "ssh:lab";
+  const first = reconcileHerdrWorkspaces(
+    [],
+    snap(
+      [
+        { workspace_id: "w5", label: "n8n" },
+        { workspace_id: "w7", label: "herald" },
+      ],
+      [
+        pane("p1", "w5", { cwd: "/srv/n8n" }),
+        pane("p2", "w7", { cwd: "/srv/herald" }),
+      ],
+    ),
+    host,
+  );
+  // The host restarted: w5 is gone and a session made w9 at the same folder.
+  const next = reconcileHerdrWorkspaces(
+    first,
+    snap(
+      [{ workspace_id: "w9", label: "n8n" }],
+      [pane("p3", "w9", { cwd: "/srv/n8n" })],
+    ),
+    host,
+  );
+  assert.deepEqual(
+    next.map((workspace) => workspace.id),
+    ["herdr:ssh:lab:w7", "herdr:ssh:lab:w9"],
+  );
+});
+
+test("a workspace keeps its folder when a pane cds away, and a remote one never gets this Mac's home", async () => {
+  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
+  const first = reconcileHerdrWorkspaces(
+    [],
+    snap(
+      [{ workspace_id: "w1", label: "App" }],
+      [pane("p1", "w1", { cwd: "/srv/app" })],
+    ),
+    "ssh:lab",
+    "/Users/me",
+  );
+  const moved = reconcileHerdrWorkspaces(
+    first,
+    snap(
+      [{ workspace_id: "w1", label: "App" }],
+      [pane("p1", "w1", { cwd: "/tmp" })],
+    ),
+    "ssh:lab",
+    "/Users/me",
+  );
+  assert.equal(moved[0].cwd, "/srv/app");
+  const unknown = reconcileHerdrWorkspaces(
+    [],
+    snap([{ workspace_id: "w2", label: "New" }], [pane("p2", "w2")]),
+    "ssh:lab",
+    "/Users/me",
+  );
+  assert.equal(unknown[0].cwd, "");
 });

@@ -44,15 +44,9 @@ async function open(
     terminals: new Map(),
     terminalPending: new Map(),
     stageModelSettings: async () => "",
-    stageClaudeAccount: async () => {
+    resolveClaudeAccount: async () => {
       staged.push(1);
-      const tokenPath = path.join(
-        host.home,
-        "..",
-        `${path.basename(host.home)}-token`,
-      );
-      await fs.writeFile(tokenPath, "invented-subscription-token");
-      return { kind: "subscription", tokenPath };
+      return { kind: "subscription", value: "invented-subscription-token" };
     },
     projects,
     sshBinary: secondUploadFails ? ssh : host.ssh,

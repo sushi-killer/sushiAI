@@ -308,11 +308,7 @@ export function PanelPickerDialog({
               (profile) => profile.id === selectedModelProfileId,
             )
           : undefined,
-        // A Herdr session runs under the host's own Claude login: an account
-        // chosen for local sessions does not apply to it.
-        agent === "claude" && !(targetWorkspace.herdrId && backend === "herdr")
-          ? selectedClaudeAccountId || undefined
-          : undefined,
+        agent === "claude" ? selectedClaudeAccountId || undefined : undefined,
         backend,
         targetWorkspaceId,
         worktreeArg,
@@ -325,7 +321,6 @@ export function PanelPickerDialog({
       modelProfiles,
       selectedClaudeAccountId,
       selectedModelProfileId,
-      targetWorkspace.herdrId,
       targetWorkspaceId,
       worktreeArg,
       worktreeInvalid,
@@ -749,22 +744,14 @@ export function PanelPickerDialog({
                             <span className="pk-text">
                               <strong>{item.label}</strong>
                               <small
-                                className={
-                                  targetIsSsh
-                                    ? matrix?.clis.claude.loggedIn
-                                      ? ""
-                                      : "is-warning"
-                                    : item.hasValue
-                                      ? ""
-                                      : "is-warning"
-                                }
+                                className={item.hasValue ? "" : "is-warning"}
                               >
-                                {targetIsSsh
-                                  ? matrix?.clis.claude.loggedIn
-                                    ? `Uses Claude's own login on ${launchLabel}`
-                                    : `Claude is not signed in on ${launchLabel} · sign in there once`
-                                  : item.hasValue
-                                    ? "Subscription · logged in"
+                                {item.hasValue
+                                  ? remoteNote
+                                    ? `Subscription · token sent to ${remoteNote}`
+                                    : "Subscription · logged in"
+                                  : remoteNote
+                                    ? "Subscription · paste its token in Settings first"
                                     : "Subscription · not logged in · logs in on first run"}
                               </small>
                             </span>

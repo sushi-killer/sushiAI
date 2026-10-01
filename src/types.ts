@@ -416,6 +416,8 @@ export interface Bridge {
   projectSessionEnv(options: {
     endpoint: string;
     cwd: string;
+    agent?: string;
+    claudeAccountId?: string;
   }): Promise<{ prefix: string }>;
   terminalOpen(options: {
     panelId: string;

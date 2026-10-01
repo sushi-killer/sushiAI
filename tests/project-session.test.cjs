@@ -9,8 +9,15 @@ const { registerTerminalIpc } = require("../electron/ipc/terminals.cjs");
 const { makeHost, makeStore } = require("./helpers/fake-host.cjs");
 
 const SECRET = "invented-session-secret";
+const ACCOUNTS = {
+  sub: { kind: "subscription", value: "invented-oauth-token" },
+  key: { kind: "apiKey", value: "invented-api-key" },
+};
 
-async function rig(t, { attach = true, withheld = false } = {}) {
+async function rig(
+  t,
+  { attach = true, withheld = false, sessions = undefined } = {},
+) {
   const host = await makeHost(t, {
     bin: { mktemp: '#!/bin/sh\nexec /usr/bin/mktemp "$HOME/tmp.XXXXXX"\n' },
   });
@@ -22,6 +29,7 @@ async function rig(t, { attach = true, withheld = false } = {}) {
       { name: "APP_TOKEN", secret: true },
       { name: "PLAIN", secret: false },
     ],
+    sessions,
   });
   await projects.setSecret(project.id, "APP_TOKEN", SECRET);
   await projects.setSecret(project.id, "PLAIN", "visible");
@@ -55,6 +63,7 @@ async function rig(t, { attach = true, withheld = false } = {}) {
     terminalPending: new Map(),
     stageModelSettings: async () => "",
     stageClaudeAccount: async () => ({}),
+    resolveClaudeAccount: async (id) => ACCOUNTS[id],
     projects,
     sshBinary: host.ssh,
   });
@@ -149,4 +158,68 @@ test("a Herdr pane on a host switched off, or in a folder with no project, is ty
     }),
     { prefix: "" },
   );
+});
+
+const seen = async (host, prefix, names) => {
+  await host.connections.exec(
+    host.endpoint,
+    `${prefix}printf '%s|' ${names.map((n) => `"$${n}"`).join(" ")} > "$HOME/seen"`,
+  );
+  return fs.readFile(path.join(host.home, "seen"), "utf8");
+};
+
+test("a Herdr pane gets the picked Claude account even in a folder with no project", async (t) => {
+  const { host, cwd, handlers } = await rig(t, { attach: false });
+  const { prefix } = await handlers.get("project-session-env")({
+    endpoint: host.endpoint,
+    cwd,
+    claudeAccountId: "sub",
+  });
+  assert.equal(prefix.includes("invented-oauth-token"), false);
+  assert.equal(
+    await seen(host, prefix, ["CLAUDE_CODE_OAUTH_TOKEN"]),
+    "invented-oauth-token|",
+  );
+  assert.deepEqual(await left(host), []);
+});
+
+test("a Herdr pane runs as the project's own account when none is picked, an API key as one", async (t) => {
+  const { host, cwd, handlers } = await rig(t, {
+    sessions: { claudeAccount: "key" },
+  });
+  const { prefix } = await handlers.get("project-session-env")({
+    endpoint: host.endpoint,
+    cwd,
+  });
+  assert.equal(
+    await seen(host, prefix, ["APP_TOKEN", "ANTHROPIC_API_KEY"]),
+    `${SECRET}|invented-api-key|`,
+  );
+});
+
+test("a host switched off for the project gets no Claude account either", async (t) => {
+  const { host, cwd, handlers } = await rig(t, { withheld: true });
+  assert.deepEqual(
+    await handlers.get("project-session-env")({
+      endpoint: host.endpoint,
+      cwd,
+      claudeAccountId: "sub",
+    }),
+    { prefix: "" },
+  );
+});
+
+test("a host with no Codex login gets this Mac's, a host with one keeps it", async (t) => {
+  const { seedCodexLogin } = require("../electron/project-session.cjs");
+  const { host } = await rig(t, { attach: false });
+  const local = path.join(host.root, "local-codex");
+  await fs.mkdir(local);
+  await fs.writeFile(path.join(local, "auth.json"), '{"tokens":"mine"}');
+  await seedCodexLogin(host.connections, host.endpoint, local);
+  const remote = path.join(host.home, ".codex", "auth.json");
+  assert.equal(await fs.readFile(remote, "utf8"), '{"tokens":"mine"}');
+  assert.equal((await fs.stat(remote)).mode & 0o777, 0o600);
+  await fs.writeFile(path.join(local, "auth.json"), '{"tokens":"newer"}');
+  await seedCodexLogin(host.connections, host.endpoint, local);
+  assert.equal(await fs.readFile(remote, "utf8"), '{"tokens":"mine"}');
 });

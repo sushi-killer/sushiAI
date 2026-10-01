@@ -289,7 +289,11 @@ export function useWorkspaces({
           { label: name, cwd, focus: false },
         );
         await refreshHerdr(endpoint);
-        const prefix = await sessionPrefix(endpoint, cwd);
+        const prefix = await sessionPrefix(
+          endpoint,
+          cwd,
+          starter === "shell" ? undefined : starter,
+        );
         if (starter !== "shell" || prefix)
           await window.bridge!.herdr(endpoint, "pane.send_input", {
             pane_id: result.root_pane.pane_id,
@@ -354,13 +358,27 @@ export function useWorkspaces({
     showWorkspace();
     setZoomed(null);
   }
-  /** What to type into a new Herdr pane before anything else: it sources the
-   * project's values from a one-shot file (the text holds no value). Empty
-   * when the folder has no project or the host gets none. */
-  async function sessionPrefix(endpoint: string, cwd: string) {
+  /** What a Herdr pane is typed first: the project's values and the
+   * agent's sign-in (the Claude account picked, else the project's own; this
+   * Mac's Codex login on a host without one). A picked account that cannot
+   * be sent is an error; anything else missing just sends nothing. */
+  async function sessionPrefix(
+    endpoint: string,
+    cwd: string,
+    agent?: string,
+    claudeAccountId?: string,
+  ) {
     try {
-      return (await window.bridge!.projectSessionEnv({ endpoint, cwd })).prefix;
-    } catch {
+      return (
+        await window.bridge!.projectSessionEnv({
+          endpoint,
+          cwd,
+          agent,
+          claudeAccountId,
+        })
+      ).prefix;
+    } catch (error) {
+      if (claudeAccountId) throw error;
       return "";
     }
   }
@@ -449,10 +467,6 @@ export function useWorkspaces({
       // A Herdr workspace runs its sessions in Herdr unless this panel was
       // asked to be local. Nothing else can start a process.
       const viaHerdr = current.herdrId && (backend ?? "herdr") === "herdr";
-      if (claudeAccountId && viaHerdr)
-        throw new Error(
-          "Claude accounts are available for Local sessions only.",
-        );
       if (viaHerdr && launchesInWorktree(kind)) {
         if (!window.bridge) throw new Error("Open the desktop app first.");
         const endpoint = current.connection || socket;
@@ -469,7 +483,12 @@ export function useWorkspaces({
           agent,
           kind === "agent" ? modelProfileId : undefined,
         );
-        const prefix = await sessionPrefix(endpoint, current.cwd);
+        const prefix = await sessionPrefix(
+          endpoint,
+          current.cwd,
+          kind === "agent" ? agent : undefined,
+          kind === "agent" && agent === "claude" ? claudeAccountId : undefined,
+        );
         if (worktree) {
           // A linked worktree of the same repository: the existing merge
           // logic groups it with the project row automatically.
@@ -494,7 +513,9 @@ export function useWorkspaces({
         }
         const result = await window.bridge.herdr(endpoint, "pane.split", {
           workspace_id: current.herdrId,
-          target_pane_id: current.panels.find((p) => p.herdrId)?.herdrId,
+          // An ended pane is still in the layout, but Herdr no longer has it.
+          target_pane_id: current.panels.find((p) => p.herdrId && !p.ended)
+            ?.herdrId,
           direction: "right",
           focus: false,
           cwd: current.cwd,
@@ -620,7 +641,12 @@ export function useWorkspaces({
         herdrWorkspaceId = result.workspace?.workspace_id;
       }
       if (!paneId) throw new Error("Herdr did not report the new pane.");
-      const prefix = await sessionPrefix(endpoint, owner.cwd);
+      const prefix = await sessionPrefix(
+        endpoint,
+        owner.cwd,
+        launchText ? ended.agent || "claude" : undefined,
+        launchText ? ended.claudeAccountId : undefined,
+      );
       if (launchText || prefix)
         await window.bridge.herdr(endpoint, "pane.send_input", {
           pane_id: paneId,

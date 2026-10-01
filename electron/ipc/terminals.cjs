@@ -8,6 +8,9 @@ const { spawn } = require("node:child_process");
 const {
   projectForFolder,
   sessionEnvPrefix,
+  sessionAccountId,
+  accountVars,
+  seedCodexLogin,
 } = require("../project-session.cjs");
 
 function remoteEnvPayload(env) {
@@ -92,36 +95,47 @@ function registerTerminalIpc({
   terminalPending,
   stageModelSettings,
   stageClaudeAccount,
+  resolveClaudeAccount,
   projects,
   sshBinary = "/usr/bin/ssh",
 }) {
   // A Herdr pane starts a shell the app does not launch: the values it needs
   // are handed over as a one-shot file whose sourcing is typed into the pane.
-  handle("project-session-env", async ({ endpoint, cwd }) => {
-    const connections = getConnections();
-    const sshFor = (host) => {
-      const remote = connections.get(host);
-      return { remote, args: [...connections.args(remote), "-T", remote.host] };
-    };
-    const prefix = await sessionEnvPrefix(
-      {
-        projects,
-        connections,
-        upload: (host, payload) =>
-          uploadRemoteFile(
-            sshBinary,
-            [...sshFor(host).args, remoteFileCommand()],
-            payload,
-          ),
-        remove: (host, file) =>
-          removeRemoteFiles(sshBinary, sshFor(host).args, [file]).catch(
-            () => {},
-          ),
-      },
-      { endpoint, cwd },
-    );
-    return { prefix };
-  });
+  handle(
+    "project-session-env",
+    async ({ endpoint, cwd, claudeAccountId, agent }) => {
+      if (claudeAccountId) id(claudeAccountId);
+      const connections = getConnections();
+      if (agent === "codex")
+        await seedCodexLogin(connections, endpoint).catch(() => {});
+      const sshFor = (host) => {
+        const remote = connections.get(host);
+        return {
+          remote,
+          args: [...connections.args(remote), "-T", remote.host],
+        };
+      };
+      const prefix = await sessionEnvPrefix(
+        {
+          projects,
+          connections,
+          upload: (host, payload) =>
+            uploadRemoteFile(
+              sshBinary,
+              [...sshFor(host).args, remoteFileCommand()],
+              payload,
+            ),
+          remove: (host, file) =>
+            removeRemoteFiles(sshBinary, sshFor(host).args, [file]).catch(
+              () => {},
+            ),
+          resolveAccount: resolveClaudeAccount,
+        },
+        { endpoint, cwd, claudeAccountId, agent },
+      );
+      return { prefix };
+    },
+  );
 
   const detectionTimer = setInterval(() => {
     for (const [panelId, entry] of terminals) {
@@ -218,29 +232,31 @@ function registerTerminalIpc({
       if (remote) {
         binary = sshBinary;
         // The renderer may not know the project: the folder says which it is.
-        const ownProject =
-          projectId ||
-          (await projectForFolder({ projects, connections }, endpoint, cwd))
-            ?.id;
-        const projectEnv =
-          projects && ownProject
-            ? await projects.environmentFor(ownProject, "agent", endpoint)
-            : {};
-        let subscriptionToken = null;
+        const ownProject = projects
+          ? projectId
+            ? await projects.get(projectId)
+            : await projectForFolder({ projects, connections }, endpoint, cwd)
+          : null;
         const sendToHost = ownProject
-          ? await projects?.sendsValues(ownProject, endpoint)
+          ? await projects.sendsValues(ownProject.id, endpoint)
           : false;
-        if (
-          sendToHost &&
-          claudeAccountId &&
-          command === "claude" &&
-          stageClaudeAccount
-        ) {
-          const staged = await stageClaudeAccount(claudeAccountId);
-          if (staged.kind === "subscription" && staged.tokenPath) {
-            subscriptionToken = await fs.readFile(staged.tokenPath, "utf8");
-            await fs.unlink(staged.tokenPath).catch(() => {});
-          }
+        const projectEnv = sendToHost
+          ? await projects.environmentFor(ownProject.id, "agent", endpoint)
+          : {};
+        // The account picked for the session goes with it whether or not the
+        // folder has a project; the project's own only where its values go.
+        let subscriptionToken = null;
+        const accountId =
+          command === "claude"
+            ? sessionAccountId(ownProject, sendToHost, claudeAccountId)
+            : undefined;
+        if (command === "codex")
+          await seedCodexLogin(connections, endpoint).catch(() => {});
+        if (accountId && resolveClaudeAccount) {
+          const account = await resolveClaudeAccount(accountId);
+          if (account.kind === "subscription")
+            subscriptionToken = account.value;
+          else Object.assign(projectEnv, accountVars(account));
         }
         const sshArgs = [...connections.args(remote), "-T", remote.host];
         const envPayload = remoteEnvPayload(projectEnv);

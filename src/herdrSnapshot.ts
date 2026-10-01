@@ -181,10 +181,14 @@ export function reconcileHerdrWorkspaces(
           : tidy(addedPanels.map((panel) => panel.id));
       }
     }
+    // A workspace keeps the folder it was opened at: a pane that `cd`s
+    // elsewhere does not move it to another project. A remote host's
+    // workspace never falls back to this Mac's home.
     const cwd =
+      (old?.cwd && old.cwd !== systemHome ? old.cwd : "") ||
       remotePanes.find((pane) => pane.cwd)?.cwd ||
       workspace.worktree?.checkout_path ||
-      systemHome;
+      (endpointKey === "local" ? systemHome : old?.cwd || "");
     return {
       id: old?.id || `herdr:${endpointKey}:${workspace.workspace_id}`,
       connection,
@@ -213,7 +217,27 @@ export function reconcileHerdrWorkspaces(
   const brandNew = [...bySnapshotId.keys()]
     .filter((id) => !existing.has(id))
     .map((id) => buildWorkspace(id));
-  const next = [...nextBase, ...brandNew];
+  // A workspace the host dropped is kept so it can be reopened - unless the
+  // host already has a live one at the same folder: then it is a stale
+  // double of that one, and a list of them is what a few restarts left.
+  const ownDropped = (workspace: Workspace) =>
+    Boolean(workspace.herdrId) &&
+    workspace.connection === connection &&
+    !bySnapshotId.has(workspace.herdrId!);
+  const all = [...nextBase, ...brandNew];
+  const liveFolders = new Set(
+    all
+      .filter(
+        (workspace) =>
+          workspace.herdrId &&
+          workspace.connection === connection &&
+          !ownDropped(workspace),
+      )
+      .map((workspace) => workspace.cwd),
+  );
+  const next = all.filter(
+    (workspace) => !(ownDropped(workspace) && liveFolders.has(workspace.cwd)),
+  );
   return sameWorkspaces(current, next) ? current : next;
 }
 

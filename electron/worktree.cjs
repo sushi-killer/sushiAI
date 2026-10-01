@@ -145,7 +145,8 @@ const PATH_SH =
  * branch. Plain sh and git, so the same script runs on this Mac and over
  * ssh. Merged means the head is in the base, or a commit with the same tree
  * on the merge base is (a squash merge); `commit-tree` only writes a
- * dangling object for that check. The base branch itself, and a branch that
+ * dangling object for that check, under an identity of its own so a host
+ * with no git user configured still answers. The base branch itself, and a branch that
  * never had a commit of its own (its reflog holds only its creation), are
  * never merged: removing them as merged would delete the base or a worktree
  * just cut. */
@@ -173,7 +174,7 @@ emit() {
     else
       a=$(git rev-list --count "$base..$h" 2>/dev/null || echo 0)
       mb=$(git merge-base "$base" "$h" 2>/dev/null)
-      if [ "$own" = 1 ] && [ -n "$mb" ] && c=$(git commit-tree "$h^{tree}" -p "$mb" -m squash 2>/dev/null); then
+      if [ "$own" = 1 ] && [ -n "$mb" ] && c=$(GIT_AUTHOR_NAME=sushiai GIT_AUTHOR_EMAIL=sushiai@localhost GIT_COMMITTER_NAME=sushiai GIT_COMMITTER_EMAIL=sushiai@localhost git commit-tree "$h^{tree}" -p "$mb" -m squash 2>/dev/null); then
         case $(git cherry "$base" "$c" 2>/dev/null) in -*) m=1 ;; esac
       fi
     fi

@@ -10,7 +10,21 @@ const {
   worktreeRemoveScript,
 } = require("../electron/worktree.cjs");
 
-const sh = (script) => execFileSync("sh", ["-c", script]).toString();
+// No git identity reaches the scripts, as on a CI runner or a fresh host:
+// HOME points nowhere and the global config is off.
+const sh = (script) =>
+  execFileSync("sh", ["-c", script], {
+    env: {
+      ...process.env,
+      HOME: os.tmpdir(),
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      // and git may not invent one from the host name, as it does on macOS.
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "user.useConfigOnly",
+      GIT_CONFIG_VALUE_0: "true",
+    },
+  }).toString();
 
 function git(cwd, ...args) {
   execFileSync("git", ["-C", cwd, ...args], {

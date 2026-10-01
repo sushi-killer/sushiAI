@@ -341,7 +341,7 @@ test("an agent typed with values runs in a subshell: they are gone from the pane
 });
 
 test("a remote pane runs a custom model: the key in its shell, the settings inline, neither key in the text", async (t) => {
-  const { remoteModelLaunch } = require("../electron/project-session.cjs");
+  const { modelLaunch } = require("../electron/project-session.cjs");
   const { quote } = require("../electron/connections.cjs");
   const { host, cwd, handlers } = await rig(t, { attach: false });
   const { prefix } = await handlers.get("project-session-env")({
@@ -350,13 +350,13 @@ test("a remote pane runs a custom model: the key in its shell, the settings inli
     agent: "claude",
     modelProfileId: "m1",
   });
-  const launch = await handlers.get("model-launch-remote")("m1");
+  const launch = await handlers.get("model-launch")("m1");
   assert.equal((prefix + launch).includes("invented-model-key"), false);
   const document = JSON.parse(
     launch.slice("claude --settings '".length, -1).replaceAll("'\\''", "'"),
   );
   assert.equal(document.env.ANTHROPIC_BASE_URL, "https://models.example.test");
-  assert.equal(launch, remoteModelLaunch(document.env));
+  assert.equal(launch, modelLaunch(document.env));
   // What Claude Code does with apiKeyHelper in the pane's shell.
   await host.connections.exec(
     host.endpoint,

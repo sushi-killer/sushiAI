@@ -12,7 +12,7 @@ const {
   accountLaunch,
   CODEX_SESSION,
   localCodexAuth,
-  remoteModelLaunch,
+  modelLaunch,
 } = require("../project-session.cjs");
 
 function remoteEnvPayload(env) {
@@ -147,9 +147,9 @@ function registerTerminalIpc({
       );
     },
   );
-  handle("model-launch-remote", async (modelProfileId) => {
+  handle("model-launch", async (modelProfileId) => {
     id(modelProfileId);
-    return remoteModelLaunch((await resolveModel(modelProfileId)).settings);
+    return modelLaunch((await resolveModel(modelProfileId)).settings);
   });
 
   const detectionTimer = setInterval(() => {

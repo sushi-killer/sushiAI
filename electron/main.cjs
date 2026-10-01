@@ -233,7 +233,6 @@ registerAppIpc({
   scanLocalSkills,
   manageSkill,
   userDataDir: () => app.getPath("userData"),
-  stageModelSettings,
 });
 let orchestrator;
 let devRestart = false;

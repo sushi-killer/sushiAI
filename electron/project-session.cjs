@@ -80,11 +80,11 @@ function sessionAccountId(project, sends, picked) {
   return picked || project?.sessions?.claudeAccount || undefined;
 }
 
-/** The command a remote pane starts Claude on a custom model with. The
- * settings carry no secret, so they ride inline on the command line; the
- * key is in the shell's environment (sent like a project value) and
- * apiKeyHelper reads it from there - no file has to outlive the start. */
-function remoteModelLaunch(settings) {
+/** The command a Herdr pane starts Claude on a custom model with, on any
+ * host. The settings carry no secret, so they ride inline on the command
+ * line; the key is in the agent's environment (sent like a project value)
+ * and apiKeyHelper reads it from there - no file outlives the start. */
+function modelLaunch(settings) {
   const document = {
     apiKeyHelper: 'printf %s "$SUSHIAI_MODEL_KEY"',
     env: settings,
@@ -149,8 +149,8 @@ async function sessionEnvPrefix(
     Object.assign(vars, launch.vars);
     settings = launch.settings;
   }
-  // A custom model's key, for the pane `remoteModelLaunch` starts.
-  if (modelProfileId && remote && resolveModel)
+  // A custom model's key, for the pane `modelLaunch` starts.
+  if (modelProfileId && resolveModel)
     vars.SUSHIAI_MODEL_KEY = (await resolveModel(modelProfileId)).key;
   const payload = envPayload(vars);
   if (!payload) return { prefix: "", settings: "", launch: "" };
@@ -187,6 +187,6 @@ module.exports = {
   accountLaunch,
   CODEX_SESSION,
   localCodexAuth,
-  remoteModelLaunch,
+  modelLaunch,
   envPayload,
 };

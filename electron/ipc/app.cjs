@@ -18,7 +18,6 @@ function registerAppIpc({
   scanLocalSkills,
   manageSkill,
   userDataDir,
-  stageModelSettings,
 }) {
   let skillsCatalogCache;
   let skillsCatalogScan;
@@ -217,9 +216,6 @@ function registerAppIpc({
   );
   handle("model-profiles-delete", (profileId) =>
     modelProviders.deleteProfile(profileId),
-  );
-  handle("model-settings-stage", (modelProfileId) =>
-    stageModelSettings(modelProfileId),
   );
 }
 

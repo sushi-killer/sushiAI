@@ -584,8 +584,7 @@ export interface Bridge {
     contextWindow?: number;
   }): Promise<ModelProfile>;
   modelProfilesDelete(id: string): Promise<void>;
-  modelSettingsStage(modelProfileId: string): Promise<string>;
-  modelLaunchRemote(modelProfileId: string): Promise<string>;
+  modelLaunch(modelProfileId: string): Promise<string>;
   claudeAccountsList(): Promise<ClaudeAccount[]>;
   claudeAccountsUpsert(input: {
     id?: string;

@@ -413,21 +413,12 @@ export function useWorkspaces({
     }
   }
   /** What a Herdr pane is sent to start an agent: the CLI's name, or - for
-   * Claude on a custom model - the command with its settings (a staged file
-   * here, inline on a remote host, whose key comes in the prefix). */
-  async function agentLaunchText(
-    endpoint: string,
-    agent: string,
-    modelProfileId?: string,
-  ) {
-    if (agent === "claude" && modelProfileId) {
-      if (endpoint.startsWith("ssh:"))
-        return window.bridge!.modelLaunchRemote(modelProfileId);
-      const settingsPath =
-        await window.bridge!.modelSettingsStage(modelProfileId);
-      return `claude --settings '${settingsPath}'`;
-    }
-    return agent;
+   * Claude on a custom model - the command with its settings inline (its key
+   * comes in the prefix). */
+  async function agentLaunchText(agent: string, modelProfileId?: string) {
+    return agent === "claude" && modelProfileId
+      ? window.bridge!.modelLaunch(modelProfileId)
+      : agent;
   }
   type AddPanelArgs = [
     PanelKind,
@@ -508,7 +499,6 @@ export function useWorkspaces({
         // shell command, so the model swap rides on that command line
         // instead of the argv/env injection the direct local launch uses.
         const launchText = await agentLaunchText(
-          endpoint,
           agent,
           kind === "agent" ? modelProfileId : undefined,
         );
@@ -650,11 +640,7 @@ export function useWorkspaces({
       const endpoint = owner.connection || socket;
       const launchText =
         ended.kind === "agent"
-          ? await agentLaunchText(
-              endpoint,
-              ended.agent || "claude",
-              ended.modelProfileId,
-            )
+          ? await agentLaunchText(ended.agent || "claude", ended.modelProfileId)
           : "";
       const target = owner.panels.find((p) => p.herdrId && !p.ended);
       let paneId: string;

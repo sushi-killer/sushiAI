@@ -44,20 +44,28 @@ async function seedCodexLogin(connections, endpoint, codexHome) {
     await connections.exec(endpoint, SEED_CODEX, { input: auth });
 }
 
-/** The variables a Claude account is used through: a subscription's OAuth
- * token, or an API key. */
-function accountVars(account) {
-  if (!account?.value) return {};
-  return account.kind === "subscription"
-    ? { CLAUDE_CODE_OAUTH_TOKEN: account.value }
-    : { ANTHROPIC_API_KEY: account.value };
+/** How a Claude account reaches a session: the variables to send and what
+ * to add to the `claude` command. A subscription's OAuth token is read from
+ * its variable; an API key goes through apiKeyHelper, because interactive
+ * Claude Code drops an env API key the user never approved (see
+ * `stageSettings` in model-providers.cjs). */
+function accountLaunch(account) {
+  if (!account?.value) return { vars: {}, settings: "" };
+  if (account.kind === "subscription")
+    return { vars: { CLAUDE_CODE_OAUTH_TOKEN: account.value }, settings: "" };
+  const document = { apiKeyHelper: 'printf %s "$SUSHIAI_ACCOUNT_KEY"' };
+  return {
+    vars: { SUSHIAI_ACCOUNT_KEY: account.value },
+    settings: ` --settings ${quote(JSON.stringify(document))}`,
+  };
 }
 
 /** The Claude account a session on a host runs as: the one picked for it,
- * else the project's own. A host switched off for the folder's project gets
- * none, like it gets none of the project's values. */
+ * else the project's own. An empty pick is "none" (the host's own login). A
+ * host switched off for the folder's project gets none, like it gets none of
+ * the project's values. */
 function sessionAccountId(project, sends, picked) {
-  if (project && !sends) return undefined;
+  if (picked === "" || (project && !sends)) return undefined;
   return picked || project?.sessions?.claudeAccount || undefined;
 }
 
@@ -74,12 +82,21 @@ function remoteModelLaunch(settings) {
 }
 
 /** What to type into a Herdr pane so the project's values and the session's
- * Claude account are in its shell: they go into a one-shot 0600 file (on the
- * host, over ssh stdin; here for the local machine), and the text typed only sources
- * and removes that file, so no value is ever in the text, the pane's history
- * or argv. Empty when there is nothing to send. */
+ * sign-in are in its shell: they go into a one-shot 0600 file (on the host,
+ * over ssh stdin; here for the local machine), and the text typed only
+ * sources and removes that file, so no value is ever in the text, the pane's
+ * history or argv. `settings` is what the `claude` command needs added for
+ * the account. Both empty when there is nothing to send. */
 async function sessionEnvPrefix(
-  { projects, connections, upload, remove, resolveAccount, resolveModel },
+  {
+    projects,
+    connections,
+    upload,
+    remove,
+    resolveAccount,
+    resolveModel,
+    seedCodex,
+  },
   { endpoint, cwd, claudeAccountId, agent, modelProfileId },
 ) {
   const project = await projectForFolder(
@@ -90,46 +107,58 @@ async function sessionEnvPrefix(
   const remote = typeof endpoint === "string" && endpoint.startsWith("ssh:");
   const host = remote ? endpoint : "local";
   const sends = project ? await projects.sendsValues(project.id, host) : false;
+  const withheld = Boolean(project) && !sends;
+  if (agent === "codex" && remote && !withheld && seedCodex)
+    await seedCodex(endpoint).catch(() => {});
   const vars = sends
     ? await projects.environmentFor(project.id, "agent", host)
     : {};
-  // A shell may run Claude later; another agent's pane never needs it.
+  let settings = "";
+  // Only Claude itself, and not on a custom model: that has its own key, and
+  // an account's key must never reach the model's gateway.
   const accountId =
-    !agent || agent === "claude"
+    agent === "claude" && !modelProfileId
       ? sessionAccountId(project, sends, claudeAccountId)
       : undefined;
-  if (accountId && resolveAccount)
-    Object.assign(vars, accountVars(await resolveAccount(accountId)));
+  if (accountId && resolveAccount) {
+    // The project's own account without a value yet: the session still gets
+    // the project's values, on the host's own login.
+    const account = await resolveAccount(accountId).catch((error) => {
+      if (claudeAccountId) throw error;
+      return null;
+    });
+    const launch = accountLaunch(account);
+    Object.assign(vars, launch.vars);
+    settings = launch.settings;
+  }
   // A custom model's key, for the pane `remoteModelLaunch` starts.
   if (modelProfileId && remote && resolveModel)
     vars.SUSHIAI_MODEL_KEY = (await resolveModel(modelProfileId)).key;
   const payload = envPayload(vars);
-  if (!payload) return "";
-  let file;
+  if (!payload) return { prefix: "", settings: "" };
   if (remote) {
-    file = await upload(endpoint, payload);
+    const file = await upload(endpoint, payload);
     // A file nothing sourced does not stay: gone after two minutes.
     const timer = setTimeout(() => void remove(endpoint, file), 120000);
     timer.unref?.();
-  } else {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sushiai-env-"));
-    file = path.join(dir, "env");
-    await fs.writeFile(file, payload, { mode: 0o600 });
-    const timer = setTimeout(
-      () => void fs.rm(dir, { recursive: true, force: true }),
-      120000,
-    );
-    timer.unref?.();
-    return `. ${quote(file)}; rm -rf ${quote(dir)}; `;
+    return { prefix: `. ${quote(file)}; rm -f ${quote(file)}; `, settings };
   }
-  return `. ${quote(file)}; rm -f ${quote(file)}; `;
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sushiai-env-"));
+  const file = path.join(dir, "env");
+  await fs.writeFile(file, payload, { mode: 0o600 });
+  const timer = setTimeout(
+    () => void fs.rm(dir, { recursive: true, force: true }),
+    120000,
+  );
+  timer.unref?.();
+  return { prefix: `. ${quote(file)}; rm -rf ${quote(dir)}; `, settings };
 }
 
 module.exports = {
   projectForFolder,
   sessionEnvPrefix,
   sessionAccountId,
-  accountVars,
+  accountLaunch,
   seedCodexLogin,
   remoteModelLaunch,
   envPayload,

@@ -219,11 +219,13 @@ export function reconcileHerdrWorkspaces(
     .map((id) => buildWorkspace(id));
   // A workspace the host dropped is kept so it can be reopened - unless the
   // host already has a live one at the same folder: then it is a stale
-  // double of that one, and a list of them is what a few restarts left.
+  // double of that one, and a list of them is what a few restarts left. One
+  // holding anything but Herdr panes (a chat, a local process) always stays.
   const ownDropped = (workspace: Workspace) =>
     Boolean(workspace.herdrId) &&
     workspace.connection === connection &&
-    !bySnapshotId.has(workspace.herdrId!);
+    !bySnapshotId.has(workspace.herdrId!) &&
+    workspace.panels.every((panel) => panel.herdrId);
   const all = [...nextBase, ...brandNew];
   const liveFolders = new Set(
     all
@@ -231,7 +233,7 @@ export function reconcileHerdrWorkspaces(
         (workspace) =>
           workspace.herdrId &&
           workspace.connection === connection &&
-          !ownDropped(workspace),
+          bySnapshotId.has(workspace.herdrId),
       )
       .map((workspace) => workspace.cwd),
   );

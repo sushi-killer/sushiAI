@@ -9,7 +9,7 @@ const {
   projectForFolder,
   sessionEnvPrefix,
   sessionAccountId,
-  accountVars,
+  accountLaunch,
   seedCodexLogin,
   remoteModelLaunch,
 } = require("../project-session.cjs");
@@ -20,14 +20,20 @@ function remoteEnvPayload(env) {
     .join("\n");
 }
 
-function remoteEnvBootstrap(cwd, command, envPath, tokenPath = null) {
+function remoteEnvBootstrap(
+  cwd,
+  command,
+  envPath,
+  tokenPath = null,
+  settings = "",
+) {
   const envSetup = envPath
     ? `trap 'rm -f ${quote(envPath)}${tokenPath ? ` ${quote(tokenPath)}` : ""}' EXIT HUP INT TERM; . ${quote(envPath)}; rm -f ${quote(envPath)};`
     : "";
   const tokenSetup = tokenPath
     ? `exec 3<${quote(tokenPath)}; rm -f ${quote(tokenPath)}; export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3;`
     : "";
-  const shell = `${envSetup} ${tokenSetup} cd ${quote(cwd)} && exec ${command ? quote(command) : '"${SHELL:-/bin/sh}" -l'}`;
+  const shell = `${envSetup} ${tokenSetup} cd ${quote(cwd)} && exec ${command ? quote(command) + settings : '"${SHELL:-/bin/sh}" -l'}`;
   return {
     shell,
   };
@@ -109,8 +115,6 @@ function registerTerminalIpc({
       if (claudeAccountId) id(claudeAccountId);
       if (modelProfileId) id(modelProfileId);
       const connections = getConnections();
-      if (agent === "codex")
-        await seedCodexLogin(connections, endpoint).catch(() => {});
       const sshFor = (host) => {
         const remote = connections.get(host);
         return {
@@ -118,7 +122,7 @@ function registerTerminalIpc({
           args: [...connections.args(remote), "-T", remote.host],
         };
       };
-      const prefix = await sessionEnvPrefix(
+      return sessionEnvPrefix(
         {
           projects,
           connections,
@@ -134,10 +138,10 @@ function registerTerminalIpc({
             ),
           resolveAccount: resolveClaudeAccount,
           resolveModel,
+          seedCodex: (host) => seedCodexLogin(connections, host),
         },
         { endpoint, cwd, claudeAccountId, agent, modelProfileId },
       );
-      return { prefix };
     },
   );
   handle("model-launch-remote", async (modelProfileId) => {
@@ -254,17 +258,30 @@ function registerTerminalIpc({
         // The account picked for the session goes with it whether or not the
         // folder has a project; the project's own only where its values go.
         let subscriptionToken = null;
+        let accountSettings = "";
+        const withheld = Boolean(ownProject) && !sendToHost;
         const accountId =
-          command === "claude"
+          command === "claude" && !modelProfileId
             ? sessionAccountId(ownProject, sendToHost, claudeAccountId)
             : undefined;
-        if (command === "codex")
+        if (command === "codex" && !withheld)
           await seedCodexLogin(connections, endpoint).catch(() => {});
         if (accountId && resolveClaudeAccount) {
-          const account = await resolveClaudeAccount(accountId);
-          if (account.kind === "subscription")
+          // The project's own account without a value yet runs on the host's
+          // login; one picked for the session has to work.
+          const account = await resolveClaudeAccount(accountId).catch(
+            (error) => {
+              if (claudeAccountId) throw error;
+              return null;
+            },
+          );
+          if (account?.kind === "subscription")
             subscriptionToken = account.value;
-          else Object.assign(projectEnv, accountVars(account));
+          else {
+            const launch = accountLaunch(account);
+            Object.assign(projectEnv, launch.vars);
+            accountSettings = launch.settings;
+          }
         }
         const sshArgs = [...connections.args(remote), "-T", remote.host];
         const envPayload = remoteEnvPayload(projectEnv);
@@ -295,6 +312,7 @@ function registerTerminalIpc({
           command,
           envPath,
           tokenPath,
+          accountSettings,
         );
         args = [
           ...connections.args(remote),

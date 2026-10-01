@@ -308,7 +308,9 @@ export function PanelPickerDialog({
               (profile) => profile.id === selectedModelProfileId,
             )
           : undefined,
-        agent === "claude" ? selectedClaudeAccountId || undefined : undefined,
+        // "" is a deliberate "none": the host's own login, not the
+        // project's account.
+        agent === "claude" ? selectedClaudeAccountId : undefined,
         backend,
         targetWorkspaceId,
         worktreeArg,

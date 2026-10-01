@@ -289,7 +289,7 @@ export function useWorkspaces({
           { label: name, cwd, focus: false },
         );
         await refreshHerdr(endpoint);
-        const prefix = await sessionPrefix(
+        const { prefix, settings } = await sessionPrefix(
           endpoint,
           cwd,
           starter === "shell" ? undefined : starter,
@@ -297,7 +297,7 @@ export function useWorkspaces({
         if (starter !== "shell" || prefix)
           await window.bridge!.herdr(endpoint, "pane.send_input", {
             pane_id: result.root_pane.pane_id,
-            text: starter === "shell" ? prefix : prefix + starter,
+            text: starter === "shell" ? prefix : prefix + starter + settings,
             keys: ["Enter"],
           });
         await refreshHerdr(endpoint);
@@ -371,18 +371,16 @@ export function useWorkspaces({
     modelProfileId?: string,
   ) {
     try {
-      return (
-        await window.bridge!.projectSessionEnv({
-          endpoint,
-          cwd,
-          agent,
-          claudeAccountId,
-          modelProfileId,
-        })
-      ).prefix;
+      return await window.bridge!.projectSessionEnv({
+        endpoint,
+        cwd,
+        agent,
+        claudeAccountId,
+        modelProfileId,
+      });
     } catch (error) {
       if (claudeAccountId || modelProfileId) throw error;
-      return "";
+      return { prefix: "", settings: "" };
     }
   }
   /** What a Herdr pane is sent to start an agent: the CLI's name, or - for
@@ -485,7 +483,7 @@ export function useWorkspaces({
           agent,
           kind === "agent" ? modelProfileId : undefined,
         );
-        const prefix = await sessionPrefix(
+        const { prefix, settings } = await sessionPrefix(
           endpoint,
           current.cwd,
           kind === "agent" ? agent : undefined,
@@ -504,7 +502,7 @@ export function useWorkspaces({
           if (kind === "agent" && paneId)
             await window.bridge.herdr(endpoint, "pane.send_input", {
               pane_id: paneId,
-              text: prefix + launchText,
+              text: prefix + launchText + settings,
               keys: ["Enter"],
             });
           await refreshHerdr(endpoint);
@@ -527,7 +525,7 @@ export function useWorkspaces({
         if (paneId && (kind === "agent" || prefix))
           await window.bridge.herdr(endpoint, "pane.send_input", {
             pane_id: paneId,
-            text: kind === "agent" ? prefix + launchText : prefix,
+            text: kind === "agent" ? prefix + launchText + settings : prefix,
             keys: ["Enter"],
           });
         await refreshHerdr(endpoint);
@@ -644,7 +642,7 @@ export function useWorkspaces({
         herdrWorkspaceId = result.workspace?.workspace_id;
       }
       if (!paneId) throw new Error("Herdr did not report the new pane.");
-      const prefix = await sessionPrefix(
+      const { prefix, settings } = await sessionPrefix(
         endpoint,
         owner.cwd,
         launchText ? ended.agent || "claude" : undefined,
@@ -654,7 +652,7 @@ export function useWorkspaces({
       if (launchText || prefix)
         await window.bridge.herdr(endpoint, "pane.send_input", {
           pane_id: paneId,
-          text: prefix + launchText,
+          text: prefix + launchText + (launchText ? settings : ""),
           keys: ["Enter"],
         });
       const next: Panel = {
@@ -664,21 +662,25 @@ export function useWorkspaces({
       };
       delete next.ended;
       setWorkspaces((list) =>
-        list
-          // A poll between the RPC and this update may have listed the new
-          // workspace on its own; the rebound one replaces that copy.
-          .filter(
-            (w) =>
-              !herdrWorkspaceId ||
-              w.id === owner.id ||
-              w.connection !== owner.connection ||
-              w.herdrId !== herdrWorkspaceId,
-          )
-          .map((w) =>
-            w.id === owner.id
-              ? reopenInSlot(w, panelId, next, herdrWorkspaceId)
-              : w,
-          ),
+        // A poll may have dropped the old workspace as a double of the new
+        // one: then the new one, already listed, is where the pane lives.
+        !list.some((w) => w.id === owner.id)
+          ? list
+          : list
+              // A poll between the RPC and this update may have listed the new
+              // workspace on its own; the rebound one replaces that copy.
+              .filter(
+                (w) =>
+                  !herdrWorkspaceId ||
+                  w.id === owner.id ||
+                  w.connection !== owner.connection ||
+                  w.herdrId !== herdrWorkspaceId,
+              )
+              .map((w) =>
+                w.id === owner.id
+                  ? reopenInSlot(w, panelId, next, herdrWorkspaceId)
+                  : w,
+              ),
       );
       disposeTerminal(panelId);
       window.bridge.terminalClose(panelId).catch(() => {});

@@ -5,9 +5,15 @@ const { execFile } = require("node:child_process");
  * installer or release. Prints one `SUSHIAI_SETUP <tool> <state>` line per
  * tool; installers' chatter goes to stderr. Safe to run again at any time. */
 const SETUP_SCRIPT = `set -u
-export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+# CLIs installed with npm (nvm, a user prefix) count as installed.
+for d in "$HOME"/.nvm/versions/node/*/bin "$HOME/.npm-global/bin"; do
+  [ -d "$d" ] && PATH="$PATH:$d"
+done
 have() { command -v "$1" >/dev/null 2>&1; }
 say() { printf 'SUSHIAI_SETUP %s %s\\n' "$1" "$2"; }
+# The app reads a host's files with python3; it is not installed here.
+have python3 || say python3 missing
 have curl || { say curl missing; exit 0; }
 if have herdr; then say herdr present
 elif curl -fsSL https://herdr.dev/install.sh | sh >&2 && have herdr; then say herdr installed
@@ -66,8 +72,34 @@ function setupSummary(states) {
   return [...done, ...failed].join(" · ");
 }
 
-/** Runs the setup on an SSH host (over its connection) or on the local machine. */
-async function setupHost(connections, endpoint) {
+/** What a Herdr server started here may see: it outlives the app and hands
+ * its environment to every pane, so nothing of the app's own (Electron, npm,
+ * a Claude Code session the app was started from) goes in. */
+function cleanEnvironment(env = process.env) {
+  const keep = ["HOME", "PATH", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR"];
+  return Object.fromEntries(
+    keep.filter((name) => env[name]).map((name) => [name, env[name]]),
+  );
+}
+
+/** Setups under way, by machine: a second connect waits for the first
+ * instead of running the installers twice. */
+const running = new Map();
+
+/** Runs the setup on an SSH host (over its connection) or on the local
+ * machine. */
+function setupHost(connections, endpoint) {
+  const key = typeof endpoint === "string" ? endpoint : "local";
+  if (!running.has(key)) {
+    const run = runSetup(connections, endpoint).finally(() =>
+      running.delete(key),
+    );
+    running.set(key, run);
+  }
+  return running.get(key);
+}
+
+async function runSetup(connections, endpoint) {
   const timeout = 10 * 60 * 1000;
   const output =
     typeof endpoint === "string" && endpoint.startsWith("ssh:")
@@ -79,7 +111,7 @@ async function setupHost(connections, endpoint) {
           const child = execFile(
             "/bin/sh",
             ["-s"],
-            { timeout, maxBuffer: 4 * 1024 * 1024 },
+            { timeout, maxBuffer: 4 * 1024 * 1024, env: cleanEnvironment() },
             (error, stdout) => (error ? reject(error) : resolve(stdout)),
           );
           child.stdin.end(SETUP_SCRIPT);
@@ -87,4 +119,10 @@ async function setupHost(connections, endpoint) {
   return parseSetup(output);
 }
 
-module.exports = { SETUP_SCRIPT, parseSetup, setupSummary, setupHost };
+module.exports = {
+  SETUP_SCRIPT,
+  parseSetup,
+  setupSummary,
+  setupHost,
+  cleanEnvironment,
+};

@@ -419,7 +419,7 @@ export interface Bridge {
     agent?: string;
     claudeAccountId?: string;
     modelProfileId?: string;
-  }): Promise<{ prefix: string }>;
+  }): Promise<{ prefix: string; settings: string }>;
   terminalOpen(options: {
     panelId: string;
     cwd: string;

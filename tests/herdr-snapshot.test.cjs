@@ -452,3 +452,32 @@ test("a workspace keeps its folder when a pane cds away, and a remote one never 
   );
   assert.equal(unknown[0].cwd, "");
 });
+
+test("a dropped workspace holding a non-Herdr panel stays even with a live double", async () => {
+  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
+  const host = "ssh:host-a";
+  const [first] = reconcileHerdrWorkspaces(
+    [],
+    snap(
+      [{ workspace_id: "w1", label: "app" }],
+      [pane("p1", "w1", { cwd: "/srv/app" })],
+    ),
+    host,
+  );
+  const withChat = {
+    ...first,
+    panels: [...first.panels, { id: "chat", kind: "chat", title: "Thread" }],
+  };
+  const next = reconcileHerdrWorkspaces(
+    [withChat],
+    snap(
+      [{ workspace_id: "w2", label: "app" }],
+      [pane("p2", "w2", { cwd: "/srv/app" })],
+    ),
+    host,
+  );
+  assert.deepEqual(
+    next.map((workspace) => workspace.id),
+    ["herdr:ssh:host-a:w1", "herdr:ssh:host-a:w2"],
+  );
+});

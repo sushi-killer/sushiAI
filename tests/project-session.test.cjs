@@ -63,7 +63,10 @@ async function rig(
     terminalPending: new Map(),
     stageModelSettings: async () => "",
     stageClaudeAccount: async () => ({}),
-    resolveClaudeAccount: async (id) => ACCOUNTS[id],
+    resolveClaudeAccount: async (id) => {
+      if (!ACCOUNTS[id]) throw new Error("Add a value for it first.");
+      return ACCOUNTS[id];
+    },
     resolveModel: async () => ({
       key: "invented-model-key",
       settings: { ANTHROPIC_BASE_URL: "https://models.example.test" },
@@ -152,7 +155,7 @@ test("a Herdr pane on a host switched off, or in a folder with no project, is ty
       endpoint: off.host.endpoint,
       cwd: off.cwd,
     }),
-    { prefix: "" },
+    { prefix: "", settings: "" },
   );
   const none = await rig(t, { attach: false });
   assert.deepEqual(
@@ -160,7 +163,7 @@ test("a Herdr pane on a host switched off, or in a folder with no project, is ty
       endpoint: none.host.endpoint,
       cwd: none.cwd,
     }),
-    { prefix: "" },
+    { prefix: "", settings: "" },
   );
 });
 
@@ -177,6 +180,7 @@ test("a Herdr pane gets the picked Claude account even in a folder with no proje
   const { prefix } = await handlers.get("project-session-env")({
     endpoint: host.endpoint,
     cwd,
+    agent: "claude",
     claudeAccountId: "sub",
   });
   assert.equal(prefix.includes("invented-oauth-token"), false);
@@ -187,17 +191,81 @@ test("a Herdr pane gets the picked Claude account even in a folder with no proje
   assert.deepEqual(await left(host), []);
 });
 
-test("a Herdr pane runs as the project's own account when none is picked, an API key as one", async (t) => {
+test("Claude runs as the project's own account when none is picked; an API key goes through apiKeyHelper", async (t) => {
+  const { quote } = require("../electron/connections.cjs");
   const { host, cwd, handlers } = await rig(t, {
     sessions: { claudeAccount: "key" },
   });
-  const { prefix } = await handlers.get("project-session-env")({
+  const { prefix, settings } = await handlers.get("project-session-env")({
     endpoint: host.endpoint,
     cwd,
+    agent: "claude",
+  });
+  assert.equal((prefix + settings).includes("invented-api-key"), false);
+  const document = JSON.parse(
+    settings.slice(" --settings '".length, -1).replaceAll("'\\''", "'"),
+  );
+  // Interactive Claude Code drops an unapproved env API key: none is sent,
+  // and apiKeyHelper prints the key from the shell's environment.
+  await host.connections.exec(
+    host.endpoint,
+    `${prefix}printf '%s|' "$ANTHROPIC_API_KEY" > "$HOME/seen"; sh -c ${quote(document.apiKeyHelper)} >> "$HOME/seen"`,
+  );
+  assert.equal(
+    await fs.readFile(path.join(host.home, "seen"), "utf8"),
+    "|invented-api-key",
+  );
+});
+
+test("no account goes with a custom model, an empty pick, another agent, or an account with no value", async (t) => {
+  const { host, cwd, handlers } = await rig(t, {
+    sessions: { claudeAccount: "sub" },
+  });
+  const ask = (extra) =>
+    handlers.get("project-session-env")({
+      endpoint: host.endpoint,
+      cwd,
+      agent: "claude",
+      ...extra,
+    });
+  for (const extra of [
+    { modelProfileId: "m1" },
+    { claudeAccountId: "" },
+    { agent: "codex" },
+  ]) {
+    const { prefix, settings } = await ask(extra);
+    assert.equal(settings, "");
+    assert.equal(
+      await seen(host, prefix, ["APP_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]),
+      `${SECRET}||`,
+      JSON.stringify(extra),
+    );
+  }
+  // The project's account has no value yet: the values still arrive.
+  const empty = await rig(t, { sessions: { claudeAccount: "unset" } });
+  const { prefix } = await empty.handlers.get("project-session-env")({
+    endpoint: empty.host.endpoint,
+    cwd: empty.cwd,
+    agent: "claude",
+  });
+  assert.equal(await seen(empty.host, prefix, ["APP_TOKEN"]), `${SECRET}|`);
+});
+
+test("a host switched off for the project gets no Codex login", async (t) => {
+  const { host, cwd, handlers } = await rig(t, { withheld: true });
+  // The real seeder runs: with a local Codex login, a seeded host would have
+  // ~/.codex.
+  await handlers.get("project-session-env")({
+    endpoint: host.endpoint,
+    cwd,
+    agent: "codex",
   });
   assert.equal(
-    await seen(host, prefix, ["APP_TOKEN", "ANTHROPIC_API_KEY"]),
-    `${SECRET}|invented-api-key|`,
+    await fs.stat(path.join(host.home, ".codex")).then(
+      () => true,
+      () => false,
+    ),
+    false,
   );
 });
 
@@ -209,7 +277,7 @@ test("a host switched off for the project gets no Claude account either", async 
       cwd,
       claudeAccountId: "sub",
     }),
-    { prefix: "" },
+    { prefix: "", settings: "" },
   );
 });
 

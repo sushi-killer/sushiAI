@@ -1,5 +1,72 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
+const { herdrWorkspaceKey: key } = require("../src/workspace/worktree.ts");
+
+test("Herdr reconciliation keeps the checkout and every saved workspace field", async () => {
+  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
+  const current = [
+    {
+      id: "saved-workspace",
+      herdrId: "workspace-1",
+      connection: "/tmp/herdr.sock",
+      name: "App",
+      cwd: "/work/checkout",
+      panels: [],
+      layout: null,
+      metadata: { layoutOwner: "saved" },
+    },
+  ];
+  const snapshot = {
+    version: "1",
+    workspaces: [
+      {
+        workspace_id: "workspace-1",
+        label: "App",
+        worktree: { checkout_path: "/work/checkout" },
+      },
+      { workspace_id: "intentional-copy", label: "Another session" },
+    ],
+    panes: [
+      {
+        pane_id: "a",
+        workspace_id: "workspace-1",
+        cwd: "/work/checkout/subdir",
+        agent_status: "idle",
+      },
+      {
+        pane_id: "b",
+        workspace_id: "intentional-copy",
+        cwd: "/work/checkout",
+        agent_status: "idle",
+      },
+    ],
+  };
+  const next = reconcileHerdrWorkspaces(current, snapshot, "/tmp/herdr.sock");
+  assert.equal(next[0].cwd, "/work/checkout");
+  assert.deepEqual(next[0].metadata, { layoutOwner: "saved" });
+  assert.equal(
+    next.length,
+    2,
+    "intentional sessions in one checkout stay accessible",
+  );
+  const afterCd = reconcileHerdrWorkspaces(
+    next,
+    {
+      ...snapshot,
+      workspaces: snapshot.workspaces.map((w) => ({
+        ...w,
+        worktree: undefined,
+      })),
+      panes: snapshot.panes.map((p) => ({ ...p, cwd: "/work/elsewhere" })),
+    },
+    "/tmp/herdr.sock",
+  );
+  assert.equal(
+    afterCd[0].cwd,
+    "/work/checkout",
+    "pane cd never changes a saved project's checkout",
+  );
+});
 
 test("Herdr reconciliation indexes panes and keeps identical snapshots referentially stable", async () => {
   const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
@@ -31,7 +98,7 @@ test("Herdr reconciliation indexes panes and keeps identical snapshots referenti
   assert.equal(first.length, 1);
   assert.deepEqual(
     first[0].panels.map((panel) => panel.id),
-    ["herdr:local:pane-1", "herdr:local:pane-2"],
+    [key("/tmp/herdr", "pane-1"), key("/tmp/herdr", "pane-2")],
   );
   assert.equal(first[0].panels[1].title, "Codex");
 
@@ -97,7 +164,7 @@ test("Herdr reconciliation indexes panes and keeps identical snapshots referenti
   );
   assert.deepEqual(
     changed[0].panels.map((panel) => panel.id),
-    ["herdr:local:pane-2", "herdr:local:pane-1", "local"],
+    [key("/tmp/herdr", "pane-2"), key("/tmp/herdr", "pane-1"), "local"],
   );
   assert.equal(changed[0].panels[1].ended, true);
   assert.equal(changed[0].panels[0].ended, undefined);
@@ -164,7 +231,10 @@ test("Herdr reconciliation builds a large workspace without recursive layout ove
     },
     "/tmp/herdr",
   );
-  assert.deepEqual(single[0].layout, { type: "leaf", id: "herdr:local:only" });
+  assert.deepEqual(single[0].layout, {
+    type: "leaf",
+    id: key("/tmp/herdr", "only"),
+  });
 
   const importedIntoEmpty = reconcileHerdrWorkspaces(
     [
@@ -189,7 +259,7 @@ test("Herdr reconciliation builds a large workspace without recursive layout ove
   );
   assert.deepEqual(importedIntoEmpty[0].layout, {
     type: "leaf",
-    id: "herdr:local:only",
+    id: key("/tmp/herdr", "only"),
   });
 });
 
@@ -255,7 +325,10 @@ test("Herdr refresh keeps hidden sessions and chat-only panels out of Code", asy
     "/tmp/herdr",
     "/home/test",
   );
-  assert.equal(contains(withNewPane[0].layout, "herdr:local:pane-2"), true);
+  assert.equal(
+    contains(withNewPane[0].layout, key("/tmp/herdr", "pane-2")),
+    true,
+  );
   assert.equal(contains(withNewPane[0].layout, "herdr:local:pane-1"), false);
   assert.equal(contains(withNewPane[0].layout, "chat-only"), false);
 });
@@ -280,8 +353,8 @@ test("a pane missing from the snapshot keeps its layout slot, marked ended", asy
   assert.deepEqual(
     ended[0].panels.map((panel) => [panel.id, panel.ended]),
     [
-      ["herdr:local:a", undefined],
-      ["herdr:local:b", true],
+      [key("local", "a"), undefined],
+      [key("local", "b"), true],
     ],
   );
   assert.equal(ended[0].panels[1].status, undefined);
@@ -291,12 +364,15 @@ test("a pane missing from the snapshot keeps its layout slot, marked ended", asy
     first[0].layout,
     "the layout, and so the slot, is untouched",
   );
-  assert.equal(JSON.stringify(ended[0].layout).includes("herdr:local:b"), true);
+  assert.equal(
+    JSON.stringify(ended[0].layout).includes(key("local", "b")),
+    true,
+  );
   // The same poll again changes nothing, down to object identity.
   assert.strictEqual(reconcileHerdrWorkspaces(ended, oneLeft, "local"), ended);
   // The pane coming back clears the mark and keeps its id.
   const back = reconcileHerdrWorkspaces(ended, both, "local");
-  assert.equal(back[0].panels[1].id, "herdr:local:b");
+  assert.equal(back[0].panels[1].id, key("local", "b"));
   assert.equal("ended" in back[0].panels[1], false);
 });
 
@@ -308,7 +384,7 @@ test("a pane hidden from the layout is dropped, not ended, when it goes", async 
     "local",
   );
   const hidden = [
-    { ...first[0], layout: { type: "leaf", id: "herdr:local:a" } },
+    { ...first[0], layout: { type: "leaf", id: key("local", "a") } },
   ];
   const next = reconcileHerdrWorkspaces(
     hidden,
@@ -317,7 +393,7 @@ test("a pane hidden from the layout is dropped, not ended, when it goes", async 
   );
   assert.deepEqual(
     next[0].panels.map((panel) => panel.id),
-    ["herdr:local:a"],
+    [key("local", "a")],
   );
 });
 
@@ -351,7 +427,7 @@ test("a workspace missing from the snapshot stays with every Herdr pane ended", 
   );
   assert.deepEqual(
     next.map((workspace) => workspace.id),
-    ["herdr:local:w1", "herdr:local:w2", "plain"],
+    [key("local", "w1"), key("local", "w2"), "plain"],
   );
   assert.equal(next[0].panels[0].ended, true);
   assert.strictEqual(next[0].layout, first[0].layout);
@@ -381,12 +457,12 @@ test("a workspace rebound to a new Herdr id adopts it and keeps its panels", asy
     "local",
   );
   assert.equal(next.length, 1);
-  assert.equal(next[0].id, "herdr:local:w1");
+  assert.equal(next[0].id, key("local", "w1"));
   assert.deepEqual(
     next[0].panels.map((panel) => [panel.id, Boolean(panel.ended)]),
     [
-      ["herdr:local:n", false],
-      ["herdr:local:a", true],
+      [key("local", "n"), false],
+      [key("local", "a"), true],
     ],
   );
 });
@@ -419,7 +495,7 @@ test("a dropped workspace is removed once the host has a live one at the same fo
   );
   assert.deepEqual(
     next.map((workspace) => workspace.id),
-    ["herdr:ssh:host-a:w7", "herdr:ssh:host-a:w9"],
+    [key(host, "w7"), key(host, "w9")],
   );
 });
 
@@ -481,7 +557,7 @@ test("a dropped workspace folds into its folder's live one: its chat moves, its 
       workspace.id,
       workspace.panels.map((panel) => panel.id),
     ]),
-    [["herdr:ssh:host-a:w2", ["herdr:ssh:host-a:p2", "chat"]]],
+    [[key(host, "w2"), [key(host, "p2"), "chat"]]],
   );
 });
 
@@ -519,6 +595,6 @@ test("two dropped workspaces of one folder, nothing live, become one", async () 
       workspace.id,
       workspace.panels.map((panel) => panel.id),
     ]),
-    [["herdr:local:w1", ["herdr:local:p1", "chat"]]],
+    [[key("local", "w1"), [key("local", "p1"), "chat"]]],
   );
 });

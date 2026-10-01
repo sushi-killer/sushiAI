@@ -7,6 +7,7 @@ import type { Panel } from "./types";
 import { fitTerminal, queueTerminalFit } from "./terminal-sizing";
 import { installTerminalInteractions } from "./terminal-interactions";
 import { createTerminalLinkProvider, openTerminalLink } from "./terminal-links";
+import { createTerminalOutput, createTerminalInput } from "./terminal-output";
 import "@xterm/xterm/css/xterm.css";
 
 type CachedTerminal = {
@@ -20,7 +21,6 @@ type CachedTerminal = {
   notify?: () => void;
   requestFit?: () => void;
   selectionPaused?: boolean;
-  resumeSelection?: () => void;
   transfer?: string;
   disposeInteractions?: () => void;
   cols: number;
@@ -63,7 +63,7 @@ export function TerminalPanel({
    * a merged workspace's local (non-Herdr) pane still gets the label alone. */
   hostLabel?: string;
   onStart(): void;
-  /** Starts a new pane in place of an ended Herdr one. */
+  /** Reopens an ended pane or retries preparation of its existing session. */
   onReopen(): void;
 }) {
   const host = useRef<HTMLDivElement>(null);
@@ -136,36 +136,55 @@ export function TerminalPanel({
       };
       cache.set(panel.id, runtime);
       const entry = runtime;
-      const pending: string[] = [];
+      const streamId = panel.herdrId ? crypto.randomUUID() : undefined;
       let selecting = false;
-      let selectedOutput = "";
+      const delivery = createTerminalOutput({
+        streamId,
+        write: (data, done) => terminal.write(data, done),
+        reset: () => terminal.reset(),
+        ack: (token, sequence) => {
+          window
+            .bridge!.terminalAck(panel.id, token, sequence)
+            .catch((error) => {
+              entry.exited = true;
+              entry.error = error.message;
+              delivery.close();
+              entry.notify?.();
+              void window.bridge!.terminalClose(panel.id);
+            });
+        },
+        fail: (message) => {
+          entry.exited = true;
+          entry.error = message;
+          entry.notify?.();
+          void window.bridge!.terminalClose(panel.id);
+        },
+      });
       entry.unsubscribe = window.bridge.onTerminal((event) => {
-        if (event.panelId !== panel.id) return;
+        if (event.panelId !== panel.id || !delivery.accepts(event.streamId))
+          return;
         if (event.agent !== undefined)
           attachmentsAllowed.current = !!event.agent;
-        if (event.data) {
-          if (entry.ready && selecting && panel.herdrId) {
-            selectedOutput += event.data;
-            if (selectedOutput.length > 2 * 1024 * 1024) {
-              entry.resumeSelection?.();
-            }
-          } else if (entry.ready) terminal.write(event.data);
-          else pending.push(event.data);
-        }
+        if (event.data || event.sequence) delivery.push(event);
         if (event.exitCode !== undefined) {
           entry.exited = true;
-          entry.error = panel.herdrId
-            ? "Stream disconnected. Reconnect to resume. If another app owns this terminal, detach it first."
-            : "Process exited. Reconnect to start a new shell.";
+          entry.error =
+            event.error ||
+            (panel.herdrId
+              ? "Stream disconnected. Reconnect to resume. If another app owns this terminal, detach it first."
+              : "Process exited. Reconnect to start a new shell.");
           entry.notify?.();
         }
       });
+      const input = createTerminalInput(
+        (data) => window.bridge!.terminalWrite(panel.id, data),
+        (message) => {
+          entry.error = message;
+          entry.notify?.();
+        },
+      );
       const sendInput = (data: string) => {
-        if (entry.ready && !entry.exited)
-          window.bridge!.terminalWrite(panel.id, data).catch((e) => {
-            entry.error = e.message;
-            entry.notify?.();
-          });
+        if (entry.ready && !entry.exited) input.send(data);
       };
       terminal.onData(sendInput);
       const interactions = installTerminalInteractions(
@@ -188,17 +207,15 @@ export function TerminalPanel({
           entry.selectionPaused = !!panel.herdrId && active;
           entry.notify?.();
           if (!active) entry.requestFit?.();
-          if (!active && selectedOutput) {
-            terminal.write(selectedOutput);
-            selectedOutput = "";
-          }
+          if (panel.herdrId) delivery.pause(active);
         },
       );
       entry.disposeInteractions = () => {
+        delivery.close();
+        input.close();
         links.dispose();
         interactions();
       };
-      entry.resumeSelection = interactions.resume;
       // Paste or drop a screenshot and the terminal receives its path, which is
       // what Claude Code and the other agent CLIs read an image from.
       let uploads = Promise.resolve();
@@ -277,6 +294,7 @@ export function TerminalPanel({
           cwd,
           endpoint: panel.herdrId ? socket : endpoint,
           herdrId: panel.herdrId,
+          streamId,
           command: panel.kind === "agent" ? panel.agent || "claude" : undefined,
           modelProfileId:
             panel.kind === "agent" ? panel.modelProfileId : undefined,
@@ -289,13 +307,12 @@ export function TerminalPanel({
         })
         .then((result) => {
           if (cache.get(panel.id) !== entry) return;
-          terminal.write(result.history);
-          pending.forEach((data) => terminal.write(data));
+          if (result.history) delivery.push({ data: result.history });
           entry.ready = true;
           entry.exited = entry.exited || !!result.exited;
           if (entry.exited)
             entry.error = "Session ended. Reconnect to continue.";
-          pending.length = 0;
+          delivery.start();
           entry.requestFit?.();
           entry.notify?.();
         })
@@ -438,28 +455,38 @@ export function TerminalPanel({
           {transfer}
         </div>
       )}
-      {error && (
+      {(error || panel.launchError) && (
         <div className="panel-error" role="alert">
-          {error}
-          <button
-            className="terminal-reconnect"
-            onClick={async () => {
-              if (!disconnected) {
-                currentErrorDismiss();
-                return;
-              }
-              try {
-                await window.bridge?.terminalClose(panel.id);
-                disposeTerminal(panel.id);
-                setError("");
-                setAttempt((a) => a + 1);
-              } catch (e) {
-                setError(e instanceof Error ? e.message : String(e));
-              }
-            }}
-          >
-            {disconnected ? "Reconnect" : "Dismiss"}
-          </button>
+          {panel.launchError && (
+            <div>
+              {panel.launchError}
+              <button className="terminal-reconnect" onClick={onReopen}>
+                Retry preparation
+              </button>
+            </div>
+          )}
+          {error && <div>{error}</div>}
+          {error && (
+            <button
+              className="terminal-reconnect"
+              onClick={async () => {
+                if (!disconnected) {
+                  currentErrorDismiss();
+                  return;
+                }
+                try {
+                  await window.bridge?.terminalClose(panel.id);
+                  disposeTerminal(panel.id);
+                  setError("");
+                  setAttempt((a) => a + 1);
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : String(e));
+                }
+              }}
+            >
+              {disconnected ? "Reconnect" : "Dismiss"}
+            </button>
+          )}
         </div>
       )}
       {(hostLabel || panel.herdrId) && (

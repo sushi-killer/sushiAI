@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const library = import("../src/workspaceState.ts");
+const { herdrWorkspaceKey } = require("../src/workspace/worktree.ts");
 const helper = require("../electron/workspace-snapshot.cjs");
 
 const leaf = (id) => ({ type: "leaf", id });
@@ -35,7 +36,7 @@ function busySnapshot() {
   const panels = [
     { id: "local-term", kind: "terminal", title: "zsh", ...runtime },
     {
-      id: "herdr-term",
+      id: herdrWorkspaceKey("/tmp/herdr.sock", "pane-1"),
       kind: "terminal",
       title: "zsh",
       herdrId: "pane-1",
@@ -51,7 +52,7 @@ function busySnapshot() {
       ...runtime,
     },
     {
-      id: "herdr-agent",
+      id: herdrWorkspaceKey("/tmp/herdr.sock", "pane-2"),
       kind: "agent",
       title: "Claude Code",
       agent: "claude",
@@ -109,7 +110,7 @@ function busySnapshot() {
       ...runtime,
     },
     {
-      id: "gone",
+      id: herdrWorkspaceKey("/tmp/herdr.sock", "pane-9"),
       kind: "terminal",
       title: "zsh",
       herdrId: "pane-9",
@@ -126,12 +127,24 @@ function busySnapshot() {
       "s2",
       "column",
       0.61,
-      split("s3", "row", 0.29, leaf("herdr-term"), leaf("local-agent")),
+      split(
+        "s3",
+        "row",
+        0.29,
+        leaf(herdrWorkspaceKey("/tmp/herdr.sock", "pane-1")),
+        leaf("local-agent"),
+      ),
       split(
         "s4",
         "column",
         0.44,
-        split("s5", "row", 0.71, leaf("herdr-agent"), leaf("browser")),
+        split(
+          "s5",
+          "row",
+          0.71,
+          leaf(herdrWorkspaceKey("/tmp/herdr.sock", "pane-2")),
+          leaf("browser"),
+        ),
         split(
           "s6",
           "row",
@@ -142,7 +155,13 @@ function busySnapshot() {
             "column",
             0.82,
             leaf("orch"),
-            split("s8", "row", 0.33, leaf("ext"), leaf("gone")),
+            split(
+              "s8",
+              "row",
+              0.33,
+              leaf("ext"),
+              leaf(herdrWorkspaceKey("/tmp/herdr.sock", "pane-9")),
+            ),
           ),
         ),
       ),
@@ -158,7 +177,7 @@ function busySnapshot() {
         layout,
       },
       {
-        id: "herdr:local:w1",
+        id: herdrWorkspaceKey("/tmp/herdr.sock", "w1"),
         name: "remote",
         cwd: "/work/remote",
         herdrId: "w1",
@@ -193,7 +212,7 @@ function busySnapshot() {
         "column",
         0.4,
         leaf("local-term"),
-        leaf("herdr-term"),
+        leaf(herdrWorkspaceKey("/tmp/herdr.sock", "pane-1")),
       ),
     },
     agentTabs: [

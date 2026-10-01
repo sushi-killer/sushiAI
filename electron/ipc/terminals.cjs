@@ -4,6 +4,7 @@ const { quote } = require("../connections.cjs");
 const { openHerdrStream, detectAgent } = require("../terminal-stream.cjs");
 const { terminalEnvironment } = require("../terminal-text.cjs");
 const { storeTerminalAttachment } = require("../terminal-attachments.cjs");
+const { validatePanelId } = require("./panel-id.cjs");
 const { spawn } = require("node:child_process");
 const {
   projectForFolder,
@@ -111,6 +112,7 @@ function registerTerminalIpc({
   codexAuth = localCodexAuth,
   projects,
   sshBinary = "/usr/bin/ssh",
+  openStream = openHerdrStream,
 }) {
   // A Herdr pane starts a shell the app does not launch: the values it needs
   // are handed over as a one-shot file whose sourcing is typed into the pane.
@@ -202,47 +204,82 @@ function registerTerminalIpc({
       claudeAccountId,
       codexAccountId,
       projectId,
+      streamId,
     }) => {
-      id(panelId);
+      validatePanelId(panelId);
       if (codexAccountId) id(codexAccountId);
-      if (terminals.has(panelId))
+      if (
+        streamId !== undefined &&
+        (typeof streamId !== "string" ||
+          !/^[a-zA-Z0-9-]{1,100}$/.test(streamId))
+      )
+        throw new Error("Invalid terminal stream generation");
+      const existing = terminals.get(panelId);
+      if (existing && herdrId && streamId && existing.streamId !== streamId) {
+        if (existing.opening) existing.opening.cancelled = true;
+        terminals.delete(panelId);
+      } else if (existing)
         return {
-          history: terminals.get(panelId).history,
-          exited: terminals.get(panelId).exited,
+          history: existing.history,
+          exited: existing.exited,
+          streamId: existing.streamId,
         };
       const connections = getConnections();
       let remoteEnvBootstrapData;
       if (herdrId) {
         id(herdrId);
-        if (terminalPending.has(panelId)) {
-          const pending = terminalPending.get(panelId);
-          const entry = await pending.promise;
-          return { history: entry.history, exited: entry.exited };
+        const previous = terminalPending.get(panelId);
+        if (
+          previous &&
+          !previous.cancelled &&
+          (!streamId || previous.streamId === streamId)
+        ) {
+          const entry = await previous.promise;
+          return {
+            history: entry?.history || "",
+            exited: entry ? entry.exited : true,
+            streamId: entry?.streamId,
+          };
         }
-        const pending = { cancelled: false, endpoint };
+        if (previous) previous.cancelled = true;
+        const pending = { cancelled: false, endpoint, streamId };
         terminalPending.set(panelId, pending);
-        pending.promise = openHerdrStream({
-          endpoint,
-          panelId,
-          target: herdrId,
-          cols,
-          rows,
-          connections,
-          binary: executable("herdr"),
-          send: (channel, event) => {
-            if (!pending.cancelled) send(channel, event);
-          },
-        });
-        try {
-          const entry = await pending.promise;
+        pending.promise = (async () => {
+          if (previous) {
+            const priorEntry = await previous.promise.catch(() => null);
+            if (priorEntry) await priorEntry.proc.kill();
+          }
+          if (existing) await existing.proc.kill();
+          if (pending.cancelled) return null;
+          const entry = await openStream({
+            endpoint,
+            panelId,
+            target: herdrId,
+            cols,
+            rows,
+            connections,
+            binary: executable("herdr"),
+            streamId,
+            send: (channel, event) => {
+              if (!pending.cancelled) send(channel, event);
+            },
+          });
           if (pending.cancelled) {
-            entry.proc.kill();
-            return { history: "", exited: true };
+            await entry.proc.kill();
+            return null;
           }
           terminals.set(panelId, entry);
           entry.opening = pending;
           entry.endpoint = endpoint;
-          return { history: "" };
+          return entry;
+        })();
+        try {
+          const entry = await pending.promise;
+          return {
+            history: "",
+            streamId: entry?.streamId,
+            exited: entry ? entry.exited : true,
+          };
         } finally {
           if (terminalPending.get(panelId) === pending)
             terminalPending.delete(panelId);
@@ -496,17 +533,32 @@ function registerTerminalIpc({
       lines < 1000
     )
       return terminals
-        .get(id(panelId))
+        .get(validatePanelId(panelId))
         ?.proc.scroll?.(direction, lines, position);
   });
   handle("terminal-write", (panelId, data) => {
     if (typeof data !== "string" || data.length > 1000000)
       throw new Error("Invalid input");
-    terminals.get(id(panelId))?.proc.write(data);
+    const terminal = terminals.get(validatePanelId(panelId));
+    if (!terminal || terminal.exited)
+      throw new Error(
+        "Terminal stream is disconnected. Reconnect before sending input.",
+      );
+    return terminal.proc.write(data);
+  });
+  handle("terminal-ack", (panelId, streamId, sequence) => {
+    if (
+      typeof streamId !== "string" ||
+      streamId.length > 100 ||
+      !Number.isSafeInteger(sequence) ||
+      sequence < 1
+    )
+      throw new Error("Invalid terminal acknowledgement");
+    terminals.get(validatePanelId(panelId))?.ack?.(streamId, sequence);
   });
   handle("terminal-attach", async ({ panelId, name, data }) =>
     storeTerminalAttachment({
-      terminal: terminals.get(id(panelId)),
+      terminal: terminals.get(validatePanelId(panelId)),
       name,
       data,
       dataDir: app.getPath("userData"),
@@ -523,19 +575,33 @@ function registerTerminalIpc({
       rows > 300
     )
       return;
-    const terminal = terminals.get(id(panelId));
-    if (terminal && !terminal.exited) terminal.proc.resize(cols, rows);
+    const terminal = terminals.get(validatePanelId(panelId));
+    if (terminal && !terminal.exited) return terminal.proc.resize(cols, rows);
   });
   handle("terminal-close", (panelId) => {
-    const pending = terminalPending.get(id(panelId));
-    if (pending) {
-      pending.cancelled = true;
-      terminalPending.delete(panelId);
-    }
-    const terminal = terminals.get(id(panelId));
+    const pending = terminalPending.get(validatePanelId(panelId));
+    if (pending) pending.cancelled = true;
+    const terminal = terminals.get(validatePanelId(panelId));
     if (terminal?.opening) terminal.opening.cancelled = true;
-    if (terminal && !terminal.exited) terminal.proc.kill();
     terminals.delete(panelId);
+    if (terminal?.source === "herdr") {
+      const release = {
+        cancelled: true,
+        endpoint: terminal.endpoint,
+        streamId: terminal.streamId,
+      };
+      terminalPending.set(panelId, release);
+      release.promise = Promise.resolve()
+        .then(() => terminal.proc.kill())
+        .then(() => null)
+        .finally(() => {
+          if (terminalPending.get(panelId) === release)
+            terminalPending.delete(panelId);
+        });
+      return release.promise;
+    }
+    if (terminal && !terminal.exited) terminal.proc.kill();
+    return pending?.promise;
   });
 
   return {

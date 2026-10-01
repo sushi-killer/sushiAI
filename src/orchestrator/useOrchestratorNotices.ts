@@ -16,6 +16,7 @@ type Shell = {
     agent?: string,
     filesTarget?: undefined,
     modelProfile?: undefined,
+    accountId?: string,
     backend?: "herdr" | "local",
     targetWorkspaceId?: string,
   ): Promise<void>;
@@ -73,6 +74,7 @@ export function useOrchestratorNotices(shell: Shell) {
       void addPanel(
         "orchestrator",
         "claude",
+        undefined,
         undefined,
         undefined,
         "local",

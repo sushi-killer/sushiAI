@@ -8,4 +8,9 @@ export const errorText = (error: unknown) =>
 
 /** Herdr no longer has the pane or workspace the app still remembers. */
 export const isGone = (error: unknown) =>
-  /no longer open on the host/i.test(errorText(error));
+  typeof error === "object" &&
+  error !== null &&
+  "code" in error &&
+  ["pane_not_found", "workspace_not_found", "HERDR_GONE"].includes(
+    String(error.code),
+  );

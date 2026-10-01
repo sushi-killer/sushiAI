@@ -48,7 +48,9 @@ Local terminals stop when sushiAI quits. Herdr sessions continue independently o
 
 ## Connect to Herdr
 
-Install and start [Herdr](https://github.com/ogulcancelik/herdr) before connecting. Compatibility has been tested with Herdr **0.8.0 / protocol 19**. Local terminals also work without Herdr.
+Install and start [Herdr](https://github.com/herdrdev/herdr) before connecting. The verified release, protocol, required capabilities, and asset checksums are defined in [the Herdr contract](electron/herdr-contract.cjs). Local terminals also work without Herdr.
+
+In **Settings → Connections**, **Check compatibility** checks the running daemon and terminal CLI separately, on the selected local or SSH endpoint. **Install verified Herdr CLI** installs the pinned, checksum-verified CLI in an application-managed directory; it does not replace your running daemon. Start that verified release on your chosen socket and check compatibility again. Incompatible installations are reported before a terminal stream opens.
 
 The default local socket is `~/.config/herdr/herdr.sock`. Set another socket in Settings or through `HERDR_SOCKET_PATH`.
 
@@ -62,6 +64,8 @@ For a remote project:
 Named Herdr sessions usually use `~/.config/herdr/sessions/<session-name>/herdr.sock`. The remote host needs Herdr, Python 3, Git, and the agent CLIs you want to run.
 
 sushiAI uses your system SSH configuration, keys, and agent. Remote browser URLs such as `http://localhost:3000` are forwarded through SSH automatically. A Herdr terminal supports one controlling client; if another client holds control, disconnect it before choosing **Reconnect**.
+
+Local sockets have separate workspace and panel identities. Existing saved layouts migrate once without removing live sessions, local panels, or conversations. New project launches reuse their canonical checkout on its host, while separate worktrees and checkouts remain separate. Failed agent preparation offers **Retry preparation** on the already-created session. See [Herdr stability evidence](docs/HERDR-STABILITY.md) for measurements and reproduction commands.
 
 ## Files and editing
 

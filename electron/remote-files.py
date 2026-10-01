@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import copy
+import shlex
 
 LIMIT = 16 * 1024 * 1024
 MAX_MCP_NAME = 200
@@ -579,6 +580,46 @@ def claude_plugins(data):
 
 def inspect(data):
     operation = data["operation"]
+    if operation == "canonical_checkout":
+        try:
+            root = Path(data["root"]).expanduser().resolve(strict=True)
+        except FileNotFoundError:
+            return {"missing": True}
+        if not root.is_dir():
+            raise ValueError("Choose an existing project folder.")
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=15,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        )
+        if result.returncode == 0:
+            root = Path(result.stdout.decode("utf-8").strip()).resolve(strict=True)
+        elif any((parent / ".git").exists() for parent in (root, *root.parents)):
+            raise ValueError(result.stderr.decode("utf-8", "replace")[:2000] or "Could not inspect the checkout.")
+        return {"cwd": str(root)}
+    if operation == "worktree_create":
+        root = Path(data["root"]).expanduser().resolve(strict=True)
+        branch = data.get("branch")
+        base = data.get("base", "refs/heads/main")
+        if not isinstance(branch, str) or not branch or len(branch) > 100:
+            raise ValueError("Invalid worktree branch.")
+        if not isinstance(base, str) or not base or base.startswith("-") or len(base) > 1024:
+            raise ValueError("Choose an existing base branch.")
+        subprocess.run(
+            ["git", "check-ref-format", "--branch", branch],
+            check=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=15,
+        )
+        root = Path(git(root, "rev-parse", "--show-toplevel").strip()).resolve(strict=True)
+        target = root.parent / (root.name + "-" + branch.replace("/", "-"))
+        if target.exists():
+            raise ValueError("A worktree already exists at that path.")
+        result = subprocess.run(
+            ["git", "-C", str(root), "worktree", "add", "-b", branch, str(target), base],
+            capture_output=True, stdin=subprocess.DEVNULL,
+        )
+        if result.returncode:
+            raise ValueError(result.stderr.decode("utf-8", "replace")[:2000])
+        return {"path": str(target), "root": str(root)}
     if operation == "terminal_attachment":
         encoded = data.get("data")
         if not isinstance(encoded, str) or len(encoded) > 28 * 1024 * 1024:

@@ -127,9 +127,8 @@ function distinctCheckouts(members: MergedMember[]): MergedMember[] {
  * other, and a host holding two clones cannot say which one a remote host's
  * checkout matches, so neither joins the cross-host row (product-brief edge
  * case 3) - each clone's own worktrees still merge. Returned as a lookup by
- * workspace id, because the caller (Sidebar's flat list, or a single active
- * workspace) always starts from one workspace and needs to know which group,
- * if any, it belongs to. */
+ * workspace id, because each sidebar list or active workspace needs to know
+ * which group, if any, a workspace belongs to. */
 export function computeMergeGroups(
   visible: Workspace[],
   projectGit: Record<string, ProjectGit>,
@@ -182,6 +181,31 @@ export function computeMergeGroups(
     addGroup(identity, shared);
   }
   return byWorkspaceId;
+}
+
+/** Worktree groups for the sidebar's host sections. Scoping each host before
+ * computing groups keeps a project on another host in its own section. */
+export function computeHostMergeGroups(
+  visible: Workspace[],
+  projectGit: Record<string, ProjectGit>,
+  connectionProfiles: ConnectionProfile[],
+): Map<string, MergeGroup> {
+  const byHost = new Map<string, Workspace[]>();
+  for (const workspace of visible) {
+    const key = groupKey(workspace.connection);
+    byHost.set(key, [...(byHost.get(key) ?? []), workspace]);
+  }
+
+  const groups = new Map<string, MergeGroup>();
+  for (const members of byHost.values()) {
+    for (const [workspaceId, group] of computeMergeGroups(
+      members,
+      projectGit,
+      connectionProfiles,
+    ))
+      groups.set(workspaceId, group);
+  }
+  return groups;
 }
 
 /** The slice of an orchd task the sidebar needs to name its worktree. */

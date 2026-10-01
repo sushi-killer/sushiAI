@@ -119,6 +119,7 @@ function normalizeGit(value: unknown): ProjectGit {
     remote: typeof g.remote === "string" ? g.remote : "",
     commonDir: typeof g.commonDir === "string" ? g.commonDir : "",
     checkout: typeof g.checkout === "string" ? g.checkout : "",
+    linkedWorktree: g.linkedWorktree === true,
     subdir: typeof g.subdir === "string" ? g.subdir : "",
     branch: typeof g.branch === "string" ? g.branch : "",
   };

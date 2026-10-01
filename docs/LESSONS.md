@@ -22,13 +22,10 @@ one index line; git history keeps the detail and updates.
 
 ## Open
 
-## 2026-10-01 — a temp `$HOME` did not isolate Herdr on macOS
-
-Root cause: macOS Herdr resolved its socket from the real home; stopping it stopped the owner's server.
-Rule: try Herdr setup on a Linux or SSH host; never stop a server you didn't start.
-
 ## Promoted
 
+- 2026-10-02 Git identity loading split worktree rows → wait for first-host identities before drawing.
+- 2026-10-01 A temp `$HOME` did not isolate Herdr on macOS → never stop an unowned server; test on SSH.
 - 2026-10-01 Herdr 0.8.2 closes linked sessions with the primary's last pane when confirmation is disabled → inspect membership and detach first. `herdr-pane-close.test.cjs` and isolated daemon evidence.
 - 2026-10-01 Prepare lost SSH recovery between callers → preserve structured failures; reuse recovery UI. `GitRecovery` and `project-git-ssh.test.cjs`.
 - 2026-10-01 contextBridge discards Error fields → transport tagged values; reconstruct before App restores state. `tests/bridge.test.cjs`.

@@ -2,6 +2,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const library = import("../src/app/workspaceMerge.ts");
+const readinessLibrary = import("../src/app/projectGitReadiness.ts");
 
 const REMOTE = "example.test/dev/sushiai";
 const profile = (id, name, extra = {}) => ({
@@ -151,6 +152,71 @@ test("worktrees of one repository on one host merge, labelled by branch, main ch
       "/tmp/local.sock": "connected",
     }),
     "Checked out as main (Connected) and feature (Connected).",
+  );
+});
+
+test("host-grouped lists merge same-host worktrees and keep other hosts separate", async () => {
+  const { computeHostMergeGroups, computeMergeGroups } = await library;
+  const main = workspace("w-main", undefined, "/Users/dev/sushiai");
+  const feature = workspace(
+    "w-feature",
+    undefined,
+    "/Users/dev/sushiai-feature",
+  );
+  const lab = workspace("w-lab", "ssh:lab", "/home/dev/sushiai");
+  const projectGit = {
+    "w-main": git(REMOTE, main.cwd),
+    "w-feature": git(REMOTE, feature.cwd, "feature", main.cwd),
+    "w-lab": git(REMOTE, lab.cwd),
+  };
+  const profiles = [profile("lab", "Lab")];
+
+  const grouped = computeHostMergeGroups(
+    [main, feature, lab],
+    projectGit,
+    profiles,
+  );
+  assert.deepEqual(
+    grouped.get("w-main").members.map((m) => m.workspace.id),
+    ["w-main", "w-feature"],
+  );
+  assert.equal(grouped.get("w-feature"), grouped.get("w-main"));
+  assert.equal(grouped.has("w-lab"), false);
+
+  const flat = computeMergeGroups([main, feature, lab], projectGit, profiles);
+  assert.deepEqual(
+    flat.get("w-main").members.map((m) => m.workspace.id),
+    ["w-main", "w-feature", "w-lab"],
+  );
+});
+
+test("workspace rows wait for a host's first Git identities before grouping", async () => {
+  const {
+    projectGitRequestKey,
+    readyProjectGitHostKeys,
+    readyProjectGitWorkspaceIds,
+  } = await readinessLibrary;
+  const main = workspace("w-main", undefined, "/repo");
+  const feature = workspace("w-feature", undefined, "/repo-feature");
+  const remote = workspace("w-remote", "ssh:lab", "/home/repo");
+  const workspaces = [main, feature, remote];
+  const settled = { "w-feature": projectGitRequestKey(feature) };
+
+  assert.deepEqual(
+    [...readyProjectGitWorkspaceIds(workspaces, settled)],
+    ["w-feature"],
+  );
+  assert.equal(
+    readyProjectGitHostKeys(workspaces, settled).has("local"),
+    false,
+    "a worktree cannot flash as its own row while its sibling is still loading",
+  );
+  settled["w-main"] = projectGitRequestKey(main);
+  assert.equal(readyProjectGitHostKeys(workspaces, settled).has("local"), true);
+  assert.equal(
+    readyProjectGitHostKeys(workspaces, settled).has("ssh:lab"),
+    false,
+    "a slow remote does not delay the local workspace list",
   );
 });
 

@@ -57,6 +57,17 @@ panel, picks the task by title, saves
 `artifacts/orchestrator-{window,detail,home}.png` (`home` is the Home view before a task is picked; `detail` crops the task view `.td`), plus `artifacts/orchestrator-proposals.png` (a crop of the first proposal card on the Improvements view, only when proposals were seeded; `report.screenshots.proposals`), plus `artifacts/orchestrator-improvements.png` (the whole Improvements view, when proposals or notes were seeded) and `artifacts/orchestrator-repo-notes.png` (a crop of the notes list on that view, only when notes were seeded; `report.screenshots.notes`), prints a JSON report, and
 exits non-zero with `error` set on any failure, including an unmatched title.
 
+## Worktree grouping and cleanup
+
+For workspace grouping, flat-list stability and merged/closed PR cleanup
+defaults, run `npm run build && node .agents/skills/ui-evidence/scripts/worktrees.mjs`
+from the repository root. The driver creates a disposable local repository
+and linked worktree, uses a fake `gh` response, and points sushiAI at a missing
+Herdr socket. It measures the workspace row count, label width and overflow,
+samples the flat list for two seconds, then opens the close dialog without
+submitting it. It saves full-window and focused screenshots under `artifacts/`
+and exits non-zero on renderer errors or a failed step.
+
 ## Orchestrator host selector
 
 `node .agents/skills/ui-evidence/scripts/orchestrator-remote-host.mjs` runs the

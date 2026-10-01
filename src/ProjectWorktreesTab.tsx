@@ -169,7 +169,14 @@ export function ProjectWorktreesTab({
             row.worktree.path,
             // Only the changes the owner saw in the confirmation; a checkout
             // that changed since is kept.
-            { deleteBranch, discardChanges: row.worktree.changes > 0 },
+            // and the branch and head they saw, so a worktree that moved
+            // since (a new branch, a new commit) is kept with its branch.
+            {
+              deleteBranch,
+              discardChanges: row.worktree.changes > 0,
+              branch: row.worktree.branch,
+              head: row.worktree.head,
+            },
           );
           removed.push(row);
         }

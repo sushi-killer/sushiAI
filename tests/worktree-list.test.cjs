@@ -306,18 +306,24 @@ test("closing a worktree's last session keeps a changed checkout, a moved branch
   const remove = (target, options) =>
     handlers["worktrees:remove"]("local", target, target, options);
   await assert.rejects(remove(f.repo, { branch: "main" }), /not part/);
-  await assert.rejects(remove(f.merged, { branch: "other" }), /branch changed/);
+  await assert.rejects(remove(f.merged, { branch: "other" }), /changed/);
   await assert.rejects(remove(f.open, { branch: "open's" }), /uncommitted/);
   assert.equal(fs.existsSync(path.join(f.open, "dirty")), true);
-  // Changed after the owner looked: git itself still refuses without force.
+  // Changed after the owner looked, with untracked files hidden from
+  // `git status`: the removal script itself checks again and keeps it.
+  git(f.repo, "config", "status.showUntrackedFiles", "no");
   fs.writeFileSync(path.join(f.merged, "late"), "1");
-  await assert.rejects(
-    handlers["worktrees:remove"]("local", f.repo, f.merged, {
-      discardChanges: false,
-      branch: "merged",
-    }),
+  assert.throws(
+    () => sh(worktreeRemoveScript(f.repo, f.merged, "", false)),
+    /uncommitted changes/,
   );
+  assert.equal(fs.existsSync(path.join(f.merged, "late")), true);
+  await assert.rejects(remove(f.merged, { branch: "merged" }), /uncommitted/);
   fs.rmSync(path.join(f.merged, "late"));
+  await assert.rejects(
+    remove(f.merged, { branch: "merged", head: "0".repeat(40) }),
+    /changed/,
+  );
   assert.deepEqual(await remove(f.merged, { branch: "merged" }), {
     removed: f.merged,
     branch: "merged",

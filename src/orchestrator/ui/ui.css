@@ -53,6 +53,7 @@
 }
 /* A confirm that throws work away. */
 .ui-button.danger {
+  height: 32px;
   border-color: var(--danger-line);
   background: var(--danger-bg);
   color: var(--danger);

@@ -779,8 +779,12 @@ function registerProjectIpc({
       );
       if (!item) throw new Error("That worktree is not part of this project.");
       if (item.locked) throw new Error("That worktree is locked.");
-      if (typeof options.branch === "string" && options.branch !== item.branch)
-        throw new Error("The worktree branch changed; refresh and try again.");
+      if (
+        (typeof options.branch === "string" &&
+          options.branch !== item.branch) ||
+        (typeof options.head === "string" && options.head !== item.head)
+      )
+        throw new Error("The worktree changed; refresh and try again.");
       const discardChanges = options.discardChanges === true;
       if (item.changes && !discardChanges)
         throw new Error("The worktree has uncommitted changes and was kept.");

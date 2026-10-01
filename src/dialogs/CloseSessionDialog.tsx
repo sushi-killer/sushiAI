@@ -177,7 +177,7 @@ export function CloseSessionDialog({
               ? "Close the other panes in this worktree first."
               : checkingPr
                 ? "Checking whether its pull request was merged…"
-                : "The branch stays in Git. Uncommitted changes keep the worktree; ignored files like .env go with it."}
+                : "The branch stays in Git. A worktree with uncommitted changes is kept; ignored files like .env go with it."}
           </p>
         </>
       )}

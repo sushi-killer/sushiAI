@@ -162,7 +162,7 @@ emit() {
   [ -n "$p" ] || return 0
   t=$(git log -1 --format=%ct "$h" 2>/dev/null)
   e=0; d=0; m=0; a=0
-  if [ -d "$p" ]; then e=1; d=$(git -C "$p" status --porcelain 2>/dev/null | wc -l | tr -d ' '); fi
+  if [ -d "$p" ]; then e=1; d=$(git -C "$p" status --porcelain --untracked-files=all 2>/dev/null | wc -l | tr -d ' '); fi
   own=1
   if [ -n "$br" ]; then
     [ "$br" = "\${base#origin/}" ] && own=0
@@ -244,12 +244,20 @@ function parseWorktreeList(output) {
  * that is merely unmounted), then its branch when asked. */
 function worktreeRemoveScript(root, path, branch, discardChanges = true) {
   const drop = branch ? ` && git branch -D ${quote(branch)}` : "";
-  // Without --force git itself refuses a checkout with modified or untracked
-  // files, so a change made after the caller looked is never lost.
+  // Without discardChanges the checkout is checked again right before the
+  // removal, counting every untracked file whatever status.showUntrackedFiles
+  // says (git worktree remove obeys that setting), so a change made after the
+  // caller looked is never lost.
   const force = discardChanges ? " --force" : "";
   return `${PATH_SH}
 cd ${quote(root)} || exit 1
-if [ -d ${quote(path)} ]; then git worktree remove${force} ${quote(path)} || exit 1
+if [ -d ${quote(path)} ]; then
+  ${
+    discardChanges
+      ? ""
+      : `[ -z "$(git -C ${quote(path)} status --porcelain --untracked-files=all)" ] || { echo "The worktree has uncommitted changes and was kept." >&2; exit 1; }
+  `
+  }git worktree remove${force} ${quote(path)} || exit 1
 else
   admin=$(git rev-parse --git-common-dir)/worktrees
   for d in "$admin"/*; do

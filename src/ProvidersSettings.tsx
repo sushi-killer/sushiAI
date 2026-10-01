@@ -6,6 +6,7 @@ import type {
   ModelProviderKind,
   ProviderModel,
   ClaudeAccount,
+  CodexAccount,
 } from "./types";
 
 const KIND_LABEL: Record<ModelProviderKind, string> = {
@@ -194,6 +195,122 @@ function ProfileForm({
         </button>
       </div>
     </form>
+  );
+}
+
+function codexStatus(account: CodexAccount) {
+  if (account.signingIn) return "Signing in · finish in the browser";
+  if (!account.signedIn) return "Not signed in";
+  return account.mode === "apiKey"
+    ? `OpenAI API key · ${account.detail}`
+    : `ChatGPT${account.detail ? ` · ${account.detail}` : ""}`;
+}
+
+/** Codex accounts: each signs in with `codex login` into its own Codex home,
+ * in the browser or with an API key. */
+function CodexAccounts({ onError }: { onError(text: string): void }) {
+  const [accounts, setAccounts] = useState<CodexAccount[]>([]);
+  const refresh = () =>
+    window.bridge
+      ?.codexAccountsList()
+      .then(setAccounts)
+      .catch((e) => onError(errorText(e)));
+  useEffect(() => {
+    refresh();
+    // Loaded once; every change below refreshes it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const login = async (account: CodexAccount, apiKey?: string) => {
+    onError("");
+    setAccounts((items) =>
+      items.map((item) =>
+        item.id === account.id && apiKey === undefined
+          ? { ...item, signingIn: true }
+          : item,
+      ),
+    );
+    try {
+      await window.bridge!.codexAccountLogin(account.id, apiKey);
+    } catch (e) {
+      onError(errorText(e));
+    }
+    await refresh();
+  };
+  return (
+    <section className="claude-accounts">
+      <div className="provider-card-head">
+        <strong>Codex accounts</strong>
+        <button
+          className="add-profile"
+          onClick={async () => {
+            try {
+              const account = await window.bridge!.codexAccountAdd(
+                `Codex ${accounts.length + 1}`,
+              );
+              setAccounts((items) => [...items, account]);
+            } catch (e) {
+              onError(errorText(e));
+            }
+          }}
+        >
+          <Plus size={12} /> Add account
+        </button>
+      </div>
+      <p className="muted">
+        Sign in opens ChatGPT in your browser; or paste an OpenAI API key. Each
+        account keeps its own Codex login and shares your Codex settings, skills
+        and history.
+      </p>
+      {accounts.map((account) => (
+        <form
+          className="claude-account-row codex-account-row"
+          key={account.id}
+          onSubmit={(event) => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const value = String(new FormData(form).get("value") || "");
+            form.reset();
+            void login(account, value);
+          }}
+        >
+          <strong>{account.label}</strong>
+          <span>{codexStatus(account)}</span>
+          <input
+            name="value"
+            type="password"
+            autoComplete="new-password"
+            placeholder={
+              account.mode === "apiKey" ? "Replace API key" : "Paste API key"
+            }
+            aria-label={`${account.label} API key`}
+          />
+          <button type="submit" disabled={account.signingIn}>
+            Save key
+          </button>
+          <button
+            type="button"
+            disabled={account.signingIn}
+            onClick={() => void login(account)}
+          >
+            Sign in
+          </button>
+          <button
+            type="button"
+            aria-label={`Remove ${account.label}`}
+            onClick={async () => {
+              try {
+                await window.bridge!.codexAccountDelete(account.id);
+              } catch (e) {
+                onError(errorText(e));
+              }
+              await refresh();
+            }}
+          >
+            Remove
+          </button>
+        </form>
+      ))}
+    </section>
   );
 }
 
@@ -411,6 +528,7 @@ export function ProvidersSettings() {
           </form>
         ))}
       </section>
+      <CodexAccounts onError={setError} />
       {providers.map((provider) => {
         const mine = profiles.filter((p) => p.providerId === provider.id);
         return (

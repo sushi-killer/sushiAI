@@ -76,6 +76,7 @@ type PanelState = {
   /** Set when this agent panel was launched against a custom model provider. */
   modelProfileId?: string;
   claudeAccountId?: string;
+  codexAccountId?: string;
 };
 export type CorePanel = PanelState & { kind: PanelKind };
 export type ExtensionPanel = PanelState & {
@@ -95,6 +96,16 @@ export type ClaudeAccount = {
   kind: "subscription" | "apiKey";
   hint: string;
   hasValue: boolean;
+};
+/** A Codex sign-in kept in its own Codex home; never carries the login. */
+export type CodexAccount = {
+  id: string;
+  label: string;
+  signedIn: boolean;
+  mode: "chatgpt" | "apiKey" | "";
+  /** The ChatGPT email, or the API key's last four characters. */
+  detail: string;
+  signingIn?: boolean;
 };
 export type ModelProvider = {
   id: string;
@@ -157,7 +168,11 @@ export type Project = {
   mcp: Record<string, unknown>;
   setup: { install: string; check: string };
   network: { allowedDomains: string[] };
-  sessions: { claudeAccount?: string; backend?: "herdr" | "local" };
+  sessions: {
+    claudeAccount?: string;
+    codexAccount?: string;
+    backend?: "herdr" | "local";
+  };
   targets: string[];
   hosts?: Record<
     string,
@@ -418,6 +433,7 @@ export interface Bridge {
     cwd: string;
     agent?: string;
     claudeAccountId?: string;
+    codexAccountId?: string;
     modelProfileId?: string;
   }): Promise<{ prefix: string; settings: string; launch: string }>;
   terminalOpen(options: {
@@ -430,6 +446,7 @@ export interface Bridge {
     herdrId?: string;
     modelProfileId?: string;
     claudeAccountId?: string;
+    codexAccountId?: string;
   }): Promise<{ history: string; exited?: boolean }>;
   terminalWrite(panelId: string, data: string): Promise<void>;
   terminalAttach(input: {
@@ -596,6 +613,11 @@ export interface Bridge {
     value: string,
   ): Promise<{ hasValue: boolean; hint: string }>;
   claudeAccountDelete(id: string): Promise<void>;
+  codexAccountsList(): Promise<CodexAccount[]>;
+  codexAccountAdd(label: string): Promise<CodexAccount>;
+  /** Browser sign-in, or an API key when one is given. */
+  codexAccountLogin(id: string, apiKey?: string): Promise<CodexAccount>;
+  codexAccountDelete(id: string): Promise<void>;
   extensionsList(): Promise<import("./extensions/types.ts").ExtensionSnapshot>;
   extensionsRefresh(): Promise<
     import("./extensions/types.ts").ExtensionSnapshot

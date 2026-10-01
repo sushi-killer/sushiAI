@@ -367,10 +367,15 @@ export function useWorkspaces({
   function rememberLaunch(
     endpoint: string,
     paneId: string,
-    claudeAccountId?: string,
+    accounts: Pick<Panel, "claudeAccountId" | "codexAccountId">,
     modelProfileId?: string,
   ) {
-    if (claudeAccountId === undefined && !modelProfileId) return;
+    if (
+      accounts.claudeAccountId === undefined &&
+      accounts.codexAccountId === undefined &&
+      !modelProfileId
+    )
+      return;
     setWorkspaces((list) =>
       list.map((w) =>
         (w.connection || socket) !== endpoint ||
@@ -380,7 +385,7 @@ export function useWorkspaces({
               ...w,
               panels: w.panels.map((p) =>
                 p.herdrId === paneId
-                  ? { ...p, claudeAccountId, modelProfileId }
+                  ? { ...p, ...accounts, modelProfileId }
                   : p,
               ),
             },
@@ -388,15 +393,16 @@ export function useWorkspaces({
     );
   }
   /** What a Herdr pane is typed first: the project's values and the
-   * agent's sign-in (the Claude account picked, else the project's own; this
-   * local Codex login on a host without one; a remote custom model's key).
+   * agent's sign-in (the Claude or Codex account picked, else the project's
+   * own; this local Codex login on a host without one; a remote custom
+   * model's key).
    * A picked account or model that cannot be sent is an error; anything else
    * missing just sends nothing. */
   async function sessionPrefix(
     endpoint: string,
     cwd: string,
     agent?: string,
-    claudeAccountId?: string,
+    accounts: Pick<Panel, "claudeAccountId" | "codexAccountId"> = {},
     modelProfileId?: string,
   ) {
     try {
@@ -404,11 +410,12 @@ export function useWorkspaces({
         endpoint,
         cwd,
         agent,
-        claudeAccountId,
+        ...accounts,
         modelProfileId,
       });
     } catch (error) {
-      if (claudeAccountId || modelProfileId) throw error;
+      if (accounts.claudeAccountId || accounts.codexAccountId || modelProfileId)
+        throw error;
       return { prefix: "", settings: "", launch: "" };
     }
   }
@@ -469,12 +476,21 @@ export function useWorkspaces({
     agent = "claude",
     filesTarget?: Panel["filesTarget"],
     modelProfile?: ModelProfile,
-    claudeAccountId?: string,
+    accountId?: string,
     backend?: "herdr" | "local",
     targetWorkspaceId?: string,
     worktree?: { branch: string },
   ): Promise<"ok" | "gone" | "failed" | "busy"> {
     const modelProfileId = modelProfile?.id;
+    // The account picked is the one of the agent it was picked for.
+    const accounts =
+      kind !== "agent"
+        ? {}
+        : agent === "claude"
+          ? { claudeAccountId: accountId }
+          : agent === "codex"
+            ? { codexAccountId: accountId }
+            : {};
     // A merged-row session host choice (D2): defaults to the active
     // workspace, same as before targetWorkspaceId existed.
     const current =
@@ -506,7 +522,7 @@ export function useWorkspaces({
           endpoint,
           current.cwd,
           kind === "agent" ? agent : undefined,
-          kind === "agent" && agent === "claude" ? claudeAccountId : undefined,
+          accounts,
           kind === "agent" && agent === "claude" ? modelProfileId : undefined,
         );
         if (worktree) {
@@ -526,7 +542,7 @@ export function useWorkspaces({
             });
           await refreshHerdr(endpoint);
           if (kind === "agent" && paneId)
-            rememberLaunch(endpoint, paneId, claudeAccountId, modelProfileId);
+            rememberLaunch(endpoint, paneId, accounts, modelProfileId);
           switchWorkspace(
             herdrWorkspaceKey(endpoint, result.workspace.workspace_id),
           );
@@ -554,7 +570,7 @@ export function useWorkspaces({
           });
         await refreshHerdr(endpoint);
         if (kind === "agent" && paneId)
-          rememberLaunch(endpoint, paneId, claudeAccountId, modelProfileId);
+          rememberLaunch(endpoint, paneId, accounts, modelProfileId);
         if (paneId) setSelected(herdrWorkspaceKey(endpoint, paneId));
       } else if (worktree && launchesInWorktree(kind)) {
         // The local counterpart of the branch above: no Herdr involved, so
@@ -577,7 +593,7 @@ export function useWorkspaces({
           agent: kind === "agent" ? agent : undefined,
           started: kind === "agent",
           modelProfileId: kind === "agent" ? modelProfileId : undefined,
-          claudeAccountId: kind === "agent" ? claudeAccountId : undefined,
+          ...accounts,
         };
         w.panels = [panel];
         w.layout = leaf(panel.id);
@@ -605,7 +621,7 @@ export function useWorkspaces({
           messages: kind === "chat" ? [] : undefined,
           filesTarget: kind === "files" ? filesTarget : undefined,
           modelProfileId: kind === "agent" ? modelProfileId : undefined,
-          claudeAccountId: kind === "agent" ? claudeAccountId : undefined,
+          ...accounts,
         };
         updateWorkspace(current.id, (w) => appendPanel(w, panel));
         setSelected(panel.id);
@@ -668,7 +684,12 @@ export function useWorkspaces({
         endpoint,
         owner.cwd,
         launchText ? ended.agent || "claude" : undefined,
-        launchText ? ended.claudeAccountId : undefined,
+        launchText
+          ? {
+              claudeAccountId: ended.claudeAccountId,
+              codexAccountId: ended.codexAccountId,
+            }
+          : {},
         launchText ? ended.modelProfileId : undefined,
       );
       if (launchText || prefix)

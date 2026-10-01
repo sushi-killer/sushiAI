@@ -13,6 +13,9 @@ const ACCOUNTS = {
   sub: { kind: "subscription", value: "invented-oauth-token" },
   key: { kind: "apiKey", value: "invented-api-key" },
 };
+const CODEX_ACCOUNTS = {
+  work: { home: "/invented/codex-home", auth: '{"tokens":"work"}' },
+};
 
 async function rig(
   t,
@@ -51,14 +54,16 @@ async function rig(
     });
   if (withheld) await projects.setHostWithheld(project.id, host.endpoint, true);
   const spawned = [];
+  const envs = [];
   const handlers = new Map();
   registerTerminalIpc({
     handle: (channel, callback) => handlers.set(channel, callback),
     send: () => {},
     app: {},
     pty: {
-      spawn: (binary, args) => {
+      spawn: (binary, args, options) => {
         spawned.push([binary, ...args]);
+        envs.push(options.env);
         return { onData: () => {}, onExit: () => {} };
       },
     },
@@ -75,6 +80,10 @@ async function rig(
       return ACCOUNTS[id];
     },
     codexAuth: async () => codex,
+    resolveCodexAccount: async (id) => {
+      if (!CODEX_ACCOUNTS[id]) throw new Error("Sign in to it first.");
+      return CODEX_ACCOUNTS[id];
+    },
     resolveModel: async () => ({
       key: "invented-model-key",
       settings: { ANTHROPIC_BASE_URL: "https://models.example.test" },
@@ -82,7 +91,7 @@ async function rig(
     projects,
     sshBinary: host.ssh,
   });
-  return { host, projects, project, cwd, handlers, spawned };
+  return { host, projects, project, cwd, handlers, spawned, envs };
 }
 
 const left = async (host) =>
@@ -329,6 +338,140 @@ test("a host with its own Codex login keeps using it", async (t) => {
     await fs.readFile(path.join(host.home, "codex-saw"), "utf8")
   ).split("|");
   assert.deepEqual([home, auth], ["", '{"tokens":"host"}']);
+});
+
+test("a picked Codex account runs on a host even where the host has its own login", async (t) => {
+  const { host, cwd, handlers } = await rig(t, {
+    attach: false,
+    codex: '{"tokens":"mine"}',
+  });
+  await fs.mkdir(path.join(host.home, ".codex"));
+  await fs.writeFile(
+    path.join(host.home, ".codex", "auth.json"),
+    '{"tokens":"host"}',
+  );
+  const { prefix, launch } = await handlers.get("project-session-env")({
+    endpoint: host.endpoint,
+    cwd,
+    agent: "codex",
+    codexAccountId: "work",
+  });
+  assert.equal((prefix + launch).includes("work"), false);
+  await host.connections.exec(host.endpoint, `(${prefix}exec ${launch})`);
+  const [home, auth] = (
+    await fs.readFile(path.join(host.home, "codex-saw"), "utf8")
+  ).split("|");
+  assert.equal(auth, '{"tokens":"work"}');
+  await assert.rejects(fs.stat(home));
+  // The host's own login is left as it was.
+  assert.equal(
+    await fs.readFile(path.join(host.home, ".codex", "auth.json"), "utf8"),
+    '{"tokens":"host"}',
+  );
+});
+
+test("Codex runs as the project's account when none is picked; an empty pick is the host's own login", async (t) => {
+  const { host, cwd, handlers } = await rig(t, {
+    sessions: { codexAccount: "work" },
+  });
+  const ask = (extra) =>
+    handlers.get("project-session-env")({
+      endpoint: host.endpoint,
+      cwd,
+      agent: "codex",
+      ...extra,
+    });
+  const own = await ask({});
+  await host.connections.exec(
+    host.endpoint,
+    `(${own.prefix}exec ${own.launch})`,
+  );
+  assert.equal(
+    (await fs.readFile(path.join(host.home, "codex-saw"), "utf8")).split(
+      "|",
+    )[1],
+    '{"tokens":"work"}',
+  );
+  const none = await ask({ codexAccountId: "" });
+  assert.equal(none.launch, "");
+  assert.equal(await seen(host, none.prefix, ["SUSHIAI_CODEX_AUTH"]), "|");
+  // A picked account that is not signed in is an error, the project's own
+  // just falls back.
+  await assert.rejects(ask({ codexAccountId: "unset" }), /Sign in/);
+  const fallback = await rig(t, { sessions: { codexAccount: "unset" } });
+  assert.equal(
+    (
+      await fallback.handlers.get("project-session-env")({
+        endpoint: fallback.host.endpoint,
+        cwd: fallback.cwd,
+        agent: "codex",
+      })
+    ).launch,
+    "",
+  );
+});
+
+test("a local Codex pane starts in the account's own home; no login is in the text", async (t) => {
+  const { handlers } = await rig(t, { attach: false });
+  const answer = await handlers.get("project-session-env")({
+    endpoint: "local",
+    cwd: "/invented/folder",
+    agent: "codex",
+    codexAccountId: "work",
+  });
+  assert.deepEqual(answer, {
+    prefix: "",
+    settings: "",
+    launch: "env CODEX_HOME='/invented/codex-home' codex",
+  });
+});
+
+test("a remote Codex terminal runs as the picked account over the host's login, and on the local login without one", async (t) => {
+  const { host, cwd, handlers, spawned } = await rig(t, {
+    attach: false,
+    codex: '{"tokens":"mine"}',
+  });
+  await fs.mkdir(path.join(host.home, ".codex"));
+  const saw = async (panelId, extra, hostAuth) => {
+    const own = path.join(host.home, ".codex", "auth.json");
+    if (hostAuth) await fs.writeFile(own, hostAuth);
+    else await fs.rm(own, { force: true });
+    await handlers.get("terminal-open")({
+      panelId,
+      cwd,
+      command: "codex",
+      endpoint: host.endpoint,
+      ...extra,
+    });
+    const command = spawned.at(-1).at(-1);
+    assert.equal(command.includes("tokens"), false);
+    await host.connections.exec(host.endpoint, command);
+    return (await fs.readFile(path.join(host.home, "codex-saw"), "utf8")).split(
+      "|",
+    )[1];
+  };
+  assert.equal(
+    await saw("r1", { codexAccountId: "work" }, '{"tokens":"host"}'),
+    '{"tokens":"work"}',
+  );
+  assert.equal(await saw("r2", {}, ""), '{"tokens":"mine"}');
+  assert.equal(await saw("r3", {}, '{"tokens":"host"}'), '{"tokens":"host"}');
+});
+
+test("a local Codex terminal runs in the account's home, and on the default login without one", async (t) => {
+  const { handlers, envs, host } = await rig(t, { attach: false });
+  for (const [panelId, codexAccountId] of [
+    ["a", "work"],
+    ["b", undefined],
+  ])
+    await handlers.get("terminal-open")({
+      panelId,
+      cwd: host.home,
+      command: "codex",
+      codexAccountId,
+    });
+  assert.equal(envs[0].CODEX_HOME, "/invented/codex-home");
+  assert.equal(envs[1].CODEX_HOME, process.env.CODEX_HOME);
 });
 
 test("an agent typed with values runs in a subshell: they are gone from the pane's shell after it", async () => {

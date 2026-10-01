@@ -11,14 +11,14 @@ nobody else can answer. A plan or a progress note is a checkpoint, not done.
 
 ## Roles and models
 
-| Lane                 | Who                     | Model   | Owns                                                  |
-| -------------------- | ----------------------- | ------- | ----------------------------------------------------- |
-| lead                 | the main session        | session | scope, briefs, integration, commit, report            |
-| `implementer`        | subagent                | sonnet  | one bounded code lane and its tests                   |
-| `functional-qa`      | subagent                | sonnet  | proof against the acceptance criteria                 |
-| `reviewer`           | subagent                | opus    | fresh correctness and root-cause review of the diff   |
-| `design-critic`      | subagent                | opus    | judgement of the screenshots, only when a screen changes |
-| wide read-only search | built-in `Explore`     | default | locating code across many files                       |
+| Lane                  | Who                | Model   | Owns                                                     |
+| --------------------- | ------------------ | ------- | -------------------------------------------------------- |
+| lead                  | the main session   | session | scope, briefs, integration, commit, report               |
+| `implementer`         | subagent           | sonnet  | one bounded code lane and its tests                      |
+| `functional-qa`       | subagent           | sonnet  | proof against the acceptance criteria                    |
+| `reviewer`            | subagent           | opus    | fresh correctness and root-cause review of the diff      |
+| `design-critic`       | subagent           | opus    | judgement of the screenshots, only when a screen changes |
+| wide read-only search | built-in `Explore` | default | locating code across many files                          |
 
 Sonnet does work that something else checks afterwards (tests, review). Opus
 does judgement nothing checks after it. The lead stays hands-on: it verifies
@@ -74,6 +74,33 @@ every consequential conclusion a lane reports instead of forwarding it.
    `cut-release` unless the owner asked in this task.
    **Done when:** `git status -sb` shows only unrelated work left.
 10. **Report** in the shape of [references/report.md](references/report.md).
+
+## Pace
+
+These rules keep a task from growing into days. Source: the project-environments
+retro (`artifacts/RETRO-project-environments.md`).
+
+- **Cutline.** After step 1 write the done list (about eight items) and a time
+  budget, and tell the owner the ETA. A new ask goes to a `Next` list unless the
+  owner marks it blocking. Update the ETA after every pass; never answer "how is
+  it going" with only "still running".
+- **Ask consent and security UX before building.** Default to the lowest-friction
+  choice for owner-owned resources (a host the owner added is trusted). Never
+  build a second mechanism for a decision the owner already made.
+- **Two gate tiers.** Inner loop: targeted tests and only the affected screens.
+  Final gate once: `prettier`, build, `npm run ci`, `npm run test:desktop`, the
+  full screen pass. Revert-red checks run once at the end, only for tests that
+  guard security or data.
+- **Review budget.** One full `reviewer` pass and one delta pass. The second
+  reports P0/P1 only; P2 goes to the report's "Left open" unless it is a
+  security issue. `design-critic`: one full pass, one delta pass.
+- **Fixed fidelity tolerances**, set by the lead before the run (text width 3%,
+  shifts 2 px, no data-list excuses for layout). The critic, not a diff tool the
+  implementer wrote, decides.
+- **Parallel lanes** for independent surfaces (electron/orchd, renderer, docs and
+  Figma), each in its own worktree.
+- **Preflight (two minutes):** Figma bridge connected, ssh alias answers, the
+  build runs, the ports you need are free. Fix this before briefing a lane.
 
 ## Boundaries that hold in every lane
 

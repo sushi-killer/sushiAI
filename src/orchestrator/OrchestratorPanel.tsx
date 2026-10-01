@@ -41,7 +41,13 @@ import {
   shownHost,
   type DaemonReach,
 } from "./hosts";
-import { HostSelect } from "./HostSelect";
+import { HostSelect, RunOnSelect } from "./HostSelect";
+import { rememberPrepareTimes } from "../projectPrepare";
+import {
+  PrepareProgress,
+  PreparingHost,
+  type PrepareFailure,
+} from "./PrepareViews";
 import { PreflightStrip, RemoteSetup, RepoPrompt } from "./RemoteHostViews";
 import { useOrchestratorHosts } from "./useHosts";
 import { useWorkspaceRepos } from "./workspaceRepos";
@@ -71,6 +77,7 @@ import type {
   Settings,
   Task,
 } from "./types";
+import type { Project, ProjectHostReadiness } from "../types";
 import { Banner, Tag } from "./ui";
 import { OrchRail } from "./OrchRail";
 import { Composer, OrchestratorRouteChip, TaskRouteLabel } from "./Composer";
@@ -105,11 +112,12 @@ async function createTask(
   text: string,
   base: string,
   start: boolean,
+  projectId?: string,
 ): Promise<Task> {
   try {
     return await orchestratorClient.taskCreate(
       cwd,
-      taskCreateParams({ request: text, start, source: "ui" }, base),
+      taskCreateParams({ request: text, start, source: "ui", projectId }, base),
     );
   } catch (e) {
     if (!errorText(e).includes("planner is disabled")) throw e;
@@ -121,6 +129,7 @@ async function createTask(
           goal: text,
           start,
           source: "ui",
+          projectId,
         },
         base,
       ),
@@ -177,13 +186,16 @@ function viewIcon(kind: View["kind"]) {
 
 function OrchestratorBody({
   cwd,
+  hosts,
   header,
   remote,
   onDaemon,
   view: savedView,
   onViewChange,
+  onChooseLocal,
 }: {
   cwd: string;
+  hosts: OrchestratorHost[];
   /** The host selector, pinned at the top of the rail. */
   header: ReactNode;
   /** Set on a remote host: its name (the composer's "on <host>") and what
@@ -195,9 +207,24 @@ function OrchestratorBody({
   view?: OrchestratorView;
   /** Reports the view after each change so it can be saved on the panel. */
   onViewChange(view: OrchestratorView | undefined): void;
+  /** Switches the panel itself to This Mac (the Run on menu offers it). */
+  onChooseLocal(): void;
 }) {
   const orchestratorClient = useOrchestratorClient();
   const host = useOrchestratorHost();
+  const [runHost, setRunHost] = useState(host);
+  const addresses = useHostAddresses(hosts);
+  const [project, setProject] = useState<Project | null>(null);
+  const [runReadiness, setRunReadiness] = useState<
+    Record<string, ProjectHostReadiness>
+  >({});
+  const [prepareBusy, setPrepareBusy] = useState(false);
+  const [prepareStart, setPrepareStart] = useState(true);
+  const [prepareFailure, setPrepareFailure] = useState<PrepareFailure | null>(
+    null,
+  );
+  const [editGitToken, setEditGitToken] = useState(false);
+  const [gitTokenDraft, setGitTokenDraft] = useState("");
   const [daemonState, setDaemonState] = useState<DaemonState>("loading");
   // Set once the daemon has answered at least once: a later failure keeps
   // the last known task list on the rail instead of blanking the panel.
@@ -232,6 +259,54 @@ function OrchestratorBody({
     readChatSeen(cwd),
   );
   const [proposals, setProposals] = useState<Proposal[]>([]);
+
+  useEffect(() => setRunHost(host), [host]);
+  useEffect(() => {
+    let cancelled = false;
+    const endpoint = host === LOCAL ? undefined : host;
+    // By the folder's remote, or by the folder itself when it has none.
+    window.bridge
+      ?.projectsResolve({ endpoint: endpoint || "local", cwd })
+      .then((resolved) => {
+        if (!cancelled) setProject(resolved || null);
+      })
+      .catch(() => {
+        if (!cancelled) setProject(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, host]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!project) {
+      setRunReadiness({});
+      return;
+    }
+    Promise.all(
+      hosts
+        .filter((item) => item.id.startsWith("ssh:"))
+        .map(async (item) => {
+          try {
+            const result = await window.bridge?.projectHostCheck(
+              project.id,
+              item.id,
+            );
+            return result ? ([item.id, result] as const) : null;
+          } catch {
+            return null;
+          }
+        }),
+    ).then((results) => {
+      if (!cancelled)
+        setRunReadiness(
+          Object.fromEntries(results.flatMap((item) => (item ? [item] : []))),
+        );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [project, hosts]);
 
   const reportDaemon = useRef(onDaemon);
   reportDaemon.current = onDaemon;
@@ -491,29 +566,89 @@ function OrchestratorBody({
       });
   }
 
-  async function submitNewTask(start: boolean) {
+  async function submitNewTask(start: boolean, useHostLogin = false) {
     const text = taskDraft.trim();
     if (!text || creatingBusy) return;
+    if (runHost.startsWith("ssh:")) setPrepareStart(start);
     setCreatingBusy(true);
     setError("");
-    try {
+    setPrepareFailure(null);
+    const ssh = runHost.startsWith("ssh:");
+    const go = async () => {
+      let targetClient = orchestratorClient;
+      let targetCwd = cwd;
+      if (ssh) {
+        if (!project)
+          throw new Error(
+            "This folder is not linked to a project with a Git remote.",
+          );
+        // A host that already has the project, installed, takes the task at
+        // once; Prepare runs only when something is missing.
+        const ready = useHostLogin
+          ? { ready: false }
+          : await window
+              .bridge!.projectHostReady(project.id, runHost)
+              .catch(() => ({ ready: false, path: undefined }));
+        if ("path" in ready && ready.ready && ready.path) {
+          targetCwd = ready.path;
+        } else {
+          setPrepareBusy(true);
+          const prepared = await window.bridge!.projectHostPrepare(
+            project.id,
+            runHost,
+            useHostLogin,
+            { pull: false },
+          );
+          setPrepareBusy(false);
+          if (!prepared.ok) {
+            setPrepareFailure(prepared);
+            return;
+          }
+          targetCwd = prepared.path;
+          rememberPrepareTimes(project.id, runHost, prepared.steps);
+        }
+        targetClient = orchestratorClientFor(runHost);
+      }
       const task = await createTask(
-        orchestratorClient,
-        cwd,
+        targetClient,
+        targetCwd,
         text,
         baseBranchDraft,
         start,
+        project?.id,
       );
       setLive((old) => ({ ...old, tasks: upsertTask(old.tasks, task) }));
       setTaskDraft("");
       setBaseBranchDraft("");
       setBaseOpen(false);
       if (start) open({ kind: "task", id: task.id });
+    };
+    try {
+      await go();
     } catch (e) {
       fail(e);
     } finally {
+      if (ssh && project)
+        setProject(await window.bridge!.projectsGet(project.id));
+      setPrepareBusy(false);
       setCreatingBusy(false);
     }
+  }
+
+  async function saveGitTokenAndRetry() {
+    if (!project || !gitTokenDraft.trim()) return;
+    try {
+      setProject(
+        await window.bridge!.projectGitTokenSet(project.id, gitTokenDraft),
+      );
+    } catch (e) {
+      fail(e);
+      return;
+    }
+    setGitTokenDraft("");
+    setEditGitToken(false);
+    setPrepareFailure(null);
+    void submitNewTask(prepareStart);
   }
 
   /** The task view's composer talks to the orchestrator; the reply is read
@@ -581,7 +716,15 @@ function OrchestratorBody({
       improvementsCount={improvementsCount}
       archivedCount={archivedTasks.length}
       offline={offline && !connecting}
-      header={header}
+      header={
+        project && (prepareBusy || prepareFailure) ? (
+          <PreparingHost
+            name={hosts.find((item) => item.id === runHost)?.name || "host"}
+          />
+        ) : (
+          header
+        )
+      }
       bare={connecting}
       onOpen={open}
     />
@@ -846,8 +989,33 @@ function OrchestratorBody({
           start={chatStart}
           onShow={(kind) => open({ kind })}
         />
-        {!chatKind && mainView()}
-        {composerMode && (
+        {!chatKind && project && (prepareBusy || prepareFailure) ? (
+          <PrepareProgress
+            project={project}
+            platform={runReadiness[runHost]?.platform}
+            address={addresses[runHost]}
+            hostName={hosts.find((item) => item.id === runHost)?.name || "host"}
+            failure={prepareFailure}
+            editToken={editGitToken}
+            tokenDraft={gitTokenDraft}
+            onTokenDraft={setGitTokenDraft}
+            noSecrets={!!project.hosts?.[runHost]?.withheld}
+            onRetry={() => {
+              setPrepareFailure(null);
+              void submitNewTask(prepareStart);
+            }}
+            onHostLogin={() => void submitNewTask(prepareStart, true)}
+            onEditToken={() => setEditGitToken(true)}
+            onSaveToken={() => void saveGitTokenAndRetry()}
+            onCancel={() => {
+              setPrepareFailure(null);
+              setEditGitToken(false);
+            }}
+          />
+        ) : (
+          !chatKind && mainView()
+        )}
+        {composerMode && !prepareBusy && !prepareFailure && (
           <div className="orch-composer-dock">
             <Composer
               inputRef={composerRef}
@@ -877,7 +1045,13 @@ function OrchestratorBody({
               }
               disabled={offline}
               sending={creatingBusy}
-              host={remote ? `on ${remote.name}` : undefined}
+              host={
+                runHost.startsWith("ssh:") && composerMode !== "ask"
+                  ? ""
+                  : remote
+                    ? `on ${remote.name}`
+                    : undefined
+              }
               route={
                 composerMode === "ask" && settings ? (
                   <OrchestratorRouteChip
@@ -885,10 +1059,27 @@ function OrchestratorBody({
                     onRouteChange={setOrchestratorRoute}
                   />
                 ) : (
-                  <TaskRouteLabel
-                    disabled={offline}
-                    onBaseBranch={() => setBaseOpen(true)}
-                  />
+                  <>
+                    <TaskRouteLabel
+                      disabled={offline}
+                      onBaseBranch={() => setBaseOpen(true)}
+                    />
+                    {composerMode !== "ask" && (
+                      <RunOnSelect
+                        hosts={hosts}
+                        currentHost={host}
+                        value={runHost}
+                        readiness={runReadiness}
+                        project={project}
+                        cwd={cwd}
+                        onChange={(next) =>
+                          next === "local" && host !== "local"
+                            ? onChooseLocal()
+                            : setRunHost(next)
+                        }
+                      />
+                    )}
+                  </>
                 )
               }
               extra={
@@ -1197,11 +1388,13 @@ function OrchestratorPanelBody({
         <OrchestratorBody
           key={`${host}\n${repo}`}
           cwd={repo}
+          hosts={hosts}
           header={hostSelect}
           remote={remote ? { name, preflight: info?.preflight } : undefined}
           onDaemon={onDaemon}
           view={savedHost === host || !savedHost ? view : undefined}
           onViewChange={onViewChange}
+          onChooseLocal={() => choose({ host: "local" })}
         />
       </OrchestratorHostProvider>
     </div>

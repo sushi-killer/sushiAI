@@ -1047,6 +1047,7 @@ async fn split_into_subtasks(
                 backlog: None,
                 id: ids[part.key.trim()].clone(),
                 repo_root: PathBuf::from(&parent.repo),
+                project_id: parent.project_id.clone(),
                 title: title.clone(),
                 goal: String::new(),
                 criteria: vec![],

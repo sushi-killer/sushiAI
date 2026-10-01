@@ -23,6 +23,8 @@ export type TaskCreateParams = {
   base?: string;
   start?: boolean;
   source?: string;
+  /** The project the task belongs to: its variables and MCP servers follow. */
+  projectId?: string;
 };
 
 /** Adds a trimmed `base` to a task.create params object, only when the field

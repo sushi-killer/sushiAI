@@ -58,7 +58,6 @@ function setup() {
     scanLocalSkills: async () => [{ name: "skill" }],
     manageSkill: async (action) => ({ action }),
     userDataDir: () => "/tmp/sushiai-app-ipc",
-    stageModelSettings: async (id) => `/tmp/${id}.json`,
   });
   return { handlers, calls };
 }
@@ -74,7 +73,6 @@ test("app IPC registration keeps core channels outside main and preserves contra
     "claude-plugins-list",
     "providers-list",
     "model-profiles-list",
-    "model-settings-stage",
   ])
     assert.equal(handlers.has(channel), true, channel);
   assert.deepEqual(await handlers.get("agent-providers")(), ["agent"]);
@@ -84,10 +82,6 @@ test("app IPC registration keeps core channels outside main and preserves contra
     { name: "skill" },
   ]);
   assert.deepEqual(await handlers.get("providers-list")(), ["provider"]);
-  assert.equal(
-    await handlers.get("model-settings-stage")("profile"),
-    "/tmp/profile.json",
-  );
   await handlers.get("window")("minimize");
   await handlers.get("agent-open-external")("https://example.com");
   assert.deepEqual(calls, ["minimize", ["external", "https://example.com/"]]);

@@ -8,7 +8,14 @@ export type Dialog =
   | { kind: "updates" }
   | { kind: "routine" }
   | { kind: "close-session"; workspaceId: string; panelId: string }
-  | { kind: "workspace-actions"; workspaceId: string };
+  // `cwd` stands in for an id the caller does not have (the Run on menu knows
+  // only the folder): the dialog then opens for the workspace in that folder.
+  | {
+      kind: "workspace-actions";
+      workspaceId: string;
+      cwd?: string;
+      connection?: string;
+    };
 
 export type DialogKind = Dialog["kind"];
 
@@ -17,7 +24,7 @@ export const DIALOG_META: Record<
   { label: string; className: string }
 > = {
   pane: { label: "Add panel", className: "command-modal" },
-  workspace: { label: "New workspace", className: "" },
+  workspace: { label: "New project", className: "np-dialog" },
   settings: { label: "Settings", className: "" },
   notifications: { label: "Notifications", className: "" },
   updates: { label: "Software updates", className: "" },
@@ -25,7 +32,7 @@ export const DIALOG_META: Record<
   "close-session": { label: "Notifications", className: "" },
   "workspace-actions": {
     label: "Workspace controls",
-    className: "workspace-actions-modal claude-controls-modal",
+    className: "project-dialog",
   },
 };
 
@@ -38,7 +45,14 @@ export function resolveDialog(
   workspaces: Workspace[],
 ): { workspace: Workspace; panel?: Panel } | null {
   if (!dialog || !("workspaceId" in dialog)) return null;
-  const workspace = workspaces.find((item) => item.id === dialog.workspaceId);
+  const workspace = workspaces.find((item) =>
+    dialog.workspaceId
+      ? item.id === dialog.workspaceId
+      : "cwd" in dialog &&
+        item.cwd === dialog.cwd &&
+        (item.connection ?? "") ===
+          (("connection" in dialog && dialog.connection) || ""),
+  );
   if (!workspace) return null;
   if (!("panelId" in dialog)) return { workspace };
   const panel = workspace.panels.find((item) => item.id === dialog.panelId);

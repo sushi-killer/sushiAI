@@ -24,10 +24,12 @@ const { manageSkill } = require("./skills-manager.cjs");
 const { ClaudeMcp } = require("./claude-mcp.cjs");
 const { ClaudePlugins } = require("./claude-plugins.cjs");
 const { ModelProviders } = require("./model-providers.cjs");
+const { Projects } = require("./projects.cjs");
 const { AgentRegistry } = require("./agents/registry.cjs");
 const { HermesProvider } = require("./agents/hermes-provider.cjs");
 const { registerProjectIpc } = require("./ipc/projects.cjs");
 const { registerTerminalIpc } = require("./ipc/terminals.cjs");
+const { setupHost, setupSummary } = require("./host-setup.cjs");
 const { registerChatIpc } = require("./ipc/chat.cjs");
 const { registerAppIpc } = require("./ipc/app.cjs");
 const { registerExtensionIpc } = require("./ipc/extensions.cjs");
@@ -100,6 +102,10 @@ const modelProviders = new ModelProviders({
   userDataDir: app.getPath("userData"),
   safeStorage,
 });
+const projects = new Projects({
+  userDataDir: app.getPath("userData"),
+  safeStorage,
+});
 const extraPath = [
   path.join(os.homedir(), ".local/bin"),
   "/opt/homebrew/bin",
@@ -137,6 +143,10 @@ async function stageModelSettings(modelProfileId) {
   id(modelProfileId);
   return modelProviders.stageSettings(modelProfileId, os.tmpdir());
 }
+async function stageClaudeAccount(accountId) {
+  id(accountId);
+  return modelProviders.stageClaudeAccount(accountId, os.tmpdir());
+}
 function send(channel, value) {
   if (mainWindow && !mainWindow.isDestroyed())
     mainWindow.webContents.send(channel, value);
@@ -155,8 +165,10 @@ registerProjectIpc({
   handle,
   getConnections: () => connections,
   getPreview: () => preview,
+  getClaudeMcp: () => claudeMcp,
   terminals,
   terminalPending,
+  projects,
 });
 registerExtensionIpc({
   handle,
@@ -183,6 +195,18 @@ const terminalIpc = registerTerminalIpc({
   terminals,
   terminalPending,
   stageModelSettings,
+  stageClaudeAccount,
+  resolveClaudeAccount: (accountId) => {
+    id(accountId);
+    return modelProviders.resolveClaudeAccount(accountId);
+  },
+  resolveModel: (profileId) => {
+    id(profileId);
+    return modelProviders.resolveEnv(profileId);
+  },
+  projects,
+  // The test harness runs a fake ssh (see SUSHIAI_TEST_SSH above).
+  sshBinary: (testMode.hidden && process.env.SUSHIAI_TEST_SSH) || undefined,
 });
 const chatIpc = registerChatIpc({
   handle,
@@ -209,7 +233,6 @@ registerAppIpc({
   scanLocalSkills,
   manageSkill,
   userDataDir: () => app.getPath("userData"),
-  stageModelSettings,
 });
 let orchestrator;
 let devRestart = false;
@@ -271,6 +294,7 @@ orchestrator = registerOrchestratorExtension({
   packaged: app.isPackaged,
   getClaudeMcp: () => claudeMcp,
   getModelProviders: () => modelProviders,
+  getProjects: () => projects,
   stopDaemonOnQuit: testMode.test,
   getConnections: () => connections,
   hostsFile: path.join(app.getPath("userData"), "orchestrator-hosts.json"),
@@ -295,6 +319,15 @@ app.whenReady().then(async () => {
     fakeSsh ? { ssh: fakeSsh } : undefined,
   );
   await connections.init();
+  // The local machine gets what sessions need (Herdr running, Claude Code, Codex) on
+  // its own; a test run never installs anything.
+  if (!testMode.test)
+    void setupHost(connections, "local")
+      .then((states) => {
+        const summary = setupSummary(states);
+        if (summary) console.log(`Environment: ${summary}`);
+      })
+      .catch((error) => console.error("Environment setup failed:", error));
   await orchestrator.start();
   // Sleep/wake can drop every SSH tunnel at once - retry them all rather than
   // waiting for each one's own backoff timer to come back around.

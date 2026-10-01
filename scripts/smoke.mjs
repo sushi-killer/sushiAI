@@ -312,7 +312,7 @@ try {
   await page.keyboard.press("Meta+k");
   await page
     .getByRole("button", {
-      name: "Terminal A real shell in your project",
+      name: "Terminal A shell in the project",
       exact: false,
     })
     .click();

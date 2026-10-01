@@ -405,6 +405,7 @@ class OrchestratorService {
     onTask,
     getClaudeMcp,
     getModelProviders,
+    getProjects,
     spawnRetries = 50,
     spawnIntervalMs = 100,
     stopDaemonOnQuit = false,
@@ -430,6 +431,7 @@ class OrchestratorService {
     this.onTask = onTask;
     this.getClaudeMcp = getClaudeMcp;
     this.getModelProviders = getModelProviders;
+    this.getProjects = getProjects;
     this.spawnRetries = spawnRetries;
     this.spawnIntervalMs = spawnIntervalMs;
     this.stopDaemonOnQuit = stopDaemonOnQuit;
@@ -596,11 +598,43 @@ class OrchestratorService {
 
   async #withMcp(params) {
     // The project's .mcp.json lives on this machine; a remote repo path has none here.
-    if (this.remote || !this.getClaudeMcp || typeof params?.repo !== "string")
-      return params;
+    if (typeof params?.repo !== "string") return params;
+    if (this.getProjects) {
+      try {
+        const project = params.projectId
+          ? await this.getProjects().get(params.projectId)
+          : this.remote
+            ? await this.getProjects().resolveFolder({
+                endpoint: this.host,
+                cwd: params.repo,
+              })
+            : await this.getProjects().resolveDirectory(params.repo);
+        if (project) {
+          params = { ...params, projectId: project.id };
+          // The project keeps `{ mcpServers, disabledMcpServers }`: only the
+          // servers that are on go to the task.
+          const off = new Set(project.mcp?.disabledMcpServers || []);
+          const own = Object.fromEntries(
+            Object.entries(project.mcp?.mcpServers || {}).filter(
+              ([name]) => !off.has(name),
+            ),
+          );
+          if (Object.keys(own).length) {
+            const current = params.mcp?.mcpServers || params.mcp || {};
+            params.mcp = { mcpServers: { ...own, ...current } };
+          }
+        }
+      } catch {}
+    }
+    if (!this.getClaudeMcp) return params;
     try {
       const mcp = await this.getClaudeMcp().launchConfig(params.repo);
-      return { ...params, mcp };
+      const project = params.mcp?.mcpServers || params.mcp || {};
+      const local = mcp?.mcpServers || mcp || {};
+      return {
+        ...params,
+        mcp: { mcpServers: { ...local, ...project } },
+      };
     } catch {
       // No .mcp.json / no readable project: the task still starts, just
       // without MCP servers wired into the Claude run.
@@ -611,10 +645,14 @@ class OrchestratorService {
   /** Full replace, always pushed (connect + after every `settings.set`):
    * `profiles` is every route's resolved model-profile env + key. Nothing
    * is staged to disk - `resolveEnv` hands the env map and key back in memory. */
+  /** Replaces what the daemon holds with what is allowed now (a host switched off for
+   * a project gets no values of it). Never throws. */
+  refreshSecrets() {
+    return this.#pushSecrets().catch(() => {});
+  }
+
   async #pushSecrets() {
-    // API keys never leave this machine: a remote daemon uses the harness
-    // logins already on its host.
-    if (this.remote || !this.getModelProviders) return;
+    if (!this.getProjects && (this.remote || !this.getModelProviders)) return;
     let settings;
     try {
       settings = await orchdRequest(
@@ -627,7 +665,10 @@ class OrchestratorService {
     } catch {
       return;
     }
-    const providers = this.getModelProviders();
+    // Provider and subscription credentials stay on this machine. Project
+    // values are resolved per host, which honours "don't send to this host".
+    const providers =
+      !this.remote && this.getModelProviders ? this.getModelProviders() : null;
     const profileIds = [
       ...new Set(
         (settings?.routes || [])
@@ -636,7 +677,8 @@ class OrchestratorService {
       ),
     ];
     const profiles = {};
-    for (const id of profileIds) {
+    const accounts = {};
+    for (const id of providers ? profileIds : []) {
       try {
         const { settings: env, key } = await providers.resolveEnv(id);
         profiles[id] = { env, key };
@@ -645,10 +687,45 @@ class OrchestratorService {
         // to the tier's plain route, per the profile-fallback contract.
       }
     }
+    for (const id of providers
+      ? new Set(
+          (settings?.routes || [])
+            .map((route) => route.accountId)
+            .filter((id) => typeof id === "string" && id),
+        )
+      : []) {
+      try {
+        accounts[id] = await providers.resolveClaudeAccount(id);
+      } catch {
+        // An account without a saved value is omitted and uses the host login.
+      }
+    }
     await orchdRequest(
       this.socketPath,
       "secrets.set",
-      { profiles },
+      {
+        profiles,
+        accounts,
+        projects: this.getProjects
+          ? await this.getProjects()
+              .agentEnvironments(this.remote ? this.host : "local")
+              .catch(() => ({}))
+          : {},
+        projectMcp: this.getProjects
+          ? await this.getProjects()
+              .mcpEnvironments(this.remote ? this.host : "local")
+              .catch(() => ({}))
+          : {},
+        projectRepos: this.getProjects
+          ? await Promise.resolve(
+              this.getProjects().repoProjects?.(
+                this.remote ? this.host : "local",
+              ),
+            )
+              .then((map) => map ?? {})
+              .catch(() => ({}))
+          : {},
+      },
       this.token,
       5000,
     ).catch(() => {});
@@ -670,6 +747,7 @@ class OrchestratorService {
       method === "chat.edit"
         ? await this.#withMcp(params)
         : params;
+    if (method === "task.create") await this.#pushSecrets();
     const result = await orchdRequest(
       this.socketPath,
       method,
@@ -982,6 +1060,21 @@ class OrchestratorHosts {
     if (!this.on) throw offError();
   }
 
+  /** Sending to `host` was switched off or on: its daemon forgets values it may no longer
+   * hold. Only a service that already exists is touched. */
+  refreshSecrets(host) {
+    return this.services.get(host)?.refreshSecrets();
+  }
+
+  /** What the projects hold changed: every daemon this app talks to is told. */
+  refreshAllSecrets() {
+    return Promise.all(
+      [this.local, ...this.services.values()].map((service) =>
+        service?.refreshSecrets?.(),
+      ),
+    );
+  }
+
   /** Lists the hosts the owner enabled earlier; they connect on first use.
    * Never throws. */
   async init() {
@@ -1089,6 +1182,7 @@ function createOrchestratorHosts({
   packaged,
   getClaudeMcp,
   getModelProviders,
+  getProjects,
   stopDaemonOnQuit,
   getConnections,
   hostsFile,
@@ -1108,6 +1202,7 @@ function createOrchestratorHosts({
     onTask,
     getClaudeMcp,
     getModelProviders,
+    getProjects,
     stopDaemonOnQuit,
   });
   const artifacts = localArtifacts({
@@ -1116,7 +1211,7 @@ function createOrchestratorHosts({
     resourcesPath,
     packaged,
   });
-  return new OrchestratorHosts({
+  const hosts = new OrchestratorHosts({
     local,
     connections: getConnections ?? (() => null),
     artifacts,
@@ -1129,6 +1224,7 @@ function createOrchestratorHosts({
         send,
         notify,
         onTask,
+        getProjects,
         remote: new RemoteOrchd({
           connections: getConnections(),
           endpoint: host,
@@ -1141,6 +1237,15 @@ function createOrchestratorHosts({
         }),
       }),
   });
+  // When sending to a host is switched off or on, its daemon's copy of the
+  // project values is replaced.
+  const projects = getProjects?.();
+  if (projects) {
+    projects.onSendChange = (host) => hosts.refreshSecrets(host);
+    // An edit in Project settings reaches every host's daemon at once.
+    projects.onChange = () => hosts.refreshAllSecrets();
+  }
+  return hosts;
 }
 
 /** Registers the IPC surface. Nothing connects here: `start()` (called once

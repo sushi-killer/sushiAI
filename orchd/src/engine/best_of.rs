@@ -63,6 +63,29 @@ pub(super) fn prepare_run(
                 }
             }
         }
+        if let Some(account) = route
+            .account_id
+            .as_ref()
+            .and_then(|id| app.secrets.read().unwrap().accounts.get(id).cloned())
+        {
+            match account.kind.as_str() {
+                "apiKey" => {
+                    if store::write_secret_file(&key_path, &account.value).is_ok() {
+                        profile_obj.insert(
+                            "apiKeyHelper".into(),
+                            json!(format!(
+                                "cat {}",
+                                harness::shell_quote(&key_path.to_string_lossy())
+                            )),
+                        );
+                    }
+                }
+                "subscription" => {
+                    let _ = store::write_secret_file(&run_dir.join("oauth-token"), &account.value);
+                }
+                _ => {}
+            }
+        }
         let profile_value = if profile_obj.is_empty() {
             None
         } else {

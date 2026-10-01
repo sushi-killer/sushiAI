@@ -36,6 +36,7 @@ fn with_route(settings: &mut Settings, id: &str, harness: Harness, model: &str, 
         model: Some(model.into()),
         effort: None,
         profile_id: None,
+        account_id: None,
         strength,
     });
 }

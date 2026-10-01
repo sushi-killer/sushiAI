@@ -280,6 +280,8 @@ export function TerminalPanel({
           command: panel.kind === "agent" ? panel.agent || "claude" : undefined,
           modelProfileId:
             panel.kind === "agent" ? panel.modelProfileId : undefined,
+          claudeAccountId:
+            panel.kind === "agent" ? panel.claudeAccountId : undefined,
           cols: terminal.cols,
           rows: terminal.rows,
         })

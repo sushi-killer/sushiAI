@@ -98,6 +98,58 @@ test("falls back to a marked plaintext key when encryption is unavailable", asyn
   }
 });
 
+test("stores Claude accounts encrypted and stages subscription tokens separately", async () => {
+  const f = await fixture();
+  try {
+    const account = await f.providers.upsertClaudeAccount({
+      label: "Work subscription",
+      kind: "subscription",
+    });
+    await f.providers.setClaudeAccountValue(account.id, "invented-oauth-token");
+    const listed = await f.providers.listClaudeAccounts();
+    assert.equal(listed[0].hasValue, true);
+    assert.equal(listed[0].hint, "inv…oken");
+    assert.equal(
+      JSON.stringify(listed).includes("invented-oauth-token"),
+      false,
+    );
+    const staged = await f.providers.stageClaudeAccount(
+      account.id,
+      f.userDataDir,
+    );
+    assert.equal(staged.kind, "subscription");
+    assert.equal(
+      await fs.readFile(staged.tokenPath, "utf8"),
+      "invented-oauth-token",
+    );
+    assert.equal((await fs.stat(staged.tokenPath)).mode & 0o777, 0o600);
+    assert.equal(
+      (await f.providers.resolveClaudeAccount(account.id)).value,
+      "invented-oauth-token",
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("refuses Claude account values when secure storage is unavailable", async () => {
+  const f = await fixture({
+    safeStorage: fakeSafeStorage({ available: false }),
+  });
+  try {
+    const account = await f.providers.upsertClaudeAccount({
+      label: "Work subscription",
+      kind: "subscription",
+    });
+    await assert.rejects(
+      f.providers.setClaudeAccountValue(account.id, "invented-token"),
+      /Secure storage is unavailable/,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("stages a --settings file that feeds the key via apiKeyHelper, never ANTHROPIC_API_KEY (interactive Claude Code drops unapproved env keys)", async () => {
   const f = await fixture();
   try {

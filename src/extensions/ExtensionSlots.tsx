@@ -4,7 +4,6 @@ import {
   ListChecks,
   ListTodo,
   Plug,
-  Plus,
   Sparkles,
   TerminalSquare,
   Workflow,
@@ -107,44 +106,25 @@ export function ExtensionNavSlot({
   );
 }
 
-/** Entries an extension asked to show in the add-panel list. They render as
- * ordinary panel cards, so a pane an extension provides is picked the same way
- * a terminal is. */
-export function ExtensionPanelOptions({
-  registry,
-  onAdd,
-}: {
-  registry: ExtensionRegistry;
-  onAdd(extensionId: string, targetSurfaceId: string): void;
-}) {
-  const items = navigationFor(registry, "panel.picker");
-  const describe = (extensionId: string, surfaceId: string) =>
-    registry
-      .availableSurfaces()
-      .find(
-        (surface) =>
-          surface.extensionId === extensionId && surface.id === surfaceId,
-      )?.description;
-  return (
-    <>
-      {items.map((item) => (
-        <button
-          key={`${item.extensionId}:${item.id}`}
-          onClick={() => onAdd(item.extensionId, item.targetSurfaceId)}
-        >
-          <ExtensionIcon icon={item.icon} size={19} />
-          <div>
-            <strong>{item.label}</strong>
-            <small>
-              {describe(item.extensionId, item.targetSurfaceId) ||
-                "From an extension"}
-            </small>
-          </div>
-          <Plus size={15} />
-        </button>
-      ))}
-    </>
-  );
+/** Entries an extension asked to show in the add-panel list. The picker draws
+ * them as ordinary panel cards, so a pane an extension provides is picked the
+ * same way a terminal is. */
+export function extensionPanelOptions(registry: ExtensionRegistry) {
+  return navigationFor(registry, "panel.picker").map((item) => ({
+    extensionId: item.extensionId,
+    surfaceId: item.targetSurfaceId,
+    key: `${item.extensionId}:${item.id}`,
+    label: item.label,
+    icon: item.icon,
+    description:
+      registry
+        .availableSurfaces()
+        .find(
+          (surface) =>
+            surface.extensionId === item.extensionId &&
+            surface.id === item.targetSurfaceId,
+        )?.description || "From an extension",
+  }));
 }
 
 /** The commands a surface asked to put on its own page. They land in the page

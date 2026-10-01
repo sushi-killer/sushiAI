@@ -14,7 +14,7 @@ let forward = null;
 const rest = [];
 for (let i = 0; i < argv.length; i++) {
   const arg = argv[i];
-  if (arg === "-T") continue;
+  if (arg === "-T" || arg === "-tt") continue;
   if (arg === "-N") mode = "forward";
   else if (arg === "-o" || arg === "-p") i++;
   else if (arg === "-G") mode = "G";
@@ -47,7 +47,7 @@ if (mode === "G") {
 } else {
   const child = spawn("/bin/sh", ["-c", rest[1]], {
     stdio: "inherit",
-    env: { HOME: config.home, PATH: config.bin },
+    env: { HOME: config.home, PATH: config.bin, TMPDIR: config.home },
   });
   child.on("close", (code) => process.exit(code ?? 1));
 }

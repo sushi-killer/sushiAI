@@ -26,20 +26,23 @@ this file's own path keeps the discarded detail, `Update:` trail included.
 
 ## Open
 
-## 2026-09-30 — Parallel lane worktrees filled the disk
-Root cause: each `.claude/worktrees/agent-*` lane built its own `orchd/target`; ten lanes left 262 MB free.
-Rule: delete a lane's `orchd/target` once it is merged; check `df` before more lanes.
+## 2026-10-01 — a temp `$HOME` did not isolate Herdr on macOS
+
+Root cause: Herdr resolves its socket from the real home there; `herdr server stop` stopped the owner's server.
+Rule: try Herdr setup on a Linux or SSH host; never stop a server you didn't start.
 
 ## Promoted
 
-- 2026-09-30 orchd defaults carried this repo's desktop smoke and one owner's MCP servers to every repo → defaults stay empty; repo specifics live in settings. `scoped_checks_and_chat_tools_default_to_none`.
-- 2026-09-30 A hook `allow` did not open `.claude/**` to a headless `claude -p` (also not a `Write(.claude/**)` rule or `updatedInput`; checked on 2.1.285) → an allowed write goes to `.orchd-staging/` and is copied in before verify. `an_allowed_write_under_claude_goes_through_staging_and_lands_before_verify`.
-- 2026-09-30 A connected MCP server that worked in `claude` failed under `--strict-mcp-config` (Slack's OAuth is keyed by the plugin name) → keep a plugin server's Claude Code name and probe with a real run. `chat_tools::server_key`.
+- 2026-10-01 "0 unexplained diffs" hid defects → a fresh critic compares Figma and app PNGs; revert each fix once to see its test fail. `design-critic`.
+- 2026-09-30 Lane worktrees each built `orchd/target`, 262 MB left → delete it after merge.
+- 2026-09-30 orchd defaults leaked repo specifics to every repo → defaults stay empty. `scoped_checks_and_chat_tools_default_to_none`.
+- 2026-09-30 A hook `allow` did not open `.claude/**` to headless `claude -p` → stage in `.orchd-staging/`, copy in before verify.
+- 2026-09-30 A plugin MCP server failed under `--strict-mcp-config` (OAuth keyed by plugin name) → keep its Claude Code name. `chat_tools::server_key`.
 - 2026-09-29 A kill lost the whole workspace snapshot (Chromium had not committed localStorage) → durable state goes in `workspace-state.json`, atomically.
 - 2026-09-30 A preselected answer plus global Enter sent answers the owner never picked → Enter needs an explicit pick or typed text. `enterAnswer` in `ownerAttention.ts`.
 - 2026-09-29 Contradicting criteria cost three attempts → cross-check criteria before launch.
 - 2026-09-28 Trusted `rtk rewrite` (`rtk read` drops code) → allowlist. `rtk_rewrite_output_*`.
-- 2026-09-25 A changed orchd default never reached earlier-saved settings (`settings.set` stores the whole struct) → mark settings differing from `settings.defaults`. `settings_defaults_reports_the_built_in_defaults_not_the_saved_settings`.
+- 2026-09-25 A changed orchd default never reached saved settings → mark settings differing from `settings.defaults`.
 - 2026-09-25 Disabled `select!` branch still built `Instant + Duration::MAX`, panicking the loop → bounded deadline. `run_harness`.
 - 2026-09-24 An unparsed review verdict counted as PASS → no verdict asks the owner. `a_review_without_a_verdict_waits_for_the_owner_instead_of_passing`.
 - 2026-09-24 Chat harness outlived daemon shutdown → drain every live-child map. `shutdown_kills_a_live_orchestrator_chat_turn_s_child`.

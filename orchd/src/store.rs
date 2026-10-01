@@ -389,6 +389,7 @@ mod tests {
             held_out: None,
             request: None,
             repo: "/repo".into(),
+            project_id: None,
             worktree: "/repo-task".into(),
             worktree_removed: false,
             deliverables: vec![],

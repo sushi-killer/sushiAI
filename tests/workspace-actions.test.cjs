@@ -433,7 +433,15 @@ test("reopenInSlot rebinds a vanished workspace and folds in a pane a poll alrea
     true,
     "local panes do not keep a Herdr workspace alive",
   );
-  assert.equal(isVanished({ ...before, panels: [panel("t")] }), false);
+  assert.equal(
+    isVanished({ ...before, panels: [] }),
+    true,
+    "a Herdr workspace whose last session closed is gone with it",
+  );
+  assert.equal(
+    isVanished({ ...before, herdrId: undefined, panels: [] }),
+    false,
+  );
 });
 
 test("reopenInSlot adds a pane whose ended predecessor had left the layout", async () => {

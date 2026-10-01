@@ -39,16 +39,16 @@ export function ConnectionsSettings({
     setBusy(value);
     setError("");
     try {
-      await window.bridge!.connectionsConnect(value);
+      const { setup } = await window.bridge!.connectionsConnect(value);
       onSelect(value);
       const response = await window
         .bridge!.herdr(value, "session.snapshot")
         .catch(() => null);
       const count = (response?.snapshot ?? response)?.workspaces?.length;
       notify(
-        typeof count === "number"
+        (typeof count === "number"
           ? `Connected to ${label}: ${count} workspace${count === 1 ? "" : "s"}.`
-          : `Connected to ${label}.`,
+          : `Connected to ${label}.`) + (setup ? ` Set up: ${setup}.` : ""),
       );
       await onRefresh();
     } catch (e) {

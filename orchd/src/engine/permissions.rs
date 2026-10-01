@@ -106,6 +106,7 @@ pub(super) struct TaskTools {
     pub task: BTreeMap<String, serde_json::Value>,
     /// `mcp__server__tool` names the owner allowed for this repo or task.
     pub granted: Vec<String>,
+    pub env: HashMap<String, String>,
 }
 
 fn servers_of(file: &Path) -> BTreeMap<String, serde_json::Value> {
@@ -141,6 +142,20 @@ pub(super) fn task_tools(
             off.push((cfg.id.clone(), cfg.label.clone()));
         }
     }
+    let project_id = task.project_id.clone().or_else(|| {
+        app.secrets
+            .read()
+            .unwrap()
+            .repo_projects
+            .get(&task.repo)
+            .cloned()
+    });
+    let env = project_id.as_ref().map_or_else(HashMap::new, |id| {
+        let secrets = app.secrets.read().unwrap();
+        let mut env = secrets.projects.get(id).cloned().unwrap_or_default();
+        env.extend(secrets.project_mcp.get(id).cloned().unwrap_or_default());
+        env
+    });
     TaskTools {
         connected: chat_tools::for_task(app, &on),
         off,
@@ -151,6 +166,7 @@ pub(super) fn task_tools(
             .filter_map(|r| r.strip_prefix("tool:"))
             .map(str::to_string)
             .collect(),
+        env,
     }
 }
 
@@ -180,7 +196,31 @@ impl TaskTools {
             servers.insert(key.clone(), without_mark(def));
         }
         servers.insert(messages::SERVER.to_string(), messages_server.clone());
-        json!({"mcpServers": servers})
+        fn resolve(value: &mut serde_json::Value, env: &HashMap<String, String>) {
+            match value {
+                serde_json::Value::String(text) => {
+                    let mut result = text.clone();
+                    for (name, secret) in env {
+                        result = result.replace(&format!("${{{name}}}"), secret);
+                    }
+                    *text = result;
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        resolve(item, env);
+                    }
+                }
+                serde_json::Value::Object(items) => {
+                    for item in items.values_mut() {
+                        resolve(item, env);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut config = json!({"mcpServers": servers});
+        resolve(&mut config, &self.env);
+        config
     }
 
     /// The servers a Codex run gets: the task's own that carry
@@ -1013,6 +1053,7 @@ mod tests {
             ]
             .into(),
             granted: vec!["mcp__a__send".into(), "mcp__a__get".into()],
+            env: HashMap::new(),
         };
         assert_eq!(tools.allowed(), vec!["mcp__a__get", "mcp__a__send"]);
         let config = tools.mcp_config(&json!({"command": "messages"}));

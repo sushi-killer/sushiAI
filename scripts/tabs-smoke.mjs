@@ -71,9 +71,7 @@ try {
     .getByRole("tab", { name: "One", exact: true })
     .waitFor({ state: "detached" });
   await page.keyboard.press("Meta+t");
-  await page
-    .getByRole("heading", { name: "Add a panel", exact: true })
-    .waitFor();
+  await page.locator(".pk").waitFor();
   console.log(
     "PASS: previous/next tab, maximize, close tab and add-session shortcuts",
   );

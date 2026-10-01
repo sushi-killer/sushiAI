@@ -18,7 +18,6 @@ function registerAppIpc({
   scanLocalSkills,
   manageSkill,
   userDataDir,
-  stageModelSettings,
 }) {
   let skillsCatalogCache;
   let skillsCatalogScan;
@@ -149,6 +148,7 @@ function registerAppIpc({
         })
       : claudeMcp.list(cwd),
   );
+  handle("claude-mcp-usage", (cwd) => claudeMcp.usage(cwd));
   handle("claude-mcp-toggle", (input) => {
     if (!input || typeof input !== "object" || Array.isArray(input))
       throw new Error("Invalid MCP request.");
@@ -184,6 +184,16 @@ function registerAppIpc({
   });
 
   handle("providers-list", () => modelProviders.listProviders());
+  handle("claude-accounts-list", () => modelProviders.listClaudeAccounts());
+  handle("claude-accounts-upsert", (input) =>
+    modelProviders.upsertClaudeAccount(input),
+  );
+  handle("claude-accounts-value-set", (id, value) =>
+    modelProviders.setClaudeAccountValue(id, value),
+  );
+  handle("claude-accounts-delete", (id) =>
+    modelProviders.deleteClaudeAccount(id),
+  );
   handle("providers-upsert", (input) => modelProviders.upsertProvider(input));
   handle("providers-delete", (providerId) =>
     modelProviders.deleteProvider(providerId),
@@ -206,9 +216,6 @@ function registerAppIpc({
   );
   handle("model-profiles-delete", (profileId) =>
     modelProviders.deleteProfile(profileId),
-  );
-  handle("model-settings-stage", (modelProfileId) =>
-    stageModelSettings(modelProfileId),
   );
 }
 

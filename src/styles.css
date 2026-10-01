@@ -398,7 +398,11 @@ textarea::placeholder {
   text-overflow: ellipsis;
 }
 .workspace-name .remote-tag {
-  flex: none;
+  /* A long label (an orchestrator task's branch) shrinks and ellipsizes
+     before the name does, like the pane rows' chips. */
+  flex: 0 1 auto;
+  max-width: 45%;
+  min-width: 0;
   margin-left: calc(var(--gap-xs) - 8px);
 }
 .workspace-name .host-marker-group .remote-tag {
@@ -2781,6 +2785,20 @@ iframe {
   font-size: 11px;
   color: #777;
 }
+.host-readiness > span {
+  width: 6px;
+  height: 6px;
+  display: inline-block;
+  border-radius: 50%;
+  background: #87b77a;
+}
+.host-readiness {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #8da88a;
+  font-size: 9px;
+}
 .agent-options-label {
   margin-top: 25px;
   margin-bottom: 9px;
@@ -3007,6 +3025,9 @@ iframe {
   align-items: center;
   justify-content: center;
 }
+.workspace-more.extension-action {
+  right: 31px;
+}
 .workspace-item:hover > .workspace-more {
   opacity: 1;
 }
@@ -3093,6 +3114,7 @@ iframe {
   display: flex;
   gap: 4px;
   overflow: auto;
+  scrollbar-width: none;
   padding: 0 0 7px;
   flex-shrink: 0;
 }
@@ -3117,7 +3139,7 @@ iframe {
   min-height: 0;
   display: flex;
 }
-.secondary {
+.secondary:not(.ui-button) {
   background: #272727;
   border: 1px solid #3b3b3b;
   padding: 9px 13px;
@@ -3282,6 +3304,36 @@ iframe {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+.claude-accounts {
+  margin: 16px 0;
+  padding: 12px;
+  border: 1px solid #333;
+  border-radius: 9px;
+  background: #1c1c1c;
+}
+.claude-accounts > .muted {
+  font-size: 11px;
+}
+.claude-account-row {
+  display: grid;
+  grid-template-columns:
+    minmax(100px, 1fr) minmax(90px, auto) minmax(150px, 2fr)
+    auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid #333;
+}
+.claude-account-row > strong {
+  font-size: 11px;
+}
+.claude-account-row > span {
+  font-size: 10px;
+  color: #aaa;
+}
+.claude-account-row input {
+  min-width: 0;
 }
 .provider-card-head {
   display: flex;
@@ -3542,10 +3594,6 @@ iframe {
 .modal .ssh-form {
   gap: 12px;
 }
-.workspace-actions-modal h2 {
-  padding-right: 24px;
-  overflow-wrap: anywhere;
-}
 .workspace-summary {
   display: flex;
   flex-direction: column;
@@ -3555,15 +3603,14 @@ iframe {
   overflow-wrap: anywhere;
   color: #737b80;
 }
-.workspace-actions-modal form > .primary {
-  align-self: stretch;
-}
-.claude-controls-modal {
-  width: min(960px, calc(100vw - 48px));
-}
 .workspace-controls-settings {
   display: grid;
   gap: 12px;
+}
+.claude-controls-modal {
+  width: min(1000px, calc(100vw - 48px));
+  padding: 0;
+  overflow: hidden;
 }
 .workspace-controls-heading {
   display: flex;
@@ -3598,6 +3645,84 @@ iframe {
 .workspace-control-tabs button.selected {
   background: #2b2b2b;
   color: #e0e0e0;
+}
+.project-hosts-settings {
+  display: grid;
+  gap: 10px;
+}
+.project-host-row {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #303030;
+  border-radius: 7px;
+  background: #171717;
+}
+.project-host-heading,
+.project-host-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.project-host-heading strong {
+  color: #e0e0e0;
+}
+.project-host-sends,
+.project-host-withheld {
+  font-size: 11px;
+}
+.project-host-sends {
+  color: #a9c58b;
+}
+.project-host-withheld {
+  color: #d9ae75;
+}
+.project-host-matrix {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 16px;
+}
+.project-host-matrix > div {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 8px;
+  color: #858585;
+  font-size: 11px;
+}
+.project-host-matrix > div strong {
+  color: #d0d0d0;
+  font-weight: 500;
+  text-align: right;
+}
+.project-host-matrix > div small {
+  grid-column: 1 / -1;
+  color: #858585;
+}
+.project-host-matrix > .project-host-ready > strong {
+  color: #a9c58b;
+}
+.project-host-matrix > .project-host-missing > strong {
+  color: #d9ae75;
+}
+.project-host-overrides {
+  display: grid;
+  gap: 6px;
+  color: #a8a8a8;
+  font-size: 11px;
+}
+.project-host-overrides textarea {
+  min-height: 56px;
+  resize: vertical;
+  font:
+    11px ui-monospace,
+    SFMono-Regular,
+    monospace;
+}
+.project-host-matrix > p {
+  grid-column: 1 / -1;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 .workspace-controls-columns {
   display: grid;
@@ -5500,4 +5625,12 @@ iframe {
   align-self: flex-start;
   margin-top: 18px;
   color: #a9c58b;
+}
+.spinning {
+  animation: new-project-spin 1s linear infinite;
+}
+@keyframes new-project-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }

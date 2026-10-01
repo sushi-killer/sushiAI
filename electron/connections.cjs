@@ -14,7 +14,9 @@ function run(binary, args, input = "", timeout = 20000) {
       stderr = "",
       failure;
     const timer = setTimeout(() => {
-      failure = new Error("Connection timed out");
+      failure = Object.assign(new Error("Connection timed out"), {
+        timedOut: true,
+      });
       proc.kill();
     }, timeout);
     proc.stdout.setEncoding("utf8");
@@ -36,7 +38,7 @@ function run(binary, args, input = "", timeout = 20000) {
     proc.on("close", (code) => {
       clearTimeout(timer);
       failure
-        ? reject(failure)
+        ? reject(Object.assign(failure, { stderr }))
         : code
           ? reject(new Error(stderr || `Process exited (${code})`))
           : resolve(stdout);

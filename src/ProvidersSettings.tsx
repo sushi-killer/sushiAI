@@ -5,6 +5,7 @@ import type {
   ModelProvider,
   ModelProviderKind,
   ProviderModel,
+  ClaudeAccount,
 } from "./types";
 
 const KIND_LABEL: Record<ModelProviderKind, string> = {
@@ -197,6 +198,7 @@ function ProfileForm({
 }
 
 export function ProvidersSettings() {
+  const [accounts, setAccounts] = useState<ClaudeAccount[]>([]);
   const [providers, setProviders] = useState<ModelProvider[]>([]);
   const [profiles, setProfiles] = useState<ModelProfile[]>([]);
   const [addingKind, setAddingKind] = useState<ModelProviderKind | "">("");
@@ -212,10 +214,12 @@ export function ProvidersSettings() {
     Promise.all([
       window.bridge?.providersList(),
       window.bridge?.modelProfilesList(),
+      window.bridge?.claudeAccountsList(),
     ])
-      .then(([p, m]) => {
+      .then(([p, m, a]) => {
         setProviders(p || []);
         setProfiles(m || []);
+        setAccounts(a || []);
       })
       .catch((e) => setError(errorText(e)));
   useEffect(() => {
@@ -307,6 +311,106 @@ export function ProvidersSettings() {
           {error}
         </p>
       )}
+      <section className="claude-accounts">
+        <div className="provider-card-head">
+          <strong>Claude accounts</strong>
+          <button
+            className="add-profile"
+            onClick={async () => {
+              try {
+                const account = await window.bridge!.claudeAccountsUpsert({
+                  label: `Subscription ${accounts.length + 1}`,
+                  kind: "subscription",
+                });
+                setAccounts((items) => [...items, account]);
+              } catch (e) {
+                setError(errorText(e));
+              }
+            }}
+          >
+            <Plus size={12} /> Add subscription
+          </button>
+          <button
+            className="add-profile"
+            onClick={async () => {
+              try {
+                const account = await window.bridge!.claudeAccountsUpsert({
+                  label: `API key ${accounts.length + 1}`,
+                  kind: "apiKey",
+                });
+                setAccounts((items) => [...items, account]);
+              } catch (e) {
+                setError(errorText(e));
+              }
+            }}
+          >
+            <Plus size={12} /> Add API key
+          </button>
+        </div>
+        <p className="muted">
+          Subscriptions use a setup token. Run <code>claude setup-token</code>{" "}
+          in a terminal, then paste its result here. Tokens stay in encrypted
+          local storage and are passed to Claude through a file descriptor.
+        </p>
+        {accounts.map((account) => (
+          <form
+            className="claude-account-row"
+            key={account.id}
+            onSubmit={async (event) => {
+              event.preventDefault();
+              const form = event.currentTarget;
+              const value = new FormData(form).get("value");
+              try {
+                const result = await window.bridge!.claudeAccountValueSet(
+                  account.id,
+                  String(value || ""),
+                );
+                setAccounts((items) =>
+                  items.map((item) =>
+                    item.id === account.id ? { ...item, ...result } : item,
+                  ),
+                );
+                form.reset();
+              } catch (e) {
+                setError(errorText(e));
+              }
+            }}
+          >
+            <strong>{account.label}</strong>
+            <span>
+              {account.kind === "subscription"
+                ? "Subscription"
+                : "Anthropic API key"}
+            </span>
+            <input
+              name="value"
+              type="password"
+              autoComplete="new-password"
+              placeholder={
+                account.hasValue
+                  ? `Saved · ${account.hint}`
+                  : account.kind === "subscription"
+                    ? "Paste setup token"
+                    : "Paste API key"
+              }
+              aria-label={`${account.label} ${account.kind === "subscription" ? "token" : "API key"}`}
+            />
+            <button type="submit">Save</button>
+            <button
+              type="button"
+              aria-label={`Remove ${account.label}`}
+              onClick={async () => {
+                await window.bridge!.claudeAccountDelete(account.id);
+                setAccounts((items) =>
+                  items.filter((item) => item.id !== account.id),
+                );
+              }}
+            >
+              Remove
+            </button>
+          </form>
+        ))}
+      </section>
       {providers.map((provider) => {
         const mine = profiles.filter((p) => p.providerId === provider.id);
         return (

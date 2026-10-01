@@ -592,6 +592,26 @@ pub(super) fn write_readonly_claude_settings_with_profile(
             }
         }
     }
+    if let Some(account) = route
+        .account_id
+        .as_ref()
+        .and_then(|id| app.secrets.read().unwrap().accounts.get(id).cloned())
+    {
+        if account.kind == "apiKey" {
+            if store::write_secret_file(key_path, &account.value).is_ok() {
+                profile_obj.insert(
+                    "apiKeyHelper".into(),
+                    serde_json::Value::String(format!(
+                        "cat {}",
+                        harness::shell_quote(&key_path.to_string_lossy())
+                    )),
+                );
+            }
+        } else if account.kind == "subscription" {
+            let _ =
+                store::write_secret_file(&key_path.with_file_name("oauth-token"), &account.value);
+        }
+    }
     let profile_value = if profile_obj.is_empty() {
         None
     } else {

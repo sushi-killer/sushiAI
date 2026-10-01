@@ -521,6 +521,7 @@ pub(super) async fn run_task_loop(
                 model: None,
                 effort: None,
                 profile_id: None,
+                account_id: None,
                 strength: None,
             });
         let Some((route, swap)) = app.usable_route(&settings, route) else {

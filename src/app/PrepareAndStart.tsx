@@ -49,7 +49,7 @@ export function PrepareAndStart({
     onCancel();
   };
 
-  async function run(useHostLogin = false) {
+  async function run(useHostLogin = false, gitUrl?: string) {
     if (!window.bridge) return;
     setFailure(null);
     setPhase("checking");
@@ -62,6 +62,7 @@ export function PrepareAndStart({
       projectId: project.id,
       endpoint,
       useHostLogin,
+      gitUrl,
       isGone: () => gone.current,
       start: onStart,
     });
@@ -139,6 +140,7 @@ export function PrepareAndStart({
         <PrepareProgress
           project={project}
           hostName={hostName}
+          endpoint={endpoint}
           failure={failure}
           noSecrets={noSecrets}
           session
@@ -147,7 +149,7 @@ export function PrepareAndStart({
           editToken={editToken}
           tokenDraft={tokenDraft}
           onTokenDraft={setTokenDraft}
-          onRetry={() => void run()}
+          onRetry={(url) => void run(false, url)}
           onHostLogin={() => void run(true)}
           onEditToken={() => setEditToken(true)}
           onSaveToken={() => void saveToken()}

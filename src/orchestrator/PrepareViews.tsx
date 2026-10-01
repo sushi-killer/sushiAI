@@ -2,10 +2,12 @@ import { useState, type ReactNode } from "react";
 import { ChevronDown, RefreshCw, Server } from "lucide-react";
 import { projectSlug, repoSlug } from "../projectPrepare";
 import { advice, cloneFailure } from "./prepareCopy";
+import { GitRecovery } from "./GitRecovery";
 import type {
   Project,
   ProjectHostReadiness,
   ProjectPrepareStep,
+  ProjectGitFailure,
 } from "../types";
 
 export type PrepareFailure = {
@@ -14,6 +16,7 @@ export type PrepareFailure = {
   status?: number;
   message: string;
   steps?: ProjectPrepareStep[];
+  git?: ProjectGitFailure;
 };
 
 type Mark = "done" | "active" | "failed" | "pending";
@@ -168,7 +171,7 @@ function planRows(
           ? `Update ${slug}`
           : `Clone ${slug}`,
       sub:
-        mode === "failed" && failure
+        mode === "failed" && failure && stateOf("clone") === "failed"
           ? (cloneFailure({
               hostName,
               repo: slug,
@@ -176,31 +179,46 @@ function planRows(
               noSecrets: !!options.noSecrets,
               status: failure.status,
               message: failure.message,
+              git: failure.git,
             }) ?? firstLine(failure.message))
           : options.found
             ? `at ${path} · nothing to clone`
             : `${cloned ? "at" : "into"} ${path}, using ${token}`,
       right: seconds("clone"),
+      more:
+        failure?.git && stateOf("clone") === "failed"
+          ? failure.message
+              .split("\n")
+              .filter((line) => !line.startsWith("SUSHIAI_"))
+              .join("\n")
+              .trim()
+          : undefined,
     },
   ];
   if (project.setup.install)
     rows.push({
       mark: stateOf("install"),
       title: "Install",
-      sub: `${project.setup.install} · ${
-        mode === "failed"
-          ? "waits for the clone"
-          : setupOnly.length
-            ? `uses ${setupOnly.join(", ")} (setup only)`
-            : "runs when the lock file changes"
-      }`,
+      sub:
+        stateOf("install") === "failed" && failure
+          ? firstLine(failure.message)
+          : `${project.setup.install} · ${
+              mode === "failed" && stateOf("clone") !== "done"
+                ? "waits for the clone"
+                : setupOnly.length
+                  ? `uses ${setupOnly.join(", ")} (setup only)`
+                  : "runs when the lock file changes"
+            }`,
       right: seconds("install"),
     });
   if (project.setup.check)
     rows.push({
       mark: stateOf("check"),
       title: "Check",
-      sub: project.setup.check,
+      sub:
+        stateOf("check") === "failed" && failure
+          ? firstLine(failure.message)
+          : project.setup.check,
       right: seconds("check"),
     });
   const missing = ready?.mcp.missing ?? [];
@@ -248,6 +266,7 @@ function firstLine(message: string): string {
 export function PrepareProgress({
   project,
   hostName,
+  endpoint,
   platform,
   address,
   failure,
@@ -267,6 +286,7 @@ export function PrepareProgress({
 }: {
   project: Project;
   hostName: string;
+  endpoint?: string;
   /** The host is switched off for this project: nothing was sent. */
   noSecrets?: boolean;
   /** The + picker's session start: no task-run rows. */
@@ -284,7 +304,7 @@ export function PrepareProgress({
   editToken: boolean;
   tokenDraft: string;
   onTokenDraft(value: string): void;
-  onRetry(): void;
+  onRetry(gitUrl?: string): void;
   onHostLogin(): void;
   onEditToken(): void;
   onSaveToken(): void;
@@ -320,6 +340,7 @@ export function PrepareProgress({
             stage: failure.stage,
             setupSecrets: setupSeen(project).secrets,
             setupOthers: setupSeen(project).others,
+            git: failure.git,
           })}
         </p>
         {editToken && (
@@ -334,10 +355,18 @@ export function PrepareProgress({
           />
         )}
         <div className="orch-prep-actions">
-          <button type="button" className="ui-button ghost" onClick={onRetry}>
+          <button
+            type="button"
+            className="ui-button ghost"
+            onClick={() =>
+              onRetry(
+                failure.git?.transport === "ssh" ? failure.git.url : undefined,
+              )
+            }
+          >
             <RefreshCw size={14} aria-hidden /> Try again
           </button>
-          {!failure.timedOut && !noSecrets && (
+          {failure.stage === "clone" && !failure.timedOut && !noSecrets && (
             <>
               <button
                 type="button"
@@ -382,6 +411,18 @@ export function PrepareProgress({
       </p>
       <StepList rows={rows} />
       {extra}
+      {failure?.stage === "clone" &&
+        failure.git &&
+        endpoint &&
+        ["auth", "host-key", "network"].includes(failure.git.kind) && (
+          <GitRecovery
+            key={`${project.id}:${endpoint}:${failure.git.url}`}
+            projectId={project.id}
+            endpoint={endpoint}
+            failure={failure.git}
+            onRetry={onRetry}
+          />
+        )}
     </div>
   );
 }

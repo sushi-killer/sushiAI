@@ -1197,6 +1197,55 @@
 }
 .orch-prep-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
+}
+
+.orch-git-recovery,
+.orch-git-key,
+.orch-git-url {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.orch-git-recovery {
+  padding: 14px;
+  border: 1px solid var(--line-pane);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.orch-git-recovery p {
+  margin: 0;
+  color: var(--text-muted);
+}
+.orch-git-recovery input,
+.orch-git-recovery textarea {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-app);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.orch-git-recovery textarea {
+  resize: vertical;
+  overflow-wrap: anywhere;
+}
+.orch-git-recovery code {
+  overflow-wrap: anywhere;
+}
+.orch-git-recovery .ui-button {
+  align-self: flex-start;
+}
+.orch-git-recovery .orch-git-error {
+  color: var(--danger);
 }

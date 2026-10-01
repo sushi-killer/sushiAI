@@ -1,4 +1,4 @@
-import type { Bridge, ProjectPrepareStep } from "./types.ts";
+import type { Bridge, ProjectPrepareStep, ProjectGitFailure } from "./types.ts";
 
 export type PrepareOutcome =
   | { kind: "failed"; failure: PrepareFailureLike }
@@ -12,6 +12,7 @@ type PrepareFailureLike = {
   timedOut?: boolean;
   message: string;
   steps?: ProjectPrepareStep[];
+  git?: ProjectGitFailure;
 };
 
 /** One run of the picker's flow: prepare the host, then start the session
@@ -22,6 +23,7 @@ export async function prepareAndStart(options: {
   projectId: string;
   endpoint: string;
   useHostLogin: boolean;
+  gitUrl?: string;
   isGone(): boolean;
   start(path: string): Promise<boolean>;
   /** Called when a prepare really starts (not for a host that is ready). */
@@ -40,7 +42,7 @@ export async function prepareAndStart(options: {
             reason?: string;
           },
       );
-    if (ready.ready && ready.path && !options.useHostLogin) {
+    if (ready.ready && ready.path && !options.useHostLogin && !options.gitUrl) {
       if (options.isGone()) return { kind: "cancelled" };
       return (await options.start(ready.path))
         ? { kind: "started" }
@@ -51,7 +53,7 @@ export async function prepareAndStart(options: {
       options.projectId,
       options.endpoint,
       options.useHostLogin,
-      { pull: false },
+      { pull: false, ...(options.gitUrl ? { gitUrl: options.gitUrl } : {}) },
     );
     if (!result.ok) return { kind: "failed", failure: result };
     if (options.isGone()) return { kind: "cancelled" };

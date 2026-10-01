@@ -566,7 +566,11 @@ function OrchestratorBody({
       });
   }
 
-  async function submitNewTask(start: boolean, useHostLogin = false) {
+  async function submitNewTask(
+    start: boolean,
+    useHostLogin = false,
+    gitUrl?: string,
+  ) {
     const text = taskDraft.trim();
     if (!text || creatingBusy) return;
     if (runHost.startsWith("ssh:")) setPrepareStart(start);
@@ -584,11 +588,12 @@ function OrchestratorBody({
           );
         // A host that already has the project, installed, takes the task at
         // once; Prepare runs only when something is missing.
-        const ready = useHostLogin
-          ? { ready: false }
-          : await window
-              .bridge!.projectHostReady(project.id, runHost)
-              .catch(() => ({ ready: false, path: undefined }));
+        const ready =
+          useHostLogin || gitUrl
+            ? { ready: false }
+            : await window
+                .bridge!.projectHostReady(project.id, runHost)
+                .catch(() => ({ ready: false, path: undefined }));
         if ("path" in ready && ready.ready && ready.path) {
           targetCwd = ready.path;
         } else {
@@ -597,7 +602,7 @@ function OrchestratorBody({
             project.id,
             runHost,
             useHostLogin,
-            { pull: false },
+            { pull: false, ...(gitUrl ? { gitUrl } : {}) },
           );
           setPrepareBusy(false);
           if (!prepared.ok) {
@@ -995,14 +1000,15 @@ function OrchestratorBody({
             platform={runReadiness[runHost]?.platform}
             address={addresses[runHost]}
             hostName={hosts.find((item) => item.id === runHost)?.name || "host"}
+            endpoint={runHost}
             failure={prepareFailure}
             editToken={editGitToken}
             tokenDraft={gitTokenDraft}
             onTokenDraft={setGitTokenDraft}
             noSecrets={!!project.hosts?.[runHost]?.withheld}
-            onRetry={() => {
+            onRetry={(url) => {
               setPrepareFailure(null);
-              void submitNewTask(prepareStart);
+              void submitNewTask(prepareStart, false, url);
             }}
             onHostLogin={() => void submitNewTask(prepareStart, true)}
             onEditToken={() => setEditGitToken(true)}

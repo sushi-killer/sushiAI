@@ -453,7 +453,7 @@ test("a workspace keeps its folder when a pane cds away, and a remote one never 
   assert.equal(unknown[0].cwd, "");
 });
 
-test("a dropped workspace holding a non-Herdr panel stays even with a live double", async () => {
+test("a dropped workspace folds into its folder's live one: its chat moves, its ended panes go", async () => {
   const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
   const host = "ssh:host-a";
   const [first] = reconcileHerdrWorkspaces(
@@ -477,7 +477,48 @@ test("a dropped workspace holding a non-Herdr panel stays even with a live doubl
     host,
   );
   assert.deepEqual(
-    next.map((workspace) => workspace.id),
-    ["herdr:ssh:host-a:w1", "herdr:ssh:host-a:w2"],
+    next.map((workspace) => [
+      workspace.id,
+      workspace.panels.map((panel) => panel.id),
+    ]),
+    [["herdr:ssh:host-a:w2", ["herdr:ssh:host-a:p2", "chat"]]],
+  );
+});
+
+test("two dropped workspaces of one folder, nothing live, become one", async () => {
+  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
+  const workspaces = reconcileHerdrWorkspaces(
+    [],
+    snap(
+      [
+        { workspace_id: "w1", label: "app" },
+        { workspace_id: "w2", label: "app" },
+      ],
+      [
+        pane("p1", "w1", { cwd: "/srv/app" }),
+        pane("p2", "w2", { cwd: "/srv/app" }),
+      ],
+    ),
+    "local",
+  );
+  const withChat = workspaces.map((workspace, index) =>
+    index === 1
+      ? {
+          ...workspace,
+          panels: [
+            ...workspace.panels,
+            { id: "chat", kind: "chat", title: "Thread" },
+          ],
+        }
+      : workspace,
+  );
+  // The host restarted and lists neither.
+  const next = reconcileHerdrWorkspaces(withChat, snap([], []), "local");
+  assert.deepEqual(
+    next.map((workspace) => [
+      workspace.id,
+      workspace.panels.map((panel) => panel.id),
+    ]),
+    [["herdr:local:w1", ["herdr:local:p1", "chat"]]],
   );
 });

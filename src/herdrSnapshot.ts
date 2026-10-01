@@ -217,29 +217,48 @@ export function reconcileHerdrWorkspaces(
   const brandNew = [...bySnapshotId.keys()]
     .filter((id) => !existing.has(id))
     .map((id) => buildWorkspace(id));
-  // A workspace the host dropped is kept so it can be reopened - unless the
-  // host already has a live one at the same folder: then it is a stale
-  // double of that one, and a list of them is what a few restarts left. One
-  // holding anything but Herdr panes (a chat, a local process) always stays.
-  const ownDropped = (workspace: Workspace) =>
-    Boolean(workspace.herdrId) &&
-    workspace.connection === connection &&
-    !bySnapshotId.has(workspace.herdrId!) &&
-    workspace.panels.every((panel) => panel.herdrId);
+  // A host shows a project's folder once. A workspace the host dropped is
+  // kept so it can be reopened - unless the folder already has a workspace on
+  // this host (a live one first, else an earlier dropped one): then it folds
+  // into that one. Its chats, files and other non-Herdr panels move there;
+  // its ended Herdr panes, which nothing can reopen twice, go. That is what a
+  // few restarts and re-starts used to leave as a list of doubles.
   const all = [...nextBase, ...brandNew];
-  const liveFolders = new Set(
-    all
-      .filter(
-        (workspace) =>
-          workspace.herdrId &&
-          workspace.connection === connection &&
-          bySnapshotId.has(workspace.herdrId),
-      )
-      .map((workspace) => workspace.cwd),
-  );
-  const next = all.filter(
-    (workspace) => !(ownDropped(workspace) && liveFolders.has(workspace.cwd)),
-  );
+  const own = (workspace: Workspace) =>
+    Boolean(workspace.herdrId && workspace.cwd) &&
+    workspace.connection === connection;
+  const live = (workspace: Workspace) => bySnapshotId.has(workspace.herdrId!);
+  const home = new Map<string, Workspace>();
+  for (const workspace of all.filter(own).filter(live))
+    if (!home.has(workspace.cwd)) home.set(workspace.cwd, workspace);
+  for (const workspace of all.filter(own))
+    if (!home.has(workspace.cwd)) home.set(workspace.cwd, workspace);
+  const moved = new Map<string, Panel[]>();
+  const kept = all.filter((workspace) => {
+    if (!own(workspace) || live(workspace)) return true;
+    const target = home.get(workspace.cwd)!;
+    if (target === workspace) return true;
+    const extras = workspace.panels.filter((panel) => !panel.herdrId);
+    if (extras.length)
+      moved.set(target.id, [...(moved.get(target.id) || []), ...extras]);
+    return false;
+  });
+  const next = kept.map((workspace) => {
+    const extras = moved.get(workspace.id);
+    return extras
+      ? {
+          ...workspace,
+          panels: [...workspace.panels, ...extras],
+          layout: extras.reduce<Layout | null>(
+            (layout, panel) =>
+              layout
+                ? splitLayout(layout, leaf(panel.id), "column")
+                : leaf(panel.id),
+            workspace.layout,
+          ),
+        }
+      : workspace;
+  });
   return sameWorkspaces(current, next) ? current : next;
 }
 

@@ -78,13 +78,17 @@ export function ProjectSettingsDialog({
     if (project) await save({ ...project, name: value });
   }
 
+  // One name wherever the dialog opens from: every worktree and host of the
+  // project shares the project's, while each workspace keeps its own.
+  const projectName = project?.name || workspaceName;
+
   return (
     <div className="pd">
       <aside className="pd-rail">
         <div className="pd-head">
           <span className="pd-eyebrow">PROJECT</span>
-          <strong className="pd-name" title={workspaceName}>
-            {workspaceName}
+          <strong className="pd-name" title={projectName}>
+            {projectName}
           </strong>
           <span className="pd-remote">
             {project
@@ -124,7 +128,7 @@ export function ProjectSettingsDialog({
             project={project}
             setProject={setProject}
             save={save}
-            name={workspaceName}
+            name={projectName}
             onRename={rename}
           />
         )}
@@ -182,7 +186,7 @@ export function ProjectSettingsDialog({
         <div className="pd-confirm">
           <div className="pd-confirm-box">
             <div className="dialog-eyebrow">CLOSE PROJECT</div>
-            <h2>Close {workspaceName}?</h2>
+            <h2>Close {projectName}?</h2>
             <p>
               The project disappears from the sidebar and its {sessionCount}{" "}
               {sessionCount === 1 ? "session stops" : "sessions stop"}.

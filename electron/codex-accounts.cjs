@@ -170,7 +170,7 @@ class CodexAccounts {
       ["login", ...(apiKey === undefined ? [] : ["--with-api-key"])],
       {
         env: { ...process.env, CODEX_HOME: home },
-        stdio: ["pipe", "pipe", "pipe"],
+        stdio: [apiKey === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       },
     );
     proc.browser = apiKey === undefined;
@@ -178,7 +178,7 @@ class CodexAccounts {
     let output = "";
     proc.stdout.on("data", (chunk) => (output += chunk));
     proc.stderr.on("data", (chunk) => (output += chunk));
-    proc.stdin.end(apiKey === undefined ? "" : apiKey.trim());
+    if (apiKey !== undefined) proc.stdin.end(apiKey.trim());
     // ponytail: an abandoned browser sign-in ends here, not by a cancel button.
     const timer = setTimeout(() => proc.kill(), LOGIN_TIMEOUT);
     try {

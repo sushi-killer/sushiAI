@@ -53,7 +53,65 @@ test("propagates backend errors without resolving successfully", async (t) => {
     ),
   );
   await assert.rejects(request(socket, "pane.read"), /Pane not found/);
+  await assert.rejects(
+    request(socket, "pane.read"),
+    (error) => error.code === "not_found",
+  );
 });
+test("Herdr polls cannot import the workspace used during a protected pane close", async (t) => {
+  const {
+    registerHerdrExtension,
+  } = require("../electron/extensions/builtin-herdr.cjs");
+  const calls = [];
+  const socketPath = await fixture(t, (client, message) => {
+    calls.push(message.method);
+    const respond = (body) =>
+      client.write(JSON.stringify({ id: message.id, ...body }) + "\n");
+    if (message.method === "pane.close" && message.params.pane_id === "w1:p1")
+      respond({
+        error: {
+          code: "confirmation_required",
+          message: "closing this pane would close a worktree group",
+        },
+      });
+    else if (message.method === "pane.move")
+      setTimeout(
+        () =>
+          respond({
+            result: {
+              move_result: { changed: true, pane: { pane_id: "w3:p1" } },
+            },
+          }),
+        25,
+      );
+    else if (message.method === "pane.close")
+      setTimeout(() => respond({ result: { type: "ok" } }), 25);
+    else
+      respond({
+        result: { snapshot: { workspaces: [], panes: [{ pane_id: "w2:p1" }] } },
+      });
+  });
+  const handlers = new Map();
+  registerHerdrExtension({
+    handle: (channel, handler) => handlers.set(channel, handler),
+    getConnections: () => ({ socket: async () => socketPath }),
+    id: (value) => value,
+  });
+  const herdr = handlers.get("herdr");
+  const [, snapshot] = await Promise.all([
+    herdr("local", "pane.close", { pane_id: "w1:p1" }),
+    herdr("local", "session.snapshot"),
+  ]);
+  assert.deepEqual(calls, [
+    "session.snapshot",
+    "pane.close",
+    "pane.move",
+    "pane.close",
+    "session.snapshot",
+  ]);
+  assert.deepEqual(snapshot.snapshot.panes, [{ pane_id: "w2:p1" }]);
+});
+
 test("times out unresponsive sockets and rejects early disconnects", async (t) => {
   const socket = await fixture(t, () => {});
   await assert.rejects(request(socket, "ping", {}, 40), /did not respond/);

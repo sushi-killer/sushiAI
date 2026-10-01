@@ -350,7 +350,7 @@ fn attempt_images(worktree: &Path, since_ms: i64, scope: &EvidenceScope) -> Vec<
             }
         }
     }
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|item| std::cmp::Reverse(item.0));
     found.into_iter().map(|(_, p)| p).collect()
 }
 

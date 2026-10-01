@@ -143,6 +143,37 @@ export function removeClosedPanels(
   return changed ? next : workspaces;
 }
 
+/** Ending the last session closes its worktree workspace. Other live sessions
+ * and chat transcripts keep the workspace. */
+export function removeClosedSessions(
+  workspaces: Workspace[],
+  closed: Set<string>,
+): Workspace[] {
+  const affected = new Set(
+    workspaces
+      .filter((workspace) =>
+        workspace.panels.some((panel) => closed.has(panel.id)),
+      )
+      .map((workspace) => workspace.id),
+  );
+  const remaining = removeClosedPanels(workspaces, closed);
+  return remaining.filter((workspace) => {
+    if (
+      (!workspace.herdrId && !workspace.localWorktree) ||
+      !affected.has(workspace.id)
+    )
+      return true;
+    return workspace.panels.some(
+      (panel) =>
+        panel.kind === "chat" ||
+        (!panel.ended &&
+          (panel.herdrId ||
+            panel.kind === "terminal" ||
+            panel.kind === "agent")),
+    );
+  });
+}
+
 /** Center drop swaps the two panels; an edge drop re-inserts the source next to
  * the target. Anything that no longer matches the live layout is a no-op. */
 export function movePanel(

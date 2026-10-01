@@ -1,9 +1,7 @@
 # Lessons
 
-A short queue of open problems, plus an index of what's already been fixed.
-Check both before repeating a mistake - but this file is not the archive;
-`git log -p -- docs/LESSONS.md` is, so a promoted entry moves to the index
-instead of staying around at full length forever.
+A capped queue of open problems and fixed lessons. Check both before repeating
+a mistake; `git log -p -- docs/LESSONS.md` preserves promoted entries and updates.
 
 **Open** (not yet promoted to a real check/test/doc line): cap **8 entries,
 120 words each** (including any `Update:` lines). **Whole-file cap: 600
@@ -33,6 +31,7 @@ Rule: try Herdr setup on a Linux or SSH host; never stop a server you didn't sta
 
 ## Promoted
 
+- 2026-10-01 Herdr 0.8.2 closes linked sessions with the primary's last pane when confirmation is disabled → inspect membership and detach first. `herdr-pane-close.test.cjs` and isolated daemon evidence.
 - 2026-10-01 "0 unexplained diffs" hid defects → a fresh critic compares Figma and app PNGs; revert each fix once to see its test fail. `design-critic`.
 - 2026-09-30 Lane worktrees each built `orchd/target`, 262 MB left → delete it after merge.
 - 2026-09-30 orchd defaults leaked repo specifics to every repo → defaults stay empty. `scoped_checks_and_chat_tools_default_to_none`.

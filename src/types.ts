@@ -418,6 +418,7 @@ export interface Bridge {
     cwd: string;
     agent?: string;
     claudeAccountId?: string;
+    modelProfileId?: string;
   }): Promise<{ prefix: string }>;
   terminalOpen(options: {
     panelId: string;
@@ -584,6 +585,7 @@ export interface Bridge {
   }): Promise<ModelProfile>;
   modelProfilesDelete(id: string): Promise<void>;
   modelSettingsStage(modelProfileId: string): Promise<string>;
+  modelLaunchRemote(modelProfileId: string): Promise<string>;
   claudeAccountsList(): Promise<ClaudeAccount[]>;
   claudeAccountsUpsert(input: {
     id?: string;

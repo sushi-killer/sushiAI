@@ -116,6 +116,7 @@ contextBridge.exposeInMainWorld("bridge", {
   modelProfilesUpsert: invoke("model-profiles-upsert"),
   modelProfilesDelete: invoke("model-profiles-delete"),
   modelSettingsStage: invoke("model-settings-stage"),
+  modelLaunchRemote: invoke("model-launch-remote"),
   extensionsList: invoke("extensions-list"),
   extensionsRefresh: invoke("extensions-refresh"),
   extensionsStateRead: invoke("extensions-state-read"),

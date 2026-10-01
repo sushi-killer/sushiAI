@@ -61,14 +61,26 @@ function sessionAccountId(project, sends, picked) {
   return picked || project?.sessions?.claudeAccount || undefined;
 }
 
+/** The command a remote pane starts Claude on a custom model with. The
+ * settings carry no secret, so they ride inline on the command line; the
+ * key is in the shell's environment (sent like a project value) and
+ * apiKeyHelper reads it from there - no file has to outlive the start. */
+function remoteModelLaunch(settings) {
+  const document = {
+    apiKeyHelper: 'printf %s "$SUSHIAI_MODEL_KEY"',
+    env: settings,
+  };
+  return `claude --settings ${quote(JSON.stringify(document))}`;
+}
+
 /** What to type into a Herdr pane so the project's values and the session's
  * Claude account are in its shell: they go into a one-shot 0600 file (on the
  * host, over ssh stdin; here for This Mac), and the text typed only sources
  * and removes that file, so no value is ever in the text, the pane's history
  * or argv. Empty when there is nothing to send. */
 async function sessionEnvPrefix(
-  { projects, connections, upload, remove, resolveAccount },
-  { endpoint, cwd, claudeAccountId, agent },
+  { projects, connections, upload, remove, resolveAccount, resolveModel },
+  { endpoint, cwd, claudeAccountId, agent, modelProfileId },
 ) {
   const project = await projectForFolder(
     { projects, connections },
@@ -88,6 +100,9 @@ async function sessionEnvPrefix(
       : undefined;
   if (accountId && resolveAccount)
     Object.assign(vars, accountVars(await resolveAccount(accountId)));
+  // A custom model's key, for the pane `remoteModelLaunch` starts.
+  if (modelProfileId && remote && resolveModel)
+    vars.SUSHIAI_MODEL_KEY = (await resolveModel(modelProfileId)).key;
   const payload = envPayload(vars);
   if (!payload) return "";
   let file;
@@ -116,5 +131,6 @@ module.exports = {
   sessionAccountId,
   accountVars,
   seedCodexLogin,
+  remoteModelLaunch,
   envPayload,
 };

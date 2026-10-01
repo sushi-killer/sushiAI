@@ -64,6 +64,10 @@ async function rig(
     stageModelSettings: async () => "",
     stageClaudeAccount: async () => ({}),
     resolveClaudeAccount: async (id) => ACCOUNTS[id],
+    resolveModel: async () => ({
+      key: "invented-model-key",
+      settings: { ANTHROPIC_BASE_URL: "https://models.example.test" },
+    }),
     projects,
     sshBinary: host.ssh,
   });
@@ -222,4 +226,32 @@ test("a host with no Codex login gets this Mac's, a host with one keeps it", asy
   await fs.writeFile(path.join(local, "auth.json"), '{"tokens":"newer"}');
   await seedCodexLogin(host.connections, host.endpoint, local);
   assert.equal(await fs.readFile(remote, "utf8"), '{"tokens":"mine"}');
+});
+
+test("a remote pane runs a custom model: the key in its shell, the settings inline, neither key in the text", async (t) => {
+  const { remoteModelLaunch } = require("../electron/project-session.cjs");
+  const { quote } = require("../electron/connections.cjs");
+  const { host, cwd, handlers } = await rig(t, { attach: false });
+  const { prefix } = await handlers.get("project-session-env")({
+    endpoint: host.endpoint,
+    cwd,
+    agent: "claude",
+    modelProfileId: "m1",
+  });
+  const launch = await handlers.get("model-launch-remote")("m1");
+  assert.equal((prefix + launch).includes("invented-model-key"), false);
+  const document = JSON.parse(
+    launch.slice("claude --settings '".length, -1).replaceAll("'\\''", "'"),
+  );
+  assert.equal(document.env.ANTHROPIC_BASE_URL, "https://models.example.test");
+  assert.equal(launch, remoteModelLaunch(document.env));
+  // What Claude Code does with apiKeyHelper in the pane's shell.
+  await host.connections.exec(
+    host.endpoint,
+    `${prefix}sh -c ${quote(document.apiKeyHelper)} > "$HOME/seen"`,
+  );
+  assert.equal(
+    await fs.readFile(path.join(host.home, "seen"), "utf8"),
+    "invented-model-key",
+  );
 });

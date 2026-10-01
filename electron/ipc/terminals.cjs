@@ -11,6 +11,7 @@ const {
   sessionAccountId,
   accountVars,
   seedCodexLogin,
+  remoteModelLaunch,
 } = require("../project-session.cjs");
 
 function remoteEnvPayload(env) {
@@ -96,6 +97,7 @@ function registerTerminalIpc({
   stageModelSettings,
   stageClaudeAccount,
   resolveClaudeAccount,
+  resolveModel,
   projects,
   sshBinary = "/usr/bin/ssh",
 }) {
@@ -103,8 +105,9 @@ function registerTerminalIpc({
   // are handed over as a one-shot file whose sourcing is typed into the pane.
   handle(
     "project-session-env",
-    async ({ endpoint, cwd, claudeAccountId, agent }) => {
+    async ({ endpoint, cwd, claudeAccountId, agent, modelProfileId }) => {
       if (claudeAccountId) id(claudeAccountId);
+      if (modelProfileId) id(modelProfileId);
       const connections = getConnections();
       if (agent === "codex")
         await seedCodexLogin(connections, endpoint).catch(() => {});
@@ -130,12 +133,17 @@ function registerTerminalIpc({
               () => {},
             ),
           resolveAccount: resolveClaudeAccount,
+          resolveModel,
         },
-        { endpoint, cwd, claudeAccountId, agent },
+        { endpoint, cwd, claudeAccountId, agent, modelProfileId },
       );
       return { prefix };
     },
   );
+  handle("model-launch-remote", async (modelProfileId) => {
+    id(modelProfileId);
+    return remoteModelLaunch((await resolveModel(modelProfileId)).settings);
+  });
 
   const detectionTimer = setInterval(() => {
     for (const [panelId, entry] of terminals) {

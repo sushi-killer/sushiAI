@@ -199,6 +199,10 @@ const terminalIpc = registerTerminalIpc({
     id(accountId);
     return modelProviders.resolveClaudeAccount(accountId);
   },
+  resolveModel: (profileId) => {
+    id(profileId);
+    return modelProviders.resolveEnv(profileId);
+  },
   projects,
   // The test harness runs a fake ssh (see SUSHIAI_TEST_SSH above).
   sshBinary: (testMode.hidden && process.env.SUSHIAI_TEST_SSH) || undefined,

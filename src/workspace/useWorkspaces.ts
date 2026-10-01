@@ -360,13 +360,15 @@ export function useWorkspaces({
   }
   /** What a Herdr pane is typed first: the project's values and the
    * agent's sign-in (the Claude account picked, else the project's own; this
-   * Mac's Codex login on a host without one). A picked account that cannot
-   * be sent is an error; anything else missing just sends nothing. */
+   * Mac's Codex login on a host without one; a remote custom model's key).
+   * A picked account or model that cannot be sent is an error; anything else
+   * missing just sends nothing. */
   async function sessionPrefix(
     endpoint: string,
     cwd: string,
     agent?: string,
     claudeAccountId?: string,
+    modelProfileId?: string,
   ) {
     try {
       return (
@@ -375,15 +377,17 @@ export function useWorkspaces({
           cwd,
           agent,
           claudeAccountId,
+          modelProfileId,
         })
       ).prefix;
     } catch (error) {
-      if (claudeAccountId) throw error;
+      if (claudeAccountId || modelProfileId) throw error;
       return "";
     }
   }
   /** What a Herdr pane is sent to start an agent: the CLI's name, or - for
-   * Claude on a custom model - the command with its staged settings file. */
+   * Claude on a custom model - the command with its settings (a staged file
+   * here, inline on a remote host, whose key comes in the prefix). */
   async function agentLaunchText(
     endpoint: string,
     agent: string,
@@ -391,9 +395,7 @@ export function useWorkspaces({
   ) {
     if (agent === "claude" && modelProfileId) {
       if (endpoint.startsWith("ssh:"))
-        throw new Error(
-          "Custom models aren't supported on remote (SSH) workspaces yet.",
-        );
+        return window.bridge!.modelLaunchRemote(modelProfileId);
       const settingsPath =
         await window.bridge!.modelSettingsStage(modelProfileId);
       return `claude --settings '${settingsPath}'`;
@@ -488,6 +490,7 @@ export function useWorkspaces({
           current.cwd,
           kind === "agent" ? agent : undefined,
           kind === "agent" && agent === "claude" ? claudeAccountId : undefined,
+          kind === "agent" && agent === "claude" ? modelProfileId : undefined,
         );
         if (worktree) {
           // A linked worktree of the same repository: the existing merge
@@ -646,6 +649,7 @@ export function useWorkspaces({
         owner.cwd,
         launchText ? ended.agent || "claude" : undefined,
         launchText ? ended.claudeAccountId : undefined,
+        launchText ? ended.modelProfileId : undefined,
       );
       if (launchText || prefix)
         await window.bridge.herdr(endpoint, "pane.send_input", {

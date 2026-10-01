@@ -2,6 +2,17 @@ const path = require("node:path");
 const { herdrLaunchParams } = require("../terminal-text.cjs");
 const { request, inputCommands } = require("../herdr.cjs");
 const { closeHerdrPane } = require("../herdr-pane-close.cjs");
+const { HERDR_CONTRACT } = require("../herdr-contract.cjs");
+const { checkHerdrCompatibility } = require("../herdr-compatibility.cjs");
+const { HerdrEvents } = require("../herdr-events.cjs");
+const { HerdrSnapshots } = require("../herdr-snapshots.cjs");
+const {
+  installPinnedHerdr,
+  installRemoteHerdr,
+} = require("../herdr-install.cjs");
+
+const CLOSING = new Set(["pane.close", "workspace.close"]);
+const GONE_MESSAGE = "That session is no longer open on the host.";
 
 const HERDR_MANIFEST = {
   id: "builtin.herdr",
@@ -14,38 +25,46 @@ const HERDR_MANIFEST = {
   contributions: { surfaces: [], navigation: [], actions: [], commands: [] },
 };
 
-/** Herdr says a pane or workspace is not there (closed, Herdr restarted, a
- * stale id kept in app state). */
-const GONE = /\b(?:pane|workspace|worktree|tab)\b[^\n]*\bnot found\b/i;
-const CLOSING = new Set(["pane.close", "workspace.close"]);
-const GONE_MESSAGE = "That session is no longer open on the host.";
-
-function goneResult(method, error) {
-  if (!GONE.test(error?.message ?? "")) throw error;
-  if (CLOSING.has(method)) return { gone: true };
-  throw Object.assign(new Error(GONE_MESSAGE), { code: "HERDR_GONE" });
-}
-
-function registerHerdrExtension({ handle, getConnections, id }) {
+function registerHerdrExtension({
+  handle,
+  getConnections,
+  id,
+  send = () => {},
+  executable = () => null,
+}) {
   const inputQueues = new Map();
   const sessionQueues = new Map();
-  const allowedMethods = new Set([
-    "ping",
-    "session.snapshot",
-    "workspace.create",
-    "workspace.rename",
-    "worktree.create",
-    "pane.rename",
-    "pane.split",
-    "pane.read",
-    "pane.send_text",
-    "pane.send_keys",
-    "pane.send_input",
-    "pane.close",
-    "workspace.close",
-  ]);
+  function queueSession(socketPath, operation) {
+    const next = (sessionQueues.get(socketPath) || Promise.resolve())
+      .catch(() => {})
+      .then(operation);
+    sessionQueues.set(socketPath, next);
+    return next.finally(() => {
+      if (sessionQueues.get(socketPath) === next)
+        sessionQueues.delete(socketPath);
+    });
+  }
+  const snapshots = new HerdrSnapshots({
+    getConnections,
+    rpc: (socketPath, method) =>
+      queueSession(socketPath, () => request(socketPath, method)),
+  });
+  const eventSubscriptions = new HerdrEvents({
+    getConnections,
+    send: (channel, event) => {
+      snapshots.invalidate(event.endpoint);
+      send(channel, event);
+    },
+  });
+  const installs = new Map();
+  const allowedMethods = new Set(
+    HERDR_CONTRACT.requiredMethods.filter(
+      (method) => method !== "events.subscribe",
+    ),
+  );
 
   handle("herdr", async (endpoint, method, params = {}) => {
+    if (method === "session.snapshot") return snapshots.read(endpoint);
     const socketPath = await getConnections().socket(endpoint);
     if (
       typeof socketPath !== "string" ||
@@ -60,30 +79,6 @@ function registerHerdrExtension({ handle, getConnections, id }) {
         base: params.base,
       });
       params = { ...params, cwd: prepared.cwd, base: prepared.base };
-    }
-    if (
-      method === "pane.close" ||
-      method === "session.snapshot" ||
-      method === "worktree.create"
-    ) {
-      const paneId = method === "pane.close" ? id(params.pane_id) : null;
-      // Polls must not import the temporary workspace used to detach a pane.
-      const next = (sessionQueues.get(socketPath) || Promise.resolve())
-        .catch(() => {})
-        .then(() =>
-          paneId
-            ? closeHerdrPane(socketPath, paneId)
-            : request(socketPath, method, herdrLaunchParams(method, params)),
-        );
-      sessionQueues.set(socketPath, next);
-      try {
-        return await next;
-      } catch (error) {
-        return goneResult(method, error);
-      } finally {
-        if (sessionQueues.get(socketPath) === next)
-          sessionQueues.delete(socketPath);
-      }
     }
     if (method === "pane.send_input" && params.raw !== undefined) {
       if (typeof params.raw !== "string" || params.raw.length > 1000000)
@@ -106,16 +101,75 @@ function registerHerdrExtension({ handle, getConnections, id }) {
         if (inputQueues.get(queueKey) === next) inputQueues.delete(queueKey);
       }
     }
+    const changesState =
+      method !== "ping" &&
+      method !== "pane.read" &&
+      method !== "pane.process_info";
+    if (changesState) snapshots.invalidate(endpoint);
     try {
+      if (method === "pane.close") {
+        const paneId = id(params.pane_id);
+        return await queueSession(socketPath, () =>
+          closeHerdrPane(socketPath, paneId),
+        );
+      }
+      if (method === "worktree.create")
+        return await queueSession(socketPath, () =>
+          request(socketPath, method, herdrLaunchParams(method, params)),
+        );
       return await request(
         socketPath,
         method,
         herdrLaunchParams(method, params),
       );
     } catch (error) {
-      return goneResult(method, error);
+      if (!["pane_not_found", "workspace_not_found"].includes(error.code))
+        throw error;
+      if (CLOSING.has(method)) return { gone: true };
+      error.message = GONE_MESSAGE;
+      throw error;
+    } finally {
+      if (changesState) snapshots.invalidate(endpoint);
     }
   });
+  handle("herdr-compatibility", (endpoint) =>
+    checkHerdrCompatibility({
+      endpoint,
+      connections: getConnections(),
+      binary: executable("herdr"),
+    }),
+  );
+  handle("herdr-events-subscribe", (endpoint, subscriptionId) => {
+    if (
+      typeof endpoint !== "string" ||
+      (!endpoint.startsWith("ssh:") && !path.isAbsolute(endpoint))
+    )
+      throw new Error("Invalid Herdr endpoint.");
+    if (endpoint.startsWith("ssh:")) getConnections().get(endpoint);
+    return eventSubscriptions.subscribe(endpoint, id(subscriptionId));
+  });
+  handle("herdr-events-unsubscribe", (endpoint, subscriptionId) =>
+    eventSubscriptions.unsubscribe(endpoint, id(subscriptionId)),
+  );
+  handle("herdr-install", (endpoint) => {
+    if (
+      typeof endpoint !== "string" ||
+      (!endpoint.startsWith("ssh:") && !path.isAbsolute(endpoint))
+    )
+      throw new Error("Invalid Herdr endpoint.");
+    if (installs.has(endpoint)) return installs.get(endpoint);
+    const connections = getConnections();
+    const installation = Promise.resolve()
+      .then(() =>
+        endpoint.startsWith("ssh:")
+          ? installRemoteHerdr(endpoint, connections)
+          : installPinnedHerdr(connections.herdrInstallDirectory),
+      )
+      .finally(() => installs.delete(endpoint));
+    installs.set(endpoint, installation);
+    return installation;
+  });
+  return { snapshots, close: () => eventSubscriptions.close() };
 }
 
 module.exports = { HERDR_MANIFEST, registerHerdrExtension, GONE_MESSAGE };

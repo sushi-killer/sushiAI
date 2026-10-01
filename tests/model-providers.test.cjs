@@ -335,3 +335,41 @@ test("fetchModels returns OpenRouter's fixed Claude-alias list without hitting t
     await f.cleanup();
   }
 });
+
+test("Claude account resolver tags only legitimate absence and preserves configuration errors", async () => {
+  const path = require("node:path");
+  const f = await fixture();
+  try {
+    await assert.rejects(f.providers.resolveClaudeAccount("missing"), {
+      code: "ACCOUNT_NOT_CONFIGURED",
+    });
+    const account = await f.providers.upsertClaudeAccount({
+      kind: "apiKey",
+      label: "Work",
+    });
+    await assert.rejects(f.providers.resolveClaudeAccount(account.id), {
+      code: "ACCOUNT_NOT_CONFIGURED",
+    });
+    await fs.writeFile(path.join(f.userDataDir, "secrets.json"), "{broken");
+    await assert.rejects(
+      f.providers.resolveClaudeAccount(account.id),
+      SyntaxError,
+    );
+    await fs.rm(path.join(f.userDataDir, "secrets.json"));
+    await fs.mkdir(path.join(f.userDataDir, "secrets.json"));
+    await assert.rejects(f.providers.resolveClaudeAccount(account.id), {
+      code: "EISDIR",
+    });
+    await fs.rm(path.join(f.userDataDir, "secrets.json"), { recursive: true });
+    await f.providers.setClaudeAccountValue(account.id, "synthetic-key");
+    f.providers.safeStorage.decryptString = () => {
+      throw new Error("Decrypt failed");
+    };
+    await assert.rejects(
+      f.providers.resolveClaudeAccount(account.id),
+      /Decrypt failed/,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});

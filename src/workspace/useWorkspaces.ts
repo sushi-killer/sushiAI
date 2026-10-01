@@ -4,7 +4,7 @@ import { initialWorkspace } from "../workspaceState.ts";
 import type { ClosedProject, Routine, Saved } from "../workspaceState.ts";
 import { applyChatEvent, startUserTurn } from "../chat-threads.ts";
 import { disposeTerminal } from "../TerminalPanel.tsx";
-import { errorText, isGone } from "../app/errors.ts";
+import { errorText } from "../app/errors.ts";
 import { agentTitle } from "../app/agent-title.ts";
 import { normalizeRemote } from "../app/useProjectGit.ts";
 import {
@@ -18,13 +18,10 @@ import {
   findPanelOwner,
   fixSelection,
   groupPanelIds,
-  agentLine,
-  findHostWorkspace,
   isVanished,
   movePanel as moveInLayout,
   removeClosedSessions,
   removePanel,
-  reopenInSlot,
   retitleTerminal,
   tidyGroupLayout,
   tidyWorkspace,
@@ -34,9 +31,15 @@ import {
   herdrWorkspaceKey,
   launchesInWorktree,
   worktreeBranchError,
-  worktreeCreateParams,
 } from "./worktree.ts";
-import type { ModelProfile, Panel, PanelKind, Workspace } from "../types";
+import { applySessionLaunch } from "./session-launch.ts";
+import type {
+  ModelProfile,
+  Panel,
+  PanelKind,
+  SessionLaunchRequest,
+  Workspace,
+} from "../types";
 
 export type WorkspaceController = ReturnType<typeof useWorkspaces>;
 
@@ -49,6 +52,7 @@ export function useWorkspaces({
   saved,
   socket,
   refreshHerdr,
+  invalidateHerdr,
   useEndpoint,
   notify,
   showWorkspace,
@@ -59,6 +63,7 @@ export function useWorkspaces({
   saved: Saved | null;
   socket: string;
   refreshHerdr(path: string): Promise<void>;
+  invalidateHerdr?(path: string): void;
   useEndpoint(endpoint: string): void;
   notify(text: string): void;
   showWorkspace(): void;
@@ -69,6 +74,9 @@ export function useWorkspaces({
   const [zoomed, setZoomed] = useState<string | null>(saved?.zoomed || null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const launches = useRef(0);
+  const failedLaunches = useRef(new Map<string, SessionLaunchRequest>());
+  const reopening = useRef(new Map<string, Promise<void>>());
   const [closedProjects, setClosedProjects] = useState<ClosedProject[]>(
     saved?.closedProjects || [],
   );
@@ -199,8 +207,6 @@ export function useWorkspaces({
     },
     [notify, refreshHerdr, socket, updatePanel],
   );
-  /** Places a panel App already built (an extension surface) into the active
-   * workspace. */
   /** "Hide only": drop the pane from the layout but leave its process running.
    * The Herdr session and the transcript are untouched. */
   function hidePanel(workspaceId: string, panelId: string) {
@@ -225,110 +231,140 @@ export function useWorkspaces({
       );
     updateWorkspace(workspaceId, (w) => ({ ...w, name }));
   }
-  /** Creates a workspace either as a Herdr session or a local one. Plugins
-   * are configured afterwards from the workspace's own controls. Returns false
-   * when nothing was created. */
-  /** Starts of one project on one host that are under way, and the
-   * workspace each made, so a second start (a double click, two panels asked
-   * for in a row) waits and adds a panel instead of opening another one. */
-  const herdrStarts = useRef(new Map<string, Promise<boolean>>());
-  const herdrMade = useRef(new Map<string, string>());
+  async function launchSession(
+    request: SessionLaunchRequest,
+    template: Panel,
+    restore?: { workspaceId: string; panelId: string },
+  ): Promise<boolean> {
+    const operationKey = JSON.stringify([
+      request.endpoint,
+      request.operationId,
+    ]);
+    launches.current += 1;
+    setAdding(true);
+    invalidateHerdr?.(request.endpoint);
+    try {
+      if (!window.bridge) throw new Error("Open the desktop app first.");
+      const result = await window.bridge.sessionLaunch(request);
+      const value = result.ok ? result.value : result.error.created;
+      if (value) {
+        const panel: Panel = {
+          ...template,
+          id: herdrWorkspaceKey(request.endpoint, value.paneId),
+          herdrId: value.paneId,
+          started: result.ok && request.kind === "agent",
+          launchOperationId: result.ok ? undefined : request.operationId,
+          launchError: result.ok ? undefined : result.error.message,
+        };
+        delete panel.ended;
+        invalidateHerdr?.(request.endpoint);
+        setWorkspaces((items) =>
+          applySessionLaunch(
+            items,
+            request.endpoint,
+            value,
+            panel,
+            restore,
+            request.label,
+          ),
+        );
+        switchWorkspace(
+          restore?.workspaceId ||
+            herdrWorkspaceKey(request.endpoint, value.workspaceId),
+        );
+        setSelected(panel.id);
+        if (restore) {
+          disposeTerminal(restore.panelId);
+          window.bridge.terminalClose(restore.panelId).catch(() => {});
+          if (zoomedRef.current === restore.panelId) setZoomed(panel.id);
+        }
+      }
+      if (!result.ok) {
+        if (result.error.retryable)
+          failedLaunches.current.set(operationKey, request);
+        else failedLaunches.current.delete(operationKey);
+        notify(result.error.message);
+        return false;
+      }
+      failedLaunches.current.delete(operationKey);
+      await refreshHerdr(request.endpoint).catch((error) =>
+        notify(errorText(error)),
+      );
+      return true;
+    } catch (error) {
+      failedLaunches.current.set(operationKey, request);
+      notify(errorText(error));
+      return false;
+    } finally {
+      launches.current -= 1;
+      setAdding(launches.current > 0);
+    }
+  }
   async function createWorkspace(
     name: string,
     cwd: string,
     backend: string,
     starter: string,
     endpoint: string = socket,
+    operationId?: string,
+    env?: Record<string, string>,
   ): Promise<boolean> {
     if (backend === "herdr") {
-      const key = `${endpoint}|${cwd}`;
-      await herdrStarts.current.get(key)?.catch(() => {});
-      const known = findHostWorkspace(
-        workspacesRef.current,
-        socket,
+      const kind = starter === "shell" ? "terminal" : "agent";
+      const pending = workspacesRef.current
+        .flatMap((workspace) =>
+          workspace.connection === endpoint && workspace.cwd === cwd
+            ? workspace.panels
+            : [],
+        )
+        .find(
+          (panel) =>
+            panel.launchError &&
+            panel.launchOperationId &&
+            operationId &&
+            panel.launchOperationId === operationId &&
+            panel.kind === kind &&
+            panel.agent === (kind === "agent" ? starter : undefined),
+        );
+      const owner =
+        pending && findPanelOwner(workspacesRef.current, pending.id);
+      const request: SessionLaunchRequest = {
+        operationId: operationId || pending?.launchOperationId || uid(),
         endpoint,
         cwd,
-        herdrMade.current.get(key),
+        label: name,
+        kind,
+        agent: kind === "agent" ? starter : undefined,
+        ...(pending && owner
+          ? { workspaceId: owner.herdrId, paneId: pending.herdrId }
+          : {}),
+        env,
+      };
+      return launchSession(
+        request,
+        {
+          id: "",
+          kind,
+          title: kind === "terminal" ? "zsh" : agentTitle(starter),
+          agent: kind === "agent" ? starter : undefined,
+        },
+        undefined,
       );
-      if (known) {
-        // The project is already open on this host: a session is one more
-        // panel in it.
-        await addPanel(
-          starter === "shell" ? "terminal" : "agent",
-          starter === "shell" ? "claude" : starter,
-          undefined,
-          undefined,
-          undefined,
-          "herdr",
-          known.id,
-        );
-        return true;
-      }
-      const run = createWorkspaceOnce(name, cwd, backend, starter, endpoint);
-      herdrStarts.current.set(key, run);
-      try {
-        return await run;
-      } finally {
-        if (herdrStarts.current.get(key) === run)
-          herdrStarts.current.delete(key);
-      }
     }
-    return createWorkspaceOnce(name, cwd, backend, starter, endpoint);
-  }
-  async function createWorkspaceOnce(
-    name: string,
-    cwd: string,
-    backend: string,
-    starter: string,
-    endpoint: string,
-  ): Promise<boolean> {
-    try {
-      if (backend === "herdr") {
-        const result = await window.bridge!.herdr(
-          endpoint,
-          "workspace.create",
-          { label: name, cwd, focus: false },
-        );
-        await refreshHerdr(endpoint);
-        const { prefix, settings, launch } = await sessionPrefix(
-          endpoint,
-          cwd,
-          starter === "shell" ? undefined : starter,
-        );
-        if (starter !== "shell" || prefix)
-          await window.bridge!.herdr(endpoint, "pane.send_input", {
-            pane_id: result.root_pane.pane_id,
-            text:
-              starter === "shell"
-                ? prefix
-                : agentLine(prefix, launch || starter, settings),
-            keys: ["Enter"],
-          });
-        await refreshHerdr(endpoint);
-        const made = herdrWorkspaceKey(endpoint, result.workspace.workspace_id);
-        herdrMade.current.set(`${endpoint}|${cwd}`, made);
-        switchWorkspace(made);
-      } else {
-        const w = initialWorkspace(cwd);
-        w.name = name;
-        const panel: Panel = {
-          id: uid(),
-          kind: starter === "shell" ? "terminal" : "agent",
-          title: starter === "shell" ? "zsh" : agentTitle(starter),
-          agent: starter === "shell" ? undefined : starter,
-          started: starter !== "shell",
-        };
-        w.panels = [panel];
-        w.layout = leaf(panel.id);
-        setWorkspaces((items) => [...items, w]);
-        switchWorkspace(w.id);
-      }
-      return true;
-    } catch (error) {
-      notify(errorText(error));
-      if (isGone(error)) void refreshHerdr(endpoint).catch(() => {});
-      return false;
-    }
+    const w = initialWorkspace(cwd);
+    w.name = name;
+    const panel: Panel = {
+      id: uid(),
+      kind: starter === "shell" ? "terminal" : "agent",
+      title: starter === "shell" ? "zsh" : agentTitle(starter),
+      agent: starter === "shell" ? undefined : starter,
+      started: starter !== "shell",
+    };
+    w.panels = [panel];
+    w.layout = leaf(panel.id);
+    setWorkspaces((items) => [...items, w]);
+    switchWorkspace(w.id);
+    return true;
   }
   /** Places a panel App already built (an extension surface) into a
    * workspace - the merged row's chosen host (D2) when given, else the
@@ -362,120 +398,7 @@ export function useWorkspaces({
     showWorkspace();
     setZoomed(null);
   }
-  /** A Herdr pane's account and model, kept on its panel (a snapshot does
-   * not carry them) so reopening it starts it the same way. */
-  function rememberLaunch(
-    endpoint: string,
-    paneId: string,
-    accounts: Pick<Panel, "claudeAccountId" | "codexAccountId">,
-    modelProfileId?: string,
-  ) {
-    if (
-      accounts.claudeAccountId === undefined &&
-      accounts.codexAccountId === undefined &&
-      !modelProfileId
-    )
-      return;
-    setWorkspaces((list) =>
-      list.map((w) =>
-        (w.connection || socket) !== endpoint ||
-        !w.panels.some((p) => p.herdrId === paneId)
-          ? w
-          : {
-              ...w,
-              panels: w.panels.map((p) =>
-                p.herdrId === paneId
-                  ? { ...p, ...accounts, modelProfileId }
-                  : p,
-              ),
-            },
-      ),
-    );
-  }
-  /** What a Herdr pane is typed first: the project's values and the
-   * agent's sign-in (the Claude or Codex account picked, else the project's
-   * own; this local Codex login on a host without one; a remote custom
-   * model's key).
-   * A picked account or model that cannot be sent is an error; anything else
-   * missing just sends nothing. */
-  async function sessionPrefix(
-    endpoint: string,
-    cwd: string,
-    agent?: string,
-    accounts: Pick<Panel, "claudeAccountId" | "codexAccountId"> = {},
-    modelProfileId?: string,
-  ) {
-    try {
-      return await window.bridge!.projectSessionEnv({
-        endpoint,
-        cwd,
-        agent,
-        ...accounts,
-        modelProfileId,
-      });
-    } catch (error) {
-      if (accounts.claudeAccountId || accounts.codexAccountId || modelProfileId)
-        throw error;
-      return { prefix: "", settings: "", launch: "" };
-    }
-  }
-  /** What a Herdr pane is sent to start an agent: the CLI's name, or - for
-   * Claude on a custom model - the command with its settings inline (its key
-   * comes in the prefix). */
-  async function agentLaunchText(agent: string, modelProfileId?: string) {
-    return agent === "claude" && modelProfileId
-      ? window.bridge!.modelLaunch(modelProfileId)
-      : agent;
-  }
-  type AddPanelArgs = [
-    PanelKind,
-    string?,
-    Panel["filesTarget"]?,
-    ModelProfile?,
-    string?,
-    ("herdr" | "local")?,
-    string?,
-    { branch: string; base: string }?,
-  ];
-  /** A panel for a session. Herdr may no longer have the workspace the app
-   * still remembers (closed elsewhere, Herdr restarted, the host
-   * reconnected): that is recovered, not shown. The list is reconciled with
-   * Herdr and the action is tried once more - in the workspace when it is
-   * still there, else in a new one for the same folder. */
-  async function addPanel(...args: AddPanelArgs) {
-    const outcome = await addPanelOnce(...args);
-    if (outcome !== "gone") return;
-    const [kind, agent = "claude", , , , , targetWorkspaceId, worktree] = args;
-    const stale =
-      (targetWorkspaceId &&
-        workspacesRef.current.find((w) => w.id === targetWorkspaceId)) ||
-      activeRef.current;
-    const endpoint = stale.connection || socket;
-    await refreshHerdr(endpoint).catch(() => {});
-    // Let the reconciled list reach the refs before looking at it.
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    if (worktree) {
-      notify("That worktree session is no longer open on the host. Try again.");
-      return;
-    }
-    const alive = workspacesRef.current.find(
-      (w) => w.id === stale.id && !isVanished(w),
-    );
-    if (alive) {
-      if ((await addPanelOnce(...args)) === "gone")
-        notify("That session is no longer open on the host.");
-      return;
-    }
-    // The workspace is gone: make it again where it was.
-    await createWorkspaceOnce(
-      stale.name,
-      stale.cwd,
-      "herdr",
-      kind === "agent" ? agent : "shell",
-      endpoint,
-    );
-  }
-  async function addPanelOnce(
+  async function addPanel(
     kind: PanelKind,
     agent = "claude",
     filesTarget?: Panel["filesTarget"],
@@ -483,10 +406,11 @@ export function useWorkspaces({
     accountId?: string,
     backend?: "herdr" | "local",
     targetWorkspaceId?: string,
-    worktree?: { branch: string; base: string },
-  ): Promise<"ok" | "gone" | "failed" | "busy"> {
+    worktree?: { branch: string; base?: string },
+    operationId?: string,
+    env?: Record<string, string>,
+  ) {
     const modelProfileId = modelProfile?.id;
-    // The account picked is the one of the agent it was picked for.
     const accounts =
       kind !== "agent"
         ? {}
@@ -501,81 +425,56 @@ export function useWorkspaces({
       (targetWorkspaceId &&
         workspacesRef.current.find((w) => w.id === targetWorkspaceId)) ||
       activeRef.current;
-    if (adding) return "busy";
-    setAdding(true);
     try {
       // A Herdr workspace runs its sessions in Herdr unless this panel was
       // asked to be local. Nothing else can start a process.
       const viaHerdr = current.herdrId && (backend ?? "herdr") === "herdr";
       if (viaHerdr && launchesInWorktree(kind)) {
-        if (!window.bridge) throw new Error("Open the desktop app first.");
         const endpoint = current.connection || socket;
-        if (worktree) {
-          const branchError = worktreeBranchError(worktree.branch);
-          if (branchError) throw new Error(branchError);
-        }
-        // Staged before the pane exists: a gateway that can't be reached
-        // shouldn't leave an empty pane behind. Herdr panes are just a typed
-        // shell command, so the model swap rides on that command line
-        // instead of the argv/env injection the direct local launch uses.
-        const launchText = await agentLaunchText(
-          agent,
-          kind === "agent" ? modelProfileId : undefined,
+        const pending = current.panels.find(
+          (panel) =>
+            panel.launchError &&
+            panel.launchOperationId &&
+            operationId &&
+            panel.launchOperationId === operationId &&
+            panel.kind === kind &&
+            panel.agent === (kind === "agent" ? agent : undefined) &&
+            panel.modelProfileId === modelProfileId,
         );
-        const { prefix, settings, launch } = await sessionPrefix(
-          endpoint,
-          current.cwd,
-          kind === "agent" ? agent : undefined,
-          accounts,
-          kind === "agent" && agent === "claude" ? modelProfileId : undefined,
-        );
-        if (worktree) {
-          // A linked worktree of the same repository: the existing merge
-          // logic groups it with the project row automatically.
-          const result = await window.bridge.herdr(
+        await launchSession(
+          {
+            operationId: operationId || pending?.launchOperationId || uid(),
             endpoint,
-            "worktree.create",
-            worktreeCreateParams(current, worktree.branch, worktree.base),
-          );
-          const paneId = result.root_pane?.pane_id;
-          if (kind === "agent" && paneId)
-            await window.bridge.herdr(endpoint, "pane.send_input", {
-              pane_id: paneId,
-              text: agentLine(prefix, launch || launchText, settings),
-              keys: ["Enter"],
-            });
-          await refreshHerdr(endpoint);
-          if (kind === "agent" && paneId)
-            rememberLaunch(endpoint, paneId, accounts, modelProfileId);
-          switchWorkspace(
-            herdrWorkspaceKey(endpoint, result.workspace.workspace_id),
-          );
-          if (paneId) setSelected(herdrWorkspaceKey(endpoint, paneId));
-          return "ok";
-        }
-        const result = await window.bridge.herdr(endpoint, "pane.split", {
-          workspace_id: current.herdrId,
-          // An ended pane is still in the layout, but Herdr no longer has it.
-          target_pane_id: current.panels.find((p) => p.herdrId && !p.ended)
-            ?.herdrId,
-          direction: "right",
-          focus: false,
-          cwd: current.cwd,
-        });
-        const paneId = result.pane?.pane_id || result.pane_id;
-        if (paneId && (kind === "agent" || prefix))
-          await window.bridge.herdr(endpoint, "pane.send_input", {
-            pane_id: paneId,
-            text:
+            cwd: current.cwd,
+            label: worktree
+              ? `${current.name} · ${worktree.branch}`
+              : current.name,
+            kind: kind === "agent" ? "agent" : "terminal",
+            agent: kind === "agent" ? agent : undefined,
+            modelProfileId,
+            ...accounts,
+            env,
+            workspaceId: current.herdrId,
+            targetPaneId: current.panels.find(
+              (panel) => panel.herdrId && !panel.ended,
+            )?.herdrId,
+            ...(pending ? { paneId: pending.herdrId } : {}),
+            worktree,
+          },
+          {
+            id: "",
+            kind,
+            title:
               kind === "agent"
-                ? agentLine(prefix, launch || launchText, settings)
-                : prefix,
-            keys: ["Enter"],
-          });
-        await refreshHerdr(endpoint);
-        if (kind === "agent" && paneId)
-          rememberLaunch(endpoint, paneId, accounts, modelProfileId);
-        if (paneId) setSelected(herdrWorkspaceKey(endpoint, paneId));
+                ? modelProfile?.label || agentTitle(agent)
+                : "zsh",
+            agent: kind === "agent" ? agent : undefined,
+            modelProfileId,
+            ...accounts,
+          },
+          undefined,
+        );
+        return;
       } else if (worktree && launchesInWorktree(kind)) {
         // The local counterpart of the branch above: no Herdr involved, so
         // the new checkout runs as a plain local process on this Mac (also
@@ -605,7 +504,7 @@ export function useWorkspaces({
         w.layout = leaf(panel.id);
         setWorkspaces((items) => [...items, w]);
         switchWorkspace(w.id);
-        return "ok";
+        return;
       } else {
         const panel: Panel = {
           id: uid(),
@@ -639,110 +538,59 @@ export function useWorkspaces({
         showWorkspace();
         setZoomed(null);
       }
-      return "ok";
     } catch (error) {
-      if (isGone(error)) return "gone";
       notify(errorText(error));
-      return "failed";
-    } finally {
-      setAdding(false);
     }
   }
-  /** Brings an ended Herdr pane back as a new one at the workspace's folder:
-   * a split in a workspace Herdr still lists, or - when the whole workspace
-   * is gone - a new Herdr workspace the old one is rebound to. An agent pane
-   * gets the same launch text `addPanel` sends. */
-  async function reopenPanel(panelId: string) {
+  function reopenPanel(panelId: string, operationId?: string): Promise<void> {
+    const queued = reopening.current.get(panelId);
+    if (queued) return queued;
     const owner = findPanelOwner(workspacesRef.current, panelId);
     const ended = owner?.panels.find((item) => item.id === panelId);
-    if (!owner || !ended?.ended || !ended.herdrId || adding) return;
-    setAdding(true);
-    try {
-      if (!window.bridge) throw new Error("Open the desktop app first.");
-      const endpoint = owner.connection || socket;
-      const launchText =
-        ended.kind === "agent"
-          ? await agentLaunchText(ended.agent || "claude", ended.modelProfileId)
-          : "";
-      const target = owner.panels.find((p) => p.herdrId && !p.ended);
-      let paneId: string;
-      let herdrWorkspaceId: string | undefined;
-      if (target) {
-        const result = await window.bridge.herdr(endpoint, "pane.split", {
-          workspace_id: owner.herdrId,
-          target_pane_id: target.herdrId,
-          direction: "right",
-          focus: false,
-          cwd: owner.cwd,
-        });
-        paneId = result.pane?.pane_id || result.pane_id;
-      } else {
-        const result = await window.bridge.herdr(endpoint, "workspace.create", {
-          label: owner.name,
-          cwd: owner.cwd,
-          focus: false,
-        });
-        paneId = result.root_pane?.pane_id;
-        herdrWorkspaceId = result.workspace?.workspace_id;
-      }
-      if (!paneId) throw new Error("Herdr did not report the new pane.");
-      const { prefix, settings, launch } = await sessionPrefix(
-        endpoint,
-        owner.cwd,
-        launchText ? ended.agent || "claude" : undefined,
-        launchText
-          ? {
-              claudeAccountId: ended.claudeAccountId,
-              codexAccountId: ended.codexAccountId,
-            }
-          : {},
-        launchText ? ended.modelProfileId : undefined,
-      );
-      if (launchText || prefix)
-        await window.bridge.herdr(endpoint, "pane.send_input", {
-          pane_id: paneId,
-          text: launchText
-            ? agentLine(prefix, launch || launchText, settings)
-            : prefix,
-          keys: ["Enter"],
-        });
-      const next: Panel = {
-        ...ended,
-        id: herdrWorkspaceKey(endpoint, paneId),
-        herdrId: paneId,
-      };
-      delete next.ended;
-      setWorkspaces((list) =>
-        // A poll may have dropped the old workspace as a double of the new
-        // one: then the new one, already listed, is where the pane lives.
-        !list.some((w) => w.id === owner.id)
-          ? list
-          : list
-              // A poll between the RPC and this update may have listed the new
-              // workspace on its own; the rebound one replaces that copy.
-              .filter(
-                (w) =>
-                  !herdrWorkspaceId ||
-                  w.id === owner.id ||
-                  w.connection !== owner.connection ||
-                  w.herdrId !== herdrWorkspaceId,
-              )
-              .map((w) =>
-                w.id === owner.id
-                  ? reopenInSlot(w, panelId, next, herdrWorkspaceId)
-                  : w,
-              ),
-      );
-      disposeTerminal(panelId);
-      window.bridge.terminalClose(panelId).catch(() => {});
-      setSelected(next.id);
-      if (zoomedRef.current === panelId) setZoomed(next.id);
-      await refreshHerdr(endpoint);
-    } catch (error) {
-      notify(errorText(error));
-    } finally {
-      setAdding(false);
-    }
+    if (!owner || !ended?.herdrId || (!ended.ended && !ended.launchError))
+      return Promise.resolve();
+    const endpoint = owner.connection || socket;
+    const cached = ended.launchOperationId
+      ? failedLaunches.current.get(
+          JSON.stringify([endpoint, ended.launchOperationId]),
+        )
+      : undefined;
+    const request: SessionLaunchRequest =
+      cached &&
+      !ended.ended &&
+      (!operationId || cached.operationId === operationId)
+        ? cached
+        : {
+            operationId:
+              operationId || (!ended.ended && ended.launchOperationId) || uid(),
+            endpoint,
+            cwd: owner.cwd,
+            label: owner.name,
+            kind: ended.kind === "agent" ? "agent" : "terminal",
+            agent: ended.kind === "agent" ? ended.agent || "claude" : undefined,
+            modelProfileId: ended.modelProfileId,
+            claudeAccountId: ended.claudeAccountId,
+            codexAccountId: ended.codexAccountId,
+            workspaceId: owner.herdrId,
+            targetPaneId: owner.panels.find(
+              (panel) => panel.herdrId && !panel.ended && panel.id !== panelId,
+            )?.herdrId,
+            ...(ended.launchError && !ended.ended
+              ? { paneId: ended.herdrId }
+              : {}),
+            restore: true,
+          };
+    const run = Promise.resolve()
+      .then(() =>
+        launchSession(request, ended, { workspaceId: owner.id, panelId }),
+      )
+      .then(() => {});
+    reopening.current.set(panelId, run);
+    void run.finally(() => {
+      if (reopening.current.get(panelId) === run)
+        reopening.current.delete(panelId);
+    });
+    return run;
   }
   const endSessions = useCallback(
     async (items: { workspace: Workspace; panel: Panel }[]) => {

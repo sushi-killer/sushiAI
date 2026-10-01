@@ -107,12 +107,17 @@ test("worktreeCreateParams builds the Herdr worktree.create payload", () => {
 test("herdrWorkspaceKey builds the sushiAI id for local and SSH endpoints", () => {
   assert.equal(
     herdrWorkspaceKey("unix:///tmp/herdr.sock", "ws-1"),
-    "herdr:local:ws-1",
+    "herdr:v2:unix%3A%2F%2F%2Ftmp%2Fherdr.sock:ws-1",
   );
   assert.equal(
     herdrWorkspaceKey("ssh:devbox", "ws-2"),
-    "herdr:ssh:devbox:ws-2",
+    "herdr:v2:ssh%3Adevbox:ws-2",
   );
+  assert.notEqual(
+    herdrWorkspaceKey("/tmp/first.sock", "same"),
+    herdrWorkspaceKey("/tmp/second.sock", "same"),
+  );
+  assert.notEqual(herdrWorkspaceKey("a:b", "c"), herdrWorkspaceKey("a", "b:c"));
 });
 
 test("the Herdr allowlist accepts worktree.create without touching any other method", async () => {

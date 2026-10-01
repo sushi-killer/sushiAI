@@ -2,6 +2,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { existsSync } = require("node:fs");
 const { Tray, Menu, Notification, nativeImage } = require("electron");
+const { MAX_VIEW_ID_LENGTH } = require("./ipc/panel-id.cjs");
 
 const DEFAULT_PREFERENCES = {
   runInMenuBar: true,
@@ -72,9 +73,9 @@ function validateNotice(notice) {
   if (!notice || typeof notice !== "object" || Array.isArray(notice))
     throw new Error("Invalid attention notice.");
   const { workspaceId, panelId, title, body } = notice;
-  if (!boundedString(workspaceId, 200))
+  if (!boundedString(workspaceId, MAX_VIEW_ID_LENGTH))
     throw new Error("Invalid attention workspace ID.");
-  if (!boundedString(panelId, 200))
+  if (!boundedString(panelId, MAX_VIEW_ID_LENGTH))
     throw new Error("Invalid attention panel ID.");
   if (!boundedString(title, 120))
     throw new Error("Invalid attention notice title.");

@@ -96,12 +96,14 @@ export function App() {
     connection,
     connectionError,
     refreshHerdr,
+    invalidateHerdr,
     statusByEndpoint,
   } = useHerdr({
     savedSocket: saved?.socket || "",
     notify,
     setWorkspaces,
     connectionProfiles,
+    workspaces,
   });
   const skills = useSkills(sectionName, notify);
   const [sidebar, setSidebar] = useState(
@@ -110,7 +112,6 @@ export function App() {
   const [workspaceGrouping, setWorkspaceGrouping] = useState<
     "grouped" | "flat"
   >(saved?.workspaceGrouping || "grouped");
-  // Agent and Chat render their lists into this slot of the shared sidebar.
   const [slot, setSlot] = useState<HTMLElement | null>(null);
   useEffect(() => {
     const query = window.matchMedia("(max-width: 760px)");
@@ -125,6 +126,7 @@ export function App() {
     socket,
     refreshHerdr,
     useEndpoint: setSocket,
+    invalidateHerdr,
     notify,
     showWorkspace,
     confirmClose: ({ workspace, panel }) =>
@@ -210,7 +212,6 @@ export function App() {
     ws.createWorkspace,
     closeDialog,
   );
-  /** Clicking a pane inside an expanded merged row (AC21) - unlike a plain row's `showPanel`, the pane's owning workspace need not be active yet. */
   function selectHostPane(workspace: Workspace, panel: Panel) {
     switchWorkspace(workspace.id);
     setSelected(panel.id);
@@ -321,7 +322,6 @@ export function App() {
     (sum, w) => sum + codePanels(w).length,
     0,
   );
-  // The canvas owns the tab strip; a merged project's count is every member's panes.
   const paneCount = merged.group
     ? merged.panes.length
     : codePanels(active).length;

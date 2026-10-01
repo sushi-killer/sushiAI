@@ -88,16 +88,21 @@ class CodexAccounts {
   async #account(id) {
     const accounts = await this.#read();
     if (typeof id !== "string" || !Object.hasOwn(accounts, id))
-      throw new Error("Unknown Codex account.");
+      throw Object.assign(new Error("Unknown Codex account."), {
+        code: "ACCOUNT_NOT_CONFIGURED",
+      });
     return accounts[id];
   }
   homeFor(id) {
     return path.join(this.homes, id);
   }
-  #auth(id) {
+  #auth(id, strict = false) {
     return fs
       .readFile(path.join(this.homeFor(id), "auth.json"), "utf8")
-      .catch(() => "");
+      .catch((error) => {
+        if (strict && error.code !== "ENOENT") throw error;
+        return "";
+      });
   }
 
   async list() {
@@ -178,14 +183,18 @@ class CodexAccounts {
     let output = "";
     proc.stdout.on("data", (chunk) => (output += chunk));
     proc.stderr.on("data", (chunk) => (output += chunk));
-    if (apiKey !== undefined) proc.stdin.end(apiKey.trim());
+    let inputError;
+    proc.stdin?.on("error", (error) => (inputError = error));
     // ponytail: an abandoned browser sign-in ends here, not by a cancel button.
     const timer = setTimeout(() => proc.kill(), LOGIN_TIMEOUT);
     try {
       const code = await new Promise((resolve, reject) => {
         proc.on("error", reject);
         proc.on("close", resolve);
+        proc.stdin?.end(apiKey.trim());
       });
+      if (inputError && (inputError.code !== "EPIPE" || code === 0))
+        throw inputError;
       if (code !== 0 || !signedInAs(await this.#auth(id)))
         throw new Error(
           output.trim().split("\n").pop() ||
@@ -258,9 +267,12 @@ class CodexAccounts {
   }
   async #resolve(id, endpoint) {
     const account = await this.#account(id);
-    const auth = (await this.#auth(id)).trim();
+    const auth = (await this.#auth(id, true)).trim();
+    if (auth) JSON.parse(auth);
     if (!signedInAs(auth))
-      throw new Error(`Sign in to ${account.label} first.`);
+      throw Object.assign(new Error(`Sign in to ${account.label} first.`), {
+        code: "ACCOUNT_NOT_CONFIGURED",
+      });
     const home = this.homeFor(id);
     // What Codex would otherwise make in the account home on a first run, so
     // history and sessions stay shared.

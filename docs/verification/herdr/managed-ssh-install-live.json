@@ -1,0 +1,48 @@
+{
+  "recordedAt": "2026-10-01T19:41:38.085Z",
+  "version": "0.8.2",
+  "sourceCommit": "9eb521456ac0d19d3ab3d9d7cea3cca10baa8a4c",
+  "localAssetSource": "/usr/local/bin/herdr",
+  "local": {
+    "binary": "/tmp/herdr-install-verify-Ulq5xx/managed/0.8.2/herdr",
+    "version": "0.8.2",
+    "sha256": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
+    "installed": true
+  },
+  "remote": {
+    "binary": "/tmp/herdr-install-verify-Ulq5xx/.local/share/sushiai/herdr/0.8.2/herdr",
+    "version": "0.8.2",
+    "sha256": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
+    "installed": true
+  },
+  "repeatUsesVerifiedInstallation": true,
+  "expectedSha256": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
+  "status": {
+    "endpoint": "ssh:67652f76-b76b-4fda-a15f-e923c8ee8d4e",
+    "compatible": true,
+    "expected": {
+      "version": "0.8.2",
+      "protocol": 20
+    },
+    "daemon": {
+      "available": true,
+      "compatible": true,
+      "socket": "/tmp/sushiai-ssh-o4RWeK/67652f76.sock",
+      "version": "0.8.2",
+      "protocol": 20,
+      "capabilities": {
+        "live_handoff": true,
+        "detached_server_daemon": true
+      }
+    },
+    "cli": {
+      "available": true,
+      "compatible": true,
+      "binary": "/tmp/herdr-install-verify-Ulq5xx/.local/share/sushiai/herdr/0.8.2/herdr",
+      "version": "0.8.2",
+      "stream": true,
+      "protocol": 20
+    },
+    "issues": []
+  }
+}

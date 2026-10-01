@@ -48,15 +48,20 @@ test("propagates backend errors without resolving successfully", async (t) => {
     client.write(
       JSON.stringify({
         id: message.id,
-        error: { code: "not_found", message: "Pane not found" },
+        error: {
+          code: "not_found",
+          message: "Pane not found",
+          data: { pane_id: "gone" },
+        },
       }) + "\n",
     ),
   );
-  await assert.rejects(request(socket, "pane.read"), /Pane not found/);
-  await assert.rejects(
-    request(socket, "pane.read"),
-    (error) => error.code === "not_found",
-  );
+  await assert.rejects(request(socket, "pane.read"), (error) => {
+    assert.equal(error.message, "Pane not found");
+    assert.equal(error.code, "not_found");
+    assert.deepEqual(error.data, { pane_id: "gone" });
+    return true;
+  });
 });
 test("Herdr polls cannot import the workspace used during a protected pane close", async (t) => {
   const {
@@ -108,6 +113,7 @@ test("Herdr polls cannot import the workspace used during a protected pane close
     "pane.move",
     "pane.close",
     "session.snapshot",
+    "session.snapshot",
   ]);
   assert.deepEqual(snapshot.snapshot.panes, [{ pane_id: "w2:p1" }]);
 });
@@ -121,6 +127,10 @@ test("times out unresponsive sockets and rejects early disconnects", async (t) =
 test("rejects malformed JSON instead of leaving requests pending", async (t) => {
   const socket = await fixture(t, (client) => client.write("invalid\n"));
   await assert.rejects(request(socket, "ping"), /Invalid JSON/);
+  const nullResponse = await fixture(t, (client) => client.write("null\n"));
+  await assert.rejects(request(nullResponse, "ping"), {
+    code: "HERDR_INVALID_RESPONSE",
+  });
 });
 test("preserves text and ordering around navigation, enter and control keys", () => {
   assert.deepEqual(inputCommands("hello 🍣\x1b[D\x7f!\r\x03"), [
@@ -179,7 +189,15 @@ test("a pane or workspace Herdr no longer has: closing it is fine, anything else
       const { id, method } = JSON.parse(String(chunk).split("\n")[0]);
       const what = method.startsWith("pane") ? "pane p9" : "workspace w5";
       socket.write(
-        JSON.stringify({ id, error: { message: `${what} not found` } }) + "\n",
+        JSON.stringify({
+          id,
+          error: {
+            code: method.startsWith("pane")
+              ? "pane_not_found"
+              : "workspace_not_found",
+            message: `${what} not found`,
+          },
+        }) + "\n",
       );
     });
   });
@@ -190,7 +208,9 @@ test("a pane or workspace Herdr no longer has: closing it is fine, anything else
   });
   let call;
   registerHerdrExtension({
-    handle: (_channel, callback) => (call = callback),
+    handle: (channel, callback) => {
+      if (channel === "herdr") call = callback;
+    },
     getConnections: () => ({ socket: async () => socketPath }),
     id: (value) => String(value),
   });
@@ -261,6 +281,15 @@ test("a session for a project on a host reuses its workspace, and an IPC wrapper
     errorText(wrapped),
     "That session is no longer open on the host.",
   );
-  assert.equal(isGone(wrapped), true);
+  assert.equal(isGone(wrapped), false);
+  assert.equal(
+    isGone(
+      Object.assign(new Error("arbitrary host text"), {
+        code: "pane_not_found",
+      }),
+    ),
+    true,
+  );
+  assert.equal(isGone({ code: "workspace_not_found" }), true);
   assert.equal(isGone(new Error("boom")), false);
 });

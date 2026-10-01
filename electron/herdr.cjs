@@ -1,6 +1,23 @@
 const net = require("node:net");
 const { randomUUID } = require("node:crypto");
 
+class HerdrError extends Error {
+  constructor(code, message, data) {
+    super(message);
+    this.name = "HerdrError";
+    this.code = code;
+    if (data !== undefined) this.data = data;
+  }
+}
+
+function errorDetails(error) {
+  return {
+    code: error.code || "HERDR_ERROR",
+    message: error.message || String(error),
+    ...(error.data === undefined ? {} : { data: error.data }),
+  };
+}
+
 function request(socketPath, method, params = {}, timeout = 5000) {
   return new Promise((resolve, reject) => {
     const id = randomUUID();
@@ -15,19 +32,35 @@ function request(socketPath, method, params = {}, timeout = 5000) {
     };
     socket.setEncoding("utf8");
     socket.setTimeout(timeout, () =>
-      finish(new Error("Herdr did not respond. Check the socket in Settings.")),
+      finish(
+        new HerdrError(
+          "HERDR_TIMEOUT",
+          "Herdr did not respond. Check the socket in Settings.",
+        ),
+      ),
     );
     socket.on("error", (error) => finish(error));
     socket.on("close", () => {
-      if (!settled) finish(new Error("Herdr disconnected before responding."));
+      if (!settled)
+        finish(
+          new HerdrError(
+            "HERDR_DISCONNECTED",
+            "Herdr disconnected before responding.",
+          ),
+        );
     });
     socket.on("connect", () =>
       socket.write(JSON.stringify({ id, method, params }) + "\n"),
     );
     socket.on("data", (chunk) => {
       buffer += chunk;
-      if (buffer.length > 16 * 1024 * 1024)
-        return finish(new Error("Herdr response exceeds 16 MB."));
+      if (Buffer.byteLength(buffer) > 16 * 1024 * 1024)
+        return finish(
+          new HerdrError(
+            "HERDR_RESPONSE_TOO_LARGE",
+            "Herdr response exceeds 16 MB.",
+          ),
+        );
       let boundary;
       while ((boundary = buffer.indexOf("\n")) >= 0) {
         const line = buffer.slice(0, boundary);
@@ -37,14 +70,28 @@ function request(socketPath, method, params = {}, timeout = 5000) {
         try {
           message = JSON.parse(line);
         } catch {
-          return finish(new Error("Invalid JSON from Herdr."));
+          return finish(
+            new HerdrError(
+              "HERDR_INVALID_RESPONSE",
+              "Invalid JSON from Herdr.",
+            ),
+          );
         }
+        if (!message || typeof message !== "object")
+          return finish(
+            new HerdrError(
+              "HERDR_INVALID_RESPONSE",
+              "Invalid response from Herdr.",
+            ),
+          );
         if (message.id !== id) continue;
         if (message.error)
           return finish(
-            Object.assign(new Error(message.error.message), {
-              code: message.error.code,
-            }),
+            new HerdrError(
+              message.error.code,
+              message.error.message,
+              message.error.data,
+            ),
           );
         finish(null, message.result);
       }
@@ -101,4 +148,4 @@ function inputCommands(data) {
   flush();
   return commands;
 }
-module.exports = { request, inputCommands };
+module.exports = { request, inputCommands, HerdrError, errorDetails };

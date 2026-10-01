@@ -24,13 +24,14 @@ one index line; git history keeps the detail and updates.
 
 ## 2026-10-01 — a temp `$HOME` did not isolate Herdr on macOS
 
-Root cause: Herdr resolves its socket from the real home there; `herdr server stop` stopped the owner's server.
+Root cause: macOS Herdr resolved its socket from the real home; stopping it stopped the owner's server.
 Rule: try Herdr setup on a Linux or SSH host; never stop a server you didn't start.
 
 ## Promoted
 
 - 2026-10-01 Herdr 0.8.2 closes linked sessions with the primary's last pane when confirmation is disabled → inspect membership and detach first. `herdr-pane-close.test.cjs` and isolated daemon evidence.
 - 2026-10-01 Prepare lost SSH recovery between callers → preserve structured failures; reuse recovery UI. `GitRecovery` and `project-git-ssh.test.cjs`.
+- 2026-10-01 contextBridge discards Error fields → transport tagged values; reconstruct before App restores state. `tests/bridge.test.cjs`.
 
 - 2026-10-01 "0 unexplained diffs" hid defects → a fresh critic compares Figma and app PNGs; revert each fix once to see its test fail. `design-critic`.
 - 2026-09-30 Lane worktrees each built `orchd/target`, 262 MB left → delete it after merge.
@@ -48,7 +49,6 @@ Rule: try Herdr setup on a Linux or SSH host; never stop a server you didn't sta
 - 2026-09-24 Orchestrator chat edited code instead of filing tasks → enforce roles with tools. `orchd/src/chat.rs`.
 - 2026-09-24 Unset `HERDR_SOCKET_PATH`/inherited `BRIDGE_DEV_URL` photographed the owner's Herdr/dev server → override both. `ui-evidence` template.
 - 2026-09-24 Real Claude/Codex output broke `orchd` while self-written fakes passed → parsers assert captured CLI lines. `parses_captured_real_cli_streams`.
-- 2026-09-15 A `;`-joined gate chain let a failure commit → join gates with `&&`.
 - 2026-09-14 A `flex: 1`-stretched label measured 0px wide → measure text ink with a `Range`, assert non-zero widths. `ui-evidence` skill.
 - 2026-09-14 A copied debug session leaked a real private IP/host/ports → examples use 192.0.2.0/24 (RFC 5737). `check-conventions.mjs`.
 - 2026-09-13 A wrapper printed success for a run that exited 1 → exit code is the verdict, never `npx`. `sushiai-testing` skill.

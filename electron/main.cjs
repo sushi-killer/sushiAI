@@ -29,10 +29,22 @@ const { Projects } = require("./projects.cjs");
 const { AgentRegistry } = require("./agents/registry.cjs");
 const { HermesProvider } = require("./agents/hermes-provider.cjs");
 const { registerProjectIpc } = require("./ipc/projects.cjs");
-const { registerTerminalIpc } = require("./ipc/terminals.cjs");
+const {
+  registerTerminalIpc,
+  uploadRemoteFile,
+  removeRemoteFiles,
+  remoteFileCommand,
+} = require("./ipc/terminals.cjs");
+const {
+  sessionEnvironment,
+  sessionEnvPrefix,
+} = require("./project-session.cjs");
 const { setupHost, setupSummary } = require("./host-setup.cjs");
 const { registerChatIpc } = require("./ipc/chat.cjs");
 const { registerAppIpc } = require("./ipc/app.cjs");
+const { ipcResult } = require("./ipc/errors.cjs");
+const { registerSessionLaunchIpc } = require("./session-launch.cjs");
+const { assertHerdrCompatibility } = require("./herdr-compatibility.cjs");
 const { registerExtensionIpc } = require("./ipc/extensions.cjs");
 const { registerAttentionIpc } = require("./attention.cjs");
 const { registerWorkspaceSnapshot } = require("./workspace-snapshot.cjs");
@@ -165,7 +177,7 @@ function handle(channel, callback) {
       event.senderFrame !== mainWindow.webContents.mainFrame
     )
       throw new Error("Untrusted IPC sender");
-    return callback(...args);
+    return ipcResult(callback, args);
   });
 }
 registerProjectIpc({
@@ -183,7 +195,64 @@ registerExtensionIpc({
   getSurfaceState: () => surfaceState,
   announce: (change) => send("extensions-state-changed", change),
 });
-registerHerdrExtension({ handle, getConnections: () => connections, id });
+const herdrExtension = registerHerdrExtension({
+  handle,
+  getConnections: () => connections,
+  id,
+  send,
+  executable,
+});
+registerSessionLaunchIpc({
+  handle,
+  getConnections: () => connections,
+  modelProviders,
+  resolveEnvironment: (input) =>
+    sessionEnvironment({ projects, connections }, input),
+  prepareSession: (input, environment) => {
+    const sshBinary =
+      (testMode.hidden && process.env.SUSHIAI_TEST_SSH) || connections.ssh;
+    const sshArgs = (endpoint) => {
+      const remote = connections.get(endpoint);
+      return [...connections.args(remote), "-T", remote.host];
+    };
+    return sessionEnvPrefix(
+      {
+        projects,
+        connections,
+        upload: (endpoint, payload) =>
+          uploadRemoteFile(
+            sshBinary,
+            [...sshArgs(endpoint), remoteFileCommand()],
+            payload,
+          ),
+        remove: (endpoint, file) =>
+          removeRemoteFiles(sshBinary, sshArgs(endpoint), [file]),
+        resolveAccount: (accountId) =>
+          modelProviders.resolveClaudeAccount(accountId),
+        resolveCodexAccount: (accountId, endpoint) =>
+          codexAccounts.resolve(accountId, endpoint),
+        resolveModel: async () => environment.model,
+      },
+      {
+        ...input,
+        agent: input.kind === "agent" ? input.agent : undefined,
+        nativeEnvironment: environment,
+      },
+    );
+  },
+  readSnapshot: (endpoint) => herdrExtension.snapshots.read(endpoint),
+  journalPath: path.join(app.getPath("userData"), "herdr-launches.json"),
+  workspaceStatePath: path.join(
+    app.getPath("userData"),
+    "workspace-state.json",
+  ),
+  checkCompatibility: (endpoint) =>
+    assertHerdrCompatibility({
+      endpoint,
+      connections,
+      binary: executable("herdr"),
+    }),
+});
 registerWorkspaceSnapshot({
   ipcMain,
   handle,
@@ -562,9 +631,10 @@ app.on("before-quit", (event) => {
     if (!window.isDestroyed()) window.hide();
   preview?.close();
   terminalIpc.close();
+  herdrExtension.close();
   for (const pending of terminalPending.values()) pending.cancelled = true;
   for (const terminal of terminals.values())
-    if (!terminal.exited) terminal.proc.kill();
+    if (!terminal.exited || terminal.source === "herdr") terminal.proc.kill();
   chatIpc.close();
   Promise.allSettled([
     Promise.resolve(connections?.close()),

@@ -84,6 +84,7 @@ export function WorkspaceDialog({
     backend: string,
     starter: string,
     endpoint?: string,
+    operationId?: string,
   ): Promise<boolean>;
   onStart(): void;
   onClose(): void;
@@ -388,12 +389,19 @@ export function WorkspaceDialog({
     workspaceOpening.current = true;
     try {
       const project = createdProject.current;
+      const launchKey = JSON.stringify([project.id, host.endpoint, target]);
+      let operationId = launches.current.get(launchKey);
+      if (!operationId) {
+        operationId = crypto.randomUUID();
+        launches.current.set(launchKey, operationId);
+      }
       const created = await onCreate(
         project.name,
         target,
         project.sessions.backend || "local",
         "shell",
         host.local ? undefined : host.endpoint,
+        operationId,
       );
       if (!created)
         throw new Error(
@@ -407,6 +415,7 @@ export function WorkspaceDialog({
   }
 
   const creating = useRef(false);
+  const launches = useRef(new Map<string, string>());
   async function createProject() {
     // A second click before the first has rendered must not start a second one.
     if (!window.bridge || busy || creating.current) return;

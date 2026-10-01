@@ -64,10 +64,17 @@ class ModelProviders {
     this.fetchImpl = fetchImpl;
   }
 
-  async #readJson(file) {
+  async #readJson(file, strict = false) {
     try {
-      return JSON.parse(await fs.readFile(file, "utf8"));
-    } catch {
+      const value = JSON.parse(await fs.readFile(file, "utf8"));
+      if (
+        strict &&
+        (!value || typeof value !== "object" || Array.isArray(value))
+      )
+        throw new TypeError("Invalid account configuration.");
+      return value;
+    } catch (error) {
+      if (strict && error.code !== "ENOENT") throw error;
       return {};
     }
   }
@@ -190,13 +197,20 @@ class ModelProviders {
   }
 
   async resolveClaudeAccount(id) {
-    const accounts = await this.#readJson(this.accountsFileFor());
+    const accounts = await this.#readJson(this.accountsFileFor(), true);
     const account = accounts[id];
-    if (!account) throw new Error("Unknown Claude account.");
-    const secret = (await this.#readJson(this.secretsFile))[
+    if (!account)
+      throw Object.assign(new Error("Unknown Claude account."), {
+        code: "ACCOUNT_NOT_CONFIGURED",
+      });
+    const secret = (await this.#readJson(this.secretsFile, true))[
       `claude-account:${id}`
     ];
-    if (!secret) throw new Error(`Add a value for ${account.label} first.`);
+    if (!secret)
+      throw Object.assign(
+        new Error(`Add a value for ${account.label} first.`),
+        { code: "ACCOUNT_NOT_CONFIGURED" },
+      );
     const bytes = Buffer.from(secret.ct, "base64");
     const value =
       secret.backend === "plain"

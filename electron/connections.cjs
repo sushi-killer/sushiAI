@@ -80,6 +80,7 @@ class Connections {
   constructor(dataDir, { ssh = "/usr/bin/ssh" } = {}) {
     this.ssh = ssh;
     this.file = path.join(dataDir, "connections.json");
+    this.herdrInstallDirectory = path.join(dataDir, "herdr");
     this.knownHostsFile = path.join(dataDir, "known_hosts");
     this.profiles = [];
     this.runtime = new Map();
@@ -87,6 +88,8 @@ class Connections {
     this.retryTimers = new Map();
     this.inspectionWorkers = new Map();
     this.inspectionSourcePromise = null;
+    this.endpointGenerations = new Map();
+    this.stateListeners = new Set();
     this.closed = false;
     this.closePromise = null;
   }
@@ -106,6 +109,19 @@ class Connections {
       ...p,
       connected: this.runtime.has(p.id),
     }));
+  }
+  generation(endpoint) {
+    return this.endpointGenerations.get(endpoint) || 0;
+  }
+  onStateChange(listener) {
+    this.stateListeners.add(listener);
+    return () => this.stateListeners.delete(listener);
+  }
+  changed(endpoint, connected) {
+    const generation = this.generation(endpoint) + 1;
+    this.endpointGenerations.set(endpoint, generation);
+    for (const listener of this.stateListeners)
+      listener({ endpoint, generation, connected });
   }
   get(endpoint) {
     const p = this.profiles.find((p) => `ssh:${p.id}` === endpoint);
@@ -409,6 +425,7 @@ class Connections {
       if (this.runtime.get(profile.id) === state) {
         for (const child of state.forwards.values()) child.proc.kill();
         this.runtime.delete(profile.id);
+        this.changed(`ssh:${profile.id}`, false);
         if (!this.closed) this.scheduleRetry(profile.id);
       }
     });
@@ -418,6 +435,7 @@ class Connections {
         await fs.stat(socketPath);
         await request(socketPath, "ping", {}, 1000);
         this.runtime.set(profile.id, state);
+        this.changed(`ssh:${profile.id}`, true);
         return socketPath;
       } catch {}
       await new Promise((resolve) => setTimeout(resolve, 200));
@@ -487,9 +505,10 @@ class Connections {
     if (this.pending.has(id)) await this.pending.get(id).catch(() => {});
     const state = this.runtime.get(id);
     if (state) {
+      this.runtime.delete(id);
+      this.changed(endpoint, false);
       for (const forward of state.forwards.values()) await forward.proc.kill();
       await state.proc.kill();
-      this.runtime.delete(id);
     }
   }
   async close() {
@@ -505,6 +524,7 @@ class Connections {
       for (const id of [...this.runtime.keys()])
         await this.disconnect(`ssh:${id}`);
       if (this.temp) await fs.rm(this.temp, { recursive: true, force: true });
+      this.stateListeners.clear();
     })();
     return this.closePromise;
   }

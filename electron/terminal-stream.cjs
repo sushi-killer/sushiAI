@@ -1,7 +1,13 @@
 const { spawn } = require("node:child_process");
+const { randomUUID } = require("node:crypto");
 const { quote } = require("./connections.cjs");
 const { request } = require("./herdr.cjs");
 const { createFrameDecoder } = require("./terminal-text.cjs");
+const {
+  MAX_FRAME_BYTES,
+  createOutputDelivery,
+  createInputWriter,
+} = require("./terminal-flow.cjs");
 
 function claudeForeground(info) {
   return (info?.process_info?.foreground_processes || []).some((process) =>
@@ -97,7 +103,7 @@ function createScrollHandler({ lookup, write, closed, now = Date.now }) {
       foreground,
       amount,
     ))
-      write(command);
+      await write(command);
   };
   scroll.invalidate = () => {
     generation++;
@@ -125,7 +131,13 @@ async function openHerdrStream({
   connections,
   binary,
   send,
+  spawnProcess = spawn,
+  streamId = randomUUID(),
+  preflight = (options) =>
+    require("./herdr-compatibility.cjs").assertHerdrCompatibility(options),
 }) {
+  const compatibility = await preflight({ endpoint, connections, binary });
+  binary = compatibility.cli.binary;
   const args = [
     "terminal",
     "session",
@@ -146,25 +158,106 @@ async function openHerdrStream({
       operation: "home",
       socket: profile.socket,
     });
-    command = "/usr/bin/ssh";
+    command = connections.ssh || "/usr/bin/ssh";
     argv = [
       ...connections.args(profile),
       profile.host,
-      `export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; HERDR_SOCKET_PATH=${quote(info.socket)} exec herdr ${args.map(quote).join(" ")}`,
+      `export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; HERDR_SOCKET_PATH=${quote(info.socket)} exec ${quote(binary)} ${args.map(quote).join(" ")}`,
     ];
     env = process.env;
   }
   if (!command) throw new Error("Install Herdr to attach a terminal stream.");
-  const child = spawn(command, argv, { env, stdio: ["pipe", "pipe", "pipe"] });
-  const entry = { history: "", exited: false, source: "herdr", target };
-  const decodeFrame = createFrameDecoder();
-  let buffer = "",
-    diagnostic = "",
-    closing = false;
-  const write = (value) => {
-    if (!entry.exited && !child.stdin.destroyed)
-      child.stdin.write(JSON.stringify(value) + "\n");
+  const child = spawnProcess(command, argv, {
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let resolveClosed;
+  const closed = new Promise((resolve) => {
+    resolveClosed = resolve;
+  });
+  const entry = {
+    history: "",
+    exited: false,
+    source: "herdr",
+    target,
+    streamId,
   };
+  const decodeFrame = createFrameDecoder(MAX_FRAME_BYTES);
+  const maxLineBytes = Math.ceil(MAX_FRAME_BYTES / 3) * 4 + 1024;
+  let buffer = Buffer.alloc(0),
+    diagnostic = "",
+    closing = false,
+    failed = false,
+    firstFrame = true,
+    reportedDisconnect = false;
+  const input = createInputWriter(child.stdin);
+  const write = (value) => {
+    if (entry.exited || closing)
+      return Promise.reject(new Error("Terminal stream is disconnected."));
+    return input.write(value);
+  };
+  const fail = (message) => {
+    if (failed || closing) return;
+    failed = true;
+    diagnostic = String(message).slice(0, 4000);
+    buffer = Buffer.alloc(0);
+    child.stdout.destroy();
+    delivery.close();
+    input.close(new Error(diagnostic));
+    child.kill();
+  };
+  const delivery = createOutputDelivery({
+    streamId,
+    send: (event) => send("terminal-data", { panelId, ...event }),
+    changed: () => {
+      if (!failed && !closing) consume();
+    },
+  });
+  function consume() {
+    try {
+      while (!delivery.blocked && !failed && !closing) {
+        const boundary = buffer.indexOf(10);
+        if (boundary < 0) {
+          if (buffer.length > maxLineBytes)
+            fail(
+              "Terminal frame exceeds the supported size. Reconnect to refresh the screen.",
+            );
+          break;
+        }
+        if (boundary > maxLineBytes)
+          throw new Error("Terminal frame exceeds the supported size.");
+        const line = buffer.subarray(0, boundary).toString("utf8");
+        buffer = buffer.subarray(boundary + 1);
+        const frame = JSON.parse(line);
+        if (frame.type === "terminal.frame") {
+          if (
+            typeof frame.full !== "boolean" ||
+            typeof frame.bytes !== "string"
+          )
+            throw new Error("Malformed Herdr terminal frame.");
+          if (frame.bytes.length > Math.ceil(MAX_FRAME_BYTES / 3) * 4)
+            throw new Error("Terminal frame exceeds the supported size.");
+          if (firstFrame && !frame.full)
+            throw new Error(
+              "Herdr did not provide an initial terminal snapshot.",
+            );
+          const data = decodeFrame(frame.bytes, frame.full);
+          firstFrame = false;
+          if (data || frame.full) delivery.enqueue(data, frame.full);
+        } else if (frame.type === "terminal.closed") {
+          fail(
+            typeof frame.reason === "string"
+              ? frame.reason
+              : "Terminal detached. Reconnect to continue.",
+          );
+        } else throw new Error("Unsupported Herdr terminal stream.");
+      }
+      if (delivery.blocked || failed || closing) child.stdout.pause();
+      else child.stdout.resume();
+    } catch (error) {
+      fail(`${error.message} Reconnect to refresh the terminal.`);
+    }
+  }
   const scroll = createScrollHandler({
     lookup: () =>
       connections
@@ -180,47 +273,46 @@ async function openHerdrStream({
     write: (data) => {
       // Enter and process-control keys can launch/exit the foreground program.
       if (/[\r\n\x03\x04\x1a]/.test(data)) scroll.invalidate();
-      write({
+      return write({
         type: "terminal.input",
         bytes: Buffer.from(data).toString("base64"),
       });
     },
     resize: (cols, rows) => write({ type: "terminal.resize", cols, rows }),
     kill: () => {
+      if (closing) return closed;
       closing = true;
-      write({ type: "terminal.release" });
-      child.stdin.end();
+      delivery.close();
+      buffer = Buffer.alloc(0);
+      // Paused pipes hold ChildProcess.close until their unread bytes drain.
+      child.stdout.resume();
+      input
+        .write({ type: "terminal.release" })
+        .catch(() => {})
+        .finally(() => child.stdin.end());
       const timer = setTimeout(() => child.kill(), 500);
       timer.unref();
+      return closed;
     },
     scroll,
   };
-  child.stdout.setEncoding("utf8");
+  entry.ack = (token, sequence) => delivery.ack(token, sequence);
+  entry.flowStats = () => ({
+    output: delivery.stats,
+    input: input.stats,
+    parserBytes: buffer.length,
+    pid: child.pid,
+    limits: { frameBytes: MAX_FRAME_BYTES, parserBytes: maxLineBytes + 65536 },
+  });
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
-    buffer += chunk;
-    if (buffer.length > 24 * 1024 * 1024) {
-      diagnostic = "Terminal frame too large";
-      return child.kill();
-    }
-    let boundary;
-    while ((boundary = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 1);
-      try {
-        const frame = JSON.parse(line);
-        if (frame.type === "terminal.frame") {
-          const data = decodeFrame(frame.bytes, frame.full);
-          entry.history = frame.full
-            ? data
-            : (entry.history + data).slice(-2 * 1024 * 1024);
-          send("terminal-data", { panelId, data });
-        } else if (frame.type === "terminal.closed")
-          diagnostic = frame.reason || "Terminal detached";
-      } catch {
-        diagnostic = "Unsupported Herdr terminal stream";
-      }
-    }
+    if (closing || failed) return;
+    if (buffer.length + chunk.length > maxLineBytes + 65536)
+      return fail(
+        "Terminal frame exceeds the supported size. Reconnect to refresh the screen.",
+      );
+    buffer = Buffer.concat([buffer, chunk]);
+    consume();
   });
   child.stderr.on("data", (data) => {
     diagnostic = (diagnostic + data).slice(-4000);
@@ -229,15 +321,30 @@ async function openHerdrStream({
   child.on("error", (error) => {
     diagnostic = error.message;
   });
-  child.on("close", (code) => {
+  const reportDisconnect = (code) => {
+    if (reportedDisconnect) return;
+    reportedDisconnect = true;
     entry.exited = true;
+    input.close(new Error(diagnostic || "Terminal stream is disconnected."));
+    if (closing || failed) {
+      buffer = Buffer.alloc(0);
+      delivery.close();
+      child.stdout.destroy();
+    }
     send("terminal-data", {
       panelId,
+      streamId,
       exitCode: code || 0,
-      data: closing
-        ? ""
-        : `\r\n\x1b[90m${diagnostic || "Terminal detached. Reconnect to continue."}\x1b[0m\r\n`,
+      data: "",
+      error: closing
+        ? undefined
+        : diagnostic || "Terminal detached. Reconnect to continue.",
     });
+  };
+  child.on("exit", reportDisconnect);
+  child.on("close", (code) => {
+    reportDisconnect(code);
+    resolveClosed();
   });
   return entry;
 }

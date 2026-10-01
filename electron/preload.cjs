@@ -10,7 +10,7 @@ const sendSync = (channel, ...args) => {
   if (reply?.error) throw new Error(reply.error);
   return reply?.value ?? null;
 };
-contextBridge.exposeInMainWorld("bridge", {
+contextBridge.exposeInMainWorld("nativeBridge", {
   workspaceStateRead: () => {
     try {
       return sendSync("workspace-state-read");
@@ -64,7 +64,18 @@ contextBridge.exposeInMainWorld("bridge", {
   terminalResize: invoke("terminal-resize"),
   terminalClose: invoke("terminal-close"),
   terminalScroll: invoke("terminal-scroll"),
+  terminalAck: invoke("terminal-ack"),
   herdr: invoke("herdr"),
+  sessionLaunch: invoke("session-launch"),
+  herdrCompatibility: invoke("herdr-compatibility"),
+  herdrInstall: invoke("herdr-install"),
+  herdrSubscribe: invoke("herdr-events-subscribe"),
+  herdrUnsubscribe: invoke("herdr-events-unsubscribe"),
+  onHerdr: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on("herdr-event", listener);
+    return () => ipcRenderer.removeListener("herdr-event", listener);
+  },
   orchestrator: invoke("orchestrator"),
   onOrchestrator: (callback) => {
     const listener = (_, data) => callback(data);

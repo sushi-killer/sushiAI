@@ -70,6 +70,25 @@ test("a failed sign-in reports what Codex said and leaves the account signed out
   await assert.rejects(accounts.login(id, "  "), /Paste an OpenAI API key/);
 });
 
+test("a login that closes stdin reports its failure and can be retried", async (t) => {
+  const { accounts } = await rig(
+    t,
+    'exec 0<&-\necho "Login refused before reading the key" >&2\nexit 1',
+  );
+  const { id } = await accounts.add("Work");
+  await assert.rejects(
+    accounts.login(id, "synthetic-key-".repeat(65536)),
+    /Login refused before reading the key/,
+  );
+  const [failed] = await accounts.list();
+  assert.equal(failed.signedIn, false);
+  assert.equal(failed.signingIn, false);
+  await fs.writeFile(accounts.codexBinary(), `#!/bin/sh\n${API_KEY_LOGIN}\n`, {
+    mode: 0o755,
+  });
+  assert.equal((await accounts.login(id, KEY)).signedIn, true);
+});
+
 test("a session home shares ~/.codex but keeps its own login", async (t) => {
   const { accounts, codexHome } = await rig(t, API_KEY_LOGIN);
   const { id } = await accounts.add("Work");
@@ -102,4 +121,21 @@ test("removing an account removes its home; ids it never made are refused", asyn
   assert.deepEqual(await accounts.list(), []);
   for (const bad of ["__proto__", "../..", id, 7])
     await assert.rejects(accounts.resolve(bad), /Unknown Codex account/);
+});
+
+test("Codex session resolver tags missing sign-in but preserves damaged or unreadable auth", async (t) => {
+  const { accounts } = await rig(t, API_KEY_LOGIN);
+  await assert.rejects(accounts.resolve("missing"), {
+    code: "ACCOUNT_NOT_CONFIGURED",
+  });
+  const { id } = await accounts.add("Work");
+  await assert.rejects(accounts.resolve(id), {
+    code: "ACCOUNT_NOT_CONFIGURED",
+  });
+  const auth = path.join(accounts.homeFor(id), "auth.json");
+  await fs.writeFile(auth, "{broken");
+  await assert.rejects(accounts.resolve(id), SyntaxError);
+  await fs.rm(auth);
+  await fs.mkdir(auth);
+  await assert.rejects(accounts.resolve(id), { code: "EISDIR" });
 });

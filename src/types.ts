@@ -38,6 +38,8 @@ export type OrchestratorView =
 export type FilesView = { root: string; directory: string; file: string };
 type PanelState = {
   id: string;
+  launchOperationId?: string;
+  launchError?: string;
   title: string;
   agent?: string;
   started?: boolean;
@@ -129,6 +131,68 @@ export type ProviderTestResult = {
   ok: boolean;
   code: "ok" | "no_key" | "unauthorized" | "network" | "unknown";
   message: string;
+};
+export type SessionLaunchRequest = {
+  claudeAccountId?: string;
+  codexAccountId?: string;
+  operationId: string;
+  endpoint: string;
+  kind: "terminal" | "agent";
+  agent?: string;
+  modelProfileId?: string;
+  env?: Record<string, string>;
+  cwd: string;
+  label: string;
+  workspaceId?: string;
+  targetPaneId?: string;
+  paneId?: string;
+  restore?: boolean;
+  worktree?: { branch: string; base?: string };
+};
+export type SessionLaunchValue = {
+  operationId: string;
+  workspaceId: string;
+  paneId: string;
+  cwd: string;
+  createdWorkspace: boolean;
+};
+export type SessionLaunchResult =
+  | { ok: true; value: SessionLaunchValue }
+  | {
+      ok: false;
+      error: {
+        code: string;
+        message: string;
+        retryable: boolean;
+        stage: string;
+        created?: SessionLaunchValue;
+      };
+    };
+export type HerdrCompatibility = {
+  endpoint: string;
+  compatible: boolean;
+  expected: { version: string; protocol: number };
+  daemon: {
+    available: boolean;
+    compatible: boolean;
+    version?: string;
+    protocol?: number;
+  };
+  cli: {
+    available: boolean;
+    compatible: boolean;
+    version?: string;
+    protocol?: number;
+    stream: boolean;
+  };
+  issues: string[];
+};
+export type HerdrEvent = {
+  endpoint: string;
+  generation: number;
+  type: "connected" | "disconnected" | "changed";
+  event?: string;
+  error?: { code: string; message: string };
 };
 export type Layout =
   | { type: "leaf"; id: string }
@@ -460,7 +524,13 @@ export interface Bridge {
     modelProfileId?: string;
     claudeAccountId?: string;
     codexAccountId?: string;
-  }): Promise<{ history: string; exited?: boolean }>;
+    streamId?: string;
+  }): Promise<{ history: string; exited?: boolean; streamId?: string }>;
+  terminalAck(
+    panelId: string,
+    streamId: string,
+    sequence: number,
+  ): Promise<void>;
   terminalWrite(panelId: string, data: string): Promise<void>;
   terminalAttach(input: {
     panelId: string;
@@ -481,6 +551,15 @@ export interface Bridge {
     params?: Record<string, unknown>,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic RPC passthrough, callers narrow the result themselves
   ): Promise<any>;
+  sessionLaunch(request: SessionLaunchRequest): Promise<SessionLaunchResult>;
+  herdrCompatibility(endpoint: string): Promise<HerdrCompatibility>;
+  herdrInstall(endpoint: string): Promise<{ binary: string }>;
+  herdrSubscribe(
+    endpoint: string,
+    subscriptionId: string,
+  ): Promise<{ generation: number }>;
+  herdrUnsubscribe(endpoint: string, subscriptionId: string): Promise<void>;
+  onHerdr(callback: (event: HerdrEvent) => void): () => void;
   /** Raw NDJSON-RPC passthrough to the orchestrator daemon; the renderer's
    * typed wrapper is `src/orchestrator/client.ts`. */
   orchestrator(
@@ -535,6 +614,10 @@ export interface Bridge {
       data: string;
       exitCode?: number;
       agent?: string | null;
+      streamId?: string;
+      sequence?: number;
+      reset?: boolean;
+      error?: string;
     }) => void,
   ): () => void;
   onChat(callback: (event: ChatEvent) => void): () => void;
@@ -874,5 +957,6 @@ export interface Bridge {
 declare global {
   interface Window {
     bridge?: Bridge;
+    nativeBridge?: Bridge;
   }
 }

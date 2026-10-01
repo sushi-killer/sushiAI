@@ -2,6 +2,7 @@ import type { Layout, Panel, Workspace } from "./types";
 import { contains, isValidLayout, leaf, split, uid } from "./layout.ts";
 import { validRoute, type RouteRef } from "./extensions/routes.ts";
 import type { ProjectGit } from "./app/useProjectGit.ts";
+import { migrateHerdrIdentities } from "./herdrIdentity.ts";
 
 /** Where the snapshot lives when there is no desktop bridge (dev:web). With
  * the bridge it is <userData>/workspace-state.json, written by the main
@@ -259,7 +260,7 @@ export function restore(store: SnapshotStore = snapshotStore()): Saved | null {
       return null;
     const mode =
       value.mode === "Agent" || value.mode === "Chat" ? value.mode : "Code";
-    return {
+    const normalized: Saved = {
       ...value,
       mode,
       tabMode: value.tabMode === true,
@@ -290,6 +291,15 @@ export function restore(store: SnapshotStore = snapshotStore()): Saved | null {
         })),
       })),
     };
+    const migrated = migrateHerdrIdentities(normalized);
+    if (migrated !== normalized) {
+      try {
+        store.flush(JSON.stringify(migrated));
+      } catch {
+        /* Restore the migrated state; an unchanged disk retries next start. */
+      }
+    }
+    return migrated;
   } catch {
     return null;
   }

@@ -33,7 +33,11 @@ flowchart TB
       ipc["ipc/* - app, chat,<br/>terminals, projects"]
       orchSvc["orchestrator.cjs<br/>spawns + proxies orchd; the Extensions switch<br/>(builtin.orchestrator, the only disableable built-in)<br/>calls OrchestratorHosts.setEnabled, and while off<br/>every IPC rejects with ORCHESTRATOR_OFF"]
       extMgr["extensions/*<br/>manifest validator"]
-      herdrIpc["herdr.cjs, connections.cjs"]
+      herdrIpc["herdr.cjs, connections.cjs<br/>endpoint RPC + SSH tunnels"]
+      sessionLaunch["session-launch.cjs<br/>operation queue + durable creation journal<br/>host checkout + environment preparation"]
+      herdrSync["herdr-events.cjs, herdr-snapshots.cjs<br/>native events + one snapshot flight per endpoint"]
+      terminalFlow["terminal-stream.cjs, terminal-flow.cjs<br/>bounded output credit + xterm acknowledgements"]
+      herdrContract["herdr-contract.cjs<br/>verified release, protocol, capabilities, checksums"]
       remoteSvc["orchestrator-remote.cjs<br/>install, start, forward, preflight<br/>per SSH profile"]
       projectStore[("projects.json + project-secrets.json<br/>metadata + safeStorage values")]
       gitSsh["project-git-ssh.cjs<br/>public key + Git server trust recovery"]
@@ -49,6 +53,13 @@ flowchart TB
     projectStore -->|"prepare: clone + install over ssh,<br/>values on stdin (none for a host switched off)"| remoteHost[("SSH host ~/sushiai/slug")]
     ipc --> gitSsh
     gitSsh -->|key stays on host;<br/>public key and fingerprints to UI| remoteHost
+    panels <--> preload <--> sessionLaunch
+    sessionLaunch --> herdrIpc
+    herdrSync --> herdrIpc
+    herdrSync -->|events + snapshots| preload -->|SnapshotCoordinator| wsState
+    panels <-->|frame acknowledgement| preload <--> terminalFlow
+    terminalFlow -->|Herdr CLI stream| herdr
+    sessionLaunch & terminalFlow -->|compatibility preflight| herdrContract
     inbox -->|attention-badge, attention-notify| preload --> attention
     wsState <-->|workspace-state-read / -flush sendSync,<br/>-write invoke| preload <--> wsSnap
     orchSvc -->|task notice| attention

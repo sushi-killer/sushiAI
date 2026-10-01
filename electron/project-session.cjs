@@ -5,7 +5,11 @@ const { quote } = require("./connections.cjs");
 
 /** The project a folder on a host belongs to: the one the folder was attached
  * to, else the one of its git remote. Null when it has none. */
-async function projectForFolder({ projects, connections }, endpoint, cwd) {
+async function projectForFolder(
+  { projects, connections, strict = false },
+  endpoint,
+  cwd,
+) {
   if (!projects || typeof cwd !== "string" || !cwd) return null;
   const host =
     typeof endpoint === "string" && endpoint.startsWith("ssh:")
@@ -18,8 +22,34 @@ async function projectForFolder({ projects, connections }, endpoint, cwd) {
       operation: "git_remote",
       root: cwd,
     })
-    .catch(() => null);
+    .catch((error) => {
+      if (strict) throw error;
+      return null;
+    });
   return info?.remote ? projects.resolve(info.remote) : null;
+}
+
+/** Project values travel in the Herdr creation RPC; account files are prepared separately. */
+async function sessionEnvironment(
+  { projects, connections },
+  { endpoint, cwd },
+) {
+  const project = await projectForFolder(
+    { projects, connections, strict: true },
+    endpoint,
+    cwd,
+  );
+  const host =
+    typeof endpoint === "string" && endpoint.startsWith("ssh:")
+      ? endpoint
+      : "local";
+  const sends = project ? await projects.sendsValues(project.id, host) : false;
+  return {
+    project,
+    sends,
+    withheld: Boolean(project) && !sends,
+    env: sends ? await projects.environmentFor(project.id, "agent", host) : {},
+  };
 }
 
 /** Exported lines for a shell to source: one `export NAME='value'` each. */
@@ -70,10 +100,16 @@ const CODEX_COLLECT = (tokens) =>
 const codexSessionLaunch = () => `sh -c ${quote(CODEX_SESSION)}`;
 
 /** The local Codex login, or "" when there is none. */
-function localCodexAuth(codexHome = path.join(os.homedir(), ".codex")) {
+function localCodexAuth(
+  codexHome = path.join(os.homedir(), ".codex"),
+  strict = false,
+) {
   return fs.readFile(path.join(codexHome, "auth.json"), "utf8").then(
     (text) => text.trim(),
-    () => "",
+    (error) => {
+      if (strict && error.code !== "ENOENT") throw error;
+      return "";
+    },
   );
 }
 
@@ -105,10 +141,17 @@ function sessionAccountId(project, sends, picked, key = "claudeAccount") {
 /** A Codex account, or null for the host's own login. The project's own
  * account that is not signed in yet falls back to it; a picked one has to
  * work. */
-async function codexAccountFor(resolve, accountId, picked, endpoint) {
+async function codexAccountFor(
+  resolve,
+  accountId,
+  picked,
+  endpoint,
+  strict = false,
+) {
   if (!accountId || !resolve) return null;
   return resolve(accountId, endpoint).catch((error) => {
-    if (picked) throw error;
+    if (picked || (strict && error.code !== "ACCOUNT_NOT_CONFIGURED"))
+      throw error;
     return null;
   });
 }
@@ -146,20 +189,31 @@ async function sessionEnvPrefix(
     resolveModel,
     codexAuth = localCodexAuth,
   },
-  { endpoint, cwd, claudeAccountId, codexAccountId, agent, modelProfileId },
-) {
-  const project = await projectForFolder(
-    { projects, connections },
+  {
     endpoint,
     cwd,
-  );
+    claudeAccountId,
+    codexAccountId,
+    agent,
+    modelProfileId,
+    nativeEnvironment,
+  },
+) {
+  const project = nativeEnvironment
+    ? nativeEnvironment.project
+    : await projectForFolder({ projects, connections }, endpoint, cwd);
   const remote = typeof endpoint === "string" && endpoint.startsWith("ssh:");
   const host = remote ? endpoint : "local";
-  const sends = project ? await projects.sendsValues(project.id, host) : false;
+  const sends = nativeEnvironment
+    ? nativeEnvironment.sends
+    : project
+      ? await projects.sendsValues(project.id, host)
+      : false;
   const withheld = Boolean(project) && !sends;
-  const vars = sends
-    ? await projects.environmentFor(project.id, "agent", host)
-    : {};
+  const vars =
+    sends && !nativeEnvironment
+      ? await projects.environmentFor(project.id, "agent", host)
+      : {};
   let settings = "";
   let launch = "";
   if (agent === "codex" && !withheld) {
@@ -168,8 +222,12 @@ async function sessionEnvPrefix(
       sessionAccountId(project, sends, codexAccountId, "codexAccount"),
       codexAccountId,
       remote ? endpoint : undefined,
+      Boolean(nativeEnvironment),
     );
-    const auth = remote ? account?.auth || (await codexAuth()) : "";
+    const auth = remote
+      ? account?.auth ||
+        (await codexAuth(undefined, Boolean(nativeEnvironment)))
+      : "";
     if (account && !remote) launch = codexHomeLaunch(account.home);
     else if (auth) {
       vars.SUSHIAI_CODEX_AUTH = auth;
@@ -188,7 +246,11 @@ async function sessionEnvPrefix(
     // The project's own account without a value yet: the session still gets
     // the project's values, on the host's own login.
     const account = await resolveAccount(accountId).catch((error) => {
-      if (claudeAccountId) throw error;
+      if (
+        claudeAccountId ||
+        (nativeEnvironment && error.code !== "ACCOUNT_NOT_CONFIGURED")
+      )
+        throw error;
       return null;
     });
     const launch = accountLaunch(account);
@@ -202,11 +264,18 @@ async function sessionEnvPrefix(
   if (!payload) return { prefix: "", settings, launch };
   if (remote) {
     const file = await upload(endpoint, payload);
+    if (
+      nativeEnvironment &&
+      (typeof file !== "string" ||
+        !path.posix.isAbsolute(file) ||
+        /[\r\n\0]/.test(file))
+    )
+      throw new Error("The host did not confirm the session preparation file.");
     // A file nothing sourced does not stay: gone after two minutes.
     const timer = setTimeout(() => void remove(endpoint, file), 120000);
     timer.unref?.();
     return {
-      prefix: `. ${quote(file)}; rm -f ${quote(file)}; `,
+      prefix: `. ${quote(file)}${nativeEnvironment ? " || exit" : ""}; rm -f ${quote(file)}; `,
       settings,
       launch,
     };
@@ -220,7 +289,7 @@ async function sessionEnvPrefix(
   );
   timer.unref?.();
   return {
-    prefix: `. ${quote(file)}; rm -rf ${quote(dir)}; `,
+    prefix: `. ${quote(file)}${nativeEnvironment ? " || exit" : ""}; rm -rf ${quote(dir)}; `,
     settings,
     launch,
   };
@@ -228,6 +297,7 @@ async function sessionEnvPrefix(
 
 module.exports = {
   projectForFolder,
+  sessionEnvironment,
   sessionEnvPrefix,
   sessionAccountId,
   codexAccountFor,

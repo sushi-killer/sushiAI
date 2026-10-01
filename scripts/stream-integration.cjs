@@ -1,11 +1,16 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
+const {
+  startStreamDaemon,
+  streamTestBinary,
+} = require("./terminal-stream-fixture.cjs");
 const { Connections, quote } = require("../electron/connections.cjs");
 const {
   openHerdrStream,
   claudeForeground,
 } = require("../electron/terminal-stream.cjs");
 const { request } = require("../electron/herdr.cjs");
+const { herdrLaunchParams } = require("../electron/terminal-text.cjs");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function until(check, label) {
   for (let i = 0; i < 100; i++) {
@@ -17,29 +22,42 @@ async function until(check, label) {
 (async () => {
   const dir = await fs.mkdtemp("/tmp/sushiai-stream-test-");
   const connections = new Connections(dir);
+  if (process.env.SUSHIAI_SSH_CONFIG) {
+    const args = connections.args.bind(connections);
+    connections.args = (profile) => [
+      "-F",
+      process.env.SUSHIAI_SSH_CONFIG,
+      ...args(profile),
+    ];
+  }
   await connections.init();
-  let workspace, stream, socket;
+  let workspace, stream, socket, daemon;
   try {
     const remote = process.env.SUSHIAI_SSH_HOST;
+    const binary = streamTestBinary();
+    if (remote && !process.env.SUSHIAI_SSH_SOCKET)
+      throw new Error(
+        "Set SUSHIAI_SSH_SOCKET to an isolated SSH test daemon socket.",
+      );
+    if (!remote) daemon = await startStreamDaemon(binary);
     const profile = remote
       ? await connections.save({
           host: remote,
-          socket:
-            process.env.SUSHIAI_SSH_SOCKET ||
-            "~/.config/herdr/sessions/sushiai/herdr.sock",
+          socket: process.env.SUSHIAI_SSH_SOCKET,
         })
       : null;
-    const endpoint = profile
-      ? "ssh:" + profile.id
-      : process.env.HERDR_SOCKET_PATH ||
-        process.env.HOME + "/.config/herdr/herdr.sock";
+    const endpoint = profile ? "ssh:" + profile.id : daemon.socket;
     socket = await connections.socket(endpoint);
     const home = await connections.inspect(endpoint, { operation: "home" });
-    const created = await request(socket, "workspace.create", {
-      label: "sushiAI stream test",
-      cwd: home.home,
-      focus: false,
-    });
+    const created = await request(
+      socket,
+      "workspace.create",
+      herdrLaunchParams("workspace.create", {
+        label: "sushiAI stream test",
+        cwd: home.home,
+        focus: false,
+      }),
+    );
     workspace = created.workspace.workspace_id;
     const pane = created.root_pane.pane_id;
     let output = "",
@@ -51,16 +69,18 @@ async function until(check, label) {
       cols: 110,
       rows: 35,
       connections,
-      binary: process.env.HOME + "/.local/bin/herdr",
+      binary,
       send: (_channel, event) => {
         output += event.data || "";
         frames++;
+        if (event.sequence)
+          queueMicrotask(() => stream.ack(event.streamId, event.sequence));
       },
     });
     await until(() => frames > 0, "first streamed frame");
     await sleep(400);
     let start = Date.now();
-    stream.proc.write("printf 'STREAM_%s\\n' VERIFIED\r");
+    await stream.proc.write("printf 'STREAM_%s\\n' VERIFIED\r");
     await until(
       () =>
         output
@@ -69,10 +89,26 @@ async function until(check, label) {
       "raw input / streamed output",
     );
     const latency = Date.now() - start;
+    await stream.proc.write("printf '\\nUNICODE:%s\\n' 'Приве");
+    await stream.proc.write("тш\x7f 🌍'\r");
+    await until(async () => {
+      const read = await request(socket, "pane.read", {
+        pane_id: pane,
+        source: "recent",
+        format: "text",
+        strip_ansi: true,
+      });
+      return read.read.text.includes("UNICODE:Привет 🌍");
+    }, "Unicode input, multibyte backspace and stream output");
+    assert.equal(
+      output.includes("\ufffd"),
+      false,
+      "Unicode stream must not contain replacement characters",
+    );
     output = "";
-    stream.proc.resize(123, 41);
+    await stream.proc.resize(123, 41);
     await sleep(300);
-    stream.proc.write("stty size\r");
+    await stream.proc.write("stty size\r");
     await until(async () => {
       const r = await request(socket, "pane.read", {
         pane_id: pane,
@@ -88,7 +124,7 @@ async function until(check, label) {
       throw e;
     });
     output = "";
-    stream.proc.write("printf 'EDIT_%s\\n' OKx\x7f\r");
+    await stream.proc.write("printf 'EDIT_%s\\n' OKx\x7f\r");
     await until(
       () => output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").includes("EDIT_OK"),
       "backspace input",
@@ -109,7 +145,7 @@ async function until(check, label) {
       "os.write(1,b'\\x1b[?1000l\\x1b[?1006l\\r\\nMOUSE_HEX:'+data.hex().encode()+b'\\r\\n')",
     ].join("\n");
     output = "";
-    stream.proc.write(
+    await stream.proc.write(
       `python3 -c "import base64;exec(base64.b64decode('${Buffer.from(fixture).toString("base64")}'))"\r`,
     );
     await until(() => output.includes("MOUSE_READY"), "mouse fixture ready");
@@ -117,7 +153,7 @@ async function until(check, label) {
     await stream.proc.scroll("up", 6, { column: 12, row: 5 });
     await stream.proc.scroll("up", 6, { column: 12, row: 5, fast: true });
     const click = "\x1b[<0;13;6M\x1b[<0;13;6m";
-    stream.proc.write(click);
+    await stream.proc.write(click);
     const expectedMouse = Buffer.from(
       "\x1b[<64;13;6M".repeat(4) + click,
     ).toString("hex");
@@ -148,7 +184,7 @@ async function until(check, label) {
         process.exit(0);
       });
     `;
-    stream.proc.write("node -e " + quote(redrawFixture) + "\r");
+    await stream.proc.write("node -e " + quote(redrawFixture) + "\r");
     await until(
       () => output.includes("MOUSE_READY"),
       "Claude redraw fixture ready",
@@ -164,7 +200,7 @@ async function until(check, label) {
     );
     await stream.proc.scroll("up", 6, { column: 12, row: 5 });
     await stream.proc.scroll("up", 6, { column: 12, row: 5, fast: true });
-    stream.proc.write(click);
+    await stream.proc.write(click);
     await until(
       () =>
         output
@@ -173,8 +209,8 @@ async function until(check, label) {
           .includes("MOUSE_HEX:" + expectedMouse),
       "Claude receives accelerated scroll even while mouse reporting is disabled",
     );
-    stream.proc.kill();
-    await until(() => stream.exited, "release lease");
+    await stream.proc.kill();
+    assert.equal(stream.exited, true);
     output = "";
     frames = 0;
     stream = await openHerdrStream({
@@ -184,10 +220,12 @@ async function until(check, label) {
       cols: 100,
       rows: 30,
       connections,
-      binary: process.env.HOME + "/.local/bin/herdr",
+      binary,
       send: (_, event) => {
         output += event.data || "";
         frames++;
+        if (event.sequence)
+          queueMicrotask(() => stream.ack(event.streamId, event.sequence));
       },
     });
     await until(
@@ -208,6 +246,7 @@ async function until(check, label) {
             "mouse coordinates / native wheel / click",
             "Claude Alt scroll during disabled mouse reporting",
             "input/backspace",
+            "Unicode input, backspace and stream output",
             "real PTY resize",
             "release/reattach",
             "pane closure",
@@ -224,6 +263,7 @@ async function until(check, label) {
         workspace_id: workspace,
       }).catch(() => {});
     await connections.close();
+    await daemon?.close();
     await fs.rm(dir, { recursive: true, force: true });
   }
 })().catch((e) => {

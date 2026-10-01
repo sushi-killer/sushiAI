@@ -63,6 +63,7 @@ const navLabel = (id) => contributed("navigation", id).label;
 const ledger = surfaceOf("probe.ledger");
 const itemLabel = ledger.view.document.itemLabel;
 const profile = await fs.mkdtemp("/tmp/sushiai-smoke-");
+await fs.writeFile(path.join(profile, ".zshrc"), "");
 const orchdBuilt = existsSync(path.join(root, "orchd/target/release/orchd"));
 // Polls `ps` until a daemon for this profile's data dir is (or is no longer)
 // running; true when the wanted state was reached in time.
@@ -107,6 +108,7 @@ const desktop = await electron.launch({
   env: {
     ...process.env,
     BRIDGE_DATA_DIR: profile,
+    ZDOTDIR: profile,
     SUSHIAI_EXTENSIONS_DIR: "tests/fixtures/extensions",
     // Inherited from `npm run dev`, it would load the dev server, not dist/.
     BRIDGE_DEV_URL: "",
@@ -197,11 +199,11 @@ try {
           ).history,
         terminalId,
       ),
-    (history) => history.includes("\r\nBRIDGE_PTY_OK"),
+    (history) => /(?:^|\r|\n)BRIDGE_PTY_OK\r?\n/.test(history),
   );
   assert.ok(
-    output.includes("\r\nBRIDGE_PTY_OK"),
-    "PTY must execute a real shell command",
+    /(?:^|\r|\n)BRIDGE_PTY_OK\r?\n/.test(output),
+    `PTY must execute a real shell command; received ${JSON.stringify(output)}`,
   );
   // Herdr is a separate daemon: it is always there on a developer machine but
   // never on a clean CI runner. Skip explicitly rather than silently, and let

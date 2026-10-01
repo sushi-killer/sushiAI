@@ -2,6 +2,7 @@ import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
 import assert from "node:assert/strict";
 const profile = await fs.mkdtemp("/tmp/sushiai-unicode-");
+await fs.writeFile(`${profile}/.zshrc`, "");
 let desktop;
 try {
   desktop = await electron.launch({
@@ -54,9 +55,15 @@ try {
   await page.evaluate(() =>
     window.bridge.terminalWrite("unicode-check", "\x7f\r"),
   );
-  await page.waitForFunction(() =>
-    window.unicodeOutput.includes("RESULT:Привет\r\n"),
-  );
+  await page
+    .waitForFunction(() => window.unicodeOutput.includes("RESULT:Привет\r\n"))
+    .catch(async (error) => {
+      console.error(
+        "Unicode terminal output:",
+        JSON.stringify(await page.evaluate(() => window.unicodeOutput)),
+      );
+      throw error;
+    });
   const result = await page.evaluate(async () => {
     let blocked = false;
     try {

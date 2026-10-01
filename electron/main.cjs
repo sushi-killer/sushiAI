@@ -106,6 +106,8 @@ const modelProviders = new ModelProviders({
 const codexAccounts = new CodexAccounts({
   userDataDir: app.getPath("userData"),
   codexBinary: () => executable("codex"),
+  remoteExec: (endpoint, command) =>
+    connections.exec(endpoint, command, { timeout: 8000 }),
 });
 const projects = new Projects({
   userDataDir: app.getPath("userData"),
@@ -205,9 +207,9 @@ const terminalIpc = registerTerminalIpc({
     id(accountId);
     return modelProviders.resolveClaudeAccount(accountId);
   },
-  resolveCodexAccount: (accountId) => {
+  resolveCodexAccount: (accountId, endpoint) => {
     id(accountId);
-    return codexAccounts.resolve(accountId);
+    return codexAccounts.resolve(accountId, endpoint);
   },
   resolveModel: (profileId) => {
     id(profileId);

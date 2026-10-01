@@ -917,7 +917,7 @@ export function PanelPickerDialog({
                                   ? "Not signed in · sign in from Settings first"
                                   : remoteNote
                                     ? item.mode === "chatgpt"
-                                      ? `Login copied to ${remoteNote} for this session · may ask to sign in again later`
+                                      ? `Login copied to ${remoteNote} for this session · a refresh comes back`
                                       : `Key sent to ${remoteNote} for this session`
                                     : `${item.mode === "apiKey" ? "API key" : "ChatGPT"}${item.detail ? ` · ${item.detail}` : ""}`}
                               </small>

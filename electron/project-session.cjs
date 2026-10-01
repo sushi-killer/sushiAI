@@ -34,20 +34,39 @@ function envPayload(env) {
  * comes in the one-shot values file (as SUSHIAI_CODEX_AUTH), goes into a
  * private temporary Codex home with the host's own config and history linked
  * in, and is removed when Codex exits or its pane closes. Herdr closes a
- * pane with SIGKILL, which no trap sees: each start also removes the homes
- * of sessions whose shell is gone. A host that has a login keeps using it,
+ * pane with SIGKILL, which no trap sees: each start also clears the homes of
+ * sessions whose shell is gone. A host that has a login keeps using it,
  * unless the session was started as a picked Codex account
- * (SUSHIAI_CODEX_FORCE). */
+ * (SUSHIAI_CODEX_FORCE).
+ *
+ * A ChatGPT account's refresh token is single-use, so a session that
+ * refreshed it must hand the new login back: started with
+ * SUSHIAI_CODEX_RETURN, its home has a name the app knows
+ * (`~/.sushiai/codex-sessions/<token>`, see CODEX_COLLECT), and when it ends
+ * only a changed `auth.json` stays there (marked `.ret`) until the app
+ * collects it, at most seven days. An unchanged one is removed like any
+ * other session home. */
 const CODEX_SESSION = [
-  'for o in "${TMPDIR:-/tmp}"/sushiai-codex.*; do [ -d "$o" ] || continue; p=$(cat "$o/pid" 2>/dev/null); [ -n "$p" ] && kill -0 "$p" 2>/dev/null || rm -rf "$o"; done',
-  "force=${SUSHIAI_CODEX_FORCE:-}; unset SUSHIAI_CODEX_FORCE",
+  'keep() { [ -f "$1/.ret" ] && return; if [ -f "$1/.sent" ] && [ "$(cat "$1/auth.json" 2>/dev/null)" != "$(cat "$1/.sent")" ]; then for f in "$1"/* "$1"/.[!.]*; do { [ -e "$f" ] || [ -L "$f" ]; } && [ "${f##*/}" != auth.json ] && rm -rf "$f"; done; : > "$1/.ret"; else rm -rf "$1"; fi; }',
+  // A home shared between hosts (NFS) holds other hosts' sessions: their
+  // pid means nothing here, so only this host's are judged.
+  'me=$(uname -n); for o in "${TMPDIR:-/tmp}"/sushiai-codex.* "$HOME"/.sushiai/codex-sessions/*; do [ -d "$o" ] || continue; if [ -f "$o/.ret" ]; then [ -n "$(find "$o/.ret" -mtime +7)" ] && rm -rf "$o"; continue; fi; h=$(cat "$o/host" 2>/dev/null); [ -n "$h" ] && [ "$h" != "$me" ] && continue; p=$(cat "$o/pid" 2>/dev/null); [ -n "$p" ] && kill -0 "$p" 2>/dev/null || keep "$o"; done',
+  "force=${SUSHIAI_CODEX_FORCE:-}; t=${SUSHIAI_CODEX_RETURN:-}; unset SUSHIAI_CODEX_FORCE SUSHIAI_CODEX_RETURN",
   'if { [ -z "$force" ] && [ -s "${CODEX_HOME:-$HOME/.codex}/auth.json" ]; } || [ -z "${SUSHIAI_CODEX_AUTH:-}" ]; then unset SUSHIAI_CODEX_AUTH; exec codex; fi',
-  'c="$HOME/.codex"; mkdir -p "$c/sessions"; d=$(mktemp -d "${TMPDIR:-/tmp}/sushiai-codex.XXXXXX"); echo $$ > "$d/pid"',
-  "trap 'rm -rf \"$d\"' EXIT HUP INT TERM",
+  'c="$HOME/.codex"; mkdir -p "$c/sessions"',
+  'if [ -n "$t" ]; then mkdir -p -m 700 "$HOME/.sushiai/codex-sessions"; d="$HOME/.sushiai/codex-sessions/$t"; mkdir -m 700 "$d" || exit 1; else d=$(mktemp -d "${TMPDIR:-/tmp}/sushiai-codex.XXXXXX"); fi; echo $$ > "$d/pid"; uname -n > "$d/host"',
+  "trap 'keep \"$d\"' EXIT HUP INT TERM",
   'for f in "$c"/* "$c"/.[!.]*; do [ -e "$f" ] && [ "${f##*/}" != auth.json ] && [ "${f##*/}" != pid ] && ln -s "$f" "$d/"; done',
-  '(umask 077; printf %s "$SUSHIAI_CODEX_AUTH" > "$d/auth.json"); unset SUSHIAI_CODEX_AUTH',
+  '(umask 077; printf %s "$SUSHIAI_CODEX_AUTH" > "$d/auth.json"; [ -z "$t" ] || cp "$d/auth.json" "$d/.sent"); unset SUSHIAI_CODEX_AUTH',
   'CODEX_HOME="$d" codex',
 ].join("; ");
+/** What the app runs on a host to collect its sessions' logins, one block
+ * per token: `@@ <token>`, then whether the session is `live` (the file is
+ * read and left), `ended` (read and removed) or `gone`, then the file. A
+ * session of another host sharing this home counts as live. */
+const CODEX_COLLECT = (tokens) =>
+  `me=$(uname -n); for t in ${tokens.join(" ")}; do d="$HOME/.sushiai/codex-sessions/$t"; echo "@@ $t"; if [ ! -d "$d" ]; then echo gone; continue; fi; p=$(cat "$d/pid" 2>/dev/null); h=$(cat "$d/host" 2>/dev/null); if [ ! -f "$d/.ret" ] && { { [ -n "$h" ] && [ "$h" != "$me" ]; } || { [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }; }; then echo live; cat "$d/auth.json"; else echo ended; cat "$d/auth.json" 2>/dev/null; rm -rf "$d"; fi; echo; done`;
+
 const codexSessionLaunch = () => `sh -c ${quote(CODEX_SESSION)}`;
 
 /** The local Codex login, or "" when there is none. */
@@ -86,9 +105,9 @@ function sessionAccountId(project, sends, picked, key = "claudeAccount") {
 /** A Codex account, or null for the host's own login. The project's own
  * account that is not signed in yet falls back to it; a picked one has to
  * work. */
-async function codexAccountFor(resolve, accountId, picked) {
+async function codexAccountFor(resolve, accountId, picked, endpoint) {
   if (!accountId || !resolve) return null;
-  return resolve(accountId).catch((error) => {
+  return resolve(accountId, endpoint).catch((error) => {
     if (picked) throw error;
     return null;
   });
@@ -148,12 +167,14 @@ async function sessionEnvPrefix(
       resolveCodexAccount,
       sessionAccountId(project, sends, codexAccountId, "codexAccount"),
       codexAccountId,
+      remote ? endpoint : undefined,
     );
     const auth = remote ? account?.auth || (await codexAuth()) : "";
     if (account && !remote) launch = codexHomeLaunch(account.home);
     else if (auth) {
       vars.SUSHIAI_CODEX_AUTH = auth;
       if (account) vars.SUSHIAI_CODEX_FORCE = "1";
+      if (account?.ret) vars.SUSHIAI_CODEX_RETURN = account.ret;
       launch = codexSessionLaunch();
     }
   }
@@ -213,6 +234,7 @@ module.exports = {
   codexHomeLaunch,
   accountLaunch,
   CODEX_SESSION,
+  CODEX_COLLECT,
   localCodexAuth,
   modelLaunch,
   envPayload,

@@ -300,11 +300,13 @@ function registerTerminalIpc({
               "codexAccount",
             ),
             codexAccountId,
+            endpoint,
           );
           const auth = account?.auth || (await codexAuth());
           if (auth) {
             projectEnv.SUSHIAI_CODEX_AUTH = auth;
             if (account) projectEnv.SUSHIAI_CODEX_FORCE = "1";
+            if (account?.ret) projectEnv.SUSHIAI_CODEX_RETURN = account.ret;
             launchShell = CODEX_SESSION;
           }
         }

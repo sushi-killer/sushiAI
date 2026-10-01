@@ -11,7 +11,27 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 
+const { CODEX_COLLECT } = require("./project-session.cjs");
+
 const LOGIN_TIMEOUT = 10 * 60 * 1000;
+// How long a session not seen live is still asked for its login; the host
+// keeps it as long (CODEX_SESSION).
+const RETURN_DAYS = 7 * 24 * 60 * 60 * 1000;
+
+/** True when `text` is a later login of the same ChatGPT account. */
+function newerLogin(text, than) {
+  try {
+    const next = JSON.parse(text);
+    const now = JSON.parse(than);
+    return (
+      Boolean(next.tokens?.refresh_token) &&
+      next.tokens.account_id === now.tokens?.account_id &&
+      Date.parse(next.last_refresh) > Date.parse(now.last_refresh)
+    );
+  } catch {
+    return false;
+  }
+}
 
 function signedInAs(text) {
   try {
@@ -31,8 +51,10 @@ class CodexAccounts {
   constructor({
     userDataDir,
     codexBinary,
+    remoteExec,
     codexHome = path.join(os.homedir(), ".codex"),
   }) {
+    this.remoteExec = remoteExec;
     this.file = path.join(userDataDir, "codex-accounts.json");
     this.homes = path.join(userDataDir, "codex-accounts");
     this.codexBinary = codexBinary;
@@ -173,12 +195,68 @@ class CodexAccounts {
       clearTimeout(timer);
       this.logins.delete(id);
     }
+    // A new sign-in replaces whatever host sessions still hold.
+    await this.#locked(async () => {
+      const accounts = await this.#read();
+      if (!Object.hasOwn(accounts, id)) return;
+      accounts[id].returns = [];
+      await this.#write(accounts);
+    });
     return (await this.list()).find((item) => item.id === id);
   }
 
+  /** Brings back the login a host session refreshed: one that is newer
+   * than the account's own, of the same ChatGPT account, replaces it. The
+   * hosts are asked outside the lock, one call per host. A host that does
+   * not answer is asked again at the next start; a live session is kept for
+   * as long as it is seen live. */
+  async #collect(id) {
+    const pending = (await this.#account(id)).returns || [];
+    if (!pending.length || !this.remoteExec) return;
+    const seen = new Map();
+    // ponytail: an unreachable host costs its ssh timeout once per start.
+    for (const endpoint of new Set(pending.map((item) => item.endpoint))) {
+      const tokens = pending
+        .filter((item) => item.endpoint === endpoint)
+        .map((item) => item.token);
+      const out = await this.remoteExec(endpoint, CODEX_COLLECT(tokens)).catch(
+        () => "",
+      );
+      for (const block of String(out).split(/^@@ /m).slice(1)) {
+        const [token, status, ...rest] = block.split("\n");
+        seen.set(token, { status, text: rest.join("\n").trim() });
+      }
+    }
+    await this.#locked(async () => {
+      const accounts = await this.#read();
+      if (!Object.hasOwn(accounts, id)) return;
+      const current = await this.#auth(id);
+      let best = current;
+      for (const { text } of seen.values())
+        if (newerLogin(text, best)) best = text;
+      if (best !== current) {
+        const file = path.join(this.homeFor(id), "auth.json");
+        await fs.writeFile(`${file}.next`, best, { mode: 0o600 });
+        await fs.rename(`${file}.next`, file);
+      }
+      accounts[id].returns = (accounts[id].returns || []).flatMap((item) => {
+        const answer = seen.get(item.token);
+        if (!answer) return Date.now() - item.at > RETURN_DAYS ? [] : [item];
+        return answer.status === "live" ? [{ ...item, at: Date.now() }] : [];
+      });
+      await this.#write(accounts);
+    });
+  }
+
   /** The account's home ready for a session (the rest of `~/.codex` linked
-   * in) and its login, for a host that runs it from a copy. */
-  async resolve(id) {
+   * in) and its login, for a host that runs it from a copy. A ChatGPT login
+   * sent to `endpoint` also gets a return token (`ret`), so a refresh made
+   * there comes back. */
+  async resolve(id, endpoint) {
+    await this.#collect(id);
+    return this.#locked(() => this.#resolve(id, endpoint));
+  }
+  async #resolve(id, endpoint) {
     const account = await this.#account(id);
     const auth = (await this.#auth(id)).trim();
     if (!signedInAs(auth))
@@ -199,8 +277,16 @@ class CodexAccounts {
           if (error.code !== "EEXIST") throw error;
         });
     }
-    return { home, auth };
+    if (!endpoint || signedInAs(auth).mode !== "chatgpt") return { home, auth };
+    const ret = randomUUID();
+    const accounts = await this.#read();
+    accounts[id].returns = [
+      ...(accounts[id].returns || []),
+      { endpoint, token: ret, at: Date.now() },
+    ];
+    await this.#write(accounts);
+    return { home, auth, ret };
   }
 }
 
-module.exports = { CodexAccounts, signedInAs };
+module.exports = { CodexAccounts, signedInAs, newerLogin };

@@ -18,6 +18,7 @@ import {
   findPanelOwner,
   fixSelection,
   groupPanelIds,
+  agentLine,
   findHostWorkspace,
   isVanished,
   movePanel as moveInLayout,
@@ -289,7 +290,7 @@ export function useWorkspaces({
           { label: name, cwd, focus: false },
         );
         await refreshHerdr(endpoint);
-        const { prefix, settings } = await sessionPrefix(
+        const { prefix, settings, launch } = await sessionPrefix(
           endpoint,
           cwd,
           starter === "shell" ? undefined : starter,
@@ -297,7 +298,10 @@ export function useWorkspaces({
         if (starter !== "shell" || prefix)
           await window.bridge!.herdr(endpoint, "pane.send_input", {
             pane_id: result.root_pane.pane_id,
-            text: starter === "shell" ? prefix : prefix + starter + settings,
+            text:
+              starter === "shell"
+                ? prefix
+                : agentLine(prefix, launch || starter, settings),
             keys: ["Enter"],
           });
         await refreshHerdr(endpoint);
@@ -358,6 +362,31 @@ export function useWorkspaces({
     showWorkspace();
     setZoomed(null);
   }
+  /** A Herdr pane's account and model, kept on its panel (a snapshot does
+   * not carry them) so reopening it starts it the same way. */
+  function rememberLaunch(
+    endpoint: string,
+    paneId: string,
+    claudeAccountId?: string,
+    modelProfileId?: string,
+  ) {
+    if (claudeAccountId === undefined && !modelProfileId) return;
+    setWorkspaces((list) =>
+      list.map((w) =>
+        (w.connection || socket) !== endpoint ||
+        !w.panels.some((p) => p.herdrId === paneId)
+          ? w
+          : {
+              ...w,
+              panels: w.panels.map((p) =>
+                p.herdrId === paneId
+                  ? { ...p, claudeAccountId, modelProfileId }
+                  : p,
+              ),
+            },
+      ),
+    );
+  }
   /** What a Herdr pane is typed first: the project's values and the
    * agent's sign-in (the Claude account picked, else the project's own; this
    * local Codex login on a host without one; a remote custom model's key).
@@ -380,7 +409,7 @@ export function useWorkspaces({
       });
     } catch (error) {
       if (claudeAccountId || modelProfileId) throw error;
-      return { prefix: "", settings: "" };
+      return { prefix: "", settings: "", launch: "" };
     }
   }
   /** What a Herdr pane is sent to start an agent: the CLI's name, or - for
@@ -483,7 +512,7 @@ export function useWorkspaces({
           agent,
           kind === "agent" ? modelProfileId : undefined,
         );
-        const { prefix, settings } = await sessionPrefix(
+        const { prefix, settings, launch } = await sessionPrefix(
           endpoint,
           current.cwd,
           kind === "agent" ? agent : undefined,
@@ -502,10 +531,12 @@ export function useWorkspaces({
           if (kind === "agent" && paneId)
             await window.bridge.herdr(endpoint, "pane.send_input", {
               pane_id: paneId,
-              text: prefix + launchText + settings,
+              text: agentLine(prefix, launch || launchText, settings),
               keys: ["Enter"],
             });
           await refreshHerdr(endpoint);
+          if (kind === "agent" && paneId)
+            rememberLaunch(endpoint, paneId, claudeAccountId, modelProfileId);
           switchWorkspace(
             herdrWorkspaceKey(endpoint, result.workspace.workspace_id),
           );
@@ -525,10 +556,15 @@ export function useWorkspaces({
         if (paneId && (kind === "agent" || prefix))
           await window.bridge.herdr(endpoint, "pane.send_input", {
             pane_id: paneId,
-            text: kind === "agent" ? prefix + launchText + settings : prefix,
+            text:
+              kind === "agent"
+                ? agentLine(prefix, launch || launchText, settings)
+                : prefix,
             keys: ["Enter"],
           });
         await refreshHerdr(endpoint);
+        if (kind === "agent" && paneId)
+          rememberLaunch(endpoint, paneId, claudeAccountId, modelProfileId);
         if (paneId) setSelected(herdrWorkspaceKey(endpoint, paneId));
       } else if (worktree && launchesInWorktree(kind)) {
         // The local counterpart of the branch above: no Herdr involved, so
@@ -642,7 +678,7 @@ export function useWorkspaces({
         herdrWorkspaceId = result.workspace?.workspace_id;
       }
       if (!paneId) throw new Error("Herdr did not report the new pane.");
-      const { prefix, settings } = await sessionPrefix(
+      const { prefix, settings, launch } = await sessionPrefix(
         endpoint,
         owner.cwd,
         launchText ? ended.agent || "claude" : undefined,
@@ -652,7 +688,9 @@ export function useWorkspaces({
       if (launchText || prefix)
         await window.bridge.herdr(endpoint, "pane.send_input", {
           pane_id: paneId,
-          text: prefix + launchText + (launchText ? settings : ""),
+          text: launchText
+            ? agentLine(prefix, launch || launchText, settings)
+            : prefix,
           keys: ["Enter"],
         });
       const next: Panel = {

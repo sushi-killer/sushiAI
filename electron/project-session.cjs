@@ -30,18 +30,29 @@ function envPayload(env) {
 }
 
 /** Codex signs in through `auth.json` in its home. A host with no login of
- * its own gets the local one, the way Codex's docs sign in a headless machine;
- * a host that has one keeps it. The file goes over ssh stdin, never argv. */
-const SEED_CODEX =
-  'd="${CODEX_HOME:-$HOME/.codex}"; [ -s "$d/auth.json" ] && exit 0; umask 077; mkdir -p "$d" && cat > "$d/auth.json.tmp" && mv "$d/auth.json.tmp" "$d/auth.json"';
-async function seedCodexLogin(connections, endpoint, codexHome) {
-  if (typeof endpoint !== "string" || !endpoint.startsWith("ssh:")) return;
-  const home = codexHome || path.join(os.homedir(), ".codex");
-  const auth = await fs
-    .readFile(path.join(home, "auth.json"), "utf8")
-    .catch(() => "");
-  if (auth.trim())
-    await connections.exec(endpoint, SEED_CODEX, { input: auth });
+ * its own runs a session on the local one, for that session only: the file
+ * comes in the one-shot values file (as SUSHIAI_CODEX_AUTH), goes into a
+ * private temporary Codex home with the host's own config and history linked
+ * in, and is removed when Codex exits or its pane closes. Herdr closes a
+ * pane with SIGKILL, which no trap sees: each start also removes the homes
+ * of sessions whose shell is gone. A host that has a login keeps using it. */
+const CODEX_SESSION = [
+  'for o in "${TMPDIR:-/tmp}"/sushiai-codex.*; do [ -d "$o" ] || continue; p=$(cat "$o/pid" 2>/dev/null); [ -n "$p" ] && kill -0 "$p" 2>/dev/null || rm -rf "$o"; done',
+  'if [ -s "${CODEX_HOME:-$HOME/.codex}/auth.json" ] || [ -z "${SUSHIAI_CODEX_AUTH:-}" ]; then unset SUSHIAI_CODEX_AUTH; exec codex; fi',
+  'c="$HOME/.codex"; mkdir -p "$c/sessions"; d=$(mktemp -d "${TMPDIR:-/tmp}/sushiai-codex.XXXXXX"); echo $$ > "$d/pid"',
+  "trap 'rm -rf \"$d\"' EXIT HUP INT TERM",
+  'for f in "$c"/* "$c"/.[!.]*; do [ -e "$f" ] && [ "${f##*/}" != auth.json ] && [ "${f##*/}" != pid ] && ln -s "$f" "$d/"; done',
+  '(umask 077; printf %s "$SUSHIAI_CODEX_AUTH" > "$d/auth.json"); unset SUSHIAI_CODEX_AUTH',
+  'CODEX_HOME="$d" codex',
+].join("; ");
+const codexSessionLaunch = () => `sh -c ${quote(CODEX_SESSION)}`;
+
+/** The local Codex login, or "" when there is none. */
+function localCodexAuth(codexHome = path.join(os.homedir(), ".codex")) {
+  return fs.readFile(path.join(codexHome, "auth.json"), "utf8").then(
+    (text) => text.trim(),
+    () => "",
+  );
 }
 
 /** How a Claude account reaches a session: the variables to send and what
@@ -86,7 +97,8 @@ function remoteModelLaunch(settings) {
  * over ssh stdin; here for the local machine), and the text typed only
  * sources and removes that file, so no value is ever in the text, the pane's
  * history or argv. `settings` is what the `claude` command needs added for
- * the account. Both empty when there is nothing to send. */
+ * the account, `launch` a command to start the agent with instead of its
+ * name. All empty when there is nothing to send. */
 async function sessionEnvPrefix(
   {
     projects,
@@ -95,7 +107,7 @@ async function sessionEnvPrefix(
     remove,
     resolveAccount,
     resolveModel,
-    seedCodex,
+    codexAuth = localCodexAuth,
   },
   { endpoint, cwd, claudeAccountId, agent, modelProfileId },
 ) {
@@ -108,12 +120,18 @@ async function sessionEnvPrefix(
   const host = remote ? endpoint : "local";
   const sends = project ? await projects.sendsValues(project.id, host) : false;
   const withheld = Boolean(project) && !sends;
-  if (agent === "codex" && remote && !withheld && seedCodex)
-    await seedCodex(endpoint).catch(() => {});
   const vars = sends
     ? await projects.environmentFor(project.id, "agent", host)
     : {};
   let settings = "";
+  let launch = "";
+  if (agent === "codex" && remote && !withheld) {
+    const auth = await codexAuth();
+    if (auth) {
+      vars.SUSHIAI_CODEX_AUTH = auth;
+      launch = codexSessionLaunch();
+    }
+  }
   // Only Claude itself, and not on a custom model: that has its own key, and
   // an account's key must never reach the model's gateway.
   const accountId =
@@ -135,13 +153,17 @@ async function sessionEnvPrefix(
   if (modelProfileId && remote && resolveModel)
     vars.SUSHIAI_MODEL_KEY = (await resolveModel(modelProfileId)).key;
   const payload = envPayload(vars);
-  if (!payload) return { prefix: "", settings: "" };
+  if (!payload) return { prefix: "", settings: "", launch: "" };
   if (remote) {
     const file = await upload(endpoint, payload);
     // A file nothing sourced does not stay: gone after two minutes.
     const timer = setTimeout(() => void remove(endpoint, file), 120000);
     timer.unref?.();
-    return { prefix: `. ${quote(file)}; rm -f ${quote(file)}; `, settings };
+    return {
+      prefix: `. ${quote(file)}; rm -f ${quote(file)}; `,
+      settings,
+      launch,
+    };
   }
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sushiai-env-"));
   const file = path.join(dir, "env");
@@ -151,7 +173,11 @@ async function sessionEnvPrefix(
     120000,
   );
   timer.unref?.();
-  return { prefix: `. ${quote(file)}; rm -rf ${quote(dir)}; `, settings };
+  return {
+    prefix: `. ${quote(file)}; rm -rf ${quote(dir)}; `,
+    settings,
+    launch,
+  };
 }
 
 module.exports = {
@@ -159,7 +185,8 @@ module.exports = {
   sessionEnvPrefix,
   sessionAccountId,
   accountLaunch,
-  seedCodexLogin,
+  CODEX_SESSION,
+  localCodexAuth,
   remoteModelLaunch,
   envPayload,
 };

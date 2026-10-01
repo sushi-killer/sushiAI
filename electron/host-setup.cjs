@@ -1,4 +1,5 @@
 const { execFile } = require("node:child_process");
+const { quote } = require("./connections.cjs");
 
 /** Brings a machine to what sessions need - Herdr running, Claude Code and
  * Codex on the PATH - installing only what is missing, from each tool's own
@@ -82,16 +83,26 @@ function cleanEnvironment(env = process.env) {
   );
 }
 
+/** The line that points Herdr at a connection's own socket, so the server
+ * the setup starts is the one the app connects to. "" for the default. */
+function socketLine(socket) {
+  if (!socket || socket === "~/.config/herdr/herdr.sock") return "";
+  const where = socket.startsWith("~/")
+    ? `"$HOME"/${quote(socket.slice(2))}`
+    : quote(socket);
+  return `export HERDR_SOCKET_PATH=${where}\n`;
+}
+
 /** Setups under way, by machine: a second connect waits for the first
  * instead of running the installers twice. */
 const running = new Map();
 
-/** Runs the setup on an SSH host (over its connection) or on the local
- * machine. */
-function setupHost(connections, endpoint) {
+/** Runs the setup on an SSH host (over its connection, for its Herdr
+ * `socket`) or on the local machine. */
+function setupHost(connections, endpoint, socket = "") {
   const key = typeof endpoint === "string" ? endpoint : "local";
   if (!running.has(key)) {
-    const run = runSetup(connections, endpoint).finally(() =>
+    const run = runSetup(connections, endpoint, socket).finally(() =>
       running.delete(key),
     );
     running.set(key, run);
@@ -99,12 +110,12 @@ function setupHost(connections, endpoint) {
   return running.get(key);
 }
 
-async function runSetup(connections, endpoint) {
+async function runSetup(connections, endpoint, socket) {
   const timeout = 10 * 60 * 1000;
   const output =
     typeof endpoint === "string" && endpoint.startsWith("ssh:")
       ? await connections.exec(endpoint, "sh -s", {
-          input: SETUP_SCRIPT,
+          input: socketLine(socket) + SETUP_SCRIPT,
           timeout,
         })
       : await new Promise((resolve, reject) => {

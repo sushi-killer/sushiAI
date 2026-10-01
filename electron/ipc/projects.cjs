@@ -746,17 +746,23 @@ function registerProjectIpc({
   });
   handle("connections-connect", async (endpoint) => {
     const remote = endpoint?.startsWith("ssh:");
+    const socket = remote ? connections().get(endpoint).socket : "";
+    let setup = "";
     try {
       await connections().socket(endpoint);
       // Anything else a session needs that the host lacks comes in behind.
-      if (remote) void setupHost(connections(), endpoint).catch(() => {});
+      if (remote)
+        void setupHost(connections(), endpoint, socket).catch(() => {});
     } catch (error) {
       if (!remote) throw error;
       // A fresh server has no Herdr: set the host up, then connect again. A
       // host ssh cannot reach fails the setup too, with the first error.
-      const states = await setupHost(connections(), endpoint).catch(() => {
-        throw error;
-      });
+      const states = await setupHost(connections(), endpoint, socket).catch(
+        () => {
+          throw error;
+        },
+      );
+      setup = setupSummary(states);
       if (!["running", "started"].includes(states.server))
         throw new Error(
           `Couldn't set up the host: ${setupSummary(states) || "nothing ran"}.`,
@@ -767,7 +773,7 @@ function registerProjectIpc({
       await connections().exec(endpoint, 'mkdir -p "$HOME/sushiai"\n');
       await connections().setAutoConnect(endpoint, true);
     }
-    return { connected: true };
+    return { connected: true, setup };
   });
   handle("connections-disconnect", disconnectEndpoint);
   handle("connections-forward", async (endpoint, url) => {

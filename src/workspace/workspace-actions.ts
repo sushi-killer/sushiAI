@@ -69,6 +69,14 @@ export function reopenInSlot(
   };
 }
 
+/** The line a Herdr pane is typed to start an agent. With values to source,
+ * the agent runs in a subshell: the values (a token, a key, the project's
+ * secrets) live in the agent's process only, and are gone from the pane's
+ * shell when it exits. */
+export function agentLine(prefix: string, command: string, settings = "") {
+  return prefix ? `(${prefix}exec ${command}${settings})` : command + settings;
+}
+
 /** True for a Herdr workspace whose host no longer lists it: none of its
  * Herdr panes is live. Herdr closes a workspace with its last pane, so one
  * left with no panes at all (its last session closed) is gone too. */

@@ -419,7 +419,7 @@ export interface Bridge {
     agent?: string;
     claudeAccountId?: string;
     modelProfileId?: string;
-  }): Promise<{ prefix: string; settings: string }>;
+  }): Promise<{ prefix: string; settings: string; launch: string }>;
   terminalOpen(options: {
     panelId: string;
     cwd: string;
@@ -641,7 +641,10 @@ export interface Bridge {
     hidden: boolean,
   ): Promise<ConnectionProfile>;
   connectionsDelete(endpoint: string): Promise<void>;
-  connectionsConnect(endpoint: string): Promise<void>;
+  /** `setup` says what a fresh host was given ("" when nothing ran). */
+  connectionsConnect(
+    endpoint: string,
+  ): Promise<{ connected: boolean; setup: string }>;
   connectionsDisconnect(endpoint: string): Promise<void>;
   connectionsForward(endpoint: string, url: string): Promise<string>;
   projectsList(): Promise<Project[]>;

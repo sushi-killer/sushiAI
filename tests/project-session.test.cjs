@@ -16,10 +16,17 @@ const ACCOUNTS = {
 
 async function rig(
   t,
-  { attach = true, withheld = false, sessions = undefined } = {},
+  { attach = true, withheld = false, sessions = undefined, codex = "" } = {},
 ) {
   const host = await makeHost(t, {
-    bin: { mktemp: '#!/bin/sh\nexec /usr/bin/mktemp "$HOME/tmp.XXXXXX"\n' },
+    bin: {
+      mktemp:
+        '#!/bin/sh\n[ "$1" = -d ] && exec /usr/bin/mktemp -d "$HOME/tmpd.XXXXXX"\nexec /usr/bin/mktemp "$HOME/tmp.XXXXXX"\n',
+      ln: '#!/bin/sh\nexec /bin/ln "$@"\n',
+      // Shows what a Codex session sees: its home, its login, its files.
+      codex:
+        '#!/bin/sh\nprintf \'%s|%s|%s\' "${CODEX_HOME:-}" "$(cat "${CODEX_HOME:-$HOME/.codex}/auth.json" 2>/dev/null)" "$(ls -A "${CODEX_HOME:-$HOME/.codex}" | tr "\\n" ,)" > "$HOME/codex-saw"\n',
+    },
   });
   const { projects } = await makeStore(t);
   const project = await projects.upsert({
@@ -67,6 +74,7 @@ async function rig(
       if (!ACCOUNTS[id]) throw new Error("Add a value for it first.");
       return ACCOUNTS[id];
     },
+    codexAuth: async () => codex,
     resolveModel: async () => ({
       key: "invented-model-key",
       settings: { ANTHROPIC_BASE_URL: "https://models.example.test" },
@@ -155,7 +163,7 @@ test("a Herdr pane on a host switched off, or in a folder with no project, is ty
       endpoint: off.host.endpoint,
       cwd: off.cwd,
     }),
-    { prefix: "", settings: "" },
+    { prefix: "", settings: "", launch: "" },
   );
   const none = await rig(t, { attach: false });
   assert.deepEqual(
@@ -163,7 +171,7 @@ test("a Herdr pane on a host switched off, or in a folder with no project, is ty
       endpoint: none.host.endpoint,
       cwd: none.cwd,
     }),
-    { prefix: "", settings: "" },
+    { prefix: "", settings: "", launch: "" },
   );
 });
 
@@ -252,21 +260,16 @@ test("no account goes with a custom model, an empty pick, another agent, or an a
 });
 
 test("a host switched off for the project gets no Codex login", async (t) => {
-  const { host, cwd, handlers } = await rig(t, { withheld: true });
-  // The real seeder runs: with a local Codex login, a seeded host would have
-  // ~/.codex.
-  await handlers.get("project-session-env")({
+  const { host, cwd, handlers } = await rig(t, {
+    withheld: true,
+    codex: '{"tokens":"mine"}',
+  });
+  const answer = await handlers.get("project-session-env")({
     endpoint: host.endpoint,
     cwd,
     agent: "codex",
   });
-  assert.equal(
-    await fs.stat(path.join(host.home, ".codex")).then(
-      () => true,
-      () => false,
-    ),
-    false,
-  );
+  assert.deepEqual(answer, { prefix: "", settings: "", launch: "" });
 });
 
 test("a host switched off for the project gets no Claude account either", async (t) => {
@@ -277,23 +280,64 @@ test("a host switched off for the project gets no Claude account either", async 
       cwd,
       claudeAccountId: "sub",
     }),
-    { prefix: "", settings: "" },
+    { prefix: "", settings: "", launch: "" },
   );
 });
 
-test("a host with no Codex login gets the local one, a host with one keeps it", async (t) => {
-  const { seedCodexLogin } = require("../electron/project-session.cjs");
-  const { host } = await rig(t, { attach: false });
-  const local = path.join(host.root, "local-codex");
-  await fs.mkdir(local);
-  await fs.writeFile(path.join(local, "auth.json"), '{"tokens":"mine"}');
-  await seedCodexLogin(host.connections, host.endpoint, local);
-  const remote = path.join(host.home, ".codex", "auth.json");
-  assert.equal(await fs.readFile(remote, "utf8"), '{"tokens":"mine"}');
-  assert.equal((await fs.stat(remote)).mode & 0o777, 0o600);
-  await fs.writeFile(path.join(local, "auth.json"), '{"tokens":"newer"}');
-  await seedCodexLogin(host.connections, host.endpoint, local);
-  assert.equal(await fs.readFile(remote, "utf8"), '{"tokens":"mine"}');
+test("a host with no Codex login runs a session on the local one, for that session only", async (t) => {
+  const { host, cwd, handlers } = await rig(t, {
+    attach: false,
+    codex: '{"tokens":"mine"}',
+  });
+  await fs.mkdir(path.join(host.home, ".codex"));
+  await fs.writeFile(path.join(host.home, ".codex", "config.toml"), "");
+  const { prefix, launch } = await handlers.get("project-session-env")({
+    endpoint: host.endpoint,
+    cwd,
+    agent: "codex",
+  });
+  assert.equal((prefix + launch).includes("mine"), false);
+  await host.connections.exec(host.endpoint, `(${prefix}exec ${launch})`);
+  const [home, auth, files] = (
+    await fs.readFile(path.join(host.home, "codex-saw"), "utf8")
+  ).split("|");
+  assert.equal(auth, '{"tokens":"mine"}');
+  assert.match(files, /config\.toml/);
+  assert.match(files, /sessions/);
+  // Gone with the session; the host's own Codex home never got the login.
+  await assert.rejects(fs.stat(home));
+  await assert.rejects(fs.stat(path.join(host.home, ".codex", "auth.json")));
+});
+
+test("a host with its own Codex login keeps using it", async (t) => {
+  const { host, cwd, handlers } = await rig(t, {
+    attach: false,
+    codex: '{"tokens":"mine"}',
+  });
+  await fs.mkdir(path.join(host.home, ".codex"));
+  await fs.writeFile(
+    path.join(host.home, ".codex", "auth.json"),
+    '{"tokens":"host"}',
+  );
+  const { prefix, launch } = await handlers.get("project-session-env")({
+    endpoint: host.endpoint,
+    cwd,
+    agent: "codex",
+  });
+  await host.connections.exec(host.endpoint, `(${prefix}exec ${launch})`);
+  const [home, auth] = (
+    await fs.readFile(path.join(host.home, "codex-saw"), "utf8")
+  ).split("|");
+  assert.deepEqual([home, auth], ["", '{"tokens":"host"}']);
+});
+
+test("an agent typed with values runs in a subshell: they are gone from the pane's shell after it", async () => {
+  const { agentLine } = await import("../src/workspace/workspace-actions.ts");
+  assert.equal(agentLine("", "claude"), "claude");
+  assert.equal(
+    agentLine(". 'f'; rm -f 'f'; ", "claude", " --settings 'x'"),
+    "(. 'f'; rm -f 'f'; exec claude --settings 'x')",
+  );
 });
 
 test("a remote pane runs a custom model: the key in its shell, the settings inline, neither key in the text", async (t) => {

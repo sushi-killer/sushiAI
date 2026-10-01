@@ -35,3 +35,26 @@ esac
     "running",
   );
 });
+
+test("a connection's own socket is the one the started server listens on", async (t) => {
+  const host = await makeHost(t, {
+    bin: {
+      curl: "#!/bin/sh\nexit 1\n",
+      claude: "#!/bin/sh\n",
+      codex: "#!/bin/sh\n",
+      herdr: `#!/bin/sh
+case "$1 $2" in
+  "server ") printf '%s' "\${HERDR_SOCKET_PATH:-default}" > "$HOME/socket" ;;
+  "status server") [ -e "$HOME/socket" ] && echo "status: running" || echo "status: not running" ;;
+esac
+`,
+    },
+  });
+  const fs = require("node:fs/promises");
+  const path = require("node:path");
+  await setupHost(host.connections, host.endpoint, "~/run/my herdr.sock");
+  assert.equal(
+    await fs.readFile(path.join(host.home, "socket"), "utf8"),
+    path.join(host.home, "run/my herdr.sock"),
+  );
+});

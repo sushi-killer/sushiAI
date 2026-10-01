@@ -10,7 +10,8 @@ const {
   sessionEnvPrefix,
   sessionAccountId,
   accountLaunch,
-  seedCodexLogin,
+  CODEX_SESSION,
+  localCodexAuth,
   remoteModelLaunch,
 } = require("../project-session.cjs");
 
@@ -26,6 +27,7 @@ function remoteEnvBootstrap(
   envPath,
   tokenPath = null,
   settings = "",
+  launchShell = "",
 ) {
   const envSetup = envPath
     ? `trap 'rm -f ${quote(envPath)}${tokenPath ? ` ${quote(tokenPath)}` : ""}' EXIT HUP INT TERM; . ${quote(envPath)}; rm -f ${quote(envPath)};`
@@ -33,7 +35,7 @@ function remoteEnvBootstrap(
   const tokenSetup = tokenPath
     ? `exec 3<${quote(tokenPath)}; rm -f ${quote(tokenPath)}; export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3;`
     : "";
-  const shell = `${envSetup} ${tokenSetup} cd ${quote(cwd)} && exec ${command ? quote(command) + settings : '"${SHELL:-/bin/sh}" -l'}`;
+  const shell = `${envSetup} ${tokenSetup} cd ${quote(cwd)} && exec ${launchShell ? `sh -c ${quote(launchShell)}` : command ? quote(command) + settings : '"${SHELL:-/bin/sh}" -l'}`;
   return {
     shell,
   };
@@ -104,6 +106,7 @@ function registerTerminalIpc({
   stageClaudeAccount,
   resolveClaudeAccount,
   resolveModel,
+  codexAuth = localCodexAuth,
   projects,
   sshBinary = "/usr/bin/ssh",
 }) {
@@ -138,7 +141,7 @@ function registerTerminalIpc({
             ),
           resolveAccount: resolveClaudeAccount,
           resolveModel,
-          seedCodex: (host) => seedCodexLogin(connections, host),
+          codexAuth,
         },
         { endpoint, cwd, claudeAccountId, agent, modelProfileId },
       );
@@ -264,8 +267,15 @@ function registerTerminalIpc({
           command === "claude" && !modelProfileId
             ? sessionAccountId(ownProject, sendToHost, claudeAccountId)
             : undefined;
-        if (command === "codex" && !withheld)
-          await seedCodexLogin(connections, endpoint).catch(() => {});
+        // Codex on the local login, for this session only (CODEX_SESSION).
+        let launchShell = "";
+        if (command === "codex" && !withheld) {
+          const auth = await codexAuth();
+          if (auth) {
+            projectEnv.SUSHIAI_CODEX_AUTH = auth;
+            launchShell = CODEX_SESSION;
+          }
+        }
         if (accountId && resolveClaudeAccount) {
           // The project's own account without a value yet runs on the host's
           // login; one picked for the session has to work.
@@ -313,6 +323,7 @@ function registerTerminalIpc({
           envPath,
           tokenPath,
           accountSettings,
+          launchShell,
         );
         args = [
           ...connections.args(remote),

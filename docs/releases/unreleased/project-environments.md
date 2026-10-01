@@ -9,7 +9,7 @@
 - The New project flow clones, installs and sends the values to each chosen host, then goes to Ready; there is no approval step.
 - The MCP servers tab counts real uses over 30 days for your Claude config servers and plugins.
 - Preparing a host shows each step (clone, install, check) and reports which step failed and what reached the host.
-- Sessions on a remote host sign in on their own: the Claude account picked in the "+" picker (or the project's own) reaches Herdr and SSH sessions as a one-shot file, and a host with no Codex login gets the local `~/.codex/auth.json` once. A host switched off for the project gets neither.
+- Sessions on a remote host sign in on their own: the Claude account picked in the "+" picker (or the project's own) reaches Herdr and SSH sessions as a one-shot file, and a host with no Codex login runs a session on the local one. Nothing is kept on the host: the sign-in lives in the session's process (Codex: a private temporary home) and is gone when it ends. A host switched off for the project gets neither.
 - Starting a session on a host no longer leaves a duplicate of the project in the sidebar: a workspace keeps the folder it was opened at, and a stale copy is dropped once the host has a live one at the same folder.
 - Custom models (Providers) now run on remote hosts too: the model's settings go inline on the command line and its key reaches the session like a project secret.
 - A machine sets itself up: on launch, and when you connect an SSH host that has no Herdr, sushiAI installs whatever is missing (Herdr, Claude Code, Codex) from their official installers and starts the Herdr server, so a fresh server is ready in one click.

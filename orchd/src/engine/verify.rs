@@ -98,6 +98,7 @@ fn build_verify_command(
     }
     command
         .current_dir(cwd)
+        .env("PATH", augmented_path())
         .env("ORCHD_BASE_SHA", base_sha)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -425,6 +426,7 @@ pub(super) fn split_verify_commands(cwd: &Path, commands: &[String]) -> (Vec<Str
         std::process::Command::new("/bin/sh")
             .args(args)
             .current_dir(cwd)
+            .env("PATH", augmented_path())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()

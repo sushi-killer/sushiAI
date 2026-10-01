@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Eye,
   EyeOff,
@@ -10,7 +10,7 @@ import {
   Trash2,
   Unplug,
 } from "lucide-react";
-import type { ConnectionProfile } from "./types";
+import type { ConnectionProfile, HerdrCompatibility } from "./types";
 export function ConnectionsSettings({
   endpoint,
   localSocket,
@@ -30,6 +30,49 @@ export function ConnectionsSettings({
   onRefresh(): Promise<void>;
   notify(text: string): void;
 }) {
+  const [compatibility, setCompatibility] = useState<HerdrCompatibility | null>(
+    null,
+  );
+  const [checking, setChecking] = useState(false);
+  const [compatibilityError, setCompatibilityError] = useState("");
+  useEffect(() => {
+    let stopped = false;
+    setCompatibility(null);
+    setCompatibilityError("");
+    setChecking(true);
+    window.bridge
+      ?.herdrCompatibility(endpoint)
+      .then((status) => {
+        if (!stopped) setCompatibility(status);
+      })
+      .catch((error) => {
+        if (!stopped) setCompatibilityError(error.message);
+      })
+      .finally(() => {
+        if (!stopped) setChecking(false);
+      });
+    return () => {
+      stopped = true;
+    };
+  }, [endpoint]);
+  async function checkCompatibility(install = false) {
+    setChecking(true);
+    setCompatibilityError("");
+    try {
+      if (install) await window.bridge!.herdrInstall(endpoint);
+      setCompatibility(await window.bridge!.herdrCompatibility(endpoint));
+      if (install)
+        notify(
+          "Verified Herdr CLI installed. The running daemon must use the verified version too.",
+        );
+    } catch (error) {
+      setCompatibilityError(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setChecking(false);
+    }
+  }
   const [editing, setEditing] = useState<ConnectionProfile | "new" | null>(
       null,
     ),
@@ -60,6 +103,52 @@ export function ConnectionsSettings({
   return (
     <div className="connections-settings">
       {socketForm}
+      <div className="herdr-compatibility">
+        <strong>Herdr compatibility</strong>
+        {checking && (
+          <p className="muted" role="status">
+            Checking daemon and terminal CLI…
+          </p>
+        )}
+        {compatibility && (
+          <>
+            <p role="status">
+              {compatibility.compatible ? "Compatible" : "Needs attention"} ·
+              verified version {compatibility.expected.version}
+            </p>
+            <p className="muted">
+              Daemon: {compatibility.daemon.version || "unavailable"} · Terminal
+              CLI: {compatibility.cli.version || "unavailable"}
+            </p>
+            {compatibility.issues.length > 0 && (
+              <p className="inline-error" role="alert">
+                {compatibility.issues.join(" ")}
+              </p>
+            )}
+          </>
+        )}
+        {compatibilityError && (
+          <p className="inline-error" role="alert">
+            {compatibilityError}
+          </p>
+        )}
+        <div className="dialog-actions">
+          <button
+            className="secondary"
+            disabled={checking}
+            onClick={() => checkCompatibility()}
+          >
+            Check compatibility
+          </button>
+          <button
+            className="secondary"
+            disabled={checking}
+            onClick={() => checkCompatibility(true)}
+          >
+            Install verified Herdr CLI
+          </button>
+        </div>
+      </div>
       <div className="connections-hosts">
         <button
           className={`connection-card ${!endpoint.startsWith("ssh:") ? "selected" : ""}`}

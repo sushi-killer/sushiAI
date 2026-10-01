@@ -1,4 +1,5 @@
 import { createRoot } from "react-dom/client";
+import "./bridge-bootstrap";
 import { App } from "./App";
 import "./styles/tokens.css";
 import "./styles.css";

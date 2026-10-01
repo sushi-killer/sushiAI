@@ -2,25 +2,19 @@ import type { ConnectionProfile, Workspace } from "../types";
 import type { ClosedProject } from "../workspaceState.ts";
 import { codePanels } from "../workspaceState.ts";
 import type { ProjectGit } from "./useProjectGit.ts";
-import {
-  computeMergeGroups,
-  groupKey,
-  isHidden,
-  memberLabel,
-} from "./workspaceMerge.ts";
+import { closedProjectKey } from "../herdrIdentity.ts";
+import { computeMergeGroups, isHidden, memberLabel } from "./workspaceMerge.ts";
 
 /** A closed project's identity is its host endpoint + cwd - the same pair
  * that decides whether reopening it would just recreate an already-open
  * workspace. Used both as the remembered entry's `id` and as the pseudo
  * workspace id merging keys off (`closed:<endpoint>:<cwd>`), so the two never
- * drift apart. `groupKey` normalizes the endpoint the same way the sidebar's
- * host grouping does - a local Herdr workspace's own socket path and "no
- * connection at all" both mean "this Mac", so both must produce the same id. */
+ * drift apart. A concrete local socket identifies its own session server. */
 export function closedProjectId(
   endpoint: string | undefined,
   cwd: string,
 ): string {
-  return `closed:${groupKey(endpoint)}:${cwd}`;
+  return closedProjectKey(endpoint, cwd);
 }
 
 function isClosedId(id: string): boolean {
@@ -105,17 +99,13 @@ export function dashboardEntries(
   projectGit: Record<string, ProjectGit>,
   connectionProfiles: ConnectionProfile[],
 ): DashboardEntry[] {
-  // Normalized the same way closedProjectId is (P2-f): a local Herdr
-  // workspace's own socket path and "no connection at all" both mean "this
-  // Mac", so a stale closed entry from before that normalization existed
-  // still dedupes correctly against the now-open workspace.
   const openKeys = new Set(
-    workspaces.map((w) => `${groupKey(w.connection)}::${w.cwd}`),
+    workspaces.map((w) => closedProjectId(w.connection, w.cwd)),
   );
   const closedVisible = closedProjects.filter(
     (p) =>
       !isHidden(p.endpoint, connectionProfiles) &&
-      !openKeys.has(`${groupKey(p.endpoint)}::${p.cwd}`),
+      !openKeys.has(closedProjectId(p.endpoint, p.cwd)),
   );
   const visibleWorkspaces = workspaces.filter(
     (w) => !isHidden(w.connection, connectionProfiles),

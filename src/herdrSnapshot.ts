@@ -1,4 +1,5 @@
 import type { Layout, Panel, Snapshot, Workspace } from "./types";
+import { herdrWorkspaceKey } from "./herdrIdentity.ts";
 
 const leaf = (id: string): Layout => ({ type: "leaf", id });
 const splitLayout = (
@@ -96,7 +97,6 @@ export function reconcileHerdrWorkspaces(
   connection: string,
   systemHome = "",
 ): Workspace[] {
-  const endpointKey = connection.startsWith("ssh:") ? connection : "local";
   const existing = new Map(
     current
       .filter(
@@ -137,15 +137,20 @@ export function reconcileHerdrWorkspaces(
       const existingPanel = oldPanelsByHerdr.get(pane.pane_id);
       const nextPanel: Panel = {
         ...(existingPanel || {}),
-        id: existingPanel?.id || `herdr:${endpointKey}:${pane.pane_id}`,
-        kind: pane.agent ? "agent" : "terminal",
+        id: existingPanel?.id || herdrWorkspaceKey(connection, pane.pane_id),
+        kind:
+          (existingPanel?.launchError && existingPanel.kind === "agent") ||
+          pane.agent
+            ? "agent"
+            : "terminal",
         title:
+          (existingPanel?.launchError ? existingPanel.title : undefined) ||
           pane.label ||
           (pane.agent
             ? agentTitle(pane.agent)
             : pane.terminal_title_stripped || "zsh"),
         herdrId: pane.pane_id,
-        agent: pane.agent,
+        agent: existingPanel?.launchError ? existingPanel.agent : pane.agent,
         status: pane.agent_status,
       };
       delete nextPanel.ended;
@@ -185,12 +190,13 @@ export function reconcileHerdrWorkspaces(
     // elsewhere does not move it to another project. A remote host's
     // workspace never falls back to the local home.
     const cwd =
+      workspace.worktree?.checkout_path ||
       (old?.cwd && old.cwd !== systemHome ? old.cwd : "") ||
       remotePanes.find((pane) => pane.cwd)?.cwd ||
-      workspace.worktree?.checkout_path ||
-      (endpointKey === "local" ? systemHome : old?.cwd || "");
+      (connection.startsWith("ssh:") ? old?.cwd || "" : systemHome);
     return {
-      id: old?.id || `herdr:${endpointKey}:${workspace.workspace_id}`,
+      ...old,
+      id: old?.id || herdrWorkspaceKey(connection, workspace.workspace_id),
       connection,
       herdrId: workspace.workspace_id,
       name: workspace.label,

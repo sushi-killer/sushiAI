@@ -1,0 +1,457 @@
+{
+  "root": "/home/agent/sushiai/sushi-ai",
+  "sourceCommit": "ae6de54f5b99306e4ea88791a8d8c43d98b937a8",
+  "assets": {
+    "ConnectionsSettings-BhUJ_u7Y.js": "4e00df9667c5e09aac44139c8d85c40953e642ea2c7287a59236d3ccd2193242",
+    "GitHistoryPanel-CQ-gQMPW.js": "c0d4295b884e5554a68356075246df02d5a76f3c604ff0e8b0e9589dce58e886",
+    "OrchestratorSettings-BMRIHQJD.js": "fed8058cdfa68e50d6469d93aa180b296db6503a8580c18afc4d977a5d60322d",
+    "OrchestratorSettings-Ct0ppPCE.css": "ad2425e636be2668e3efc1f9783706b4d834bb7b055f58645e92733b04a60a97",
+    "ProvidersSettings-aXr_Mhop.js": "a836dc02c66a7932464e812a0fc2e9e08a1f15b5416d8991bcea3369cd3a7c7e",
+    "UpdateSettings-CUOKQbeb.js": "46a5fb462e80300b310faa2c0abde52d388e2d20e036166ed5f3b0aac2f4c431",
+    "main-CtGJO84N.css": "1acbfdb07ef08844187ec1a8eb3747be0393e1a268ec07800752c89090837512",
+    "main-DgkQWYcG.js": "6d3cc78e3bf529e21d78eb0df29f0605e39c4b58a046fcd5d3712cfb52e3c2d8",
+    "mascot-DvgEDpD5.js": "e3a96e795d38148be65fa55a91d5c5550832d356fcaaae3d5ea6606f528d51b9",
+    "mascot-Dw8PpdUO.css": "9dd5ac81578e88e1846495f655310dfbdb7cf656a58623b69519f9c3fc3a7081",
+    "terminal-DP_gxef0.js": "92d02b39275ab25b6853441487beb367a2dd2a10f35ae26f2943c4ea212f9cae",
+    "tokens-B5Ly4bUs.js": "677ad99c967dd5d9b5706eba9ea11f1501c2ff8c62837fe9a940138051a55957",
+    "tokens-CZ4CEAzr.css": "aa676f24f3d616d673db6aa80a494702f62a0bef95bfe9b9e72006a41c07ec41"
+  },
+  "recordedAt": "2026-10-01T20:31:54.403Z",
+  "durationMs": 120000,
+  "transport": "ssh",
+  "backgroundThrottling": false,
+  "pageErrors": [],
+  "stderr": "[1432771:1001/233154.782685:ERROR:dbus/bus.cc:406] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")\n[1432771:1001/233155.612445:ERROR:dbus/bus.cc:406] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")\n[1432771:1001/233415.262512:ERROR:dbus/bus.cc:406] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")\n[1432771:1001/233415.262614:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: \n[1432771:1001/233415.262646:ERROR:dbus/bus.cc:406] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")\n[1432771:1001/233415.262655:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: \nDebugger ending on ws://127.0.0.1:38065/83aa5467-dbf6-4baa-9e20-a5bcbbae8d73\nFor help, see: https://nodejs.org/learn/getting-started/debugging\n",
+  "idle": {
+    "elapsedMs": 120002.441176,
+    "snapshotCount": 2
+  },
+  "externalChange": {
+    "p50Ms": 283.46119999999064,
+    "p95Ms": 386.04307400000107,
+    "samples": [
+      {
+        "requestToRenderedMs": 290.17524699999194,
+        "acknowledgedToRenderedMs": 287.28611999998975,
+        "label": "External benchmark 1",
+        "geometry": {
+          "width": 209,
+          "height": 15
+        },
+        "requestToAnimationFrameMs": 812.5,
+        "requestToDomMs": 225.59999990463257
+      },
+      {
+        "requestToRenderedMs": 184.63058399999863,
+        "acknowledgedToRenderedMs": 182.80465099999856,
+        "label": "External benchmark 2",
+        "geometry": {
+          "width": 209,
+          "height": 15
+        },
+        "requestToAnimationFrameMs": 582.8000001907349,
+        "requestToDomMs": 179.40000009536743
+      },
+      {
+        "requestToRenderedMs": 180.61324999999488,
+        "acknowledgedToRenderedMs": 178.78638299999875,
+        "label": "External benchmark 3",
+        "geometry": {
+          "width": 209,
+          "height": 15
+        },
+        "requestToAnimationFrameMs": 487.69999980926514,
+        "requestToDomMs": 169.59999990463257
+      },
+      {
+        "requestToRenderedMs": 386.04307400000107,
+        "acknowledgedToRenderedMs": 283.940214000002,
+        "label": "External benchmark 4",
+        "geometry": {
+          "width": 209,
+          "height": 15
+        },
+        "requestToAnimationFrameMs": 1203.5,
+        "requestToDomMs": 356.80000019073486
+      },
+      {
+        "requestToRenderedMs": 283.46119999999064,
+        "acknowledgedToRenderedMs": 281.45006000000285,
+        "label": "External benchmark 5",
+        "geometry": {
+          "width": 209,
+          "height": 15
+        },
+        "requestToAnimationFrameMs": 1011.9000000953674,
+        "requestToDomMs": 229.80000019073486
+      },
+      {
+        "requestToRenderedMs": 289.38159999999334,
+        "acknowledgedToRenderedMs": 287.2756700000027,
+        "label": "External benchmark 6",
+        "geometry": {
+          "width": 209,
+          "height": 15
+        },
+        "requestToAnimationFrameMs": 918.9000000953674,
+        "requestToDomMs": 205.30000019073486
+      },
+      {
+        "requestToRenderedMs": 181.39068599999882,
+        "acknowledgedToRenderedMs": 179.55724799999734,
+        "label": "External benchmark 7",
+        "geometry": {
+          "width": 209,
+          "height": 15
+        },
+        "requestToAnimationFrameMs": 713.4000000953674,
+        "requestToDomMs": 174
+      },
+      {
+        "requestToRenderedMs": 181.6089370000118,
+        "acknowledgedToRenderedMs": 179.68059400000493,
+        "label": "External benchmark 8",
+        "geometry": {
+          "width": 209,
+          "height": 15
+        },
+        "requestToAnimationFrameMs": 521.7999997138977,
+        "requestToDomMs": 149.89999961853027
+      }
+    ],
+    "animationFrameP50Ms": 812.5,
+    "animationFrameP95Ms": 1203.5,
+    "domP50Ms": 205.30000019073486,
+    "domP95Ms": 356.80000019073486
+  },
+  "structuredIpc": {
+    "rejected": true,
+    "code": "pane_not_found",
+    "message": "That session is no longer open on the host."
+  },
+  "reconnect": {
+    "listRestored": true,
+    "disruptionToRenderedMs": 1394.925355000014,
+    "fullSnapshots": 8
+  },
+  "window": {
+    "visible": false,
+    "focused": false,
+    "contentSize": [1280, 880]
+  },
+  "screenshot": "/tmp/herdr-app-rebased-113f-ssh-after.png",
+  "appClosePersistence": {
+    "sameShellPid": true,
+    "shellPid": "1449841",
+    "beforePaneId": "wA:p1",
+    "afterPaneId": "wA:p1"
+  },
+  "rpc": [
+    {
+      "id": "7c8c5f81-daa0-4915-a63e-5e0cd3591e70",
+      "method": "ping",
+      "requested": 1168.029683,
+      "received": 1267.905027
+    },
+    {
+      "id": "dc55feb5-3e22-4a2c-9631-4b145c32a060",
+      "method": "events.subscribe",
+      "requested": 1524.147378,
+      "received": 1624.520344
+    },
+    {
+      "id": "b5dd5d98-be63-4156-986d-e0f78d1ec1fe",
+      "method": "session.snapshot",
+      "requested": 1525.522797,
+      "received": 1625.682979
+    },
+    {
+      "id": "2e29e30d-e7e9-429a-b041-53739b1b79b1",
+      "method": "ping",
+      "requested": 1628.782072,
+      "received": 1728.371925
+    },
+    {
+      "id": "99e9d502-7b7b-41bc-8dfa-e3156345ce63",
+      "method": "session.snapshot",
+      "requested": 1628.827753,
+      "received": 1728.868029
+    },
+    {
+      "id": "5c2c86f1-b5da-4723-a313-2cf221db9dec",
+      "method": "session.snapshot",
+      "requested": 1771.937133,
+      "received": 1872.114651
+    },
+    {
+      "id": "a6b2512a-ea9c-4340-9845-765171bff6dd",
+      "method": "session.snapshot",
+      "requested": 61524.580324,
+      "received": 61625.08783
+    },
+    {
+      "id": "9ffdf71f-93ee-4b86-9fa2-92034456be39",
+      "method": "session.snapshot",
+      "requested": 121524.342411,
+      "received": 121624.722973
+    },
+    {
+      "id": "ea488c30-0f0c-471b-964c-a18eb5215ee4",
+      "method": "session.snapshot",
+      "requested": 124765.955303,
+      "received": 124866.719377
+    },
+    {
+      "id": "03a97659-f883-4cae-8dd9-cb5455dfa266",
+      "method": "session.snapshot",
+      "requested": 124868.172014,
+      "received": 124968.760536
+    },
+    {
+      "id": "a2c86424-5873-4ee2-8340-dd5eb4bac49b",
+      "method": "session.snapshot",
+      "requested": 125766.291467,
+      "received": 125766.640019
+    },
+    {
+      "id": "36006f52-3814-4e57-93e8-eba49f49e4e8",
+      "method": "session.snapshot",
+      "requested": 126066.324595,
+      "received": 126167.312233
+    },
+    {
+      "id": "1231aa9d-63e5-4258-ae5a-9302c561063d",
+      "method": "session.snapshot",
+      "requested": 126168.869821,
+      "received": 126169.360266
+    },
+    {
+      "id": "d5637e4e-cd2b-41a1-8238-626d3a3d0072",
+      "method": "session.snapshot",
+      "requested": 126667.54377,
+      "received": 126768.018126
+    },
+    {
+      "id": "2284f9b6-faef-47a5-8939-085957e4d8ab",
+      "method": "session.snapshot",
+      "requested": 127168.174781,
+      "received": 127168.939021
+    },
+    {
+      "id": "2df43589-703d-43ba-8bf5-e5b1d4aee40b",
+      "method": "session.snapshot",
+      "requested": 127170.853945,
+      "received": 127271.99325
+    },
+    {
+      "id": "9fa2bbc5-7934-4fd9-9e63-9f75f276d66b",
+      "method": "session.snapshot",
+      "requested": 127770.089333,
+      "received": 127870.449999
+    },
+    {
+      "id": "6b7b2625-4e34-4756-9497-665d3caf07c5",
+      "method": "session.snapshot",
+      "requested": 128570.996596,
+      "received": 128672.357731
+    },
+    {
+      "id": "0a4a0960-1f07-4cdf-9d53-7eff52e34f9b",
+      "method": "session.snapshot",
+      "requested": 128675.010838,
+      "received": 128775.980773
+    },
+    {
+      "id": "487ea76d-0f21-4109-a7bc-5cadf952880d",
+      "method": "session.snapshot",
+      "requested": 129772.749573,
+      "received": 129873.098526
+    },
+    {
+      "id": "9b83bc8f-4f27-493b-9d45-8bbdcb838ca2",
+      "method": "session.snapshot",
+      "requested": 130672.704395,
+      "received": 130773.203692
+    },
+    {
+      "id": "98590d38-85e2-4516-9deb-dc742d222c3d",
+      "method": "session.snapshot",
+      "requested": 130774.770273,
+      "received": 130875.186019
+    },
+    {
+      "id": "965dc356-96ae-42bd-bab8-49ea2d495d19",
+      "method": "session.snapshot",
+      "requested": 131773.554088,
+      "received": 131773.83024
+    },
+    {
+      "id": "e47554d0-4ee7-4456-9710-b381caccba1f",
+      "method": "session.snapshot",
+      "requested": 132874.158691,
+      "received": 132974.974474
+    },
+    {
+      "id": "097b0dc2-c356-466b-8fe5-0b88a059ba21",
+      "method": "session.snapshot",
+      "requested": 132976.478067,
+      "received": 132976.741508
+    },
+    {
+      "id": "7ad77f4c-9f72-4b90-a1ee-0eaef73b60a3",
+      "method": "session.snapshot",
+      "requested": 133776.283294,
+      "received": 133877.079375
+    },
+    {
+      "id": "de176fbf-d7d8-4013-afa9-b84550cc6f0f",
+      "method": "session.snapshot",
+      "requested": 135078.20677,
+      "received": 135079.234637
+    },
+    {
+      "id": "82cb5ae5-de95-4b51-967e-f928b22e0787",
+      "method": "session.snapshot",
+      "requested": 135081.110777,
+      "received": 135182.061208
+    },
+    {
+      "id": "d990dfe5-8d1d-4aa6-956a-a4a17bc347e0",
+      "method": "session.snapshot",
+      "requested": 135777.721858,
+      "received": 135878.234066
+    },
+    {
+      "id": "1f1207b1-ffe0-4aef-b293-f7088b0a62e5",
+      "method": "session.snapshot",
+      "requested": 137280.347136,
+      "received": 137381.779424
+    },
+    {
+      "id": "c3fb80f7-0950-491d-a259-cd6d5309bab0",
+      "method": "session.snapshot",
+      "requested": 137383.727802,
+      "received": 137384.144992
+    },
+    {
+      "id": "21d926ea-8259-4f1d-86fd-4a56a7ed7e7b",
+      "method": "pane.split",
+      "requested": 137780.713859,
+      "received": 137881.463813
+    },
+    {
+      "id": "0403757b-473e-48b4-a24e-e947ce845f49",
+      "method": "session.snapshot",
+      "requested": 137881.692334,
+      "received": null
+    },
+    {
+      "id": "654250bf-e016-466d-9bce-72668be79af2",
+      "method": "events.subscribe",
+      "requested": 138675.205485,
+      "received": 138675.562136
+    },
+    {
+      "id": "687838c7-aea0-468b-9dfe-b9c08aee3bad",
+      "method": "session.snapshot",
+      "requested": 138716.988185,
+      "received": 138777.622584
+    },
+    {
+      "id": "f4053761-d14d-41ca-b203-201d8f2734d4",
+      "method": "session.snapshot",
+      "requested": 138818.403511,
+      "received": 138819.01108
+    },
+    {
+      "id": "2dd948b7-5f88-4093-a4e9-33d1eaea8183",
+      "method": "session.snapshot",
+      "requested": 138819.789537,
+      "received": 138820.05635
+    },
+    {
+      "id": "abb8db02-b79b-4e86-b415-ddc06aae9a3e",
+      "method": "session.snapshot",
+      "requested": 138880.157387,
+      "received": 138881.093387
+    },
+    {
+      "id": "2246d676-6bd7-4db8-a33a-7c39995c0191",
+      "method": "session.snapshot",
+      "requested": 138882.479423,
+      "received": 138882.817551
+    },
+    {
+      "id": "92fbee58-e558-44e8-a8f1-231acfd11165",
+      "method": "session.snapshot",
+      "requested": 138980.220223,
+      "received": 139080.729797
+    },
+    {
+      "id": "51c66a96-0b9c-4f22-8e1c-64087eb9b58e",
+      "method": "session.snapshot",
+      "requested": 139161.856476,
+      "received": 139222.162776
+    },
+    {
+      "id": "9a0d3358-254d-4db7-b43f-e38f7b71e2bf",
+      "method": "session.snapshot",
+      "requested": 139222.748275,
+      "received": 139323.203202
+    },
+    {
+      "id": "2101e8c6-ac9d-460e-9b55-528bb6e80e73",
+      "method": "session.snapshot",
+      "requested": 139323.868362,
+      "received": 139424.616077
+    },
+    {
+      "id": "0565567a-2a36-4ddb-978b-e87143f068b0",
+      "method": "session.snapshot",
+      "requested": 139425.175731,
+      "received": 139425.445287
+    },
+    {
+      "id": "ebb3c8a6-455c-4012-88c7-5c3d846f3455",
+      "method": "session.snapshot",
+      "requested": 139426.540984,
+      "received": 139526.676361
+    },
+    {
+      "id": "06a97df4-d039-4897-928f-afac629b2bad",
+      "method": "session.snapshot",
+      "requested": 139527.224962,
+      "received": 139527.578056
+    },
+    {
+      "id": "2a96a8cd-4732-4f65-9897-695e593baeaf",
+      "method": "session.snapshot",
+      "requested": 139528.201282,
+      "received": 139528.408888
+    },
+    {
+      "id": "bab0c597-3690-4616-bf33-e283f3027053",
+      "method": "session.snapshot",
+      "requested": 139584.238754,
+      "received": 139585.321155
+    },
+    {
+      "id": "108db2c2-129c-4ecc-bc40-0da0c5013c54",
+      "method": "session.snapshot",
+      "requested": 139587.03711,
+      "received": 139687.999701
+    },
+    {
+      "id": "618fcc2e-6524-45be-b9a5-35cd3dc28b21",
+      "method": "ping",
+      "requested": 140830.50567,
+      "received": 140930.662519
+    },
+    {
+      "id": "3d3ecfb1-2127-425e-948a-a78e7b64fedc",
+      "method": "pane.process_info",
+      "requested": 141356.916597,
+      "received": 141457.726487
+    }
+  ]
+}

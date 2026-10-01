@@ -83,8 +83,4 @@ export function worktreeCreateParams(
   return { cwd: workspace.cwd, branch, base, label: branch, focus: false };
 }
 
-/** The sushiAI id for a Herdr workspace (or pane) on `endpoint`: local Herdr
- * sessions and every SSH host share this one `herdr:<host>:<id>` shape. */
-export function herdrWorkspaceKey(endpoint: string, workspaceId: string) {
-  return `herdr:${endpoint.startsWith("ssh:") ? endpoint : "local"}:${workspaceId}`;
-}
+export { herdrWorkspaceKey } from "../herdrIdentity.ts";

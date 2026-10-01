@@ -50,13 +50,32 @@ test("closedProjectId is stable per endpoint+cwd, local when there is no endpoin
   );
 });
 
-test('closedProjectId normalizes a local Herdr socket path to "local" (P2-f)', async () => {
+test("closedProjectId scopes local Herdr sockets independently", async () => {
   const { closedProjectId } = await library;
   assert.equal(
     closedProjectId("/tmp/sushiai-local.sock", "/Users/dev/app"),
-    "closed:local:/Users/dev/app",
-    "a local Herdr workspace's own socket is still this Mac, same as no endpoint",
+    "closed:/tmp/sushiai-local.sock:/Users/dev/app",
   );
+  assert.notEqual(
+    closedProjectId("/tmp/first.sock", "/work/app"),
+    closedProjectId("/tmp/second.sock", "/work/app"),
+  );
+});
+
+test("an open project on one local Herdr server cannot hide a closed project on another", async () => {
+  const { dashboardEntries, closedProjectId } = await library;
+  const open = workspace("open", "/tmp/first.sock", "/work/app");
+  const closed = closedProject(
+    closedProjectId("/tmp/second.sock", open.cwd),
+    "App",
+    open.cwd,
+    "/tmp/second.sock",
+    true,
+    git("", open.cwd),
+  );
+  const entries = dashboardEntries([open], [closed], {}, []);
+  assert.equal(entries.length, 2);
+  assert.ok(entries.some((entry) => entry.id === closed.id && entry.closed));
 });
 
 test("refreshProject updates an entry only while it is still on the list", async () => {

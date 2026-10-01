@@ -1,0 +1,379 @@
+{
+  "baselineCommit": "113f576264c9e7c4807838008b124aaf8f2a0b16",
+  "implementationSha256": "1cadeca6739096beba35b83d7d7d98c03c70e8c416230018841fa0ba729d0742",
+  "implementationPaths": [
+    "electron/attention.cjs",
+    "electron/codex-accounts.cjs",
+    "electron/connections.cjs",
+    "electron/extensions/builtin-herdr.cjs",
+    "electron/herdr-compatibility.cjs",
+    "electron/herdr-contract.cjs",
+    "electron/herdr-events.cjs",
+    "electron/herdr-install.cjs",
+    "electron/herdr-snapshots.cjs",
+    "electron/herdr.cjs",
+    "electron/host-setup.cjs",
+    "electron/ipc/errors.cjs",
+    "electron/ipc/panel-id.cjs",
+    "electron/ipc/terminals.cjs",
+    "electron/main.cjs",
+    "electron/model-providers.cjs",
+    "electron/preload.cjs",
+    "electron/project-session.cjs",
+    "electron/remote-files.py",
+    "electron/session-launch.cjs",
+    "electron/terminal-flow.cjs",
+    "electron/terminal-stream.cjs",
+    "electron/terminal-text.cjs",
+    "scripts/herdr-app-benchmark.mjs",
+    "scripts/herdr-benchmark.cjs",
+    "scripts/herdr-install-verification.cjs",
+    "scripts/herdr-ui-evidence.mjs",
+    "scripts/smoke.mjs",
+    "scripts/stream-integration.cjs",
+    "scripts/terminal-flow-load.cjs",
+    "scripts/terminal-stream-fixture.cjs",
+    "scripts/terminal-unicode.mjs",
+    "src/App.tsx",
+    "src/ConnectionsSettings.tsx",
+    "src/TerminalPanel.tsx",
+    "src/WorkspaceDialog.tsx",
+    "src/app/errors.ts",
+    "src/app/projects.ts",
+    "src/app/useHerdr.ts",
+    "src/bridge-bootstrap.ts",
+    "src/bridge.ts",
+    "src/herdrIdentity.ts",
+    "src/herdrSnapshot.ts",
+    "src/herdrSync.ts",
+    "src/main.tsx",
+    "src/orchestrator/useOrchestratorNotices.ts",
+    "src/terminal-output.ts",
+    "src/types.ts",
+    "src/workspace/session-launch.ts",
+    "src/workspace/useWorkspaces.ts",
+    "src/workspace/worktree.ts",
+    "src/workspaceState.ts",
+    "tests/attention-main.test.cjs",
+    "tests/bridge.test.cjs",
+    "tests/codex-accounts.test.cjs",
+    "tests/herdr-identity-migration.test.cjs",
+    "tests/herdr-runtime-live.cjs",
+    "tests/herdr-runtime.test.cjs",
+    "tests/herdr-snapshot.test.cjs",
+    "tests/herdr-sync.test.cjs",
+    "tests/herdr.test.cjs",
+    "tests/host-setup.test.cjs",
+    "tests/model-providers.test.cjs",
+    "tests/projects.test.cjs",
+    "tests/session-launch.test.cjs",
+    "tests/terminal-flow.test.cjs",
+    "tests/workspace-launch-entry.test.cjs",
+    "tests/workspace-snapshot.test.cjs",
+    "tests/worktree-session.test.cjs"
+  ],
+  "runtime": "official Herdr 0.8.2; protocol 20; no fork",
+  "platform": "Linux x64; Intel i7-11800H; Node 22.23.2; Electron 44.2.0",
+  "sshScope": "real encrypted SSH over isolated loopback sshd; no WAN latency",
+  "app": {
+    "local-before": {
+      "recordedAt": "2026-10-01T20:22:28.870Z",
+      "sourceCommit": "113f576264c9e7c4807838008b124aaf8f2a0b16",
+      "idle": {
+        "elapsedMs": 120001.112108,
+        "snapshotCount": 30
+      },
+      "externalDomMs": {
+        "p50": 2231.4000000953674,
+        "p95": 3412.199999809265,
+        "samples": [
+          3047.5999999046326, 3412.199999809265, 2589.5999999046326,
+          2231.4000000953674, 2068.2999997138977, 2008, 1749.5999999046326,
+          1586.8999996185303
+        ]
+      },
+      "locatorP95Ms": 3809.7989899999957,
+      "animationFrameP95Ms": 4397.900000095367,
+      "reconnect": {
+        "listRestored": true,
+        "disruptionToRenderedMs": 3302.9576680000173,
+        "fullSnapshots": 1
+      },
+      "structuredIpc": {
+        "rejected": true,
+        "message": "Error invoking remote method 'herdr': Error: That session is no longer open on the host."
+      },
+      "appClosePersistence": {
+        "sameShellPid": true,
+        "shellPid": "1422241",
+        "beforePaneId": "wA:p1",
+        "afterPaneId": "wA:p1"
+      }
+    },
+    "local-after": {
+      "recordedAt": "2026-10-01T20:31:56.783Z",
+      "sourceCommit": "ae6de54f5b99306e4ea88791a8d8c43d98b937a8",
+      "idle": {
+        "elapsedMs": 120002.558038,
+        "snapshotCount": 2
+      },
+      "externalDomMs": {
+        "p50": 211.5,
+        "p95": 287.40000009536743,
+        "samples": [
+          211.5, 211, 195.59999990463257, 287.40000009536743, 49,
+          232.2000002861023, 107.39999961853027, 270.5
+        ]
+      },
+      "locatorP95Ms": 291.7690109999967,
+      "animationFrameP95Ms": 1209.1999998092651,
+      "reconnect": {
+        "listRestored": true,
+        "disruptionToRenderedMs": 1785.9113990000042,
+        "fullSnapshots": 14
+      },
+      "structuredIpc": {
+        "rejected": true,
+        "code": "pane_not_found",
+        "message": "That session is no longer open on the host."
+      },
+      "appClosePersistence": {
+        "sameShellPid": true,
+        "shellPid": "1449910",
+        "beforePaneId": "wA:p1",
+        "afterPaneId": "wA:p1"
+      }
+    },
+    "ssh-before": {
+      "recordedAt": "2026-10-01T20:22:29.443Z",
+      "sourceCommit": "113f576264c9e7c4807838008b124aaf8f2a0b16",
+      "idle": {
+        "elapsedMs": 120000.306583,
+        "snapshotCount": 30
+      },
+      "externalDomMs": {
+        "p50": 3196.8999996185303,
+        "p95": 3664.2999997138977,
+        "samples": [
+          3664.2999997138977, 3519.0999999046326, 3196.8999996185303, 3275.5,
+          3120.6000003814697, 2602.4000000953674, 2585.199999809265, 2269.5
+        ]
+      },
+      "locatorP95Ms": 3917.1775259999995,
+      "animationFrameP95Ms": 3840.7999997138977,
+      "reconnect": {
+        "listRestored": true,
+        "disruptionToRenderedMs": 3799.5371319999977,
+        "fullSnapshots": 1
+      },
+      "structuredIpc": {
+        "rejected": true,
+        "message": "Error invoking remote method 'herdr': Error: That session is no longer open on the host."
+      },
+      "appClosePersistence": {
+        "sameShellPid": true,
+        "shellPid": "1422252",
+        "beforePaneId": "wA:p1",
+        "afterPaneId": "wA:p1"
+      }
+    },
+    "ssh-after": {
+      "recordedAt": "2026-10-01T20:31:54.403Z",
+      "sourceCommit": "ae6de54f5b99306e4ea88791a8d8c43d98b937a8",
+      "idle": {
+        "elapsedMs": 120002.441176,
+        "snapshotCount": 2
+      },
+      "externalDomMs": {
+        "p50": 205.30000019073486,
+        "p95": 356.80000019073486,
+        "samples": [
+          225.59999990463257, 179.40000009536743, 169.59999990463257,
+          356.80000019073486, 229.80000019073486, 205.30000019073486, 174,
+          149.89999961853027
+        ]
+      },
+      "locatorP95Ms": 386.04307400000107,
+      "animationFrameP95Ms": 1203.5,
+      "reconnect": {
+        "listRestored": true,
+        "disruptionToRenderedMs": 1394.925355000014,
+        "fullSnapshots": 8
+      },
+      "structuredIpc": {
+        "rejected": true,
+        "code": "pane_not_found",
+        "message": "That session is no longer open on the host."
+      },
+      "appClosePersistence": {
+        "sameShellPid": true,
+        "shellPid": "1449841",
+        "beforePaneId": "wA:p1",
+        "afterPaneId": "wA:p1"
+      }
+    }
+  },
+  "terminalLoad": {
+    "passed": true,
+    "durationSeconds": 600,
+    "panels": 2,
+    "consumer": "hidden Electron, production terminal IPC and output queue, actual xterm write acknowledgements, real text selection for 15 seconds every 30 seconds, Unicode paste",
+    "deliveredBytes": 102951198,
+    "maxOutputCreditBytes": 189783,
+    "maxRendererQueueBytes": 189783,
+    "maxParserBytes": 0,
+    "mainRssGrowthBytes": 2704998.400000006,
+    "rendererRssGrowthBytes": 4473716.736000001,
+    "mainHeapGrowthBytes": -846284.256,
+    "warmupSamples": 60,
+    "rssDriftToleranceBytes": 16777216,
+    "windows": [
+      {
+        "fromSecond": 1,
+        "toSecond": 60,
+        "mainRssMinBytes": 160378880,
+        "mainRssMaxBytes": 165851136,
+        "mainHeapMinBytes": 4487844,
+        "mainHeapMaxBytes": 8448352,
+        "rendererRssMinBytes": 123576320,
+        "rendererRssMaxBytes": 160923648,
+        "cliRssMaxBytes": [6623232, 6623232]
+      },
+      {
+        "fromSecond": 61,
+        "toSecond": 120,
+        "mainRssMinBytes": 165916672,
+        "mainRssMaxBytes": 170889216,
+        "mainHeapMinBytes": 6328876,
+        "mainHeapMaxBytes": 10120780,
+        "rendererRssMinBytes": 136699904,
+        "rendererRssMaxBytes": 147750912,
+        "cliRssMaxBytes": [6623232, 6623232]
+      },
+      {
+        "fromSecond": 121,
+        "toSecond": 180,
+        "mainRssMinBytes": 169914368,
+        "mainRssMaxBytes": 171937792,
+        "mainHeapMinBytes": 5017880,
+        "mainHeapMaxBytes": 10946904,
+        "rendererRssMinBytes": 140124160,
+        "rendererRssMaxBytes": 148967424,
+        "cliRssMaxBytes": [6623232, 6631424]
+      },
+      {
+        "fromSecond": 181,
+        "toSecond": 240,
+        "mainRssMinBytes": 169549824,
+        "mainRssMaxBytes": 172568576,
+        "mainHeapMinBytes": 6515416,
+        "mainHeapMaxBytes": 10752308,
+        "rendererRssMinBytes": 138383360,
+        "rendererRssMaxBytes": 150237184,
+        "cliRssMaxBytes": [6627328, 6631424]
+      },
+      {
+        "fromSecond": 241,
+        "toSecond": 300,
+        "mainRssMinBytes": 171110400,
+        "mainRssMaxBytes": 172548096,
+        "mainHeapMinBytes": 3907844,
+        "mainHeapMaxBytes": 10544540,
+        "rendererRssMinBytes": 139776000,
+        "rendererRssMaxBytes": 149671936,
+        "cliRssMaxBytes": [6631424, 6631424]
+      },
+      {
+        "fromSecond": 301,
+        "toSecond": 360,
+        "mainRssMinBytes": 171147264,
+        "mainRssMaxBytes": 172347392,
+        "mainHeapMinBytes": 5766848,
+        "mainHeapMaxBytes": 9732004,
+        "rendererRssMinBytes": 145125376,
+        "rendererRssMaxBytes": 152240128,
+        "cliRssMaxBytes": [6631424, 6631424]
+      },
+      {
+        "fromSecond": 361,
+        "toSecond": 420,
+        "mainRssMinBytes": 170680320,
+        "mainRssMaxBytes": 172593152,
+        "mainHeapMinBytes": 3544308,
+        "mainHeapMaxBytes": 10155120,
+        "rendererRssMinBytes": 142413824,
+        "rendererRssMaxBytes": 150089728,
+        "cliRssMaxBytes": [6631424, 6631424]
+      },
+      {
+        "fromSecond": 421,
+        "toSecond": 480,
+        "mainRssMinBytes": 171724800,
+        "mainRssMaxBytes": 172867584,
+        "mainHeapMinBytes": 5702092,
+        "mainHeapMaxBytes": 9384092,
+        "rendererRssMinBytes": 143503360,
+        "rendererRssMaxBytes": 151674880,
+        "cliRssMaxBytes": [6631424, 6631424]
+      },
+      {
+        "fromSecond": 481,
+        "toSecond": 540,
+        "mainRssMinBytes": 170401792,
+        "mainRssMaxBytes": 173187072,
+        "mainHeapMinBytes": 3914008,
+        "mainHeapMaxBytes": 9758544,
+        "rendererRssMinBytes": 142823424,
+        "rendererRssMaxBytes": 152264704,
+        "cliRssMaxBytes": [6631424, 6631424]
+      },
+      {
+        "fromSecond": 541,
+        "toSecond": 560,
+        "mainRssMinBytes": 171245568,
+        "mainRssMaxBytes": 171769856,
+        "mainHeapMinBytes": 6519988,
+        "mainHeapMaxBytes": 7888152,
+        "rendererRssMinBytes": 149114880,
+        "rendererRssMaxBytes": 154009600,
+        "cliRssMaxBytes": [6631424, 6631424]
+      }
+    ],
+    "sourceScope": "600-second run before final main integration; terminal-flow.cjs, terminal-output.ts and xterm ACK behavior unchanged by integration"
+  },
+  "unverified": [
+    "physical monitor paint within 500 ms",
+    "WAN latency",
+    "baseline memory reduction",
+    "Herdr daemon memory",
+    "macOS runtime"
+  ],
+  "checks": {
+    "ci": "exit 0; 1056 Node tests; 761 Rust tests; Rust 1.94.1",
+    "desktop": "exit 0; no skips",
+    "herdrRpc": "exit 0",
+    "streamLocalAndSsh": "exit 0",
+    "unicode": "exit 0",
+    "terminalRendering": "exit 0; installed Chromium 1223 override",
+    "managedInstallation": "local fresh online official download; SSH fresh online official download + repeat verification + independent daemon/CLI checks; exit 0",
+    "independentReview": "no confirmed P0/P1; 122 focused regressions passed; later Git-SSH wizard/IPC integration delta independently reviewed",
+    "uiMigration": "exit 0; two endpoints with identical internal IDs; 62/38 layout and selection retained; 20 distinct + 20 replayed real IPC launches; exact process PID survives app close"
+  },
+  "rawSha256": {
+    "docs/verification/herdr/lifecycle-local-ssh.json": "369751f112ed5499d3b088a83c17df5460a7b0960ced11099f94a405add6cda5",
+    "docs/verification/herdr/local-after.json": "3ca3d442803b164c0998a0e6c08c27036d1202501912b3cf289051bb8a5dbd93",
+    "docs/verification/herdr/local-before.json": "fe7e021a176a0906203b67311dfd1517fb663021edc4186e8f234ca03936bc53",
+    "docs/verification/herdr/managed-install-live.json": "ba40000e87f884cd7b13b2fe3d3c462c51910cdd33d8a97c5484d6b4ce0f3e65",
+    "docs/verification/herdr/managed-ssh-install-live.json": "6a369879260729143af27676bdb1cdad4a772721519dfd68010d8853499f641b",
+    "docs/verification/herdr/release-metadata.json": "a8c9203e9c98ac223285226ecbab7a1f750616b5102f7d547197a4f22937b275",
+    "docs/verification/herdr/release-rpc.json": "cb1768ae96edbb038fe5521b0f46a4d0ae7e7d436fdab8dbded7f948b6df3439",
+    "docs/verification/herdr/ssh-after.json": "5ba1b598644473c87517ef5ebeb738fdaf05dc58223bb52c715846545b072b61",
+    "docs/verification/herdr/ssh-before.json": "a9a803540177e9e593d6a11ce7c31198fe35019194450fe4ae7c152904bcf0ed",
+    "artifacts/herdr-terminal-flow/terminal-flow-electron-measured.json": "f4efe18933dff49140985c4c2f63e1753cf64c82b4c7d3cac76bdd7ff10607f4",
+    "artifacts/herdr-terminal-flow/terminal-flow-electron-samples.json": "9f877bdeaf669bb6febf8f12b87db31fd3adbc0a8d3ac97a27071d128aa93f25",
+    "artifacts/herdr-ui-evidence.json": "f4c9b1881992b49f75f7726bcd004e33d88e4f51202a7119b6acf32ab6ed264d"
+  },
+  "measuredImplementationCommit": "ae6de54f5b99306e4ea88791a8d8c43d98b937a8",
+  "finalBaseCommit": "9f45d06",
+  "measurementScope": "113f576 versus ae6de54. Final rebase preserves 9f45d06 Git SSH recovery; Herdr snapshot and terminal-flow modules are unchanged. No additional latency measurement is claimed for that later integration."
+}

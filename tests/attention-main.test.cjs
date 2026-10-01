@@ -117,6 +117,23 @@ test("validateNotice accepts a well-formed notice and returns its fields", () =>
   assert.deepEqual(validateNotice(notice), notice);
 });
 
+test("notifications accept endpoint-scoped IDs and retain a finite bound", () => {
+  const endpoint = `/tmp/${String.fromCodePoint(0x044f).repeat(30)}.sock`;
+  const prefix = `herdr:v2:${encodeURIComponent(endpoint)}:`;
+  const notice = {
+    workspaceId: `${prefix}w1`,
+    panelId: `${prefix}w1%3Ap1`,
+    title: "Ready",
+    body: "Preparation finished",
+  };
+  assert.ok(notice.workspaceId.length > 200);
+  assert.deepEqual(validateNotice(notice), notice);
+  assert.throws(() =>
+    validateNotice({ ...notice, workspaceId: "x".repeat(4097) }),
+  );
+  assert.throws(() => validateNotice({ ...notice, panelId: "x".repeat(4097) }));
+});
+
 test("validateNotice rejects a non-object notice", () => {
   assert.throws(() => validateNotice(null));
   assert.throws(() => validateNotice(undefined));

@@ -282,6 +282,8 @@ export function TerminalPanel({
             panel.kind === "agent" ? panel.modelProfileId : undefined,
           claudeAccountId:
             panel.kind === "agent" ? panel.claudeAccountId : undefined,
+          codexAccountId:
+            panel.kind === "agent" ? panel.codexAccountId : undefined,
           cols: terminal.cols,
           rows: terminal.rows,
         })

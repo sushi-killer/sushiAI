@@ -62,7 +62,7 @@ const SETTINGS_NAV: {
     key: "providers",
     label: "Providers",
     icon: Server,
-    description: "API keys and model profiles.",
+    description: "Claude and Codex accounts, API keys and model profiles.",
   },
   {
     key: "orchestration",

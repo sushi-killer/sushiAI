@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { ClaudeAccount, Project } from "./types";
+import type { ClaudeAccount, CodexAccount, Project } from "./types";
 import { ProjectPage } from "./ProjectPage";
 
 function Field({
@@ -58,12 +58,17 @@ export function ProjectGeneralTab({
     }
   }
   const [accounts, setAccounts] = useState<ClaudeAccount[]>([]);
+  const [codexAccounts, setCodexAccounts] = useState<CodexAccount[]>([]);
   const [domain, setDomain] = useState("");
   const [adding, setAdding] = useState(false);
   useEffect(() => {
     window.bridge
       ?.claudeAccountsList()
       .then(setAccounts)
+      .catch(() => {});
+    window.bridge
+      ?.codexAccountsList()
+      .then(setCodexAccounts)
       .catch(() => {});
   }, []);
   const subtitle =
@@ -170,6 +175,32 @@ export function ProjectGeneralTab({
         >
           <option value="">Default account</option>
           {accounts.map((account) => (
+            <option key={account.id} value={account.id}>
+              {account.label}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field
+        label="Codex account"
+        hint="For new sessions. Change it for one session in +."
+      >
+        <select
+          className="pd-input"
+          aria-label="Codex account"
+          value={project.sessions.codexAccount || ""}
+          onChange={(event) =>
+            void save({
+              ...project,
+              sessions: {
+                ...project.sessions,
+                codexAccount: event.target.value || undefined,
+              },
+            })
+          }
+        >
+          <option value="">Default account</option>
+          {codexAccounts.map((account) => (
             <option key={account.id} value={account.id}>
               {account.label}
             </option>

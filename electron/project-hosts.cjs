@@ -4,6 +4,7 @@ const {
 } = require("./orchestrator-remote.cjs");
 const { normalizeRemote, assertRemote } = require("./projects.cjs");
 const { projectSlug, slugOf } = require("./project-slug.cjs");
+const { prepareGitUrl, gitSshEnv } = require("./project-git-ssh.cjs");
 
 const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 
@@ -169,6 +170,8 @@ function prepareScript(
   options = {},
 ) {
   assertRemote(project.git.url);
+  const gitUrl = prepareGitUrl(project, options.gitUrl);
+  assertRemote(gitUrl);
   const slug = slugOf(project);
   // An existing checkout of this repository elsewhere on the host is used
   // where it is; only a missing one is cloned, into the standard folder.
@@ -201,8 +204,8 @@ function prepareScript(
     ? `rm -f "$askpass"\nunset SUSHIAI_GIT_TOKEN git_token GIT_ASKPASS\n`
     : "";
   const install = installScript(project);
-  const cloneFresh = `${tokenSetup}if [ -e ${target} ]; then\n  echo "$HOME/sushiai/${slug} exists and is not a checkout" >&2\n  exit 1\nfi\nrm -rf ${target}.prepare\ngit clone ${project.git.defaultBranch ? `--branch ${quote(project.git.defaultBranch)} ` : ""}-- ${quote(project.git.url)} ${target}.prepare\nmv ${target}.prepare ${target}\necho 'SUSHIAI_PULL=cloned'\n${tokenCleanup}`;
-  const pullExisting = `${tokenSetup}pull=current\ncd ${target}\nif [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then pull=skipped:local-changes\nelif ! git fetch --quiet "$(${REMOTE_NAME_SH})" >/dev/null 2>&1; then pull=skipped:fetch-failed\nelif ! git symbolic-ref -q HEAD >/dev/null 2>&1; then pull=skipped:detached-head\nelif ! git rev-parse -q --verify '@{u}' >/dev/null 2>&1; then pull=skipped:no-upstream\nelse\n  before=$(git rev-parse HEAD)\n  if git pull --ff-only --quiet >/dev/null 2>&1; then\n    [ "$(git rev-parse HEAD)" = "$before" ] || pull=updated\n  else\n    pull=skipped:not-fast-forward\n  fi\nfi\necho "SUSHIAI_PULL=$pull"\ncd "$HOME"\n${tokenCleanup}`;
+  const cloneFresh = `${tokenSetup}${gitSshEnv(gitUrl)}if [ -e ${target} ]; then\n  echo "The target folder exists and is not a checkout" >&2\n  exit 1\nfi\nclone_directory=$(mktemp -d ${target}.prepare.XXXXXX)\ngit clone ${project.git.defaultBranch ? `--branch ${quote(project.git.defaultBranch)} ` : ""}-- ${quote(gitUrl)} "$clone_directory"\nif [ -e ${target} ]; then echo 'The target folder already exists; nothing was replaced.' >&2; exit 1; fi\nmkdir -m 700 ${target}\nreserved_target=${target}\n(cd "$clone_directory" && find . ! -name . -prune -exec mv {} ${target}/ \\;)\nrmdir "$clone_directory"\nreserved_target=\nclone_directory=\necho 'SUSHIAI_PULL=cloned'\nunset GIT_SSH_COMMAND GIT_SSH_VARIANT\n${tokenCleanup}`;
+  const pullExisting = `${tokenSetup}${gitSshEnv(gitUrl)}git_url=${quote(gitUrl)}\npull=current\ncd ${target}\nremote_name="$(${REMOTE_NAME_SH})" || true\nif [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then pull=skipped:local-changes\nelif ! git ${options.gitUrl ? '-c "remote.$remote_name.url=$git_url" ' : ""}fetch --quiet "$(${REMOTE_NAME_SH})" >/dev/null 2>&1; then pull=skipped:fetch-failed\nelif ! git symbolic-ref -q HEAD >/dev/null 2>&1; then pull=skipped:detached-head\nelif ! git rev-parse -q --verify '@{u}' >/dev/null 2>&1; then pull=skipped:no-upstream\nelse\n  before=$(git rev-parse HEAD)\n  if git ${options.gitUrl ? '-c "remote.$remote_name.url=$git_url" ' : ""}pull --ff-only --quiet >/dev/null 2>&1; then\n    [ "$(git rev-parse HEAD)" = "$before" ] || pull=updated\n  else\n    pull=skipped:not-fast-forward\n  fi\nfi\necho "SUSHIAI_PULL=$pull"\ncd "$HOME"\nunset GIT_SSH_COMMAND GIT_SSH_VARIANT\n${tokenCleanup}`;
   // A start that only needs the install leaves the checkout's history alone.
   const keep = `echo 'SUSHIAI_PULL=skipped:not-asked'\n`;
   const clone = `mkdir -p "$HOME/sushiai"\nif [ ! -e ${target}/.git ]; then\n${cloneFresh}else\n${options.pull === false ? keep : pullExisting}fi`;
@@ -217,7 +220,7 @@ function prepareScript(
   const stage = (id) => `sushiai_stage=${id}; echo 'SUSHIAI_STAGE=${id}' >&2`;
   // Whatever way the script ends, a failure says which step it was in as its
   // very last line, so a noisy install cannot bury it.
-  const guard = `sushiai_stage=clone\ntrap 'rc=$?; rm -f "\${askpass:-}"; unset SUSHIAI_GIT_TOKEN git_token; [ "$rc" -eq 0 ] || echo "SUSHIAI_FAILED=$sushiai_stage" >&2' EXIT\n`;
+  const guard = `sushiai_stage=clone\ntrap 'rc=$?; rm -f "\${askpass:-}"; [ -z "\${clone_directory:-}" ] || rm -rf "$clone_directory"; [ -z "\${reserved_target:-}" ] || rm -rf "$reserved_target"; unset SUSHIAI_GIT_TOKEN git_token; [ "$rc" -eq 0 ] || echo "SUSHIAI_FAILED=$sushiai_stage" >&2' EXIT\n`;
   const setup = install
     ? `cd ${target}\n${stage("install")}\n${install}\n${mark("install")}`
     : "";

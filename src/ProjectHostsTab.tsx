@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Plus, RefreshCw } from "lucide-react";
-import type { ConnectionProfile, Project, ProjectHostReadiness } from "./types";
+import type {
+  Bridge,
+  ConnectionProfile,
+  Project,
+  ProjectHostReadiness,
+} from "./types";
 import { Tag, Toggle } from "./orchestrator/ui";
+import { GitRecovery } from "./orchestrator/GitRecovery";
 import { openSettings } from "./app/openSettings";
 import { ProjectPage } from "./ProjectPage";
 import {
@@ -26,6 +32,10 @@ type Row = {
   local: boolean;
 };
 type Check = ProjectHostReadiness | "checking" | { error: string };
+type PrepareFailure = Extract<
+  Awaited<ReturnType<Bridge["projectHostPrepare"]>>,
+  { ok: false }
+>;
 
 const COLUMNS = ["checkout", "setup", "clis", "mcp", "secrets"] as const;
 const LABELS: Record<(typeof COLUMNS)[number], string> = {
@@ -70,11 +80,13 @@ export function ProjectHostsTab({
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [failures, setFailures] = useState<Record<string, PrepareFailure>>({});
   const [system, setSystem] = useState<{
     home: string;
     agents: { name: string; path: string | null }[];
   }>({ home: "", agents: [] });
   const started = useRef("");
+  const preparing = useRef(false);
 
   useEffect(() => {
     window.bridge
@@ -160,8 +172,9 @@ export function ProjectHostsTab({
     }
   }
 
-  async function prepare(row: Row) {
-    if (!window.bridge || !project) return;
+  async function prepare(row: Row, gitUrl?: string) {
+    if (!window.bridge || !project || busy || preparing.current) return;
+    preparing.current = true;
     setSelected(row.key);
     setBusy(row.key);
     setError("");
@@ -169,14 +182,24 @@ export function ProjectHostsTab({
       const result = await window.bridge.projectHostPrepare(
         project.id,
         row.key,
+        false,
+        gitUrl ? { gitUrl } : undefined,
       );
-      if (!result.ok) setError(result.message);
-      else rememberPrepareTimes(project.id, row.key, result.steps);
+      if (!result.ok) setFailures((all) => ({ ...all, [row.key]: result }));
+      else {
+        rememberPrepareTimes(project.id, row.key, result.steps);
+        setFailures((all) => {
+          const next = { ...all };
+          delete next[row.key];
+          return next;
+        });
+      }
       await checkHost(row.key);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setBusy("");
+      preparing.current = false;
     }
   }
 
@@ -239,6 +262,7 @@ export function ProjectHostsTab({
     current && !current.local
       ? (project.hosts?.[current.key]?.overrides ?? {})
       : {};
+  const failure = current ? failures[current.key] : undefined;
 
   return (
     <ProjectPage title="Hosts" subtitle={subtitle}>
@@ -338,7 +362,7 @@ export function ProjectHostsTab({
                 ) : missing ? (
                   <button
                     className="ui-button secondary"
-                    disabled={busy === row.key}
+                    disabled={!!busy}
                     onClick={(event) => {
                       event.stopPropagation();
                       void prepare(row);
@@ -367,6 +391,36 @@ export function ProjectHostsTab({
         <p className="pd-note">No SSH hosts are configured.</p>
       )}
       {notes.length > 0 && <p className="pd-note">{notes.join("  ")}</p>}
+      {current && !current.local && failure && (
+        <>
+          <p role="alert" className="pd-alert">
+            {failure.message}
+          </p>
+          {failure.git &&
+            ["auth", "network", "host-key"].includes(failure.git.kind) && (
+              <GitRecovery
+                key={`${project.id}:${current.key}:${failure.git.url}`}
+                projectId={project.id}
+                endpoint={current.key}
+                failure={failure.git}
+                disabled={!!busy}
+                onRetry={(gitUrl) => void prepare(current, gitUrl)}
+              />
+            )}
+          <button
+            className="ui-button secondary"
+            disabled={!!busy}
+            onClick={() =>
+              void prepare(
+                current,
+                failure.git?.transport === "ssh" ? failure.git.url : undefined,
+              )
+            }
+          >
+            {busy === current.key ? "Preparing…" : "Retry preparation"}
+          </button>
+        </>
+      )}
       {current && !current.local && (
         <>
           <h3 className="pd-group-label">{`Overrides · ${current.name}`}</h3>

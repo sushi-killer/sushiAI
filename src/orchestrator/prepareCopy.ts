@@ -1,3 +1,5 @@
+import type { ProjectGitFailure } from "../types";
+
 /** What the failure screens say, said honestly: which value (if any) was
  * used, and what the owner can do. Pure, so the wording is tested. */
 export type CopyInput = {
@@ -16,6 +18,7 @@ export type CopyInput = {
   setupSecrets?: string[];
   /** How many non-secret variables the install would see as well. */
   setupOthers?: number;
+  git?: ProjectGitFailure;
 };
 
 const plural = (count: number, noun: string) =>
@@ -26,6 +29,8 @@ const plural = (count: number, noun: string) =>
  * install that failed ran with the setup variables. Only
  * secrets are named, the rest are counted. */
 export function sentLine(input: CopyInput): string {
+  if (input.git?.transport === "ssh" && input.stage !== "setup")
+    return "SSH used the remote host’s keys. The install did not run.";
   if (input.noSecrets)
     return `No value was sent to ${input.hostName}; the clone used its own git login.`;
   if (input.stage !== "setup")
@@ -45,6 +50,20 @@ export function sentLine(input: CopyInput): string {
 
 /** The sub line of the clone row when the clone failed. */
 export function cloneFailure(input: CopyInput): string | null {
+  if (input.git) {
+    const transport = input.git.transport === "ssh" ? "SSH" : "HTTPS";
+    const problems = {
+      auth: "repository access was refused",
+      "host-key": input.git.changed
+        ? "the Git server’s key changed"
+        : "the Git server’s key is not trusted yet",
+      network: "the Git server could not be reached",
+      branch: "the requested branch was not found",
+      path: "the checkout destination is unavailable",
+      other: "the checkout failed",
+    };
+    return `${transport}: ${problems[input.git.kind]}`;
+  }
   if (input.status !== 403) return null;
   return input.noSecrets
     ? `git clone failed: ${input.hostName}’s git login has no access to ${input.repo} (403)`
@@ -55,6 +74,20 @@ export function cloneFailure(input: CopyInput): string | null {
 export function advice(input: CopyInput): string {
   if (input.timedOut)
     return `${input.message} ${sentLine(input)} Try again; a slow install usually finishes the second time.`;
+  if (input.git) {
+    const action = {
+      auth: `Add the host’s public SSH key to an account or deploy key with read access, then try again.${input.noSecrets ? "" : " You can also use an HTTPS token."}`,
+      "host-key":
+        "Check and verify the Git server’s fingerprint below before trusting it, then try again.",
+      network:
+        "Check the Git server address and SSH port below, then try again. If the host cannot reach it, check the server or network.",
+      branch:
+        "Check the repository’s branch in Project settings, then try again.",
+      path: "Choose another project folder or resolve the destination conflict, then try again. Existing files are kept.",
+      other: "Read the failed step’s details, fix the cause, then try again.",
+    };
+    return `${action[input.git.kind]} ${sentLine(input)}`;
+  }
   if (input.status === 403)
     return input.noSecrets
       ? `${input.hostName}’s git login cannot read ${input.repo}. ${sentLine(input)} Give its git login access, or turn off “Don’t send secrets to this host” in Project settings → Hosts to use ${input.token ?? "a git token"}.`

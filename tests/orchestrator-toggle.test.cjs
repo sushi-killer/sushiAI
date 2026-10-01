@@ -46,12 +46,6 @@ async function setup(t, { on }) {
   const pidFile = path.join(data, "orchd.pid");
   const readPid = async () =>
     Number(await fs.readFile(pidFile, "utf8").catch(() => 0));
-  t.after(async () => {
-    const pid = await readPid();
-    if (pid && alive(pid)) process.kill(pid, "SIGKILL");
-    await fs.rm(dir, { recursive: true, force: true });
-  });
-
   const listeners = [];
   const extensions = {
     ready: Promise.resolve(),
@@ -78,6 +72,12 @@ async function setup(t, { on }) {
     getConnections: () => ({ get: () => ({}), list: () => [] }),
     hostsFile: path.join(dir, "hosts.json"),
     hostsChanged: () => {},
+  });
+  t.after(async () => {
+    await hosts.quit();
+    const pid = await readPid();
+    if (pid && alive(pid)) process.kill(pid, "SIGKILL");
+    await fs.rm(dir, { recursive: true, force: true });
   });
   return { dir, data, root, binary, hosts, handlers, events, toggle, readPid };
 }

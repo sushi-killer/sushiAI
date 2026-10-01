@@ -31,7 +31,7 @@ def git(root, *args):
         capture_output=True,
         stdin=subprocess.DEVNULL,
         timeout=15,
-        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0"},
     )
     if result.returncode:
         raise ValueError(result.stderr.decode("utf-8", "replace")[:2000])
@@ -120,12 +120,12 @@ def git_log_result(base, data):
     return {"commits": commits, "head": head, "truncated": len(commits) >= limit}
 
 
-def git_branches_result(base):
+def git_branches_result(base, include_remote=False):
     # One for-each-ref call covers the whole list; trackshort gives ahead /
     # behind against the upstream without a rev-list subprocess per branch.
     output = git(
         base, "for-each-ref",
-        "--format=%(refname:short)" + FIELD_SEP + "%(HEAD)" + FIELD_SEP
+        "--format=%(refname)" + FIELD_SEP + "%(HEAD)" + FIELD_SEP
         + "%(upstream:short)" + FIELD_SEP + "%(upstream:trackshort)" + FIELD_SEP
         + "%(committerdate:unix)" + FIELD_SEP + "%(contents:subject)",
         "--sort=-committerdate", "refs/heads",
@@ -133,7 +133,7 @@ def git_branches_result(base):
     remote_output = git(
         base,
         "for-each-ref",
-        "--format=%(refname:short)" + FIELD_SEP + "%(committerdate:unix)" + FIELD_SEP + "%(contents:subject)",
+        "--format=%(refname)" + FIELD_SEP + "%(committerdate:unix)" + FIELD_SEP + "%(contents:subject)",
         "--sort=-committerdate",
         "refs/remotes/origin",
     )
@@ -142,6 +142,7 @@ def git_branches_result(base):
         fields = line.split(FIELD_SEP, 2)
         fields += [""] * (3 - len(fields))
         name, date, subject = fields
+        name = name.removeprefix("refs/remotes/")
         if name:
             remote_rows[name] = (date, subject)
     origin_refs = {
@@ -149,12 +150,21 @@ def git_branches_result(base):
         for name in remote_rows
         if name != "origin/HEAD"
     }
+    if include_remote and "origin" in git(base, "remote").splitlines():
+        available = git(base, "ls-remote", "--heads", "--refs", "--", "origin")
+        origin_refs = set()
+        for line in available.splitlines():
+            _, ref = line.split("\t", 1)
+            name = "origin/" + ref.removeprefix("refs/heads/")
+            origin_refs.add(name)
+            remote_rows.setdefault(name, ("", ""))
     branches = []
     local_names = set()
     for line in output.splitlines():
         fields = line.split(FIELD_SEP, 5)
         fields += [""] * (6 - len(fields))
         name, head, upstream, track, date, subject = fields
+        name = name.removeprefix("refs/heads/")
         if not name:
             continue
         local_names.add(name)
@@ -208,6 +218,72 @@ def remote_url(base):
         return git(base, "remote", "get-url", name).strip()
     except ValueError:
         return ""
+
+
+def git_setting(base, key):
+    try:
+        return git(base, "config", "--get", key).strip()
+    except ValueError as error:
+        if str(error).strip():
+            raise
+        return ""
+
+
+def git_worktree_base(base, data):
+    branch = data.get("base", "refs/heads/main")
+    if not isinstance(branch, str) or not branch or branch.startswith("-") or len(branch) > 1024:
+        raise ValueError("Choose an existing base branch.")
+    if branch.startswith("refs/heads/"):
+        local_ref = branch
+    elif branch.startswith("refs/remotes/"):
+        local_ref = ""
+    else:
+        local_ref = "refs/heads/" + branch
+    git(base, "check-ref-format", local_ref or branch)
+
+    primary = git(base, "worktree", "list", "--porcelain", "-z").split("\0\0", 1)[0].split("\0")
+    if not primary or not primary[0].startswith("worktree ") or "bare" in primary:
+        raise ValueError("Choose a repository with a primary checkout.")
+    cwd = primary[0].removeprefix("worktree ")
+    remotes = git(base, "remote").splitlines()
+    remote = ""
+    remote_ref = ""
+    remote_name = ""
+    if local_ref:
+        name = local_ref.removeprefix("refs/heads/")
+        remote = git_setting(base, "branch." + name + ".remote")
+        remote_ref = git_setting(base, "branch." + name + ".merge")
+        if remote and not remote_ref:
+            raise ValueError("The base branch has no configured upstream branch.")
+        if not remote and name == "main" and "origin" in remotes:
+            remote, remote_ref = "origin", "refs/heads/main"
+        if not remote:
+            refs = git(base, "for-each-ref", "--format=%(refname)", local_ref).splitlines()
+            if local_ref not in refs:
+                remote_name = branch.removeprefix("refs/remotes/")
+    else:
+        remote_name = branch.removeprefix("refs/remotes/")
+    if remote_name:
+        for candidate in sorted(remotes, key=len, reverse=True):
+            if remote_name.startswith(candidate + "/"):
+                remote = candidate
+                remote_ref = "refs/heads/" + remote_name[len(candidate) + 1:]
+                break
+
+    if remote:
+        if remote != "." and remote not in remotes:
+            raise ValueError("The base branch's configured remote is unavailable.")
+        if not remote_ref.startswith("refs/heads/"):
+            raise ValueError("Choose an existing upstream branch.")
+        git(base, "check-ref-format", remote_ref)
+        git(base, "fetch", "--no-tags", "--", remote, remote_ref)
+        commit_ref = "FETCH_HEAD"
+    elif local_ref:
+        commit_ref = local_ref
+    else:
+        raise ValueError("The base branch's remote is unavailable.")
+    commit = git(base, "rev-parse", "--verify", commit_ref + "^{commit}").strip()
+    return {"base": commit, "cwd": cwd}
 
 
 def git_remote_result(base):
@@ -529,6 +605,8 @@ def inspect(data):
     if operation == "claude_plugins":
         return claude_plugins(data)
     base, target = resolve(data["root"], data.get("path", "."))
+    if operation == "worktree_base":
+        return git_worktree_base(base, data)
     if operation == "list":
         entries = []
         for item in target.iterdir():
@@ -643,7 +721,7 @@ def inspect(data):
     if operation == "log":
         return git_log_result(base, data)
     if operation == "branches":
-        return git_branches_result(base)
+        return git_branches_result(base, data.get("includeRemote") is True)
     if operation == "git_remote":
         return git_remote_result(base)
     if operation == "checkout":

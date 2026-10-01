@@ -3,14 +3,10 @@ import { normalizeRemote, type ProjectGit } from "./useProjectGit.ts";
 import {
   activeMergeGroup,
   groupLabel,
-  LOCAL_GROUP,
-  memberLabel,
+  type MergedMember,
 } from "./workspaceMerge.ts";
 
-/** One host the new-session picker can launch into: a merge-group member's
- * own workspace, on its own connection. Only the active workspace's merge
- * group (flat sidebar mode, D1) ever produces more than one - a workspace
- * that stands alone keeps the picker's plain, single-host behaviour (D3). */
+/** One representative checkout per host in the active workspace's merge group. */
 export type SessionHostOption = {
   workspaceId: string;
   label: string;
@@ -72,10 +68,6 @@ export function launchTarget(
   return hostCount > 0 || baseId !== openedId ? hostId : undefined;
 }
 
-/** D1: one option per merge-group member. `memberLabel` names a worktree
- * member on this Mac by its branch alone. That is enough while every member
- * is on one machine, but next to `Lab · feature-x` a bare `main` hides where
- * it runs - so only a group spanning hosts prefixes the Local member. */
 export function sessionHostOptions(
   active: Workspace,
   {
@@ -93,13 +85,12 @@ export function sessionHostOptions(
     workspaceGrouping,
   );
   if (!group) return [];
-  const manyHosts = new Set(group.members.map((m) => m.hostKey)).size > 1;
-  return group.members.map((member) => {
-    const label = memberLabel(group, member, connectionProfiles);
-    const named =
-      group.worktrees && manyHosts && member.hostKey === LOCAL_GROUP
-        ? `${groupLabel(member.hostKey, connectionProfiles)} · ${label}`
-        : label;
-    return { workspaceId: member.workspace.id, label: named };
-  });
+  const hosts = new Map<string, MergedMember>();
+  for (const member of group.members)
+    if (!hosts.has(member.hostKey) || member.workspace.id === active.id)
+      hosts.set(member.hostKey, member);
+  return [...hosts.values()].map((member) => ({
+    workspaceId: member.workspace.id,
+    label: groupLabel(member.hostKey, connectionProfiles),
+  }));
 }

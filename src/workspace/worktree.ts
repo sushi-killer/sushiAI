@@ -1,4 +1,4 @@
-import type { PanelKind, Workspace } from "../types";
+import type { Panel, Workspace } from "../types";
 
 /** A local-time, minute-precision suggestion for the branch field, prefilled
  * when the "New worktree" launch choice opens. */
@@ -55,8 +55,15 @@ export function worktreeBranchError(name: string): string {
 /** Only a session runs somewhere: a terminal or an agent. Files, Browser and
  * Thread are views of the project and open in the checkout they are given, so
  * the picker must not promise them a worktree either. */
-export function launchesInWorktree(kind: PanelKind): boolean {
+export function launchesInWorktree(kind: Panel["kind"]): boolean {
   return kind === "terminal" || kind === "agent";
+}
+
+export function worktreeBaseRef(branch: {
+  ref: string;
+  local: boolean;
+}): string {
+  return `refs/${branch.local ? "heads" : "remotes"}/${branch.ref}`;
 }
 
 /** Params for the Herdr `worktree.create` socket RPC: a linked worktree of
@@ -65,8 +72,15 @@ export function launchesInWorktree(kind: PanelKind): boolean {
 export function worktreeCreateParams(
   workspace: Pick<Workspace, "cwd">,
   branch: string,
-): { cwd: string; branch: string; label: string; focus: boolean } {
-  return { cwd: workspace.cwd, branch, label: branch, focus: false };
+  base = "refs/heads/main",
+): {
+  cwd: string;
+  branch: string;
+  base: string;
+  label: string;
+  focus: boolean;
+} {
+  return { cwd: workspace.cwd, branch, base, label: branch, focus: false };
 }
 
 /** The sushiAI id for a Herdr workspace (or pane) on `endpoint`: local Herdr

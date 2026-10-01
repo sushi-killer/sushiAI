@@ -145,6 +145,7 @@ export type Workspace = {
   name: string;
   cwd: string;
   herdrId?: string;
+  localWorktree?: boolean;
   connection?: string;
   panels: Panel[];
   layout: Layout | null;
@@ -402,7 +403,11 @@ export interface Bridge {
   onAttentionOpen(callback: (target: AttentionTarget) => void): () => void;
   /** Adds a git worktree on a new branch next to the repository holding
    * `cwd`, on this Mac. Resolves to the new checkout's path. */
-  worktreeCreate(cwd: string, branch: string): Promise<{ path: string }>;
+  worktreeCreate(
+    cwd: string,
+    branch: string,
+    base?: string,
+  ): Promise<{ path: string }>;
   appPreferences(): Promise<AppPreferences>;
   appPreferencesSet(patch: Partial<AppPreferences>): Promise<AppPreferences>;
   mascotShortcutStatus(): Promise<MascotShortcutStatus>;

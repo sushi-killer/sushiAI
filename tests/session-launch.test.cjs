@@ -647,11 +647,12 @@ test("canonical checkout is resolved on the host, separating symlinks, worktrees
           root: selected,
         })
       ).cwd;
-    assert.equal(await canonical(alias), root);
-    assert.equal(await canonical(subdir), root);
-    assert.equal(await canonical(`${root}/`), root);
-    assert.equal(await canonical(worktree), worktree);
-    assert.equal(await canonical(checkout), checkout);
+    const canonicalRoot = await fs.realpath(root);
+    assert.equal(await canonical(alias), canonicalRoot);
+    assert.equal(await canonical(subdir), canonicalRoot);
+    assert.equal(await canonical(`${root}/`), canonicalRoot);
+    assert.equal(await canonical(worktree), await fs.realpath(worktree));
+    assert.equal(await canonical(checkout), await fs.realpath(checkout));
   } finally {
     await connections.close();
     await fs.rm(directory, { recursive: true, force: true });

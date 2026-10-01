@@ -529,6 +529,7 @@ test("actual close removes a last session workspace while preserving its chats",
       },
       [workspace],
     );
+    app.ws.setProjectGit({ [workspace.id]: { linkedWorktree: false } });
     app.ws.closePanel(panel.id);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(app.confirmations.length, 0);
@@ -543,6 +544,35 @@ test("actual close removes a last session workspace while preserving its chats",
       );
     else assert.equal(app.current().length, 1);
   }
+  const pending = {
+    ...initial()[0],
+    id: herdrWorkspaceKey("/tmp/entry.sock", "pending-git"),
+    herdrId: "pending-git",
+    connection: "/tmp/entry.sock",
+    panels: [{ id: "pending-pane", herdrId: "pending-pane", kind: "terminal" }],
+    layout: { type: "leaf", id: "pending-pane" },
+  };
+  const pendingApp = controller({ herdr: async () => {} }, [pending]);
+  pendingApp.ws.closePanel("pending-pane");
+  assert.equal(pendingApp.confirmations.length, 1);
+  assert.equal(pendingApp.confirmations[0].workspace.id, pending.id);
+
+  const linked = {
+    ...initial()[0],
+    id: herdrWorkspaceKey("/tmp/entry.sock", "linked"),
+    herdrId: "linked",
+    connection: "/tmp/entry.sock",
+    panels: [{ id: "linked-pane", herdrId: "linked-pane", kind: "terminal" }],
+    layout: { type: "leaf", id: "linked-pane" },
+  };
+  const linkedApp = controller({ herdr: async () => {} }, [linked]);
+  linkedApp.ws.setProjectGit({
+    [linked.id]: { linkedWorktree: true },
+  });
+  linkedApp.ws.closePanel("linked-pane");
+  assert.equal(linkedApp.confirmations.length, 1);
+  assert.equal(linkedApp.confirmations[0].workspace.id, linked.id);
+
   const local = {
     ...initial()[0],
     localWorktree: true,
@@ -555,11 +585,41 @@ test("actual close removes a last session workspace while preserving its chats",
   ]);
   app.ws.closePanel("local-shell");
   await new Promise((resolve) => setImmediate(resolve));
-  assert.ok(closed.includes("local-shell"));
-  assert.equal(
-    app.current().some((item) => item.id === local.id),
-    false,
+  assert.deepEqual(closed, []);
+  assert.equal(app.confirmations.length, 1);
+  assert.equal(app.confirmations[0].workspace.id, local.id);
+  assert.equal(app.confirmations[0].panel.id, "local-shell");
+  assert.equal(app.current()[0].id, local.id);
+});
+
+test("closed pane keeps a worktree workspace when checkout removal fails", async () => {
+  const panel = { id: "worktree-pane", kind: "terminal", title: "Shell" };
+  const workspace = {
+    ...initial()[0],
+    localWorktree: true,
+    cwd: "/tmp/checkout",
+    panels: [panel],
+    layout: { type: "leaf", id: panel.id },
+  };
+  const app = controller(
+    {
+      terminalClose: async () => {},
+      projectInspect: async () => {
+        throw new Error("worktree is dirty");
+      },
+    },
+    [workspace],
   );
+  await app.ws.endSessions([{ workspace, panel }], {
+    workspace,
+    panel,
+    checkout: workspace.cwd,
+    branch: "feature/task",
+  });
+  assert.equal(app.current().length, 1);
+  assert.equal(app.current()[0].id, workspace.id);
+  assert.equal(app.current()[0].panels.length, 0);
+  assert.match(app.errors.join(" "), /Worktree kept: worktree is dirty/);
 });
 
 test("actual workspace close shares concurrent intent and allows retry after failure", async () => {

@@ -295,9 +295,17 @@ def git_remote_result(base):
         # Every worktree of one repository shares this directory; separate
         # clones never do, which is what tells the two apart.
         common = git(base, "rev-parse", "--git-common-dir").strip()
+        git_dir = git(base, "rev-parse", "--git-dir").strip()
         checkout = git(base, "rev-parse", "--show-toplevel").strip()
     except ValueError:
-        return {"remote": url, "commonDir": "", "checkout": "", "subdir": "", "branch": ""}
+        return {
+            "remote": url,
+            "commonDir": "",
+            "checkout": "",
+            "linkedWorktree": False,
+            "subdir": "",
+            "branch": "",
+        }
     try:
         branch = git(base, "symbolic-ref", "--short", "-q", "HEAD").strip()
     except ValueError:
@@ -306,14 +314,71 @@ def git_remote_result(base):
         except ValueError:
             branch = ""
     checkout = os.path.realpath(checkout)
+    common_dir = os.path.realpath(os.path.join(base, common))
+    linked_worktree = os.path.realpath(os.path.join(base, git_dir)) != common_dir
     subdir = os.path.relpath(base, checkout)
     return {
         "remote": url,
-        "commonDir": os.path.realpath(os.path.join(base, common)),
+        "commonDir": common_dir,
         "checkout": checkout,
+        "linkedWorktree": linked_worktree,
         "subdir": "" if subdir == "." else subdir,
         "branch": branch,
     }
+
+
+def git_pr_status_result(base, data):
+    branch = data.get("branch")
+    if not isinstance(branch, str) or not branch or branch.startswith("-"):
+        raise ValueError("Invalid branch")
+    git(base, "check-ref-format", "--branch", branch)
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", branch, "--json", "state,mergedAt"],
+            cwd=base,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+            env={**os.environ, "GH_PROMPT_DISABLED": "1"},
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return {"state": "UNKNOWN", "mergedAt": None}
+    if result.returncode:
+        return {"state": "UNKNOWN", "mergedAt": None}
+    try:
+        status = json.loads(result.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {"state": "UNKNOWN", "mergedAt": None}
+    if not isinstance(status, dict):
+        return {"state": "UNKNOWN", "mergedAt": None}
+    return {"state": status.get("state"), "mergedAt": status.get("mergedAt")}
+
+
+def git_worktree_remove_result(base, data):
+    root = Path(base).resolve()
+    checkout = Path(git(base, "rev-parse", "--show-toplevel").strip()).resolve()
+    if root != checkout:
+        raise ValueError("Choose the worktree root")
+    common = os.path.realpath(
+        os.path.join(base, git(base, "rev-parse", "--git-common-dir").strip())
+    )
+    git_dir = os.path.realpath(
+        os.path.join(base, git(base, "rev-parse", "--git-dir").strip())
+    )
+    if git_dir == common:
+        raise ValueError("The main checkout cannot be removed as a worktree")
+    try:
+        branch = git(base, "symbolic-ref", "--short", "-q", "HEAD").strip()
+    except ValueError:
+        branch = git(base, "rev-parse", "--short", "HEAD").strip()
+    expected = data.get("branch")
+    if not isinstance(expected, str) or not expected or expected != branch:
+        raise ValueError("The worktree branch changed; refresh and try again")
+    if git(base, "status", "--porcelain=v1", "-z", "--untracked-files=all"):
+        raise ValueError("The worktree has uncommitted changes and was kept")
+    main_checkout = os.path.dirname(common)
+    git(main_checkout, "worktree", "remove", "--", str(checkout))
+    return {"removed": str(checkout), "branch": branch}
 
 
 def read_json_file(filename, fallback):
@@ -765,6 +830,10 @@ def inspect(data):
         return git_branches_result(base, data.get("includeRemote") is True)
     if operation == "git_remote":
         return git_remote_result(base)
+    if operation == "git_pr_status":
+        return git_pr_status_result(base, data)
+    if operation == "git_worktree_remove":
+        return git_worktree_remove_result(base, data)
     if operation == "checkout":
         branch = data.get("branch")
         if not isinstance(branch, str) or not branch or branch.startswith("-"):

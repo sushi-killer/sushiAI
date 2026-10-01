@@ -154,7 +154,6 @@ export function App() {
     endSessions,
     endWorkspace,
   } = ws;
-  const addPanel = ws.addPanel;
   function switchWorkspace(id: string) {
     if (window.innerWidth < 760) setSidebar(false);
     ws.switchWorkspace(id);
@@ -183,7 +182,11 @@ export function App() {
   const [keepAwake, setKeepAwake] = useKeepAwake();
   const connected = connection === "connected";
   const activeEndpoint = active.connection || socket;
-  const projectGit = useProjectGit(workspaces, active.id);
+  const { projectGit, readyWorkspaceIds, hydratedHostKeys } = useProjectGit(
+    workspaces,
+    active.id,
+    ws.setProjectGit,
+  );
   const session = useSessionState(saved);
   const merged = useMergedCanvas(
     ws,
@@ -204,7 +207,7 @@ export function App() {
     switchWorkspace,
     setSelected,
     setZoomed,
-    addPanel,
+    addPanel: ws.addPanel,
     createWorkspace: ws.createWorkspace,
   });
   const hostContext = useHostContext(
@@ -354,7 +357,7 @@ export function App() {
         runExtensionCommand={runExtensionCommand}
         openFiles={() => {
           const panel = active.panels.find((p) => p.kind === "files");
-          panel ? showPanel(panel) : addPanel("files");
+          panel ? showPanel(panel) : ws.addPanel("files");
         }}
         tidy={() => {
           ws.tidy();
@@ -410,6 +413,8 @@ export function App() {
             connectionProfiles={connectionProfiles}
             statusByEndpoint={statusByEndpoint}
             projectGit={projectGit}
+            readyWorkspaceIds={readyWorkspaceIds}
+            hydratedHostKeys={hydratedHostKeys}
             workspaceGrouping={workspaceGrouping}
             setWorkspaceGrouping={setWorkspaceGrouping}
             totalPanels={totalPanels}
@@ -504,18 +509,13 @@ export function App() {
             </Suspense>
           ) : dialog.kind === "close-session" && target?.panel ? (
             <CloseSessionDialog
-              workspace={target!.workspace}
-              panel={target!.panel!}
-              onHide={() => {
-                ws.hidePanel(target!.workspace.id, target!.panel!.id);
-                closeDialog();
-              }}
-              onEnd={async () => {
-                await endSessions([
-                  { workspace: target!.workspace, panel: target!.panel! },
-                ]);
-                closeDialog();
-              }}
+              workspace={target.workspace}
+              panel={target.panel}
+              workspaces={workspaces}
+              projectGit={projectGit}
+              hidePanel={ws.hidePanel}
+              endSessions={endSessions}
+              onClose={closeDialog}
             />
           ) : dialog.kind === "workspace-actions" && target ? (
             <ProjectSettingsDialog
@@ -538,7 +538,7 @@ export function App() {
               adding={adding}
               system={system}
               addPanel={async (...args) => {
-                await addPanel(...args);
+                await ws.addPanel(...args);
                 closeDialog();
               }}
               addExtensionPanel={addExtensionPanel}

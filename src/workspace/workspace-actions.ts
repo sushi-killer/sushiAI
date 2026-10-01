@@ -148,6 +148,7 @@ export function removeClosedPanels(
 export function removeClosedSessions(
   workspaces: Workspace[],
   closed: Set<string>,
+  keepWorkspaceIds: ReadonlySet<string> = new Set(),
 ): Workspace[] {
   const affected = new Set(
     workspaces
@@ -158,6 +159,7 @@ export function removeClosedSessions(
   );
   const remaining = removeClosedPanels(workspaces, closed);
   return remaining.filter((workspace) => {
+    if (keepWorkspaceIds.has(workspace.id)) return true;
     if (
       (!workspace.herdrId && !workspace.localWorktree) ||
       !affected.has(workspace.id)

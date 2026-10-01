@@ -1066,10 +1066,8 @@ impl App {
                     }
                 }
                 Waits::Pending if unstarted_children => self.spawn_task_loop(task.id.clone(), true),
-                Waits::Ended(ended) => {
-                    if !asking {
-                        self.ask_dependency_question(task, &all, &ended);
-                    }
+                Waits::Ended(ended) if !asking => {
+                    self.ask_dependency_question(task, &all, &ended);
                 }
                 _ => {}
             }

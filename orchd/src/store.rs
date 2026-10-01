@@ -102,7 +102,7 @@ impl Store {
                 Err(_) => continue, // skip corrupt entries rather than fail the whole listing
             }
         }
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.sort_by_key(|task| std::cmp::Reverse(task.created_at));
         Ok(out)
     }
 
@@ -190,7 +190,7 @@ impl Store {
                 }
             }
         }
-        out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        out.sort_by_key(|audit| std::cmp::Reverse(audit.started_at));
         Ok(out)
     }
 

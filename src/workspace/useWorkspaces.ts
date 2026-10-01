@@ -22,7 +22,7 @@ import {
   findHostWorkspace,
   isVanished,
   movePanel as moveInLayout,
-  removeClosedPanels,
+  removeClosedSessions,
   removePanel,
   reopenInSlot,
   retitleTerminal,
@@ -435,7 +435,7 @@ export function useWorkspaces({
     string?,
     ("herdr" | "local")?,
     string?,
-    { branch: string }?,
+    { branch: string; base: string }?,
   ];
   /** A panel for a session. Herdr may no longer have the workspace the app
    * still remembers (closed elsewhere, Herdr restarted, the host
@@ -445,7 +445,7 @@ export function useWorkspaces({
   async function addPanel(...args: AddPanelArgs) {
     const outcome = await addPanelOnce(...args);
     if (outcome !== "gone") return;
-    const [kind, agent = "claude", , , , , targetWorkspaceId] = args;
+    const [kind, agent = "claude", , , , , targetWorkspaceId, worktree] = args;
     const stale =
       (targetWorkspaceId &&
         workspacesRef.current.find((w) => w.id === targetWorkspaceId)) ||
@@ -454,6 +454,10 @@ export function useWorkspaces({
     await refreshHerdr(endpoint).catch(() => {});
     // Let the reconciled list reach the refs before looking at it.
     await new Promise((resolve) => setTimeout(resolve, 60));
+    if (worktree) {
+      notify("That worktree session is no longer open on the host. Try again.");
+      return;
+    }
     const alive = workspacesRef.current.find(
       (w) => w.id === stale.id && !isVanished(w),
     );
@@ -479,7 +483,7 @@ export function useWorkspaces({
     accountId?: string,
     backend?: "herdr" | "local",
     targetWorkspaceId?: string,
-    worktree?: { branch: string },
+    worktree?: { branch: string; base: string },
   ): Promise<"ok" | "gone" | "failed" | "busy"> {
     const modelProfileId = modelProfile?.id;
     // The account picked is the one of the agent it was picked for.
@@ -531,7 +535,7 @@ export function useWorkspaces({
           const result = await window.bridge.herdr(
             endpoint,
             "worktree.create",
-            worktreeCreateParams(current, worktree.branch),
+            worktreeCreateParams(current, worktree.branch, worktree.base),
           );
           const paneId = result.root_pane?.pane_id;
           if (kind === "agent" && paneId)
@@ -582,8 +586,10 @@ export function useWorkspaces({
         const { path } = await window.bridge.worktreeCreate(
           current.cwd,
           worktree.branch,
+          worktree.base,
         );
         const w = initialWorkspace(path);
+        w.localWorktree = true;
         w.name = `${current.name} · ${worktree.branch}`;
         const panel: Panel = {
           id: uid(),
@@ -738,19 +744,70 @@ export function useWorkspaces({
       setAdding(false);
     }
   }
+  const endSessions = useCallback(
+    async (items: { workspace: Workspace; panel: Panel }[]) => {
+      const closed = new Set<string>(),
+        errors: string[] = [];
+      for (const { workspace, panel } of items) {
+        try {
+          if (panel.herdrId) {
+            if (!panel.ended)
+              await window.bridge!.herdr(
+                workspace.connection || socket,
+                "pane.close",
+                { pane_id: panel.herdrId },
+              );
+          } else await window.bridge?.terminalClose(panel.id);
+          if (panel.busy) await window.bridge?.cancelChat(panel.id);
+          await window.bridge?.terminalClose(panel.id);
+          disposeTerminal(panel.id);
+          closed.add(panel.id);
+        } catch (error) {
+          errors.push(panel.title + ": " + errorText(error));
+        }
+      }
+      setWorkspaces((list) => {
+        const remaining = removeClosedSessions(list, closed);
+        return remaining.length ? remaining : [initialWorkspace()];
+      });
+      if (zoomedRef.current && closed.has(zoomedRef.current)) setZoomed(null);
+      for (const endpoint of new Set(
+        items
+          .filter((i) => i.panel.herdrId)
+          .map((i) => i.workspace.connection || socket),
+      ))
+        await refreshHerdr(endpoint);
+      if (errors.length) notify(errors.join("; "));
+    },
+    [notify, refreshHerdr, setWorkspaces, socket],
+  );
   const closePanel = useCallback(
     (panelId: string) => {
       const owner = findPanelOwner(workspacesRef.current, panelId);
       const panel = owner?.panels.find((item) => item.id === panelId);
       if (!owner || !panel) return;
+      if (owner.localWorktree && launchesInWorktree(panel.kind)) {
+        void endSessions([{ workspace: owner, panel }]);
+        return;
+      }
       if (panel.herdrId && !panel.ended) {
+        if (
+          owner.panels.filter((item) => item.herdrId && !item.ended).length ===
+          1
+        ) {
+          void endSessions([{ workspace: owner, panel }]);
+          return;
+        }
         confirmClose({ workspace: owner, panel });
         return;
       }
       disposeTerminal(panel.id);
       // An ended pane has no session left to end: drop it outright.
       if (panel.ended) {
-        setWorkspaces((list) => removeClosedPanels(list, new Set([panel.id])));
+        setWorkspaces((list) => {
+          const remaining = removeClosedSessions(list, new Set([panel.id]));
+          return remaining.length ? remaining : [initialWorkspace()];
+        });
         if (zoomedRef.current === panel.id) setZoomed(null);
         return;
       }
@@ -768,7 +825,7 @@ export function useWorkspaces({
       updateWorkspace(owner.id, (w) => removePanel(w, panel));
       if (zoomedRef.current === panel.id) setZoomed(null);
     },
-    [notify, updateWorkspace],
+    [confirmClose, endSessions, notify, setWorkspaces, updateWorkspace],
   );
   function showPanel(panel: Panel) {
     showWorkspace();
@@ -898,37 +955,6 @@ export function useWorkspaces({
     }
   }
 
-  async function endSessions(items: { workspace: Workspace; panel: Panel }[]) {
-    const closed = new Set<string>(),
-      errors: string[] = [];
-    for (const { workspace, panel } of items) {
-      try {
-        if (panel.herdrId) {
-          if (!panel.ended)
-            await window.bridge!.herdr(
-              workspace.connection || socket,
-              "pane.close",
-              { pane_id: panel.herdrId },
-            );
-        } else await window.bridge?.terminalClose(panel.id);
-        if (panel.busy) await window.bridge?.cancelChat(panel.id);
-        await window.bridge?.terminalClose(panel.id);
-        disposeTerminal(panel.id);
-        closed.add(panel.id);
-      } catch (error) {
-        errors.push(panel.title + ": " + errorText(error));
-      }
-    }
-    setWorkspaces((list) => removeClosedPanels(list, closed));
-    if (zoomed && closed.has(zoomed)) setZoomed(null);
-    for (const endpoint of new Set(
-      items
-        .filter((i) => i.panel.herdrId)
-        .map((i) => i.workspace.connection || socket),
-    ))
-      await refreshHerdr(endpoint);
-    if (errors.length) notify(errors.join("; "));
-  }
   const closing = useRef(new Set<string>());
   async function endWorkspace(workspace: Workspace) {
     // A second click while the first is closing it does nothing.

@@ -7,6 +7,7 @@ const { makeHost } = require("./helpers/fake-host.cjs");
 
 test("a host with every tool keeps them, and its stopped Herdr server is started", async (t) => {
   const host = await makeHost(t, {
+    userBin: true,
     bin: {
       // Nothing is missing, so nothing is downloaded.
       curl: "#!/bin/sh\nexit 1\n",
@@ -38,6 +39,7 @@ esac
 
 test("a connection's own socket is the one the started server listens on", async (t) => {
   const host = await makeHost(t, {
+    userBin: true,
     bin: {
       curl: "#!/bin/sh\nexit 1\n",
       claude: "#!/bin/sh\n",

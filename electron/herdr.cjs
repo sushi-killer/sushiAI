@@ -40,7 +40,12 @@ function request(socketPath, method, params = {}, timeout = 5000) {
           return finish(new Error("Invalid JSON from Herdr."));
         }
         if (message.id !== id) continue;
-        if (message.error) return finish(new Error(message.error.message));
+        if (message.error)
+          return finish(
+            Object.assign(new Error(message.error.message), {
+              code: message.error.code,
+            }),
+          );
         finish(null, message.result);
       }
     });

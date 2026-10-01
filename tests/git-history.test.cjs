@@ -154,8 +154,8 @@ test("git overview keeps history when branch metadata times out", async (t) => {
   );
   c.inspectionSource = async () =>
     source.replace(
-      "def git_branches_result(base):",
-      'def git_branches_result(base):\n    raise subprocess.TimeoutExpired("git", 15)',
+      "def git_branches_result(base, include_remote=False):",
+      'def git_branches_result(base, include_remote=False):\n    raise subprocess.TimeoutExpired("git", 15)',
     );
 
   const overview = await c.inspect(null, {
@@ -183,6 +183,10 @@ test("branches lists local branches and checkout refuses to drop uncommitted wor
     const featureHash = (
       await run("/usr/bin/git", ["-C", root, "rev-parse", "feature"])
     ).trim();
+    const mainHash = (
+      await run("/usr/bin/git", ["-C", root, "rev-parse", "refs/heads/main"])
+    ).trim();
+    await run("/usr/bin/git", ["-C", root, "tag", "main", featureHash]);
     await run("/usr/bin/git", [
       "-C",
       root,
@@ -211,6 +215,20 @@ test("branches lists local branches and checkout refuses to drop uncommitted wor
     );
     assert.ok(
       before.branches.every((branch) => typeof branch.track === "string"),
+    );
+    assert.equal(
+      before.branches.find((branch) => branch.name === "main").ref,
+      "main",
+    );
+    assert.equal(
+      (await inspect("worktree_base", { base: "main" })).base,
+      mainHash,
+      "a same-named tag must not change the selected branch's commit",
+    );
+    assert.deepEqual(
+      (await inspect("branches", { includeRemote: true })).branches,
+      before.branches,
+      "a repository without an origin performs only local branch inspection",
     );
     assert.equal(
       before.branches.find((branch) => branch.name === "feature").origin,

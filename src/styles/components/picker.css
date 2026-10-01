@@ -243,6 +243,38 @@
 .pk-branch:focus-within {
   border-color: var(--focus);
 }
+.pk .pk-base {
+  display: inline-flex;
+  flex: 1;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 23px;
+  margin: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-app);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 14px;
+}
+.pk .pk-base select {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--text-muted);
+  font-size: inherit;
+  line-height: inherit;
+  outline: none;
+}
+.pk-base:focus-within {
+  border-color: var(--focus);
+}
 
 /* The two lists. */
 .pk-lists {

@@ -822,7 +822,14 @@ function registerProjectIpc({
     return getPreview().grant(endpoint, root, file);
   });
 
-  handle("worktree-create", (cwd, branch) => createWorktree(cwd, branch));
+  handle("worktree-create", async (cwd, branch, base) => {
+    const prepared = await connections().inspect(null, {
+      operation: "worktree_base",
+      root: cwd,
+      base,
+    });
+    return createWorktree(prepared.cwd, branch, prepared.base);
+  });
 }
 
 module.exports = { registerProjectIpc };

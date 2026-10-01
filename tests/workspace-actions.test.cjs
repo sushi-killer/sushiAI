@@ -114,6 +114,86 @@ test("removeClosedPanels applies to the workspace list as it is now", async () =
   );
 });
 
+test("ending a last Herdr session drops its workspace, while other sessions and transcripts survive", async () => {
+  const { removeClosedSessions } = await library;
+  const sole = {
+    ...(await workspace([
+      panel("p", "terminal", { herdrId: "w1:p1" }),
+      panel("files", "files"),
+    ])),
+    herdrId: "w1",
+  };
+  const linked = {
+    ...(await workspace([panel("linked", "terminal", { herdrId: "w2:p1" })])),
+    id: "w2",
+    herdrId: "w2",
+  };
+  assert.deepEqual(removeClosedSessions([sole, linked], new Set(["p"])), [
+    linked,
+  ]);
+  for (const survivor of [
+    panel("q", "terminal", { herdrId: "w1:p2" }),
+    panel("local", "terminal"),
+    panel("chat", "chat"),
+  ]) {
+    const withOther = { ...sole, panels: [...sole.panels, survivor] };
+    const after = removeClosedSessions([withOther, linked], new Set(["p"]));
+    assert.equal(after.length, 2);
+    assert.ok(after[0].panels.some((item) => item.id === survivor.id));
+    assert.equal(after[1], linked);
+  }
+  assert.deepEqual(removeClosedSessions([sole, linked], new Set()), [
+    sole,
+    linked,
+  ]);
+});
+
+test("ending the last local worktree session removes only that workspace", async () => {
+  const { removeClosedSessions } = await library;
+  const local = {
+    ...(await workspace([panel("local", "terminal"), panel("files", "files")])),
+    localWorktree: true,
+  };
+  const project = {
+    ...(await workspace([panel("other", "terminal")])),
+    id: "other",
+  };
+  assert.deepEqual(removeClosedSessions([local, project], new Set(["local"])), [
+    project,
+  ]);
+  assert.equal(
+    removeClosedSessions(
+      [{ ...local, localWorktree: undefined }],
+      new Set(["local"]),
+    ).length,
+    1,
+  );
+  for (const survivor of [panel("agent", "agent"), panel("chat", "chat")]) {
+    const after = removeClosedSessions(
+      [{ ...local, panels: [...local.panels, survivor] }],
+      new Set(["local"]),
+    );
+    assert.equal(after.length, 1);
+    assert.ok(after[0].panels.some((item) => item.id === survivor.id));
+  }
+});
+
+test("closing a sole ended Herdr session removes its empty workspace", async () => {
+  const { removeClosedSessions } = await library;
+  const ended = {
+    ...(await workspace([
+      panel("ended", "terminal", { herdrId: "w1:p1", ended: true }),
+    ])),
+    herdrId: "w1",
+  };
+  assert.deepEqual(removeClosedSessions([ended], new Set(["ended"])), []);
+  const withChat = {
+    ...ended,
+    panels: [...ended.panels, panel("chat", "chat")],
+  };
+  assert.equal(removeClosedSessions([withChat], new Set(["ended"])).length, 1);
+});
+
 test("movePanel swaps on a center drop and re-inserts on an edge drop", async () => {
   const { movePanel } = await library;
   const { contains } = await layoutLibrary;

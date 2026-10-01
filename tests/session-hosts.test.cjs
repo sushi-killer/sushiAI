@@ -39,6 +39,7 @@ const context = (
   projectGit,
   connectionProfiles,
   workspaceGrouping,
+  startOnHost: async () => true,
 });
 
 test("workspace outside any merge group -> no host options", async () => {
@@ -89,7 +90,7 @@ test("local + remote host merge -> one option per host, labelled by host", async
   assert.equal(byId["w-lab"].label, "Lab");
 });
 
-test("worktrees on one host -> labelled by branch alone, no repeated host", async () => {
+test("worktrees on one host -> one host option keeps the active checkout", async () => {
   const { sessionHostOptions } = await library;
   const main = workspace("w-main", undefined, "/Users/dev/sushiai");
   const feature = workspace("w-feature", undefined, "/Users/dev/sushiai-fx");
@@ -103,15 +104,13 @@ test("worktrees on one host -> labelled by branch alone, no repeated host", asyn
     ),
   };
   const options = sessionHostOptions(
-    main,
+    feature,
     context([main, feature], projectGit, [], "flat"),
   );
-  const byId = Object.fromEntries(options.map((o) => [o.workspaceId, o]));
-  assert.equal(byId["w-main"].label, "main");
-  assert.equal(byId["w-feature"].label, "feature-x");
+  assert.deepEqual(options, [{ workspaceId: feature.id, label: "Local" }]);
 });
 
-test("worktrees mixing hosts -> only the Local member needs the prefix added", async () => {
+test("worktrees mixing hosts -> one option per host chooses its primary checkout", async () => {
   const { sessionHostOptions } = await library;
   const local = workspace("w-local", undefined, "/Users/dev/sushiai");
   const remoteA = workspace("w-lab-a", "ssh:lab", "/home/dev/sushiai");
@@ -129,15 +128,32 @@ test("worktrees mixing hosts -> only the Local member needs the prefix added", a
   const options = sessionHostOptions(
     local,
     context(
-      [local, remoteA, remoteB],
+      [remoteB, local, remoteA],
       projectGit,
       [profile("lab", "Lab")],
       "flat",
     ),
   );
-  const byId = Object.fromEntries(options.map((o) => [o.workspaceId, o]));
-  assert.equal(byId["w-local"].label, "Local · main");
-  assert.equal(byId["w-lab-b"].label, "Lab · feature-x");
+  assert.deepEqual(options, [
+    { workspaceId: local.id, label: "Local" },
+    { workspaceId: remoteA.id, label: "Lab" },
+  ]);
+
+  assert.deepEqual(
+    sessionHostOptions(
+      remoteB,
+      context(
+        [remoteA, local, remoteB],
+        projectGit,
+        [profile("lab", "Lab")],
+        "flat",
+      ),
+    ),
+    [
+      { workspaceId: local.id, label: "Local" },
+      { workspaceId: remoteB.id, label: "Lab" },
+    ],
+  );
 });
 
 test("default selection (D1): the active workspace is always one of its own group's options", async () => {

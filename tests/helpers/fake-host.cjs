@@ -12,13 +12,17 @@ const TOOLS =
     " ",
   );
 
-async function makeHost(t, { bin = {} } = {}) {
+async function makeHost(t, { bin = {}, userBin = false } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "fake-host-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const home = path.join(root, "home");
   const tools = path.join(root, "bin");
   await fs.mkdir(home);
   await fs.mkdir(tools);
+  if (userBin) {
+    await fs.mkdir(path.join(home, ".local"));
+    await fs.symlink(tools, path.join(home, ".local/bin"));
+  }
   const realGit = execFileSync("/bin/sh", ["-c", "command -v git"], {
     encoding: "utf8",
   }).trim();

@@ -31,6 +31,7 @@ import {
   launchesInWorktree,
   suggestWorktreeBranch,
   worktreeBranchError,
+  worktreeBaseRef,
 } from "../workspace/worktree.ts";
 import type {
   ClaudeAccount,
@@ -90,6 +91,13 @@ const TOOLS = [
 
 type Tone = "ok" | "warning" | "danger";
 
+type BaseBranch = {
+  name: string;
+  ref: string;
+  local: boolean;
+  remoteOnly?: boolean;
+};
+
 /** Model profiles are this dialog's business only, so they load when it opens
  * and the picked profile resets with it. Same for the session-host pick
  * (D1-D3): the merge group is only ever the active workspace's, so it too is
@@ -116,7 +124,7 @@ export function PanelPickerDialog({
     claudeAccountId?: string,
     backend?: "herdr" | "local",
     targetWorkspaceId?: string,
-    worktree?: { branch: string },
+    worktree?: { branch: string; base: string },
   ): void;
   connected: boolean;
   addExtensionPanel(
@@ -289,19 +297,88 @@ export function PanelPickerDialog({
   // Mac, so it needs the target workspace's own checkout to be local too.
   const canLocalWorktree =
     !targetIsSsh && (!targetWorkspace.herdrId || backend === "local");
-  const canWorktree = canHerdrWorktree || canLocalWorktree;
+  const canWorktree = !setupPick && (canHerdrWorktree || canLocalWorktree);
   const [checkout, setCheckout] = useState<"current" | "worktree">("current");
   const [branch, setBranch] = useState(() => suggestWorktreeBranch(new Date()));
+  const [base, setBase] = useState("main");
+  const [baseBranches, setBaseBranches] = useState<{
+    connection: string | undefined;
+    cwd: string;
+    branches: BaseBranch[];
+    error: string;
+  } | null>(null);
   // A backend or host switch can take the worktree option away while it is
   // selected; the radiogroup unmounts, so the choice has to lapse with it or a
   // remote path reaches the local git.
   const wantsWorktree = canWorktree && checkout === "worktree";
+  const baseConnection = targetWorkspace.connection;
+  const baseCwd = targetWorkspace.cwd;
+  useEffect(() => {
+    if (!wantsWorktree) return;
+    let cancelled = false;
+    setBaseBranches(null);
+    setBase("main");
+    async function loadBranches() {
+      try {
+        if (!window.bridge) throw new Error("Open the desktop app first.");
+        const { branches }: { branches: BaseBranch[] } =
+          await window.bridge.projectInspect(baseConnection, {
+            operation: "branches",
+            root: baseCwd,
+            includeRemote: true,
+          });
+        if (cancelled) return;
+        setBaseBranches({
+          connection: baseConnection,
+          cwd: baseCwd,
+          branches,
+          error: "",
+        });
+        setBase(
+          branches.find((branch) => branch.ref === "main")?.ref ||
+            branches.find((branch) => branch.ref === "origin/main")?.ref ||
+            "",
+        );
+      } catch (error) {
+        if (cancelled) return;
+        setBaseBranches({
+          connection: baseConnection,
+          cwd: baseCwd,
+          branches: [],
+          error: error instanceof Error ? error.message : String(error),
+        });
+        setBase("");
+      }
+    }
+    void loadBranches();
+    return () => {
+      cancelled = true;
+    };
+  }, [wantsWorktree, baseConnection, baseCwd]);
+  const baseReady =
+    baseBranches?.connection === baseConnection &&
+    baseBranches?.cwd === baseCwd;
+  const branches = baseReady ? baseBranches.branches : [];
+  const baseError = baseReady ? baseBranches.error : "";
   const branchError = wantsWorktree ? worktreeBranchError(branch) : "";
+  const selectedBase = branches.find((branch) => branch.ref === base);
   const worktreeArg = useMemo(
-    () => (wantsWorktree ? { branch } : undefined),
-    [branch, wantsWorktree],
+    () =>
+      wantsWorktree && selectedBase
+        ? { branch, base: worktreeBaseRef(selectedBase) }
+        : undefined,
+    [branch, selectedBase, wantsWorktree],
   );
-  const worktreeInvalid = wantsWorktree && Boolean(branchError);
+  const worktreeInvalid =
+    wantsWorktree &&
+    (Boolean(branchError || baseError) || !baseReady || !selectedBase);
+  const baseMessage =
+    baseError ||
+    (baseReady && !branches.length
+      ? "No base branches are available."
+      : baseReady && !base
+        ? "main is unavailable. Choose a base branch."
+        : "");
   useEffect(() => {
     if (!canWorktree && checkout !== "current") setCheckout("current");
   }, [canWorktree, checkout]);
@@ -500,13 +577,6 @@ export function PanelPickerDialog({
                 : "ready"
             }`;
   const setupProfile = setupHosts.find((item) => item.id === setupPick);
-  const slug = branch.replace(/\//g, "-");
-  // A remote worktree is shown from that host's home, not this Mac's.
-  const shownParent =
-    targetIsSsh && matrix
-      ? checkoutPath(matrix).replace(/\/[^/]*$/, "")
-      : tilde(targetWorkspace.cwd.replace(/\/[^/]*$/, ""), system?.home);
-  const base = targetWorkspace.cwd.split("/").pop() || "";
   const pick = (next: { account?: string; profile?: string }) => {
     accountTouched.current = true;
     setSelectedClaudeAccountId(next.account || "");
@@ -670,24 +740,50 @@ export function PanelPickerDialog({
         )}
       </section>
       {wantsWorktree ? (
-        <div className="pk-worktree-line">
-          <span className="pk-branch">
-            <GitBranch size={12} aria-hidden />
-            <input
-              aria-label="Branch"
-              value={branch}
-              onChange={(event) => setBranch(event.target.value)}
-              placeholder="feature/my-change"
-            />
-          </span>
-          <span className="pk-info">
-            {branchError ? (
-              <span className="pk-error">{branchError}</span>
+        <>
+          <div className="pk-worktree-line">
+            <label className="pk-base">
+              <span>Base</span>
+              <select
+                aria-label="Base branch"
+                value={baseReady ? base : ""}
+                disabled={!baseReady || !branches.length}
+                onChange={(event) => setBase(event.target.value)}
+              >
+                {!baseReady ? (
+                  <option value="">Loading branches…</option>
+                ) : (
+                  <>
+                    {!base && <option value="">Choose a base branch</option>}
+                    {branches.map((branch) => (
+                      <option key={branch.ref} value={branch.ref}>
+                        {branch.remoteOnly ? branch.ref : branch.name}
+                      </option>
+                    ))}
+                  </>
+                )}
+              </select>
+            </label>
+            <span className="pk-branch">
+              <GitBranch size={12} aria-hidden />
+              <input
+                aria-label="Branch"
+                value={branch}
+                onChange={(event) => setBranch(event.target.value)}
+                placeholder="feature/my-change"
+              />
+            </span>
+          </div>
+          <p className="pk-info">
+            {branchError || baseMessage ? (
+              <span className="pk-error">{branchError || baseMessage}</span>
+            ) : !baseReady ? (
+              "Loading base branches…"
             ) : (
-              `from ${hostContext.projectGit[targetWorkspace.id]?.branch || project?.git.defaultBranch || "main"} · ${shownParent}/${base}-${slug}`
+              `New worktree from ${selectedBase?.name || base} on ${launchLabel}`
             )}
-          </span>
-        </div>
+          </p>
+        </>
       ) : (
         <p className="pk-info">{info}</p>
       )}

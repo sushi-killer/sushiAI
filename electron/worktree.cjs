@@ -54,8 +54,8 @@ function worktreePath(root, branch) {
   return path.join(path.dirname(root), `${path.basename(root)}-${slug}`);
 }
 
-function worktreeAddArgs(branch, targetPath) {
-  return ["worktree", "add", "-b", branch, targetPath];
+function worktreeAddArgs(branch, targetPath, base = "refs/heads/main") {
+  return ["worktree", "add", "-b", branch, targetPath, base];
 }
 
 function firstLine(text) {
@@ -100,6 +100,7 @@ async function git(root, args, execFn, timeout = 15000) {
 async function createWorktree(
   cwd,
   branch,
+  base = "refs/heads/main",
   { execFn = execute, stat = fs.statSync } = {},
 ) {
   if (
@@ -110,6 +111,8 @@ async function createWorktree(
     throw new Error("Choose an existing project folder.");
   const branchError = worktreeBranchError(branch);
   if (branchError) throw new Error(branchError);
+  if (typeof base !== "string" || !base || base.startsWith("-"))
+    throw new Error("Choose an existing base branch.");
   let root;
   try {
     root = await git(cwd, ["rev-parse", "--show-toplevel"], execFn);
@@ -125,7 +128,7 @@ async function createWorktree(
   // finish. The root travels back so the caller can say which repository the
   // worktree was cut from - `rev-parse` walks upward, so a project folder
   // inside an outer repository resolves to that outer one.
-  await git(root, worktreeAddArgs(branch, targetPath), execFn, 0);
+  await git(root, worktreeAddArgs(branch, targetPath, base), execFn, 0);
   return { path: targetPath, root };
 }
 

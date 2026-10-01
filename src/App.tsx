@@ -519,11 +519,9 @@ export function App() {
             />
           ) : dialog.kind === "workspace-actions" && target ? (
             <ProjectSettingsDialog
-              cwd={target!.workspace.cwd}
-              endpoint={target!.workspace.connection}
-              remote={target!.workspace.connection?.startsWith("ssh:") || false}
-              workspaceName={target!.workspace.name}
-              sessionCount={target!.workspace.panels.length}
+              workspace={target!.workspace}
+              workspaces={workspaces}
+              onEndWorkspace={endWorkspace}
               onRename={(name) =>
                 ws.renameWorkspace(target!.workspace.id, name)
               }

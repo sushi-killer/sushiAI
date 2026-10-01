@@ -280,6 +280,30 @@ export type ProjectImportPreview = {
   newServers: string[];
   removedServers: string[];
 };
+export type Worktree = {
+  path: string;
+  branch: string;
+  head: string;
+  committedAt: number;
+  exists: boolean;
+  changes: number;
+  merged: boolean;
+  ahead: number;
+  locked: boolean;
+  main: boolean;
+};
+
+/** One host's worktrees of a project, or why they could not be read. */
+export type WorktreeList =
+  | {
+      host: string;
+      cwd: string;
+      root: string;
+      base: string;
+      worktrees: Worktree[];
+    }
+  | { host: string; cwd: string; error: string };
+
 export type ProjectHostReadiness = {
   /** `uname -sm` of the host, e.g. "Linux x86_64". */
   platform?: string;
@@ -480,6 +504,21 @@ export interface Bridge {
     branch: string,
     base?: string,
   ): Promise<{ path: string }>;
+  /** The worktrees of a project on every host it has a folder on, one list
+   * per host; `id` is the project's, or null for a folder without one. */
+  worktreesList(
+    id: string | null,
+    endpoint: string | undefined,
+    cwd: string,
+  ): Promise<WorktreeList[]>;
+  /** Removes a linked worktree (its folder, changes and all) or forgets one
+   * whose folder is gone, and deletes its branch when asked. */
+  worktreeRemove(
+    endpoint: string,
+    cwd: string,
+    path: string,
+    deleteBranch: boolean,
+  ): Promise<void>;
   appPreferences(): Promise<AppPreferences>;
   appPreferencesSet(patch: Partial<AppPreferences>): Promise<AppPreferences>;
   mascotShortcutStatus(): Promise<MascotShortcutStatus>;

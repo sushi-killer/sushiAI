@@ -1,39 +1,40 @@
 import { useCallback, useEffect, useState } from "react";
-import { Globe, Lock, Server, Settings } from "lucide-react";
-import type { ConnectionProfile, Project } from "./types";
+import { GitBranch, Globe, Lock, Server, Settings } from "lucide-react";
+import type { ConnectionProfile, Project, Workspace } from "./types";
 import { ProjectMcpServersTab } from "./ProjectMcpServersTab";
 import { ProjectEnvironmentTab } from "./ProjectEnvironmentTab";
 import { ProjectGeneralTab } from "./ProjectGeneralTab";
 import { ProjectHostsTab } from "./ProjectHostsTab";
+import { ProjectWorktreesTab } from "./ProjectWorktreesTab";
 import { ProjectPage } from "./ProjectPage";
 import { repoSlug } from "./projectPrepare";
 import { takePendingTab } from "./app/openSettings";
 
-type Tab = "General" | "Environment" | "MCP servers" | "Hosts";
+type Tab = "General" | "Environment" | "MCP servers" | "Worktrees" | "Hosts";
 const TABS = [
   ["General", Settings],
   ["Environment", Lock],
   ["MCP servers", Server],
+  ["Worktrees", GitBranch],
   ["Hosts", Globe],
 ] as const;
 
 export function ProjectSettingsDialog({
-  cwd,
-  endpoint,
-  remote,
-  workspaceName,
-  sessionCount,
+  workspace,
+  workspaces,
   onRename,
   onCloseWorkspace,
+  onEndWorkspace,
 }: {
-  cwd: string;
-  endpoint?: string;
-  remote: boolean;
-  workspaceName: string;
-  sessionCount: number;
+  workspace: Workspace;
+  workspaces: Workspace[];
   onRename: (name: string) => Promise<void>;
   onCloseWorkspace: () => Promise<void>;
+  onEndWorkspace: (workspace: Workspace) => Promise<void>;
 }) {
+  const { cwd, connection: endpoint, name: workspaceName } = workspace;
+  const remote = endpoint?.startsWith("ssh:") || false;
+  const sessionCount = workspace.panels.length;
   const [project, setProject] = useState<Project | null>(null);
   const [tab, setTab] = useState<Tab>(() => takePendingTab(cwd, endpoint));
   const [error, setError] = useState("");
@@ -156,6 +157,16 @@ export function ProjectSettingsDialog({
               </p>
             </ProjectPage>
           ))}
+        {tab === "Worktrees" && (
+          <ProjectWorktreesTab
+            project={project}
+            cwd={cwd}
+            endpoint={endpoint}
+            hosts={hostRows}
+            workspaces={workspaces}
+            onEndWorkspace={onEndWorkspace}
+          />
+        )}
         {tab === "Hosts" && (
           <ProjectHostsTab
             project={project}

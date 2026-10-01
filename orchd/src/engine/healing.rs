@@ -270,6 +270,17 @@ pub(super) async fn heal_feasibility(
     };
     let mut changed = false;
     for (failed, ruling) in rulings {
+        // 127: the shell could not find a program. A rewrite to a check the
+        // repo can run is fine, but "unrelated" would be this host's PATH or
+        // toolchain quietly switching the check off: it keeps gating.
+        if failed.code == Some(127) && matches!(ruling, Feasibility::Unrelated { .. }) {
+            task.decisions.push(format!(
+                "Orchestrator: check {} cannot find a program on this host (exit 127); it keeps gating - fix the host's PATH or toolchain",
+                failed.command
+            ));
+            changed = true;
+            continue;
+        }
         changed |= apply_feasibility(&mut task, &failed.command, ruling);
     }
     if changed {

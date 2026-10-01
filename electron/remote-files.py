@@ -189,13 +189,31 @@ def git_branches_result(base):
     return {"branches": branches}
 
 
+def remote_url(base):
+    # The remote a checkout is known by: the one its branch tracks, else
+    # origin, else the first one it has. get-url applies insteadOf rewrites.
+    try:
+        names = [n for n in git(base, "remote").split("\n") if n]
+    except ValueError:
+        return ""
+    if not names:
+        return ""
+    try:
+        branch = git(base, "symbolic-ref", "-q", "--short", "HEAD").strip()
+        tracked = git(base, "config", "branch." + branch + ".remote").strip() if branch else ""
+    except ValueError:
+        tracked = ""
+    name = next((n for n in (tracked, "origin", names[0]) if n in names), names[0])
+    try:
+        return git(base, "remote", "get-url", name).strip()
+    except ValueError:
+        return ""
+
+
 def git_remote_result(base):
     # Missing repo or missing "origin" both raise the same way from git() -
     # neither is an error worth surfacing, just "no remote to match on".
-    try:
-        url = git(base, "remote", "get-url", "origin").strip()
-    except ValueError:
-        url = ""
+    url = remote_url(base)
     try:
         # Every worktree of one repository shares this directory; separate
         # clones never do, which is what tells the two apart.

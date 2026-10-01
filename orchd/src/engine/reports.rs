@@ -351,6 +351,7 @@ impl App {
             backlog: None,
             id: uuid::Uuid::new_v4().to_string(),
             repo_root: PathBuf::from(&task.repo),
+            project_id: task.project_id.clone(),
             title: follow_up_title(task),
             goal: String::new(),
             criteria: vec![],

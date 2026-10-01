@@ -330,7 +330,7 @@ test("a workspace missing from the snapshot stays with every Herdr pane ended", 
         { workspace_id: "w1", label: "One" },
         { workspace_id: "w2", label: "Two" },
       ],
-      [pane("a"), pane("b", "w2")],
+      [pane("a", "w1", { cwd: "/one" }), pane("b", "w2", { cwd: "/two" })],
     ),
     "local",
   );
@@ -388,5 +388,137 @@ test("a workspace rebound to a new Herdr id adopts it and keeps its panels", asy
       ["herdr:local:n", false],
       ["herdr:local:a", true],
     ],
+  );
+});
+
+test("a dropped workspace is removed once the host has a live one at the same folder", async () => {
+  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
+  const host = "ssh:host-a";
+  const first = reconcileHerdrWorkspaces(
+    [],
+    snap(
+      [
+        { workspace_id: "w5", label: "app" },
+        { workspace_id: "w7", label: "docs" },
+      ],
+      [
+        pane("p1", "w5", { cwd: "/srv/app" }),
+        pane("p2", "w7", { cwd: "/srv/docs" }),
+      ],
+    ),
+    host,
+  );
+  // The host restarted: w5 is gone and a session made w9 at the same folder.
+  const next = reconcileHerdrWorkspaces(
+    first,
+    snap(
+      [{ workspace_id: "w9", label: "app" }],
+      [pane("p3", "w9", { cwd: "/srv/app" })],
+    ),
+    host,
+  );
+  assert.deepEqual(
+    next.map((workspace) => workspace.id),
+    ["herdr:ssh:host-a:w7", "herdr:ssh:host-a:w9"],
+  );
+});
+
+test("a workspace keeps its folder when a pane cds away, and a remote one never gets the local home", async () => {
+  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
+  const first = reconcileHerdrWorkspaces(
+    [],
+    snap(
+      [{ workspace_id: "w1", label: "App" }],
+      [pane("p1", "w1", { cwd: "/srv/app" })],
+    ),
+    "ssh:host-a",
+    "/local/home",
+  );
+  const moved = reconcileHerdrWorkspaces(
+    first,
+    snap(
+      [{ workspace_id: "w1", label: "App" }],
+      [pane("p1", "w1", { cwd: "/tmp" })],
+    ),
+    "ssh:host-a",
+    "/local/home",
+  );
+  assert.equal(moved[0].cwd, "/srv/app");
+  const unknown = reconcileHerdrWorkspaces(
+    [],
+    snap([{ workspace_id: "w2", label: "New" }], [pane("p2", "w2")]),
+    "ssh:host-a",
+    "/local/home",
+  );
+  assert.equal(unknown[0].cwd, "");
+});
+
+test("a dropped workspace folds into its folder's live one: its chat moves, its ended panes go", async () => {
+  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
+  const host = "ssh:host-a";
+  const [first] = reconcileHerdrWorkspaces(
+    [],
+    snap(
+      [{ workspace_id: "w1", label: "app" }],
+      [pane("p1", "w1", { cwd: "/srv/app" })],
+    ),
+    host,
+  );
+  const withChat = {
+    ...first,
+    panels: [...first.panels, { id: "chat", kind: "chat", title: "Thread" }],
+  };
+  const next = reconcileHerdrWorkspaces(
+    [withChat],
+    snap(
+      [{ workspace_id: "w2", label: "app" }],
+      [pane("p2", "w2", { cwd: "/srv/app" })],
+    ),
+    host,
+  );
+  assert.deepEqual(
+    next.map((workspace) => [
+      workspace.id,
+      workspace.panels.map((panel) => panel.id),
+    ]),
+    [["herdr:ssh:host-a:w2", ["herdr:ssh:host-a:p2", "chat"]]],
+  );
+});
+
+test("two dropped workspaces of one folder, nothing live, become one", async () => {
+  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
+  const workspaces = reconcileHerdrWorkspaces(
+    [],
+    snap(
+      [
+        { workspace_id: "w1", label: "app" },
+        { workspace_id: "w2", label: "app" },
+      ],
+      [
+        pane("p1", "w1", { cwd: "/srv/app" }),
+        pane("p2", "w2", { cwd: "/srv/app" }),
+      ],
+    ),
+    "local",
+  );
+  const withChat = workspaces.map((workspace, index) =>
+    index === 1
+      ? {
+          ...workspace,
+          panels: [
+            ...workspace.panels,
+            { id: "chat", kind: "chat", title: "Thread" },
+          ],
+        }
+      : workspace,
+  );
+  // The host restarted and lists neither.
+  const next = reconcileHerdrWorkspaces(withChat, snap([], []), "local");
+  assert.deepEqual(
+    next.map((workspace) => [
+      workspace.id,
+      workspace.panels.map((panel) => panel.id),
+    ]),
+    [["herdr:local:w1", ["herdr:local:p1", "chat"]]],
   );
 });

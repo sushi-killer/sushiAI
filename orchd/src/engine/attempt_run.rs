@@ -67,8 +67,27 @@ pub(super) async fn run_harness(
     mut detector: Option<LoopDetector>,
 ) -> Result<harness::RunOutcome, RunError> {
     let started_at = now_ms();
-    let argv = harness::build_argv(req);
-    let bin = resolve_binary(req.harness);
+    let mut argv = harness::build_argv(req);
+    let mut bin = resolve_binary(req.harness);
+    #[cfg(unix)]
+    if req.harness == Harness::Claude {
+        if let Some(settings_path) = req.settings_path {
+            let token_path = settings_path.with_file_name("oauth-token");
+            if token_path.is_file() {
+                let claude = bin;
+                let args = argv;
+                bin = "/bin/sh".to_string();
+                argv = vec![
+                    "-c".into(),
+                    "exec 3<\"$1\"; rm -f \"$1\"; export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; shift; exec \"$@\"".into(),
+                    "sushiai".into(),
+                    token_path.to_string_lossy().into_owned(),
+                    claude,
+                ];
+                argv.extend(args);
+            }
+        }
+    }
     // Asked before the run, not after, so a stand-in binary that logs its
     // argv per invocation ends with the run's own.
     let codex_version = match req.harness {
@@ -76,12 +95,43 @@ pub(super) async fn run_harness(
         Harness::Claude => None,
     };
     let mut cmd = tokio::process::Command::new(&bin);
+    let (project_env, redaction_env) = app
+        .store
+        .load_task(task_id)
+        .ok()
+        .flatten()
+        .and_then(|task| {
+            task.project_id.or_else(|| {
+                app.secrets
+                    .read()
+                    .unwrap()
+                    .repo_projects
+                    .get(&task.repo)
+                    .cloned()
+            })
+        })
+        .map_or_else(
+            || {
+                (
+                    std::collections::HashMap::new(),
+                    std::collections::HashMap::new(),
+                )
+            },
+            |id| {
+                let secrets = app.secrets.read().unwrap();
+                let agent = secrets.projects.get(&id).cloned().unwrap_or_default();
+                let mut known = agent.clone();
+                known.extend(secrets.project_mcp.get(&id).cloned().unwrap_or_default());
+                (agent, known)
+            },
+        );
     cmd.args(&argv)
         .current_dir(worktree)
         .env("PATH", augmented_path())
         // Lets a repo's own hooks tell an orchd-run agent from a person's
         // session (sushiAI's lesson reminder stays quiet for it).
         .env("ORCHD_TASK", task_id)
+        .envs(&project_env)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -180,6 +230,7 @@ pub(super) async fn run_harness(
                 match line {
                     Ok(Some(l)) => {
                         last_output = tokio::time::Instant::now();
+                        let l = redact(&l, &redaction_env);
                         append_line(events_path, &l);
                         if let Some(note) = harness::feed_stream_line(harness_kind, &l, &mut outcome) {
                             app.broadcast_log(task_id, attempt_n, note);
@@ -218,6 +269,7 @@ pub(super) async fn run_harness(
                 match line {
                     Ok(Some(l)) => {
                         last_output = tokio::time::Instant::now();
+                        let l = redact(&l, &redaction_env);
                         append_line(events_path, &format!("[stderr] {l}"));
                         stderr_tail.push_str(&l);
                         stderr_tail.push('\n');
@@ -257,6 +309,14 @@ pub(super) async fn run_harness(
         started_at,
     );
     Ok(outcome)
+}
+
+fn redact(line: &str, env: &std::collections::HashMap<String, String>) -> String {
+    let mut values: Vec<_> = env.values().filter(|value| !value.is_empty()).collect();
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values.into_iter().fold(line.to_string(), |text, value| {
+        text.replace(value, "[REDACTED]")
+    })
 }
 
 /// Prices a run the harness reported no cost for: Codex from its token
@@ -413,4 +473,22 @@ pub(super) fn read_cancelled_fingerprint(events_path: &Path) -> Option<Fingerpri
     let text = std::fs::read_to_string(&path).ok()?;
     let _ = std::fs::remove_file(&path);
     serde_json::from_str(&text).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact;
+    use std::collections::HashMap;
+
+    #[test]
+    fn redacts_known_values_longest_first() {
+        let env = HashMap::from([
+            ("TOKEN".to_string(), "invented-secret-value".to_string()),
+            ("SHORT".to_string(), "xyz".to_string()),
+        ]);
+        assert_eq!(
+            redact("invented-secret-value xyz", &env),
+            "[REDACTED] [REDACTED]"
+        );
+    }
 }

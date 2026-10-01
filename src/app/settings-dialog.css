@@ -2,10 +2,10 @@
  * scrolling main column. The shared `.modal` frame is widened and unpadded
  * only when it holds this shell. */
 /* Figma "Settings · in window": the app stays visible behind a light,
- * unblurred scrim and the dialog hangs 72px from the window top. */
+ * unblurred scrim; the dialog is centred in the window (72px from the top of
+ * the 864px frame, and the same from its foot, at any window height). */
 .modal-backdrop:has(> .modal > .settings-shell) {
-  align-items: flex-start;
-  padding-top: 72px;
+  align-items: center;
   background: rgb(0 0 0 / 55%);
   backdrop-filter: none;
 }

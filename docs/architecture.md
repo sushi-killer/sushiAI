@@ -35,6 +35,7 @@ flowchart TB
       extMgr["extensions/*<br/>manifest validator"]
       herdrIpc["herdr.cjs, connections.cjs"]
       remoteSvc["orchestrator-remote.cjs<br/>install, start, forward, preflight<br/>per SSH profile"]
+      projectStore[("projects.json + project-secrets.json<br/>metadata + safeStorage values")]
       attention["attention.cjs<br/>tray, Dock badge, notifications,<br/>close-to-menu-bar, app preferences"]
       mascotSvc["mascot.cjs<br/>mascot window, notice queue,<br/>mascot-* IPC, presenting watch"]
       winState["window-state.cjs<br/>bounds, display, maximized"]
@@ -43,6 +44,8 @@ flowchart TB
     end
     orchPanel <--> preload <--> orchSvc
     orchSvc --> remoteSvc --> herdrIpc
+    projectStore -->|host values over forwarded socket;<br/>SSH terminal values via one-shot stdin file| remoteOrchd
+    projectStore -->|"prepare: clone + install over ssh,<br/>values on stdin (none for a host switched off)"| remoteHost[("SSH host ~/sushiai/slug")]
     inbox -->|attention-badge, attention-notify| preload --> attention
     wsState <-->|workspace-state-read / -flush sendSync,<br/>-write invoke| preload <--> wsSnap
     orchSvc -->|task notice| attention
@@ -113,7 +116,12 @@ flowchart TB
   side --> repo
   herdrIpc <--> herdr
   remoteSvc <-->|shared ssh master,<br/>forwarded orchd.sock + token| remoteOrchd[("orchd on an SSH host<br/>detached, outlives the app")]
+  remoteOrchd -->|task agent env + project MCP| taskAgent
 ```
+
+Project metadata is stored in `projects.json`; environment and account values are stored separately in `project-secrets.json` through Electron `safeStorage`. The renderer receives presence and masked hints, while the main process resolves values for the selected project, stage, and host. Local sessions receive their stage-specific environment at launch. Every SSH host the owner added receives a project's values (adding the host is the consent) unless the owner switched sending off for that project and host; remote task values cross through the forwarded orchd socket; remote terminal values use a one-shot file sent over SSH stdin and removed after sourcing. Switching sending off prevents later reads from including that host's project values and replaces what that host's daemon already holds (when the host is offline, at the next connection).
+
+Every writer of the project store (`upsert`, `updateEnv`, `updateMcp`, `mergeImport`, `setSecret`, `setHostSecret`, `clearSecret`, `setHostWithheld`, `setHostOverrides`, `setGitToken`, `delete`) runs one at a time under a single lock and reads fresh state; `upsert` never rewrites the variables or MCP servers of an existing project, and ids that are not own keys of the store are unknown projects. Project IPCs: `projects:env:update` and `projects:mcp:update` (variables and servers, MCP credentials become `${VAR}` references), `projects:git-token:set`, `projects:import-local`, `projects:import-mcp-text`, `projects:scan-source`, `projects:env:review-text`, `projects:env:classify`, `projects:local-install`, and `projects:host:prepare`. A host the owner added gets a project's values with no prompt: the "+" picker's "Prepare <host> and start" and the New project flow just clone, install, send the values and go on. The one control is "Don't send secrets to this host" (Project settings → Hosts, off by default, stored as `hosts[host].withheld`): with it on, `projects:host:prepare` clones with the host's own git login and installs with no value, task and terminal reads return none, and `setHostWithheld` makes `OrchestratorHosts.refreshSecrets(host)` re-push the allowed values so the host's daemon drops what it holds. Tasks and SSH terminals get the values; Herdr panes never do. `#withMcp` sends the enabled server definitions, with `${VAR}` references, to a remote orchd regardless of that switch; the values behind those references and the project's variables reach a remote orchd only through `#pushSecrets`, which honours it. Every folder has a project: `projects:attach` finds it by the folder's git remote (the branch's upstream remote, else `origin`, else the first one, through `insteadOf`), else by its host and path, and a folder that gains a remote later keeps its project, which follows the remote; `projects:import-local` pulls a folder's `.env`, `.env.local`, `.mcp.json` and Claude config into the project (new keys only, empty secrets filled, removed keys not brought back unless asked), previewable. `claude-mcp-usage` counts MCP tool calls per server and plugin from Claude Code's own transcripts for the last 30 days.
 
 ## 2. Task lifecycle
 

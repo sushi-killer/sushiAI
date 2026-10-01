@@ -69,11 +69,22 @@ export function reopenInSlot(
   };
 }
 
-/** True for a Herdr workspace whose host no longer lists it: it has Herdr
- * panes and every one of them is ended. */
+/** The line a Herdr pane is typed to start an agent. With values to source,
+ * the agent runs in a subshell: the values (a token, a key, the project's
+ * secrets) live in the agent's process only, and are gone from the pane's
+ * shell when it exits. */
+export function agentLine(prefix: string, command: string, settings = "") {
+  return prefix ? `(${prefix}exec ${command}${settings})` : command + settings;
+}
+
+/** True for a Herdr workspace whose host no longer lists it: none of its
+ * Herdr panes is live. Herdr closes a workspace with its last pane, so one
+ * left with no panes at all (its last session closed) is gone too. */
 export function isVanished(workspace: Workspace): boolean {
-  const herdr = workspace.panels.filter((panel) => panel.herdrId);
-  return herdr.length > 0 && herdr.every((panel) => panel.ended);
+  return (
+    Boolean(workspace.herdrId) &&
+    !workspace.panels.some((panel) => panel.herdrId && !panel.ended)
+  );
 }
 
 /** The workspace that currently owns a panel id, wherever it lives - not
@@ -272,4 +283,23 @@ export function retitleTerminal(
           : "zsh"
         : panel.title,
   };
+}
+
+/** The Herdr workspace a project already has on a host: the one at its path,
+ * or the one a start just made (before the host's listing catches up). A
+ * session for the project is one more panel in it, never another workspace. */
+export function findHostWorkspace(
+  workspaces: Workspace[],
+  defaultEndpoint: string,
+  endpoint: string,
+  cwd: string,
+  madeId?: string,
+): Workspace | undefined {
+  return workspaces.find(
+    (w) =>
+      w.herdrId &&
+      !isVanished(w) &&
+      (w.connection || defaultEndpoint) === endpoint &&
+      (w.cwd === cwd || w.id === madeId),
+  );
 }

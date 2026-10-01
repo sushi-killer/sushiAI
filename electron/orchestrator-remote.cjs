@@ -548,6 +548,7 @@ module.exports = {
   localArtifacts,
   parseProbe,
   parsePreflight,
+  PREFLIGHT_SCRIPT,
   installPlan,
   startScript,
   uploadScript,

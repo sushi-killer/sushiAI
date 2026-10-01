@@ -25,7 +25,7 @@ import {
   presetOf,
   type AutonomyPreset,
 } from "./autonomy";
-import type { ChatModels, ModelProfile } from "../types";
+import type { ChatModels, ClaudeAccount, ModelProfile } from "../types";
 import type { Harness, Route, Settings, Tier, Variant } from "./types";
 
 const HARNESSES: Harness[] = ["claude", "codex"];
@@ -306,6 +306,7 @@ function RouteRow({
   route,
   chatModels,
   profiles,
+  accounts,
   problem,
   onChange,
   onDelete,
@@ -315,6 +316,7 @@ function RouteRow({
   problem?: string | null;
   chatModels: ChatModels;
   profiles: ModelProfile[];
+  accounts: ClaudeAccount[];
   onChange(next: Route): void;
   onDelete(): void;
 }) {
@@ -341,6 +343,7 @@ function RouteRow({
             harness: harness as Harness,
             model: undefined,
             profileId: undefined,
+            accountId: undefined,
           })
         }
       >
@@ -377,20 +380,38 @@ function RouteRow({
         ))}
       </Select>
       {route.harness === "claude" ? (
-        <Select
-          label="Model profile"
-          value={route.profileId || ""}
-          onChange={(profileId) =>
-            onChange({ ...route, profileId: profileId || undefined })
-          }
-        >
-          <option value="">Anthropic</option>
-          {profiles.map((profile) => (
-            <option key={profile.id} value={profile.id}>
-              {profile.label}
-            </option>
-          ))}
-        </Select>
+        <>
+          <Select
+            label="Model profile"
+            value={route.profileId || ""}
+            onChange={(profileId) =>
+              onChange({ ...route, profileId: profileId || undefined })
+            }
+          >
+            <option value="">Default</option>
+            {profiles.map((profile) => (
+              <option key={profile.id} value={profile.id}>
+                {profile.label}
+              </option>
+            ))}
+          </Select>
+          <Select
+            label="Claude account"
+            value={route.accountId || ""}
+            onChange={(accountId) =>
+              onChange({ ...route, accountId: accountId || undefined })
+            }
+          >
+            <option value="">Signed-in account</option>
+            {accounts
+              .filter((account) => account.hasValue)
+              .map((account) => (
+                <option key={account.id} value={account.id}>
+                  {account.label}
+                </option>
+              ))}
+          </Select>
+        </>
       ) : (
         <span />
       )}
@@ -453,6 +474,7 @@ function OrchestratorSettingsBody({
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saved, setSaved] = useState<Settings | null>(null);
   const [profiles, setProfiles] = useState<ModelProfile[]>([]);
+  const [accounts, setAccounts] = useState<ClaudeAccount[]>([]);
   const [chatModels, setChatModels] = useState<ChatModels>({});
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -467,12 +489,14 @@ function OrchestratorSettingsBody({
     Promise.all([
       orchestratorClient.settingsGet(),
       window.bridge?.modelProfilesList() ?? Promise.resolve([]),
+      window.bridge?.claudeAccountsList() ?? Promise.resolve([]),
       window.bridge?.chatModels() ?? Promise.resolve({}),
     ])
-      .then(([s, m, c]) => {
+      .then(([s, m, a, c]) => {
         setSettings(s);
         setSaved(s);
         setProfiles(m);
+        setAccounts(a);
         setChatModels(c);
       })
       .catch((e) => {
@@ -809,6 +833,7 @@ function OrchestratorSettingsBody({
             problem={routeProblem(preflight, route)}
             chatModels={chatModels}
             profiles={profiles}
+            accounts={accounts}
             onChange={(next) =>
               update({
                 routes: settings.routes.map((r) =>

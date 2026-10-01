@@ -8,6 +8,7 @@ pub(super) struct NewTask {
     pub(super) id: String,
     pub(super) backlog: Option<Backlog>,
     pub(super) repo_root: PathBuf,
+    pub(super) project_id: Option<String>,
     pub(super) title: String,
     pub(super) goal: String,
     pub(super) criteria: Vec<String>,
@@ -235,6 +236,8 @@ impl App {
             base: Option<String>,
             #[serde(default)]
             mcp: Option<serde_json::Value>,
+            #[serde(default, rename = "projectId")]
+            project_id: Option<String>,
             #[serde(default)]
             start: Option<bool>,
             /// The `{repo, request}` form: a one-sentence ask instead of a
@@ -357,6 +360,7 @@ impl App {
                 id: uuid::Uuid::new_v4().to_string(),
                 backlog,
                 repo_root,
+                project_id: p.project_id,
                 title,
                 goal,
                 checks: valid_checks(p.checks, p.criteria.len()),
@@ -537,6 +541,7 @@ impl App {
             },
             request: new.request,
             repo: new.repo_root.to_string_lossy().to_string(),
+            project_id: new.project_id,
             worktree: created.path.to_string_lossy().to_string(),
             worktree_removed: false,
             deliverables: vec![],

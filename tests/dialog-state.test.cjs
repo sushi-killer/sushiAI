@@ -20,10 +20,7 @@ test("every dialog kind has a label and a class", async () => {
   }
   assert.equal(DIALOG_META.pane.label, "Add panel");
   assert.equal(DIALOG_META.pane.className, "command-modal");
-  assert.equal(
-    DIALOG_META["workspace-actions"].className,
-    "workspace-actions-modal claude-controls-modal",
-  );
+  assert.equal(DIALOG_META["workspace-actions"].className, "project-dialog");
 });
 
 test("a targeted dialog reads the live workspace, not a snapshot", async () => {
@@ -62,4 +59,78 @@ test("a dialog whose target disappeared resolves to null", async () => {
   );
   assert.equal(resolveDialog({ kind: "pane" }, list), null);
   assert.equal(resolveDialog(null, list), null);
+});
+
+test("project settings can be opened by folder when the caller has no workspace id", async () => {
+  const { resolveDialog } = await import("../src/dialogs/dialog-state.ts");
+  const workspaces = [
+    { id: "a", cwd: "/work/a", panels: [] },
+    { id: "b", cwd: "/work/b", panels: [] },
+  ];
+  assert.equal(
+    resolveDialog(
+      { kind: "workspace-actions", workspaceId: "", cwd: "/work/b" },
+      workspaces,
+    )?.workspace.id,
+    "b",
+  );
+  assert.equal(
+    resolveDialog(
+      { kind: "workspace-actions", workspaceId: "", cwd: "/work/none" },
+      workspaces,
+    ),
+    null,
+  );
+  // An id still wins over a folder.
+  assert.equal(
+    resolveDialog(
+      { kind: "workspace-actions", workspaceId: "a", cwd: "/work/b" },
+      workspaces,
+    )?.workspace.id,
+    "a",
+  );
+});
+
+test("a folder opens the workspace on the same host, not the same path elsewhere", async () => {
+  const { resolveDialog } = await library;
+  const here = { ...workspace("here"), cwd: "/work/app" };
+  const there = {
+    ...workspace("there"),
+    cwd: "/work/app",
+    connection: "ssh:lab",
+  };
+  const dialog = (connection) => ({
+    kind: "workspace-actions",
+    workspaceId: "",
+    cwd: "/work/app",
+    connection,
+  });
+  assert.equal(
+    resolveDialog(dialog(undefined), [there, here])?.workspace.id,
+    "here",
+  );
+  assert.equal(
+    resolveDialog(dialog("ssh:lab"), [here, there])?.workspace.id,
+    "there",
+  );
+  assert.equal(resolveDialog(dialog("ssh:other"), [here, there]), null);
+});
+
+test("a requested project tab is used once, by its own workspace, and expires", async () => {
+  const { setPendingProjectTab, takePendingTab } =
+    await import("../src/app/openSettings.ts");
+  setPendingProjectTab("Hosts", "/work/app", "ssh:lab");
+  assert.equal(takePendingTab("/work/app", undefined), "General"); // same path, other host
+  setPendingProjectTab("Hosts", "/work/app", "ssh:lab");
+  assert.equal(takePendingTab("/work/other", "ssh:lab"), "General"); // other folder
+  assert.equal(takePendingTab("/work/app", "ssh:lab"), "General"); // already consumed
+  setPendingProjectTab("Hosts", "/work/app", "ssh:lab");
+  assert.equal(takePendingTab("/work/app", "ssh:lab"), "Hosts");
+  assert.equal(takePendingTab("/work/app", "ssh:lab"), "General");
+  // A request nobody picked up does not turn up on a later dialog.
+  setPendingProjectTab("Hosts", "/work/app");
+  assert.equal(
+    takePendingTab("/work/app", undefined, Date.now() + 60000),
+    "General",
+  );
 });

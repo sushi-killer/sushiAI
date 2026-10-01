@@ -4,6 +4,92 @@ const { quote } = require("../connections.cjs");
 const { openHerdrStream, detectAgent } = require("../terminal-stream.cjs");
 const { terminalEnvironment } = require("../terminal-text.cjs");
 const { storeTerminalAttachment } = require("../terminal-attachments.cjs");
+const { spawn } = require("node:child_process");
+const {
+  projectForFolder,
+  sessionEnvPrefix,
+  sessionAccountId,
+  accountLaunch,
+  CODEX_SESSION,
+  localCodexAuth,
+  modelLaunch,
+} = require("../project-session.cjs");
+
+function remoteEnvPayload(env) {
+  return Object.entries(env || {})
+    .map(([name, value]) => `export ${name}=${quote(value)}`)
+    .join("\n");
+}
+
+function remoteEnvBootstrap(
+  cwd,
+  command,
+  envPath,
+  tokenPath = null,
+  settings = "",
+  launchShell = "",
+) {
+  const envSetup = envPath
+    ? `trap 'rm -f ${quote(envPath)}${tokenPath ? ` ${quote(tokenPath)}` : ""}' EXIT HUP INT TERM; . ${quote(envPath)}; rm -f ${quote(envPath)};`
+    : "";
+  const tokenSetup = tokenPath
+    ? `exec 3<${quote(tokenPath)}; rm -f ${quote(tokenPath)}; export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3;`
+    : "";
+  const shell = `${envSetup} ${tokenSetup} cd ${quote(cwd)} && exec ${launchShell ? `sh -c ${quote(launchShell)}` : command ? quote(command) + settings : '"${SHELL:-/bin/sh}" -l'}`;
+  return {
+    shell,
+  };
+}
+
+function uploadRemoteFile(binary, args, payload) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(binary, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let output = "";
+    let error = "";
+    proc.stdout.setEncoding("utf8");
+    proc.stderr.setEncoding("utf8");
+    proc.stdout.on("data", (chunk) => (output += chunk));
+    proc.stderr.on("data", (chunk) => (error += chunk));
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      if (code !== 0) return reject(new Error(error || `ssh exited ${code}`));
+      resolve(output.trim());
+    });
+    proc.stdin.end(payload);
+  });
+}
+
+function remoteFileCommand() {
+  return 'umask 077; f=$(mktemp); cat > "$f"; chmod 600 "$f"; printf \'%s\' "$f"';
+}
+
+/** Deletes uploaded secret files from a host, best effort: a session that
+ * never started must not leave them behind. */
+async function removeRemoteFiles(binary, args, paths) {
+  const files = paths.filter(Boolean);
+  if (!files.length) return;
+  const quoted = files.map(
+    (path) => `'${String(path).replaceAll("'", "'\\''")}'`,
+  );
+  await uploadRemoteFile(
+    binary,
+    [...args, `rm -f ${quoted.join(" ")}`],
+    "",
+  ).catch(() => {});
+}
+
+function claudeFdLaunch(binary, tokenPath) {
+  return {
+    binary: "/bin/sh",
+    args: [
+      "-c",
+      'exec 3<"$1"; rm -f "$1"; export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; shift; exec "$@"',
+      "sushiai",
+      tokenPath,
+      binary,
+    ],
+  };
+}
 
 function registerTerminalIpc({
   handle,
@@ -17,7 +103,55 @@ function registerTerminalIpc({
   terminals,
   terminalPending,
   stageModelSettings,
+  stageClaudeAccount,
+  resolveClaudeAccount,
+  resolveModel,
+  codexAuth = localCodexAuth,
+  projects,
+  sshBinary = "/usr/bin/ssh",
 }) {
+  // A Herdr pane starts a shell the app does not launch: the values it needs
+  // are handed over as a one-shot file whose sourcing is typed into the pane.
+  handle(
+    "project-session-env",
+    async ({ endpoint, cwd, claudeAccountId, agent, modelProfileId }) => {
+      if (claudeAccountId) id(claudeAccountId);
+      if (modelProfileId) id(modelProfileId);
+      const connections = getConnections();
+      const sshFor = (host) => {
+        const remote = connections.get(host);
+        return {
+          remote,
+          args: [...connections.args(remote), "-T", remote.host],
+        };
+      };
+      return sessionEnvPrefix(
+        {
+          projects,
+          connections,
+          upload: (host, payload) =>
+            uploadRemoteFile(
+              sshBinary,
+              [...sshFor(host).args, remoteFileCommand()],
+              payload,
+            ),
+          remove: (host, file) =>
+            removeRemoteFiles(sshBinary, sshFor(host).args, [file]).catch(
+              () => {},
+            ),
+          resolveAccount: resolveClaudeAccount,
+          resolveModel,
+          codexAuth,
+        },
+        { endpoint, cwd, claudeAccountId, agent, modelProfileId },
+      );
+    },
+  );
+  handle("model-launch", async (modelProfileId) => {
+    id(modelProfileId);
+    return modelLaunch((await resolveModel(modelProfileId)).settings);
+  });
+
   const detectionTimer = setInterval(() => {
     for (const [panelId, entry] of terminals) {
       if (entry.exited || entry.source !== "pty") continue;
@@ -47,6 +181,8 @@ function registerTerminalIpc({
       endpoint,
       herdrId,
       modelProfileId,
+      claudeAccountId,
+      projectId,
     }) => {
       id(panelId);
       if (terminals.has(panelId))
@@ -55,6 +191,7 @@ function registerTerminalIpc({
           exited: terminals.get(panelId).exited,
         };
       const connections = getConnections();
+      let remoteEnvBootstrapData;
       if (herdrId) {
         id(herdrId);
         if (terminalPending.has(panelId)) {
@@ -102,17 +239,97 @@ function registerTerminalIpc({
         !["claude", "codex", "gemini", "cursor-agent"].includes(command)
       )
         throw new Error("Unsupported agent");
+      let remoteCleanup = async () => {};
       let binary = command
         ? executable(command)
         : process.env.SHELL || "/bin/zsh";
       let args = command ? [] : ["-l"];
       if (remote) {
-        binary = "/usr/bin/ssh";
+        binary = sshBinary;
+        // The renderer may not know the project: the folder says which it is.
+        const ownProject = projects
+          ? projectId
+            ? await projects.get(projectId)
+            : await projectForFolder({ projects, connections }, endpoint, cwd)
+          : null;
+        const sendToHost = ownProject
+          ? await projects.sendsValues(ownProject.id, endpoint)
+          : false;
+        const projectEnv = sendToHost
+          ? await projects.environmentFor(ownProject.id, "agent", endpoint)
+          : {};
+        // The account picked for the session goes with it whether or not the
+        // folder has a project; the project's own only where its values go.
+        let subscriptionToken = null;
+        let accountSettings = "";
+        const withheld = Boolean(ownProject) && !sendToHost;
+        const accountId =
+          command === "claude" && !modelProfileId
+            ? sessionAccountId(ownProject, sendToHost, claudeAccountId)
+            : undefined;
+        // Codex on the local login, for this session only (CODEX_SESSION).
+        let launchShell = "";
+        if (command === "codex" && !withheld) {
+          const auth = await codexAuth();
+          if (auth) {
+            projectEnv.SUSHIAI_CODEX_AUTH = auth;
+            launchShell = CODEX_SESSION;
+          }
+        }
+        if (accountId && resolveClaudeAccount) {
+          // The project's own account without a value yet runs on the host's
+          // login; one picked for the session has to work.
+          const account = await resolveClaudeAccount(accountId).catch(
+            (error) => {
+              if (claudeAccountId) throw error;
+              return null;
+            },
+          );
+          if (account?.kind === "subscription")
+            subscriptionToken = account.value;
+          else {
+            const launch = accountLaunch(account);
+            Object.assign(projectEnv, launch.vars);
+            accountSettings = launch.settings;
+          }
+        }
+        const sshArgs = [...connections.args(remote), "-T", remote.host];
+        const envPayload = remoteEnvPayload(projectEnv);
+        const envPath = envPayload
+          ? await uploadRemoteFile(
+              binary,
+              [...sshArgs, remoteFileCommand()],
+              envPayload,
+            )
+          : null;
+        let tokenPath = null;
+        try {
+          tokenPath = subscriptionToken
+            ? await uploadRemoteFile(
+                binary,
+                [...sshArgs, remoteFileCommand()],
+                subscriptionToken,
+              )
+            : null;
+        } catch (error) {
+          await removeRemoteFiles(binary, sshArgs, [envPath]);
+          throw error;
+        }
+        remoteCleanup = () =>
+          removeRemoteFiles(binary, sshArgs, [envPath, tokenPath]);
+        remoteEnvBootstrapData = remoteEnvBootstrap(
+          cwd,
+          command,
+          envPath,
+          tokenPath,
+          accountSettings,
+          launchShell,
+        );
         args = [
           ...connections.args(remote),
           "-tt",
           remote.host,
-          `export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; cd ${quote(cwd)} && exec ${command ? quote(command) : '"${SHELL:-/bin/sh}" -l'}`,
+          `export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; ${remoteEnvBootstrapData.shell}`,
         ];
       }
       if (!binary)
@@ -120,17 +337,48 @@ function registerTerminalIpc({
           `${command} is not installed. Install it and sign in from a terminal first.`,
         );
       let modelSettingsPath;
+      let accountSettingsPath;
+      let accountKeyPath;
+      let accountTokenPath;
+      const project =
+        !remote && projects ? await projects.resolveDirectory(cwd) : null;
+      if (claudeAccountId && command === "claude" && !remote) {
+        const staged = await stageClaudeAccount(claudeAccountId);
+        accountSettingsPath = staged.settingsPath;
+        accountKeyPath = staged.keyPath;
+        accountTokenPath = staged.tokenPath;
+        if (staged.kind === "subscription") {
+          const launch = claudeFdLaunch(binary, accountTokenPath);
+          binary = launch.binary;
+          args = launch.args;
+        } else {
+          args = [...args, "--settings", accountSettingsPath];
+        }
+      }
       if (modelProfileId && command === "claude" && !remote) {
         modelSettingsPath = await stageModelSettings(modelProfileId);
         args = [...args, "--settings", modelSettingsPath];
       }
-      const proc = pty.spawn(binary, args, {
-        name: "xterm-256color",
-        cols: Math.max(10, Math.min(500, cols)),
-        rows: Math.max(3, Math.min(300, rows)),
-        cwd: remote ? os.homedir() : cwd,
-        env: terminalEnvironment(),
-      });
+      let proc;
+      try {
+        proc = pty.spawn(binary, args, {
+          name: "xterm-256color",
+          cols: Math.max(10, Math.min(500, cols)),
+          rows: Math.max(3, Math.min(300, rows)),
+          cwd: remote ? os.homedir() : cwd,
+          env: {
+            ...terminalEnvironment(),
+            // A remote session's project values travel over ssh, never in
+            // the local pty's environment (ssh could forward them).
+            ...(!remote && projects && (projectId || project?.id)
+              ? await projects.environmentFor(projectId || project.id, "agent")
+              : {}),
+          },
+        });
+      } catch (error) {
+        await remoteCleanup();
+        throw error;
+      }
       const entry = {
         proc,
         history: "",
@@ -142,6 +390,9 @@ function registerTerminalIpc({
         command,
         endpoint,
         modelSettingsPath,
+        accountSettingsPath,
+        accountKeyPath,
+        accountTokenPath,
       };
       terminals.set(panelId, entry);
       proc.onData((data) => {
@@ -154,11 +405,21 @@ function registerTerminalIpc({
       });
       proc.onExit(({ exitCode }) => {
         entry.exited = true;
-        if (entry.modelSettingsPath)
+        // ssh can end before the remote shell ever reached its own cleanup.
+        void remoteCleanup();
+        if (
+          entry.modelSettingsPath ||
+          entry.accountSettingsPath ||
+          entry.accountKeyPath ||
+          entry.accountTokenPath
+        )
           for (const file of [
             entry.modelSettingsPath,
-            entry.modelSettingsPath.replace(/\.json$/, ".key"),
-          ])
+            entry.modelSettingsPath?.replace(/\.json$/, ".key"),
+            entry.accountSettingsPath,
+            entry.accountKeyPath,
+            entry.accountTokenPath,
+          ].filter(Boolean))
             fs.unlink(file).catch(() => {});
         send("terminal-data", {
           panelId,
@@ -236,4 +497,12 @@ function registerTerminalIpc({
   };
 }
 
-module.exports = { registerTerminalIpc };
+module.exports = {
+  registerTerminalIpc,
+  claudeFdLaunch,
+  remoteEnvBootstrap,
+  remoteEnvPayload,
+  uploadRemoteFile,
+  removeRemoteFiles,
+  remoteFileCommand,
+};

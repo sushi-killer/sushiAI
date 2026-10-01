@@ -75,6 +75,7 @@ type PanelState = {
   permission?: string;
   /** Set when this agent panel was launched against a custom model provider. */
   modelProfileId?: string;
+  claudeAccountId?: string;
 };
 export type CorePanel = PanelState & { kind: PanelKind };
 export type ExtensionPanel = PanelState & {
@@ -88,6 +89,13 @@ export type ExtensionPanel = PanelState & {
 };
 export type Panel = CorePanel | ExtensionPanel;
 export type ModelProviderKind = "openrouter" | "opencode-go" | "custom";
+export type ClaudeAccount = {
+  id: string;
+  label: string;
+  kind: "subscription" | "apiKey";
+  hint: string;
+  hasValue: boolean;
+};
 export type ModelProvider = {
   id: string;
   kind: ModelProviderKind;
@@ -129,6 +137,82 @@ export type Workspace = {
   connection?: string;
   panels: Panel[];
   layout: Layout | null;
+};
+export type Project = {
+  /** The folder name under ~/sushiai on a host; fixed when the project is made. */
+  slug?: string;
+  /** Folders attached to the project (by host and path). */
+  folders?: { endpoint: string; cwd: string }[];
+  id: string;
+  name: string;
+  git: { url: string; defaultBranch: string };
+  env: {
+    name: string;
+    secret: boolean;
+    hasValue?: boolean;
+    hint?: string;
+    availableTo?: string[];
+    hosts?: string[];
+  }[];
+  mcp: Record<string, unknown>;
+  setup: { install: string; check: string };
+  network: { allowedDomains: string[] };
+  sessions: { claudeAccount?: string; backend?: "herdr" | "local" };
+  targets: string[];
+  hosts?: Record<
+    string,
+    { withheld?: boolean; overrides?: Record<string, unknown> }
+  >;
+};
+/** One step of preparing a host: what it is, how it went, and how long. */
+export type ProjectPrepareStep = {
+  id: "clone" | "install" | "check";
+  state: "done" | "failed" | "pending";
+  seconds?: number;
+};
+/** What an import added: names and flags, never values. */
+export type ProjectImportResult = {
+  project: Project;
+  addedVariables: { name: string; secret: boolean }[];
+  /** Variables that existed without a value and got the folder's. */
+  filledVariables?: string[];
+  skippedVariables?: string[];
+  addedServers: string[];
+  skippedServers?: string[];
+  /** Removed by the owner earlier, so not brought back. */
+  removedVariables?: string[];
+  removedServers?: string[];
+};
+/** What pulling a folder into its project would change. */
+export type ProjectImportPreview = {
+  newVariables: string[];
+  fillVariables: string[];
+  /** Removed by the owner earlier; a forced pull brings them back. */
+  removedVariables: string[];
+  newServers: string[];
+  removedServers: string[];
+};
+export type ProjectHostReadiness = {
+  /** `uname -sm` of the host, e.g. "Linux x86_64". */
+  platform?: string;
+  checkout: { ok: boolean; path: string; nonStandard: boolean };
+  setup: {
+    ok: boolean;
+    configured: boolean;
+    /** The next run reinstalls: the lock file changed since the last install. */
+    stale?: boolean;
+    lockFile?: string;
+  };
+  clis: import("./orchestrator/types.ts").Preflight;
+  mcp: {
+    ok: boolean;
+    count: number;
+    /** Enabled stdio servers whose command the host does not have. */
+    missing?: { name: string; command: string }[];
+  };
+  secrets: { ok: boolean; count: number };
+  /** The owner switched sending this project's values to the host off. */
+  withheld: boolean;
 };
 export type Snapshot = {
   version: string;
@@ -328,6 +412,14 @@ export interface Bridge {
   chooseDirectory(): Promise<string | null>;
   chooseAttachments(): Promise<string[]>;
   pathForFile(file: File): string;
+  /** What to type into a Herdr pane so the project's values reach its shell. */
+  projectSessionEnv(options: {
+    endpoint: string;
+    cwd: string;
+    agent?: string;
+    claudeAccountId?: string;
+    modelProfileId?: string;
+  }): Promise<{ prefix: string; settings: string; launch: string }>;
   terminalOpen(options: {
     panelId: string;
     cwd: string;
@@ -337,6 +429,7 @@ export interface Bridge {
     endpoint?: string;
     herdrId?: string;
     modelProfileId?: string;
+    claudeAccountId?: string;
   }): Promise<{ history: string; exited?: boolean }>;
   terminalWrite(panelId: string, data: string): Promise<void>;
   terminalAttach(input: {
@@ -434,6 +527,12 @@ export interface Bridge {
     cwd: string;
     servers: ClaudeMcpServer[];
   }>;
+  /** Calls per MCP server (and per plugin, with the servers seen) from this
+   * project in the last 30 days. */
+  claudeMcpUsage(cwd: string): Promise<{
+    servers: Record<string, number>;
+    plugins: Record<string, { uses: number; servers: string[] }>;
+  }>;
   claudeMcpToggle(input: {
     cwd: string;
     endpoint?: string;
@@ -485,7 +584,18 @@ export interface Bridge {
     contextWindow?: number;
   }): Promise<ModelProfile>;
   modelProfilesDelete(id: string): Promise<void>;
-  modelSettingsStage(modelProfileId: string): Promise<string>;
+  modelLaunch(modelProfileId: string): Promise<string>;
+  claudeAccountsList(): Promise<ClaudeAccount[]>;
+  claudeAccountsUpsert(input: {
+    id?: string;
+    label?: string;
+    kind: ClaudeAccount["kind"];
+  }): Promise<ClaudeAccount>;
+  claudeAccountValueSet(
+    id: string,
+    value: string,
+  ): Promise<{ hasValue: boolean; hint: string }>;
+  claudeAccountDelete(id: string): Promise<void>;
   extensionsList(): Promise<import("./extensions/types.ts").ExtensionSnapshot>;
   extensionsRefresh(): Promise<
     import("./extensions/types.ts").ExtensionSnapshot
@@ -530,14 +640,175 @@ export interface Bridge {
     hidden: boolean,
   ): Promise<ConnectionProfile>;
   connectionsDelete(endpoint: string): Promise<void>;
-  connectionsConnect(endpoint: string): Promise<void>;
+  /** `setup` says what a fresh host was given ("" when nothing ran). */
+  connectionsConnect(
+    endpoint: string,
+  ): Promise<{ connected: boolean; setup: string }>;
   connectionsDisconnect(endpoint: string): Promise<void>;
   connectionsForward(endpoint: string, url: string): Promise<string>;
+  projectsList(): Promise<Project[]>;
+  projectsGet(id: string): Promise<Project | null>;
+  projectsUpsert(
+    project: Partial<Project> & { importToken?: string },
+  ): Promise<Project>;
+  projectsDelete(id: string): Promise<void>;
+  /** Variables change through these, on the stored state, never by saving a
+   * whole project: a stale copy cannot overwrite what an import added. */
+  projectEnvUpdate(
+    id: string,
+    change: { set?: Project["env"]; remove?: string[] },
+  ): Promise<Project>;
+  /** Stores the clone token, adding a GIT_TOKEN variable when none exists. */
+  projectGitTokenSet(id: string, value: string): Promise<Project>;
+  projectMcpUpdate(
+    id: string,
+    change: {
+      set?: Record<string, Record<string, unknown>>;
+      remove?: string[];
+      disabled?: string[];
+    },
+  ): Promise<Project>;
+  projectSecretSet(
+    id: string,
+    name: string,
+    value: string,
+  ): Promise<{ hasValue: boolean; hint: string }>;
+  projectHostSecretSet(
+    id: string,
+    name: string,
+    host: string,
+    value: string,
+  ): Promise<{ hasValue: boolean; hint: string }>;
+  projectSecretClear(id: string, name: string): Promise<void>;
+  /** "Don't send secrets to this host": it gets no value of the project and
+   * its daemon drops what it holds. */
+  projectHostWithhold(
+    id: string,
+    host: string,
+    withheld: boolean,
+  ): Promise<{ withheld: boolean }>;
+  projectHostOverrides(
+    id: string,
+    host: string,
+    overrides: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  projectHostCheck(
+    id: string,
+    host: string,
+    cwd?: string,
+  ): Promise<ProjectHostReadiness>;
+  /** Cheap check before a start: the project is on the host and installed. */
+  projectHostReady(
+    id: string,
+    host: string,
+  ): Promise<{ ready: boolean; path?: string; reason?: string }>;
+  projectHostPrepare(
+    id: string,
+    host: string,
+    useHostLogin?: boolean,
+    /** `pull: false` leaves an existing checkout's history alone. */
+    options?: { pull?: boolean },
+  ): Promise<
+    | {
+        ok: true;
+        path: string;
+        output: string;
+        pull: string;
+        message: string;
+        steps: ProjectPrepareStep[];
+      }
+    | {
+        ok: false;
+        stage: "clone" | "setup";
+        /** The 15 minute limit ran out; nothing says the host refused. */
+        timedOut?: boolean;
+        status?: number;
+        message: string;
+        steps: ProjectPrepareStep[];
+      }
+  >;
+  /** Parses a `.env` file the owner chose and says, per variable, whether it
+   * is a secret and how it compares with what the project already has. */
+  projectEnvReviewText(
+    id: string,
+    text: string,
+  ): Promise<
+    {
+      name: string;
+      value: string;
+      secret: boolean;
+      status: "exists" | "differs" | "new" | "same";
+    }[]
+  >;
+  /** Whether each variable name looks like a secret (the one classifier). */
+  projectEnvClassify(names: string[]): Promise<boolean[]>;
+  /** Reads a local checkout's .env files, .mcp.json and Claude config into
+   * the project, adding what is missing. Values stay in the main process. */
+  projectImportLocal(
+    id: string,
+    cwd: string,
+    options?: { endpoint?: string; force?: boolean },
+  ): Promise<ProjectImportResult>;
+  projectImportPreview(
+    id: string,
+    cwd: string,
+    options?: { endpoint?: string },
+  ): Promise<ProjectImportPreview>;
+  /** The project of a folder, made when it has none: by its git remote, else
+   * by its host and path. */
+  projectAttach(input: {
+    endpoint?: string;
+    cwd: string;
+    name?: string;
+  }): Promise<Project>;
+  projectImportMcpText(id: string, text: string): Promise<ProjectImportResult>;
+  /** Reads a source before its project exists. Secret values are held in the
+   * main process under `token`; pass it to `projectsUpsert` as `importToken`. */
+  projectScanSource(input: {
+    endpoint?: string;
+    root?: string;
+    local?: boolean;
+    example?: string;
+    mcp?: string;
+  }): Promise<{
+    token: string;
+    /** The install command the source's lock file implies, or empty. */
+    install: string;
+    servers: Record<string, Record<string, unknown>>;
+    variables: {
+      name: string;
+      secret: boolean;
+      availableTo?: string[];
+      value?: string;
+      held?: boolean;
+    }[];
+  }>;
+  projectsResolve(
+    remote: string | { remote?: string; endpoint?: string; cwd?: string },
+  ): Promise<Project | null>;
   projectInspect(
     endpoint: string | undefined,
     options: Record<string, unknown>,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic inspection result, callers narrow it themselves
   ): Promise<any>;
+  projectLocalCreate(input: {
+    url?: string;
+    cwd: string;
+    branch?: string;
+    empty?: boolean;
+  }): Promise<{ cwd: string; pull: string; message: string }>;
+  projectLocalInstall(
+    id: string,
+    cwd: string,
+  ): Promise<{ ran: boolean; seconds: number }>;
+  projectSourceInspect(url: string): Promise<{
+    branch: string;
+    envExample: string;
+    mcp: string;
+    lockFile: string;
+    /** The install command that lock file implies, or empty. */
+    install: string;
+  }>;
   projectPreview(
     endpoint: string | undefined,
     root: string,

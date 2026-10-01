@@ -2108,6 +2108,7 @@ mod tests {
             model: Some("m".into()),
             effort: None,
             profile_id: None,
+            account_id: None,
             strength: None,
         }
     }
@@ -2737,6 +2738,7 @@ mod tests {
             held_out: None,
             request: None,
             repo: "/repo".into(),
+            project_id: None,
             worktree: "/wt".into(),
             worktree_removed: false,
             deliverables: vec![],

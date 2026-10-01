@@ -381,6 +381,7 @@ mod tests {
             model: None,
             effort: None,
             profile_id: None,
+            account_id: None,
             strength: None,
         }
     }

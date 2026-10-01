@@ -10,4 +10,5 @@ export { GroupLabel } from "./GroupLabel";
 export { StageTrack } from "./StageTrack";
 export { Stepper } from "./Stepper";
 export { Tag } from "./Tag";
+export { Toggle } from "./Toggle";
 export { TaskRow } from "./TaskRow";

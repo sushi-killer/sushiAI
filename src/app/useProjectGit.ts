@@ -1,11 +1,14 @@
 import {
+  useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type Dispatch,
   type SetStateAction,
 } from "react";
 import type { Workspace } from "../types";
+import type { SessionHostContext } from "./sessionHosts.ts";
 
 /** Turns the many equivalent spellings of the same git remote
  * (`git@host:org/repo.git`, `ssh://git@host/org/repo`, `https://host/org/repo/`)
@@ -114,4 +117,56 @@ export function useProjectGit(workspaces: Workspace[], activeId: string) {
     return () => clearInterval(timer);
   }, [activeId, activeCwd, activeConnection]);
   return projectGit;
+}
+
+/** What the "+" picker is handed about hosts: the workspaces and their git
+ * state, plus the one thing it may do on its own, open a workspace on a host
+ * and close itself (a session started on a host that had no workspace). The
+ * callbacks live in refs: the object changes only when the data it carries
+ * does, so a re-render of the app never makes the picker look again. */
+export function useHostContext(
+  base: Omit<SessionHostContext, "startOnHost">,
+  createWorkspace: (
+    name: string,
+    cwd: string,
+    backend: string,
+    starter: string,
+    endpoint?: string,
+  ) => Promise<boolean>,
+  closeDialog: () => void,
+): SessionHostContext {
+  const { workspaces, projectGit, connectionProfiles, workspaceGrouping } =
+    base;
+  const latest = useRef({ createWorkspace, closeDialog });
+  latest.current = { createWorkspace, closeDialog };
+  const startOnHost = useCallback(
+    async (name: string, cwd: string, endpoint: string, starter: string) => {
+      const started = await latest.current.createWorkspace(
+        name,
+        cwd,
+        "herdr",
+        starter,
+        endpoint,
+      );
+      if (started) latest.current.closeDialog();
+      return started;
+    },
+    [],
+  );
+  return useMemo(
+    () => ({
+      workspaces,
+      projectGit,
+      connectionProfiles,
+      workspaceGrouping,
+      startOnHost,
+    }),
+    [
+      workspaces,
+      projectGit,
+      connectionProfiles,
+      workspaceGrouping,
+      startOnHost,
+    ],
+  );
 }

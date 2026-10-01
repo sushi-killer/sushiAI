@@ -15,6 +15,8 @@
   --bg-elevated: #1b1b1b;
   --bg-control: #232323;
   --bg-count: #262626;
+  --bg-dialog: #131313;
+  --scrim: rgb(0 0 0 / 0.55);
   --shadow-popover: 0 8px 30px #0008;
 
   /* Line. */
@@ -58,6 +60,10 @@
   --tone-neutral-bg: transparent;
   --tone-muted: var(--text-faint);
   --tone-muted-bg: transparent;
+
+  /* Type families. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
 
   /* Geometry. */
   --radius-sm: 4px;

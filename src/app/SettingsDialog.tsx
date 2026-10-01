@@ -13,6 +13,12 @@ import "./settings-dialog.css";
 import { RenderProfiler } from "../RenderProfiler.tsx";
 import { agentTitle } from "./agent-title.ts";
 import { errorText } from "./errors.ts";
+import {
+  OPEN_PROJECT_SETTINGS_EVENT,
+  OPEN_SETTINGS_EVENT,
+  setPendingProjectTab,
+  type ProjectSettingsTab,
+} from "./openSettings.ts";
 import { useOrchestratorEnabled } from "../orchestrator/enabled.ts";
 import { ExtensionSectionSlot } from "../extensions/ExtensionSlots.tsx";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
@@ -425,12 +431,53 @@ export function SettingsDialog({
  * the same function every render (as long as `setDialog` is), so a memoized
  * panel that receives it does not re-render. */
 export function useSettingsTab(
-  setDialog: (dialog: { kind: "settings" }) => void,
+  setDialog: (
+    dialog:
+      | { kind: "settings" }
+      | {
+          kind: "workspace-actions";
+          workspaceId: string;
+          cwd: string;
+          connection?: string;
+        },
+  ) => void,
 ) {
   const [tab, setTab] = useState<SettingsTab>("general");
   const openConnections = useCallback(() => {
     setTab("connections");
     setDialog({ kind: "settings" });
+  }, [setDialog]);
+  useEffect(() => {
+    const open = (event: Event) => {
+      setTab((event as CustomEvent<SettingsTab>).detail);
+      setDialog({ kind: "settings" });
+    };
+    window.addEventListener(OPEN_SETTINGS_EVENT, open);
+    return () => window.removeEventListener(OPEN_SETTINGS_EVENT, open);
+  }, [setDialog]);
+  useEffect(() => {
+    const open = (event: Event) => {
+      const {
+        cwd,
+        tab: target,
+        connection,
+      } = (
+        event as CustomEvent<{
+          cwd: string;
+          tab: ProjectSettingsTab;
+          connection?: string;
+        }>
+      ).detail;
+      setPendingProjectTab(target, cwd, connection);
+      setDialog({
+        kind: "workspace-actions",
+        workspaceId: "",
+        cwd,
+        connection,
+      });
+    };
+    window.addEventListener(OPEN_PROJECT_SETTINGS_EVENT, open);
+    return () => window.removeEventListener(OPEN_PROJECT_SETTINGS_EVENT, open);
   }, [setDialog]);
   return [tab, setTab, openConnections] as const;
 }

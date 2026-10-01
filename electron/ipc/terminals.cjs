@@ -190,11 +190,11 @@ function registerTerminalIpc({
             ? await projects.environmentFor(projectId, "agent", endpoint)
             : {};
         let subscriptionToken = null;
-        const trustedProjectHost = projectId
-          ? (await projects?.get(projectId))?.hosts?.[endpoint]?.trusted
+        const sendToHost = projectId
+          ? await projects?.sendsValues(projectId, endpoint)
           : false;
         if (
-          trustedProjectHost &&
+          sendToHost &&
           claudeAccountId &&
           command === "claude" &&
           stageClaudeAccount

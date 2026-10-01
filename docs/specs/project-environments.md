@@ -63,8 +63,9 @@ fragment.
 ## Sub-tasks
 
 ### S1 · Project entity and stores
+
 - Project model (`id, name, git{url, defaultBranch}, env[], mcp{}, setup{install, check},
-  network{allowedDomains}, sessions{claudeAccount, backend}, targets[]`) in `src/types.ts`.
+network{allowedDomains}, sessions{claudeAccount, backend}, targets[]`) in `src/types.ts`.
 - `electron/projects.cjs`: CRUD, atomic writes, safeStorage values, IPC (`projects:*`). The value
   never crosses IPC.
 - Workspace → project resolution by normalized remote.
@@ -73,6 +74,7 @@ fragment.
 - Files: `src/types.ts`, `electron/projects.cjs` (new), `electron/ipc/*`, `electron/preload.cjs`.
 
 ### S2 · Project dialog shell + General (depends on S1)
+
 - Replaces the `"workspace-actions"` dialog (`src/ClaudeMcpSettings.tsx`, `src/App.tsx:520`) with
   a rail: General · Environment · MCP servers · Hosts. Rename next to the name, Close project… at
   the bottom of the rail (keeps today's close flow).
@@ -82,6 +84,7 @@ fragment.
   stays under 600 lines (`tests/app-boundary.test.cjs`); screenshots saved and compared with the design concept.
 
 ### S3 · Environment tab + .env import (depends on S1)
+
 - Table: key, masked value + hint, available to (setup + agent · agent · setup only · MCP only),
   hosts (all / override).
 - Import .env: parse, mark `*_TOKEN|*_KEY|*_SECRET` as secrets, review (exists/differs/new/same),
@@ -90,6 +93,7 @@ fragment.
   is masked in the UI; screenshots saved and compared with the design concept.
 
 ### S4 · MCP servers tab (depends on S1)
+
 - Project servers with `${VAR}` references (validated against Environment). Import `.mcp.json`.
 - "Also in this project": the repo `.mcp.json` (read-only), `~/.claude.json` servers and Claude
   plugins with 30-day usage and on/off, ported from `ClaudeMcpSettings` (`electron/claude-mcp.cjs`).
@@ -97,6 +101,7 @@ fragment.
   screenshots saved and compared with the design concept.
 
 ### S5 · Local delivery (depends on S1, S3, S4; after S7 in `terminals.cjs`)
+
 - Local terminals and agents (`electron/ipc/terminals.cjs`, Herdr and local PTY) start with the
   project env for their stage. The setup-only values go only to the install step.
 - Local orchd: `secrets.set` gains `projects: {id: env}` (`electron/orchestrator.cjs:603`,
@@ -108,6 +113,7 @@ fragment.
   `npm run ci` pass.
 
 ### S6 · "+" popup, V4 (depends on S1; the account picker uses S7)
+
 - `src/app/PanelPickerDialog.tsx` redesigned. Head: project + switcher, environment pill. Host
   row: pills with readiness, Herdr/Local, New worktree checkbox (branch field on the path line).
   Two lists: agents (1–4), tools (letter keys) plus extension panels (`ExtensionPanelOptions`).
@@ -117,6 +123,7 @@ fragment.
   smoke; screenshots saved and compared with the design concept.
 
 ### S7 · Claude multi-subscription (depends on S1)
+
 - `ClaudeAccount {id, label, kind: subscription|apiKey, hint}` in Settings → Providers. "Add
   subscription" opens a terminal pane with `claude setup-token`; the token is pasted into a masked
   field and stored like a provider key.
@@ -128,6 +135,7 @@ fragment.
   not show the token; an orchd task uses the route's account; tests for fd passing.
 
 ### S8 · Hosts and trust (depends on S1) — M2
+
 - Hosts tab: readiness matrix (checkout, setup, CLIs, MCP, secrets) from the existing preflight
   (`electron/orchestrator-remote.cjs:87`) plus a checkout check against the project remote;
   trusted / not trusted; per-host overrides; Revoke trust.
@@ -136,6 +144,7 @@ fragment.
   getting values; screenshots saved and compared with the design concept.
 
 ### S9 · Remote delivery (depends on S5, S8)
+
 - Remote orchd gets `secrets.set` for trusted hosts only (drop the "never leave this machine"
   branch for trusted hosts). SSH terminals get a one-shot 0600 env file over stdin (and the fd
   for a subscription token), deleted after sourcing. Project MCP reaches remote tasks.
@@ -143,6 +152,7 @@ fragment.
   untrusted host gets nothing; `docs/architecture.md` arrow updated.
 
 ### S10 · Prepare a host and Run on (depends on S8, S9)
+
 - Prepare: clone into `~/sushiai/<slug>` (`GIT_ASKPASS` with the project's git token, or the
   host's own login), install when the lock-file hash changes, optional check.
 - Orchestrator composer "Run on" menu with readiness (`src/orchestrator/HostSelect.tsx`); first
@@ -152,6 +162,7 @@ fragment.
   shows the failure screen and sends nothing; screenshots saved and compared with the design concept.
 
 ### S11 · New project flow (depends on S1, S3, S8; remote clone uses S10) — M3
+
 - Replaces `src/WorkspaceDialog.tsx`: one window with steps that open in turn. Step 1 Source (git
   URL / folder on a host / empty; reads branch, `.env.example`, `.mcp.json`, lock file) → Hosts
   (checkboxes; existing checkout reused) → Environment (fill secrets, MCP, install, Claude
@@ -163,6 +174,7 @@ fragment.
   (`git init` in `~/sushiai/<slug>`); closing the window mid-create does not stop it; screenshots saved and compared with the design concept.
 
 ### S12 · Docs, evidence, release (every milestone)
+
 - `docs/architecture.md` (project store, delivery arrows), `docs/INSTALL.md` (`~/sushiai`
   standard), release fragment per milestone, `docs/LESSONS.md` entry or an explicit "none".
 - UI evidence through `.agents/skills/ui-evidence` for every changed screen, compared with the

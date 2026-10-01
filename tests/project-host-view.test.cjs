@@ -16,14 +16,14 @@ test("host view helpers", async () => {
     },
     mcp: { ok: true, count: 2 },
     secrets: { ok: true, count: 3 },
-    trusted: true,
+    withheld: false,
   };
-  assert.deepEqual(hostDots(ready, true).problems, []);
+  assert.deepEqual(hostDots(ready).problems, []);
   const bare = {
     ...ready,
     checkout: { ok: false, path: "", nonStandard: false },
   };
-  const dots = hostDots(bare, false);
+  const dots = hostDots({ ...bare, withheld: true });
   assert.equal(dots.checkout, "danger");
   assert.equal(dots.setup, null);
   assert.deepEqual(dots.problems, ["secrets"]);

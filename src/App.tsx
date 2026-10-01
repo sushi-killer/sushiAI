@@ -1,4 +1,4 @@
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { X } from "lucide-react";
 import type { Panel, Workspace } from "./types";
 import { uid } from "./layout";
@@ -30,7 +30,7 @@ import { TitleBar } from "./app/TitleBar";
 import { useExtensions } from "./app/useExtensions";
 import { useConnectionProfiles } from "./app/useConnectionProfiles";
 import { useHerdr } from "./app/useHerdr";
-import { useProjectGit } from "./app/useProjectGit";
+import { useHostContext, useProjectGit } from "./app/useProjectGit";
 import { useMergedCanvas } from "./workspace/mergedLayouts";
 import { useProjectView } from "./workspace/projectView";
 import { useSkills } from "./app/useSkills";
@@ -205,9 +205,10 @@ export function App() {
     addPanel,
     createWorkspace: ws.createWorkspace,
   });
-  const hostContext = useMemo(
-    () => ({ workspaces, projectGit, connectionProfiles, workspaceGrouping }),
-    [workspaces, projectGit, connectionProfiles, workspaceGrouping],
+  const hostContext = useHostContext(
+    { workspaces, projectGit, connectionProfiles, workspaceGrouping },
+    ws.createWorkspace,
+    closeDialog,
   );
   /** Clicking a pane inside an expanded merged row (AC21) - unlike a plain row's `showPanel`, the pane's owning workspace need not be active yet. */
   function selectHostPane(workspace: Workspace, panel: Panel) {
@@ -217,7 +218,6 @@ export function App() {
   }
   const primaryExtensionNavigation = primaryNavigation(extensionRegistry);
   const openPanelPicker = useCallback(() => setDialog({ kind: "pane" }), []);
-
   useAppPersistence(
     {
       workspaces,

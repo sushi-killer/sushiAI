@@ -3664,14 +3664,14 @@ iframe {
 .project-host-heading strong {
   color: #e0e0e0;
 }
-.project-host-trusted,
-.project-host-untrusted {
+.project-host-sends,
+.project-host-withheld {
   font-size: 11px;
 }
-.project-host-trusted {
+.project-host-sends {
   color: #a9c58b;
 }
-.project-host-untrusted {
+.project-host-withheld {
   color: #d9ae75;
 }
 .project-host-matrix {

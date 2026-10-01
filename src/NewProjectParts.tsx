@@ -74,7 +74,7 @@ export function StepFooter({
 /** What one host is doing while the project is created on it. */
 export type HostStep = {
   label: string;
-  state: "done" | "working" | "pending" | "failed";
+  state: "done" | "working" | "pending" | "failed" | "warning";
   seconds?: number;
 };
 
@@ -89,12 +89,15 @@ export function HostProgress({
   path,
   tag,
   steps,
+  retry,
 }: {
   icon: ReactNode;
   name: string;
   path: string;
   tag: { label: string; tone: Tone };
   steps: HostStep[];
+  /** The clone was refused for lack of access: the host's own git login may work. */
+  retry?: { label: string; onRetry(): void };
 }) {
   return (
     <section className="np-card" aria-label={name}>
@@ -113,6 +116,20 @@ export function HostProgress({
           )}
         </div>
       ))}
+      {retry && (
+        <div className="np-retry">
+          <span className="np-retry-text">
+            The clone was refused. The host’s own git login may have access.
+          </span>
+          <button
+            type="button"
+            className="ui-button secondary"
+            onClick={retry.onRetry}
+          >
+            {retry.label}
+          </button>
+        </div>
+      )}
     </section>
   );
 }

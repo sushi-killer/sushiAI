@@ -43,6 +43,10 @@ type HostResult = {
   state: "queued" | "working" | "ready" | "failed";
   detail: string;
   steps: HostStep[];
+  /** Names of the values the host may receive once the owner says OK. */
+  /** The clone was refused (403) and a git token exists: the host's own git
+   * login may do better. */
+  retry?: boolean;
 };
 
 const SOURCES: [Source, string, typeof GitBranch][] = [
@@ -414,17 +418,15 @@ export function WorkspaceDialog({
               throw new Error(
                 "This folder has no git remote to clone on another host.",
               );
-            await window.bridge.projectHostTrust(
-              project.id,
-              host.endpoint,
-              true,
-            );
             const prepared = await window.bridge.projectHostPrepare(
               project.id,
               host.endpoint,
             );
             if (!prepared.ok)
-              throw new Error(prepared.message || "Host setup failed.");
+              throw Object.assign(
+                new Error(prepared.message || "Host setup failed."),
+                { status: prepared.status },
+              );
             target = prepared.path;
             note = prepared.message;
             rememberPrepareTimes(project.id, host.endpoint, prepared.steps);
@@ -432,12 +434,6 @@ export function WorkspaceDialog({
               if (step.id === "clone") checkoutSeconds = step.seconds;
               if (step.id === "install") installSeconds = step.seconds;
             }
-          } else if (!host.local && source === "folder" && reuseFolder) {
-            await window.bridge.projectHostTrust(
-              project.id,
-              host.endpoint,
-              true,
-            );
           }
           const label =
             note || (reuseFolder ? "Checkout found" : "Checkout ready");
@@ -476,6 +472,18 @@ export function WorkspaceDialog({
                 : {}),
             }),
           );
+          // A checkout that was kept as it was says so in amber.
+          if (label.startsWith("Kept the checkout"))
+            done[0] = { ...done[0], state: "warning" };
+          // The values were sent with the prepare above.
+          if (
+            !host.local &&
+            variables.some((item) => item.secret || item.value || item.held)
+          )
+            done[done.length - 1] = {
+              label: "Secrets · sent while a run is going",
+              state: "done",
+            };
           patchHost(host.endpoint, {
             state: "ready",
             detail:
@@ -502,7 +510,15 @@ export function WorkspaceDialog({
               );
           }
         } catch (reason) {
+          const refused = (reason as { status?: number })?.status === 403;
           patchHost(host.endpoint, {
+            retry:
+              refused &&
+              variables.some(
+                (item) =>
+                  ["GIT_TOKEN", "GITHUB_TOKEN"].includes(item.name) &&
+                  (item.value || item.held),
+              ),
             state: "failed",
             detail: reason instanceof Error ? reason.message : String(reason),
             steps: initial(host).steps.map((item, index) => ({
@@ -519,6 +535,38 @@ export function WorkspaceDialog({
       setStep("environment");
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** The clone was refused: prepare again with the host's own git login. */
+  async function retryWithHostLogin(host: Host) {
+    if (!window.bridge || !projectRef) return;
+    patchHost(host.endpoint, {
+      retry: false,
+      state: "working",
+      detail: host.cwd,
+    });
+    try {
+      const prepared = await window.bridge.projectHostPrepare(
+        projectRef,
+        host.endpoint,
+        true,
+      );
+      if (!prepared.ok) throw new Error(prepared.message);
+      patchHost(host.endpoint, {
+        state: "ready",
+        detail: prepared.path.replace(/^.*?\/sushiai\//, "~/sushiai/"),
+        steps: [
+          { label: prepared.message || "Checkout ready", state: "done" },
+          { label: "Secrets · sent while a run is going", state: "done" },
+        ],
+      });
+    } catch (reason) {
+      patchHost(host.endpoint, {
+        state: "failed",
+        retry: true,
+        detail: reason instanceof Error ? reason.message : String(reason),
+      });
     }
   }
 
@@ -621,6 +669,14 @@ export function WorkspaceDialog({
                       : { label: "queued", tone: "neutral" }
               }
               steps={result?.steps || []}
+              retry={
+                result?.retry
+                  ? {
+                      label: `Use ${host.label}’s git login`,
+                      onRetry: () => void retryWithHostLogin(host),
+                    }
+                  : undefined
+              }
             />
           ))}
         </div>

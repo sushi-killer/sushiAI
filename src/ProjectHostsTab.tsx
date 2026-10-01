@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Plus, RefreshCw } from "lucide-react";
 import type { ConnectionProfile, Project, ProjectHostReadiness } from "./types";
-import { Tag } from "./orchestrator/ui";
+import { Tag, Toggle } from "./orchestrator/ui";
 import { openSettings } from "./app/openSettings";
 import { ProjectPage } from "./ProjectPage";
 import {
@@ -21,7 +21,8 @@ type Row = {
   key: string;
   name: string;
   detail: string;
-  trusted: boolean;
+  /** The owner switched sending this project's values to it off. */
+  withheld: boolean;
   local: boolean;
 };
 type Check = ProjectHostReadiness | "checking" | { error: string };
@@ -89,14 +90,14 @@ export function ProjectHostsTab({
           key: "local",
           name: "This Mac",
           detail: remote ? "Not open on this Mac" : tildePath(cwd, system.home),
-          trusted: true,
+          withheld: false,
           local: true,
         },
         ...visible.map((host) => ({
           key: `ssh:${host.id}`,
           name: host.name || host.host,
           detail: host.host,
-          trusted: !!project.hosts?.[`ssh:${host.id}`]?.trusted,
+          withheld: !!project.hosts?.[`ssh:${host.id}`]?.withheld,
           local: false,
         })),
       ]
@@ -143,12 +144,12 @@ export function ProjectHostsTab({
     void checkAll();
   }, [project, hosts, checkAll]);
 
-  async function changeTrust(row: Row, trusted: boolean) {
+  async function changeWithheld(row: Row, withheld: boolean) {
     if (!window.bridge || !project) return;
     setBusy(row.key);
     setError("");
     try {
-      await window.bridge.projectHostTrust(project.id, row.key, trusted);
+      await window.bridge.projectHostWithhold(project.id, row.key, withheld);
       const next = await window.bridge.projectsGet(project.id);
       if (next) onProject(next);
       await checkHost(row.key);
@@ -162,7 +163,6 @@ export function ProjectHostsTab({
   async function prepare(row: Row) {
     if (!window.bridge || !project) return;
     setSelected(row.key);
-    if (!row.trusted) return;
     setBusy(row.key);
     setError("");
     try {
@@ -213,11 +213,11 @@ export function ProjectHostsTab({
         </p>
       </ProjectPage>
     );
-  const trustedCount = rows.filter((row) => row.trusted).length;
+  const sendingCount = rows.filter((row) => !row.withheld).length;
   const notes = rows.flatMap((row) => {
     const check = checks[row.key];
     if (!check || check === "checking" || "error" in check) return [];
-    const dots = hostDots(check, row.trusted);
+    const dots = hostDots({ ...check, withheld: row.withheld });
     if (dots.checkout === "danger")
       return [`${row.name}: not cloned yet — Prepare clones it and installs.`];
     const missing = check.mcp.missing ?? [];
@@ -230,8 +230,9 @@ export function ProjectHostsTab({
         (missing.length
           ? `${row.name}: ${[...new Set(missing.map((item) => item.command))].join(", ")} is missing, so the ${missing.map((item) => item.name).join(", ")} ${missing.length === 1 ? "server is" : "servers are"} skipped there.`
           : `${row.name}: some MCP servers cannot start.`),
-      dots.secrets === "danger" &&
-        `${row.name}: not trusted, so it gets no secrets.`,
+      dots.secrets === "warning" &&
+        row.withheld &&
+        `${row.name}: no secrets are sent to it.`,
     ].filter((line): line is string => !!line);
   });
   const overrides =
@@ -243,7 +244,7 @@ export function ProjectHostsTab({
     <ProjectPage title="Hosts" subtitle={subtitle}>
       <div className="pd-toolbar">
         <span>
-          {`${rows.length} ${rows.length === 1 ? "host" : "hosts"} · ${trustedCount} trusted with secrets`}
+          {`${rows.length} ${rows.length === 1 ? "host" : "hosts"} · ${sendingCount} get secrets`}
         </span>
         <button
           className="ui-button secondary"
@@ -287,7 +288,9 @@ export function ProjectHostsTab({
             check && check !== "checking" && !("error" in check)
               ? check
               : undefined;
-          const dots = matrix ? hostDots(matrix, row.trusted) : undefined;
+          const dots = matrix
+            ? hostDots({ ...matrix, withheld: row.withheld })
+            : undefined;
           const missing = !!dots && dots.checkout === "danger";
           return (
             <div
@@ -305,8 +308,8 @@ export function ProjectHostsTab({
               <div className="pd-host-name" role="cell">
                 <div>
                   <strong>{row.name}</strong>
-                  <Tag tone={row.trusted ? "ok" : "neutral"} dot={false}>
-                    {row.trusted ? "trusted" : "not trusted"}
+                  <Tag tone={row.withheld ? "neutral" : "ok"} dot={false}>
+                    {row.withheld ? "no secrets" : "gets secrets"}
                   </Tag>
                 </div>
                 <small>
@@ -390,20 +393,19 @@ export function ProjectHostsTab({
               onBlur={() => void saveOverrides(current)}
             />
           </div>
-          <div className="pd-trust">
-            <p>
-              A trusted host gets this project’s secrets while a run is going.
-              This Mac is trusted from the start. Revoking trust stops the next
-              run from receiving them.
-            </p>
-            <button
-              className={`ui-button ${current.trusted ? "ghost" : "primary"}`}
-              disabled={!!busy}
-              onClick={() => void changeTrust(current, !current.trusted)}
-            >
-              {current.trusted ? "Revoke trust…" : `Trust ${current.name}…`}
-            </button>
-          </div>
+          {!current.local && (
+            <div className="pd-withhold">
+              <p>
+                {`Hosts you add get this project’s secrets while a run is going. Switch this on to keep them off ${current.name}; it applies when sushiAI is connected to ${current.name}.`}
+              </p>
+              <Toggle
+                checked={current.withheld}
+                label="Don’t send secrets to this host"
+                onChange={(value) => void changeWithheld(current, value)}
+              />
+              <span>Don’t send secrets to this host</span>
+            </div>
+          )}
         </>
       )}
     </ProjectPage>

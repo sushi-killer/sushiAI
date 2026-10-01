@@ -608,9 +608,17 @@ class OrchestratorService {
             : await this.getProjects().resolveDirectory(params.repo);
         if (project) {
           params = { ...params, projectId: project.id };
-          if (Object.keys(project.mcp || {}).length) {
+          // The project keeps `{ mcpServers, disabledMcpServers }`: only the
+          // servers that are on go to the task.
+          const off = new Set(project.mcp?.disabledMcpServers || []);
+          const own = Object.fromEntries(
+            Object.entries(project.mcp?.mcpServers || {}).filter(
+              ([name]) => !off.has(name),
+            ),
+          );
+          if (Object.keys(own).length) {
             const current = params.mcp?.mcpServers || params.mcp || {};
-            params.mcp = { mcpServers: { ...project.mcp, ...current } };
+            params.mcp = { mcpServers: { ...own, ...current } };
           }
         }
       } catch {}
@@ -634,6 +642,12 @@ class OrchestratorService {
   /** Full replace, always pushed (connect + after every `settings.set`):
    * `profiles` is every route's resolved model-profile env + key. Nothing
    * is staged to disk - `resolveEnv` hands the env map and key back in memory. */
+  /** Replaces what the daemon holds with what is allowed now (a host switched off for
+   * a project gets no values of it). Never throws. */
+  refreshSecrets() {
+    return this.#pushSecrets().catch(() => {});
+  }
+
   async #pushSecrets() {
     if (!this.getProjects && (this.remote || !this.getModelProviders)) return;
     let settings;
@@ -649,7 +663,7 @@ class OrchestratorService {
       return;
     }
     // Provider and subscription credentials stay on this machine. Project
-    // values are resolved per host, which enforces the explicit trust grant.
+    // values are resolved per host, which honours "don't send to this host".
     const providers =
       !this.remote && this.getModelProviders ? this.getModelProviders() : null;
     const profileIds = [
@@ -1034,6 +1048,12 @@ class OrchestratorHosts {
     if (!this.on) throw offError();
   }
 
+  /** Sending to `host` was switched off or on: its daemon forgets values it may no longer
+   * hold. Only a service that already exists is touched. */
+  refreshSecrets(host) {
+    return this.services.get(host)?.refreshSecrets();
+  }
+
   /** Lists the hosts the owner enabled earlier; they connect on first use.
    * Never throws. */
   async init() {
@@ -1170,7 +1190,7 @@ function createOrchestratorHosts({
     resourcesPath,
     packaged,
   });
-  return new OrchestratorHosts({
+  const hosts = new OrchestratorHosts({
     local,
     connections: getConnections ?? (() => null),
     artifacts,
@@ -1196,6 +1216,11 @@ function createOrchestratorHosts({
         }),
       }),
   });
+  // When sending to a host is switched off or on, its daemon's copy of the
+  // project values is replaced.
+  const projects = getProjects?.();
+  if (projects) projects.onSendChange = (host) => hosts.refreshSecrets(host);
+  return hosts;
 }
 
 /** Registers the IPC surface. Nothing connects here: `start()` (called once

@@ -26,7 +26,7 @@ test("fake ssh probe reports checkout, setup, CLI, MCP, and secret readiness", (
       setup: { install: "npm ci", check: "npm test" },
       mcp: { mcpServers: { local: { url: "https://mcp.example.test" } } },
       env: [{ name: "TOKEN", secret: true, hasValue: true }],
-      hosts: { "ssh:user@devbox": { trusted: true } },
+      hosts: { "ssh:user@devbox": { withheld: true } },
     },
     output:
       "home=/home/dev\nroot=/home/dev/sushiai/demo\nstandard=1\nremote=https://example.invalid/team/demo.git\ngit=1\nclaude=1\nclaude_login=1\ncodex=1\n",
@@ -40,7 +40,7 @@ test("fake ssh probe reports checkout, setup, CLI, MCP, and secret readiness", (
   assert.equal(matrix.clis.cc, false);
   assert.deepEqual(matrix.mcp, { ok: true, count: 1, missing: [] });
   assert.deepEqual(matrix.secrets, { ok: true, count: 1 });
-  assert.equal(matrix.trusted, true);
+  assert.equal(matrix.withheld, true);
 });
 
 test("the hosts readiness IPC probes through a fake ssh executable", async (t) => {
@@ -111,10 +111,10 @@ test("missing checkout, setup, CLIs, MCP, secrets, and trust report missing stat
   assert.equal(matrix.clis.codex.installed, false);
   assert.equal(matrix.mcp.ok, false);
   assert.equal(matrix.secrets.ok, false);
-  assert.equal(matrix.trusted, false);
+  assert.equal(matrix.withheld, false);
 });
 
-test("revoking project host trust blocks stored secrets on the next read", async (t) => {
+test("switching a host off for a project blocks stored secrets on the next read", async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "project-hosts-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const safeStorage = {
@@ -131,13 +131,13 @@ test("revoking project host trust blocks stored secrets on the next read", async
   await projects.setSecret(project.id, "TOKEN", "invented-secret-value");
   await projects.upsert({
     ...project,
-    hosts: { "ssh:user@devbox": { trusted: true } },
+    hosts: { "ssh:user@devbox": { withheld: true } },
   });
   assert.equal(
-    (await projects.get(project.id)).hosts?.["ssh:user@devbox"]?.trusted,
+    (await projects.get(project.id)).hosts?.["ssh:user@devbox"]?.withheld,
     undefined,
   );
-  await projects.setHostTrust(project.id, "ssh:user@devbox", true);
+  await projects.setHostWithheld(project.id, "ssh:user@devbox", false);
   await projects.setHostOverrides(project.id, "ssh:user@devbox", {
     backend: "local",
   });
@@ -149,7 +149,7 @@ test("revoking project host trust blocks stored secrets on the next read", async
     (await projects.get(project.id)).hosts["ssh:user@devbox"].overrides,
     { backend: "local" },
   );
-  await projects.setHostTrust(project.id, "ssh:user@devbox", false);
+  await projects.setHostWithheld(project.id, "ssh:user@devbox", true);
   assert.equal(
     await projects.secretForHost(project.id, "TOKEN", "ssh:user@devbox"),
     null,

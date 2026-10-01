@@ -1,6 +1,8 @@
 const os = require("node:os");
 const path = require("node:path");
 const fs = require("node:fs/promises");
+const { createReadStream } = require("node:fs");
+const readline = require("node:readline");
 const { randomBytes } = require("node:crypto");
 
 const MAX_NAME = 200;
@@ -166,6 +168,60 @@ class ClaudeMcp {
     ]);
     const project = projectConfig(config, root);
     return { root, config, project, projectFile };
+  }
+
+  /** How often each MCP server was called from this project in the last 30
+   * days, counted from Claude Code's own transcripts. A plugin's servers are
+   * named `plugin_<plugin>_<server>`; they are counted under the plugin. */
+  async usage(cwd, now = Date.now()) {
+    const root = projectPath(cwd);
+    const directory = path.join(
+      this.home,
+      ".claude",
+      "projects",
+      root.replace(/[^A-Za-z0-9]/g, "-"),
+    );
+    const since = now - 30 * 86400000;
+    const servers = {};
+    const plugins = {};
+    let files = [];
+    try {
+      files = await fs.readdir(directory);
+    } catch {
+      return { servers, plugins };
+    }
+    for (const file of files.filter((name) => name.endsWith(".jsonl"))) {
+      const full = path.join(directory, file);
+      const stat = await fs.stat(full).catch(() => null);
+      if (!stat || stat.mtimeMs < since) continue;
+      const lines = readline.createInterface({
+        input: createReadStream(full, { encoding: "utf8" }),
+        crlfDelay: Infinity,
+      });
+      for await (const line of lines) {
+        if (!line.includes("tool_use") || !line.includes('"mcp__')) continue;
+        let at = Number.NaN;
+        try {
+          at = Date.parse(JSON.parse(line).timestamp);
+        } catch {
+          continue;
+        }
+        if (!(at >= since && at <= now)) continue;
+        for (const [, tool] of line.matchAll(/"name":"mcp__([^"]+)"/g)) {
+          const plugin = /^plugin_(.+?)_(.+?)__/.exec(tool);
+          if (plugin) {
+            const entry = (plugins[plugin[1]] ||= { uses: 0, servers: [] });
+            entry.uses++;
+            if (!entry.servers.includes(plugin[2]))
+              entry.servers.push(plugin[2]);
+          } else {
+            const server = tool.split("__")[0];
+            servers[server] = (servers[server] || 0) + 1;
+          }
+        }
+      }
+    }
+    return { servers, plugins };
   }
 
   async list(cwd) {

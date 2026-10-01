@@ -1,5 +1,6 @@
 import { importChanges } from "./projectEnvImport.ts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { FolderImport } from "./FolderImport";
+import { useEffect, useRef, useState } from "react";
 import { Lock, Plus, X } from "lucide-react";
 import type { ConnectionProfile, Project } from "./types";
 import { Banner, Tag, Toggle } from "./orchestrator/ui";
@@ -68,22 +69,19 @@ function resultOf(
 export function ProjectEnvironmentTab({
   project,
   setProject,
-  gitRemote,
-  projectName,
   cwd,
-  remote = false,
+  endpoint,
   targets = [],
 }: {
   /** The dialog owns the project: every tab reads and replaces this one. */
   project: Project | null;
   setProject(project: Project | null): void;
-  gitRemote: string;
-  projectName: string;
   cwd?: string;
-  remote?: boolean;
+  endpoint?: string;
   targets?: ConnectionProfile[];
 }) {
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [review, setReview] = useState<ReviewEntry[] | null>(null);
   const [fileName, setFileName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -105,47 +103,6 @@ export function ProjectEnvironmentTab({
       live = false;
     };
   }, [addingName]);
-  const autoImported = useRef(false);
-
-  const load = useCallback(async () => {
-    if (!window.bridge || !gitRemote || project) return;
-    try {
-      let found = await window.bridge.projectsResolve(gitRemote);
-      if (!found)
-        found = await window.bridge.projectsUpsert({
-          name: projectName,
-          git: { url: gitRemote, defaultBranch: "main" },
-        });
-      setProject(found);
-    } catch (reason) {
-      setError(String(reason));
-    }
-  }, [gitRemote, projectName, project, setProject]);
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  // First open of a project with an empty Environment: bring in the local
-  // checkout's .env files once. Nothing exists yet, so nothing can conflict;
-  // a later import still goes through the review dialog.
-  useEffect(() => {
-    if (!project || !cwd || remote || !window.bridge || autoImported.current)
-      return;
-    autoImported.current = true;
-    const flag = `sushiai.autoImport.env.${project.id}`;
-    if (project.env.length || localStorage.getItem(flag)) return;
-    const bridge = window.bridge;
-    void (async () => {
-      try {
-        localStorage.setItem(flag, "1");
-        const result = await bridge.projectImportLocal(project.id, cwd);
-        setProject(result.project);
-      } catch (reason) {
-        setError(String(reason));
-      }
-    })();
-  }, [project, cwd, remote, setProject]);
-
   const hostName = (key: string) =>
     key === "local"
       ? "This Mac"
@@ -208,6 +165,13 @@ export function ProjectEnvironmentTab({
           );
       }
       setProject(await window.bridge.projectsGet(updated.id));
+      setNotice(
+        `Imported ${imported.length} ${imported.length === 1 ? "variable" : "variables"} from ${fileName || "the file"}${
+          review.length > imported.length
+            ? `, ${review.length - imported.length} skipped`
+            : ""
+        }.`,
+      );
       setReview(null);
       setFileName("");
     } catch (reason) {
@@ -395,9 +359,22 @@ export function ProjectEnvironmentTab({
   return (
     <ProjectPage
       title="Environment"
-      subtitle={`Variables and secrets every host gets. Secret values stay in ${keychain}.`}
+      subtitle={`${project?.git?.url ? "Variables and secrets every host gets." : "Variables and secrets this Mac’s runs get."} Secret values stay in ${keychain}.`}
     >
       {fileInputEl}
+      {project && cwd && (
+        <FolderImport
+          project={project}
+          cwd={cwd}
+          endpoint={endpoint}
+          onProject={setProject}
+        />
+      )}
+      {notice && (
+        <p role="status" className="pd-folder-import">
+          {notice}
+        </p>
+      )}
       <div className="pd-toolbar">
         <span>
           {project
@@ -532,11 +509,7 @@ export function ProjectEnvironmentTab({
           </p>
         </>
       ) : (
-        <p className="pd-empty">
-          {gitRemote
-            ? "Loading project environment…"
-            : "Set a git remote to attach this workspace to a project."}
-        </p>
+        <p className="pd-empty">Loading project environment…</p>
       )}
     </ProjectPage>
   );

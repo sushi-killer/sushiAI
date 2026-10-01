@@ -149,6 +149,7 @@ function registerAppIpc({
         })
       : claudeMcp.list(cwd),
   );
+  handle("claude-mcp-usage", (cwd) => claudeMcp.usage(cwd));
   handle("claude-mcp-toggle", (input) => {
     if (!input || typeof input !== "object" || Array.isArray(input))
       throw new Error("Invalid MCP request.");

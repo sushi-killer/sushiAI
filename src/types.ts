@@ -139,6 +139,10 @@ export type Workspace = {
   layout: Layout | null;
 };
 export type Project = {
+  /** The folder name under ~/sushiai on a host; fixed when the project is made. */
+  slug?: string;
+  /** Folders attached to the project (by host and path). */
+  folders?: { endpoint: string; cwd: string }[];
   id: string;
   name: string;
   git: { url: string; defaultBranch: string };
@@ -157,7 +161,7 @@ export type Project = {
   targets: string[];
   hosts?: Record<
     string,
-    { trusted?: boolean; overrides?: Record<string, unknown> }
+    { withheld?: boolean; overrides?: Record<string, unknown> }
   >;
 };
 /** One step of preparing a host: what it is, how it went, and how long. */
@@ -170,7 +174,23 @@ export type ProjectPrepareStep = {
 export type ProjectImportResult = {
   project: Project;
   addedVariables: { name: string; secret: boolean }[];
+  /** Variables that existed without a value and got the folder's. */
+  filledVariables?: string[];
+  skippedVariables?: string[];
   addedServers: string[];
+  skippedServers?: string[];
+  /** Removed by the owner earlier, so not brought back. */
+  removedVariables?: string[];
+  removedServers?: string[];
+};
+/** What pulling a folder into its project would change. */
+export type ProjectImportPreview = {
+  newVariables: string[];
+  fillVariables: string[];
+  /** Removed by the owner earlier; a forced pull brings them back. */
+  removedVariables: string[];
+  newServers: string[];
+  removedServers: string[];
 };
 export type ProjectHostReadiness = {
   /** `uname -sm` of the host, e.g. "Linux x86_64". */
@@ -191,7 +211,8 @@ export type ProjectHostReadiness = {
     missing?: { name: string; command: string }[];
   };
   secrets: { ok: boolean; count: number };
-  trusted: boolean;
+  /** The owner switched sending this project's values to the host off. */
+  withheld: boolean;
 };
 export type Snapshot = {
   version: string;
@@ -498,6 +519,12 @@ export interface Bridge {
     cwd: string;
     servers: ClaudeMcpServer[];
   }>;
+  /** Calls per MCP server (and per plugin, with the servers seen) from this
+   * project in the last 30 days. */
+  claudeMcpUsage(cwd: string): Promise<{
+    servers: Record<string, number>;
+    plugins: Record<string, { uses: number; servers: string[] }>;
+  }>;
   claudeMcpToggle(input: {
     cwd: string;
     endpoint?: string;
@@ -642,11 +669,13 @@ export interface Bridge {
     value: string,
   ): Promise<{ hasValue: boolean; hint: string }>;
   projectSecretClear(id: string, name: string): Promise<void>;
-  projectHostTrust(
+  /** "Don't send secrets to this host": it gets no value of the project and
+   * its daemon drops what it holds. */
+  projectHostWithhold(
     id: string,
     host: string,
-    trusted: boolean,
-  ): Promise<{ trusted: boolean }>;
+    withheld: boolean,
+  ): Promise<{ withheld: boolean }>;
   projectHostOverrides(
     id: string,
     host: string,
@@ -697,7 +726,23 @@ export interface Bridge {
   projectEnvClassify(names: string[]): Promise<boolean[]>;
   /** Reads a local checkout's .env files, .mcp.json and Claude config into
    * the project, adding what is missing. Values stay in the main process. */
-  projectImportLocal(id: string, cwd: string): Promise<ProjectImportResult>;
+  projectImportLocal(
+    id: string,
+    cwd: string,
+    options?: { endpoint?: string; force?: boolean },
+  ): Promise<ProjectImportResult>;
+  projectImportPreview(
+    id: string,
+    cwd: string,
+    options?: { endpoint?: string },
+  ): Promise<ProjectImportPreview>;
+  /** The project of a folder, made when it has none: by its git remote, else
+   * by its host and path. */
+  projectAttach(input: {
+    endpoint?: string;
+    cwd: string;
+    name?: string;
+  }): Promise<Project>;
   projectImportMcpText(id: string, text: string): Promise<ProjectImportResult>;
   /** Reads a source before its project exists. Secret values are held in the
    * main process under `token`; pass it to `projectsUpsert` as `importToken`. */
@@ -721,7 +766,7 @@ export interface Bridge {
     }[];
   }>;
   projectsResolve(
-    remote: string | { remote: string; endpoint?: string },
+    remote: string | { remote?: string; endpoint?: string; cwd?: string },
   ): Promise<Project | null>;
   projectInspect(
     endpoint: string | undefined,

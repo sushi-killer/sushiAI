@@ -42,7 +42,6 @@ async function setup(t, { bin, setupSteps = {}, env = [] } = {}) {
     setup: { install: "npm ci", check: "npm test", ...setupSteps },
     env,
   });
-  await projects.setHostTrust(project.id, host.endpoint, true);
   const call = registerHandlers({
     projects,
     connections: host.connections,
@@ -185,15 +184,35 @@ test("setup variables reach the install over stdin, never argv, and the git toke
   assert.deepEqual(left, []);
 });
 
-test("an untrusted host gets no setup variables at all", async (t) => {
+test("a host switched off for the project is prepared with no value at all", async (t) => {
   const { host, projects, project, call } = await setup(t, {
-    bin: { npm: NPM_OK },
+    bin: {
+      npm: '#!/bin/sh\nprintf "[%s]" "$NPM_TOKEN" > "$HOME/npm-saw"\n',
+    },
     env: [{ name: "NPM_TOKEN", secret: true, availableTo: ["setup"] }],
   });
   await projects.setSecret(project.id, "NPM_TOKEN", "invented-npm-token");
-  await projects.setHostTrust(project.id, host.endpoint, false);
-  await assert.rejects(
-    call("projects:host:prepare", project.id, host.endpoint),
-    /Trust this host/,
+  await projects.setHostWithheld(project.id, host.endpoint, true);
+  const result = await call("projects:host:prepare", project.id, host.endpoint);
+  assert.equal(result.ok, true, result.message);
+  assert.equal(
+    await fs.readFile(path.join(host.home, "npm-saw"), "utf8"),
+    "[]",
+  );
+});
+
+test("a host that was just added gets the values with no question asked", async (t) => {
+  const { host, projects, project, call } = await setup(t, {
+    bin: {
+      npm: '#!/bin/sh\nprintf "[%s]" "$NPM_TOKEN" > "$HOME/npm-saw"\n',
+    },
+    env: [{ name: "NPM_TOKEN", secret: true, availableTo: ["setup"] }],
+  });
+  await projects.setSecret(project.id, "NPM_TOKEN", "invented-npm-token");
+  const result = await call("projects:host:prepare", project.id, host.endpoint);
+  assert.equal(result.ok, true, result.message);
+  assert.equal(
+    await fs.readFile(path.join(host.home, "npm-saw"), "utf8"),
+    "[invented-npm-token]",
   );
 });

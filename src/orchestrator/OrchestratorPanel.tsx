@@ -42,10 +42,8 @@ import {
   type DaemonReach,
 } from "./hosts";
 import { HostSelect, RunOnSelect } from "./HostSelect";
-import { readPrepareTimes, rememberPrepareTimes } from "../projectPrepare";
-import { createPortal } from "react-dom";
+import { rememberPrepareTimes } from "../projectPrepare";
 import {
-  PrepareConsent,
   PrepareProgress,
   PreparingHost,
   type PrepareFailure,
@@ -215,13 +213,11 @@ function OrchestratorBody({
   const [runReadiness, setRunReadiness] = useState<
     Record<string, ProjectHostReadiness>
   >({});
-  const [consentOpen, setConsentOpen] = useState(false);
   const [prepareBusy, setPrepareBusy] = useState(false);
   const [prepareStart, setPrepareStart] = useState(true);
   const [prepareFailure, setPrepareFailure] = useState<PrepareFailure | null>(
     null,
   );
-  const [rememberConsent, setRememberConsent] = useState(true);
   const [editGitToken, setEditGitToken] = useState(false);
   const [gitTokenDraft, setGitTokenDraft] = useState("");
   const [daemonState, setDaemonState] = useState<DaemonState>("loading");
@@ -263,16 +259,9 @@ function OrchestratorBody({
   useEffect(() => {
     let cancelled = false;
     const endpoint = host === LOCAL ? undefined : host;
+    // By the folder's remote, or by the folder itself when it has none.
     window.bridge
-      ?.projectInspect(endpoint, { operation: "git_remote", root: cwd })
-      .then((result) =>
-        result?.remote
-          ? window.bridge?.projectsResolve({
-              remote: result.remote,
-              endpoint: endpoint || "local",
-            })
-          : null,
-      )
+      ?.projectsResolve({ endpoint: endpoint || "local", cwd })
       .then((resolved) => {
         if (!cancelled) setProject(resolved || null);
       })
@@ -572,61 +561,35 @@ function OrchestratorBody({
       });
   }
 
-  async function submitNewTask(
-    start: boolean,
-    confirmed = false,
-    useHostLogin = false,
-    skipPrepare = false,
-  ) {
+  async function submitNewTask(start: boolean, useHostLogin = false) {
     const text = taskDraft.trim();
     if (!text || creatingBusy) return;
-    if (runHost.startsWith("ssh:") && !confirmed) {
-      setPrepareStart(start);
-      const key = `sushiai.project.prepare-consent:${project?.id}:${runHost}`;
-      if (
-        !window.localStorage.getItem(key) ||
-        !project?.hosts?.[runHost]?.trusted
-      ) {
-        setConsentOpen(true);
-        return;
-      }
-    }
-    if (runHost.startsWith("ssh:") && project) setConsentOpen(true);
+    if (runHost.startsWith("ssh:")) setPrepareStart(start);
     setCreatingBusy(true);
     setError("");
     setPrepareFailure(null);
-    try {
+    const ssh = runHost.startsWith("ssh:");
+    const go = async () => {
       let targetClient = orchestratorClient;
       let targetCwd = cwd;
-      if (runHost.startsWith("ssh:")) {
+      if (ssh) {
         if (!project)
           throw new Error(
             "This folder is not linked to a project with a Git remote.",
           );
-        if (skipPrepare) {
-          targetCwd = runReadiness[runHost]?.checkout.path || cwd;
-        } else {
-          // Only reached after the owner confirmed in the first-run dialog,
-          // which is what trusting the host means.
-          if (!project.hosts?.[runHost]?.trusted) {
-            await window.bridge!.projectHostTrust(project.id, runHost, true);
-            setProject(await window.bridge!.projectsGet(project.id));
-          }
-          setPrepareBusy(true);
-          const prepared = await window.bridge!.projectHostPrepare(
-            project.id,
-            runHost,
-            useHostLogin,
-          );
-          setPrepareBusy(false);
-          if (!prepared.ok) {
-            setPrepareFailure(prepared);
-            setCreatingBusy(false);
-            return;
-          }
-          targetCwd = prepared.path;
-          rememberPrepareTimes(project.id, runHost, prepared.steps);
+        setPrepareBusy(true);
+        const prepared = await window.bridge!.projectHostPrepare(
+          project.id,
+          runHost,
+          useHostLogin,
+        );
+        setPrepareBusy(false);
+        if (!prepared.ok) {
+          setPrepareFailure(prepared);
+          return;
         }
+        targetCwd = prepared.path;
+        rememberPrepareTimes(project.id, runHost, prepared.steps);
         targetClient = orchestratorClientFor(runHost);
       }
       const task = await createTask(
@@ -636,15 +599,19 @@ function OrchestratorBody({
         baseBranchDraft,
         start,
       );
-      setConsentOpen(false);
       setLive((old) => ({ ...old, tasks: upsertTask(old.tasks, task) }));
       setTaskDraft("");
       setBaseBranchDraft("");
       setBaseOpen(false);
       if (start) open({ kind: "task", id: task.id });
+    };
+    try {
+      await go();
     } catch (e) {
       fail(e);
     } finally {
+      if (ssh && project)
+        setProject(await window.bridge!.projectsGet(project.id));
       setPrepareBusy(false);
       setCreatingBusy(false);
     }
@@ -663,7 +630,7 @@ function OrchestratorBody({
     setGitTokenDraft("");
     setEditGitToken(false);
     setPrepareFailure(null);
-    void submitNewTask(prepareStart, true);
+    void submitNewTask(prepareStart);
   }
 
   /** The task view's composer talks to the orchestrator; the reply is read
@@ -1014,17 +981,17 @@ function OrchestratorBody({
             editToken={editGitToken}
             tokenDraft={gitTokenDraft}
             onTokenDraft={setGitTokenDraft}
+            noSecrets={!!project.hosts?.[runHost]?.withheld}
             onRetry={() => {
               setPrepareFailure(null);
-              void submitNewTask(prepareStart, true);
+              void submitNewTask(prepareStart);
             }}
-            onHostLogin={() => void submitNewTask(prepareStart, true, true)}
+            onHostLogin={() => void submitNewTask(prepareStart, true)}
             onEditToken={() => setEditGitToken(true)}
             onSaveToken={() => void saveGitTokenAndRetry()}
             onCancel={() => {
               setPrepareFailure(null);
               setEditGitToken(false);
-              setConsentOpen(false);
             }}
           />
         ) : (
@@ -1109,37 +1076,6 @@ function OrchestratorBody({
                 )
               }
             />
-            {consentOpen &&
-              project &&
-              !prepareBusy &&
-              !prepareFailure &&
-              rootRef.current &&
-              // The scrim belongs to the whole panel, rail included.
-              createPortal(
-                <PrepareConsent
-                  project={project}
-                  hostName={
-                    hosts.find((item) => item.id === runHost)?.name || "host"
-                  }
-                  ready={runReadiness[runHost]}
-                  remember={rememberConsent}
-                  busy={creatingBusy}
-                  estimates={readPrepareTimes(project.id, runHost)}
-                  canSkip={!!runReadiness[runHost]?.checkout.ok}
-                  onRemember={setRememberConsent}
-                  onPrepare={() => {
-                    const key = `sushiai.project.prepare-consent:${project.id}:${runHost}`;
-                    if (rememberConsent) window.localStorage.setItem(key, "1");
-                    else window.localStorage.removeItem(key);
-                    void submitNewTask(prepareStart, true);
-                  }}
-                  onSkip={() =>
-                    void submitNewTask(prepareStart, true, false, true)
-                  }
-                  onCancel={() => setConsentOpen(false)}
-                />,
-                rootRef.current,
-              )}
           </div>
         )}
       </div>

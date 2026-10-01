@@ -50,7 +50,7 @@ async function runFakeHost(
   });
   for (const [name, value] of Object.entries(env))
     await projects.setSecret(project.id, name, value);
-  await projects.setHostTrust(project.id, "ssh:user@devbox", trusted);
+  await projects.setHostWithheld(project.id, "ssh:user@devbox", !trusted);
   const deliveredEnv = await projects.environmentFor(
     project.id,
     "agent",

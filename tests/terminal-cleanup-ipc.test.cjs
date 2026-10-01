@@ -7,7 +7,11 @@ const path = require("node:path");
 const { registerTerminalIpc } = require("../electron/ipc/terminals.cjs");
 const { makeHost, makeStore } = require("./helpers/fake-host.cjs");
 
-async function open(t, pty, { secondUploadFails = false } = {}) {
+async function open(
+  t,
+  pty,
+  { secondUploadFails = false, withheld = false } = {},
+) {
   // mktemp into the fake HOME, so what the upload leaves is visible there.
   const host = await makeHost(t, {
     bin: { mktemp: '#!/bin/sh\nexec /usr/bin/mktemp "$HOME/tmp.XXXXXX"\n' },
@@ -25,7 +29,8 @@ async function open(t, pty, { secondUploadFails = false } = {}) {
     env: [{ name: "APP_TOKEN", secret: true }],
   });
   await projects.setSecret(project.id, "APP_TOKEN", "invented-session-secret");
-  await projects.setHostTrust(project.id, host.endpoint, true);
+  if (withheld) await projects.setHostWithheld(project.id, host.endpoint, true);
+  const staged = [];
   const handlers = new Map();
   registerTerminalIpc({
     handle: (channel, callback) => handlers.set(channel, callback),
@@ -40,6 +45,7 @@ async function open(t, pty, { secondUploadFails = false } = {}) {
     terminalPending: new Map(),
     stageModelSettings: async () => "",
     stageClaudeAccount: async () => {
+      staged.push(1);
       const tokenPath = path.join(
         host.home,
         "..",
@@ -58,9 +64,9 @@ async function open(t, pty, { secondUploadFails = false } = {}) {
       command: "claude",
       endpoint: host.endpoint,
       projectId: project.id,
-      claudeAccountId: secondUploadFails ? "account-1" : undefined,
+      claudeAccountId: secondUploadFails || withheld ? "account-1" : undefined,
     });
-  return { host, run };
+  return { host, run, staged };
 }
 
 const leftovers = async (host) => await fs.readdir(host.home);
@@ -119,4 +125,22 @@ test("a remote session's local pty carries no project values", async (t) => {
   });
   await run();
   assert.equal(seen.APP_TOKEN, undefined);
+});
+
+test("a host switched off for the project gets no project values and no Claude subscription token", async (t) => {
+  let spawned = 0;
+  const { host, run, staged } = await open(
+    t,
+    {
+      spawn: () => {
+        spawned += 1;
+        return { onData: () => {}, onExit: () => {} };
+      },
+    },
+    { withheld: true },
+  );
+  await run();
+  assert.equal(spawned, 1);
+  assert.deepEqual(staged, []);
+  assert.deepEqual(await leftovers(host), []);
 });

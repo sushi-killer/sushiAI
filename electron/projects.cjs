@@ -1,9 +1,8 @@
 const { randomUUID } = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
-const { execFile } = require("node:child_process");
-const { promisify } = require("node:util");
-const execFileAsync = promisify(execFile);
+const { remoteUrl } = require("./git-remote.cjs");
+const { projectSlug, slugOf, uniqueSlug } = require("./project-slug.cjs");
 
 function normalizeRemote(url) {
   if (typeof url !== "string" || !url.trim()) return "";
@@ -43,6 +42,14 @@ async function atomicWriteJson(file, value) {
 
 const STAGES = ["setup", "agent", "mcp"];
 
+/** Where a folder lives, as a project knows it: an SSH host by its endpoint,
+ * everything else (This Mac, whichever Herdr socket) as "local". */
+function hostOf(endpoint) {
+  return typeof endpoint === "string" && endpoint.startsWith("ssh:")
+    ? endpoint
+    : "local";
+}
+
 function hint(value) {
   return value.length >= 12 ? `••••${value.slice(-4)}` : "••••";
 }
@@ -54,6 +61,18 @@ class Projects {
     this.safeStorage = safeStorage;
     this.writeQueue = Promise.resolve();
     this.lock = Promise.resolve();
+    // `onSendChange(host)` lets whoever holds values for a host replace them
+    // when the owner turns sending to it off (or on again).
+    this.onSendChange = null;
+  }
+
+  /** Every SSH host the owner added gets a project's values: adding the host
+   * is the consent. Only a host the owner switched off for this project
+   * (`withheld`) gets none. This machine always does. */
+  async sendsValues(id, host) {
+    if (host === "local") return true;
+    const projects = await this.#read(this.projectsFile);
+    return !this.#own(projects, id)?.hosts?.[host]?.withheld;
   }
 
   /** Runs read-modify-write operations on the project list one at a time,
@@ -120,6 +139,7 @@ class Projects {
 
   #withHints(project, secrets) {
     const safe = this.#public(project);
+    safe.slug = slugOf(project);
     safe.env = safe.env.map((entry) => {
       const stored = secrets[`${project.id}:${entry.name}`];
       return {
@@ -207,6 +227,15 @@ class Projects {
       },
       targets: Array.isArray(input.targets) ? input.targets.map(String) : [],
       hosts: existing?.hosts ?? {},
+      // Folders attached to the project and what the owner removed from it
+      // are kept by their own writers, never by a saved copy.
+      folders: existing?.folders ?? [],
+      // The folder name on hosts is fixed when the project is made: a rename
+      // never moves a checkout.
+      slug: existing
+        ? slugOf(existing)
+        : uniqueSlug(projectSlug(input.name), projects),
+      dismissed: existing?.dismissed ?? { env: [], mcp: [] },
     };
     const previousNames = new Set(
       (existing?.env || []).map((entry) => entry.name),
@@ -274,6 +303,13 @@ class Projects {
           !dropped.has(entry.name) ||
           set.some((item) => item?.name === entry.name),
       );
+      // A variable the owner removed is not brought back by the next pull.
+      const gone = remove.map(String);
+      if (gone.length)
+        project.dismissed = {
+          mcp: project.dismissed?.mcp || [],
+          env: [...new Set([...(project.dismissed?.env || []), ...gone])],
+        };
       await this.#write(this.projectsFile, projects);
       const secrets = await this.#read(this.secretsFile);
       for (const name of dropped)
@@ -303,6 +339,16 @@ class Projects {
       if (!project) throw new Error("Unknown project.");
       const servers = { ...(project.mcp?.mcpServers || {}) };
       for (const name of remove) delete servers[String(name)];
+      if (remove.length)
+        project.dismissed = {
+          env: project.dismissed?.env || [],
+          mcp: [
+            ...new Set([
+              ...(project.dismissed?.mcp || []),
+              ...remove.map(String),
+            ]),
+          ],
+        };
       Object.assign(servers, set);
       project.mcp = {
         ...(project.mcp || {}),
@@ -329,18 +375,43 @@ class Projects {
   }
 
   /** Adds imported variables and MCP servers to a project, never replacing
-   * or removing anything it already has: names that exist are left alone.
-   * Values are stored here; the caller gets names and flags back, no values. */
-  mergeImport(id, { variables = [], servers = {} } = {}) {
+   * or removing anything it already has. A variable that exists without a
+   * value gets the one the source has. What the owner removed earlier stays
+   * out unless `force` asks for it again. Values are stored here; the caller
+   * gets names and flags back, no values. */
+  mergeImport(
+    id,
+    { variables = [], servers = {} } = {},
+    { force = false } = {},
+  ) {
     return this.#locked(async () => {
       const projects = await this.#read(this.projectsFile);
       const project = this.#own(projects, id);
       if (!project) throw new Error("Unknown project.");
+      const dismissed = {
+        env: new Set(force ? [] : project.dismissed?.env || []),
+        mcp: new Set(force ? [] : project.dismissed?.mcp || []),
+      };
       const have = new Set((project.env || []).map((entry) => entry.name));
       const added = [];
+      const filled = [];
+      const skipped = [];
+      const removed = [];
+      const secrets = await this.#read(this.secretsFile);
       for (const entry of variables) {
         const name = String(entry.name);
-        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || have.has(name)) continue;
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
+        if (have.has(name)) {
+          // Only a secret is filled: a plain value may be a file's example.
+          if (entry.secret && entry.value && !secrets[`${id}:${name}`]) {
+            filled.push({ ...entry, name });
+          } else skipped.push(name);
+          continue;
+        }
+        if (dismissed.env.has(name)) {
+          removed.push(name);
+          continue;
+        }
         have.add(name);
         project.env = [
           ...(project.env || []),
@@ -356,15 +427,28 @@ class Projects {
       }
       const known = { ...(project.mcp?.mcpServers || {}) };
       const addedServers = [];
+      const skippedServers = [];
+      const removedServers = [];
       for (const [name, definition] of Object.entries(servers))
-        if (!Object.hasOwn(known, name)) {
+        if (Object.hasOwn(known, name)) skippedServers.push(name);
+        else if (dismissed.mcp.has(name)) removedServers.push(name);
+        else {
           known[name] = definition;
           addedServers.push(name);
         }
       if (addedServers.length)
         project.mcp = { ...(project.mcp || {}), mcpServers: known };
+      if (force)
+        project.dismissed = {
+          env: (project.dismissed?.env || []).filter(
+            (name) => !added.some((item) => item.name === name),
+          ),
+          mcp: (project.dismissed?.mcp || []).filter(
+            (name) => !addedServers.includes(name),
+          ),
+        };
       await this.#write(this.projectsFile, projects);
-      for (const entry of added)
+      for (const entry of [...added, ...filled])
         if (entry.value)
           await this.#setEncryptedValue(id, entry.name, entry.value);
       return {
@@ -373,8 +457,144 @@ class Projects {
           name,
           secret: !!secret,
         })),
+        filledVariables: filled.map(({ name }) => name),
+        skippedVariables: skipped,
+        removedVariables: removed,
         addedServers,
+        skippedServers,
+        removedServers,
       };
+    });
+  }
+
+  async folders(id) {
+    const projects = await this.#read(this.projectsFile);
+    return [...(this.#own(projects, id)?.folders || [])];
+  }
+
+  /** What importing would change, without changing it: names that would be
+   * added, filled with a value, or skipped because the owner removed them. */
+  async describeImport(id, { variables = [], servers = {} } = {}) {
+    const projects = await this.#read(this.projectsFile);
+    const project = this.#own(projects, id);
+    if (!project) throw new Error("Unknown project.");
+    const secrets = await this.#read(this.secretsFile);
+    const have = new Set((project.env || []).map((entry) => entry.name));
+    const out = {
+      newVariables: [],
+      fillVariables: [],
+      removedVariables: [],
+      newServers: [],
+      removedServers: [],
+    };
+    for (const entry of variables) {
+      const name = String(entry.name);
+      if (have.has(name)) {
+        if (entry.secret && entry.value && !secrets[`${id}:${name}`])
+          out.fillVariables.push(name);
+      } else if ((project.dismissed?.env || []).includes(name))
+        out.removedVariables.push(name);
+      else out.newVariables.push(name);
+    }
+    for (const name of Object.keys(servers))
+      if (Object.hasOwn(project.mcp?.mcpServers || {}, name)) continue;
+      else if ((project.dismissed?.mcp || []).includes(name))
+        out.removedServers.push(name);
+      else out.newServers.push(name);
+    return out;
+  }
+
+  /** The project a folder belongs to: the one with its git remote, else the
+   * one this folder was attached to. Read only. */
+  async resolveFolder({ remote, endpoint, cwd } = {}) {
+    const projects = await this.#read(this.projectsFile);
+    const found = this.#findFolder(projects, { remote, endpoint, cwd });
+    return found
+      ? this.#withHints(found.project, await this.#read(this.secretsFile))
+      : null;
+  }
+
+  #findFolder(projects, { remote, endpoint, cwd }) {
+    const key = normalizeRemote(remote);
+    const host = hostOf(endpoint);
+    const list = Object.values(projects);
+    const byRemote = key
+      ? list.find((item) => normalizeRemote(item.git?.url) === key)
+      : undefined;
+    const byFolder =
+      typeof cwd === "string" && cwd
+        ? list.find((item) =>
+            (item.folders || []).some(
+              (folder) => folder.endpoint === host && folder.cwd === cwd,
+            ),
+          )
+        : undefined;
+    const project = byRemote ?? byFolder;
+    return project ? { project, byRemote, byFolder } : null;
+  }
+
+  /** Opens the project of a folder, making one when it has none: a folder
+   * with a git remote joins the project of that remote, any other folder is
+   * known by its host and path. A folder that gains a remote later makes its
+   * project follow it. */
+  attach({ remote = "", endpoint, cwd, name } = {}) {
+    if (typeof cwd !== "string" || !cwd)
+      throw new Error("Choose a project folder.");
+    assertRemote(remote);
+    return this.#locked(async () => {
+      const projects = await this.#read(this.projectsFile);
+      const host = hostOf(endpoint);
+      const url = typeof remote === "string" ? remote.trim() : "";
+      const found = this.#findFolder(projects, { remote: url, endpoint, cwd });
+      let project = found?.project;
+      if (!project) {
+        const id = randomUUID();
+        project = {
+          id,
+          name:
+            String(name || "")
+              .trim()
+              .slice(0, 200) ||
+            path.basename(cwd) ||
+            "Project",
+          slug: uniqueSlug(
+            projectSlug(
+              String(name || "").trim() || path.basename(cwd) || "Project",
+            ),
+            projects,
+          ),
+          git: { url, defaultBranch: "main" },
+          env: [],
+          mcp: {},
+          setup: { install: "", check: "" },
+          network: { allowedDomains: [] },
+          sessions: {},
+          targets: [host],
+          hosts: {},
+          folders: [],
+          dismissed: { env: [], mcp: [] },
+        };
+        projects[id] = project;
+      } else if (
+        url &&
+        found.byFolder &&
+        !found.byRemote &&
+        !project.git?.url
+      ) {
+        // The folder had no remote when it was attached; now it has one.
+        project.git = { ...project.git, url };
+      }
+      project.folders ||= [];
+      project.slug ||= projectSlug(project.name);
+      if (
+        !project.folders.some(
+          (folder) => folder.endpoint === host && folder.cwd === cwd,
+        )
+      )
+        project.folders.push({ endpoint: host, cwd });
+      project.targets = [...new Set([...(project.targets || []), host])];
+      await this.#write(this.projectsFile, projects);
+      return this.#withHints(project, await this.#read(this.secretsFile));
     });
   }
 
@@ -518,8 +738,7 @@ class Projects {
   }
 
   async secretForHost(id, name, host) {
-    const project = await this.get(id);
-    if (host !== "local" && !project?.hosts?.[host]?.trusted) return null;
+    if (!(await this.sendsValues(id, host))) return null;
     const override = await this.#secretValue(id, `${name}@${host}`);
     return override ?? this.secretFor(id, name);
   }
@@ -539,19 +758,11 @@ class Projects {
 
   async resolveDirectory(directory) {
     try {
-      const { stdout } = await execFileAsync(
-        "git",
-        ["remote", "get-url", "origin"],
-        {
-          cwd: directory,
-          timeout: 2000,
-          maxBuffer: 10000,
-        },
-      );
-      return this.resolve(stdout.trim());
-    } catch {
-      return null;
-    }
+      const found = await this.resolve(await remoteUrl(directory, 2000));
+      if (found) return found;
+    } catch {}
+    // No remote (or none the store knows): the folder itself.
+    return this.resolveFolder({ endpoint: "local", cwd: directory });
   }
 
   async agentEnvironments(host = "local") {
@@ -583,7 +794,9 @@ class Projects {
     }
   }
 
-  setHostTrust(id, host, trusted) {
+  /** "Don't send secrets to this host": the host gets no values of this
+   * project, and its daemon drops what it holds. */
+  setHostWithheld(id, host, withheld) {
     if (typeof host !== "string" || !host.startsWith("ssh:"))
       throw new Error("Invalid project host.");
     return this.#locked(async () => {
@@ -591,12 +804,10 @@ class Projects {
       const project = this.#own(projects, id);
       if (!project) throw new Error("Unknown project.");
       project.hosts ||= {};
-      project.hosts[host] = {
-        ...project.hosts[host],
-        trusted: !!trusted,
-      };
+      project.hosts[host] = { ...project.hosts[host], withheld: !!withheld };
       await this.#write(this.projectsFile, projects);
-      return { trusted: !!trusted };
+      this.onSendChange?.(host);
+      return { withheld: !!withheld };
     });
   }
 
@@ -613,7 +824,6 @@ class Projects {
       project.hosts[host] = {
         ...project.hosts[host],
         overrides,
-        trusted: !!project.hosts[host]?.trusted,
       };
       await this.#write(this.projectsFile, projects);
       return project.hosts[host].overrides;
@@ -621,6 +831,9 @@ class Projects {
   }
 
   async resolve(remote) {
+    // A folder is asked for by its host and path too, for one without a remote.
+    if (remote && typeof remote === "object" && remote.cwd)
+      return this.resolveFolder(remote);
     const key = normalizeRemote(
       typeof remote === "object" ? remote?.remote : remote,
     );

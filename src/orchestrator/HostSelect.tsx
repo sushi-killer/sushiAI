@@ -11,6 +11,7 @@ import { hostStatus, LOCAL_HOST, type DaemonReach } from "./hosts";
 import type { OrchestratorHost } from "./types";
 import type { Project, ProjectHostReadiness } from "../types";
 import { openProjectSettings } from "../app/openSettings";
+import { readPrepareTimes } from "../projectPrepare";
 
 export function RunOnSelect({
   hosts,
@@ -111,7 +112,7 @@ export function RunOnSelect({
                 ? "neutral"
                 : !ready.checkout.ok
                   ? "danger"
-                  : reinstall || !ready.trusted
+                  : reinstall || ready.withheld
                     ? "warning"
                     : "ok";
               return (
@@ -135,12 +136,22 @@ export function RunOnSelect({
                           ? "checking project"
                           : "connect to prepare"
                         : !ready.checkout.ok
-                          ? "not cloned · clones, installs, asks to trust"
+                          ? "not cloned · clones and installs"
                           : reinstall
-                            ? `reinstalls first — ${ready.setup.lockFile || "lock file"} changed`
-                            : ready.trusted
-                              ? "ready"
-                              : "ready · asks to trust first"}
+                            ? `reinstalls first — ${ready.setup.lockFile || "lock file"} changed${(() => {
+                                const seconds = readPrepareTimes(
+                                  project?.id ?? "",
+                                  host.id,
+                                )?.find(
+                                  (step) => step.id === "install",
+                                )?.seconds;
+                                return seconds === undefined
+                                  ? ""
+                                  : ` · ~${seconds} s`;
+                              })()}`
+                            : ready.withheld
+                              ? "ready · no secrets sent"
+                              : "ready"}
                     </span>
                   </span>
                   <span className={`ui-dot ui-tone-${tone}`} aria-hidden />

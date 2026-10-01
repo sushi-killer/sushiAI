@@ -9,9 +9,14 @@ import type {
 } from "./types";
 import { Tag, Toggle } from "./orchestrator/ui";
 import { ProjectPage } from "./ProjectPage";
+import { FolderImport, importSummary } from "./FolderImport";
 import {
+  claudeToolName,
+  mcpCountLine,
+  serversUsingSecrets,
   groupAlsoInProject,
-  mcpVariableReferences,
+  pluginLine,
+  usesText,
   unknownMcpVariables,
   type ProjectMcpServer,
 } from "./projectMcp";
@@ -96,16 +101,25 @@ export function ProjectMcpServersTab({
   const [servers, setServers] = useState<ClaudeMcpServer[]>([]);
   const [plugins, setPlugins] = useState<ClaudePlugin[]>([]);
   const [skills, setSkills] = useState<SkillCatalogItem[]>([]);
+  const [usage, setUsage] = useState<{
+    servers: Record<string, number>;
+    plugins: Record<string, { uses: number; servers: string[] }>;
+  }>({ servers: {}, plugins: {} });
   const [name, setName] = useState("");
   const [definition, setDefinition] = useState("");
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  const autoImported = useRef(false);
   // Server name -> what a host lacks to run it, from each host's own check.
   const [needs, setNeeds] = useState<Record<string, string[]>>({});
   useEffect(() => {
     let cancelled = false;
+    // Without a remote no host can hold this project: nothing to check.
+    if (!project.git?.url) {
+      setNeeds({});
+      return;
+    }
     void Promise.all(
       hosts.map(async (host) => {
         try {
@@ -138,9 +152,9 @@ export function ProjectMcpServersTab({
     () => unknownMcpVariables(ownServers, project.env),
     [ownServers, project.env],
   );
-  const secretReferences = mcpVariableReferences(ownServers).filter((name) =>
-    project.env.some((entry) => entry.name === name && entry.secret),
-  ).length;
+  // Servers that reference at least one secret (not the secrets themselves).
+  const secretReferences = serversUsingSecrets(ownServers, project.env);
+  const hasRemote = !!project.git?.url;
 
   const load = useCallback(async () => {
     if (!window.bridge) return;
@@ -150,10 +164,14 @@ export function ProjectMcpServersTab({
       remote
         ? Promise.resolve([] as SkillCatalogItem[])
         : window.bridge.catalog("skills", { force: true }),
+      remote
+        ? Promise.resolve({ servers: {}, plugins: {} })
+        : window.bridge.claudeMcpUsage(cwd),
     ]);
     if (results[0].status === "fulfilled") setServers(results[0].value.servers);
     if (results[1].status === "fulfilled") setPlugins(results[1].value.plugins);
     if (results[2].status === "fulfilled") setSkills(results[2].value);
+    if (results[3].status === "fulfilled") setUsage(results[3].value);
     const failure = results.find((result) => result.status === "rejected");
     setError(failure?.status === "rejected" ? String(failure.reason) : "");
   }, [cwd, endpoint, remote]);
@@ -161,26 +179,6 @@ export function ProjectMcpServersTab({
   useEffect(() => {
     void load();
   }, [load]);
-
-  // First open with no project MCP servers: adopt the local checkout's
-  // .mcp.json and ~/.claude.json entry once. Literal secrets become ${VAR}
-  // references with a matching secret variable.
-  useEffect(() => {
-    if (remote || !window.bridge || autoImported.current) return;
-    autoImported.current = true;
-    const flag = `sushiai.autoImport.mcp.${project.id}`;
-    if (Object.keys(ownServers).length || localStorage.getItem(flag)) return;
-    const bridge = window.bridge;
-    void (async () => {
-      try {
-        localStorage.setItem(flag, "1");
-        const result = await bridge.projectImportLocal(project.id, cwd);
-        onProject(result.project);
-      } catch (reason) {
-        setError(reason instanceof Error ? reason.message : String(reason));
-      }
-    })();
-  }, [project, ownServers, cwd, remote, onProject]);
 
   async function save(next: Record<string, ProjectMcpServer>) {
     setBusy(true);
@@ -222,14 +220,12 @@ export function ProjectMcpServersTab({
   async function importFile(file?: File) {
     if (!file || !window.bridge) return;
     try {
-      onProject(
-        (
-          await window.bridge.projectImportMcpText(
-            project.id,
-            await file.text(),
-          )
-        ).project,
+      const result = await window.bridge.projectImportMcpText(
+        project.id,
+        await file.text(),
       );
+      onProject(result.project);
+      setNotice(importSummary(result));
     } catch (reason) {
       setError(
         reason instanceof Error
@@ -289,18 +285,35 @@ export function ProjectMcpServersTab({
   }
 
   const also = groupAlsoInProject(servers, plugins);
-  const repoServers = also.repo;
+  // A server the project imported from the repo's .mcp.json is its own now:
+  // it is not listed a second time as coming from the repo.
+  const repoServers = also.repo.filter((item) => !(item.name in ownServers));
   const otherServers = also.personal;
   const disabledNames =
     (project.mcp as { disabledMcpServers?: string[] }).disabledMcpServers || [];
   return (
     <ProjectPage
       title="MCP servers"
-      subtitle="Every run on every host gets these servers. Tokens are ${VAR} references to Environment."
+      subtitle={
+        hasRemote
+          ? "Every run on every host gets these servers. Tokens are ${VAR} references to Environment."
+          : "Every run on this Mac gets these servers. Tokens are ${VAR} references to Environment."
+      }
     >
+      <FolderImport
+        project={project}
+        cwd={cwd}
+        endpoint={endpoint}
+        onProject={onProject}
+      />
+      {notice && (
+        <p role="status" className="pd-folder-import">
+          {notice}
+        </p>
+      )}
       <div className="pd-toolbar">
         <span>
-          {`${Object.keys(ownServers).length} servers · ${secretReferences} use${secretReferences === 1 ? "s" : " secrets"}`}
+          {mcpCountLine(Object.keys(ownServers).length, secretReferences)}
         </span>
         <button
           className="ui-button secondary"
@@ -428,7 +441,9 @@ export function ProjectMcpServersTab({
                 </Tag>
               </div>
               <span className="pd-server-line plain">
-                Every host has it through the repo.
+                {project.git.url
+                  ? "Every host has it through the repo."
+                  : "From this folder’s .mcp.json"}
               </span>
             </div>
             <Tag tone="ok">from repo</Tag>
@@ -444,7 +459,12 @@ export function ProjectMcpServersTab({
                 </Tag>
               </div>
               <span className="pd-server-line plain">
-                Your Claude config on this Mac
+                {[
+                  "Your Claude config on this Mac",
+                  usesText(usage.servers[claudeToolName(server.name)] ?? 0),
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
               </span>
             </div>
             <Toggle
@@ -465,12 +485,15 @@ export function ProjectMcpServersTab({
                 </Tag>
               </div>
               <span className="pd-server-line plain">
-                {(() => {
-                  const uses = usageFor(plugin, skills, cwd);
-                  return uses > 0
-                    ? `Claude plugin · ${uses} ${uses === 1 ? "use" : "uses"} in 30 days`
-                    : "Claude plugin";
-                })()}
+                {pluginLine({
+                  skills: skills.some((skill) => skill.plugin === plugin.name),
+                  servers:
+                    usage.plugins[claudeToolName(plugin.name)]?.servers
+                      .length ?? 0,
+                  uses:
+                    usageFor(plugin, skills, cwd) +
+                    (usage.plugins[claudeToolName(plugin.name)]?.uses ?? 0),
+                })}
               </span>
             </div>
             <Toggle

@@ -1,18 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ClaudeAccount, Project } from "./types";
 import { ProjectPage } from "./ProjectPage";
 
 function Field({
   label,
   hint,
+  first,
   children,
 }: {
   label: string;
   hint: string;
+  first?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <div className="pd-field">
+    <div className={`pd-field${first ? " first" : ""}`}>
       <span className="pd-field-label">
         <strong>{label}</strong>
         <span>{hint}</span>
@@ -26,11 +28,35 @@ export function ProjectGeneralTab({
   project,
   setProject,
   save,
+  name,
+  onRename,
 }: {
   project: Project | null;
   setProject(project: Project): void;
   save(project: Project): Promise<void>;
+  /** The workspace's name; renaming it renames the project with it. */
+  name: string;
+  onRename(name: string): Promise<void>;
 }) {
+  const [draft, setDraft] = useState(name);
+  const [renameError, setRenameError] = useState("");
+  useEffect(() => setDraft(name), [name]);
+  const cancelled = useRef(false);
+  async function commitName() {
+    if (cancelled.current) {
+      cancelled.current = false;
+      return setDraft(name);
+    }
+    const value = draft.trim();
+    if (!value || value === name) return setDraft(name);
+    try {
+      setRenameError("");
+      await onRename(value);
+    } catch (reason) {
+      setDraft(name);
+      setRenameError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
   const [accounts, setAccounts] = useState<ClaudeAccount[]>([]);
   const [domain, setDomain] = useState("");
   const [adding, setAdding] = useState(false);
@@ -41,7 +67,9 @@ export function ProjectGeneralTab({
       .catch(() => {});
   }, []);
   const subtitle =
-    "One repository and one setup for every host. A host without a checkout clones it on its first run.";
+    project && !project.git.url
+      ? "This folder is the project. Add a git remote to run it on other hosts."
+      : "One repository and one setup for every host. A host without a checkout clones it on its first run.";
   if (!project)
     return (
       <ProjectPage title="General" subtitle={subtitle}>
@@ -64,6 +92,32 @@ export function ProjectGeneralTab({
   };
   return (
     <ProjectPage title="General" subtitle={subtitle}>
+      <h3 className="pd-group">Project</h3>
+      <Field label="Name" hint="Shown in the sidebar and the + picker.">
+        <input
+          className="pd-input"
+          aria-label="Project name"
+          value={draft}
+          maxLength={80}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={() => void commitName()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+            if (event.key === "Escape") {
+              // Cancels the edit only: the dialog stays open.
+              event.stopPropagation();
+              cancelled.current = true;
+              setDraft(name);
+              event.currentTarget.blur();
+            }
+          }}
+        />
+        {renameError && (
+          <span role="alert" className="pd-alert">
+            {renameError}
+          </span>
+        )}
+      </Field>
       <h3 className="pd-group">Repository</h3>
       <Field
         label="Git remote"
@@ -73,6 +127,7 @@ export function ProjectGeneralTab({
           className="pd-input"
           aria-label="Git remote"
           value={project.git.url}
+          placeholder="git@host:org/repo.git"
           readOnly
         />
       </Field>

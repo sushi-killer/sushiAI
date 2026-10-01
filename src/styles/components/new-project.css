@@ -660,6 +660,10 @@
 .np-progress.working .np-mark {
   border-color: var(--tone-warning);
 }
+.np-progress.warning .np-mark {
+  border-color: transparent;
+  background: var(--tone-warning);
+}
 .np-progress.failed .np-mark {
   border-color: transparent;
   background: var(--danger);
@@ -751,4 +755,25 @@
 
 .np .np-field input[aria-label="Git URL"]::placeholder {
   font-family: var(--font-sans);
+}
+
+.np-retry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 10px 36px;
+  border-top: 1px solid var(--line);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 14px;
+}
+.np-retry > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.np-retry-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }

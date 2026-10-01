@@ -149,20 +149,12 @@ export function ClaudeMcpSettings({
     void (async () => {
       if (!window.bridge) return;
       try {
-        const [remote, profiles] = await Promise.all([
-          window.bridge.projectInspect(endpoint, {
-            operation: "git_remote",
-            root: cwd,
-          }),
-          window.bridge.connectionsList(),
-        ]);
+        const profiles = await window.bridge.connectionsList();
         setProject(
-          remote?.remote
-            ? await window.bridge.projectsResolve({
-                remote: remote.remote,
-                endpoint: endpoint || "local",
-              })
-            : null,
+          await window.bridge.projectsResolve({
+            endpoint: endpoint || "local",
+            cwd,
+          }),
         );
         setHostRows(profiles);
       } catch {
@@ -189,15 +181,15 @@ export function ClaudeMcpSettings({
     }
   }
 
-  async function changeTrust(host: string, trusted: boolean) {
+  async function changeWithheld(host: string, withheld: boolean) {
     if (!window.bridge || !project) return;
     setHostBusy(host);
     try {
-      await window.bridge.projectHostTrust(project.id, host, trusted);
+      await window.bridge.projectHostWithhold(project.id, host, withheld);
       setProject(await window.bridge.projectsGet(project.id));
       const current = hostMatrix[host];
       if (current)
-        setHostMatrix({ ...hostMatrix, [host]: { ...current, trusted } });
+        setHostMatrix({ ...hostMatrix, [host]: { ...current, withheld } });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -413,13 +405,13 @@ export function ClaudeMcpSettings({
         <div className="project-hosts-settings">
           {!project ? (
             <p className="settings-muted">
-              Open a configured project to manage host trust.
+              Open a configured project to manage its hosts.
             </p>
           ) : (
             <>
               <p className="settings-muted">
-                Hosts run this project over SSH. Secret values are sent only
-                while trust is enabled.
+                Hosts run this project over SSH and get its secret values while
+                a run is going, unless you switch sending off for a host.
               </p>
               {hostRows.length === 0 ? (
                 <p className="settings-muted">No SSH hosts are configured.</p>
@@ -427,19 +419,19 @@ export function ClaudeMcpSettings({
                 hostRows.map((host) => {
                   const key = `ssh:${host.id}`;
                   const matrix = hostMatrix[key];
-                  const trusted = !!project.hosts?.[key]?.trusted;
+                  const withheld = !!project.hosts?.[key]?.withheld;
                   return (
                     <section className="project-host-row" key={host.id}>
                       <div className="project-host-heading">
                         <strong>{host.name}</strong>
                         <span
                           className={
-                            trusted
-                              ? "project-host-trusted"
-                              : "project-host-untrusted"
+                            withheld
+                              ? "project-host-withheld"
+                              : "project-host-sends"
                           }
                         >
-                          {trusted ? "Trusted" : "Not trusted"}
+                          {withheld ? "No secrets sent" : "Gets secrets"}
                         </span>
                       </div>
                       {matrix ? (
@@ -531,23 +523,15 @@ export function ClaudeMcpSettings({
                         >
                           {hostBusy === key ? "Checking…" : "Check readiness"}
                         </button>
-                        {trusted ? (
-                          <button
-                            className="danger"
-                            disabled={!!hostBusy}
-                            onClick={() => void changeTrust(key, false)}
-                          >
-                            Revoke trust
-                          </button>
-                        ) : (
-                          <button
-                            className="primary"
-                            disabled={!!hostBusy}
-                            onClick={() => void changeTrust(key, true)}
-                          >
-                            Trust host
-                          </button>
-                        )}
+                        <button
+                          className={withheld ? "primary" : "danger"}
+                          disabled={!!hostBusy}
+                          onClick={() => void changeWithheld(key, !withheld)}
+                        >
+                          {withheld
+                            ? "Send secrets again"
+                            : "Don’t send secrets"}
+                        </button>
                       </div>
                     </section>
                   );

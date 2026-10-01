@@ -12,14 +12,20 @@ import {
 } from "lucide-react";
 import { agentTitle } from "./agent-title.ts";
 import { Icon } from "../PanelIcon.tsx";
-import { openProjectSettings, openSettings } from "./openSettings.ts";
+import { openSettings } from "./openSettings.ts";
 import {
   checkoutPath,
   readPrepareTimes,
   tildePath as tilde,
 } from "../projectPrepare.ts";
 import { useOrchestratorEnabled } from "../orchestrator/enabled.ts";
-import { sessionHostOptions, type SessionHostContext } from "./sessionHosts.ts";
+import {
+  launchTarget,
+  projectChoices,
+  sessionHostOptions,
+  type SessionHostContext,
+} from "./sessionHosts.ts";
+import { PrepareAndStart } from "./PrepareAndStart.tsx";
 import {
   ExtensionIcon,
   extensionPanelOptions,
@@ -93,7 +99,7 @@ type Tone = "ok" | "warning" | "danger";
  * safe to derive once, here, from `hostContext` (App.tsx's own state, handed
  * down as one prop). */
 export function PanelPickerDialog({
-  active,
+  active: opened,
   adding,
   system,
   addPanel,
@@ -125,6 +131,15 @@ export function PanelPickerDialog({
   hostContext: SessionHostContext;
 }) {
   const orchestrator = useOrchestratorEnabled();
+  // The project the picker targets: the one it opened for, or another from
+  // the title's list (its own open workspace).
+  const [baseId, setBaseId] = useState(opened.id);
+  const active =
+    hostContext.workspaces.find((item) => item.id === baseId) ?? opened;
+  const [allProjects, setAllProjects] = useState<Project[]>([]);
+  const [projectMenu, setProjectMenu] = useState(false);
+  const [setupPick, setSetupPick] = useState("");
+  const [starting, setStarting] = useState<string | null>(null);
   const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([]);
   const [claudeAccounts, setClaudeAccounts] = useState<ClaudeAccount[]>([]);
   // Only a Herdr-backed workspace has a choice to offer.
@@ -141,20 +156,24 @@ export function PanelPickerDialog({
   const agentButtons = useRef<(HTMLButtonElement | null)[]>([]);
   const [focusedAgent, setFocusedAgent] = useState(0);
   useEffect(() => {
+    window.bridge
+      ?.projectsList()
+      .then(setAllProjects)
+      .catch(() => {});
     window.bridge?.modelProfilesList().then(setModelProfiles);
     window.bridge?.claudeAccountsList().then(setClaudeAccounts);
   }, []);
   useEffect(() => {
     let live = true;
-    const remote = hostContext.projectGit[active.id]?.remote;
-    if (!remote || !window.bridge) {
+    if (!window.bridge) {
       setProject(null);
       return;
     }
+    // By the folder's remote, or by the folder itself when it has none.
     window.bridge
       .projectsResolve({
-        remote,
         endpoint: active.connection || "local",
+        cwd: active.cwd,
       })
       .then((found) => {
         if (!live) return;
@@ -167,7 +186,7 @@ export function PanelPickerDialog({
     return () => {
       live = false;
     };
-  }, [active.connection, active.id, hostContext.projectGit]);
+  }, [active.connection, active.cwd, active.id]);
   const projectId = project?.id || "";
   // Empty outside a merge group (D3): the picker then targets `active` alone,
   // exactly as it always has.
@@ -176,7 +195,12 @@ export function PanelPickerDialog({
     [active, hostContext],
   );
   const [hostId, setHostId] = useState(active.id);
-  const targetWorkspaceId = hostOptions.length ? hostId : undefined;
+  const targetWorkspaceId = launchTarget(
+    hostOptions.length,
+    hostId,
+    baseId,
+    opened.id,
+  );
   // The launch host, resolved the same way addPanel resolves it - the picker
   // shows worktree choices for whichever workspace a session would actually
   // start in, not always the active one.
@@ -200,6 +224,19 @@ export function PanelPickerDialog({
     workspace:
       hostContext.workspaces.find((w) => w.id === option.workspaceId) || active,
   }));
+  // The member workspaces by what a probe depends on, so a re-render with the
+  // same hosts never probes them again.
+  const hostsKey = hosts
+    .map(
+      (item) =>
+        `${item.workspace.id}|${item.workspace.connection}|${item.workspace.cwd}`,
+    )
+    .join(",");
+  const choices = projectChoices(
+    allProjects,
+    hostContext.workspaces,
+    hostContext.projectGit,
+  );
   const launchLabel = hostName(targetWorkspace);
   useEffect(() => {
     let live = true;
@@ -237,7 +274,7 @@ export function PanelPickerDialog({
     };
     // `hosts` is rebuilt every render; its identity is the member workspaces.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active.id, hostOptions, hostContext.workspaces, projectId]);
+  }, [active.id, hostsKey, projectId]);
   const targetIsSsh = Boolean(targetWorkspace.connection?.startsWith("ssh:"));
   const canHerdrWorktree =
     Boolean(targetWorkspace.herdrId) && connected && backend === "herdr";
@@ -264,6 +301,8 @@ export function PanelPickerDialog({
   const launchAgent = useCallback(
     (agent: string) => {
       if (adding || worktreeInvalid) return;
+      // A host that is not set up yet is prepared first, then started on.
+      if (setupPick) return setStarting(agent);
       addPanel(
         "agent",
         agent,
@@ -281,6 +320,7 @@ export function PanelPickerDialog({
     },
     [
       addPanel,
+      setupPick,
       backend,
       modelProfiles,
       selectedClaudeAccountId,
@@ -313,7 +353,8 @@ export function PanelPickerDialog({
         event.altKey ||
         event.shiftKey ||
         event.repeat ||
-        adding
+        adding ||
+        starting
       )
         return;
       const target = event.target as HTMLElement | null;
@@ -372,6 +413,7 @@ export function PanelPickerDialog({
     addExtensionPanel,
     launchAgent,
     adding,
+    starting,
   ]);
 
   const targetCheck = hostChecks[targetWorkspace.id];
@@ -407,7 +449,7 @@ export function PanelPickerDialog({
       return { text: "Ready" };
     }
     return system?.agents.find((a) => a.name === agent)?.path
-      ? { text: agent === "claude" ? `Ready on ${launchLabel}` : "Ready" }
+      ? { text: "Ready" }
       : { text: "CLI required", tone: "warning" };
   };
   const secrets = project?.env.filter((entry) => entry.secret).length ?? 0;
@@ -442,6 +484,7 @@ export function PanelPickerDialog({
                   })()}`
                 : "ready"
             }`;
+  const setupProfile = setupHosts.find((item) => item.id === setupPick);
   const slug = branch.replace(/\//g, "-");
   // A remote worktree is shown from that host's home, not this Mac's.
   const shownParent =
@@ -461,12 +504,73 @@ export function PanelPickerDialog({
   const keys = claudeAccounts.filter((item) => item.kind === "apiKey");
   const remoteNote = targetIsSsh ? launchLabel : "";
 
+  if (starting && setupProfile && project)
+    return (
+      <div className="pk">
+        <PrepareAndStart
+          project={project}
+          hostName={setupProfile.name}
+          endpoint={`ssh:${setupProfile.id}`}
+          onStart={(path) =>
+            hostContext.startOnHost(
+              project.name,
+              path,
+              `ssh:${setupProfile.id}`,
+              starting,
+            )
+          }
+          onCancel={() => setStarting(null)}
+        />
+      </div>
+    );
+
   return (
     <div className="pk">
       <header className="pk-head">
         <div className="pk-head-text">
           <span className="pk-eyebrow">New session</span>
-          <h2>{project?.name || active.name}</h2>
+          <h2>
+            {choices.length > 1 ? (
+              <button
+                type="button"
+                className="pk-project"
+                aria-haspopup="menu"
+                aria-expanded={projectMenu}
+                onClick={() => setProjectMenu((open) => !open)}
+              >
+                {project?.name || active.name}
+                <ChevronDown size={14} aria-hidden />
+              </button>
+            ) : (
+              project?.name || active.name
+            )}
+          </h2>
+          {projectMenu && (
+            <div className="pk-project-menu" role="menu" aria-label="Projects">
+              {choices.map((choice) => (
+                <button
+                  key={choice.project.id}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={choice.workspace.id === active.id}
+                  onClick={() => {
+                    setBaseId(choice.workspace.id);
+                    setHostId(choice.workspace.id);
+                    setSetupPick("");
+                    setProjectMenu(false);
+                  }}
+                >
+                  <span className="pk-project-text">
+                    <strong>{choice.project.name}</strong>
+                    <small>{tilde(choice.workspace.cwd, system?.home)}</small>
+                  </span>
+                  {choice.workspace.id === active.id && (
+                    <Check size={13} aria-hidden />
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         {project && (
           <span className="pk-env">
@@ -483,7 +587,10 @@ export function PanelPickerDialog({
               role="radio"
               aria-checked={hostId === host.workspaceId}
               className={`pk-host${hostId === host.workspaceId ? " selected" : ""}`}
-              onClick={() => setHostId(host.workspaceId)}
+              onClick={() => {
+                setSetupPick("");
+                setHostId(host.workspaceId);
+              }}
             >
               <span className={`ui-dot ui-tone-${hostTone(host.workspace)}`} />
               {host.label}
@@ -493,13 +600,10 @@ export function PanelPickerDialog({
             <button
               key={profile.id}
               role="radio"
-              aria-checked={false}
-              className="pk-host"
-              title={`${project?.name || "This project"} is not set up on ${profile.name}. Prepare it in Project settings, Hosts.`}
-              onClick={() => {
-                if (project)
-                  openProjectSettings(active.cwd, "Hosts", active.connection);
-              }}
+              aria-checked={setupPick === profile.id}
+              className={`pk-host${setupPick === profile.id ? " selected" : ""}`}
+              title={`${project?.name || "This project"} is not set up on ${profile.name}. Starting a session there prepares it first.`}
+              onClick={() => project && setSetupPick(profile.id)}
             >
               <span className="ui-dot ui-tone-danger" />
               {profile.name}
@@ -804,12 +908,16 @@ export function PanelPickerDialog({
       </div>
       <footer className="pk-foot">
         <span>
-          {wantsWorktree && !worktreeInvalid
-            ? `${agentTitle(AGENTS[focusedAgent])} on ${launchLabel} in a new worktree on ${branch}`
-            : `${agentTitle(AGENTS[focusedAgent])} on ${launchLabel}${project ? ", with this project’s variables, secrets and MCP servers" : ""}`}
+          {setupPick
+            ? `${agentTitle(AGENTS[focusedAgent])} on ${setupProfile?.name}: it is prepared first, then the session starts`
+            : wantsWorktree && !worktreeInvalid
+              ? `${agentTitle(AGENTS[focusedAgent])} on ${launchLabel} in a new worktree on ${branch}`
+              : `${agentTitle(AGENTS[focusedAgent])} on ${launchLabel}${project ? ", with this project’s variables, secrets and MCP servers" : ""}`}
         </span>
         <kbd className="pk-kbd">⏎</kbd>
-        <span className="pk-foot-text">start</span>
+        <span className="pk-foot-text">
+          {setupProfile ? `Prepare ${setupProfile.name} and start` : "start"}
+        </span>
         <kbd className="pk-kbd">esc</kbd>
       </footer>
     </div>

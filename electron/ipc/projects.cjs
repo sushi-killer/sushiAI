@@ -14,15 +14,17 @@ const {
   secretizeMcpServers,
 } = require("../project-import.cjs");
 const { normalizeRemote, assertRemote } = require("../projects.cjs");
+const { remoteUrl } = require("../git-remote.cjs");
+const { slugOf } = require("../project-slug.cjs");
 const {
   hostProbeScript,
   readiness,
   prepareScript,
   prepareSteps,
   installScript,
-  projectSlug,
   LOCK_FILES,
   installFor,
+  REMOTE_URL_SH,
 } = require("../project-hosts.cjs");
 
 function registerProjectIpc({
@@ -41,6 +43,19 @@ function registerProjectIpc({
   };
 
   if (projects) {
+    const hostOfEndpoint = (endpoint) =>
+      typeof endpoint === "string" && endpoint.startsWith("ssh:")
+        ? endpoint
+        : "local";
+    // The remote of a folder on a host, or "" when it has none. A host that
+    // cannot be asked throws: that is not the same as having no remote.
+    const folderRemote = (endpoint, cwd) =>
+      connections()
+        .inspect(endpoint === "local" ? undefined : endpoint, {
+          operation: "git_remote",
+          root: cwd,
+        })
+        .then((info) => String(info?.remote || ""));
     handle("projects:source-inspect", async (url) => {
       if (typeof url !== "string" || !url.trim())
         throw new Error("Enter a git URL.");
@@ -201,8 +216,8 @@ function registerProjectIpc({
     handle("projects:secret:clear", (id, name) =>
       projects.clearSecret(id, name),
     );
-    handle("projects:host:trust", (id, host, trusted) =>
-      projects.setHostTrust(id, host, trusted),
+    handle("projects:host:withhold", (id, host, withheld) =>
+      projects.setHostWithheld(id, host, withheld),
     );
     handle("projects:host:overrides", (id, host, overrides) =>
       projects.setHostOverrides(id, host, overrides),
@@ -221,25 +236,34 @@ function registerProjectIpc({
       );
       return readiness({ output, project: { ...project, host }, cwd });
     });
+    // A host the owner switched off for this project gets no value at all:
+    // it clones with its own git login and installs without values.
     handle("projects:host:prepare", async (id, host, useHostLogin = false) => {
       if (typeof host !== "string" || !host.startsWith("ssh:"))
         throw new Error("Invalid project host.");
-      const project = await projects.get(id);
-      if (!project) throw new Error("Unknown project.");
-      if (!project.hosts?.[host]?.trusted)
-        throw new Error("Trust this host before sending project values.");
+      const noSecrets = !(await projects.sendsValues(id, host));
+      const stored = await projects.get(id);
+      if (!stored) throw new Error("Unknown project.");
+      if (!stored.git?.url)
+        throw new Error(
+          "This project has no git remote, so a host has nothing to clone. Add a remote to the folder first.",
+        );
+      // Without secrets the check step (which needs them) does not run.
+      const project = noSecrets
+        ? { ...stored, setup: { ...stored.setup, check: "" } }
+        : stored;
       // The clone token is GIT_TOKEN, or GITHUB_TOKEN when that is what the
       // project already keeps.
       const tokenEntry =
         project.env.find((entry) => entry.name === "GIT_TOKEN") ||
         project.env.find((entry) => entry.name === "GITHUB_TOKEN");
       const token =
-        useHostLogin || !tokenEntry
+        noSecrets || useHostLogin || !tokenEntry
           ? ""
           : await projects.secretForHost(id, tokenEntry.name, host);
       // A folder at the standard path that belongs to another repository is
       // never reused: nothing is installed there and no secret goes near it.
-      const slug = projectSlug(project.name);
+      const slug = slugOf(project);
       const refuse = (message) => ({
         ok: false,
         stage: "clone",
@@ -250,7 +274,7 @@ function registerProjectIpc({
       const state = await connections()
         .exec(
           host,
-          `t="$HOME/sushiai/${slug}"; if [ ! -e "$t" ]; then echo ABSENT; elif [ -e "$t/.git" ]; then o=$(git -C "$t" remote get-url origin 2>/dev/null) && echo "ORIGIN=$o" || echo NOORIGIN; else echo NOTREPO; fi`,
+          `t="$HOME/sushiai/${slug}"; if [ ! -e "$t" ]; then echo ABSENT; elif [ -e "$t/.git" ]; then o=$(cd "$t" && ${REMOTE_URL_SH}) && echo "ORIGIN=$o" || echo NOORIGIN; else echo NOTREPO; fi`,
           { timeout: 30000 },
         )
         .then((out) => out.trim().split("\n").pop() || "")
@@ -275,7 +299,9 @@ function registerProjectIpc({
         );
       // The clone token goes in on its own; the rest of the setup variables
       // reach the install and check steps over stdin.
-      const setupEnv = await projects.environmentFor(id, "setup", host);
+      const setupEnv = noSecrets
+        ? {}
+        : await projects.environmentFor(id, "setup", host);
       if (tokenEntry) delete setupEnv[tokenEntry.name];
       const prepared = prepareScript(project, token, setupEnv);
       try {
@@ -434,34 +460,50 @@ function registerProjectIpc({
       return { variables, servers };
     };
 
-    handle("projects:import-local", async (id, cwd) => {
+    // Pulls what a project's folder holds (.env files, .mcp.json, the Claude
+    // config) into the project. The folder must be one the project owns: it
+    // was attached to it, or its origin is the project's remote. With
+    // `preview` nothing is written and what would change is counted.
+    handle("projects:import-local", async (id, cwd, options = {}) => {
       const project = await projects.get(id);
       if (!project) throw new Error("Unknown project.");
       if (typeof cwd !== "string" || !path.isAbsolute(cwd))
         throw new Error("Choose an absolute project folder.");
-      const remote = await execFileAsync(
-        "git",
-        ["remote", "get-url", "origin"],
-        {
-          cwd,
-          timeout: 5000,
-          maxBuffer: 10000,
-        },
-      )
-        .then(({ stdout }) => stdout.trim())
-        .catch(() => "");
-      if (
-        !remote ||
-        normalizeRemote(remote) !== normalizeRemote(project.git?.url)
-      )
-        throw new Error("This folder is not a checkout of this project.");
+      const endpoint = hostOfEndpoint(options?.endpoint);
+      const attached = (await projects.folders(id)).some(
+        (folder) => folder.endpoint === endpoint && folder.cwd === cwd,
+      );
+      if (!attached) {
+        const remote =
+          endpoint === "local"
+            ? await remoteUrl(cwd)
+            : await folderRemote(endpoint, cwd);
+        if (
+          !remote ||
+          normalizeRemote(remote) !== normalizeRemote(project.git?.url)
+        )
+          throw new Error("This folder is not a checkout of this project.");
+      }
       const found = await collect({
-        endpoint: "local",
+        endpoint,
         root: cwd,
-        local: true,
+        local: endpoint === "local",
         taken: await takenValues(project),
       });
-      return projects.mergeImport(id, found);
+      if (options?.preview) return projects.describeImport(id, found);
+      return projects.mergeImport(id, found, { force: !!options?.force });
+    });
+    handle("projects:attach", async (input) => {
+      const endpoint = hostOfEndpoint(input?.endpoint);
+      const cwd = input?.cwd;
+      if (typeof cwd !== "string" || !cwd)
+        throw new Error("Choose a project folder.");
+      return projects.attach({
+        remote: await folderRemote(endpoint, cwd),
+        endpoint,
+        cwd,
+        name: input?.name,
+      });
     });
 
     handle("projects:import-mcp-text", async (id, text) => {
@@ -543,7 +585,21 @@ function registerProjectIpc({
         })),
       };
     });
-    handle("projects:resolve", (remote) => projects.resolve(remote));
+    handle("projects:resolve", async (target) => {
+      // A folder is asked for by host and path; its remote is read here.
+      if (target && typeof target === "object" && target.cwd)
+        return projects.resolve({
+          remote:
+            target.remote ||
+            (await folderRemote(
+              hostOfEndpoint(target.endpoint),
+              target.cwd,
+            ).catch(() => "")),
+          endpoint: target.endpoint,
+          cwd: target.cwd,
+        });
+      return projects.resolve(target);
+    });
   }
 
   async function disconnectEndpoint(endpoint) {

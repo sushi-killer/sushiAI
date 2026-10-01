@@ -20,6 +20,20 @@ export function mcpVariableReferences(value: unknown): string[] {
   return [...references].sort((a, b) => a.localeCompare(b));
 }
 
+/** How many servers reference at least one secret variable (a server with two
+ * secret headers counts once). */
+export function serversUsingSecrets(
+  servers: Record<string, unknown>,
+  env: { name: string; secret?: boolean }[],
+): number {
+  const secrets = new Set(
+    env.filter((entry) => entry.secret).map((entry) => entry.name),
+  );
+  return Object.values(servers).filter((server) =>
+    mcpVariableReferences(server).some((name) => secrets.has(name)),
+  ).length;
+}
+
 export function unknownMcpVariables(
   value: unknown,
   environment: { name: string }[],
@@ -37,4 +51,44 @@ export function groupAlsoInProject<T extends { source: string }, P>(
     personal: servers.filter((server) => server.source !== "project"),
     plugins,
   };
+}
+
+/** "4 servers · 3 use secrets", with the right numbers and verbs. */
+export function mcpCountLine(servers: number, secrets: number): string {
+  const first = `${servers} ${servers === 1 ? "server" : "servers"}`;
+  if (secrets === 0) return `${first} · no secrets`;
+  return secrets === 1
+    ? `${first} · 1 uses a secret`
+    : `${first} · ${secrets} use secrets`;
+}
+
+/** "14 uses in 30 days", "1 use in 30 days", or nothing when there were none. */
+export function usesText(count: number): string {
+  return count > 0 ? `${count} ${count === 1 ? "use" : "uses"} in 30 days` : "";
+}
+
+/** The line under a plugin: what it ships (skills, servers) and how often it
+ * was used. Only what is known is said. */
+export function pluginLine(info: {
+  skills: boolean;
+  servers: number;
+  uses: number;
+}): string {
+  const ships = [
+    info.skills ? "skills" : "",
+    info.servers > 0
+      ? `${info.servers} ${info.servers === 1 ? "server" : "servers"}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" and ");
+  return ["Claude plugin", ships, usesText(info.uses)]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** The name Claude Code gives a server inside a tool name: anything but
+ * letters, digits, "_" and "-" becomes "_". */
+export function claudeToolName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9_-]/g, "_");
 }

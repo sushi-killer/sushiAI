@@ -4,23 +4,24 @@ const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const execFileAsync = promisify(execFile);
 const { normalizeRemote, assertRemote } = require("./projects.cjs");
+const { remoteUrl, remoteName } = require("./git-remote.cjs");
 
 const MESSAGES = {
   cloned: "Cloned",
   updated: "Updated",
   current: "Checkout up to date",
-  "skipped:local-changes": "Checkout has local changes, not updated",
-  "skipped:different-remote": "Checkout uses a different remote, not updated",
-  "skipped:fetch-failed": "Could not fetch, not updated",
-  "skipped:detached-head": "Checkout is not on a branch, not updated",
-  "skipped:no-upstream": "Branch has no upstream, not updated",
-  "skipped:not-fast-forward": "Branch has diverged, not updated",
+  "skipped:local-changes": "Kept the checkout · local changes",
+  "skipped:different-remote": "Kept the checkout · other remote",
+  "skipped:fetch-failed": "Kept the checkout · fetch failed",
+  "skipped:detached-head": "Kept the checkout · not on a branch",
+  "skipped:no-upstream": "Kept the checkout · no upstream",
+  "skipped:not-fast-forward": "Kept the checkout · diverged",
 };
 
 function pullMessage(state) {
   return (
     MESSAGES[state] ||
-    (String(state).startsWith("skipped:") ? "Not updated" : "")
+    (String(state).startsWith("skipped:") ? "Kept the checkout" : "")
   );
 }
 
@@ -42,12 +43,14 @@ async function pullExisting(cwd, url) {
       return null;
     }
   };
-  const origin = await ok("remote", "get-url", "origin");
+  const origin = await remoteUrl(cwd);
   if (url && normalizeRemote(origin || "") !== normalizeRemote(url))
     return "skipped:different-remote";
   if (await ok("status", "--porcelain", "--untracked-files=no"))
     return "skipped:local-changes";
-  if ((await ok("fetch", "--quiet", "origin")) === null)
+  if (
+    (await ok("fetch", "--quiet", (await remoteName(cwd)) || "origin")) === null
+  )
     return "skipped:fetch-failed";
   if (!(await ok("symbolic-ref", "-q", "HEAD"))) return "skipped:detached-head";
   if ((await ok("rev-parse", "-q", "--verify", "@{u}")) === null)

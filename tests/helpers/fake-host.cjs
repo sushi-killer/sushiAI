@@ -8,7 +8,7 @@ const { execFileSync } = require("node:child_process");
 const { Connections } = require("../../electron/connections.cjs");
 
 const TOOLS =
-  "cat mkdir tar mv cp chmod rm uname kill nohup sleep dirname setsid git sed shasum sha256sum mktemp find head tr cut printf env sh ls grep awk timeout date base64 touch test cksum".split(
+  "cat mkdir tar mv cp chmod rm uname kill nohup sleep dirname setsid git sed shasum sha256sum mktemp find head tr cut printf env sh ls grep awk timeout date base64 touch test cksum python3".split(
     " ",
   );
 
@@ -50,6 +50,8 @@ async function makeHost(t, { bin = {} } = {}) {
     { mode: 0o755 },
   );
   const connections = new Connections(root, { ssh });
+  // The inspection workers are long-lived processes: stop them with the test.
+  t.after(() => connections.close().catch(() => {}));
   const profile = await connections.save({
     id: "00000000-0000-4000-8000-0000000000aa",
     name: "Devbox",

@@ -16,10 +16,7 @@ export type HostDots = {
 };
 
 /** The five readiness dots of one host row, from a readiness check. */
-export function hostDots(
-  matrix: ProjectHostReadiness,
-  trusted: boolean,
-): HostDots {
+export function hostDots(matrix: ProjectHostReadiness): HostDots {
   const checkout: Dot = matrix.checkout.ok ? "ok" : "danger";
   const setup: Dot = !matrix.checkout.ok
     ? null
@@ -35,8 +32,8 @@ export function hostDots(
       : "danger";
   const mcp: Dot =
     matrix.mcp.count === 0 ? null : matrix.mcp.ok ? "ok" : "warning";
-  const secrets: Dot = !trusted
-    ? "danger"
+  const secrets: Dot = matrix.withheld
+    ? "warning"
     : matrix.secrets.count > 0
       ? "ok"
       : "warning";
@@ -82,7 +79,7 @@ export function localReadiness(
     },
     mcp: { ok: servers > 0, count: servers },
     secrets: { ok: secrets > 0, count: secrets },
-    trusted: true,
+    withheld: false,
   };
 }
 

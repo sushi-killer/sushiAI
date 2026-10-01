@@ -63,13 +63,7 @@
   letter-spacing: 0.8px;
   line-height: 12px;
 }
-.pd-name-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-.pd-name-row strong {
+.pd-name {
   overflow: hidden;
   font-size: 16px;
   font-weight: 600;
@@ -77,47 +71,14 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.pd-name-row button {
-  flex: none;
-  color: var(--text-faint);
-  font-size: 10.5px;
-  line-height: 13px;
-}
-.pd-name-row button:hover {
-  color: var(--text);
-}
 .pd-remote {
+  min-height: 12px;
   overflow: hidden;
   color: var(--text-faint);
   font-size: 10.5px;
   line-height: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.pd-rename {
-  display: flex;
-  gap: 6px;
-  margin: 2px 0;
-}
-.pd .pd-rename input {
-  flex: 1;
-  min-width: 0;
-  height: 26px;
-  padding: 0 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--bg-app);
-  color: var(--text);
-  font-size: var(--text-sm);
-}
-.pd-rename button {
-  height: 26px;
-  padding: 0 10px;
-  border-radius: var(--radius-md);
-  background: var(--accent);
-  color: var(--accent-ink);
-  font-size: var(--text-sm);
-  font-weight: 500;
 }
 .pd-nav {
   display: flex;
@@ -192,6 +153,8 @@
   margin-right: -32px;
   padding: 0 32px 24px 0;
   overflow-y: auto;
+  /* The page fades at its foot: a cut-off caption reads as scrolling. */
+  mask-image: linear-gradient(to bottom, black calc(100% - 28px), transparent);
   scrollbar-color: var(--line) transparent;
   scrollbar-width: thin;
 }
@@ -684,13 +647,13 @@
 .pd-overrides:focus-visible {
   outline: none;
 }
-.pd-trust {
+.pd-withhold {
   display: flex;
   align-items: center;
   gap: 12px;
   margin-top: 22px;
 }
-.pd-trust p {
+.pd-withhold p {
   flex: 1;
   margin: 0;
   color: var(--text-faint);
@@ -740,4 +703,32 @@
 .pd-remote,
 .pd-host-name small {
   font-family: var(--font-mono);
+}
+
+.pd-folder-import {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 10px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+.pd-folder-import > span {
+  flex: 1;
+  min-width: 0;
+}
+.pd-folder-ok {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--tone-ok);
+}
+.pd-folder-error {
+  color: var(--danger);
+}
+
+/* The name row opens the General page, below its subtitle. */
+.pd-field.first {
+  margin-top: 10px;
 }

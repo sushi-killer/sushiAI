@@ -3,6 +3,7 @@ const {
   PREFLIGHT_SCRIPT,
 } = require("./orchestrator-remote.cjs");
 const { normalizeRemote, assertRemote } = require("./projects.cjs");
+const { projectSlug, slugOf } = require("./project-slug.cjs");
 
 const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 
@@ -30,17 +31,12 @@ function installFor(lockFile) {
 }
 
 /** Sets `lock_file` and `lock_hash` for the lock file in the current folder. */
-const LOCK_HASH = `lock_file=$(find . -maxdepth 1 -type f \\( ${LOCK_FILES.map(([file]) => `-name ${file}`).join(" -o ")} \\) -print -quit)\nif [ -n "$lock_file" ]; then\n  if command -v sha256sum >/dev/null 2>&1; then\n    lock_hash=$(sha256sum "$lock_file" | cut -d ' ' -f 1)\n  else\n    lock_hash=$(shasum -a 256 "$lock_file" | cut -d ' ' -f 1)\n  fi\nelse\n  lock_hash=none\nfi\n`;
+/** The remote a checkout is known by (its branch's upstream remote, else
+ * origin, else the first one), as shell that runs in the checkout. */
+const REMOTE_NAME_SH = `b=$(git symbolic-ref -q --short HEAD 2>/dev/null); u=$(git config "branch.$b.remote" 2>/dev/null); if [ -z "$u" ] || [ "$u" = . ]; then u=origin; fi; git remote | grep -qx "$u" || u=$(git remote | head -n 1); printf '%s' "$u"`;
+const REMOTE_URL_SH = `n=$(${REMOTE_NAME_SH}); [ -n "$n" ] && git remote get-url "$n" 2>/dev/null`;
 
-/** The folder name a project gets under ~/sushiai on a host. */
-function projectSlug(name) {
-  return (
-    String(name)
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "") || "project"
-  );
-}
+const LOCK_HASH = `lock_file=$(find . -maxdepth 1 -type f \\( ${LOCK_FILES.map(([file]) => `-name ${file}`).join(" -o ")} \\) -print -quit)\nif [ -n "$lock_file" ]; then\n  if command -v sha256sum >/dev/null 2>&1; then\n    lock_hash=$(sha256sum "$lock_file" | cut -d ' ' -f 1)\n  else\n    lock_hash=$(shasum -a 256 "$lock_file" | cut -d ' ' -f 1)\n  fi\nelse\n  lock_hash=none\nfi\n`;
 
 /** Where the last-installed lock hash is kept: inside the checkout's git
  * folder (found by git, so a worktree or a moved .git works), else a cache
@@ -59,7 +55,7 @@ function mcpCommands(project) {
 }
 
 function hostProbeScript(cwd, projectName = "project", project) {
-  const slug = projectSlug(projectName);
+  const slug = project ? slugOf(project) : projectSlug(projectName);
   const root = cwd ? quote(cwd) : `"$HOME/sushiai/${slug}"`;
   const commands = Object.values(mcpCommands(project))
     .filter((command) => /^[\w.+-]+$/.test(command))
@@ -68,7 +64,7 @@ function hostProbeScript(cwd, projectName = "project", project) {
         `if command -v ${command} >/dev/null 2>&1; then echo "mcpcmd=${command}:1"; else echo "mcpcmd=${command}:0"; fi\n`,
     )
     .join("");
-  return `export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"\n${commands}mkdir -p "$HOME/sushiai"\nprintf 'home=%s\\n' "$HOME"\necho "platform=$(uname -sm)"\nprintf 'root=%s\\n' ${root}\ncase ${root} in "$HOME"/sushiai/*) echo "standard=1";; *) echo "standard=0";; esac\necho "remote=$(cd ${root} 2>/dev/null && git remote get-url origin 2>/dev/null || true)"\nif cd ${root} 2>/dev/null; then\n${LOCK_HASH}echo "lockfile=$lock_file"\necho "lockhash=$lock_hash"\n${HASH_FILE}echo "installed=$(cat "$hash_file" 2>/dev/null || true)"\nfi\n${PREFLIGHT_SCRIPT}`;
+  return `export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"\n${commands}mkdir -p "$HOME/sushiai"\nprintf 'home=%s\\n' "$HOME"\necho "platform=$(uname -sm)"\nprintf 'root=%s\\n' ${root}\ncase ${root} in "$HOME"/sushiai/*) echo "standard=1";; *) echo "standard=0";; esac\necho "remote=$(cd ${root} 2>/dev/null && { ${REMOTE_URL_SH}; } || true)"\nif cd ${root} 2>/dev/null; then\n${LOCK_HASH}echo "lockfile=$lock_file"\necho "lockhash=$lock_hash"\n${HASH_FILE}echo "installed=$(cat "$hash_file" 2>/dev/null || true)"\nfi\n${PREFLIGHT_SCRIPT}`;
 }
 
 /** Which enabled MCP servers can run on the host: a stdio server whose
@@ -123,7 +119,7 @@ function readiness({ output, project, cwd, now = Date.now() }) {
       count: project.env.filter((entry) => entry.secret && entry.hasValue)
         .length,
     },
-    trusted: !!project.hosts?.[project.host]?.trusted,
+    withheld: !!project.hosts?.[project.host]?.withheld,
   };
 }
 
@@ -148,21 +144,25 @@ function stdinFor(token, setupEnv) {
 
 function prepareScript(project, token, setupEnv = {}) {
   assertRemote(project.git.url);
-  const slug = projectSlug(project.name);
+  const slug = slugOf(project);
   const target = `"$HOME/sushiai/${slug}"`;
   // stdin carries, in order: the git token (a line, maybe empty), then one
   // `NAME=base64(value)` line per setup variable. Nothing is on argv or disk.
+  // The setup variables are held, not exported, until the clone is done: a
+  // failed clone never ran a command that could see them.
   const prelude =
-    [
-      "IFS= read -r git_token || true",
-      "setup_names=",
-      "while IFS= read -r line; do",
-      '  k="${line%%=*}"; v="${line#*=}"',
-      "  case \"$k\" in ''|*[!A-Za-z0-9_]*) continue ;; esac",
-      '  export "$k=$(printf \'%s\' "$v" | { base64 -d 2>/dev/null || base64 -D; })"',
-      '  setup_names="$setup_names $k"',
-      "done",
-    ].join("\n") + "\n";
+    "IFS= read -r git_token || true\nsetup_input=$(cat)\nsetup_names=\n";
+  const exportSetup = [
+    "while IFS= read -r line; do",
+    '  k="${line%%=*}"; v="${line#*=}"',
+    "  case \"$k\" in ''|*[!A-Za-z0-9_]*) continue ;; esac",
+    '  export "$k=$(printf \'%s\' "$v" | { base64 -d 2>/dev/null || base64 -D; })"',
+    '  setup_names="$setup_names $k"',
+    "done <<SUSHIAI_SETUP_INPUT",
+    "$setup_input",
+    "SUSHIAI_SETUP_INPUT",
+    "unset setup_input",
+  ].join("\n");
   const tokenSetup = token
     ? `export SUSHIAI_GIT_TOKEN="$git_token"\numask 077\nmkdir -p "$HOME/.sushiai"\naskpass=$(mktemp "$HOME/.sushiai/askpass.XXXXXX")\nprintf '%s\\n' '#!/bin/sh' 'case "$1" in *sername*) printf "%s\\n" x-access-token ;; *) printf "%s\\n" "$SUSHIAI_GIT_TOKEN" ;; esac' > "$askpass"\nchmod 700 "$askpass"\nexport GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0\n`
     : "";
@@ -171,7 +171,7 @@ function prepareScript(project, token, setupEnv = {}) {
     : "";
   const install = installScript(project);
   const cloneFresh = `${tokenSetup}if [ -e ${target} ]; then\n  echo "$HOME/sushiai/${slug} exists and is not a checkout" >&2\n  exit 1\nfi\nrm -rf ${target}.prepare\ngit clone --branch ${quote(project.git.defaultBranch || "main")} -- ${quote(project.git.url)} ${target}.prepare\nmv ${target}.prepare ${target}\necho 'SUSHIAI_PULL=cloned'\n${tokenCleanup}`;
-  const pullExisting = `${tokenSetup}pull=current\ncd ${target}\nif [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then pull=skipped:local-changes\nelif ! git fetch --quiet origin >/dev/null 2>&1; then pull=skipped:fetch-failed\nelif ! git symbolic-ref -q HEAD >/dev/null 2>&1; then pull=skipped:detached-head\nelif ! git rev-parse -q --verify '@{u}' >/dev/null 2>&1; then pull=skipped:no-upstream\nelse\n  before=$(git rev-parse HEAD)\n  if git pull --ff-only --quiet >/dev/null 2>&1; then\n    [ "$(git rev-parse HEAD)" = "$before" ] || pull=updated\n  else\n    pull=skipped:not-fast-forward\n  fi\nfi\necho "SUSHIAI_PULL=$pull"\ncd "$HOME"\n${tokenCleanup}`;
+  const pullExisting = `${tokenSetup}pull=current\ncd ${target}\nif [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then pull=skipped:local-changes\nelif ! git fetch --quiet "$(${REMOTE_NAME_SH})" >/dev/null 2>&1; then pull=skipped:fetch-failed\nelif ! git symbolic-ref -q HEAD >/dev/null 2>&1; then pull=skipped:detached-head\nelif ! git rev-parse -q --verify '@{u}' >/dev/null 2>&1; then pull=skipped:no-upstream\nelse\n  before=$(git rev-parse HEAD)\n  if git pull --ff-only --quiet >/dev/null 2>&1; then\n    [ "$(git rev-parse HEAD)" = "$before" ] || pull=updated\n  else\n    pull=skipped:not-fast-forward\n  fi\nfi\necho "SUSHIAI_PULL=$pull"\ncd "$HOME"\n${tokenCleanup}`;
   const clone = `mkdir -p "$HOME/sushiai"\nif [ ! -e ${target}/.git ]; then\n${cloneFresh}else\n${pullExisting}fi`;
   // Each step prints `SUSHIAI_STEP=<id>:<epoch>` when it finishes, so the
   // caller can tell what ran and how long it took.
@@ -192,7 +192,7 @@ function prepareScript(project, token, setupEnv = {}) {
     ? `cd ${target}\n${stage("check")}\n${project.setup.check}\n${mark("check")}`
     : "";
   return {
-    script: `export GIT_TERMINAL_PROMPT=0\n${guard}set -e\n${prelude}${mark("start")}\n${stage("clone")}\n${clone}\n${mark("clone")}\n${setup}\n${check}\nunset $setup_names\nprintf 'SUSHIAI_PREPARED=%s\\n' ${target}`,
+    script: `export GIT_TERMINAL_PROMPT=0\n${guard}set -e\n${prelude}${mark("start")}\n${stage("clone")}\n${clone}\n${mark("clone")}\n${exportSetup}\n${setup}\n${check}\nunset $setup_names\nprintf 'SUSHIAI_PREPARED=%s\\n' ${target}`,
     input: stdinFor(token, setupEnv),
     path: `~/sushiai/${slug}`,
   };
@@ -228,6 +228,7 @@ function prepareSteps(project, output, failed) {
 }
 
 module.exports = {
+  REMOTE_URL_SH,
   hostProbeScript,
   readiness,
   prepareScript,

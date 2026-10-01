@@ -207,7 +207,7 @@ test("host environment overrides preserve the shared value and stay encrypted", 
     "ssh:user@devbox",
     "host-invented-secret",
   );
-  await projects.setHostTrust(project.id, "ssh:user@devbox", true);
+  await projects.setHostWithheld(project.id, "ssh:user@devbox", false);
   assert.equal(
     await projects.secretFor(project.id, "API_TOKEN"),
     "shared-invented-secret",

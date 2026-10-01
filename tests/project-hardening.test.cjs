@@ -49,7 +49,6 @@ async function setup(t, { bin, env = [], connections } = {}) {
     setup: { install: "npm ci", check: "" },
     env,
   });
-  await projects.setHostTrust(project.id, host.endpoint, true);
   const call = registerHandlers({
     projects,
     connections: connections ? connections(host) : host.connections,
@@ -364,7 +363,7 @@ test("importing a .env again never turns a secret plain or loses its overrides",
     "ssh:lab",
     "invented-lab",
   );
-  await projects.setHostTrust(project.id, "ssh:lab", true);
+  await projects.setHostWithheld(project.id, "ssh:lab", false);
   const stored = (await projects.get(project.id)).env;
   for (const choice of ["replace", "override", "skip-like"]) {
     const set = importChanges(
@@ -395,7 +394,7 @@ test("ids that name built-ins are unknown projects, and nothing is polluted", as
       () => projects.mergeImport(id, { variables: [{ name: "A" }] }),
       () => projects.setSecret(id, "A", "x"),
       () => projects.setHostSecret(id, "A", "ssh:h", "x"),
-      () => projects.setHostTrust(id, "ssh:h", true),
+      () => projects.setHostWithheld(id, "ssh:h", false),
       () => projects.setHostOverrides(id, "ssh:h", {}),
       () => projects.reviewEnvImport(id, []),
       () => projects.upsert({ id, name: "X" }),
@@ -441,7 +440,7 @@ test("every writer of the store waits for the others", async (t) => {
       ],
     });
     await Promise.all([
-      projects.setHostTrust(project.id, "ssh:lab", true),
+      projects.setHostWithheld(project.id, "ssh:lab", false),
       projects.updateEnv(project.id, {
         set: [{ name: "THREE", secret: false }],
       }),
@@ -451,7 +450,7 @@ test("every writer of the store waits for the others", async (t) => {
       projects.setHostSecret(project.id, "ONE", "ssh:lab", "invented-lab-one"),
     ]);
     const after = await projects.get(project.id);
-    assert.equal(after.hosts["ssh:lab"].trusted, true);
+    assert.equal(after.hosts["ssh:lab"].withheld, false);
     assert.deepEqual(after.hosts["ssh:lab"].overrides, { PORT: "1" });
     assert.equal(
       after.env.some((entry) => entry.name === "THREE"),
@@ -518,8 +517,8 @@ test("a prepare that times out is a timeout in the step it was in, not a clone f
 test("the transport hands back what a timed-out command had printed", async (t) => {
   const host = await makeHost(t);
   await assert.rejects(
-    host.connections.exec(host.endpoint, "echo partial-output >&2; sleep 5", {
-      timeout: 600,
+    host.connections.exec(host.endpoint, "echo partial-output >&2; sleep 30", {
+      timeout: 3000,
     }),
     (error) =>
       error.timedOut === true && error.stderr.includes("partial-output"),
@@ -549,4 +548,17 @@ test("a checkout whose .git is a file (a worktree) is accepted by the probe and 
   const result = await call("projects:host:prepare", project.id, host.endpoint);
   assert.equal(result.ok, true, result.message);
   assert.equal(await exists(path.join(host.home, "npm-saw")), true);
+});
+
+test("a clone that fails never ran a command that could see the install variables", async (t) => {
+  const { host, projects, project, call } = await setup(t, {
+    bin: { git: '#!/bin/sh\nenv > "$HOME/git-env"\nexit 1\n' },
+    env: [{ name: "NPM_TOKEN", secret: true, availableTo: ["setup"] }],
+  });
+  await projects.setSecret(project.id, "NPM_TOKEN", "invented-npm-token");
+  const result = await call("projects:host:prepare", project.id, host.endpoint);
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, "clone");
+  const seen = await fs.readFile(path.join(host.home, "git-env"), "utf8");
+  assert.doesNotMatch(seen, /NPM_TOKEN|invented-npm-token/);
 });

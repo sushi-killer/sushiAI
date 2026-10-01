@@ -36,8 +36,6 @@ export function ProjectSettingsDialog({
 }) {
   const [project, setProject] = useState<Project | null>(null);
   const [tab, setTab] = useState<Tab>(() => takePendingTab(cwd, endpoint));
-  const [name, setName] = useState(workspaceName);
-  const [editingName, setEditingName] = useState(false);
   const [error, setError] = useState("");
   const [confirmClose, setConfirmClose] = useState(false);
   const [hostRows, setHostRows] = useState<ConnectionProfile[]>([]);
@@ -46,29 +44,23 @@ export function ProjectSettingsDialog({
     if (!window.bridge) return;
     setError("");
     try {
-      const remoteInfo = await window.bridge.projectInspect(endpoint, {
-        operation: "git_remote",
-        root: cwd,
-      });
+      // Every workspace has a project: by its remote, else by its folder.
       setProject(
-        remoteInfo?.remote
-          ? await window.bridge.projectsResolve({
-              remote: remoteInfo.remote,
-              endpoint: endpoint || "local",
-            })
-          : null,
+        await window.bridge.projectAttach({
+          endpoint: endpoint || "local",
+          cwd,
+          name: workspaceName,
+        }),
       );
       setHostRows(await window.bridge.connectionsList());
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       setProject(null);
     }
+    // The name only seeds a project that does not exist yet.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cwd, endpoint]);
 
-  useEffect(() => {
-    setName(workspaceName);
-    setEditingName(false);
-  }, [workspaceName]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -79,15 +71,10 @@ export function ProjectSettingsDialog({
     setProject(saved);
   }
 
-  async function rename() {
-    const value = name.trim();
-    if (!value) return;
-    try {
-      await onRename(value);
-      setEditingName(false);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    }
+  /** The workspace and its project take the new name together. */
+  async function rename(value: string) {
+    await onRename(value);
+    if (project) await save({ ...project, name: value });
   }
 
   return (
@@ -95,32 +82,9 @@ export function ProjectSettingsDialog({
       <aside className="pd-rail">
         <div className="pd-head">
           <span className="pd-eyebrow">PROJECT</span>
-          {editingName ? (
-            <div className="pd-rename">
-              <input
-                aria-label="Project name"
-                value={name}
-                maxLength={80}
-                autoFocus
-                onChange={(event) => setName(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") void rename();
-                  if (event.key === "Escape") setEditingName(false);
-                }}
-              />
-              <button onClick={() => void rename()}>Save</button>
-            </div>
-          ) : (
-            <div className="pd-name-row">
-              <strong title={workspaceName}>{workspaceName}</strong>
-              <button
-                title={`Rename ${workspaceName}`}
-                onClick={() => setEditingName(true)}
-              >
-                Rename
-              </button>
-            </div>
-          )}
+          <strong className="pd-name" title={workspaceName}>
+            {workspaceName}
+          </strong>
           <span className="pd-remote">
             {project
               ? repoSlug(project.git.url)
@@ -159,16 +123,16 @@ export function ProjectSettingsDialog({
             project={project}
             setProject={setProject}
             save={save}
+            name={workspaceName}
+            onRename={rename}
           />
         )}
         {tab === "Environment" && (
           <ProjectEnvironmentTab
             project={project}
             setProject={setProject}
-            gitRemote={project?.git.url || ""}
-            projectName={workspaceName}
             cwd={cwd}
-            remote={remote}
+            endpoint={endpoint}
             targets={hostRows}
           />
         )}

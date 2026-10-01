@@ -540,7 +540,10 @@ test("remote orchd receives only trusted project values and project MCP config",
     "task.create": (params) => params,
   });
   const host = "ssh:devbox-id";
-  const project = { id: "project-1", mcp: { lookup: { command: "lookup" } } };
+  const project = {
+    id: "project-1",
+    mcp: { mcpServers: { lookup: { command: "lookup" } } },
+  };
   const service = await serviceAgainst(t, socketPath, directory, {
     host,
     remote: {
@@ -564,7 +567,7 @@ test("remote orchd receives only trusted project values and project MCP config",
     title: "remote task",
   });
   assert.equal(result.projectId, project.id);
-  assert.deepEqual(result.mcp.mcpServers, project.mcp);
+  assert.deepEqual(result.mcp.mcpServers, project.mcp.mcpServers);
   const secrets = calls.find((call) => call.method === "secrets.set");
   assert.deepEqual(secrets.params, {
     profiles: {},
@@ -946,4 +949,177 @@ test("quit() during a slow first ping never lets a later spawn start a daemon", 
   await call;
   await new Promise((resolve) => setTimeout(resolve, 200));
   await assert.rejects(fs.access(marker));
+});
+
+test("a real project store delivers values and MCP to a remote orchd only once the host is trusted", async (t) => {
+  const { makeStore } = require("./helpers/fake-host.cjs");
+  const { projects } = await makeStore(t);
+  const host = "ssh:devbox-id";
+  const project = await projects.upsert({
+    name: "Demo",
+    mcp: { mcpServers: { lookup: { command: "lookup" } } },
+    env: [
+      { name: "PROJECT_KEY", secret: true, availableTo: ["setup", "agent"] },
+      { name: "LOOKUP_TOKEN", secret: true, availableTo: ["mcp"] },
+    ],
+  });
+  await projects.setSecret(project.id, "PROJECT_KEY", "invented-key");
+  await projects.setSecret(project.id, "LOOKUP_TOKEN", "invented-mcp");
+  const pushed = async (trusted) => {
+    await projects.setHostWithheld(project.id, host, !trusted);
+    const { socketPath, directory, calls } = await fixtureServer(t, {
+      ping: () => ({}),
+      "settings.get": () => ({ routes: [] }),
+      "secrets.set": () => ({}),
+      "task.create": (params) => params,
+    });
+    const service = await serviceAgainst(t, socketPath, directory, {
+      host,
+      remote: {
+        ensure: async () => ({ socketPath, token: "test-token" }),
+        reopen() {},
+        close() {},
+      },
+      getProjects: () => projects,
+    });
+    const task = await service.call("task.create", {
+      repo: "/home/user/sushiai/demo",
+      projectId: project.id,
+      title: "remote task",
+    });
+    return {
+      task,
+      secrets: calls.find((call) => call.method === "secrets.set").params,
+    };
+  };
+  let seen = await pushed(false);
+  assert.deepEqual(seen.secrets.projects[project.id] ?? {}, {});
+  assert.deepEqual(seen.secrets.projectMcp[project.id] ?? {}, {});
+  assert.deepEqual(Object.keys(seen.task.mcp.mcpServers), ["lookup"]);
+  seen = await pushed(true);
+  assert.deepEqual(seen.secrets.projects[project.id], {
+    PROJECT_KEY: "invented-key",
+  });
+  assert.deepEqual(seen.secrets.projectMcp[project.id], {
+    LOOKUP_TOKEN: "invented-mcp",
+  });
+});
+
+test("a server the project switched off is not handed to a task", async (t) => {
+  const { socketPath, directory } = await fixtureServer(t, {
+    ping: () => ({}),
+    "settings.get": () => ({ routes: [] }),
+    "secrets.set": () => ({}),
+    "task.create": (params) => params,
+  });
+  const project = {
+    id: "p1",
+    mcp: {
+      mcpServers: { on: { command: "a" }, off: { command: "b" } },
+      disabledMcpServers: ["off"],
+    },
+  };
+  const service = await serviceAgainst(t, socketPath, directory, {
+    getProjects: () => ({
+      get: async () => project,
+      resolveDirectory: async () => project,
+      agentEnvironments: async () => ({}),
+      mcpEnvironments: async () => ({}),
+    }),
+  });
+  const result = await service.call("task.create", {
+    repo: "/work/demo",
+    projectId: "p1",
+    title: "t",
+  });
+  assert.deepEqual(Object.keys(result.mcp.mcpServers), ["on"]);
+});
+
+/** A real store, a real hosts wrapper and a real service against a fake
+ * orchd: what the daemon was last told about project values on a host. */
+async function sendRig(t) {
+  const { makeStore } = require("./helpers/fake-host.cjs");
+  const { createOrchestratorHosts } = require("../electron/orchestrator.cjs");
+  const { projects } = await makeStore(t);
+  const host = "ssh:devbox-id";
+  const project = await projects.upsert({
+    name: "Mine",
+    env: [{ name: "KEY", secret: true, availableTo: ["setup", "agent"] }],
+  });
+  await projects.setSecret(project.id, "KEY", "invented-mine");
+  const fixture = await fixtureServer(t, {
+    ping: () => ({}),
+    "settings.get": () => ({ routes: [] }),
+    "secrets.set": () => ({}),
+    "task.create": (params) => ({ id: "t1", status: "queued", ...params }),
+  });
+  const service = await serviceAgainst(
+    t,
+    fixture.socketPath,
+    fixture.directory,
+    {
+      host,
+      remote: {
+        ensure: async () => ({
+          socketPath: fixture.socketPath,
+          token: "test-token",
+        }),
+        reopen() {},
+        close() {},
+      },
+      getProjects: () => projects,
+    },
+  );
+  // The real wiring: the hosts wrapper sets the store's change hook.
+  const hosts = createOrchestratorHosts({
+    send: () => {},
+    dataDir: fixture.directory,
+    root: fixture.directory,
+    resourcesPath: fixture.directory,
+    getProjects: () => projects,
+    getConnections: () => ({}),
+    enabled: false,
+  });
+  hosts.services.set(host, service);
+  const pushes = () =>
+    fixture.calls.filter((call) => call.method === "secrets.set");
+  const lastSecrets = () => pushes().at(-1)?.params;
+  return { projects, host, project, fixture, service, pushes, lastSecrets };
+}
+
+test("a host the owner added gets a task's project values with no approval step", async (t) => {
+  const { host, project, service, lastSecrets } = await sendRig(t);
+  await service.call("task.create", {
+    repo: "/home/user/sushiai/mine",
+    projectId: project.id,
+    title: "remote task",
+  });
+  assert.deepEqual(lastSecrets().projects[project.id], {
+    KEY: "invented-mine",
+  });
+  assert.ok(host);
+});
+
+test("switching sending off empties the daemon's copy at once, and switching it on gives the values back", async (t) => {
+  const { projects, host, project, service, pushes, lastSecrets } =
+    await sendRig(t);
+  await service.call("task.list", {}).catch(() => {});
+  const settled = async (check) => {
+    await waitUntil(() => lastSecrets() && check(lastSecrets()));
+  };
+  await settled((s) => s.projects[project.id]?.KEY === "invented-mine");
+  const before = pushes().length;
+  await projects.setHostWithheld(project.id, host, true);
+  await waitUntil(() => pushes().length > before);
+  await settled((s) => !s.projects[project.id]?.KEY);
+  assert.deepEqual(lastSecrets().projects[project.id] ?? {}, {});
+  // A task made while it is off carries no value either.
+  await service.call("task.create", {
+    repo: "/home/user/sushiai/mine",
+    projectId: project.id,
+    title: "later",
+  });
+  assert.deepEqual(lastSecrets().projects[project.id] ?? {}, {});
+  await projects.setHostWithheld(project.id, host, false);
+  await settled((s) => s.projects[project.id]?.KEY === "invented-mine");
 });

@@ -39,6 +39,8 @@ const {
   REMOTE_URL_SH,
 } = require("../project-hosts.cjs");
 
+const REMOVE_TIMEOUT_MS = 10 * 60 * 1000;
+
 function registerProjectIpc({
   handle,
   getConnections,
@@ -710,10 +712,10 @@ function registerProjectIpc({
     // A project's worktrees on every host it has a folder on. One sh script
     // runs here and over ssh; a host that cannot be asked reports its error
     // rather than looking like it has no worktrees.
-    const runOn = (host, script) =>
+    const runOn = (host, script, timeout = 60000) =>
       host === "local"
         ? execFileAsync("sh", ["-c", script], {
-            timeout: 60000,
+            timeout,
             maxBuffer: 4 * 1024 * 1024,
           }).then(
             (result) => result.stdout,
@@ -726,7 +728,7 @@ function registerProjectIpc({
               );
             },
           )
-        : connections().exec(host, script, { timeout: 60000 });
+        : connections().exec(host, script, { timeout });
     const worktreesOn = async (host, cwd) => ({
       host,
       cwd,
@@ -767,7 +769,9 @@ function registerProjectIpc({
     // name one of the repository's linked worktrees, never the main checkout
     // or an arbitrary folder, and the branch deleted is git's, not the
     // caller's.
-    handle("worktrees:remove", async (endpoint, cwd, target, deleteBranch) => {
+    // `branch`, when given, is the branch the caller saw checked out there;
+    // a worktree that moved to another branch since is kept.
+    handle("worktrees:remove", async (endpoint, cwd, target, options = {}) => {
       const host = hostOfEndpoint(endpoint);
       const list = await worktreesOn(host, cwd);
       const item = list.worktrees.find(
@@ -775,6 +779,11 @@ function registerProjectIpc({
       );
       if (!item) throw new Error("That worktree is not part of this project.");
       if (item.locked) throw new Error("That worktree is locked.");
+      if (typeof options.branch === "string" && options.branch !== item.branch)
+        throw new Error("The worktree branch changed; refresh and try again.");
+      const discardChanges = options.discardChanges === true;
+      if (item.changes && !discardChanges)
+        throw new Error("The worktree has uncommitted changes and was kept.");
       // Never the base branch, whatever the caller asked.
       const keepBranch =
         !item.branch || item.branch === list.base.replace(/^origin\//, "");
@@ -783,9 +792,14 @@ function registerProjectIpc({
         worktreeRemoveScript(
           list.root,
           item.path,
-          deleteBranch === true && !keepBranch ? item.branch : "",
+          options.deleteBranch === true && !keepBranch ? item.branch : "",
+          discardChanges,
         ),
+        // Deleting a large node_modules can take minutes; a kill half way
+        // would leave a half-deleted folder that git still lists.
+        REMOVE_TIMEOUT_MS,
       );
+      return { removed: item.path, branch: item.branch };
     });
 
     handle("projects:import-mcp-text", async (id, text) => {
@@ -969,7 +983,6 @@ function registerProjectIpc({
         "git_overview",
         "git_remote",
         "git_pr_status",
-        "git_worktree_remove",
         "checkout",
       ].includes(options?.operation)
     )

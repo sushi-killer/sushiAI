@@ -29,7 +29,7 @@ export const DIALOG_META: Record<
   notifications: { label: "Notifications", className: "" },
   updates: { label: "Software updates", className: "" },
   routine: { label: "New routine", className: "" },
-  "close-session": { label: "Notifications", className: "" },
+  "close-session": { label: "Close session", className: "cs-dialog" },
   "workspace-actions": {
     label: "Workspace controls",
     className: "project-dialog",

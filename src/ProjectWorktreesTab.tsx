@@ -167,7 +167,9 @@ export function ProjectWorktreesTab({
             row.host,
             row.cwd,
             row.worktree.path,
-            deleteBranch,
+            // Only the changes the owner saw in the confirmation; a checkout
+            // that changed since is kept.
+            { deleteBranch, discardChanges: row.worktree.changes > 0 },
           );
           removed.push(row);
         }

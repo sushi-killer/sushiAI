@@ -511,14 +511,20 @@ export interface Bridge {
     endpoint: string | undefined,
     cwd: string,
   ): Promise<WorktreeList[]>;
-  /** Removes a linked worktree (its folder, changes and all) or forgets one
-   * whose folder is gone, and deletes its branch when asked. */
+  /** Removes a linked worktree or forgets one whose folder is gone. It keeps
+   * a checkout with uncommitted changes unless `discardChanges`, keeps one
+   * whose branch is no longer `branch` when that is given, and deletes the
+   * branch only when asked (never the base branch). */
   worktreeRemove(
     endpoint: string,
     cwd: string,
     path: string,
-    deleteBranch: boolean,
-  ): Promise<void>;
+    options?: {
+      deleteBranch?: boolean;
+      discardChanges?: boolean;
+      branch?: string;
+    },
+  ): Promise<{ removed: string; branch: string }>;
   appPreferences(): Promise<AppPreferences>;
   appPreferencesSet(patch: Partial<AppPreferences>): Promise<AppPreferences>;
   mascotShortcutStatus(): Promise<MascotShortcutStatus>;

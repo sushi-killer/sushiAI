@@ -238,15 +238,18 @@ function parseWorktreeList(output) {
   return { root: worktrees[0]?.path || "", base: base || "", worktrees };
 }
 
-/** Removes one linked worktree: its folder (changes and all - the owner
- * confirmed), or only git's record of that one worktree when its folder is
+/** Removes one linked worktree: its folder (with its changes only when
+ * `discardChanges` - the owner confirmed losing them), or only git's record of that one worktree when its folder is
  * already gone (never `prune`, which would also forget a worktree on a drive
  * that is merely unmounted), then its branch when asked. */
-function worktreeRemoveScript(root, path, branch) {
+function worktreeRemoveScript(root, path, branch, discardChanges = true) {
   const drop = branch ? ` && git branch -D ${quote(branch)}` : "";
+  // Without --force git itself refuses a checkout with modified or untracked
+  // files, so a change made after the caller looked is never lost.
+  const force = discardChanges ? " --force" : "";
   return `${PATH_SH}
 cd ${quote(root)} || exit 1
-if [ -d ${quote(path)} ]; then git worktree remove --force ${quote(path)} || exit 1
+if [ -d ${quote(path)} ]; then git worktree remove${force} ${quote(path)} || exit 1
 else
   admin=$(git rev-parse --git-common-dir)/worktrees
   for d in "$admin"/*; do

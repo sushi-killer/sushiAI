@@ -292,3 +292,38 @@ test("an unfinished task wins over a finished one on the same worktree", async (
   assert.equal(byPath.task.title, "retry");
   assert.equal(removable(byPath), false);
 });
+
+test("closing a worktree's last session keeps a changed checkout, a moved branch and the branch itself", async (t) => {
+  const f = fixture();
+  t.after(() => fs.rmSync(f.dir, { recursive: true, force: true }));
+  const { registerProjectIpc } = require("../electron/ipc/projects.cjs");
+  const handlers = {};
+  registerProjectIpc({
+    handle: (name, fn) => (handlers[name] = fn),
+    getConnections: () => null,
+    projects: { folders: async () => [] },
+  });
+  const remove = (target, options) =>
+    handlers["worktrees:remove"]("local", target, target, options);
+  await assert.rejects(remove(f.repo, { branch: "main" }), /not part/);
+  await assert.rejects(remove(f.merged, { branch: "other" }), /branch changed/);
+  await assert.rejects(remove(f.open, { branch: "open's" }), /uncommitted/);
+  assert.equal(fs.existsSync(path.join(f.open, "dirty")), true);
+  // Changed after the owner looked: git itself still refuses without force.
+  fs.writeFileSync(path.join(f.merged, "late"), "1");
+  await assert.rejects(
+    handlers["worktrees:remove"]("local", f.repo, f.merged, {
+      discardChanges: false,
+      branch: "merged",
+    }),
+  );
+  fs.rmSync(path.join(f.merged, "late"));
+  assert.deepEqual(await remove(f.merged, { branch: "merged" }), {
+    removed: f.merged,
+    branch: "merged",
+  });
+  assert.equal(fs.existsSync(f.merged), false);
+  assert.doesNotThrow(() =>
+    git(f.repo, "rev-parse", "--verify", "refs/heads/merged"),
+  );
+});

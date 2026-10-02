@@ -308,15 +308,23 @@ test("withComments keeps unsent comments per file", async () => {
   assert.deepEqual(both["/p/a.md"], [{ note: "one" }]);
 });
 
-test("shownPath is relative inside the project and absolute outside it", async () => {
+test("shownPath is a name in artifacts/, relative in the project, absolute outside", async () => {
   const { shownPath } = await import("../src/extensions/preview/artifact.ts");
-  assert.equal(
-    shownPath("/w/p/artifacts/plan.md", "/w/p"),
-    "artifacts/plan.md",
-  );
-  assert.equal(
-    shownPath("/w/p/artifacts/plan.md", "/w/p/"),
-    "artifacts/plan.md",
-  );
+  assert.equal(shownPath("/w/p/artifacts/plan.md", "/w/p"), "plan.md");
+  assert.equal(shownPath("/w/p/docs/plan.md", "/w/p/"), "docs/plan.md");
   assert.equal(shownPath("/w/pp/plan.md", "/w/p"), "/w/pp/plan.md");
+});
+
+test("paneRoot widens the scope only to the project, a folder in it or a sibling", async () => {
+  const { paneRoot, insideProject } = await artifact;
+  assert.equal(paneRoot("/w/proj", "/w/proj/sub"), "/w/proj/sub");
+  assert.equal(paneRoot("/w/proj", "/w/proj-wt/"), "/w/proj-wt");
+  for (const wide of ["/", "//", "/w", "/w/", "/other", undefined])
+    assert.equal(paneRoot("/w/proj", wide), "", String(wide));
+  assert.equal(paneRoot("/proj", "/elsewhere"), "");
+  assert.equal(insideProject("/etc/passwd", "/w/proj", "/"), null);
+  assert.equal(
+    insideProject("/w/.ssh/id_rsa", "/w/proj", paneRoot("/w/proj", "/w")),
+    null,
+  );
 });

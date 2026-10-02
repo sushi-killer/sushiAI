@@ -4,6 +4,9 @@ import type { ExtensionRegistry } from "./registry.ts";
 /** The workspace metadata token an agent sets to ask for a surface as the
  * companion half of its own pane. */
 export const OPEN_TOKEN = "sushiai_open";
+/** Herdr cuts a token value at 80 characters without an error, so the
+ * argument travels in its own token, set in the same call. */
+export const OPEN_ARG_TOKEN = "sushiai_open_arg";
 
 export type OpenSignal = {
   paneId: string;
@@ -88,10 +91,18 @@ export function detectOpenSignals(
   const fresh: Fresh[] = [];
   for (const workspace of workspaces) {
     if (!workspace.herdrTokens) continue;
-    const value = workspace.herdrTokens[OPEN_TOKEN] ?? "";
+    const open = workspace.herdrTokens[OPEN_TOKEN] ?? "";
+    const arg = workspace.herdrTokens[OPEN_ARG_TOKEN] ?? "";
+    const value = open && arg ? `${open} ${arg}` : open;
     if (workspace.id in seen && seen[workspace.id] !== value && value)
       fresh.push({ workspace, value });
     next[workspace.id] = value;
   }
   return { seen: next, fresh };
+}
+
+/** A relative argument is a path from the agent pane's folder. */
+export function absoluteArg(arg: string, base: string | undefined): string {
+  if (!arg || arg.startsWith("/") || !base?.startsWith("/")) return arg;
+  return `${base.replace(/\/+$/, "")}/${arg.replace(/^\.\//, "")}`;
 }

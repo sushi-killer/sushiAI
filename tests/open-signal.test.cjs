@@ -251,3 +251,23 @@ test("a new nonce for the same path is fresh and addresses the same panel", asyn
     panelId: "a1",
   });
 });
+
+test("the argument token joins the open token, and a relative path is from the pane", async () => {
+  const { detectOpenSignals, parseOpenSignal, absoluteArg } = await library;
+  const workspace = (tokens) => ({ id: "w1", panels: [], herdrTokens: tokens });
+  let step = detectOpenSignals({}, [workspace({})]);
+  step = detectOpenSignals(step.seen, [
+    workspace({
+      sushiai_open: "p1 e/s n1",
+      sushiai_open_arg: "artifacts/a b.md",
+    }),
+  ]);
+  assert.equal(parseOpenSignal(step.fresh[0].value).arg, "artifacts/a b.md");
+  assert.equal(
+    absoluteArg("artifacts/a.md", "/w/proj/"),
+    "/w/proj/artifacts/a.md",
+  );
+  assert.equal(absoluteArg("./a.md", "/w/proj"), "/w/proj/a.md");
+  assert.equal(absoluteArg("/x/a.md", "/w/proj"), "/x/a.md");
+  assert.equal(absoluteArg("a.md", undefined), "a.md");
+});

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { insideProject, kindOf } from "./artifact.ts";
+import { insideProject, kindOf, paneRoot } from "./artifact.ts";
 import { usePreviewFile } from "./usePreviewFile.ts";
 
 /** True once the file a hidden Preview showed has new content. Mount it only
@@ -10,7 +10,8 @@ export function useChangedWhileHidden(
   connection: string | undefined,
 ): boolean {
   const asked = args.arg || "";
-  const path = insideProject(asked, roots[0], roots[1] || "") || "";
+  const path =
+    insideProject(asked, roots[0], paneRoot(roots[0], roots[1])) || "";
   const element = useRef<HTMLElement | null>(null);
   const file = usePreviewFile(path, kindOf(asked), connection, element);
   const first = useRef("");

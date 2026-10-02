@@ -111,6 +111,7 @@ export const PanelHost = memo(function PanelHost({
                   endpoint={endpoint}
                   onLaunchAgent={onLaunchAgent}
                   onCompanion={onCompanion}
+                  onZoom={() => onZoom(panel.id)}
                 >
                   {main}
                 </CompanionSplit>

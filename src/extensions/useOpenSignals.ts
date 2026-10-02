@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import type { Workspace } from "../types.ts";
 import type { WorkspaceController } from "../workspace/useWorkspaces.ts";
 import {
+  absoluteArg,
   detectOpenSignals,
   parseOpenSignal,
   resolveOpenSignal,
@@ -26,12 +27,14 @@ export function useOpenSignals(
       if (!signal) continue;
       const open = resolveOpenSignal(registry, workspace.panels, signal);
       if (open.kind === "unavailable") notify(open.reason);
-      else
+      else {
+        const agent = workspace.panels.find((p) => p.id === open.panelId);
         ws.openCompanion(
           open.panelId,
           { extensionId: signal.extensionId, surfaceId: signal.surfaceId },
-          { arg: signal.arg },
+          { arg: absoluteArg(signal.arg, agent?.paneCwd || workspace.cwd) },
         );
+      }
     }
   }, [workspaces, registry, ws, notify]);
 }

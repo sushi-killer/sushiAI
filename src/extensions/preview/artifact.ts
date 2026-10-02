@@ -284,6 +284,19 @@ export function parseStarts(
   }
 }
 
+export function parseComments(
+  raw: string | undefined,
+): Record<string, Comment[]> {
+  try {
+    const value = JSON.parse(raw || "{}");
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value
+      : {};
+  } catch {
+    return {};
+  }
+}
+
 /** The label after "#<id> ·" for an orchestrator task status. */
 export function taskStatusLabel(status: string): string {
   if (status === "waiting") return "waiting for you";
@@ -303,10 +316,24 @@ export function insideProject(path: string, ...roots: string[]): string | null {
   for (const cwd of roots) {
     if (!cwd?.startsWith("/")) continue;
     const root = norm(cwd);
-    if (root.split("/").includes("..")) continue;
+    if (!root || root.split("/").includes("..")) continue;
     if (file.startsWith(`${root}/`)) return file;
   }
   return null;
+}
+
+/** The agent pane's own folder as a second Preview root, only when it sits
+ * inside the project's parent folder and is not that parent: the project,
+ * a folder in it, or a sibling worktree. A shell that `cd`s to `/`, the home
+ * folder or any other ancestor gets no wider scope. */
+export function paneRoot(cwd: string, paneCwd: string | undefined): string {
+  if (!paneCwd || !cwd.startsWith("/") || !paneCwd.startsWith("/")) return "";
+  const norm = (value: string) => value.replace(/\/+/g, "/").replace(/\/$/, "");
+  const project = norm(cwd);
+  const parent = project.slice(0, project.lastIndexOf("/"));
+  if (!parent) return "";
+  const pane = norm(paneCwd);
+  return pane.startsWith(`${parent}/`) ? pane : "";
 }
 
 type TaskClient = {
@@ -335,7 +362,8 @@ export async function startOrchestratorTask(
 /** The path as the owner reads it: relative to the project when inside it. */
 export function shownPath(path: string, cwd: string): string {
   const root = cwd.replace(/\/+$/, "");
-  return root && path.startsWith(root + "/")
-    ? path.slice(root.length + 1)
-    : path;
+  const relative =
+    root && path.startsWith(root + "/") ? path.slice(root.length + 1) : path;
+  // Agents write into `artifacts/`, so its files show by name alone.
+  return relative.replace(/^artifacts\//, "");
 }

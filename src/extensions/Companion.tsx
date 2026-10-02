@@ -62,6 +62,7 @@ export function CompanionSplit({
   endpoint,
   onLaunchAgent,
   onCompanion,
+  onZoom,
   children,
 }: {
   panel: Panel;
@@ -71,6 +72,9 @@ export function CompanionSplit({
   endpoint?: string;
   onLaunchAgent?: CoreViewProps["launchAgent"];
   onCompanion(panelId: string, patch: CompanionPatch): void;
+  /** A double click on the half's header zooms the whole pane, like the
+   * agent's header. */
+  onZoom(): void;
   children: ReactNode;
 }) {
   const companion = panel.companion;
@@ -126,7 +130,13 @@ export function CompanionSplit({
             style={{ flexBasis: shown ? `${ratio * 100}%` : 0 }}
           >
             <div className="pane-companion-half">
-              <div className="pane-companion-head">
+              <div
+                className="pane-companion-head"
+                onDoubleClick={(event) => {
+                  const target = event.target as HTMLElement;
+                  if (!target.closest("button, select, input")) onZoom();
+                }}
+              >
                 <div className="pane-companion-slot" ref={setSlot} />
                 <button
                   className="pane-companion-hide"

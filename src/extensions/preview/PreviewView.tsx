@@ -13,6 +13,8 @@ import {
   commentMessage,
   goalPrompt,
   insideProject,
+  paneRoot,
+  parseComments,
   kindOf,
   parseFrontmatter,
   parseRecent,
@@ -61,7 +63,7 @@ export function PreviewView(props: CoreViewProps) {
   const { args, connection, cwd, paneCwd, headerSlot, onArgs } = props;
   const asked = args.arg || "";
   // Only a file inside the project or the pane's own folder is read or served.
-  const path = insideProject(asked, cwd, paneCwd || "") || "";
+  const path = insideProject(asked, cwd, paneRoot(cwd, paneCwd)) || "";
   const outside = asked && !path ? asked : "";
   const kind = kindOf(asked);
   const pane = useRef<HTMLDivElement>(null);
@@ -118,11 +120,15 @@ export function PreviewView(props: CoreViewProps) {
   const [selection, setSelection] = useDocSelection(wrap);
   const [boxFor, setBoxFor] = useState<Selection | null>(null);
   useAnchorHighlight(boxFor?.range);
-  // Unsent comments are kept per file; the tray shows the current file's.
-  const [byPath, setByPath] = useState<Record<string, Comment[]>>({});
-  const comments = byPath[path] || [];
+  // Unsent comments are kept per file in the companion's args, so hiding the
+  // Preview keeps them; the tray shows the current file's.
+  const comments = parseComments(args.comments)[path] || [];
   const setComments = (list: Comment[]) =>
-    setByPath((all) => withComments(all, path, list));
+    onArgs({
+      comments: JSON.stringify(
+        withComments(parseComments(argsRef.current.comments), path, list),
+      ),
+    });
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
   useEffect(() => {
@@ -208,7 +214,11 @@ export function PreviewView(props: CoreViewProps) {
         ...target,
         raw: "\r",
       });
-      setByPath((all) => withComments(all, sentPath, []));
+      onArgs({
+        comments: JSON.stringify(
+          withComments(parseComments(argsRef.current.comments), sentPath, []),
+        ),
+      });
     } catch (error) {
       setSendError(errorText(error));
     } finally {

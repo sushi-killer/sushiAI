@@ -1,39 +1,40 @@
 import { useCallback, useEffect, useState } from "react";
-import { Globe, Lock, Server, Settings } from "lucide-react";
-import type { ConnectionProfile, Project } from "./types";
+import { GitBranch, Globe, Lock, Server, Settings } from "lucide-react";
+import type { ConnectionProfile, Project, Workspace } from "./types";
 import { ProjectMcpServersTab } from "./ProjectMcpServersTab";
 import { ProjectEnvironmentTab } from "./ProjectEnvironmentTab";
 import { ProjectGeneralTab } from "./ProjectGeneralTab";
 import { ProjectHostsTab } from "./ProjectHostsTab";
+import { ProjectWorktreesTab } from "./ProjectWorktreesTab";
 import { ProjectPage } from "./ProjectPage";
 import { repoSlug } from "./projectPrepare";
 import { takePendingTab } from "./app/openSettings";
 
-type Tab = "General" | "Environment" | "MCP servers" | "Hosts";
+type Tab = "General" | "Environment" | "MCP servers" | "Worktrees" | "Hosts";
 const TABS = [
   ["General", Settings],
   ["Environment", Lock],
   ["MCP servers", Server],
+  ["Worktrees", GitBranch],
   ["Hosts", Globe],
 ] as const;
 
 export function ProjectSettingsDialog({
-  cwd,
-  endpoint,
-  remote,
-  workspaceName,
-  sessionCount,
+  workspace,
+  workspaces,
   onRename,
   onCloseWorkspace,
+  onEndWorkspace,
 }: {
-  cwd: string;
-  endpoint?: string;
-  remote: boolean;
-  workspaceName: string;
-  sessionCount: number;
+  workspace: Workspace;
+  workspaces: Workspace[];
   onRename: (name: string) => Promise<void>;
   onCloseWorkspace: () => Promise<void>;
+  onEndWorkspace: (workspace: Workspace) => Promise<void>;
 }) {
+  const { cwd, connection: endpoint, name: workspaceName } = workspace;
+  const remote = endpoint?.startsWith("ssh:") || false;
+  const sessionCount = workspace.panels.length;
   const [project, setProject] = useState<Project | null>(null);
   const [tab, setTab] = useState<Tab>(() => takePendingTab(cwd, endpoint));
   const [error, setError] = useState("");
@@ -77,13 +78,17 @@ export function ProjectSettingsDialog({
     if (project) await save({ ...project, name: value });
   }
 
+  // One name wherever the dialog opens from: every worktree and host of the
+  // project shares the project's, while each workspace keeps its own.
+  const projectName = project?.name || workspaceName;
+
   return (
     <div className="pd">
       <aside className="pd-rail">
         <div className="pd-head">
           <span className="pd-eyebrow">PROJECT</span>
-          <strong className="pd-name" title={workspaceName}>
-            {workspaceName}
+          <strong className="pd-name" title={projectName}>
+            {projectName}
           </strong>
           <span className="pd-remote">
             {project
@@ -123,7 +128,7 @@ export function ProjectSettingsDialog({
             project={project}
             setProject={setProject}
             save={save}
-            name={workspaceName}
+            name={projectName}
             onRename={rename}
           />
         )}
@@ -156,6 +161,16 @@ export function ProjectSettingsDialog({
               </p>
             </ProjectPage>
           ))}
+        {tab === "Worktrees" && (
+          <ProjectWorktreesTab
+            project={project}
+            cwd={cwd}
+            endpoint={endpoint}
+            hosts={hostRows}
+            workspaces={workspaces}
+            onEndWorkspace={onEndWorkspace}
+          />
+        )}
         {tab === "Hosts" && (
           <ProjectHostsTab
             project={project}
@@ -171,7 +186,7 @@ export function ProjectSettingsDialog({
         <div className="pd-confirm">
           <div className="pd-confirm-box">
             <div className="dialog-eyebrow">CLOSE PROJECT</div>
-            <h2>Close {workspaceName}?</h2>
+            <h2>Close {projectName}?</h2>
             <p>
               The project disappears from the sidebar and its {sessionCount}{" "}
               {sessionCount === 1 ? "session stops" : "sessions stop"}.

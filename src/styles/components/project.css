@@ -747,3 +747,46 @@
 .pd-field.first {
   margin-top: 10px;
 }
+
+/* Worktrees: one table across the project's hosts. */
+.pd-wt .pd-row {
+  grid-template-columns: minmax(0, 1fr) 84px 72px 168px 44px;
+}
+.pd-wt .pd-row:not(.head) {
+  padding: 14px;
+}
+.pd-wt-branch {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.pd-wt-branch .pd-flex {
+  gap: 6px;
+}
+.pd-wt-name {
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 16px;
+}
+.pd-wt-branch small {
+  font-size: 10.5px;
+  line-height: 12px;
+}
+.pd-wt-status {
+  gap: 8px;
+}
+.pd-wt-action {
+  display: flex;
+  justify-content: flex-end;
+}
+.pd .pd-confirm-box .pd-wt-branch-toggle {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin: -4px 0 20px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 400;
+}

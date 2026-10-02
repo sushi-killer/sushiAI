@@ -11,7 +11,7 @@ export function openSettings(tab: "connections" | "providers"): void {
  * page. The tab waits here until the dialog mounts and takes it. */
 export const OPEN_PROJECT_SETTINGS_EVENT = "sushiai:open-project-settings";
 export type ProjectSettingsTab =
-  "General" | "Environment" | "MCP servers" | "Hosts";
+  "General" | "Environment" | "MCP servers" | "Worktrees" | "Hosts";
 type Pending = {
   tab: ProjectSettingsTab;
   cwd: string;

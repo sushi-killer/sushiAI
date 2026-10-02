@@ -604,7 +604,7 @@ test("closed pane keeps a worktree workspace when checkout removal fails", async
   const app = controller(
     {
       terminalClose: async () => {},
-      projectInspect: async () => {
+      worktreeRemove: async () => {
         throw new Error("worktree is dirty");
       },
     },

@@ -51,6 +51,31 @@
 .ui-button.secondary:hover {
   background: var(--bg-hover);
 }
+/* A confirm that throws work away. */
+.ui-button.danger {
+  height: 32px;
+  border-color: var(--danger-line);
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+.ui-button.danger:hover {
+  border-color: var(--danger);
+}
+/* A compact icon-only button for a table row's action. */
+.ui-button.icon {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+}
+.ui-button.icon:hover:not(:disabled) {
+  color: var(--text);
+}
+.ui-button.icon:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
 
 /* Control/Toggle: a checkbox drawn as a switch (32x18, 14px knob). Inside a
  * dialog the generic `.modal input` rules would restyle it, so the same

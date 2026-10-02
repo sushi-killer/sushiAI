@@ -38,7 +38,7 @@ git("-C", repo, "worktree", "add", "-b", "feature/cleanup", worktree);
 const fakeGh = path.join(bin, "gh");
 await fs.writeFile(
   fakeGh,
-  '#!/bin/sh\nprintf \'%s\\n\' \'{"state":"CLOSED","mergedAt":"2026-09-20T12:00:00Z"}\'\n',
+  '#!/bin/sh\nprintf \'%s\\n\' \'[{"state":"MERGED","mergedAt":"2026-09-20T12:00:00Z"}]\'\n',
   { mode: 0o755 },
 );
 const mainPanel = {
@@ -183,11 +183,9 @@ try {
     .getByRole("button", { name: "Close Feature Agent", exact: true })
     .click();
   const dialog = page.locator(".modal");
-  await dialog
-    .getByText("Delete this worktree after ending the session")
-    .waitFor();
+  await dialog.getByText("Delete worktree feature/cleanup").waitFor();
   const checkbox = dialog.getByRole("checkbox", {
-    name: /Delete this worktree after ending the session/,
+    name: "Delete worktree feature/cleanup",
   });
   await checkbox.waitFor();
   await page.waitForFunction(() => {
@@ -197,6 +195,8 @@ try {
   report.cleanupCheckedByDefault = await checkbox.isChecked();
   assert.equal(report.cleanupCheckedByDefault, true);
   report.cleanupButton = await dialog.locator(".danger").innerText();
+  // The switch's knob slides for 120 ms after it turns on.
+  await page.waitForTimeout(250);
   await page.screenshot({
     path: path.join(root, "artifacts/worktree-close-cleanup.png"),
   });

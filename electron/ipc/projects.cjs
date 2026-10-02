@@ -3,7 +3,12 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const execFileAsync = promisify(execFile);
-const { createWorktree } = require("../worktree.cjs");
+const {
+  createWorktree,
+  worktreeListScript,
+  parseWorktreeList,
+  worktreeRemoveScript,
+} = require("../worktree.cjs");
 const { localCreate, pullMessage } = require("../project-git.cjs");
 const { randomUUID } = require("node:crypto");
 const {
@@ -33,6 +38,8 @@ const {
   installFor,
   REMOTE_URL_SH,
 } = require("../project-hosts.cjs");
+
+const REMOVE_TIMEOUT_MS = 10 * 60 * 1000;
 
 function registerProjectIpc({
   handle,
@@ -702,6 +709,103 @@ function registerProjectIpc({
       });
     });
 
+    // A project's worktrees on every host it has a folder on. One sh script
+    // runs here and over ssh; a host that cannot be asked reports its error
+    // rather than looking like it has no worktrees.
+    const runOn = (host, script, timeout = 60000) =>
+      host === "local"
+        ? execFileAsync("sh", ["-c", script], {
+            timeout,
+            maxBuffer: 4 * 1024 * 1024,
+          }).then(
+            (result) => result.stdout,
+            (error) => {
+              throw new Error(
+                String(error.stderr || "")
+                  .trim()
+                  .split("\n")
+                  .pop() || "git failed",
+              );
+            },
+          )
+        : connections().exec(host, script, { timeout });
+    const worktreesOn = async (host, cwd) => ({
+      host,
+      cwd,
+      ...parseWorktreeList(await runOn(host, worktreeListScript(cwd))),
+    });
+    handle("worktrees:list", async (id, endpoint, cwd) => {
+      const folders = [
+        { endpoint: hostOfEndpoint(endpoint), cwd },
+        ...(id ? await projects.folders(id) : []),
+      ].filter(
+        (folder, index, all) =>
+          typeof folder.cwd === "string" &&
+          folder.cwd.startsWith("/") &&
+          all.findIndex(
+            (other) =>
+              other.endpoint === folder.endpoint && other.cwd === folder.cwd,
+          ) === index,
+      );
+      const lists = await Promise.all(
+        folders.map((folder) =>
+          worktreesOn(folder.endpoint, folder.cwd).catch((error) => ({
+            host: folder.endpoint,
+            cwd: folder.cwd,
+            error: error.message,
+          })),
+        ),
+      );
+      // Two folders of one repository on a host list the same worktrees.
+      return lists.filter(
+        (list, index) =>
+          list.error ||
+          lists.findIndex(
+            (other) => other.host === list.host && other.root === list.root,
+          ) === index,
+      );
+    });
+    // The worktree is looked up again on its host, so the renderer can only
+    // name one of the repository's linked worktrees, never the main checkout
+    // or an arbitrary folder, and the branch deleted is git's, not the
+    // caller's.
+    // `branch`, when given, is the branch the caller saw checked out there;
+    // a worktree that moved to another branch since is kept.
+    handle("worktrees:remove", async (endpoint, cwd, target, options = {}) => {
+      const host = hostOfEndpoint(endpoint);
+      const list = await worktreesOn(host, cwd);
+      const item = list.worktrees.find(
+        (worktree) => worktree.path === target && !worktree.main,
+      );
+      if (!item) throw new Error("That worktree is not part of this project.");
+      if (item.locked) throw new Error("That worktree is locked.");
+      if (
+        (typeof options.branch === "string" &&
+          options.branch !== item.branch) ||
+        (typeof options.head === "string" && options.head !== item.head)
+      )
+        throw new Error("The worktree changed; refresh and try again.");
+      const discardChanges = options.discardChanges === true;
+      if (item.changes && !discardChanges)
+        throw new Error("The worktree has uncommitted changes and was kept.");
+      // Never the base branch, whatever the caller asked.
+      const keepBranch =
+        !item.branch || item.branch === list.base.replace(/^origin\//, "");
+      await runOn(
+        host,
+        worktreeRemoveScript(
+          list.root,
+          item.path,
+          options.deleteBranch === true && !keepBranch ? item.branch : "",
+          discardChanges,
+        ),
+        // Deleting a large node_modules can take minutes; a kill half way
+        // would leave a half-deleted folder that git still lists.
+        REMOVE_TIMEOUT_MS,
+      );
+      return { removed: item.path, branch: item.branch };
+    });
+
     handle("projects:import-mcp-text", async (id, text) => {
       const project = await projects.get(id);
       if (!project) throw new Error("Unknown project.");
@@ -883,7 +987,6 @@ function registerProjectIpc({
         "git_overview",
         "git_remote",
         "git_pr_status",
-        "git_worktree_remove",
         "checkout",
       ].includes(options?.operation)
     )

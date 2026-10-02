@@ -1260,7 +1260,6 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod answer_source_tests {
-    use super::test_support::*;
     use super::*;
 
     fn waiting(app: &App, kind: QuestionKind, options: &[&str]) -> String {

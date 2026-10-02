@@ -1,6 +1,26 @@
 import { herdrWorkspaceKey } from "../herdrIdentity.ts";
-import { appendPanel, reopenInSlot } from "./workspace-actions.ts";
+import { appendPanel, isVanished, reopenInSlot } from "./workspace-actions.ts";
 import type { Panel, SessionLaunchValue, Workspace } from "../types";
+
+export function findSessionWorkspace(
+  workspaces: Workspace[],
+  endpoint: string,
+  value: SessionLaunchValue,
+): Workspace | undefined {
+  return (
+    workspaces.find(
+      (workspace) =>
+        workspace.connection === endpoint &&
+        workspace.herdrId === value.workspaceId,
+    ) ||
+    workspaces.find(
+      (workspace) =>
+        workspace.connection === endpoint &&
+        workspace.cwd === value.cwd &&
+        isVanished(workspace),
+    )
+  );
+}
 
 export function applySessionLaunch(
   workspaces: Workspace[],
@@ -11,11 +31,7 @@ export function applySessionLaunch(
   name?: string,
 ): Workspace[] {
   const workspaceId = herdrWorkspaceKey(endpoint, value.workspaceId);
-  const listed = workspaces.find(
-    (workspace) =>
-      workspace.connection === endpoint &&
-      workspace.herdrId === value.workspaceId,
-  );
+  const listed = findSessionWorkspace(workspaces, endpoint, value);
   const owner =
     restore &&
     workspaces.find((workspace) => workspace.id === restore.workspaceId);
@@ -32,7 +48,7 @@ export function applySessionLaunch(
         if (!next.panels.some((existing) => existing.id === item.id))
           next = appendPanel(next, item);
   } else if (listed) {
-    next = listed.panels.some((item) => item.id === panel.id)
+    const updated = listed.panels.some((item) => item.id === panel.id)
       ? {
           ...listed,
           panels: listed.panels.map((item) =>
@@ -40,6 +56,7 @@ export function applySessionLaunch(
           ),
         }
       : appendPanel(listed, panel);
+    next = { ...updated, herdrId: value.workspaceId, cwd: value.cwd };
   } else {
     next = appendPanel(
       {

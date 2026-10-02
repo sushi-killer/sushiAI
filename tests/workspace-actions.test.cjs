@@ -114,7 +114,7 @@ test("removeClosedPanels applies to the workspace list as it is now", async () =
   );
 });
 
-test("ending a last Herdr session drops its workspace, while other sessions and transcripts survive", async () => {
+test("ending a last Herdr session keeps its project and clears its pane", async () => {
   const { removeClosedSessions } = await library;
   const sole = {
     ...(await workspace([
@@ -128,9 +128,15 @@ test("ending a last Herdr session drops its workspace, while other sessions and 
     id: "w2",
     herdrId: "w2",
   };
-  assert.deepEqual(removeClosedSessions([sole, linked], new Set(["p"])), [
-    linked,
-  ]);
+  const afterLast = removeClosedSessions([sole, linked], new Set(["p"]));
+  assert.equal(afterLast.length, 2);
+  assert.equal(afterLast[0].id, sole.id);
+  assert.deepEqual(
+    afterLast[0].panels.map((item) => item.id),
+    ["files"],
+  );
+  assert.deepEqual(afterLast[0].layout, { type: "leaf", id: "files" });
+  assert.equal(afterLast[1], linked);
   for (const survivor of [
     panel("q", "terminal", { herdrId: "w1:p2" }),
     panel("local", "terminal"),
@@ -148,7 +154,7 @@ test("ending a last Herdr session drops its workspace, while other sessions and 
   ]);
 });
 
-test("ending the last local worktree session removes only that workspace", async () => {
+test("ending the last local worktree session keeps its project", async () => {
   const { removeClosedSessions } = await library;
   const local = {
     ...(await workspace([panel("local", "terminal"), panel("files", "files")])),
@@ -158,9 +164,15 @@ test("ending the last local worktree session removes only that workspace", async
     ...(await workspace([panel("other", "terminal")])),
     id: "other",
   };
-  assert.deepEqual(removeClosedSessions([local, project], new Set(["local"])), [
-    project,
-  ]);
+  const afterLast = removeClosedSessions([local, project], new Set(["local"]));
+  assert.equal(afterLast.length, 2);
+  assert.equal(afterLast[0].id, local.id);
+  assert.deepEqual(
+    afterLast[0].panels.map((item) => item.id),
+    ["files"],
+  );
+  assert.deepEqual(afterLast[0].layout, { type: "leaf", id: "files" });
+  assert.equal(afterLast[1], project);
   const keptDirty = {
     ...(await workspace([panel("dirty", "terminal")])),
     localWorktree: true,
@@ -168,7 +180,6 @@ test("ending the last local worktree session removes only that workspace", async
   const afterFailedCleanup = removeClosedSessions(
     [keptDirty],
     new Set(["dirty"]),
-    new Set([keptDirty.id]),
   );
   assert.equal(afterFailedCleanup.length, 1);
   assert.deepEqual(afterFailedCleanup[0].panels, []);
@@ -189,7 +200,7 @@ test("ending the last local worktree session removes only that workspace", async
   }
 });
 
-test("closing a sole ended Herdr session removes its empty workspace", async () => {
+test("closing a sole ended Herdr pane leaves its empty project ready to reopen", async () => {
   const { removeClosedSessions } = await library;
   const ended = {
     ...(await workspace([
@@ -197,7 +208,11 @@ test("closing a sole ended Herdr session removes its empty workspace", async () 
     ])),
     herdrId: "w1",
   };
-  assert.deepEqual(removeClosedSessions([ended], new Set(["ended"])), []);
+  const after = removeClosedSessions([ended], new Set(["ended"]));
+  assert.equal(after.length, 1);
+  assert.equal(after[0].id, ended.id);
+  assert.deepEqual(after[0].panels, []);
+  assert.equal(after[0].layout, null);
   const withChat = {
     ...ended,
     panels: [...ended.panels, panel("chat", "chat")],

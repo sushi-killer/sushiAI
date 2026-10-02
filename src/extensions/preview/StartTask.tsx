@@ -245,8 +245,8 @@ export function useTaskStatus(record: StartRecord | undefined): string {
   return status;
 }
 
-/** The toolbar button and its states: Start task, Starting…, the running
- * task or session, Failed · Retry. */
+/** The header control and its states: the Start task icon, then a compact
+ * chip for Starting…, the running task or session, Failed · Retry. */
 export function StartButton({
   record,
   starting,
@@ -263,7 +263,7 @@ export function StartButton({
 }) {
   if (starting)
     return (
-      <button type="button" className="ui-button primary pv-start-btn" disabled>
+      <button type="button" className="pv-start-state pv-start-btn" disabled>
         Starting…
       </button>
     );
@@ -278,7 +278,7 @@ export function StartButton({
       return (
         <button
           type="button"
-          className="ui-button primary pv-start-btn"
+          className="pv-start-state pv-start-btn failed"
           title={`Task #${record.taskId} failed`}
           onClick={onOpen}
         >
@@ -298,7 +298,7 @@ export function StartButton({
     return (
       <button
         type="button"
-        className="ui-button primary pv-start-btn"
+        className="pv-start-state pv-start-btn failed"
         title="Starting the task failed"
         onClick={onOpen}
       >
@@ -308,11 +308,12 @@ export function StartButton({
   return (
     <button
       type="button"
-      className="ui-button primary pv-start-btn"
+      className="pv-icon pv-start-icon pv-start-btn"
+      aria-label="Start task"
+      title="Start task"
       onClick={onOpen}
     >
-      <Play size={12} aria-hidden />
-      Start task
+      <Play aria-hidden />
     </button>
   );
 }

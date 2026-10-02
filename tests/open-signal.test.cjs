@@ -15,19 +15,6 @@ const surface = (over = {}) => ({
 });
 const registryOf = (...surfaces) => ({ availableSurfaces: () => surfaces });
 const agent = { id: "a1", kind: "agent", title: "Claude", herdrId: "w3S:p1D" };
-const preview = (id, beside, extra = {}) => ({
-  id,
-  kind: "extension",
-  title: "Preview",
-  extension: {
-    extensionId: "builtin.artifacts",
-    contributionId: "preview",
-    instanceId: id,
-    stateVersion: 1,
-    beside,
-    ...extra,
-  },
-});
 const signal = {
   paneId: "w3S:p1D",
   extensionId: "builtin.artifacts",
@@ -70,28 +57,17 @@ test("parseOpenSignal rejects malformed values", async () => {
     assert.equal(parseOpenSignal(value), null, String(value));
 });
 
-test("resolveOpenSignal adds beside the agent pane", async () => {
+test("resolveOpenSignal targets the agent panel itself", async () => {
   const { resolveOpenSignal } = await library;
-  assert.deepEqual(resolveOpenSignal(registryOf(surface()), [agent], signal), {
-    kind: "add",
-    besidePanelId: "a1",
-  });
-});
-
-test("resolveOpenSignal updates the panel already beside that agent", async () => {
-  const { resolveOpenSignal } = await library;
-  const other = preview("x2", "someone-else");
+  const other = {
+    id: "t1",
+    kind: "terminal",
+    title: "zsh",
+    herdrId: "w3S:p2D",
+  };
   assert.deepEqual(
-    resolveOpenSignal(
-      registryOf(surface()),
-      [agent, other, preview("x1", "a1")],
-      signal,
-    ),
-    { kind: "update", panelId: "x1" },
-  );
-  assert.equal(
-    resolveOpenSignal(registryOf(surface()), [agent, other], signal).kind,
-    "add",
+    resolveOpenSignal(registryOf(surface()), [other, agent], signal),
+    { kind: "companion", panelId: "a1" },
   );
 });
 
@@ -138,41 +114,74 @@ test("resolveOpenSignal rejects declarative views and non-pane hosts", async () 
   );
 });
 
-test("placeBeside splits the target 50/50 and leaves other leaves alone", async () => {
-  const { placeBeside } = await actions;
-  const { leaf, split, leafIds } = await layoutLibrary;
-  const panels = [agent, { id: "t1", kind: "terminal", title: "zsh" }];
-  const layout = split(leaf("a1"), leaf("t1"), "column", 0.7);
-  const workspace = { id: "w1", name: "w", cwd: "/tmp", panels, layout };
-  const next = placeBeside(workspace, "a1", preview("x1", "a1"));
-  assert.equal(next.panels.length, 3);
-  assert.deepEqual(leafIds(next.layout), ["a1", "x1", "t1"]);
-  assert.equal(next.layout.axis, "column");
-  assert.equal(next.layout.ratio, 0.7);
-  assert.equal(next.layout.b.id, "t1");
-  const inner = next.layout.a;
-  assert.equal(inner.axis, "row");
-  assert.equal(inner.ratio, 0.5);
-  assert.equal(inner.a.id, "a1");
-  assert.equal(inner.b.id, "x1");
+const workspaceOf = (...panels) => [
+  { id: "w1", name: "w", cwd: "/tmp", panels, layout: null },
+];
+const target = { extensionId: "builtin.artifacts", surfaceId: "preview" };
+
+test("first signal creates the companion, later signals update its arg, a hidden one re-opens", async () => {
+  const { openCompanion, patchCompanion } = await actions;
+  const t1 = { id: "t1", kind: "terminal", title: "zsh" };
+  const first = openCompanion(workspaceOf(agent, t1), "a1", target, {
+    arg: "/p/a.md",
+  });
+  assert.deepEqual(first[0].panels[0].companion, {
+    ...target,
+    args: { arg: "/p/a.md" },
+    open: true,
+  });
+  assert.equal(first[0].panels[1], t1, "other panels are untouched");
+  // The view stores its own state in args; a later signal keeps it.
+  let next = patchCompanion(first, "a1", { args: { recent: '["/p/a.md"]' } });
+  next = openCompanion(next, "a1", target, { arg: "/p/b.md" });
+  assert.deepEqual(next[0].panels[0].companion.args, {
+    arg: "/p/b.md",
+    recent: '["/p/a.md"]',
+  });
+  // Hiding keeps args and history.
+  const hidden = patchCompanion(next, "a1", { open: false });
+  assert.equal(hidden[0].panels[0].companion.open, false);
+  assert.equal(hidden[0].panels[0].companion.args.recent, '["/p/a.md"]');
+  // A new signal while hidden opens it again.
+  const again = openCompanion(hidden, "a1", target, { arg: "/p/c.md" });
+  assert.equal(again[0].panels[0].companion.open, true);
+  assert.equal(again[0].panels[0].companion.args.arg, "/p/c.md");
+  assert.equal(next[0].panels[0].companion.args.arg, "/p/b.md", "pure");
 });
 
-test("placeBeside leaves the workspace unchanged when the target is missing", async () => {
-  const { placeBeside } = await actions;
+test("patchCompanion clamps the ratio and ignores a pane without a companion", async () => {
+  const { openCompanion, patchCompanion, companionRatio } = await actions;
+  const base = openCompanion(workspaceOf(agent), "a1", target, {
+    arg: "/x.md",
+  });
+  const ratioOf = (value) =>
+    patchCompanion(base, "a1", { ratio: value })[0].panels[0].companion.ratio;
+  assert.equal(ratioOf(0.1), 0.25);
+  assert.equal(ratioOf(0.9), 0.75);
+  assert.equal(ratioOf(0.6), 0.6);
+  assert.equal(companionRatio(undefined), 0.5);
+  assert.equal(companionRatio(Number.NaN), 0.5);
+  const bare = workspaceOf(agent);
+  assert.deepEqual(patchCompanion(bare, "a1", { open: true })[0], bare[0]);
+});
+
+test("a companion goes with its agent panel and survives a reopened session", async () => {
+  const { openCompanion, removeClosedPanels, reopenInSlot } = await actions;
   const { leaf } = await layoutLibrary;
-  const workspace = {
-    id: "w1",
-    name: "w",
-    cwd: "/tmp",
-    panels: [agent],
-    layout: leaf("a1"),
-  };
-  assert.equal(
-    placeBeside(workspace, "nope", preview("x1", "nope")),
-    workspace,
+  const list = openCompanion(
+    [{ ...workspaceOf(agent)[0], layout: leaf("a1") }],
+    "a1",
+    target,
+    { arg: "/x.md" },
   );
-  const empty = { ...workspace, layout: null };
-  assert.equal(placeBeside(empty, "a1", preview("x1", "a1")), empty);
+  assert.deepEqual(removeClosedPanels(list, new Set(["a1"]))[0].panels, []);
+  const reopened = reopenInSlot(list[0], "a1", {
+    ...agent,
+    id: "a2",
+    herdrId: "w3S:p7D",
+  });
+  assert.equal(reopened.panels[0].id, "a2");
+  assert.equal(reopened.panels[0].companion.args.arg, "/x.md");
 });
 
 test("detectOpenSignals treats the first value as a baseline", async () => {
@@ -215,7 +224,7 @@ test("detectOpenSignals treats the first value as a baseline", async () => {
   assert.equal(step.fresh.length, 1);
 });
 
-test("a new nonce for the same path is fresh and reopens a closed Preview", async () => {
+test("a new nonce for the same path is fresh and addresses the same panel", async () => {
   const { detectOpenSignals, parseOpenSignal, resolveOpenSignal } =
     await library;
   const workspace = (value) => ({
@@ -232,22 +241,13 @@ test("a new nonce for the same path is fresh and reopens a closed Preview", asyn
   // The same value again is not a request.
   step = detectOpenSignals(step.seen, [workspace(value("1-10"))]);
   assert.deepEqual(step.fresh, []);
-  // Same path, new nonce: fresh, and with the Preview closed it opens again.
+  // Same path, new nonce: fresh, so a hidden companion opens again.
   step = detectOpenSignals(step.seen, [workspace(value("2-10"))]);
   assert.equal(step.fresh.length, 1);
   const parsed = parseOpenSignal(step.fresh[0].value);
   assert.equal(parsed.arg, "/tmp/plan.md");
   assert.deepEqual(resolveOpenSignal(registryOf(surface()), [agent], parsed), {
-    kind: "add",
-    besidePanelId: "a1",
+    kind: "companion",
+    panelId: "a1",
   });
-  // With the Preview open the same request only updates that pane.
-  assert.deepEqual(
-    resolveOpenSignal(
-      registryOf(surface()),
-      [agent, preview("x1", "a1")],
-      parsed,
-    ),
-    { kind: "update", panelId: "x1" },
-  );
 });

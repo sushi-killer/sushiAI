@@ -168,6 +168,7 @@ export function reconcileHerdrWorkspaces(
             ? agentTitle(pane.agent)
             : pane.terminal_title_stripped || "zsh"),
         herdrId: pane.pane_id,
+        ...(pane.cwd ? { paneCwd: pane.cwd } : {}),
         agent: existingPanel?.launchError ? existingPanel.agent : pane.agent,
         status: pane.agent_status,
       };

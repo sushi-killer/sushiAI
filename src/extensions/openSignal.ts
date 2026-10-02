@@ -1,7 +1,8 @@
 import type { Panel, Workspace } from "../types.ts";
 import type { ExtensionRegistry } from "./registry.ts";
 
-/** The workspace metadata token an agent sets to ask for a surface beside it. */
+/** The workspace metadata token an agent sets to ask for a surface as the
+ * companion half of its own pane. */
 export const OPEN_TOKEN = "sushiai_open";
 
 export type OpenSignal = {
@@ -14,8 +15,7 @@ export type OpenSignal = {
 
 export type OpenResolution =
   | { kind: "unavailable"; reason: string }
-  | { kind: "update"; panelId: string }
-  | { kind: "add"; besidePanelId: string };
+  | { kind: "companion"; panelId: string };
 
 /** "<paneId> <extensionId>/<surfaceId> <nonce> <arg>": the nonce is one word
  * that changes on every request, so asking for the same file again is still a
@@ -65,23 +65,14 @@ export function resolveOpenSignal(
   if (surface.view.kind !== "core")
     return {
       kind: "unavailable",
-      reason: `Surface ${name} cannot be opened beside a pane.`,
+      reason: `Surface ${name} cannot be opened in a pane.`,
     };
   if (!surface.allowedHosts.includes("workspace.pane"))
     return {
       kind: "unavailable",
       reason: `Surface ${name} is not a workspace pane.`,
     };
-  const existing = panels.find(
-    (panel) =>
-      panel.kind === "extension" &&
-      panel.extension.beside === agent.id &&
-      panel.extension.extensionId === signal.extensionId &&
-      panel.extension.contributionId === signal.surfaceId,
-  );
-  return existing
-    ? { kind: "update", panelId: existing.id }
-    : { kind: "add", besidePanelId: agent.id };
+  return { kind: "companion", panelId: agent.id };
 }
 
 type Fresh = { workspace: Workspace; value: string };

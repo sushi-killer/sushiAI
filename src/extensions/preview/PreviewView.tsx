@@ -1,5 +1,6 @@
 import { ChevronDown, Copy, ExternalLink, MessageSquare } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { errorText } from "../../app/errors.ts";
 import { orchestratorClientFor } from "../../orchestrator/client.ts";
 import { useOrchestratorEnabled } from "../../orchestrator/enabled.ts";
@@ -54,13 +55,13 @@ function Updated({ since }: { since: number }) {
   return <span className="pv-updated">updated {agoText(now - since)}</span>;
 }
 
-/** The `artifacts.preview` core view: one file an agent wrote, drawn beside
- * the agent's pane, with comments and Start task going back to it. */
+/** The `artifacts.preview` core view: one file an agent wrote, drawn in
+ * the companion half of the agent's pane, with comments and Start task going back to it. */
 export function PreviewView(props: CoreViewProps) {
-  const { args, connection, cwd, onArgs } = props;
+  const { args, connection, cwd, paneCwd, headerSlot, onArgs } = props;
   const asked = args.arg || "";
-  // Only a file inside this pane's project is read or served.
-  const path = insideProject(asked, cwd) || "";
+  // Only a file inside the project or the pane's own folder is read or served.
+  const path = insideProject(asked, cwd, paneCwd || "") || "";
   const outside = asked && !path ? asked : "";
   const kind = kindOf(asked);
   const pane = useRef<HTMLDivElement>(null);
@@ -186,7 +187,7 @@ export function PreviewView(props: CoreViewProps) {
     });
   };
   const send = async (items: Comment[]) => {
-    if (!window.bridge || !props.besideHerdrPaneId || !props.herdrEndpoint)
+    if (!window.bridge || !props.agentHerdrPaneId || !props.herdrEndpoint)
       return;
     const sentPath = path;
     setSending(true);
@@ -195,7 +196,7 @@ export function PreviewView(props: CoreViewProps) {
       // One bracketed paste keeps the newlines inside a single message; the
       // Enter that submits it is a second, separate input.
       const target = {
-        pane_id: props.besideHerdrPaneId,
+        pane_id: props.agentHerdrPaneId,
       };
       await window.bridge.herdr(props.herdrEndpoint, "pane.send_input", {
         ...target,
@@ -291,106 +292,108 @@ export function PreviewView(props: CoreViewProps) {
     };
   }, [menu]);
 
-  const agentLabel = props.besideLabel || "agent";
-  const noAgent = props.besideHerdrPaneId
+  const agentLabel = props.agentLabel || "agent";
+  const noAgent = props.agentHerdrPaneId
     ? ""
     : "The agent pane is closed; there is nowhere to send this.";
   const title = parsed.meta.title || "";
 
-  return (
-    <div className="pv" ref={pane}>
-      <div className="pv-bar">
-        <div className="pv-select" ref={menuRef}>
-          <button
-            type="button"
-            className="pv-file"
-            aria-haspopup="menu"
-            aria-expanded={menu}
-            title={path}
-            disabled={!path}
-            onClick={() => setMenu(!menu)}
-          >
-            <span>{path ? shownPath(path, cwd) : "No file"}</span>
-            <ChevronDown size={12} aria-hidden />
-          </button>
-          {menu && (
-            <div className="pv-menu" role="menu">
-              {recent.map((item) => (
-                <button
-                  key={item}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={item === path}
-                  title={item}
-                  onClick={() => {
-                    setMenu(false);
-                    if (item !== path) onArgs({ arg: item });
-                  }}
-                >
-                  {shownPath(item, cwd)}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-        {file.state === "ready" && <Updated since={file.changedAt} />}
-        <span className="pv-bar-gap" />
-        {path && (
-          <button
-            type="button"
-            className="ui-button ghost pv-tool pv-copy"
-            aria-label="Copy path"
-            title="Copy path"
-            onClick={() => void navigator.clipboard?.writeText(path)}
-          >
-            <Copy size={12} aria-hidden />
-            <span className="pv-label">Copy path</span>
-          </button>
-        )}
-        {(kind === "html" ||
-          kind === "image" ||
-          kind === "svg" ||
-          kind === "pdf") &&
-          file.state === "ready" && (
-            <button
-              type="button"
-              className="ui-button ghost pv-tool pv-toggle"
-              aria-label="Comment"
-              title="Comment"
-              aria-pressed={kind === "pdf" ? undefined : commentMode}
-              onClick={() =>
-                kind === "pdf"
-                  ? // Nothing to point at in a PDF: the box opens without a quote.
-                    setBoxFor({ quote: "", where: "PDF", x: 12, y: 12 })
-                  : setCommentMode(!commentMode)
-              }
-            >
-              <MessageSquare size={12} aria-hidden />
-              <span className="pv-label">Comment</span>
-            </button>
-          )}
-        {kind === "html" && previewUrl && (
-          <button
-            type="button"
-            className="ui-button ghost pv-tool pv-present"
-            aria-label="Present"
-            title="Present"
-            onClick={() => void present()}
-          >
-            <ExternalLink size={12} aria-hidden />
-            <span className="pv-label">Present</span>
-          </button>
-        )}
-        {isPlan && (
-          <StartButton
-            record={record}
-            starting={starting}
-            status={taskStatus}
-            failed={failedPath === path}
-            onOpen={() => setCard(true)}
-          />
+  // The controls live in the companion's header row, beside its close button.
+  const bar = (
+    <>
+      <div className="pv-select" ref={menuRef}>
+        <button
+          type="button"
+          className="pv-file"
+          aria-haspopup="menu"
+          aria-expanded={menu}
+          title={path}
+          disabled={!path}
+          onClick={() => setMenu(!menu)}
+        >
+          <span>{path ? shownPath(path, cwd) : "No file"}</span>
+          <ChevronDown size={12} aria-hidden />
+        </button>
+        {menu && (
+          <div className="pv-menu" role="menu">
+            {recent.map((item) => (
+              <button
+                key={item}
+                type="button"
+                role="menuitemradio"
+                aria-checked={item === path}
+                title={item}
+                onClick={() => {
+                  setMenu(false);
+                  if (item !== path) onArgs({ arg: item });
+                }}
+              >
+                {shownPath(item, cwd)}
+              </button>
+            ))}
+          </div>
         )}
       </div>
+      {file.state === "ready" && <Updated since={file.changedAt} />}
+      <span className="pv-spacer" />
+      {path && (
+        <button
+          type="button"
+          className="pv-icon pv-copy"
+          aria-label="Copy path"
+          title="Copy path"
+          onClick={() => void navigator.clipboard?.writeText(path)}
+        >
+          <Copy aria-hidden />
+        </button>
+      )}
+      {(kind === "html" ||
+        kind === "image" ||
+        kind === "svg" ||
+        kind === "pdf") &&
+        file.state === "ready" && (
+          <button
+            type="button"
+            className="pv-icon pv-toggle"
+            aria-label="Comment"
+            title="Comment"
+            aria-pressed={kind === "pdf" ? undefined : commentMode}
+            onClick={() =>
+              kind === "pdf"
+                ? // Nothing to point at in a PDF: the box opens without a quote.
+                  setBoxFor({ quote: "", where: "PDF", x: 12, y: 12 })
+                : setCommentMode(!commentMode)
+            }
+          >
+            <MessageSquare aria-hidden />
+          </button>
+        )}
+      {kind === "html" && previewUrl && (
+        <button
+          type="button"
+          className="pv-icon pv-present"
+          aria-label="Present"
+          title="Present"
+          onClick={() => void present()}
+        >
+          <ExternalLink aria-hidden />
+        </button>
+      )}
+      {isPlan && (
+        <StartButton
+          record={record}
+          starting={starting}
+          status={taskStatus}
+          failed={failedPath === path}
+          onOpen={() => setCard(true)}
+        />
+      )}
+    </>
+  );
+
+  return (
+    <div className="pv" ref={pane}>
+      {headerSlot ? createPortal(bar, headerSlot) : null}
       {startError && (
         <div className="pd-alert pv-alert" role="alert">
           {startError}

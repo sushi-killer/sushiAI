@@ -56,9 +56,9 @@ export function WorkspaceCanvas({
     sendChat,
     openHTML,
     resizeSplit,
-    patchPanelArgs,
+    patchCompanion,
   } = ws;
-  // The agent starts in the workspace that owns the Preview pane, which in a
+  // The agent starts in the workspace that owns the pane with the Preview, which in a
   // merged view is not necessarily the active one.
   const launchPlanAgent =
     (panelId: string): CoreViewProps["launchAgent"] =>
@@ -92,12 +92,6 @@ export function WorkspaceCanvas({
     const panel =
       own?.panel || (!group && active.panels.find((p) => p.id === id));
     if (!panel) return null;
-    const beside = panel.kind === "extension" && panel.extension.beside;
-    const besidePanel = beside
-      ? (own ? merged.panes.map((mp) => mp.panel) : active.panels).find(
-          (p) => p.id === beside,
-        )
-      : undefined;
     return (
       <PanelHost
         key={panel.id}
@@ -127,12 +121,8 @@ export function WorkspaceCanvas({
         onCancel={cancelPanelChat}
         onAgent={setPanelAgent}
         extensionRegistry={extensionRegistry}
-        besideHerdrId={besidePanel?.herdrId}
-        besideLabel={besidePanel?.title}
-        onLaunchAgent={
-          panel.kind === "extension" ? launchPlanAgent(panel.id) : undefined
-        }
-        onArgs={patchPanelArgs}
+        onLaunchAgent={panel.companion ? launchPlanAgent(panel.id) : undefined}
+        onCompanion={patchCompanion}
       />
     );
   }

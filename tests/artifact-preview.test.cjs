@@ -3,7 +3,6 @@ const assert = require("node:assert/strict");
 
 const artifact = import("../src/extensions/preview/artifact.ts");
 const worktree = import("../src/workspace/worktree.ts");
-const actions = import("../src/workspace/workspace-actions.ts");
 
 test("kindOf maps extensions and defaults to text", async () => {
   const { kindOf } = await artifact;
@@ -149,42 +148,6 @@ test("recent files keep eight, newest first, without duplicates", async () => {
   assert.deepEqual(parseRecent(JSON.stringify(["/a.md", 3])), ["/a.md"]);
 });
 
-test("mergePanelArgs keeps view state when a signal sets only arg", async () => {
-  const { mergePanelArgs } = await actions;
-  const panel = (id, args) => ({
-    id,
-    kind: "extension",
-    title: "Preview",
-    extension: { extensionId: "builtin.artifacts", args },
-  });
-  const other = panel("p2", { arg: "/keep.md" });
-  const workspaces = [
-    {
-      id: "w1",
-      panels: [
-        panel("p1", { arg: "/old.md", recent: '["/old.md"]', starts: "{}" }),
-        { id: "t1", kind: "terminal", title: "zsh" },
-      ],
-    },
-    { id: "w2", panels: [other] },
-  ];
-  const next = mergePanelArgs(workspaces, "p1", { arg: "/new.md" });
-  assert.deepEqual(next[0].panels[0].extension.args, {
-    arg: "/new.md",
-    recent: '["/old.md"]',
-    starts: "{}",
-  });
-  assert.equal(next[1], workspaces[1]);
-  assert.equal(next[0].panels[1], workspaces[0].panels[1]);
-  assert.equal(workspaces[0].panels[0].extension.args.arg, "/old.md");
-  const bare = mergePanelArgs(
-    [{ id: "w", panels: [panel("p", undefined)] }],
-    "p",
-    { arg: "/x.md" },
-  );
-  assert.deepEqual(bare[0].panels[0].extension.args, { arg: "/x.md" });
-});
-
 test("acceptAnnotation accepts only the page's own well-formed message", async () => {
   const { acceptAnnotation } = await artifact;
   const message = {
@@ -258,6 +221,29 @@ test("insideProject accepts only absolute files under the project folder", async
   ])
     assert.equal(insideProject(bad, "/w/proj"), null, bad);
   assert.equal(insideProject("/w/a.md", ""), null);
+  // The pane's own folder counts too, the workspace folder is not the only root.
+  assert.equal(
+    insideProject("/w/other/artifacts/a.md", "/w/proj", "/w/other"),
+    "/w/other/artifacts/a.md",
+  );
+  assert.equal(
+    insideProject("/w/proj/a.md", "/w/proj", "/w/other"),
+    "/w/proj/a.md",
+  );
+  assert.equal(
+    insideProject("/w/proj/a.md", "/w/proj", undefined),
+    "/w/proj/a.md",
+  );
+  assert.equal(insideProject("/w/third/a.md", "/w/proj", "/w/other"), null);
+  assert.equal(
+    insideProject("/w/other/../proj/a.md", "/w/proj", "/w/other"),
+    null,
+  );
+  assert.equal(insideProject("rel/a.md", "/w/proj", "/w/other"), null);
+  assert.equal(
+    insideProject("/w/other/a.md", "/w/proj", "/w/../w/other"),
+    null,
+  );
   assert.equal(insideProject("/w/a.md", "/w/../w"), null);
 });
 

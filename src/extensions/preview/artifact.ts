@@ -292,16 +292,21 @@ export function taskStatusLabel(status: string): string {
   return status;
 }
 
-/** The path when it is absolute, free of `..` and inside the project folder;
- * otherwise null. The Preview reads and serves only such files. */
-export function insideProject(path: string, cwd: string): string | null {
-  if (!path.startsWith("/") || !cwd.startsWith("/")) return null;
+/** The path when it is absolute, free of `..` and inside one of the roots
+ * (the project folder, the agent pane's own folder); otherwise null. The
+ * Preview reads and serves only such files. */
+export function insideProject(path: string, ...roots: string[]): string | null {
+  if (!path.startsWith("/")) return null;
   if (path.includes("\0") || path.split("/").includes("..")) return null;
   const norm = (value: string) => value.replace(/\/+/g, "/").replace(/\/$/, "");
-  const root = norm(cwd);
   const file = norm(path);
-  if (root.split("/").includes("..")) return null;
-  return file.startsWith(`${root}/`) ? file : null;
+  for (const cwd of roots) {
+    if (!cwd?.startsWith("/")) continue;
+    const root = norm(cwd);
+    if (root.split("/").includes("..")) continue;
+    if (file.startsWith(`${root}/`)) return file;
+  }
+  return null;
 }
 
 type TaskClient = {

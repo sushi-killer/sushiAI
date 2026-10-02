@@ -5,7 +5,7 @@ description: Show the owner a document you wrote - a plan, research, report, dec
 
 # sushiAI artifacts
 
-sushiAI can open a file you wrote in a Preview pane on the right of your
+sushiAI can open a file you wrote in a Preview half of your
 pane. The owner reads it there, can select text and comment, and can start
 a plan as a task. Works on every host and with any agent.
 

@@ -42,23 +42,6 @@ export function appendPanel(
   };
 }
 
-/** Splits the target panel's slot 50/50 and puts the panel on its right.
- * Selection and zoom are the caller's, and are left alone. A target that is
- * not in the layout leaves the workspace unchanged. */
-export function placeBeside(
-  workspace: Workspace,
-  besidePanelId: string,
-  panel: Panel,
-): Workspace {
-  if (!workspace.layout || !contains(workspace.layout, besidePanelId))
-    return workspace;
-  return {
-    ...workspace,
-    panels: [...workspace.panels, panel],
-    layout: insert(workspace.layout, besidePanelId, panel.id, "right"),
-  };
-}
-
 /** Puts the panel that replaces an ended Herdr pane into that pane's layout
  * slot and panel-list position. `herdrId` rebinds the workspace to the Herdr
  * workspace that was created for it. A background poll may already have listed
@@ -77,7 +60,11 @@ export function reopenInSlot(
     ...(herdrId ? { herdrId } : {}),
     panels: workspace.panels
       .filter((panel) => panel.id !== next.id || panel.id === endedId)
-      .map((panel) => (panel.id === endedId ? next : panel)),
+      .map((panel) =>
+        panel.id === endedId
+          ? { ...next, companion: panel.companion ?? next.companion }
+          : panel,
+      ),
     layout: inSlot
       ? replaceLeaf(layout, endedId, next.id)
       : layout
@@ -329,29 +316,75 @@ export function findHostWorkspace(
   );
 }
 
-/** Merges `args` into an extension panel's args. A caller that sets one key
- * (the open signal's `arg`) must not wipe the view state stored beside it. */
-export function mergePanelArgs(
+export const COMPANION_RATIO = { min: 0.25, max: 0.75, fallback: 0.5 };
+
+export function companionRatio(ratio: number | undefined): number {
+  return typeof ratio === "number" && Number.isFinite(ratio)
+    ? Math.min(COMPANION_RATIO.max, Math.max(COMPANION_RATIO.min, ratio))
+    : COMPANION_RATIO.fallback;
+}
+
+function mapPanel(
   workspaces: Workspace[],
   panelId: string,
-  args: Record<string, string>,
+  update: (panel: Panel) => Panel,
 ): Workspace[] {
   return workspaces.map((w) =>
     w.panels.some((p) => p.id === panelId)
       ? {
           ...w,
-          panels: w.panels.map((p) =>
-            p.id === panelId && p.kind === "extension"
-              ? {
-                  ...p,
-                  extension: {
-                    ...p.extension,
-                    args: { ...p.extension.args, ...args },
-                  },
-                }
-              : p,
-          ),
+          panels: w.panels.map((p) => (p.id === panelId ? update(p) : p)),
         }
       : w,
+  );
+}
+
+/** An agent's open signal: the pane's companion shows `target` with `args`
+ * merged over what it already held (the view state stored beside the file),
+ * and is open again if it was hidden. A different surface starts afresh. */
+export function openCompanion(
+  workspaces: Workspace[],
+  panelId: string,
+  target: { extensionId: string; surfaceId: string },
+  args: Record<string, string>,
+): Workspace[] {
+  return mapPanel(workspaces, panelId, (panel) => {
+    const old = panel.companion;
+    const same =
+      old?.extensionId === target.extensionId &&
+      old.surfaceId === target.surfaceId;
+    return {
+      ...panel,
+      companion: {
+        ...target,
+        args: { ...(same ? old.args : {}), ...args },
+        open: true,
+        ...(same && old.ratio !== undefined ? { ratio: old.ratio } : {}),
+      },
+    };
+  });
+}
+
+/** Changes a companion: `args` merge into its args, `ratio` is clamped. A pane
+ * without a companion is left alone. */
+export function patchCompanion(
+  workspaces: Workspace[],
+  panelId: string,
+  patch: { args?: Record<string, string>; open?: boolean; ratio?: number },
+): Workspace[] {
+  return mapPanel(workspaces, panelId, (panel) =>
+    panel.companion
+      ? {
+          ...panel,
+          companion: {
+            ...panel.companion,
+            ...(patch.open === undefined ? {} : { open: patch.open }),
+            ...(patch.ratio === undefined
+              ? {}
+              : { ratio: companionRatio(patch.ratio) }),
+            args: { ...panel.companion.args, ...patch.args },
+          },
+        }
+      : panel,
   );
 }

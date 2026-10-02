@@ -1,5 +1,4 @@
 import type { ComponentType } from "react";
-import type { ExtensionPanel } from "../types.ts";
 import { PreviewView } from "./preview/PreviewView.tsx";
 
 export type LaunchAgentRequest = {
@@ -10,20 +9,23 @@ export type LaunchAgentRequest = {
 };
 
 export type CoreViewProps = {
-  panel: ExtensionPanel;
   args: Record<string, string>;
   cwd: string;
+  /** The agent pane's own live folder, which can differ from `cwd`. */
+  paneCwd?: string;
   connection?: string;
-  /** The Herdr pane id of the agent pane this view was opened beside. */
-  besideHerdrPaneId?: string;
+  /** The Herdr pane id of the agent pane this view is the companion of. */
+  agentHerdrPaneId?: string;
   /** The Herdr endpoint (local socket or "ssh:<id>") that pane lives on. */
   herdrEndpoint?: string;
   /** The title of that agent pane, for "Send to <agent>". */
-  besideLabel?: string;
+  agentLabel?: string;
   /** Starts an agent session in a new worktree with a first prompt, through
    * the app's own session launch. Resolves false when the launch failed (the
    * app has already told the owner why). */
   launchAgent?(request: LaunchAgentRequest): Promise<boolean>;
+  /** The companion's header row, where the view draws its own controls. */
+  headerSlot?: HTMLElement | null;
   onArgs(next: Record<string, string>): void;
 };
 

@@ -131,7 +131,7 @@ export function CommentBox({
         <span>Enter to add · Esc to cancel</span>
         <button
           type="button"
-          className="ui-button secondary"
+          className="ui-button primary"
           disabled={!note.trim()}
           onClick={add}
         >
@@ -189,10 +189,11 @@ export function CommentTray({
             type="button"
             className="ui-button primary"
             disabled={!!disabledReason || sending}
+            title={`Send to ${agent || "agent"}`}
             onClick={() => onSend(comments)}
           >
-            <Send size={12} aria-hidden />
-            {sending ? "Sending…" : `Send to ${agent || "agent"}`}
+            <Send size={12} color="currentColor" aria-hidden />
+            {sending ? "Sending…" : "Send"}
           </button>
         </span>
       </div>

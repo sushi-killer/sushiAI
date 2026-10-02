@@ -1,5 +1,5 @@
 import type { Layout, Panel, Workspace } from "./types";
-import { contains, isValidLayout, leaf, split, uid } from "./layout.ts";
+import { contains, isValidLayout, leaf, remove, split, uid } from "./layout.ts";
 import { validRoute, type RouteRef } from "./extensions/routes.ts";
 import type { ProjectGit } from "./app/useProjectGit.ts";
 import { closedProjectKey, migrateHerdrIdentities } from "./herdrIdentity.ts";
@@ -305,6 +305,22 @@ export function sweepLeftovers(saved: Saved): Saved {
   };
 }
 
+/** The Preview was briefly its own pane (unreleased); it is a companion of
+ * its agent pane now, so a saved Preview pane and its layout slot are dropped. */
+export function dropBesidePreviews(w: Workspace): Workspace {
+  const old = (p: Panel) =>
+    p.kind === "extension" &&
+    p.extension.extensionId === "builtin.artifacts" &&
+    p.extension.contributionId === "preview";
+  const gone = w.panels.filter(old);
+  if (!gone.length) return w;
+  return {
+    ...w,
+    panels: w.panels.filter((p) => !old(p)),
+    layout: gone.reduce((tree, p) => remove(tree, p.id), w.layout),
+  };
+}
+
 export function restore(store: SnapshotStore = snapshotStore()): Saved | null {
   try {
     const value = JSON.parse(store.read() ?? importLegacy(store) ?? "null");
@@ -329,21 +345,23 @@ export function restore(store: SnapshotStore = snapshotStore()): Saved | null {
       agentTabs: normalizeAgentTabs(value.agentTabs),
       agentFocus: normalizeAgentFocus(value.agentFocus),
       chatFocus: typeof value.chatFocus === "string" ? value.chatFocus : "",
-      workspaces: value.workspaces.map((w: Workspace) => ({
-        ...w,
-        // Tokens are live host state: the first snapshot after start sets them.
-        herdrTokens: undefined,
-        connection: w.herdrId ? w.connection || value.socket : undefined,
-        panels: w.panels.map((p) => ({
-          ...p,
-          busy: false,
-          started: false,
-          // A reply that never arrived leaves an empty bubble; drop it.
-          ...(p.messages && {
-            messages: p.messages.filter((m) => m.role === "user" || m.text),
-          }),
+      workspaces: value.workspaces
+        .map(dropBesidePreviews)
+        .map((w: Workspace) => ({
+          ...w,
+          // Tokens are live host state: the first snapshot after start sets them.
+          herdrTokens: undefined,
+          connection: w.herdrId ? w.connection || value.socket : undefined,
+          panels: w.panels.map((p) => ({
+            ...p,
+            busy: false,
+            started: false,
+            // A reply that never arrived leaves an empty bubble; drop it.
+            ...(p.messages && {
+              messages: p.messages.filter((m) => m.role === "user" || m.text),
+            }),
+          })),
         })),
-      })),
     };
     const migrated = sweepLeftovers(migrateHerdrIdentities(normalized));
     if (migrated !== normalized) {

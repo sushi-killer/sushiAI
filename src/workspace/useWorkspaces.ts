@@ -19,13 +19,13 @@ import {
 } from "../app/projects.ts";
 import {
   appendPanel,
-  placeBeside,
   findPanelOwner,
   fixSelection,
   groupPanelIds,
   isVanished,
   movePanel as moveInLayout,
-  mergePanelArgs,
+  openCompanion as openCompanionIn,
+  patchCompanion as patchCompanionIn,
   removeClosedSessions,
   removePanel,
   retitleTerminal,
@@ -132,14 +132,18 @@ export function useWorkspaces({
       ),
     [],
   );
-  const openBeside = useCallback(
-    (workspaceId: string, besidePanelId: string, panel: Panel) =>
-      updateWorkspace(workspaceId, (w) => placeBeside(w, besidePanelId, panel)),
-    [updateWorkspace],
+  const openCompanion = useCallback(
+    (
+      panelId: string,
+      target: { extensionId: string; surfaceId: string },
+      args: Record<string, string>,
+    ) =>
+      setWorkspaces((items) => openCompanionIn(items, panelId, target, args)),
+    [],
   );
-  const patchPanelArgs = useCallback(
-    (panelId: string, args: Record<string, string>) =>
-      setWorkspaces((items) => mergePanelArgs(items, panelId, args)),
+  const patchCompanion = useCallback(
+    (panelId: string, patch: Parameters<typeof patchCompanionIn>[2]) =>
+      setWorkspaces((items) => patchCompanionIn(items, panelId, patch)),
     [],
   );
   const focusPanel = useCallback((panelId: string) => {
@@ -981,8 +985,8 @@ export function useWorkspaces({
     setActiveId,
     updateWorkspace,
     updatePanel,
-    openBeside,
-    patchPanelArgs,
+    openCompanion,
+    patchCompanion,
     focusPanel,
     startPanelDrag,
     endPanelDrag,

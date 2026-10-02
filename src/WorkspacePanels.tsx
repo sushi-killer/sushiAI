@@ -10,6 +10,12 @@ import { Icon } from "./PanelIcon";
 import type { ExtensionRegistry } from "./extensions/registry";
 import { ExtensionSurface } from "./extensions/SurfaceRenderer";
 import type { CoreViewProps } from "./extensions/coreViews.ts";
+import {
+  CompanionSplit,
+  CompanionToggle,
+  companionTarget,
+  type CompanionPatch,
+} from "./extensions/Companion.tsx";
 import { OrchestratorPanel } from "./orchestrator/OrchestratorPanel";
 
 type PanelHostProps = {
@@ -43,11 +49,9 @@ type PanelHostProps = {
   /** Opens Settings -> Connections (the Orchestrator's "Add a host"). */
   onOpenConnections?: () => void;
   extensionRegistry: ExtensionRegistry;
-  /** The Herdr pane id of the agent pane an extension pane was opened beside. */
-  besideHerdrId?: string;
-  besideLabel?: string;
   onLaunchAgent?: CoreViewProps["launchAgent"];
-  onArgs?(panelId: string, args: Record<string, string>): void;
+  /** Changes the companion half of an agent or terminal pane. */
+  onCompanion(panelId: string, patch: CompanionPatch): void;
 };
 
 export const PanelHost = memo(function PanelHost({
@@ -77,11 +81,10 @@ export const PanelHost = memo(function PanelHost({
   onAgent,
   onOpenConnections,
   extensionRegistry,
-  besideHerdrId,
-  besideLabel,
   onLaunchAgent,
-  onArgs,
+  onCompanion,
 }: PanelHostProps) {
+  const companion = companionTarget(extensionRegistry, panel.companion);
   return (
     <RenderProfiler id={`panel:${panel.id}`}>
       <PanelFrame
@@ -97,6 +100,35 @@ export const PanelHost = memo(function PanelHost({
         onZoom={() => onZoom(panel.id)}
         onAdd={onAdd}
         onRename={(title) => onRename(panel.id, title)}
+        frame={
+          panel.kind === "terminal" || panel.kind === "agent"
+            ? (main) => (
+                <CompanionSplit
+                  panel={panel}
+                  registry={extensionRegistry}
+                  cwd={cwd}
+                  socket={socket}
+                  endpoint={endpoint}
+                  onLaunchAgent={onLaunchAgent}
+                  onCompanion={onCompanion}
+                >
+                  {main}
+                </CompanionSplit>
+              )
+            : undefined
+        }
+        companionToggle={
+          companion && panel.companion && !panel.companion.open ? (
+            <CompanionToggle
+              title={companion.title}
+              args={panel.companion.args}
+              cwd={cwd}
+              paneCwd={panel.paneCwd}
+              connection={endpoint}
+              onShow={() => onCompanion(panel.id, { open: true })}
+            />
+          ) : null
+        }
       >
         {panel.kind === "terminal" || panel.kind === "agent" ? (
           cwd || !window.bridge ? (
@@ -144,11 +176,6 @@ export const PanelHost = memo(function PanelHost({
             cwd={cwd}
             connection={endpoint}
             registry={extensionRegistry}
-            besideHerdrPaneId={besideHerdrId}
-            besideLabel={besideLabel}
-            herdrEndpoint={socket}
-            launchAgent={onLaunchAgent}
-            onArgs={(args) => onArgs?.(panel.id, args)}
           />
         ) : panel.kind === "orchestrator" ? (
           <OrchestratorPanel
@@ -284,6 +311,8 @@ function PanelFrame({
   onZoom,
   onAdd,
   onRename,
+  frame,
+  companionToggle,
   children,
 }: {
   panel: Panel;
@@ -298,44 +327,16 @@ function PanelFrame({
   onZoom(): void;
   onAdd(): void;
   onRename(title: string): void;
+  /** Wraps the header and body, so a companion half can sit beside both. */
+  frame?: (main: ReactNode) => ReactNode;
+  companionToggle: ReactNode;
   children: ReactNode;
 }) {
   const [edge, setEdge] = useState(""),
     [menu, setMenu] = useState(false),
     [rename, setRename] = useState(false);
-  return (
-    <section
-      className={`panel ${selected ? "focused" : ""} panel-${panel.kind}`}
-      data-panel-id={panel.id}
-      onMouseDown={onFocus}
-      onDragOver={(event) => {
-        if (!dragging) return;
-        event.preventDefault();
-        const r = event.currentTarget.getBoundingClientRect();
-        const x = (event.clientX - r.left) / r.width,
-          y = (event.clientY - r.top) / r.height;
-        setEdge(
-          x < 0.22
-            ? "left"
-            : x > 0.78
-              ? "right"
-              : y < 0.22
-                ? "top"
-                : y > 0.78
-                  ? "bottom"
-                  : "center",
-        );
-      }}
-      onDragLeave={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node))
-          setEdge("");
-      }}
-      onDrop={(event) => {
-        event.preventDefault();
-        onDrop(edge || "center");
-        setEdge("");
-      }}
-    >
+  const main = (
+    <>
       <header
         className="panel-header"
         draggable={!rename}
@@ -372,6 +373,7 @@ function PanelFrame({
           <span className="panel-title">{panel.title}</span>
         )}
         <div className="panel-actions">
+          {companionToggle}
           <button
             aria-label={`Options for ${panel.title}`}
             onClick={() => setMenu(!menu)}
@@ -413,6 +415,42 @@ function PanelFrame({
         )}
       </header>
       <div className="panel-content">{children}</div>
+    </>
+  );
+  return (
+    <section
+      className={`panel ${selected ? "focused" : ""} panel-${panel.kind}`}
+      data-panel-id={panel.id}
+      onMouseDown={onFocus}
+      onDragOver={(event) => {
+        if (!dragging) return;
+        event.preventDefault();
+        const r = event.currentTarget.getBoundingClientRect();
+        const x = (event.clientX - r.left) / r.width,
+          y = (event.clientY - r.top) / r.height;
+        setEdge(
+          x < 0.22
+            ? "left"
+            : x > 0.78
+              ? "right"
+              : y < 0.22
+                ? "top"
+                : y > 0.78
+                  ? "bottom"
+                  : "center",
+        );
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node))
+          setEdge("");
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        onDrop(edge || "center");
+        setEdge("");
+      }}
+    >
+      {frame ? frame(main) : main}
       {dragging && edge && (
         <div className={`drop-zone edge-${edge}`}>
           <span>{edge === "center" ? "Swap panels" : `Place ${edge}`}</span>

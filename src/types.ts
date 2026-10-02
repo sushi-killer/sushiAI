@@ -971,6 +971,20 @@ export interface Bridge {
   projectsResolve(
     remote: string | { remote?: string; endpoint?: string; cwd?: string },
   ): Promise<Project | null>;
+  projectIdentify(
+    endpoint: string | undefined,
+    cwd: string,
+    options?: { refresh?: boolean },
+  ): Promise<{
+    projectId: string;
+    remote: string;
+    commonDir: string;
+    checkout: string;
+    linkedWorktree: boolean;
+    subdir: string;
+    branch: string;
+    stale: boolean;
+  }>;
   projectInspect(
     endpoint: string | undefined,
     options: Record<string, unknown>,

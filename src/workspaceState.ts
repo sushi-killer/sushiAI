@@ -116,6 +116,7 @@ export function snapshotStore(): SnapshotStore {
 function normalizeGit(value: unknown): ProjectGit {
   const g = (value as Partial<ProjectGit>) || {};
   return {
+    projectId: typeof g.projectId === "string" ? g.projectId : "",
     remote: typeof g.remote === "string" ? g.remote : "",
     commonDir: typeof g.commonDir === "string" ? g.commonDir : "",
     checkout: typeof g.checkout === "string" ? g.checkout : "",
@@ -275,6 +276,7 @@ export function sweepLeftovers(saved: Saved): Saved {
       herdr: true,
       closedAt,
       git: {
+        projectId: "",
         remote: "",
         commonDir: "",
         checkout: "",

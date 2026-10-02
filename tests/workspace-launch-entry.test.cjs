@@ -642,7 +642,7 @@ test("actual workspace close shares concurrent intent and allows retry after fai
         if (fail) throw new Error("Close failed");
       },
       terminalClose: async () => {},
-      projectInspect: async () => ({ remote: "" }),
+      projectIdentify: async () => ({ projectId: "", remote: "" }),
     },
     [workspace],
   );

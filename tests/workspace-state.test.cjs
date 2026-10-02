@@ -202,6 +202,7 @@ test("restore accepts only a well-formed closedProjects array", async () => {
     herdr: true,
     closedAt: 1700000000000,
     git: {
+      projectId: "project-app",
       remote: "example.test/team/app",
       commonDir: "/home/dev/app/.git",
       checkout: "/home/dev/app",
@@ -225,6 +226,17 @@ test("restore accepts only a well-formed closedProjects array", async () => {
   });
   assert.equal(saved.closedProjects.length, 1);
   assert.deepEqual(saved.closedProjects[0], good);
+
+  const { projectId: _omitted, ...legacyGit } = good.git;
+  const legacy = restore({
+    read: () =>
+      JSON.stringify({
+        workspaces,
+        socket: "local",
+        closedProjects: [{ ...good, git: legacyGit }],
+      }),
+  });
+  assert.equal(legacy.closedProjects[0].git.projectId, "");
 
   const missingArray = restore({
     read: () => JSON.stringify({ workspaces, socket: "local" }),

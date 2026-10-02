@@ -22,6 +22,11 @@ one index line; git history keeps the detail and updates.
 
 ## Open
 
+## 2026-10-02 — duplicate project rows survived three point fixes
+
+Root cause: no stored folder → project identity.
+Rule: a subsystem regressing after point fixes gets a data-model fix, not another patch.
+
 ## Promoted
 
 - 2026-10-02 Exact Herdr pin broke on self-update → check capabilities + protocol match.
@@ -49,7 +54,6 @@ one index line; git history keeps the detail and updates.
 - 2026-09-24 Orchestrator chat edited code instead of filing tasks → enforce roles with tools. `orchd/src/chat.rs`.
 - 2026-09-24 Unset `HERDR_SOCKET_PATH`/inherited `BRIDGE_DEV_URL` photographed the owner's Herdr/dev server → override both. `ui-evidence` template.
 - 2026-09-24 Real Claude/Codex output broke `orchd` while self-written fakes passed → parsers assert captured CLI lines. `parses_captured_real_cli_streams`.
-- 2026-09-14 A `flex: 1`-stretched label measured 0px wide → measure text ink with a `Range`, assert non-zero widths. `ui-evidence` skill.
 - 2026-09-14 A copied debug session leaked a real private IP/host/ports → examples use 192.0.2.0/24 (RFC 5737). `check-conventions.mjs`.
 - 2026-09-29 orchd preflights checks on a fresh checkout → check commands build what they need. `package.json`.
 - 2026-09-18 A fixture invented a Herdr status (`running`) → check vocabularies against `herdr api snapshot`. `tests/herdr-snapshot.test.cjs`.

@@ -786,7 +786,7 @@ test("project environment read failure stops creation and remains retryable", as
       sessionEnvironment(
         {
           projects: {
-            resolveFolder: async () => ({ id: "project" }),
+            resolveProject: async () => ({ id: "project" }),
             sendsValues: async () => true,
             environmentFor: async () => {
               if (fail)

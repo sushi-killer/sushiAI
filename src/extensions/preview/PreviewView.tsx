@@ -1,4 +1,11 @@
-import { ChevronDown, Copy, ExternalLink, MessageSquare } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  Copy,
+  ExternalLink,
+  MessageSquare,
+  Play,
+} from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { errorText } from "../../app/errors.ts";
@@ -14,6 +21,8 @@ import {
   goalPrompt,
   insideProject,
   paneRoot,
+  agentEnded,
+  canStart,
   parseComments,
   kindOf,
   parseFrontmatter,
@@ -39,7 +48,7 @@ import {
 import { MarkdownDoc } from "./MarkdownDoc.tsx";
 import {
   hostOfEndpoint,
-  StartButton,
+  RunStatus,
   StartTaskCard,
   useTaskStatus,
   VerifiedTag,
@@ -233,6 +242,8 @@ export function PreviewView(props: CoreViewProps) {
   const [failedPath, setFailedPath] = useState("");
   const record: StartRecord | undefined = parseStarts(args.starts)[path];
   const taskStatus = useTaskStatus(record);
+  const ended = agentEnded(record, props.runs?.branches, Date.now());
+  const failed = failedPath === path;
   const start = async (runner: Runner, branch: string, base: string) => {
     setCard(false);
     setStarting(true);
@@ -262,7 +273,7 @@ export function PreviewView(props: CoreViewProps) {
           setFailedPath(path);
           return;
         }
-        next = { kind: "agent", agent: runner, branch };
+        next = { kind: "agent", agent: runner, branch, at: Date.now() };
       }
       onArgs({
         starts: JSON.stringify({
@@ -302,48 +313,58 @@ export function PreviewView(props: CoreViewProps) {
     };
   }, [menu]);
 
+  const [copied, setCopied] = useState(false);
   const agentLabel = props.agentLabel || "agent";
   const noAgent = props.agentHerdrPaneId
     ? ""
     : "The agent pane is closed; there is nowhere to send this.";
   const title = parsed.meta.title || "";
 
-  // The controls live in the companion's header row, beside its close button.
+  // The companion's header row holds only the file picker, beside its close
+  // button; the document's own tools sit in a bar inside the half.
   const bar = (
-    <>
-      <div className="pv-select" ref={menuRef}>
-        <button
-          type="button"
-          className="pv-file"
-          aria-haspopup="menu"
-          aria-expanded={menu}
-          title={path}
-          disabled={!path}
-          onClick={() => setMenu(!menu)}
-        >
-          <span>{path ? shownPath(path, cwd) : "No file"}</span>
-          <ChevronDown size={12} aria-hidden />
-        </button>
-        {menu && (
-          <div className="pv-menu" role="menu">
-            {recent.map((item) => (
-              <button
-                key={item}
-                type="button"
-                role="menuitemradio"
-                aria-checked={item === path}
-                title={item}
-                onClick={() => {
-                  setMenu(false);
-                  if (item !== path) onArgs({ arg: item });
-                }}
-              >
-                {shownPath(item, cwd)}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+    <div className="pv-select" ref={menuRef}>
+      <button
+        type="button"
+        className="pv-file"
+        aria-haspopup="menu"
+        aria-expanded={menu}
+        title={path}
+        disabled={!path}
+        onClick={() => setMenu(!menu)}
+      >
+        <span>{path ? shownPath(path, cwd) : "No file"}</span>
+        <ChevronDown size={12} aria-hidden />
+      </button>
+      {menu && (
+        <div className="pv-menu" role="menu">
+          {recent.map((item) => (
+            <button
+              key={item}
+              type="button"
+              role="menuitemradio"
+              aria-checked={item === path}
+              title={item}
+              onClick={() => {
+                setMenu(false);
+                if (item !== path) onArgs({ arg: item });
+              }}
+            >
+              {shownPath(item, cwd)}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+  const tools = (
+    <div className="pv-docbar">
+      {kind === "markdown" && parsed.meta.kind && (
+        <Tag tone="neutral" dot={false}>
+          {parsed.meta.kind.toUpperCase()}
+        </Tag>
+      )}
+      {isPlan && <VerifiedTag meta={parsed.meta} />}
       {file.state === "ready" && <Updated since={file.changedAt} />}
       <span className="pv-spacer" />
       {path && (
@@ -352,9 +373,14 @@ export function PreviewView(props: CoreViewProps) {
           className="pv-icon pv-copy"
           aria-label="Copy path"
           title="Copy path"
-          onClick={() => void navigator.clipboard?.writeText(path)}
+          onClick={() =>
+            void navigator.clipboard?.writeText(path).then(() => {
+              setCopied(true);
+              window.setTimeout(() => setCopied(false), 1500);
+            })
+          }
         >
-          <Copy aria-hidden />
+          {copied ? <Check aria-hidden /> : <Copy aria-hidden />}
         </button>
       )}
       {(kind === "html" ||
@@ -389,21 +415,24 @@ export function PreviewView(props: CoreViewProps) {
           <ExternalLink aria-hidden />
         </button>
       )}
-      {isPlan && (
-        <StartButton
-          record={record}
-          starting={starting}
-          status={taskStatus}
-          failed={failedPath === path}
-          onOpen={() => setCard(true)}
-        />
+      {isPlan && !starting && canStart(record, taskStatus, ended, failed) && (
+        <button
+          type="button"
+          className="pv-icon pv-start-icon"
+          aria-label="Start task"
+          title="Start task"
+          onClick={() => setCard(true)}
+        >
+          <Play aria-hidden />
+        </button>
       )}
-    </>
+    </div>
   );
 
   return (
     <div className="pv" ref={pane}>
       {headerSlot ? createPortal(bar, headerSlot) : null}
+      {path && !outside && tools}
       {startError && (
         <div className="pd-alert pv-alert" role="alert">
           {startError}
@@ -433,14 +462,17 @@ export function PreviewView(props: CoreViewProps) {
             }}
           >
             <article className="pv-md">
-              <div className="pv-head">
-                {parsed.meta.kind && (
-                  <Tag tone="neutral" dot={false}>
-                    {parsed.meta.kind.toUpperCase()}
-                  </Tag>
-                )}
-                {isPlan && <VerifiedTag meta={parsed.meta} />}
-              </div>
+              {isPlan && (
+                <RunStatus
+                  record={record}
+                  ended={ended}
+                  starting={starting}
+                  status={taskStatus}
+                  failed={failed}
+                  onOpen={() => setCard(true)}
+                  onGo={props.runs?.open}
+                />
+              )}
               {title && !/^#\s/m.test(parsed.body) && <h1>{title}</h1>}
               <MarkdownDoc body={parsed.body} />
             </article>
@@ -523,6 +555,7 @@ export function PreviewView(props: CoreViewProps) {
             cwd={cwd}
             connection={connection}
             orchestratorOn={orchestratorOn}
+            takenBranch={record?.kind === "agent" ? record.branch : undefined}
             onClose={() => setCard(false)}
             onStart={(runner, branch, base) => void start(runner, branch, base)}
           />

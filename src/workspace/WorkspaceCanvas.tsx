@@ -5,7 +5,7 @@ import { codePanels } from "../workspaceState.ts";
 import { Empty } from "../app/Empty.tsx";
 import { LayoutView, PanelHost } from "../WorkspacePanels.tsx";
 import { Icon } from "../PanelIcon.tsx";
-import type { CoreViewProps } from "../extensions/coreViews.ts";
+import type { CoreViewProps, PlanRuns } from "../extensions/coreViews.ts";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import type { WorkspaceController } from "./useWorkspaces.ts";
 import type { MergedCanvas } from "./mergedLayouts.ts";
@@ -76,6 +76,20 @@ export function WorkspaceCanvas({
         undefined,
         request.prompt,
       );
+  // ponytail: a plan's worktree workspace is named "<project> · <branch>";
+  // match on the name until workspaces carry their branch.
+  const runWorkspaces = ws.workspaces.filter(
+    (w) => w.panels.length && w.name.includes(" · "),
+  );
+  const branchOf = (w: (typeof runWorkspaces)[number]) =>
+    w.name.slice(w.name.indexOf(" · ") + 3);
+  const runs: PlanRuns = {
+    branches: runWorkspaces.map(branchOf),
+    open: (branch) => {
+      const target = runWorkspaces.find((w) => branchOf(w) === branch);
+      if (target) ws.selectWorkspace(target.id);
+    },
+  };
   const visitedTabs = useRef(new Set<string>());
   const group = merged.group;
   const paneById = new Map(merged.panes.map((mp) => [mp.panel.id, mp]));
@@ -122,6 +136,7 @@ export function WorkspaceCanvas({
         onAgent={setPanelAgent}
         extensionRegistry={extensionRegistry}
         onLaunchAgent={panel.companion ? launchPlanAgent(panel.id) : undefined}
+        runs={runs}
         onCompanion={patchCompanion}
       />
     );

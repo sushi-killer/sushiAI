@@ -104,7 +104,7 @@ test("commentMessage numbers comments and quotes the selected text", async () =>
       { where: "slide #/2", quote: "Node A", note: "Rename" },
       { where: "point at 42%, 18%", note: "Too dark" },
     ]),
-    "Comments on /r/p.md:\n\n1. > All comments go back as one\n   Check this\n2. General note\n   second line\n3. (slide #/2) > Node A\n   Rename\n4. (point at 42%, 18%) Too dark",
+    "[sushiAI Preview] Owner feedback, 4 comments on /r/p.md\n\n1. > All comments go back as one\n   Check this\n2. General note\n   second line\n3. (slide #/2) > Node A\n   Rename\n4. (point at 42%, 18%) Too dark\n\nApply them to that file, then answer each in one line.",
   );
 });
 
@@ -327,4 +327,36 @@ test("paneRoot widens the scope only to the project, a folder in it or a sibling
     insideProject("/w/.ssh/id_rsa", "/w/proj", paneRoot("/w/proj", "/w")),
     null,
   );
+});
+
+test("a plan's agent ended when no workspace runs its branch after the grace period", async () => {
+  const { agentEnded, nextBranch } = await artifact;
+  const record = {
+    kind: "agent",
+    agent: "claude",
+    branch: "feature/x",
+    at: 1000,
+  };
+  assert.equal(agentEnded(record, ["feature/x"], 99_000), false);
+  assert.equal(agentEnded(record, [], 5_000), false, "grace period");
+  assert.equal(agentEnded(record, [], 99_000), true);
+  assert.equal(agentEnded({ ...record, at: undefined }, [], 0), true);
+  assert.equal(agentEnded(record, undefined, 99_000), false);
+  assert.equal(agentEnded(undefined, [], 99_000), false);
+  assert.equal(nextBranch("feature/x"), "feature/x-2");
+  assert.equal(nextBranch("feature/x-2"), "feature/x-3");
+});
+
+test("a plan can be started again only when its last start is over", async () => {
+  const { canStart } =
+    await import("../src/extensions/preview/StartTask.tsx").catch(() => ({}));
+  if (!canStart) return;
+  const agent = { kind: "agent", agent: "claude", branch: "b" };
+  const task = { kind: "orchestrator", host: "local", repo: "/r", taskId: "1" };
+  assert.equal(canStart(undefined, "", false, false), true);
+  assert.equal(canStart(agent, "", false, false), false);
+  assert.equal(canStart(agent, "", true, false), true);
+  assert.equal(canStart(task, "running", false, false), false);
+  assert.equal(canStart(task, "failed", false, false), true);
+  assert.equal(canStart(task, "running", false, true), true);
 });

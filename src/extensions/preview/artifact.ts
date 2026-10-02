@@ -159,7 +159,9 @@ export function commentMessage(path: string, comments: Comment[]): string {
       quote.length > QUOTE_LIMIT ? `${quote.slice(0, QUOTE_LIMIT)}…` : quote;
     return `${index + 1}. ${at}> ${shown}\n   ${note}`;
   });
-  return `Comments on ${clean(path)}:\n\n${entries.join("\n")}`;
+  const count =
+    comments.length === 1 ? "1 comment" : `${comments.length} comments`;
+  return `[sushiAI Preview] Owner feedback, ${count} on ${clean(path)}\n\n${entries.join("\n")}\n\nApply them to that file, then answer each in one line.`;
 }
 
 export type Annotation = {
@@ -269,7 +271,7 @@ export function pushRecent(list: string[], path: string): string[] {
  * survives a reload. */
 export type StartRecord =
   | { kind: "orchestrator"; host: string; repo: string; taskId: string }
-  | { kind: "agent"; agent: string; branch: string };
+  | { kind: "agent"; agent: string; branch: string; at?: number };
 
 export function parseStarts(
   raw: string | undefined,
@@ -366,4 +368,35 @@ export function shownPath(path: string, cwd: string): string {
     root && path.startsWith(root + "/") ? path.slice(root.length + 1) : path;
   // Agents write into `artifacts/`, so its files show by name alone.
   return relative.replace(/^artifacts\//, "");
+}
+
+/** The session started for a plan ended: no workspace runs its branch any more.
+ * A fresh start gets a grace period, since its workspace shows up only with the
+ * next Herdr snapshot. */
+export function agentEnded(
+  record: StartRecord | undefined,
+  liveBranches: string[] | undefined,
+  now: number,
+): boolean {
+  if (record?.kind !== "agent" || !liveBranches) return false;
+  if (liveBranches.includes(record.branch)) return false;
+  return !record.at || now - record.at > 20_000;
+}
+
+/** The branch for a restart: the old one is still taken. */
+export function nextBranch(branch: string): string {
+  const match = /^(.*)-(\d+)$/.exec(branch);
+  return match ? `${match[1]}-${Number(match[2]) + 1}` : `${branch}-2`;
+}
+
+/** Whether a plan can be started now: never, or its last start is over. */
+export function canStart(
+  record: StartRecord | undefined,
+  status: string,
+  ended: boolean,
+  failed: boolean,
+): boolean {
+  if (!record || failed) return true;
+  if (record.kind === "agent") return ended;
+  return status === "failed";
 }

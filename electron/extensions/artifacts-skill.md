@@ -148,5 +148,6 @@ to switch it to another file.
 ## Comments
 
 The owner's comments arrive in your input as one message that starts with
-`Comments on <path>`, each with the quoted passage. Apply them to the same
+`[sushiAI Preview] Owner feedback, N comments on <path>`, each with the
+quoted passage. Apply them to the same
 file, then answer in one short line per comment.

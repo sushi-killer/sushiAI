@@ -7,6 +7,7 @@ import type { Task } from "../../orchestrator/types.ts";
 import { worktreeBranchError } from "../../workspace/worktree.ts";
 import {
   branchFor,
+  nextBranch,
   goalPrompt,
   isVerified,
   planSections,
@@ -42,6 +43,7 @@ export function StartTaskCard({
   cwd,
   connection,
   orchestratorOn,
+  takenBranch,
   onClose,
   onStart,
 }: {
@@ -51,13 +53,17 @@ export function StartTaskCard({
   cwd: string;
   connection?: string;
   orchestratorOn: boolean;
+  /** The branch an ended start used; a restart takes the next free name. */
+  takenBranch?: string;
   onClose(): void;
   onStart(runner: Runner, branch: string, base: string): void;
 }) {
   const sections = planSections(body);
   const [runner, setRunner] = useState<Runner>("claude");
   const [branch, setBranch] = useState(() =>
-    branchFor(meta.title || sections.title || path),
+    takenBranch
+      ? nextBranch(takenBranch)
+      : branchFor(meta.title || sections.title || path),
   );
   const [base, setBase] = useState("main");
   useEffect(() => {
@@ -245,75 +251,70 @@ export function useTaskStatus(record: StartRecord | undefined): string {
   return status;
 }
 
-/** The header control and its states: the Start task icon, then a compact
- * chip for Starting…, the running task or session, Failed · Retry. */
-export function StartButton({
+const AGENT_NAMES: Record<string, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+};
+
+/** The plan's run, shown in the document under its tags: starting, running
+ * (click to go to it), ended or failed (click to start again). */
+export function RunStatus({
   record,
+  ended,
   starting,
   status,
   failed,
   onOpen,
+  onGo,
 }: {
   record: StartRecord | undefined;
+  /** The agent session the plan started has ended. */
+  ended: boolean;
   starting: boolean;
+  status: string;
   /** A start that left no record (the agent did not launch). */
   failed: boolean;
-  status: string;
+  /** Opens the Start task card. */
   onOpen(): void;
+  /** Goes to the agent session that runs the plan. */
+  onGo?(branch: string): void;
 }) {
-  if (starting)
-    return (
-      <button type="button" className="pv-start-state pv-start-btn" disabled>
-        Starting…
-      </button>
-    );
-  if (record?.kind === "agent")
-    return (
-      <span className="pv-start-state" title={`Running in ${record.branch}`}>
-        Running in {record.branch}
-      </span>
-    );
-  if (record?.kind === "orchestrator") {
-    if (status === "failed")
-      return (
-        <button
-          type="button"
-          className="pv-start-state pv-start-btn failed"
-          title={`Task #${record.taskId} failed`}
-          onClick={onOpen}
-        >
-          Failed · Retry
+  const row = (
+    tone: string,
+    text: string,
+    action?: { label: string; run(): void },
+  ) => (
+    <div className={`pv-run ${tone}`} role="status">
+      <span className="pv-run-dot" aria-hidden="true" />
+      <span className="pv-run-text">{text}</span>
+      {action && (
+        <button type="button" className="pv-run-action" onClick={action.run}>
+          {action.label}
         </button>
-      );
-    return (
-      <span
-        className={`pv-start-state ${status === "waiting" ? "waiting" : ""}`}
-        title={`Task #${record.taskId}`}
-      >
-        #{record.taskId} · {status ? taskStatusLabel(status) : "starting"}
-      </span>
+      )}
+    </div>
+  );
+  if (starting) return row("", "Starting…");
+  if (failed)
+    return row("danger", "The start failed.", { label: "Retry", run: onOpen });
+  if (record?.kind === "agent") {
+    const agent = AGENT_NAMES[record.agent] || record.agent;
+    if (ended)
+      return row("", `${agent} in ${record.branch} ended.`, {
+        label: "Restart",
+        run: onOpen,
+      });
+    return row(
+      "ok",
+      `Running · ${agent} in ${record.branch}`,
+      onGo && { label: "Open", run: () => onGo(record.branch) },
     );
   }
-  if (failed)
-    return (
-      <button
-        type="button"
-        className="pv-start-state pv-start-btn failed"
-        title="Starting the task failed"
-        onClick={onOpen}
-      >
-        Failed · Retry
-      </button>
-    );
-  return (
-    <button
-      type="button"
-      className="pv-icon pv-start-icon pv-start-btn"
-      aria-label="Start task"
-      title="Start task"
-      onClick={onOpen}
-    >
-      <Play aria-hidden />
-    </button>
-  );
+  if (record?.kind === "orchestrator") {
+    const label = `Task #${record.taskId} · ${status ? taskStatusLabel(status) : "starting"}`;
+    if (status === "failed")
+      return row("danger", label, { label: "Retry", run: onOpen });
+    return row(status === "waiting" ? "warning" : "ok", label);
+  }
+  return null;
 }

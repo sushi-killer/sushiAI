@@ -61,6 +61,7 @@ export function CompanionSplit({
   socket,
   endpoint,
   onLaunchAgent,
+  runs,
   onCompanion,
   onZoom,
   children,
@@ -71,6 +72,7 @@ export function CompanionSplit({
   socket: string;
   endpoint?: string;
   onLaunchAgent?: CoreViewProps["launchAgent"];
+  runs?: CoreViewProps["runs"];
   onCompanion(panelId: string, patch: CompanionPatch): void;
   /** A double click on the half's header zooms the whole pane, like the
    * agent's header. */
@@ -157,6 +159,7 @@ export function CompanionSplit({
                   herdrEndpoint={socket}
                   agentLabel={panel.title}
                   launchAgent={onLaunchAgent}
+                  runs={runs}
                   headerSlot={slot}
                   onArgs={(args) => onCompanion(panel.id, { args })}
                 />

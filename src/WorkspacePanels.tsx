@@ -50,6 +50,7 @@ type PanelHostProps = {
   onOpenConnections?: () => void;
   extensionRegistry: ExtensionRegistry;
   onLaunchAgent?: CoreViewProps["launchAgent"];
+  runs?: CoreViewProps["runs"];
   /** Changes the companion half of an agent or terminal pane. */
   onCompanion(panelId: string, patch: CompanionPatch): void;
 };
@@ -82,6 +83,7 @@ export const PanelHost = memo(function PanelHost({
   onOpenConnections,
   extensionRegistry,
   onLaunchAgent,
+  runs,
   onCompanion,
 }: PanelHostProps) {
   const companion = companionTarget(extensionRegistry, panel.companion);
@@ -110,6 +112,7 @@ export const PanelHost = memo(function PanelHost({
                   socket={socket}
                   endpoint={endpoint}
                   onLaunchAgent={onLaunchAgent}
+                  runs={runs}
                   onCompanion={onCompanion}
                   onZoom={() => onZoom(panel.id)}
                 >

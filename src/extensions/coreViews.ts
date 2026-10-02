@@ -8,6 +8,11 @@ export type LaunchAgentRequest = {
   prompt: string;
 };
 
+export type PlanRuns = {
+  branches: string[];
+  open(branch: string): void;
+};
+
 export type CoreViewProps = {
   args: Record<string, string>;
   cwd: string;
@@ -20,6 +25,9 @@ export type CoreViewProps = {
   herdrEndpoint?: string;
   /** The title of that agent pane, for "Send to <agent>". */
   agentLabel?: string;
+  /** The agent sessions the app runs in worktrees: their branches, to tell a
+   * plan's agent ended, and a way to go to one. */
+  runs?: PlanRuns;
   /** Starts an agent session in a new worktree with a first prompt, through
    * the app's own session launch. Resolves false when the launch failed (the
    * app has already told the owner why). */

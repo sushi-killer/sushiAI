@@ -60,7 +60,11 @@ export function reopenInSlot(
     ...(herdrId ? { herdrId } : {}),
     panels: workspace.panels
       .filter((panel) => panel.id !== next.id || panel.id === endedId)
-      .map((panel) => (panel.id === endedId ? next : panel)),
+      .map((panel) =>
+        panel.id === endedId
+          ? { ...next, companion: panel.companion ?? next.companion }
+          : panel,
+      ),
     layout: inSlot
       ? replaceLeaf(layout, endedId, next.id)
       : layout
@@ -309,5 +313,78 @@ export function findHostWorkspace(
       !isVanished(w) &&
       (w.connection || defaultEndpoint) === endpoint &&
       (w.cwd === cwd || w.id === madeId),
+  );
+}
+
+export const COMPANION_RATIO = { min: 0.25, max: 0.75, fallback: 0.5 };
+
+export function companionRatio(ratio: number | undefined): number {
+  return typeof ratio === "number" && Number.isFinite(ratio)
+    ? Math.min(COMPANION_RATIO.max, Math.max(COMPANION_RATIO.min, ratio))
+    : COMPANION_RATIO.fallback;
+}
+
+function mapPanel(
+  workspaces: Workspace[],
+  panelId: string,
+  update: (panel: Panel) => Panel,
+): Workspace[] {
+  return workspaces.map((w) =>
+    w.panels.some((p) => p.id === panelId)
+      ? {
+          ...w,
+          panels: w.panels.map((p) => (p.id === panelId ? update(p) : p)),
+        }
+      : w,
+  );
+}
+
+/** An agent's open signal: the pane's companion shows `target` with `args`
+ * merged over what it already held (the view state stored beside the file),
+ * and is open again if it was hidden. A different surface starts afresh. */
+export function openCompanion(
+  workspaces: Workspace[],
+  panelId: string,
+  target: { extensionId: string; surfaceId: string },
+  args: Record<string, string>,
+): Workspace[] {
+  return mapPanel(workspaces, panelId, (panel) => {
+    const old = panel.companion;
+    const same =
+      old?.extensionId === target.extensionId &&
+      old.surfaceId === target.surfaceId;
+    return {
+      ...panel,
+      companion: {
+        ...target,
+        args: { ...(same ? old.args : {}), ...args },
+        open: true,
+        ...(same && old.ratio !== undefined ? { ratio: old.ratio } : {}),
+      },
+    };
+  });
+}
+
+/** Changes a companion: `args` merge into its args, `ratio` is clamped. A pane
+ * without a companion is left alone. */
+export function patchCompanion(
+  workspaces: Workspace[],
+  panelId: string,
+  patch: { args?: Record<string, string>; open?: boolean; ratio?: number },
+): Workspace[] {
+  return mapPanel(workspaces, panelId, (panel) =>
+    panel.companion
+      ? {
+          ...panel,
+          companion: {
+            ...panel.companion,
+            ...(patch.open === undefined ? {} : { open: patch.open }),
+            ...(patch.ratio === undefined
+              ? {}
+              : { ratio: companionRatio(patch.ratio) }),
+            args: { ...panel.companion.args, ...patch.args },
+          },
+        }
+      : panel,
   );
 }

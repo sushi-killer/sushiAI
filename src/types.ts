@@ -36,6 +36,16 @@ export type OrchestratorView =
 /** Where a Files pane was browsing: its root folder, the folder listed and the
  * open file ("" for none). Not part of the panel's remount key. */
 export type FilesView = { root: string; directory: string; file: string };
+/** A surface drawn as a half of its agent or terminal pane, bound to it: it
+ * zooms, moves and closes with the pane. `open: false` hides it and keeps the
+ * args; `ratio` is the share of the pane's width it takes (0.25 to 0.75). */
+export type Companion = {
+  extensionId: string;
+  surfaceId: string;
+  args: Record<string, string>;
+  open: boolean;
+  ratio?: number;
+};
 type PanelState = {
   id: string;
   launchOperationId?: string;
@@ -44,6 +54,9 @@ type PanelState = {
   agent?: string;
   started?: boolean;
   herdrId?: string;
+  /** The pane's own working folder as the host last reported it. */
+  paneCwd?: string;
+  companion?: Companion;
   status?: string;
   url?: string;
   messages?: Message[];
@@ -148,6 +161,8 @@ export type SessionLaunchRequest = {
   paneId?: string;
   restore?: boolean;
   worktree?: { branch: string; base?: string };
+  /** The agent CLI's first prompt (agent sessions only). */
+  prompt?: string;
 };
 export type SessionLaunchValue = {
   operationId: string;
@@ -210,7 +225,11 @@ export type Workspace = {
   cwd: string;
   herdrId?: string;
   localWorktree?: boolean;
+  /** The branch of the new worktree this workspace was launched into. */
+  worktreeBranch?: string;
   connection?: string;
+  /** Metadata tokens the host reported for this workspace; never saved. */
+  herdrTokens?: Record<string, string>;
   panels: Panel[];
   layout: Layout | null;
 };
@@ -332,6 +351,7 @@ export type Snapshot = {
     workspace_id: string;
     label: string;
     worktree?: { checkout_path: string };
+    tokens?: Record<string, string>;
   }[];
   panes: {
     pane_id: string;
@@ -1013,6 +1033,7 @@ export interface Bridge {
     endpoint: string | undefined,
     root: string,
     path: string,
+    options?: { annotate?: boolean },
   ): Promise<string>;
 }
 declare global {

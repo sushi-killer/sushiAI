@@ -29,6 +29,7 @@ export function applySessionLaunch(
   panel: Panel,
   restore?: { workspaceId: string; panelId: string },
   name?: string,
+  worktreeBranch?: string,
 ): Workspace[] {
   const workspaceId = herdrWorkspaceKey(endpoint, value.workspaceId);
   const listed = findSessionWorkspace(workspaces, endpoint, value);
@@ -71,6 +72,7 @@ export function applySessionLaunch(
       panel,
     );
   }
+  if (worktreeBranch) next = { ...next, worktreeBranch };
   const replaced = new Set(
     [listed?.id, owner?.id].filter((id): id is string => !!id),
   );

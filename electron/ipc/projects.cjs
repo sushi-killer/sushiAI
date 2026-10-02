@@ -10,6 +10,7 @@ const {
   worktreeRemoveScript,
 } = require("../worktree.cjs");
 const { localCreate, pullMessage } = require("../project-git.cjs");
+const { isRelativeFile } = require("../preview.cjs");
 const { randomUUID } = require("node:crypto");
 const {
   isSecretName,
@@ -1048,13 +1049,20 @@ function registerProjectIpc({
     return connections().inspect(endpoint, options);
   });
 
-  handle("project-preview", async (endpoint, root, file) => {
+  // `root` is the project folder, `file` a path inside it (subfolders fine).
+  // The read resolves the real path against `root`, so `..` and a symlink
+  // leaving the project are refused (remote-files.py resolve).
+  handle("project-preview", async (endpoint, root, file, options) => {
+    if (!isRelativeFile(file))
+      throw new Error("Preview file must be a path inside the project");
     await connections().inspect(endpoint, {
       operation: "read",
       root,
       path: file,
     });
-    return getPreview().grant(endpoint, root, file);
+    return getPreview().grant(endpoint, root, file, {
+      annotate: options?.annotate === true,
+    });
   });
 
   handle("worktree-create", async (cwd, branch, base) => {

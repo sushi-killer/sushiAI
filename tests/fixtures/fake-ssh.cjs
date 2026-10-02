@@ -1,6 +1,6 @@
 // A fake `ssh` for tests: it runs the "remote" command locally under a fake
 // HOME with a controlled PATH, and turns `-N -L local:remote` into a socket
-// proxy. `FAKE_SSH_CONFIG` names a JSON file {home, bin, log}.
+// proxy. `FAKE_SSH_CONFIG` names a JSON file {home, bin, log, forwardDelayMs?}.
 const { spawn } = require("node:child_process");
 const net = require("node:net");
 const fs = require("node:fs");
@@ -42,7 +42,8 @@ if (mode === "G") {
     upstream.on("error", () => client.destroy());
     client.on("close", () => upstream.destroy());
   });
-  server.listen(local);
+  // A slow link: `forwardDelayMs` in the config holds the local socket back.
+  setTimeout(() => server.listen(local), config.forwardDelayMs ?? 0);
   process.on("SIGTERM", () => process.exit(0));
 } else {
   const child = spawn("/bin/sh", ["-c", rest[1]], {

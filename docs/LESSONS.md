@@ -29,6 +29,7 @@ Rule: a subsystem regressing after point fixes gets a data-model fix, not anothe
 
 ## Promoted
 
+- 2026-10-02 herdr cuts token values at 80 chars → path in `sushiai_open_arg`. `open-signal.test.cjs`.
 - 2026-10-02 herdr ignored a lower `--seq` and repeats → signals carry a nonce. `open-signal.test.cjs`.
 - 2026-10-02 Exact Herdr pin broke on self-update → check capabilities + protocol match.
 - 2026-10-02 Mid-session dead-row removal raced close flows → sweep at restore.
@@ -40,7 +41,6 @@ Rule: a subsystem regressing after point fixes gets a data-model fix, not anothe
 - 2026-10-01 contextBridge discards Error fields → transport tagged values; reconstruct before App restores state. `tests/bridge.test.cjs`.
 
 - 2026-10-01 "0 unexplained diffs" hid defects → a fresh critic compares Figma and app PNGs; revert each fix once to see its test fail. `design-critic`.
-- 2026-09-30 Lane worktrees left 262 MB of `orchd/target` → delete it after merge.
 - 2026-09-30 orchd defaults leaked repo specifics to every repo → defaults stay empty. `scoped_checks_and_chat_tools_default_to_none`.
 - 2026-09-30 A hook `allow` did not open `.claude/**` to headless `claude -p` → stage in `.orchd-staging/`, copy in before verify.
 - 2026-09-30 A plugin MCP server failed under `--strict-mcp-config` (OAuth keyed by plugin name) → keep its Claude Code name. `chat_tools::server_key`.
@@ -48,7 +48,6 @@ Rule: a subsystem regressing after point fixes gets a data-model fix, not anothe
 - 2026-09-30 A preselected answer plus Enter sent unpicked answers → Enter needs a pick or typed text. `enterAnswer` in `ownerAttention.ts`.
 - 2026-09-29 Contradicting criteria cost three attempts → cross-check criteria before launch.
 - 2026-09-28 Trusted `rtk rewrite` (`rtk read` drops code) → allowlist. `rtk_rewrite_output_*`.
-- 2026-09-25 A changed orchd default never reached saved settings → mark settings differing from `settings.defaults`.
 - 2026-09-25 Disabled `select!` branch still built `Instant + Duration::MAX`, panicking the loop → bounded deadline. `run_harness`.
 - 2026-09-24 An unparsed review verdict counted as PASS → no verdict asks the owner. `a_review_without_a_verdict_waits_for_the_owner_instead_of_passing`.
 - 2026-09-24 Chat harness outlived daemon shutdown → drain every live-child map. `shutdown_kills_a_live_orchestrator_chat_turn_s_child`.

@@ -102,16 +102,10 @@ const extensions = new ExtensionManager({
       // be opened in Finder and edited by hand.
       path.join(app.getPath("userData"), "local-extensions"),
 });
-const surfaceState = new SurfaceStateStore(
-  path.join(app.getPath("userData"), "extensions", "state"),
-);
+const surfaceState = new SurfaceStateStore(app.getPath("userData"));
 agents.register(
   new HermesProvider({
-    activityFile: path.join(
-      app.getPath("userData"),
-      "agents",
-      "hermes-activity.json",
-    ),
+    userDataDir: app.getPath("userData"),
   }),
 );
 const modelProviders = new ModelProviders({
@@ -443,11 +437,7 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionRequestHandler((_, __, callback) =>
     callback(false),
   );
-  const windowStateFile = path.join(
-    app.getPath("userData"),
-    "window-state.json",
-  );
-  const savedWindow = loadWindowState(windowStateFile);
+  const savedWindow = loadWindowState(app.getPath("userData"));
   const startBounds = savedWindow
     ? clampBounds(
         savedWindow,
@@ -499,7 +489,7 @@ app.whenReady().then(async () => {
     if (mainWindow.isDestroyed()) return;
     const normalBounds = mainWindow.getNormalBounds();
     try {
-      saveWindowState(windowStateFile, {
+      saveWindowState(app.getPath("userData"), {
         bounds: normalBounds,
         displayId: screen.getDisplayMatching(normalBounds).id,
         isMaximized: mainWindow.isMaximized(),

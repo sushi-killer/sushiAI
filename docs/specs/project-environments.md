@@ -37,8 +37,8 @@ variants are archived there.
 - Project identity is `normalizeRemote(git remote)` (`src/app/useProjectGit.ts:14`). Without a
   remote it falls back to endpoint + cwd, as today. Existing workspaces attach to a project lazily
   the first time the project dialog opens.
-- Stores: `<userData>/projects.json` holds metadata and no values. Values go in
-  `<userData>/project-secrets.json` through `safeStorage`, the same code path as provider keys
+- Stores: the `projects` table in `<userData>/sushiai.db` holds metadata and no values. Values go in
+  its `project-secrets` store through `safeStorage`, the same code path as provider keys
   (`electron/model-providers.cjs:133`). The renderer never receives a value, only `hasValue`/`hint`.
 - A Claude subscription token is passed through `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` (checked
   in CLI 2.1.285), never through env. If fd passing fails under Herdr, the fallback is env plus

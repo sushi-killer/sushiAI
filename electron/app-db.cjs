@@ -61,6 +61,14 @@ const MIGRATIONS = [
     data TEXT NOT NULL
   );
   CREATE TABLE orchestrator_hosts(host TEXT PRIMARY KEY);`,
+  // v3: small named key -> JSON value stores (providers, secrets, accounts,
+  // window and update settings) that used to be one JSON file each.
+  `CREATE TABLE store(
+    name TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY(name, key)
+  );`,
 ];
 
 function migrate(db) {
@@ -81,13 +89,14 @@ function readLegacy(file) {
     text = fs.readFileSync(file, "utf8");
   } catch (error) {
     if (error?.code !== "ENOENT")
-      console.warn(`Not importing ${path.basename(file)}: ${error.message}`);
+      console.warn(`Not importing ${path.basename(file)}: unreadable`);
     return undefined;
   }
+  // A parse error can quote the text, and this text may hold secrets.
   try {
     return JSON.parse(text);
-  } catch (error) {
-    console.warn(`Not importing ${path.basename(file)}: ${error.message}`);
+  } catch {
+    console.warn(`Not importing ${path.basename(file)}: not valid JSON`);
     return undefined;
   }
 }
@@ -97,24 +106,152 @@ const isEmpty = (db, table) =>
 const isObject = (value) =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
-/** Takes in one legacy file: `apply(db, parsed)` runs in a transaction and
- * returns false to refuse the content; on success the file is renamed. */
-function importLegacy(db, userDataDir, name, tables, apply) {
-  if (!tables.every((table) => isEmpty(db, table))) return;
+/** What a store row holds when its legacy file exists but cannot be taken in:
+ * not JSON, so it reads back as DAMAGED and the owner fails closed. */
+const DAMAGED_TEXT = "damaged";
+/** The value `readStore(..., { damaged: true })` gives a row that is present
+ * but unreadable, as opposed to a key that is absent. */
+const DAMAGED = Symbol("damaged store row");
+
+/** Takes in one legacy file: `apply(parsed)` runs in a transaction and
+ * returns false to refuse the content; once committed the file is renamed to
+ * `<name>.imported`, or deleted when `remove` is set (files holding secrets;
+ * a deletion that failed is retried on the next open). `damaged(db)` runs when
+ * the file exists but cannot be read or is refused, and leaves the file. */
+function importLegacy(
+  db,
+  userDataDir,
+  name,
+  tables,
+  apply,
+  { remove = false, marker } = {},
+) {
   const file = path.join(userDataDir, name);
+  const imported = `${file}.imported`;
+  // Only a committed import renames the file; a secret file's renamed copy is
+  // then removed, and a removal that failed is retried on the next open. The
+  // file itself is never removed, so one that was not imported stays.
+  const drop = () => {
+    try {
+      fs.rmSync(imported, { force: true });
+    } catch {
+      console.warn(`Could not remove ${name}.imported`);
+    }
+  };
+  if (remove && fs.existsSync(imported)) drop();
+  if (
+    !tables.every((table) =>
+      typeof table === "function" ? table(db) : isEmpty(db, table),
+    )
+  )
+    return;
   const parsed = readLegacy(file);
-  if (parsed === undefined) return;
+  if (parsed === undefined) {
+    // A damaged file marks its key; once the owner removes the file, the
+    // marker goes too and the store starts over from defaults.
+    if (marker && fs.existsSync(file)) markDamaged(db, ...marker);
+    else if (marker) clearDamaged(db, ...marker);
+    return;
+  }
   try {
     const accepted = transaction(db, () => apply(parsed) !== false);
     if (!accepted) {
       console.warn(`Not importing ${name}: unexpected content`);
+      if (marker) markDamaged(db, ...marker);
       return;
     }
-    fs.renameSync(file, `${file}.imported`);
+    fs.renameSync(file, imported);
+    if (remove) drop();
   } catch (error) {
-    console.warn(`Not importing ${name}: ${error.message}`);
+    console.warn(`Not importing ${name}: ${error?.code || "failed"}`);
   }
 }
+
+const storeIsEmpty = (name) => (db) =>
+  !db.prepare("SELECT 1 FROM store WHERE name = ? LIMIT 1").get(name);
+
+/** The rows of store `name` as a plain key -> value object. A row that does
+ * not parse is skipped with a warning, or given as DAMAGED with `damaged`. */
+function readStoreFrom(db, name, { damaged = false } = {}) {
+  const result = Object.create(null);
+  for (const row of db
+    .prepare("SELECT key, value FROM store WHERE name = ? ORDER BY rowid")
+    .all(name)) {
+    try {
+      result[row.key] = JSON.parse(row.value);
+    } catch {
+      console.warn(`Skipping unreadable ${name} entry ${row.key}`);
+      if (damaged) result[row.key] = DAMAGED;
+    }
+  }
+  return result;
+}
+
+/** Makes store `name` equal `object`: changed keys are written, missing keys
+ * deleted, unchanged ones left alone. Runs inside the caller's transaction. */
+function putStore(db, name, object) {
+  const stored = new Map(
+    db
+      .prepare("SELECT key, value FROM store WHERE name = ?")
+      .all(name)
+      .map((row) => [row.key, row.value]),
+  );
+  for (const [key, text] of stored)
+    if (!Object.hasOwn(object, key) || object[key] === undefined) {
+      // A row that does not parse never reached the caller, so its absence
+      // from `object` is not a deletion: it is left for inspection.
+      try {
+        JSON.parse(text);
+      } catch {
+        continue;
+      }
+      db.prepare("DELETE FROM store WHERE name = ? AND key = ?").run(name, key);
+    }
+  for (const [key, value] of Object.entries(object)) {
+    if (value === undefined) continue;
+    const text = JSON.stringify(value);
+    if (stored.get(key) !== text)
+      db.prepare(
+        "INSERT INTO store(name, key, value) VALUES(?, ?, ?) ON CONFLICT(name, key) DO UPDATE SET value = excluded.value",
+      ).run(name, key, text);
+  }
+}
+
+const readStore = (userDataDir, name, options) =>
+  readStoreFrom(appDb(userDataDir), name, options);
+
+const putKey = (db, name, key, value) =>
+  db
+    .prepare(
+      "INSERT INTO store(name, key, value) VALUES(?, ?, ?) ON CONFLICT(name, key) DO UPDATE SET value = excluded.value",
+    )
+    .run(name, key, JSON.stringify(value));
+
+/** Records that the legacy file behind one key is there but unreadable. */
+const markDamaged = (db, name, key) =>
+  db
+    .prepare(
+      "INSERT INTO store(name, key, value) VALUES(?, ?, ?) ON CONFLICT(name, key) DO UPDATE SET value = excluded.value",
+    )
+    .run(name, key, DAMAGED_TEXT);
+
+const clearDamaged = (db, name, key) =>
+  db
+    .prepare("DELETE FROM store WHERE name = ? AND key = ? AND value = ?")
+    .run(name, key, DAMAGED_TEXT);
+
+/** True for a key with no row, or one only holding the damaged marker. */
+const keyIsOpen = (name, key) => (db) => {
+  const row = db
+    .prepare("SELECT value FROM store WHERE name = ? AND key = ?")
+    .get(name, key);
+  return !row || row.value === DAMAGED_TEXT;
+};
+
+const writeStore = (userDataDir, name, object) => {
+  const db = appDb(userDataDir);
+  transaction(db, () => putStore(db, name, object));
+};
 
 /** One launch record as the launcher stores it; false for anything else. */
 function validLaunchRecord(record) {
@@ -217,6 +354,102 @@ function importAll(db, userDataDir) {
       for (const host of parsed) if (typeof host === "string") insert.run(host);
     },
   );
+  // Key -> value files: each top-level key becomes a row. The first four hold
+  // secrets or their index, so the old file is deleted, not kept.
+  for (const [name, file, remove] of [
+    ["providers", "providers.json", false],
+    ["secrets", "secrets.json", true],
+    ["model-profiles", "model-profiles.json", false],
+    ["claude-accounts", "claude-accounts.json", true],
+    ["codex-accounts", "codex-accounts.json", true],
+    ["project-secrets", "project-secrets.json", true],
+    ["hermes-scheduler", "agents/hermes-scheduler.json", false],
+  ])
+    importLegacy(
+      db,
+      userDataDir,
+      file,
+      [storeIsEmpty(name)],
+      (parsed) => {
+        if (!isObject(parsed)) return false;
+        putStore(db, name, parsed);
+      },
+      { remove },
+    );
+  // Single-document files keep their whole content under the key `value`.
+  for (const [name, file] of [
+    ["window", "window-state.json"],
+    ["updates", "updates.json"],
+    ["preferences", "app-preferences.json"],
+  ])
+    importLegacy(db, userDataDir, file, [storeIsEmpty(name)], (parsed) => {
+      if (!isObject(parsed)) return false;
+      putStore(db, name, { value: parsed });
+    });
+  // Extension state fails closed: a legacy file that cannot be taken in leaves
+  // a damaged marker row, so the manager does not start over from defaults,
+  // and the import is retried on every open until the file is repaired.
+  for (const [name, file] of [
+    ["extensions", "extensions/extensions.json"],
+    ["extension-lock", "extensions/extension-lock.json"],
+  ])
+    importLegacy(
+      db,
+      userDataDir,
+      file,
+      [keyIsOpen(name, "value")],
+      (parsed) => {
+        if (!isObject(parsed)) return false;
+        putStore(db, name, { value: parsed });
+      },
+      { marker: [name, "value"] },
+    );
+  importLegacy(
+    db,
+    userDataDir,
+    "agents/hermes-activity.json",
+    [storeIsEmpty("hermes-activity")],
+    (parsed) => {
+      if (!Array.isArray(parsed)) return false;
+      const rows = parsed.filter(
+        (row) => isObject(row) && row.id !== undefined,
+      );
+      putStore(db, "hermes-activity", activityRows(rows));
+    },
+  );
+  // Surface state: one file per extension, one row per extension.
+  const stateDir = path.join(userDataDir, "extensions", "state");
+  let names = [];
+  try {
+    names = fs.readdirSync(stateDir);
+  } catch {}
+  for (const { key } of db
+    .prepare("SELECT key FROM store WHERE name = 'surface-state' AND value = ?")
+    .all(DAMAGED_TEXT))
+    if (!names.some((file) => file.replace(/\.json$/, "") === key))
+      clearDamaged(db, "surface-state", key);
+  for (const file of names) {
+    const id = file.replace(/\.json$/, "");
+    if (id === file || !/^[a-z0-9][a-z0-9._-]*$/.test(id)) continue;
+    importLegacy(
+      db,
+      userDataDir,
+      path.join("extensions", "state", file),
+      [keyIsOpen("surface-state", id)],
+      (parsed) => {
+        if (!isObject(parsed)) return false;
+        putKey(db, "surface-state", id, parsed);
+      },
+      { marker: ["surface-state", id] },
+    );
+  }
+}
+
+/** The journal as store rows: one per entry plus the order they were kept in. */
+function activityRows(entries) {
+  const rows = { order: entries.map((entry) => String(entry.id)) };
+  for (const entry of entries) rows[`e:${entry.id}`] = entry;
+  return rows;
 }
 
 const open = new Map();
@@ -255,4 +488,14 @@ function closeAppDb(userDataDir) {
   open.delete(key);
 }
 
-module.exports = { appDb, closeAppDb, transaction, validLaunchRecord };
+module.exports = {
+  DAMAGED,
+  appDb,
+  closeAppDb,
+  activityRows,
+  putStore,
+  readStore,
+  transaction,
+  validLaunchRecord,
+  writeStore,
+};

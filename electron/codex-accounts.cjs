@@ -11,6 +11,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 
+const { readStore, writeStore } = require("./app-db.cjs");
 const { CODEX_COLLECT } = require("./project-session.cjs");
 
 const LOGIN_TIMEOUT = 10 * 60 * 1000;
@@ -55,7 +56,7 @@ class CodexAccounts {
     codexHome = path.join(os.homedir(), ".codex"),
   }) {
     this.remoteExec = remoteExec;
-    this.file = path.join(userDataDir, "codex-accounts.json");
+    this.userDataDir = userDataDir;
     this.homes = path.join(userDataDir, "codex-accounts");
     this.codexBinary = codexBinary;
     this.codexHome = codexHome;
@@ -63,15 +64,9 @@ class CodexAccounts {
     this.queue = Promise.resolve();
   }
 
-  /** A store that cannot be read is an error, never an empty one a write
-   * would then replace. */
+  /** The account list, a store in sushiai.db. */
   async #read() {
-    try {
-      return JSON.parse(await fs.readFile(this.file, "utf8"));
-    } catch (error) {
-      if (error.code === "ENOENT") return {};
-      throw error;
-    }
+    return readStore(this.userDataDir, "codex-accounts");
   }
   #locked(change) {
     const run = this.queue.then(change);
@@ -79,10 +74,7 @@ class CodexAccounts {
     return run;
   }
   async #write(accounts) {
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
-    await fs.writeFile(this.file, JSON.stringify(accounts, null, 2), {
-      mode: 0o600,
-    });
+    writeStore(this.userDataDir, "codex-accounts", accounts);
   }
   // An id becomes a folder name: only one this store made is ever used.
   async #account(id) {

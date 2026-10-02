@@ -68,6 +68,63 @@ for (const dir of ["src", "electron", "tests", "scripts"])
       );
   }
 
+// App state lives in one place: `<userData>/sushiai.db`. A string literal that
+// names a `*.json` file in `electron/` - quoted, a template ending in `.json`,
+// or `+ ".json"` - is how a new userData JSON store sneaks back in, so every
+// such name is on this list with the reason it is not one.
+const JSON_NAMES = [
+  /["']([\w.-]+\.json)["']/g,
+  /`([^`\n]*\.json)`/g,
+  /\+\s*["'`](\.json)["'`]/g,
+];
+const JSON_ALLOWED = {
+  "electron/app-db.cjs": [
+    [
+      /^(agents\/)?(projects|workspace-state|herdr-launches|connections|orchestrator-hosts|providers|secrets|model-profiles|claude-accounts|codex-accounts|project-secrets|window-state|updates|app-preferences|hermes-scheduler|hermes-activity|extensions|extension-lock)\.json$/,
+      "legacy files taken in once, then renamed or deleted",
+    ],
+    [/^\.json$/, "legacy surface-state file suffix"],
+  ],
+  "electron/main.cjs": [
+    [/^installed\.json$/, "installer receipt next to the download"],
+  ],
+  "electron/installer.cjs": [
+    [/^(plan|installed)\.json$/, "installer plan and receipt files"],
+  ],
+  "electron/updates.cjs": [
+    [/^ready\.json$/, "download receipt beside the dmg"],
+  ],
+  "electron/model-providers.cjs": [
+    [/^\$\{base\}\.json$/, "temporary --settings file Claude reads"],
+  ],
+  "electron/claude-mcp.cjs": [
+    [/^\.(claude|mcp)\.json$/, "Claude CLI / repo config, not app state"],
+  ],
+  "electron/ipc/projects.cjs": [[/^\.mcp\.json$/, "repo MCP config"]],
+  "electron/codex-accounts.cjs": [[/^auth\.json$/, "Codex-owned login file"]],
+  "electron/project-session.cjs": [[/^auth\.json$/, "Codex-owned login file"]],
+  "electron/extensions/local-extensions.cjs": [
+    [/^manifest\.json$/, "extension manifest"],
+  ],
+  "electron/ipc/app.cjs": [[/^skills-catalog\.json$/, "regenerable cache"]],
+  "electron/orchestrator.cjs": [[/^task\.json$/, "orchd task file"]],
+  "electron/project-hosts.cjs": [[/^package-lock\.json$/, "repo lockfile"]],
+};
+const stateRoot = process.env.STATE_STORE_ROOT_OVERRIDE || root;
+for await (const file of walk("electron", stateRoot)) {
+  const text = await readFile(path.join(stateRoot, file), "utf8");
+  const allowed = JSON_ALLOWED[file.split(path.sep).join("/")] || [];
+  text.split("\n").forEach((value, index) => {
+    if (/^\s*(\/\/|\/?\*)/.test(value)) return;
+    for (const pattern of JSON_NAMES)
+      for (const [, name] of value.matchAll(pattern))
+        if (!allowed.some(([allow]) => allow.test(name)))
+          problems.push(
+            `${file}:${index + 1} names ${name}; app state goes in sushiai.db (electron/app-db.cjs)`,
+          );
+  });
+}
+
 // The design vocabulary lives in tokens.css; src/styles.css is the legacy file
 // the boundary moves out of. Anything already converted spends tokens, so a new
 // raw colour there is a regression. File-granular on purpose: no false

@@ -1,6 +1,7 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
+const { appDb, readStore } = require("../electron/app-db.cjs");
 const { ModelProviders } = require("../electron/model-providers.cjs");
 
 /** A fake safeStorage that "encrypts" by reversing the string, so tests can
@@ -72,7 +73,7 @@ test("stores keys encrypted and never returns the raw key from listing", async (
   try {
     const provider = await f.providers.upsertProvider({ kind: "openrouter" });
     await f.providers.setProviderKey(provider.id, "sk-or-secret-value");
-    const raw = await fs.readFile(`${f.userDataDir}/secrets.json`, "utf8");
+    const raw = JSON.stringify(readStore(f.userDataDir, "secrets"));
     assert.equal(raw.includes("sk-or-secret-value"), false);
     const listed = await f.providers.listProviders();
     assert.equal(listed[0].hasKey, true);
@@ -337,7 +338,6 @@ test("fetchModels returns OpenRouter's fixed Claude-alias list without hitting t
 });
 
 test("Claude account resolver tags only legitimate absence and preserves configuration errors", async () => {
-  const path = require("node:path");
   const f = await fixture();
   try {
     await assert.rejects(f.providers.resolveClaudeAccount("missing"), {
@@ -350,17 +350,13 @@ test("Claude account resolver tags only legitimate absence and preserves configu
     await assert.rejects(f.providers.resolveClaudeAccount(account.id), {
       code: "ACCOUNT_NOT_CONFIGURED",
     });
-    await fs.writeFile(path.join(f.userDataDir, "secrets.json"), "{broken");
-    await assert.rejects(
-      f.providers.resolveClaudeAccount(account.id),
-      SyntaxError,
-    );
-    await fs.rm(path.join(f.userDataDir, "secrets.json"));
-    await fs.mkdir(path.join(f.userDataDir, "secrets.json"));
+    // An unreadable stored row is skipped, so the account has no value.
+    appDb(f.userDataDir)
+      .prepare("INSERT INTO store(name, key, value) VALUES(?, ?, ?)")
+      .run("secrets", `claude-account:${account.id}`, "{broken");
     await assert.rejects(f.providers.resolveClaudeAccount(account.id), {
-      code: "EISDIR",
+      code: "ACCOUNT_NOT_CONFIGURED",
     });
-    await fs.rm(path.join(f.userDataDir, "secrets.json"), { recursive: true });
     await f.providers.setClaudeAccountValue(account.id, "synthetic-key");
     f.providers.safeStorage.decryptString = () => {
       throw new Error("Decrypt failed");

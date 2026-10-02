@@ -1,8 +1,13 @@
 const { randomUUID } = require("node:crypto");
-const fs = require("node:fs/promises");
 const path = require("node:path");
 const { remoteUrl } = require("./git-remote.cjs");
-const { appDb, transaction } = require("./app-db.cjs");
+const {
+  appDb,
+  putStore,
+  readStore,
+  transaction,
+  writeStore,
+} = require("./app-db.cjs");
 const { projectSlug, slugOf, uniqueSlug } = require("./project-slug.cjs");
 
 function normalizeRemote(url) {
@@ -26,21 +31,6 @@ function assertRemote(url) {
     throw new Error("A git URL cannot start with a dash.");
 }
 
-async function atomicWriteJson(file, value) {
-  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
-      mode: 0o600,
-      flag: "wx",
-    });
-    await fs.rename(temporary, file);
-  } catch (error) {
-    await fs.rm(temporary, { force: true }).catch(() => {});
-    throw error;
-  }
-}
-
 const STAGES = ["setup", "agent", "mcp"];
 
 /** Where a folder lives, as a project knows it: an SSH host by its endpoint,
@@ -51,6 +41,15 @@ function hostOf(endpoint) {
     : "local";
 }
 
+/** Matches the stored secret keys of variables `names` of project `id`: the
+ * value and its per-host copies (`id:NAME@host`). */
+function secretsOf(id, names) {
+  return (key) =>
+    [...names].some(
+      (name) => key === `${id}:${name}` || key.startsWith(`${id}:${name}@`),
+    );
+}
+
 function hint(value) {
   return value.length >= 12 ? `••••${value.slice(-4)}` : "••••";
 }
@@ -58,9 +57,7 @@ function hint(value) {
 class Projects {
   constructor({ userDataDir, safeStorage }) {
     this.userDataDir = userDataDir;
-    this.secretsFile = path.join(userDataDir, "project-secrets.json");
     this.safeStorage = safeStorage;
-    this.writeQueue = Promise.resolve();
     this.lock = Promise.resolve();
     // `onSendChange(host)` lets whoever holds values for a host replace them
     // when the owner turns sending to it off (or on again).
@@ -124,10 +121,18 @@ class Projects {
 
   /** Writes the project map back in one transaction: changed projects are
    * updated, missing ones removed, and folder rows follow each project's
-   * `folders` (a folder no project lists any more is only unattached). */
-  #save(projects) {
+   * `folders` (a folder no project lists any more is only unattached).
+   * `dropSecret(key)` names the stored secrets that go in the same
+   * transaction. */
+  #save(projects, dropSecret) {
     const db = this.#open();
     transaction(db, () => {
+      if (dropSecret) {
+        const kept = this.#secrets();
+        for (const key of Object.keys(kept))
+          if (dropSecret(key)) delete kept[key];
+        putStore(db, "project-secrets", kept);
+      }
       const stored = new Map(
         db
           .prepare("SELECT id, data FROM projects")
@@ -243,16 +248,11 @@ class Projects {
     };
   }
 
-  #write(file, value) {
-    const operation = this.writeQueue.then(() => atomicWriteJson(file, value));
-    this.writeQueue = operation.catch(() => {});
+  #putSecrets(secrets) {
+    writeStore(this.userDataDir, "project-secrets", secrets);
     // Whatever the project holds changed: every host's copy is refreshed
     // soon, not only at the next task.
-    void operation.then(
-      () => this.#changed(),
-      () => {},
-    );
-    return operation;
+    this.#changed();
   }
 
   #changed() {
@@ -261,16 +261,8 @@ class Projects {
     this.changeTimer.unref?.();
   }
 
-  async #read(file) {
-    try {
-      const parsed = JSON.parse(await fs.readFile(file, "utf8"));
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? parsed
-        : {};
-    } catch (error) {
-      if (error?.code === "ENOENT") return {};
-      throw error;
-    }
+  #secrets() {
+    return readStore(this.userDataDir, "project-secrets");
   }
 
   #public(project) {
@@ -287,7 +279,7 @@ class Projects {
 
   async list() {
     const projects = this.#load();
-    const secrets = await this.#read(this.secretsFile);
+    const secrets = this.#secrets();
     return Object.values(projects).map((project) =>
       this.#withHints(project, secrets),
     );
@@ -297,7 +289,7 @@ class Projects {
     const projects = this.#load();
     const project = this.#own(projects, id);
     if (!project) return null;
-    return this.#withHints(project, await this.#read(this.secretsFile));
+    return this.#withHints(project, this.#secrets());
   }
 
   #withHints(project, secrets) {
@@ -417,17 +409,10 @@ class Projects {
       (existing?.env || []).map((entry) => entry.name),
     );
     const nextNames = new Set(project.env.map((entry) => entry.name));
-    this.#save({ ...projects, [id]: project });
-    if ([...previousNames].some((name) => !nextNames.has(name))) {
-      const secrets = await this.#read(this.secretsFile);
-      for (const name of previousNames)
-        if (!nextNames.has(name))
-          for (const key of Object.keys(secrets))
-            if (key === `${id}:${name}` || key.startsWith(`${id}:${name}@`))
-              delete secrets[key];
-      await this.#write(this.secretsFile, secrets);
-    }
-    return this.#withHints(project, await this.#read(this.secretsFile));
+    const removed = [...previousNames].filter((name) => !nextNames.has(name));
+    this.#save({ ...projects, [id]: project }, secretsOf(id, removed));
+    if (removed.length) this.#changed();
+    return this.#withHints(project, this.#secrets());
   }
 
   /** Adds, changes or removes variables on fresh stored state. A secret made
@@ -486,14 +471,9 @@ class Projects {
           mcp: project.dismissed?.mcp || [],
           env: [...new Set([...(project.dismissed?.env || []), ...gone])],
         };
-      this.#save(projects);
-      const secrets = await this.#read(this.secretsFile);
-      for (const name of dropped)
-        for (const key of Object.keys(secrets))
-          if (key === `${id}:${name}` || key.startsWith(`${id}:${name}@`))
-            delete secrets[key];
-      await this.#write(this.secretsFile, secrets);
-      return this.#withHints(project, secrets);
+      this.#save(projects, secretsOf(id, dropped));
+      this.#changed();
+      return this.#withHints(project, this.#secrets());
     });
   }
 
@@ -546,7 +526,7 @@ class Projects {
       this.#save(projects);
       for (const entry of added)
         await this.#setEncryptedValue(id, entry.name, entry.value);
-      return this.#withHints(project, await this.#read(this.secretsFile));
+      return this.#withHints(project, this.#secrets());
     });
   }
 
@@ -573,7 +553,7 @@ class Projects {
       const filled = [];
       const skipped = [];
       const removed = [];
-      const secrets = await this.#read(this.secretsFile);
+      const secrets = this.#secrets();
       for (const entry of variables) {
         const name = String(entry.name);
         if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
@@ -628,7 +608,7 @@ class Projects {
         if (entry.value)
           await this.#setEncryptedValue(id, entry.name, entry.value);
       return {
-        project: this.#withHints(project, await this.#read(this.secretsFile)),
+        project: this.#withHints(project, this.#secrets()),
         addedVariables: added.map(({ name, secret }) => ({
           name,
           secret: !!secret,
@@ -654,7 +634,7 @@ class Projects {
     const projects = this.#load();
     const project = this.#own(projects, id);
     if (!project) throw new Error("Unknown project.");
-    const secrets = await this.#read(this.secretsFile);
+    const secrets = this.#secrets();
     const have = new Set((project.env || []).map((entry) => entry.name));
     const out = {
       newVariables: [],
@@ -688,9 +668,7 @@ class Projects {
    * folder's stored identity. Null when none fits. Read only. */
   async resolveProject(query = {}) {
     const project = this.#find(this.#load(), query);
-    return project
-      ? this.#withHints(project, await this.#read(this.secretsFile))
-      : null;
+    return project ? this.#withHints(project, this.#secrets()) : null;
   }
 
   /** The id `resolveProject` would answer, without reading secrets. */
@@ -821,7 +799,7 @@ class Projects {
             "UPDATE folders SET remote_key = COALESCE(NULLIF(?, ''), remote_key), common_dir = COALESCE(NULLIF(?, ''), common_dir) WHERE host = ? AND path = ?",
           )
           .run(key, String(commonDir || ""), host, cwd);
-      return this.#withHints(project, await this.#read(this.secretsFile));
+      return this.#withHints(project, this.#secrets());
     });
   }
 
@@ -830,11 +808,8 @@ class Projects {
       const projects = this.#load();
       if (!this.#own(projects, id)) return;
       delete projects[id];
-      this.#save(projects);
-      const secrets = await this.#read(this.secretsFile);
-      for (const key of Object.keys(secrets))
-        if (key.startsWith(`${id}:`)) delete secrets[key];
-      await this.#write(this.secretsFile, secrets);
+      this.#save(projects, (key) => key.startsWith(`${id}:`));
+      this.#changed();
     });
   }
 
@@ -869,7 +844,7 @@ class Projects {
         this.#save(projects);
       }
       await this.#setEncryptedValue(id, entry.name, value);
-      return this.#withHints(project, await this.#read(this.secretsFile));
+      return this.#withHints(project, this.#secrets());
     });
   }
 
@@ -882,7 +857,7 @@ class Projects {
       throw new Error("Secure storage is unavailable.");
     if (this.safeStorage.getSelectedStorageBackend?.() === "basic_text")
       throw new Error("Secure storage is unavailable.");
-    const secrets = await this.#read(this.secretsFile);
+    const secrets = this.#secrets();
     const entry = (owner.env || []).find(
       (item) => item.name === key.split("@")[0],
     );
@@ -893,7 +868,7 @@ class Projects {
       // decided from the variable's current secret flag when it is read.
       hint: hint(value),
     };
-    await this.#write(this.secretsFile, secrets);
+    this.#putSecrets(secrets);
     return {
       hasValue: true,
       hint: entry && !entry.secret ? value.slice(0, 200) : hint(value),
@@ -918,11 +893,10 @@ class Projects {
 
   clearSecret(id, name) {
     return this.#locked(async () => {
-      const secrets = await this.#read(this.secretsFile);
+      const secrets = this.#secrets();
       for (const key of Object.keys(secrets))
-        if (key === `${id}:${name}` || key.startsWith(`${id}:${name}@`))
-          delete secrets[key];
-      await this.#write(this.secretsFile, secrets);
+        if (secretsOf(id, [name])(key)) delete secrets[key];
+      this.#putSecrets(secrets);
     });
   }
 
@@ -930,7 +904,7 @@ class Projects {
     const projects = this.#load();
     const project = this.#own(projects, id);
     if (!project) throw new Error("Unknown project.");
-    const secrets = await this.#read(this.secretsFile);
+    const secrets = this.#secrets();
     return entries.map(({ name, value }) => {
       const existing = (project.env || []).find((entry) => entry.name === name);
       if (!existing) return { name, status: "new" };
@@ -954,7 +928,7 @@ class Projects {
   }
 
   async secretFor(id, name) {
-    const secrets = await this.#read(this.secretsFile);
+    const secrets = this.#secrets();
     const stored = secrets[`${id}:${name}`];
     if (!stored) return null;
     try {
@@ -1036,7 +1010,7 @@ class Projects {
   }
 
   async #secretValue(id, key) {
-    const secrets = await this.#read(this.secretsFile);
+    const secrets = this.#secrets();
     const stored = secrets[`${id}:${key}`];
     if (!stored) return null;
     try {
@@ -1094,4 +1068,4 @@ class Projects {
   }
 }
 
-module.exports = { Projects, normalizeRemote, assertRemote, atomicWriteJson };
+module.exports = { Projects, normalizeRemote, assertRemote };

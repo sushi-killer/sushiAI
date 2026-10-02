@@ -1,20 +1,14 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
-const {
-  chmod,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} = require("node:fs/promises");
+const { chmod, mkdir, mkdtemp, rm, writeFile } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
 const path = require("node:path");
 
 const {
   ExtensionManager,
 } = require("../electron/extensions/extension-manager.cjs");
+const { appDb, readStore, writeStore } = require("../electron/app-db.cjs");
 const { HERDR_MANIFEST } = require("../electron/extensions/builtin-herdr.cjs");
 
 const probeFixture = JSON.parse(
@@ -76,12 +70,7 @@ test("extension manager persists enabled state, lock metadata and safe overrides
         .status,
       "disabled",
     );
-    const lock = JSON.parse(
-      await readFile(
-        path.join(dir, "extensions", "extension-lock.json"),
-        "utf8",
-      ),
-    );
+    const lock = readStore(dir, "extension-lock").value;
     assert.equal(
       lock.packages["user.specimen"].source.resolvedCommit,
       "0123456789abcdef",
@@ -119,8 +108,7 @@ test("corrupted external state fails closed and is not overwritten", async () =>
       installed: [installed],
     });
     await manager.ready;
-    const stateFile = path.join(dir, "extensions", "extensions.json");
-    await writeFile(stateFile, "{broken", "utf8");
+    writeStore(dir, "extensions", { value: "broken" });
     const recovered = new ExtensionManager({
       dataDir: dir,
       installed: [installed],
@@ -128,7 +116,7 @@ test("corrupted external state fails closed and is not overwritten", async () =>
     const snapshot = await recovered.list();
     assert.equal(snapshot.extensions[0].status, "disabled");
     assert.match(snapshot.diagnostic, /disabled/);
-    assert.equal(await readFile(stateFile, "utf8"), "{broken");
+    assert.equal(readStore(dir, "extensions").value, "broken");
     await assert.rejects(
       () => recovered.setEnabled("user.specimen", true),
       /settings are repaired/,
@@ -146,8 +134,7 @@ test("invalid lock metadata fails closed and is not overwritten", async () => {
       installed: [installed],
     });
     await first.ready;
-    const lockFile = path.join(dir, "extensions", "extension-lock.json");
-    await writeFile(lockFile, "{broken", "utf8");
+    writeStore(dir, "extension-lock", { value: "broken" });
     const recovered = new ExtensionManager({
       dataDir: dir,
       installed: [installed],
@@ -155,7 +142,7 @@ test("invalid lock metadata fails closed and is not overwritten", async () => {
     const snapshot = await recovered.list();
     assert.equal(snapshot.extensions[0].status, "disabled");
     assert.match(snapshot.diagnostic, /lock metadata/);
-    assert.equal(await readFile(lockFile, "utf8"), "{broken");
+    assert.equal(readStore(dir, "extension-lock").value, "broken");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -169,10 +156,9 @@ test("a lock entry that no longer matches an external manifest fails closed", as
       installed: [installed],
     });
     await first.ready;
-    const lockFile = path.join(dir, "extensions", "extension-lock.json");
-    const lock = JSON.parse(await readFile(lockFile, "utf8"));
+    const lock = readStore(dir, "extension-lock").value;
     lock.packages["user.specimen"].version = "9.9.9";
-    await writeFile(lockFile, JSON.stringify(lock), "utf8");
+    writeStore(dir, "extension-lock", { value: lock });
     const recovered = new ExtensionManager({
       dataDir: dir,
       installed: [installed],
@@ -181,8 +167,7 @@ test("a lock entry that no longer matches an external manifest fails closed", as
     assert.equal(snapshot.extensions[0].status, "disabled");
     assert.match(snapshot.diagnostic, /does not match/);
     assert.equal(
-      JSON.parse(await readFile(lockFile, "utf8")).packages["user.specimen"]
-        .version,
+      readStore(dir, "extension-lock").value.packages["user.specimen"].version,
       "9.9.9",
     );
   } finally {
@@ -198,12 +183,11 @@ test("malformed extension entries fail closed and preserve the state file", asyn
       installed: [installed],
     });
     await first.ready;
-    const stateFile = path.join(dir, "extensions", "extensions.json");
-    const malformed = JSON.stringify({
+    const malformed = {
       schemaVersion: 2,
       extensions: { "user.specimen": { enabled: "yes", overrides: {} } },
-    });
-    await writeFile(stateFile, malformed, "utf8");
+    };
+    writeStore(dir, "extensions", { value: malformed });
     const recovered = new ExtensionManager({
       dataDir: dir,
       installed: [installed],
@@ -211,7 +195,7 @@ test("malformed extension entries fail closed and preserve the state file", asyn
     const snapshot = await recovered.list();
     assert.equal(snapshot.extensions[0].status, "disabled");
     assert.match(snapshot.diagnostic, /settings were damaged/);
-    assert.equal(await readFile(stateFile, "utf8"), malformed);
+    assert.deepEqual(readStore(dir, "extensions").value, malformed);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -352,12 +336,7 @@ test("editing the version is a normal edit, not a lock violation", async (t) => 
   );
   assert.equal(snapshot.diagnostic, undefined);
 
-  const lock = JSON.parse(
-    await readFile(
-      path.join(dirs.dataDir, "extensions", "extension-lock.json"),
-      "utf8",
-    ),
-  );
+  const lock = readStore(dirs.dataDir, "extension-lock").value;
   assert.equal(
     lock.packages["user.specimen"],
     undefined,
@@ -478,6 +457,68 @@ test("the orchestrator built-in can be turned off, stays off across a restart, a
     await restarted.setEnabled("builtin.orchestrator", true);
     assert.equal(restarted.isEnabled("builtin.orchestrator"), true);
   } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+for (const [name, diagnostic] of [
+  ["extensions", /settings were damaged/],
+  ["extension-lock", /lock metadata/],
+]) {
+  test(`an unparsable ${name} row fails closed and is not overwritten`, async () => {
+    const dir = await mkdtemp(
+      path.join(tmpdir(), "sushiai-extension-manager-"),
+    );
+    try {
+      const first = new ExtensionManager({
+        dataDir: dir,
+        installed: [installed],
+      });
+      await first.ready;
+      appDb(dir)
+        .prepare("UPDATE store SET value = '{fixture-text' WHERE name = ?")
+        .run(name);
+      const recovered = new ExtensionManager({
+        dataDir: dir,
+        installed: [installed],
+      });
+      const snapshot = await recovered.list();
+      assert.equal(snapshot.extensions[0].status, "disabled");
+      assert.match(snapshot.diagnostic, diagnostic);
+      await assert.rejects(
+        () => recovered.setEnabled("user.specimen", true),
+        /settings are repaired/,
+      );
+      assert.equal(
+        appDb(dir)
+          .prepare("SELECT value FROM store WHERE name = ? AND key = 'value'")
+          .get(name).value,
+        "{fixture-text",
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a damaged legacy extensions.json fails closed and is kept", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "sushiai-extension-manager-"));
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    const legacy = path.join(dir, "extensions", "extensions.json");
+    await mkdir(path.dirname(legacy), { recursive: true });
+    await writeFile(legacy, "{fixture-text", "utf8");
+    const manager = new ExtensionManager({
+      dataDir: dir,
+      installed: [installed],
+    });
+    const snapshot = await manager.list();
+    assert.equal(snapshot.extensions[0].status, "disabled");
+    assert.match(snapshot.diagnostic, /settings were damaged/);
+    assert.equal(fs.readFileSync(legacy, "utf8"), "{fixture-text");
+  } finally {
+    console.warn = warn;
     await rm(dir, { recursive: true, force: true });
   }
 });

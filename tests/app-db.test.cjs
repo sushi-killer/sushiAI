@@ -6,7 +6,13 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { makeStore, registerHandlers } = require("./helpers/fake-host.cjs");
-const { appDb, closeAppDb } = require("../electron/app-db.cjs");
+const {
+  DAMAGED,
+  appDb,
+  closeAppDb,
+  readStore,
+  writeStore,
+} = require("../electron/app-db.cjs");
 const { Connections } = require("../electron/connections.cjs");
 const {
   readSnapshot,
@@ -94,7 +100,7 @@ test("a failed import rolls back, keeps the file, never blocks opening and retri
   t.after(() => closeAppDb(dir));
   assert.equal(db.prepare("SELECT count(*) AS n FROM projects").get().n, 1);
   assert.equal(await exists(`${file}.imported`), true);
-  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 2);
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 3);
   assert.equal(
     db.prepare("PRAGMA journal_mode").get().journal_mode.toLowerCase(),
     "wal",
@@ -605,5 +611,261 @@ test("connection profiles persist across a reopen", async (t) => {
       [dev.id, "devbox", true],
       [again.id, "user@box2", false],
     ],
+  );
+});
+
+// [store, legacy file, legacy text, file deleted after import]
+const STORE_FILES = [
+  ["providers", "providers.json", '{"p1":{"id":"p1"}}', false],
+  [
+    "secrets",
+    "secrets.json",
+    '{"p1":{"v":1,"backend":"plain","ct":"AAAA"},"__proto__":{"v":1,"ct":"CCCC"}}',
+    true,
+  ],
+  ["model-profiles", "model-profiles.json", '{"m1":{"id":"m1"}}', false],
+  ["claude-accounts", "claude-accounts.json", '{"a1":{"id":"a1"}}', true],
+  ["codex-accounts", "codex-accounts.json", '{"c1":{"id":"c1"}}', true],
+  ["project-secrets", "project-secrets.json", '{"p:TOKEN":{"ct":"BB"}}', true],
+  ["window", "window-state.json", '{"bounds":{"x":1}}', false],
+  ["updates", "updates.json", '{"autoCheck":false}', false],
+  ["preferences", "app-preferences.json", '{"notifications":false}', false],
+];
+const DOCUMENTS = ["window", "updates", "preferences"];
+
+test("each settings file is imported into its store once; secret files are deleted, the rest renamed", async (t) => {
+  const dir = await tempDir(t);
+  for (const [, file, text] of STORE_FILES)
+    await fs.writeFile(path.join(dir, file), text);
+  appDb(dir);
+  for (const [name, file, text, removed] of STORE_FILES) {
+    const legacy = JSON.parse(text);
+    const expected = DOCUMENTS.includes(name) ? { value: legacy } : legacy;
+    assert.deepEqual({ ...readStore(dir, name) }, { ...expected }, name);
+    assert.equal(await exists(path.join(dir, file)), false, file);
+    assert.equal(await exists(path.join(dir, `${file}.imported`)), !removed);
+  }
+  assert.equal(Object.hasOwn(readStore(dir, "secrets"), "__proto__"), true);
+  assert.equal(Object.keys(readStore(dir, "secrets")).length, 2);
+  assert.equal(
+    {}.v,
+    undefined,
+    "a __proto__ key never reaches Object.prototype",
+  );
+  closeAppDb(dir);
+  await fs.writeFile(path.join(dir, "providers.json"), '{"p2":{"id":"p2"}}');
+  appDb(dir);
+  assert.deepEqual(Object.keys(readStore(dir, "providers")), ["p1"]);
+  assert.equal(await exists(path.join(dir, "providers.json")), true);
+});
+
+test("a settings file that is not an object or not JSON is kept and does not block opening", async (t) => {
+  const dir = await tempDir(t);
+  const warned = [];
+  const warn = console.warn;
+  console.warn = (message) => warned.push(String(message));
+  t.after(() => {
+    console.warn = warn;
+  });
+  for (const [, file] of STORE_FILES)
+    await fs.writeFile(
+      path.join(dir, file),
+      file.startsWith("s") || file.startsWith("u") ? "[]" : "{fixture-text",
+    );
+  appDb(dir);
+  for (const [name, file] of STORE_FILES) {
+    assert.deepEqual({ ...readStore(dir, name) }, {}, name);
+    assert.equal(await exists(path.join(dir, file)), true, file);
+    assert.equal(await exists(path.join(dir, `${file}.imported`)), false);
+  }
+  assert.ok(warned.length > 0);
+  assert.equal(
+    warned.some((line) => line.includes("fixture-text")),
+    false,
+  );
+});
+
+test("writeStore writes only changed keys and deletes missing ones", async (t) => {
+  const dir = await tempDir(t);
+  const db = appDb(dir);
+  const changes = () => db.prepare("SELECT total_changes() AS n").get().n;
+  writeStore(dir, "demo", { a: { n: 1 }, b: { n: 2 }, c: 3 });
+  const start = changes();
+  writeStore(dir, "demo", { a: { n: 1 }, b: { n: 5 } });
+  assert.equal(changes() - start, 2, "one update and one delete");
+  assert.deepEqual({ ...readStore(dir, "demo") }, { a: { n: 1 }, b: { n: 5 } });
+  const idle = changes();
+  writeStore(dir, "demo", { a: { n: 1 }, b: { n: 5 } });
+  assert.equal(changes(), idle, "an identical write touches nothing");
+  writeStore(dir, "other", { z: 1 });
+  writeStore(dir, "demo", {});
+  assert.deepEqual({ ...readStore(dir, "demo") }, {});
+  assert.deepEqual({ ...readStore(dir, "other") }, { z: 1 });
+});
+
+test("an unreadable row is skipped by readStore and never deleted by writeStore", async (t) => {
+  const dir = await tempDir(t);
+  const warned = [];
+  const warn = console.warn;
+  console.warn = (message) => warned.push(String(message));
+  t.after(() => {
+    console.warn = warn;
+  });
+  writeStore(dir, "demo", { ok: 1 });
+  const db = appDb(dir);
+  db.prepare(
+    "INSERT INTO store(name, key, value) VALUES('demo', 'bad', '{fixture-text')",
+  ).run();
+  assert.deepEqual({ ...readStore(dir, "demo") }, { ok: 1 });
+  assert.equal(
+    warned.some((line) => line.includes("fixture-text")),
+    false,
+  );
+  writeStore(dir, "demo", { ok: 2 });
+  assert.equal(
+    db
+      .prepare("SELECT value FROM store WHERE name = 'demo' AND key = 'bad'")
+      .get().value,
+    "{fixture-text",
+  );
+  assert.deepEqual({ ...readStore(dir, "demo") }, { ok: 2 });
+});
+
+test("surface, extension, scheduler and journal files are imported and renamed", async (t) => {
+  const dir = await tempDir(t);
+  const files = {
+    "extensions/state/local.tasks.json": '{"board":{"1":{"/a":[1]}}}',
+    "extensions/extensions.json": '{"schemaVersion":2}',
+    "extensions/extension-lock.json": '{"schemaVersion":2,"packages":{}}',
+    "agents/hermes-scheduler.json": '{"enabled":true}',
+    "agents/hermes-activity.json": '[{"id":"a","title":"t","createdAt":1}]',
+  };
+  for (const [file, text] of Object.entries(files)) {
+    await fs.mkdir(path.dirname(path.join(dir, file)), { recursive: true });
+    await fs.writeFile(path.join(dir, file), text);
+  }
+  appDb(dir);
+  assert.deepEqual(readStore(dir, "surface-state")["local.tasks"], {
+    board: { 1: { "/a": [1] } },
+  });
+  assert.equal(readStore(dir, "extensions").value.schemaVersion, 2);
+  assert.deepEqual(readStore(dir, "extension-lock").value.packages, {});
+  assert.equal(readStore(dir, "hermes-scheduler").enabled, true);
+  assert.deepEqual(readStore(dir, "hermes-activity").order, ["a"]);
+  for (const file of Object.keys(files)) {
+    assert.equal(await exists(path.join(dir, file)), false, file);
+    assert.equal(await exists(path.join(dir, `${file}.imported`)), true, file);
+  }
+});
+
+test("a damaged extension file leaves a damaged row, stays in place and is retried until repaired", async (t) => {
+  const dir = await tempDir(t);
+  const warned = [];
+  const warn = console.warn;
+  console.warn = (message) => warned.push(String(message));
+  t.after(() => {
+    console.warn = warn;
+  });
+  const files = {
+    "extensions/extensions.json": ["extensions", "value"],
+    "extensions/extension-lock.json": ["extension-lock", "value"],
+    "extensions/state/local.tasks.json": ["surface-state", "local.tasks"],
+  };
+  for (const file of Object.keys(files)) {
+    await fs.mkdir(path.dirname(path.join(dir, file)), { recursive: true });
+    await fs.writeFile(path.join(dir, file), "{fixture-text");
+  }
+  appDb(dir);
+  for (const [file, [name, key]] of Object.entries(files)) {
+    assert.equal(readStore(dir, name, { damaged: true })[key], DAMAGED, file);
+    assert.equal(Object.hasOwn(readStore(dir, name), key), false);
+    assert.equal(await exists(path.join(dir, file)), true, file);
+  }
+  assert.equal(
+    warned.some((line) => line.includes("fixture-text")),
+    false,
+  );
+  closeAppDb(dir);
+  appDb(dir);
+  assert.equal(readStore(dir, "extensions", { damaged: true }).value, DAMAGED);
+  closeAppDb(dir);
+  await fs.writeFile(
+    path.join(dir, "extensions/extensions.json"),
+    '{"schemaVersion":2}',
+  );
+  await fs.writeFile(
+    path.join(dir, "extensions/state/local.tasks.json"),
+    '{"board":{}}',
+  );
+  appDb(dir);
+  assert.deepEqual(readStore(dir, "extensions").value, { schemaVersion: 2 });
+  assert.deepEqual(readStore(dir, "surface-state")["local.tasks"], {
+    board: {},
+  });
+  assert.equal(
+    await exists(path.join(dir, "extensions/extensions.json.imported")),
+    true,
+  );
+  assert.equal(
+    readStore(dir, "extension-lock", { damaged: true }).value,
+    DAMAGED,
+    "the still-damaged lock file stays damaged",
+  );
+});
+
+test("a secret file is removed only after its import committed", async (t) => {
+  const dir = await tempDir(t);
+  const file = path.join(dir, "secrets.json");
+  await fs.writeFile(file, '{"p1":{"ct":"AAAA"}}');
+  appDb(dir);
+  closeAppDb(dir);
+  assert.equal(await exists(file), false);
+  assert.equal(await exists(`${file}.imported`), false);
+  // A renamed copy whose removal failed is removed on the next open.
+  await fs.writeFile(`${file}.imported`, '{"p1":{"ct":"AAAA"}}');
+  appDb(dir);
+  closeAppDb(dir);
+  assert.equal(await exists(`${file}.imported`), false);
+  // A file that was never imported (the store already holds data) stays.
+  await fs.writeFile(file, '{"p2":{"ct":"BBBB"}}');
+  appDb(dir);
+  assert.equal(await exists(file), true);
+});
+
+test("a damaged secret file is kept even after the store fills", async (t) => {
+  const dir = await tempDir(t);
+  const file = path.join(dir, "codex-accounts.json");
+  await fs.writeFile(file, '{"a":1,}');
+  appDb(dir);
+  writeStore(dir, "codex-accounts", { b: { label: "B" } });
+  closeAppDb(dir);
+  appDb(dir);
+  assert.equal(await exists(file), true);
+});
+
+test("removing a damaged extension file clears its marker", async (t) => {
+  const dir = await tempDir(t);
+  await fs.mkdir(path.join(dir, "extensions", "state"), { recursive: true });
+  const settings = path.join(dir, "extensions", "extensions.json");
+  const surface = path.join(dir, "extensions", "state", "acme.board.json");
+  await fs.writeFile(settings, "{oops");
+  await fs.writeFile(surface, "{oops");
+  appDb(dir);
+  assert.equal(readStore(dir, "extensions", { damaged: true }).value, DAMAGED);
+  assert.equal(
+    readStore(dir, "surface-state", { damaged: true })["acme.board"],
+    DAMAGED,
+  );
+  closeAppDb(dir);
+  await fs.rm(settings);
+  await fs.rm(surface);
+  appDb(dir);
+  assert.deepEqual(
+    Object.keys(readStore(dir, "extensions", { damaged: true })),
+    [],
+  );
+  assert.deepEqual(
+    Object.keys(readStore(dir, "surface-state", { damaged: true })),
+    [],
   );
 });

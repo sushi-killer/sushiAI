@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { readdir, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { DatabaseSync } from "node:sqlite";
 import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 const root = process.cwd();
@@ -548,7 +549,20 @@ try {
     .click();
   // A surface must save only what the user changed. Loading used to count as a
   // change, so each save was announced, re-read and saved again forever.
-  const stateFile = path.join(profile, `extensions/state/${probe.id}.json`);
+  // A second connection sees `data_version` move only when the app commits.
+  const stateDb = new DatabaseSync(path.join(profile, "sushiai.db"), {
+    readOnly: true,
+  });
+  const commits = () =>
+    stateDb.prepare("PRAGMA data_version").get().data_version;
+  const surfaceState = () =>
+    JSON.parse(
+      stateDb
+        .prepare(
+          "SELECT value FROM store WHERE name = 'surface-state' AND key = ?",
+        )
+        .get(probe.id)?.value ?? "null",
+    );
   const typed = `smoke-${Date.now()}`;
   // The compose box belongs to the surface people edit, so the edit is made on
   // the owner page; every other view of that slice is read-only by contract.
@@ -566,17 +580,15 @@ try {
     typed,
   );
   await page.waitForTimeout(600);
-  const settled = await fs.stat(stateFile).then((info) => info.mtimeMs);
+  const settled = commits();
   await page.waitForTimeout(1500);
   assert.equal(
-    await fs.stat(stateFile).then((info) => info.mtimeMs),
+    commits(),
     settled,
     "an idle surface must stop writing once its edit has been saved",
   );
   assert.ok(
-    JSON.parse(await fs.readFile(stateFile, "utf8"))[ledger.stateId][
-      String(ledger.stateVersion)
-    ],
+    surfaceState()?.[ledger.stateId]?.[String(ledger.stateVersion)],
     `the ${itemLabel} was stored under its state slice and version`,
   );
   // A contributed entry with no order of its own sorts after every built-in

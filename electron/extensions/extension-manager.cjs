@@ -7,7 +7,10 @@ const SCHEMA_VERSION = 2;
 
 /** Built-ins the owner may switch off. Every other built-in is part of the
  * shell and is forced back on at start. */
-const DISABLEABLE_BUILTINS = new Set(["builtin.orchestrator"]);
+const DISABLEABLE_BUILTINS = new Set([
+  "builtin.orchestrator",
+  "builtin.artifacts",
+]);
 
 function defaultState(manifests = [], externalEnabled = false) {
   return {

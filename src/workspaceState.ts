@@ -331,6 +331,8 @@ export function restore(store: SnapshotStore = snapshotStore()): Saved | null {
       chatFocus: typeof value.chatFocus === "string" ? value.chatFocus : "",
       workspaces: value.workspaces.map((w: Workspace) => ({
         ...w,
+        // Tokens are live host state: the first snapshot after start sets them.
+        herdrTokens: undefined,
         connection: w.herdrId ? w.connection || value.socket : undefined,
         panels: w.panels.map((p) => ({
           ...p,

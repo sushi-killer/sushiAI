@@ -19,7 +19,7 @@ type Shell = {
     accountId?: string,
     backend?: "herdr" | "local",
     targetWorkspaceId?: string,
-  ): Promise<void>;
+  ): Promise<boolean>;
   createWorkspace(
     name: string,
     cwd: string,

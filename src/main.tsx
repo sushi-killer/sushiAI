@@ -4,6 +4,7 @@ import { App } from "./App";
 import "./styles/tokens.css";
 import "./styles.css";
 import "./styles/components/extensions.css";
+import "./styles/components/preview.css";
 import "./styles/components/project.css";
 import "./styles/components/close-session.css";
 import "./styles/components/picker.css";

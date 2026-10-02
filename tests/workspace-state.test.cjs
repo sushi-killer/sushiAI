@@ -86,6 +86,26 @@ test("restore preserves explicit Herdr connection and clears local connection", 
   assert.equal(saved.workspaces[1].connection, undefined);
 });
 
+test("restore keeps the worktree branch a workspace was launched on", async () => {
+  const { restore } = await library;
+  const saved = restore({
+    read: () =>
+      JSON.stringify({
+        workspaces: [
+          {
+            id: "w",
+            name: "Client · Q3",
+            cwd: "/a",
+            worktreeBranch: "plan-1",
+            panels: [panel("one")],
+            layout: { type: "leaf", id: "one" },
+          },
+        ],
+      }),
+  });
+  assert.equal(saved.workspaces[0].worktreeBranch, "plan-1");
+});
+
 test("restore returns null for missing, malformed, or incomplete storage", async () => {
   const { restore } = await library;
   assert.equal(restore({ read: () => null }), null);

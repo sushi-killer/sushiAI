@@ -22,6 +22,7 @@ function preparationSignature(input) {
     input.claudeAccountId,
     input.codexAccountId,
     Object.entries(input.env || {}).sort(([a], [b]) => a.localeCompare(b)),
+    input.prompt,
   ]);
 }
 
@@ -112,6 +113,18 @@ function validate(input) {
           "Invalid session environment variable.",
         );
   }
+  if (
+    input.prompt !== undefined &&
+    (input.kind !== "agent" ||
+      typeof input.prompt !== "string" ||
+      !input.prompt.trim() ||
+      input.prompt.length > 16384 ||
+      // Control characters (a tab included) would act as terminal input, not
+      // text. Only a newline is allowed.
+      // eslint-disable-next-line no-control-regex
+      /[\x00-\x09\x0b-\x1f\x7f-\x9f]/.test(input.prompt))
+  )
+    throw launchError("INVALID_LAUNCH", "Invalid first prompt.");
 }
 
 class SessionLauncher {
@@ -560,9 +573,10 @@ class SessionLauncher {
         );
         const command =
           launch || (resolved ? modelLaunch(resolved.settings) : input.agent);
+        const prompt = input.prompt ? ` ${quote(input.prompt)}` : "";
         const text = prefix
-          ? `(${prefix}exec ${command}${settings})`
-          : `${command}${settings}`;
+          ? `(${prefix}exec ${command}${settings}${prompt})`
+          : `${command}${settings}${prompt}`;
         await this.rpc(socket, "pane.send_input", {
           pane_id: operation.created.paneId,
           text,

@@ -20,6 +20,7 @@ flowchart TB
       panels["Panels<br/>terminal, chat, browser, files, git"]
       orchPanel["Orchestrator panel<br/>src/orchestrator"]
       slots["Extension slots<br/>src/extensions"]
+      previewPane["Preview pane - src/extensions/preview<br/>core view of builtin.artifacts: Markdown,<br/>sandboxed HTML, images, PDF; comments; Start task"]
       inbox["Inbox page - src/app/InboxPage.tsx<br/>inboxModel.ts, attention.ts, useAttention.ts<br/>queue, badge count, reminders"]
       wsState["src/workspaceState.ts<br/>layout, panes, mode"]
     end
@@ -46,6 +47,8 @@ flowchart TB
       winState["window-state.cjs<br/>bounds, display, maximized"]
       wsSnap["workspace-snapshot.cjs<br/>sync read/flush + async write"]
       devRestart["dev-restart.cjs<br/>watches electron/ in npm run dev"]
+      previewSrv["preview.cjs<br/>token-granted file server;<br/>comment script for annotate HTML grants"]
+      artSkill["artifacts-skill.cjs + extensions/builtin-skills.cjs<br/>global sushiai-artifacts skill in ~/.claude, ~/.codex, ~/.agents,<br/>CLAUDE_CONFIG_DIR / CODEX_HOME, Codex account homes, SSH hosts; removed when disabled"]
     end
     orchPanel <--> preload <--> orchSvc
     orchSvc --> remoteSvc --> herdrIpc
@@ -68,6 +71,9 @@ flowchart TB
     mascotSvc -->|task.answer, land, rerun| orchSvc
     mascotSvc & attention -->|orchestrator-open, open-inbox,<br/>attention-open| preload
     devRestart -->|Core updated notice| mascotSvc
+    wsState -->|"sushiai_open token -> useOpenSignals:<br/>open a core surface as the companion half of the agent pane"| previewPane
+    previewPane <-->|"project-preview (annotate), project-inspect read"| preload <--> previewSrv
+    previewPane -->|"comments: pane.send_input;<br/>Start task: session-launch prompt /goal"| preload
     shortcut(["global Alt+Space"]) -->|fold / unfold| mascotSvc
   end
   macos[("macOS tray, Dock,<br/>Notification Center")]
@@ -129,9 +135,12 @@ flowchart TB
   taskAgent -->|Stop hook| proto
   side --> repo
   herdrIpc <--> herdr
+  herdr -->|"agent: herdr workspace report-metadata<br/>--token sushiai_open=..."| herdrSync
   remoteSvc <-->|shared ssh master,<br/>forwarded orchd.sock + token| remoteOrchd[("orchd on an SSH host<br/>detached, outlives the app")]
   remoteOrchd -->|task agent env + project MCP| taskAgent
 ```
+
+An agent asks for a Preview by setting the herdr workspace token `sushiai_open=<pane> <extension>/<surface> <nonce>` with the path in `sushiai_open_arg` (Herdr cuts a value at 80 characters) (the global `sushiai-artifacts` skill holds the command; `artifacts-skill.cjs` registers it with `extensions/builtin-skills.cjs`, which installs it for Claude Code and Codex while the extension is on and removes it when it is off). The token reaches the renderer in the next `session.snapshot` from any endpoint, local or SSH. `src/extensions/useOpenSignals.ts` acts on each new value once, ignoring the value seen at start, and opens the builtin core surface as the companion half of that pane (one pane, a draggable seam, hidden and shown from the pane header), without moving focus. Only `view.kind: "core"` surfaces, which only builtins may declare, can be opened this way. The Preview reads files only inside its workspace folder, through the main process with the project as root, so a symlink out of it is refused. HTML runs in an `allow-scripts` iframe without same-origin, so it cannot reach `window.bridge`; the injected comment script only posts what the owner pointed at.
 
 App state lives in one database, `sushiai.db` (`node:sqlite`, `electron/app-db.cjs`, one cached handle per profile, WAL, owner-only file mode, migrations on `user_version`). Each old JSON store (`projects.json`, `workspace-state.json`, `herdr-launches.json`, `connections.json`, `orchestrator-hosts.json`) is imported once into its tables and renamed `<name>.imported`. The renderer's workspace snapshot keeps its IPC (`workspace-state-read/write/flush`); the main process splits it into `workspaces` rows (unique per Herdr endpoint and workspace id, so one Herdr workspace is never stored twice) and `app_state` keys, and writes only what changed in one transaction. Session launch records, SSH connection profiles and enabled orchestrator hosts are tables too. Every other main-process store (model providers and profiles, Claude and Codex account lists, provider and project secrets, window bounds, update settings, app preferences) is a named map in the generic `store(name, key, value)` table, read with `readStore` and written with `writeStore`/`putStore` (changed keys only, one transaction). Secrets keep their `safeStorage` ciphertext, whose key lives in the macOS Keychain; when secure storage is unavailable, provider keys fall back to unencrypted storage, as before. Files stay files only where another program reads them or they can be regenerated: Codex homes, CLI settings staged for a launch, extension manifests, attachments, update downloads, the skills catalog cache. `scripts/check-conventions.mjs` fails on a new `*.json` name under `electron/` that is not on its allowlist. Project metadata is a `projects` table and a `folders` table keyed by host and path, which holds each folder's attached project and its last git identity (remote key, common dir, checkout, branch); environment and account values are stored in the `project-secrets` store, encrypted through Electron `safeStorage`, and deleted in the same transaction as their project. The renderer receives presence and masked hints, while the main process resolves values for the selected project, stage, and host. Local sessions receive their stage-specific environment at launch. Every SSH host the owner added receives a project's values (adding the host is the consent) unless the owner switched sending off for that project and host; remote task values cross through the forwarded orchd socket; remote terminal values use a one-shot file sent over SSH stdin and removed after sourcing. Codex accounts are not values in that store: each one is its own Codex home under userData (`codex-accounts/<id>`), signed in by `codex login` and refreshed by Codex itself, with the rest of `~/.codex` linked in. A local session runs Codex with `CODEX_HOME` set to it; an SSH session gets the account's login through the same one-shot file, for that session only. A ChatGPT login refreshed there (its refresh token is single-use) is left in a named session home on the host and collected over SSH at the account's next start, the newer login winning. Switching sending off prevents later reads from including that host's project values and replaces what that host's daemon already holds (when the host is offline, at the next connection).
 

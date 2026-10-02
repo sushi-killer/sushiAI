@@ -168,6 +168,7 @@ export function reconcileHerdrWorkspaces(
             ? agentTitle(pane.agent)
             : pane.terminal_title_stripped || "zsh"),
         herdrId: pane.pane_id,
+        ...(pane.cwd ? { paneCwd: pane.cwd } : {}),
         agent: existingPanel?.launchError ? existingPanel.agent : pane.agent,
         status: pane.agent_status,
       };
@@ -221,6 +222,7 @@ export function reconcileHerdrWorkspaces(
       id: saved?.id || herdrWorkspaceKey(connection, workspace.workspace_id),
       connection,
       herdrId: workspace.workspace_id,
+      herdrTokens: workspace.tokens ?? {},
       name: preservedProject?.name ?? workspace.label,
       cwd,
       panels: allPanels,

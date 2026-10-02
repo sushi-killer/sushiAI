@@ -69,6 +69,9 @@ const {
   HERDR_MANIFEST,
   registerHerdrExtension,
 } = require("./extensions/builtin-herdr.cjs");
+const { ARTIFACTS_MANIFEST } = require("./extensions/builtin-artifacts.cjs");
+const { configureArtifactsSkill } = require("./artifacts-skill.cjs");
+const { syncLocalBuiltinSkills } = require("./extensions/builtin-skills.cjs");
 const {
   ORCHESTRATOR_MANIFEST,
   registerOrchestratorExtension,
@@ -93,7 +96,7 @@ const dataDir = process.env.BRIDGE_DATA_DIR;
 if (dataDir) app.setPath("userData", path.resolve(dataDir));
 const extensions = new ExtensionManager({
   dataDir: app.getPath("userData"),
-  builtins: [HERDR_MANIFEST, ORCHESTRATOR_MANIFEST],
+  builtins: [HERDR_MANIFEST, ORCHESTRATOR_MANIFEST, ARTIFACTS_MANIFEST],
   // Folders dropped here are read as JSON manifests, never executed. The
   // override exists so the desktop smoke can point at its own fixtures.
   localDir: process.env.SUSHIAI_EXTENSIONS_DIR
@@ -102,6 +105,21 @@ const extensions = new ExtensionManager({
       // be opened in Finder and edited by hand.
       path.join(app.getPath("userData"), "local-extensions"),
 });
+configureArtifactsSkill({
+  isEnabled: () => extensions.isEnabled(ARTIFACTS_MANIFEST.id),
+  subscribe: (listener) => extensions.onChange(listener),
+  home: os.homedir(),
+  codexAccountsDir: path.join(app.getPath("userData"), "codex-accounts"),
+});
+// After the persisted enabled state is loaded, so a disabled Artifacts
+// extension does not get its skill installed (and a stale one is removed).
+extensions.ready.then(() =>
+  syncLocalBuiltinSkills(
+    os.homedir(),
+    undefined,
+    path.join(app.getPath("userData"), "codex-accounts"),
+  ),
+);
 const surfaceState = new SurfaceStateStore(app.getPath("userData"));
 agents.register(
   new HermesProvider({

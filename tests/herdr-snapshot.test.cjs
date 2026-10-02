@@ -273,6 +273,7 @@ test("Herdr refresh keeps hidden sessions and chat-only panels out of Code", asy
       cwd: "/home/test",
       connection: "/tmp/herdr",
       herdrId: "ws-1",
+      herdrTokens: {},
       panels: [
         {
           id: "herdr:local:pane-1",
@@ -641,4 +642,84 @@ test("two dropped workspaces of one folder, nothing live, become one", async () 
     ]),
     [[key("local", "w1"), [key("local", "p1"), "chat"]]],
   );
+});
+
+test("Herdr reconciliation keeps a pane's companion and records the pane's live folder", async () => {
+  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
+  const snapshot = (cwd) => ({
+    version: "1",
+    workspaces: [{ workspace_id: "ws-1", label: "Workspace" }],
+    panes: [
+      {
+        pane_id: "pane-1",
+        workspace_id: "ws-1",
+        agent: "claude",
+        agent_status: "idle",
+        cwd,
+      },
+    ],
+  });
+  const first = reconcileHerdrWorkspaces(
+    [],
+    snapshot("/work/app"),
+    "/tmp/herdr",
+    "/home/test",
+  );
+  assert.equal(first[0].panels[0].paneCwd, "/work/app");
+  const companion = {
+    extensionId: "builtin.artifacts",
+    surfaceId: "preview",
+    args: { arg: "/work/app/plan.md" },
+    open: true,
+    ratio: 0.4,
+  };
+  const withCompanion = first.map((w) => ({
+    ...w,
+    panels: w.panels.map((p) => ({ ...p, companion })),
+  }));
+  const next = reconcileHerdrWorkspaces(
+    withCompanion,
+    snapshot("/work/app/sub"),
+    "/tmp/herdr",
+    "/home/test",
+  );
+  assert.deepEqual(next[0].panels[0].companion, companion);
+  assert.equal(next[0].panels[0].paneCwd, "/work/app/sub");
+  // The pane vanishing from the host keeps the slot, companion included.
+  const gone = reconcileHerdrWorkspaces(
+    next,
+    { version: "1", workspaces: snapshot("/x").workspaces, panes: [] },
+    "/tmp/herdr",
+    "/home/test",
+  );
+  assert.deepEqual(gone[0].panels[0].companion, companion);
+});
+
+test("Herdr reconciliation keeps the worktree branch of a workspace", async () => {
+  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
+  const current = [
+    {
+      id: "saved",
+      herdrId: "ws-1",
+      connection: "/tmp/herdr.sock",
+      name: "App \u00b7 plan-1",
+      cwd: "/work/app-plan-1",
+      worktreeBranch: "plan-1",
+      panels: [],
+      layout: null,
+    },
+  ];
+  const snapshot = {
+    version: "1",
+    workspaces: [{ workspace_id: "ws-1", label: "App \u00b7 plan-1" }],
+    panes: [],
+  };
+  const next = reconcileHerdrWorkspaces(current, snapshot, "/tmp/herdr.sock");
+  assert.equal(next[0].worktreeBranch, "plan-1");
+  const gone = reconcileHerdrWorkspaces(
+    next,
+    { version: "1", workspaces: [], panes: [] },
+    "/tmp/herdr.sock",
+  );
+  assert.equal(gone[0].worktreeBranch, "plan-1");
 });

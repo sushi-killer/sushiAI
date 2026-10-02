@@ -88,6 +88,7 @@ function controller(
     snapshots,
     confirmations,
     states,
+    currentClosedProjects: () => states[5],
   };
 }
 
@@ -501,7 +502,7 @@ test("actual add forwards the selected worktree base and marks local worktree se
   assert.equal(local.current().at(-1).localWorktree, true);
 });
 
-test("actual close removes a last session workspace while preserving its chats", async () => {
+test("closing the last Herdr session keeps the project with no open panes", async () => {
   for (const chats of [false, true]) {
     const panel = {
       id: "live-pane",
@@ -536,13 +537,17 @@ test("actual close removes a last session workspace while preserving its chats",
     assert.equal(calls.length, 1);
     assert.equal(calls[0][1], "pane.close");
     const remaining = app.current().find((item) => item.id === workspace.id);
-    assert.equal(Boolean(remaining), chats);
+    assert.ok(remaining);
+    assert.equal(remaining.cwd, workspace.cwd);
+    assert.equal(remaining.name, workspace.name);
+    assert.equal(remaining.layout, null);
+    assert.equal(app.currentClosedProjects().length, 0);
     if (chats)
       assert.deepEqual(
         remaining.panels.map((item) => item.id),
         ["chat"],
       );
-    else assert.equal(app.current().length, 1);
+    else assert.deepEqual(remaining.panels, []);
   }
   const pending = {
     ...initial()[0],
@@ -622,6 +627,214 @@ test("closed pane keeps a worktree workspace when checkout removal fails", async
   assert.match(app.errors.join(" "), /Worktree kept: worktree is dirty/);
 });
 
+test("closing a local worktree session without deleting its checkout keeps the project", async () => {
+  const panel = { id: "worktree-pane", kind: "terminal", title: "Shell" };
+  const workspace = {
+    ...initial()[0],
+    localWorktree: true,
+    panels: [panel],
+    layout: { type: "leaf", id: panel.id },
+  };
+  const app = controller({ terminalClose: async () => {} }, [workspace]);
+  await app.ws.endSessions([{ workspace, panel }]);
+  assert.equal(app.current().length, 1);
+  assert.equal(app.current()[0].id, workspace.id);
+  assert.deepEqual(app.current()[0].panels, []);
+  assert.equal(app.current()[0].layout, null);
+  assert.equal(app.currentClosedProjects().length, 0);
+});
+
+test("successful worktree cleanup leaves the project until Close Project", async () => {
+  const panel = { id: "worktree-pane", kind: "terminal", title: "Shell" };
+  const workspace = {
+    ...initial()[0],
+    localWorktree: true,
+    cwd: "/tmp/checkout",
+    panels: [panel],
+    layout: { type: "leaf", id: panel.id },
+  };
+  const removals = [];
+  const app = controller(
+    {
+      terminalClose: async () => {},
+      worktreeRemove: async (...args) => removals.push(args),
+    },
+    [workspace],
+  );
+  await app.ws.endSessions([{ workspace, panel }], {
+    workspace,
+    panel,
+    checkout: workspace.cwd,
+    branch: "feature/task",
+  });
+  assert.equal(removals.length, 1);
+  assert.equal(app.current().length, 1);
+  assert.equal(app.current()[0].id, workspace.id);
+  assert.deepEqual(app.current()[0].panels, []);
+});
+
+test("renaming an empty retained Herdr project does not call its vanished host workspace", async () => {
+  const workspace = {
+    ...initial()[0],
+    id: herdrWorkspaceKey("/tmp/entry.sock", "old-workspace"),
+    herdrId: "old-workspace",
+    connection: "/tmp/entry.sock",
+    panels: [],
+    layout: null,
+  };
+  const calls = [];
+  const app = controller(
+    {
+      herdr: async (...args) => calls.push(args),
+    },
+    [workspace],
+  );
+  await app.ws.renameWorkspace(workspace.id, "Renamed project");
+  assert.equal(app.current()[0].name, "Renamed project");
+  assert.equal(calls.length, 0);
+});
+
+test("a reconciled new Herdr session and its launch result keep the saved project id", async () => {
+  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
+  const endpoint = "/tmp/entry.sock";
+  const workspace = {
+    ...initial()[0],
+    id: herdrWorkspaceKey(endpoint, "old-workspace"),
+    herdrId: "old-workspace",
+    connection: endpoint,
+    name: "Saved project",
+    panels: [{ id: "chat", kind: "chat", title: "Transcript" }],
+    layout: null,
+  };
+  const snapshot = {
+    version: "1",
+    workspaces: [{ workspace_id: "new-workspace", label: "Remote label" }],
+    panes: [
+      {
+        pane_id: "new-pane",
+        workspace_id: "new-workspace",
+        cwd: workspace.cwd,
+      },
+    ],
+  };
+  const reconciled = reconcileHerdrWorkspaces([workspace], snapshot, endpoint);
+  const value = {
+    operationId: "retry",
+    workspaceId: "new-workspace",
+    paneId: "new-pane",
+    cwd: workspace.cwd,
+  };
+  const reopened = applySessionLaunch(reconciled, endpoint, value, {
+    id: herdrWorkspaceKey(endpoint, "new-pane"),
+    herdrId: "new-pane",
+    kind: "terminal",
+    title: "Shell",
+  });
+  assert.equal(reopened.length, 1);
+  assert.equal(reopened[0].id, workspace.id);
+  assert.equal(reopened[0].herdrId, "new-workspace");
+  assert.equal(reopened[0].name, workspace.name);
+  assert.deepEqual(
+    reopened[0].panels.map((panel) => panel.id),
+    [herdrWorkspaceKey(endpoint, "new-pane"), "chat"],
+  );
+  assert.deepEqual(reopened[0].layout, {
+    type: "leaf",
+    id: herdrWorkspaceKey(endpoint, "new-pane"),
+  });
+});
+
+test("Close Project removes an empty retained Herdr project", async () => {
+  const workspace = {
+    ...initial()[0],
+    id: herdrWorkspaceKey("/tmp/entry.sock", "old-workspace"),
+    herdrId: "old-workspace",
+    connection: "/tmp/entry.sock",
+    panels: [],
+    layout: null,
+  };
+  const app = controller(
+    {
+      projectIdentify: async () => ({ projectId: "", remote: "" }),
+    },
+    [workspace],
+  );
+  await app.ws.endWorkspace(workspace);
+  assert.equal(
+    app.current().some((item) => item.id === workspace.id),
+    false,
+  );
+  assert.equal(app.currentClosedProjects().length, 1);
+  assert.equal(app.currentClosedProjects()[0].cwd, workspace.cwd);
+});
+
+test("closing a sole ended Herdr pane keeps the project empty", () => {
+  const panel = {
+    id: "ended-pane",
+    herdrId: "ended-pane",
+    kind: "terminal",
+    title: "Shell",
+    ended: true,
+  };
+  const workspace = {
+    ...initial()[0],
+    id: herdrWorkspaceKey("/tmp/entry.sock", "w1"),
+    herdrId: "w1",
+    connection: "/tmp/entry.sock",
+    panels: [panel],
+    layout: { type: "leaf", id: panel.id },
+  };
+  const app = controller({}, [workspace]);
+  app.ws.closePanel(panel.id);
+  const remaining = app.current();
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].id, workspace.id);
+  assert.deepEqual(remaining[0].panels, []);
+  assert.equal(remaining[0].layout, null);
+});
+
+test("adding a session to an empty retained Herdr project reuses its record", async () => {
+  const server = daemon();
+  const original = server.bridge.herdr;
+  server.bridge.herdr = (endpoint, method, params) => {
+    if (
+      method === "pane.split" &&
+      !server.workspaces.some(
+        (workspace) => workspace.workspace_id === params.workspace_id,
+      )
+    )
+      return Promise.reject(
+        Object.assign(new Error("Missing"), { code: "workspace_not_found" }),
+      );
+    return original(endpoint, method, params);
+  };
+  server.bridge.sessionLaunch = (input) =>
+    new SessionLauncher({
+      getConnections: () => ({
+        socket: async (endpoint) => endpoint,
+        inspect: async (_, request) => ({ cwd: request.root }),
+      }),
+      rpc: server.bridge.herdr,
+    }).launch(input);
+  const workspace = {
+    ...initial()[0],
+    id: herdrWorkspaceKey("/tmp/entry.sock", "old-workspace"),
+    herdrId: "old-workspace",
+    connection: "/tmp/entry.sock",
+    panels: [],
+    layout: null,
+  };
+  const app = controller(server.bridge, [workspace]);
+  await app.ws.addPanel("terminal");
+  const remaining = app.current();
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].id, workspace.id);
+  assert.equal(remaining[0].herdrId, "w1");
+  assert.equal(remaining[0].panels.length, 1);
+  assert.deepEqual(leafIds(remaining[0].layout), [remaining[0].panels[0].id]);
+  assert.equal(app.states[0], workspace.id);
+});
+
 test("actual workspace close shares concurrent intent and allows retry after failure", async () => {
   const workspace = {
     ...initial()[0],
@@ -659,6 +872,8 @@ test("actual workspace close shares concurrent intent and allows retry after fai
     app.current().some((item) => item.id === workspace.id),
     false,
   );
+  assert.equal(app.currentClosedProjects().length, 1);
+  assert.equal(app.currentClosedProjects()[0].cwd, workspace.cwd);
 });
 
 test("launch result adoption preserves layout, local panels and separately listed sessions", () => {

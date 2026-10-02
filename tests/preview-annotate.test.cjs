@@ -179,3 +179,46 @@ test("a nested relative file and its sibling assets are served; .., absolute and
   const leak = server.grant(null, project, "artifacts/leak.txt");
   assert.equal((await fetch(leak)).status, 404);
 });
+
+test("a page under a dot-folder opens, and its grant stays in the page's folder", async () => {
+  const http = require("node:http");
+  const { PreviewServer } = require("../electron/preview.cjs");
+  const served = [];
+  const server = new PreviewServer({
+    inspect: async (_endpoint, { path: file }) => {
+      served.push(file);
+      return {
+        base64: Buffer.from("<p>x</p>").toString("base64"),
+        mime: "text/html",
+      };
+    },
+  });
+  await server.start();
+  const get = (url) =>
+    new Promise((resolve, reject) =>
+      http
+        .get(url, (res) => (res.resume(), resolve(res.statusCode)))
+        .on("error", reject),
+    );
+  try {
+    const url = server.grant(
+      null,
+      "/proj",
+      ".claude/worktrees/x/artifacts/a.html",
+    );
+    assert.equal(await get(url), 200);
+    const base = url.slice(0, url.indexOf("/.claude/"));
+    assert.equal(await get(`${base}/.claude/worktrees/x/artifacts/b.css`), 200);
+    assert.equal(
+      await get(`${base}/.claude/worktrees/x/artifacts/.env.json`),
+      403,
+    );
+    assert.equal(await get(`${base}/other/a.html`), 403);
+    assert.deepEqual(served, [
+      ".claude/worktrees/x/artifacts/a.html",
+      ".claude/worktrees/x/artifacts/b.css",
+    ]);
+  } finally {
+    server.server.close();
+  }
+});

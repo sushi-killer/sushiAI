@@ -65,7 +65,16 @@ class PreviewServer {
     if (!isRelativeFile(file))
       throw new Error("Preview file must be a path inside the project");
     const token = randomBytes(24).toString("hex");
-    this.grants.set(token, { endpoint, root, annotate: annotate === true });
+    // The page may load what sits in its own folder and below, as before the
+    // root became the project; the folders above it (a `.claude` worktree
+    // path, say) are fixed by the grant, not requested.
+    const dir = path.posix.dirname(file);
+    this.grants.set(token, {
+      endpoint,
+      root,
+      dir: dir === "." ? [] : dir.split("/"),
+      annotate: annotate === true,
+    });
     return `http://127.0.0.1:${this.port}/${token}/${file.split("/").map(encodeURIComponent).join("/")}`;
   }
   async serve(req, res) {
@@ -79,9 +88,14 @@ class PreviewServer {
         token = parts.shift();
       const grant = this.grants.get(token),
         relative = parts.join("/");
+      const below =
+        grant && grant.dir.every((part, index) => parts[index] === part)
+          ? parts.slice(grant.dir.length)
+          : null;
       if (
         !grant ||
-        parts.some(
+        !below ||
+        below.some(
           (part) =>
             part.startsWith(".") || part.includes("\\") || part.includes("\0"),
         ) ||

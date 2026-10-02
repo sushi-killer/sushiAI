@@ -773,7 +773,11 @@ mod path_tests {
         .unwrap();
         std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
-        let login = login_shell_path(shell.to_str().unwrap(), std::time::Duration::from_secs(5));
+        // A script just written can fail to exec with ETXTBSY while a parallel
+        // test forks (Linux); the spawn then reads as "no shell". Retry that.
+        let login = (0..5).find_map(|_| {
+            login_shell_path(shell.to_str().unwrap(), std::time::Duration::from_secs(5))
+        });
         assert_eq!(login.as_deref(), Some("/login/bin:/usr/bin"));
         let merged = merge_paths("/usr/bin:/bin", login.as_deref().unwrap(), "/h");
         assert!(merged.starts_with("/usr/bin:/bin:/login/bin:"), "{merged}");

@@ -24,9 +24,8 @@ one index line; git history keeps the detail and updates.
 
 ## Promoted
 
-- 2026-10-02 An exact Herdr version pin broke the app when Herdr updated itself → check capabilities + daemon/CLI protocol match. `herdr-runtime.test.cjs`.
-- 2026-10-02 Removing dead workspaces mid-session raced close-session flows → sweep only at restore. `workspace-snapshot.test.cjs`.
-- 2026-10-02 orchd's fake-shell test flaked on Linux (ETXTBSY on a just-written script) → retry the spawn in the test.
+- 2026-10-02 Exact Herdr pin broke on self-update → check capabilities + protocol match.
+- 2026-10-02 Mid-session dead-row removal raced close flows → sweep at restore.
 - 2026-10-02 Fixtures invented `gh` output (`CLOSED` + `mergedAt`), so merged cleanup never preselected → copy real CLI shapes (`MERGED`). `worktree-session.test.cjs`.
 - 2026-10-02 Git identity loading split worktree rows → wait for first-host identities before drawing.
 - 2026-10-01 A temp `$HOME` did not isolate Herdr on macOS → never stop an unowned server; test on SSH.
@@ -52,6 +51,5 @@ one index line; git history keeps the detail and updates.
 - 2026-09-24 Real Claude/Codex output broke `orchd` while self-written fakes passed → parsers assert captured CLI lines. `parses_captured_real_cli_streams`.
 - 2026-09-14 A `flex: 1`-stretched label measured 0px wide → measure text ink with a `Range`, assert non-zero widths. `ui-evidence` skill.
 - 2026-09-14 A copied debug session leaked a real private IP/host/ports → examples use 192.0.2.0/24 (RFC 5737). `check-conventions.mjs`.
-- 2026-09-13 A wrapper printed success for a run that exited 1 → exit code is the verdict, never `npx`. `sushiai-testing` skill.
 - 2026-09-29 orchd preflights checks on a fresh checkout → check commands build what they need. `package.json`.
 - 2026-09-18 A fixture invented a Herdr status (`running`) → check vocabularies against `herdr api snapshot`. `tests/herdr-snapshot.test.cjs`.

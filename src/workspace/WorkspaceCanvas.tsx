@@ -1,9 +1,11 @@
 import { useRef } from "react";
 import { Columns2, Plus, X } from "lucide-react";
+import { findPanelOwner } from "./workspace-actions.ts";
 import { codePanels } from "../workspaceState.ts";
 import { Empty } from "../app/Empty.tsx";
 import { LayoutView, PanelHost } from "../WorkspacePanels.tsx";
 import { Icon } from "../PanelIcon.tsx";
+import type { CoreViewProps } from "../extensions/coreViews.ts";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import type { WorkspaceController } from "./useWorkspaces.ts";
 import type { MergedCanvas } from "./mergedLayouts.ts";
@@ -54,7 +56,26 @@ export function WorkspaceCanvas({
     sendChat,
     openHTML,
     resizeSplit,
+    patchPanelArgs,
   } = ws;
+  // The agent starts in the workspace that owns the Preview pane, which in a
+  // merged view is not necessarily the active one.
+  const launchPlanAgent =
+    (panelId: string): CoreViewProps["launchAgent"] =>
+    (request) =>
+      ws.addPanel(
+        "agent",
+        request.agent,
+        undefined,
+        undefined,
+        undefined,
+        "herdr",
+        findPanelOwner(ws.workspaces, panelId)?.id,
+        { branch: request.branch, base: request.base },
+        undefined,
+        undefined,
+        request.prompt,
+      );
   const visitedTabs = useRef(new Set<string>());
   const group = merged.group;
   const paneById = new Map(merged.panes.map((mp) => [mp.panel.id, mp]));
@@ -71,6 +92,12 @@ export function WorkspaceCanvas({
     const panel =
       own?.panel || (!group && active.panels.find((p) => p.id === id));
     if (!panel) return null;
+    const beside = panel.kind === "extension" && panel.extension.beside;
+    const besidePanel = beside
+      ? (own ? merged.panes.map((mp) => mp.panel) : active.panels).find(
+          (p) => p.id === beside,
+        )
+      : undefined;
     return (
       <PanelHost
         key={panel.id}
@@ -100,6 +127,12 @@ export function WorkspaceCanvas({
         onCancel={cancelPanelChat}
         onAgent={setPanelAgent}
         extensionRegistry={extensionRegistry}
+        besideHerdrId={besidePanel?.herdrId}
+        besideLabel={besidePanel?.title}
+        onLaunchAgent={
+          panel.kind === "extension" ? launchPlanAgent(panel.id) : undefined
+        }
+        onArgs={patchPanelArgs}
       />
     );
   }

@@ -19,11 +19,13 @@ import {
 } from "../app/projects.ts";
 import {
   appendPanel,
+  placeBeside,
   findPanelOwner,
   fixSelection,
   groupPanelIds,
   isVanished,
   movePanel as moveInLayout,
+  mergePanelArgs,
   removeClosedSessions,
   removePanel,
   retitleTerminal,
@@ -128,6 +130,16 @@ export function useWorkspaces({
           ),
         })),
       ),
+    [],
+  );
+  const openBeside = useCallback(
+    (workspaceId: string, besidePanelId: string, panel: Panel) =>
+      updateWorkspace(workspaceId, (w) => placeBeside(w, besidePanelId, panel)),
+    [updateWorkspace],
+  );
+  const patchPanelArgs = useCallback(
+    (panelId: string, args: Record<string, string>) =>
+      setWorkspaces((items) => mergePanelArgs(items, panelId, args)),
     [],
   );
   const focusPanel = useCallback((panelId: string) => {
@@ -416,7 +428,8 @@ export function useWorkspaces({
     worktree?: { branch: string; base?: string },
     operationId?: string,
     env?: Record<string, string>,
-  ) {
+    prompt?: string,
+  ): Promise<boolean> {
     const modelProfileId = modelProfile?.id;
     const accounts =
       kind !== "agent"
@@ -436,6 +449,8 @@ export function useWorkspaces({
       // A Herdr workspace runs its sessions in Herdr unless this panel was
       // asked to be local. Nothing else can start a process.
       const viaHerdr = current.herdrId && (backend ?? "herdr") === "herdr";
+      if (prompt && !(viaHerdr && launchesInWorktree(kind)))
+        throw new Error("Starting with a prompt needs a Herdr workspace.");
       if (viaHerdr && launchesInWorktree(kind)) {
         const endpoint = current.connection || socket;
         const pending = current.panels.find(
@@ -448,7 +463,7 @@ export function useWorkspaces({
             panel.agent === (kind === "agent" ? agent : undefined) &&
             panel.modelProfileId === modelProfileId,
         );
-        await launchSession(
+        return await launchSession(
           {
             operationId: operationId || pending?.launchOperationId || uid(),
             endpoint,
@@ -467,6 +482,7 @@ export function useWorkspaces({
             )?.herdrId,
             ...(pending ? { paneId: pending.herdrId } : {}),
             worktree,
+            ...(prompt ? { prompt } : {}),
           },
           {
             id: "",
@@ -481,7 +497,6 @@ export function useWorkspaces({
           },
           undefined,
         );
-        return;
       } else if (worktree && launchesInWorktree(kind)) {
         // The local counterpart of the branch above: no Herdr involved, so
         // the new checkout runs as a plain local process on this Mac (also
@@ -511,7 +526,7 @@ export function useWorkspaces({
         w.layout = leaf(panel.id);
         setWorkspaces((items) => [...items, w]);
         switchWorkspace(w.id);
-        return;
+        return true;
       } else {
         const panel: Panel = {
           id: uid(),
@@ -545,8 +560,10 @@ export function useWorkspaces({
         showWorkspace();
         setZoomed(null);
       }
+      return true;
     } catch (error) {
       notify(errorText(error));
+      return false;
     }
   }
   function reopenPanel(panelId: string, operationId?: string): Promise<void> {
@@ -964,6 +981,8 @@ export function useWorkspaces({
     setActiveId,
     updateWorkspace,
     updatePanel,
+    openBeside,
+    patchPanelArgs,
     focusPanel,
     startPanelDrag,
     endPanelDrag,

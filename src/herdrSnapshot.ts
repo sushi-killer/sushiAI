@@ -221,6 +221,7 @@ export function reconcileHerdrWorkspaces(
       id: saved?.id || herdrWorkspaceKey(connection, workspace.workspace_id),
       connection,
       herdrId: workspace.workspace_id,
+      herdrTokens: workspace.tokens ?? {},
       name: preservedProject?.name ?? workspace.label,
       cwd,
       panels: allPanels,

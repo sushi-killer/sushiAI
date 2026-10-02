@@ -42,6 +42,23 @@ export function appendPanel(
   };
 }
 
+/** Splits the target panel's slot 50/50 and puts the panel on its right.
+ * Selection and zoom are the caller's, and are left alone. A target that is
+ * not in the layout leaves the workspace unchanged. */
+export function placeBeside(
+  workspace: Workspace,
+  besidePanelId: string,
+  panel: Panel,
+): Workspace {
+  if (!workspace.layout || !contains(workspace.layout, besidePanelId))
+    return workspace;
+  return {
+    ...workspace,
+    panels: [...workspace.panels, panel],
+    layout: insert(workspace.layout, besidePanelId, panel.id, "right"),
+  };
+}
+
 /** Puts the panel that replaces an ended Herdr pane into that pane's layout
  * slot and panel-list position. `herdrId` rebinds the workspace to the Herdr
  * workspace that was created for it. A background poll may already have listed
@@ -309,5 +326,32 @@ export function findHostWorkspace(
       !isVanished(w) &&
       (w.connection || defaultEndpoint) === endpoint &&
       (w.cwd === cwd || w.id === madeId),
+  );
+}
+
+/** Merges `args` into an extension panel's args. A caller that sets one key
+ * (the open signal's `arg`) must not wipe the view state stored beside it. */
+export function mergePanelArgs(
+  workspaces: Workspace[],
+  panelId: string,
+  args: Record<string, string>,
+): Workspace[] {
+  return workspaces.map((w) =>
+    w.panels.some((p) => p.id === panelId)
+      ? {
+          ...w,
+          panels: w.panels.map((p) =>
+            p.id === panelId && p.kind === "extension"
+              ? {
+                  ...p,
+                  extension: {
+                    ...p.extension,
+                    args: { ...p.extension.args, ...args },
+                  },
+                }
+              : p,
+          ),
+        }
+      : w,
   );
 }

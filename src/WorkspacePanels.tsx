@@ -9,6 +9,7 @@ import { RenderProfiler } from "./RenderProfiler";
 import { Icon } from "./PanelIcon";
 import type { ExtensionRegistry } from "./extensions/registry";
 import { ExtensionSurface } from "./extensions/SurfaceRenderer";
+import type { CoreViewProps } from "./extensions/coreViews.ts";
 import { OrchestratorPanel } from "./orchestrator/OrchestratorPanel";
 
 type PanelHostProps = {
@@ -42,6 +43,11 @@ type PanelHostProps = {
   /** Opens Settings -> Connections (the Orchestrator's "Add a host"). */
   onOpenConnections?: () => void;
   extensionRegistry: ExtensionRegistry;
+  /** The Herdr pane id of the agent pane an extension pane was opened beside. */
+  besideHerdrId?: string;
+  besideLabel?: string;
+  onLaunchAgent?: CoreViewProps["launchAgent"];
+  onArgs?(panelId: string, args: Record<string, string>): void;
 };
 
 export const PanelHost = memo(function PanelHost({
@@ -71,6 +77,10 @@ export const PanelHost = memo(function PanelHost({
   onAgent,
   onOpenConnections,
   extensionRegistry,
+  besideHerdrId,
+  besideLabel,
+  onLaunchAgent,
+  onArgs,
 }: PanelHostProps) {
   return (
     <RenderProfiler id={`panel:${panel.id}`}>
@@ -134,6 +144,11 @@ export const PanelHost = memo(function PanelHost({
             cwd={cwd}
             connection={endpoint}
             registry={extensionRegistry}
+            besideHerdrPaneId={besideHerdrId}
+            besideLabel={besideLabel}
+            herdrEndpoint={socket}
+            launchAgent={onLaunchAgent}
+            onArgs={(args) => onArgs?.(panel.id, args)}
           />
         ) : panel.kind === "orchestrator" ? (
           <OrchestratorPanel

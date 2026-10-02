@@ -943,3 +943,96 @@ test("native SSH account preparation uses private temporary files and rejects fa
     /did not confirm/,
   );
 });
+
+test("a first prompt is passed to the agent CLI as one quoted argument", async () => {
+  const { launcher, calls } = setup();
+  const prompt =
+    "/goal Carry out the plan in /tmp/plan's file.md; DONE WHEN: `ok` $HOME";
+  const result = await launcher.launch(
+    launch("prompted", { kind: "agent", agent: "codex", prompt }),
+  );
+  assert.equal(result.ok, true);
+  const input = calls.find((call) => call.method === "pane.send_input");
+  assert.ok(input.params.text.startsWith("codex"));
+  assert.ok(
+    input.params.text.endsWith(
+      " '/goal Carry out the plan in /tmp/plan'\\''s file.md; DONE WHEN: `ok` $HOME'",
+    ),
+    input.params.text,
+  );
+  for (const bad of ["", "   ", "a\0b", "x".repeat(16385)])
+    assert.equal(
+      (
+        await launcher.launch(
+          launch(`bad-${bad.length}`, {
+            kind: "agent",
+            agent: "claude",
+            prompt: bad,
+          }),
+        )
+      ).ok,
+      false,
+    );
+  assert.equal(
+    (await launcher.launch(launch("shell-prompt", { prompt: "hi" }))).ok,
+    false,
+  );
+});
+
+test("a first prompt with control characters is rejected, newlines are kept", async () => {
+  const { launcher } = setup();
+  for (const [index, bad] of [
+    "a\x1b[201~\x1b[Zb",
+    "a\x03b",
+    "a\x15b",
+    "a\tb",
+    "a\x7fb",
+    "a\x85b",
+    "a\rb",
+  ].entries())
+    assert.equal(
+      (
+        await launcher.launch(
+          launch(`ctl-${index}`, {
+            kind: "agent",
+            agent: "claude",
+            prompt: bad,
+          }),
+        )
+      ).ok,
+      false,
+      JSON.stringify(bad),
+    );
+  assert.equal(
+    (
+      await launcher.launch(
+        launch("ctl-ok", { kind: "agent", agent: "claude", prompt: "a\nb" }),
+      )
+    ).ok,
+    true,
+  );
+});
+
+test("a multi-line plan prompt reaches the shell byte-exact", async () => {
+  const { execFileSync } = require("node:child_process");
+  const { goalPrompt } = await import("../src/extensions/preview/artifact.ts");
+  const plan =
+    "# Plan\n\nSay \"hi\" and 'bye'.\n- run `ls $HOME`\n- cost: $5 \\n done\n\tindented\x1b[201~\x03";
+  const prompt = goalPrompt(plan, "/tmp/plan.md");
+  const { launcher, calls } = setup();
+  const result = await launcher.launch(
+    launch("roundtrip", { kind: "agent", agent: "codex", prompt }),
+  );
+  assert.equal(result.ok, true);
+  const text = calls.find((call) => call.method === "pane.send_input").params
+    .text;
+  assert.ok(text.startsWith("codex "));
+  const echoed = execFileSync(
+    "/bin/sh",
+    ["-c", `printf %s ${text.slice("codex ".length)}`],
+    { encoding: "utf8" },
+  );
+  assert.equal(echoed, prompt);
+  // eslint-disable-next-line no-control-regex
+  assert.ok(!/[\x00-\x09\x0b-\x1f\x7f-\x9f]/.test(echoed));
+});

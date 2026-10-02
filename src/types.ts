@@ -88,6 +88,10 @@ export type ExtensionPanel = PanelState & {
     contributionId: string;
     instanceId: string;
     stateVersion: number;
+    /** Arguments an agent passed when it opened this surface beside itself. */
+    args?: Record<string, string>;
+    /** The id of the agent panel this one was opened beside. */
+    beside?: string;
   };
 };
 export type Panel = CorePanel | ExtensionPanel;
@@ -148,6 +152,8 @@ export type SessionLaunchRequest = {
   paneId?: string;
   restore?: boolean;
   worktree?: { branch: string; base?: string };
+  /** The agent CLI's first prompt (agent sessions only). */
+  prompt?: string;
 };
 export type SessionLaunchValue = {
   operationId: string;
@@ -211,6 +217,8 @@ export type Workspace = {
   herdrId?: string;
   localWorktree?: boolean;
   connection?: string;
+  /** Metadata tokens the host reported for this workspace; never saved. */
+  herdrTokens?: Record<string, string>;
   panels: Panel[];
   layout: Layout | null;
 };
@@ -332,6 +340,7 @@ export type Snapshot = {
     workspace_id: string;
     label: string;
     worktree?: { checkout_path: string };
+    tokens?: Record<string, string>;
   }[];
   panes: {
     pane_id: string;
@@ -1013,6 +1022,7 @@ export interface Bridge {
     endpoint: string | undefined,
     root: string,
     path: string,
+    options?: { annotate?: boolean },
   ): Promise<string>;
 }
 declare global {

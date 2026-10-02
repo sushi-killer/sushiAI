@@ -8,6 +8,7 @@ const {
   installRemoteHerdr,
 } = require("./herdr-install.cjs");
 const { errorDetails } = require("./herdr.cjs");
+const { installRemoteArtifactsSkill } = require("./artifacts-skill.cjs");
 
 const HOST_PATH = `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
 # CLIs installed with npm (nvm, a user prefix) count as installed.
@@ -168,10 +169,12 @@ async function runSetup(
     installRemote = installRemoteHerdr,
     checkCompatibility = checkHerdrCompatibility,
     runLocalScript = localScript,
+    installSkill = installRemoteArtifactsSkill,
   } = {},
 ) {
   const timeout = 10 * 60 * 1000;
   const remote = endpoint.startsWith("ssh:");
+  if (remote) void installSkill(connections, endpoint);
   const runScript = (script) =>
     remote
       ? connections.exec(endpoint, "sh -s", { input: script, timeout })

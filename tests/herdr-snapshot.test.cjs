@@ -273,6 +273,7 @@ test("Herdr refresh keeps hidden sessions and chat-only panels out of Code", asy
       cwd: "/home/test",
       connection: "/tmp/herdr",
       herdrId: "ws-1",
+      herdrTokens: {},
       panels: [
         {
           id: "herdr:local:pane-1",

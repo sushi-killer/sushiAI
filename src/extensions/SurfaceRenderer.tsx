@@ -22,6 +22,7 @@ import type {
   SurfaceContribution,
 } from "./types.ts";
 import type { ExtensionRegistry } from "./registry.ts";
+import { coreViews, type CoreViewProps } from "./coreViews.ts";
 
 /** Fields the host fills in rather than the extension storing them. They read
  * like any other field and can never be written. */
@@ -34,16 +35,42 @@ export function ExtensionSurface({
   cwd,
   connection,
   registry,
+  besideHerdrPaneId,
+  besideLabel,
+  herdrEndpoint,
+  launchAgent,
+  onArgs,
 }: {
   panel: ExtensionPanel;
   cwd: string;
   connection?: string;
   registry: ExtensionRegistry;
+  besideHerdrPaneId?: string;
+  besideLabel?: string;
+  herdrEndpoint?: string;
+  launchAgent?: CoreViewProps["launchAgent"];
+  onArgs?(next: Record<string, string>): void;
 }) {
   const surface = registry.resolveSurface(panel);
   if (!surface || !registry.isExtensionActive(panel.extension.extensionId))
     return (
       <UnavailableExtensionSurface extensionId={panel.extension.extensionId} />
+    );
+  const CoreView =
+    surface.view.kind === "core" ? coreViews[surface.view.viewId] : undefined;
+  if (CoreView)
+    return (
+      <CoreView
+        panel={panel}
+        args={panel.extension.args || {}}
+        cwd={cwd}
+        connection={connection}
+        besideHerdrPaneId={besideHerdrPaneId}
+        besideLabel={besideLabel}
+        herdrEndpoint={herdrEndpoint}
+        launchAgent={launchAgent}
+        onArgs={(next) => onArgs?.(next)}
+      />
     );
   return (
     <ExtensionSurfaceView

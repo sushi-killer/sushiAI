@@ -1048,13 +1048,15 @@ function registerProjectIpc({
     return connections().inspect(endpoint, options);
   });
 
-  handle("project-preview", async (endpoint, root, file) => {
+  handle("project-preview", async (endpoint, root, file, options) => {
     await connections().inspect(endpoint, {
       operation: "read",
       root,
       path: file,
     });
-    return getPreview().grant(endpoint, root, file);
+    return getPreview().grant(endpoint, root, file, {
+      annotate: options?.annotate === true,
+    });
   });
 
   handle("worktree-create", async (cwd, branch, base) => {

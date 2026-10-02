@@ -6,6 +6,7 @@
 // file at rest is what Codex keeps for its own default login; the list only
 // ever returns who is signed in, never the login itself.
 const { randomUUID } = require("node:crypto");
+const { installArtifactsSkillInto } = require("./artifacts-skill.cjs");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs/promises");
 const os = require("node:os");
@@ -127,6 +128,7 @@ class CodexAccounts {
       ).slice(0, 80),
     };
     await fs.mkdir(this.homeFor(id), { recursive: true, mode: 0o700 });
+    installArtifactsSkillInto(this.homeFor(id));
     await this.#write(accounts);
     return { ...accounts[id], signedIn: false, mode: "", detail: "" };
   }

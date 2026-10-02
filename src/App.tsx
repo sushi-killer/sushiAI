@@ -23,6 +23,7 @@ import { resolveDialog, type Dialog } from "./dialogs/dialog-state";
 import { UpdateSettings } from "./dialogs/lazy-settings";
 import { NotificationsDialog } from "./app/NotificationsDialog";
 import { RoutineDialog } from "./app/RoutineDialog";
+import { useOpenSignals } from "./extensions/useOpenSignals.ts";
 import { SettingsDialog, useSettingsTab } from "./app/SettingsDialog";
 import { SectionPage } from "./app/SectionPage";
 import { Sidebar } from "./app/Sidebar";
@@ -244,6 +245,7 @@ export function App() {
     notify,
   );
 
+  useOpenSignals(workspaces, extensionRegistry, ws, notify);
   function addExtensionPanel(
     extensionId: string,
     contributionId: string,

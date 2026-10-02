@@ -29,6 +29,7 @@ Rule: a subsystem regressing after point fixes gets a data-model fix, not anothe
 
 ## Promoted
 
+- 2026-10-02 herdr ignored a lower `--seq` and repeats → signals carry a nonce. `open-signal.test.cjs`.
 - 2026-10-02 Exact Herdr pin broke on self-update → check capabilities + protocol match.
 - 2026-10-02 Mid-session dead-row removal raced close flows → sweep at restore.
 - 2026-10-02 Fixtures invented `gh` output (`CLOSED` + `mergedAt`), so merged cleanup never preselected → copy real CLI shapes (`MERGED`). `worktree-session.test.cjs`.
@@ -39,12 +40,12 @@ Rule: a subsystem regressing after point fixes gets a data-model fix, not anothe
 - 2026-10-01 contextBridge discards Error fields → transport tagged values; reconstruct before App restores state. `tests/bridge.test.cjs`.
 
 - 2026-10-01 "0 unexplained diffs" hid defects → a fresh critic compares Figma and app PNGs; revert each fix once to see its test fail. `design-critic`.
-- 2026-09-30 Lane worktrees each built `orchd/target`, 262 MB left → delete it after merge.
+- 2026-09-30 Lane worktrees left 262 MB of `orchd/target` → delete it after merge.
 - 2026-09-30 orchd defaults leaked repo specifics to every repo → defaults stay empty. `scoped_checks_and_chat_tools_default_to_none`.
 - 2026-09-30 A hook `allow` did not open `.claude/**` to headless `claude -p` → stage in `.orchd-staging/`, copy in before verify.
 - 2026-09-30 A plugin MCP server failed under `--strict-mcp-config` (OAuth keyed by plugin name) → keep its Claude Code name. `chat_tools::server_key`.
-- 2026-09-29 A kill lost the whole workspace snapshot (Chromium had not committed localStorage) → durable state goes in `sushiai.db`.
-- 2026-09-30 A preselected answer plus global Enter sent answers the owner never picked → Enter needs an explicit pick or typed text. `enterAnswer` in `ownerAttention.ts`.
+- 2026-09-29 A kill lost uncommitted localStorage state → durable state goes in `sushiai.db`.
+- 2026-09-30 A preselected answer plus Enter sent unpicked answers → Enter needs a pick or typed text. `enterAnswer` in `ownerAttention.ts`.
 - 2026-09-29 Contradicting criteria cost three attempts → cross-check criteria before launch.
 - 2026-09-28 Trusted `rtk rewrite` (`rtk read` drops code) → allowlist. `rtk_rewrite_output_*`.
 - 2026-09-25 A changed orchd default never reached saved settings → mark settings differing from `settings.defaults`.
@@ -54,6 +55,6 @@ Rule: a subsystem regressing after point fixes gets a data-model fix, not anothe
 - 2026-09-24 Orchestrator chat edited code instead of filing tasks → enforce roles with tools. `orchd/src/chat.rs`.
 - 2026-09-24 Unset `HERDR_SOCKET_PATH`/inherited `BRIDGE_DEV_URL` photographed the owner's Herdr/dev server → override both. `ui-evidence` template.
 - 2026-09-24 Real Claude/Codex output broke `orchd` while self-written fakes passed → parsers assert captured CLI lines. `parses_captured_real_cli_streams`.
-- 2026-09-14 A copied debug session leaked a real private IP/host/ports → examples use 192.0.2.0/24 (RFC 5737). `check-conventions.mjs`.
+- 2026-09-14 A debug paste leaked a real IP/host → examples use 192.0.2.0/24. `check-conventions.mjs`.
 - 2026-09-29 orchd preflights checks on a fresh checkout → check commands build what they need. `package.json`.
 - 2026-09-18 A fixture invented a Herdr status (`running`) → check vocabularies against `herdr api snapshot`. `tests/herdr-snapshot.test.cjs`.

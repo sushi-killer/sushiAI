@@ -207,6 +207,12 @@ async function runSetup(
     }
   } else states.herdr = "present";
   let status = await probe();
+  // The daemon may still run a release whose CLI is another one on disk;
+  // sessions attach through it (see checkHerdrCompatibility), so setup does too.
+  if (!status.compatible && status.daemon.compatible) {
+    const other = await checkCompatibility({ endpoint, connections, binary });
+    if (other.compatible) status = other;
+  }
   if (!status.cli.compatible) {
     states.herdr = "incompatible";
     states.server = status.daemon.available

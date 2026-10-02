@@ -41,9 +41,12 @@ async function makeSetupHost(t, options) {
   return host;
 }
 
-function herdrCli(version = HERDR_CONTRACT.version) {
+function herdrCli(
+  version = HERDR_CONTRACT.version,
+  protocol = HERDR_CONTRACT.protocol,
+) {
   const schema = {
-    protocol: HERDR_CONTRACT.protocol,
+    protocol,
     schema_version: HERDR_CONTRACT.schemaVersion,
     schemas: {
       request: {
@@ -83,7 +86,13 @@ const tools = {
   codex: "#!/bin/sh\n",
 };
 
-function checks(host, { daemonVersion = HERDR_CONTRACT.version } = {}) {
+function checks(
+  host,
+  {
+    daemonVersion = HERDR_CONTRACT.version,
+    daemonProtocol = HERDR_CONTRACT.protocol,
+  } = {},
+) {
   return async (options) =>
     checkHerdrCompatibility({
       ...options,
@@ -93,7 +102,7 @@ function checks(host, { daemonVersion = HERDR_CONTRACT.version } = {}) {
       },
       rpc: async () => {
         await fs.access(path.join(host.home, ".herdr-up"));
-        return { version: daemonVersion, protocol: HERDR_CONTRACT.protocol };
+        return { version: daemonVersion, protocol: daemonProtocol };
       },
     });
 }
@@ -150,7 +159,7 @@ test("a connection's own nondefault socket is the one checked and started", asyn
 
 test("an incompatible user CLI stays intact and cannot bootstrap a stopped daemon", async (t) => {
   const host = await makeSetupHost(t, {
-    bin: { ...tools, herdr: herdrCli("0.0.1") },
+    bin: { ...tools, herdr: herdrCli("0.0.1", 19) },
   });
   let installs = 0;
   const states = await setupHost(host.connections, host.endpoint, "", {
@@ -170,16 +179,22 @@ test("an incompatible user CLI stays intact and cannot bootstrap a stopped daemo
   });
   assert.equal(
     await fs.readFile(path.join(host.root, "bin/herdr"), "utf8"),
-    herdrCli("0.0.1"),
+    herdrCli("0.0.1", 19),
   );
-  assert.match(setupSummary(states), /herdr incompatible.*CLI version/);
+  assert.match(
+    setupSummary(states),
+    /herdr incompatible.*older than supported/,
+  );
 });
 
 test("a compatible CLI reports an incompatible running daemon without replacing it", async (t) => {
   const host = await makeSetupHost(t, { bin: { ...tools, herdr: herdrCli() } });
   await fs.writeFile(path.join(host.home, ".herdr-up"), "user daemon");
   const states = await setupHost(host.connections, host.endpoint, "", {
-    checkCompatibility: checks(host, { daemonVersion: "0.0.1" }),
+    checkCompatibility: checks(host, {
+      daemonVersion: "0.0.1",
+      daemonProtocol: 19,
+    }),
   });
   assert.equal(states.herdr, "present");
   assert.equal(states.server, "incompatible");

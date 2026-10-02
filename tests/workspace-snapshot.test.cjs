@@ -519,3 +519,69 @@ test("the electron helper serves read, write and flush and refuses other senders
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a Herdr workspace saved with nothing live in it moves to Recently closed on start", async () => {
+  const { restore } = await library;
+  const herdr = (id, cwd, panels, connection = "/tmp/herdr.sock") => ({
+    id: herdrWorkspaceKey(connection, id),
+    name: cwd.split("/").pop(),
+    cwd,
+    herdrId: id,
+    connection,
+    panels,
+    layout: panels.length ? leaf(panels[0].id) : null,
+  });
+  const pane = (id, extra = {}) => ({
+    id,
+    kind: "terminal",
+    title: id,
+    herdrId: id,
+    ...extra,
+  });
+  // What a few host restarts left: the live project, its dropped worktree,
+  // an empty row of an unreachable SSH host, and a dropped row with a chat.
+  const workspaces = [
+    herdr("w1", "/repo/app", [pane("p1")]),
+    herdr("w2", "/repo/app-wt", [pane("p2", { ended: true })]),
+    herdr("w3", "/repo/app", [], "ssh:host"),
+    herdr("w4", "/repo/notes", [
+      pane("p4", { ended: true }),
+      { id: "c4", kind: "chat", title: "chat" },
+    ]),
+  ];
+  const store = messageStore();
+  store.text = JSON.stringify({
+    workspaces,
+    closedProjects: [],
+    activeId: workspaces[1].id,
+    selected: "p2",
+  });
+  const restored = restore(store);
+  assert.equal(restored.activeId, workspaces[0].id, "no active swept row");
+  assert.equal(restored.selected, "");
+  assert.deepEqual(
+    restored.workspaces.map((w) => w.herdrId),
+    ["w1", "w4"],
+    "before 4 rows, after 2: the live one and the one holding a chat",
+  );
+  assert.deepEqual(
+    restored.closedProjects.map((p) => [p.cwd, p.endpoint]),
+    [
+      ["/repo/app-wt", "/tmp/herdr.sock"],
+      ["/repo/app", "ssh:host"],
+    ],
+  );
+  assert.deepEqual(
+    JSON.parse(store.text).workspaces.map((w) => w.herdrId),
+    ["w1", "w4"],
+    "the sweep is saved, so it runs once",
+  );
+
+  const lone = messageStore();
+  lone.text = JSON.stringify({ workspaces: [workspaces[2]] });
+  assert.equal(
+    restore(lone).workspaces.length,
+    1,
+    "the only row stays rather than leaving an empty list",
+  );
+});

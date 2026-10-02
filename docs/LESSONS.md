@@ -24,6 +24,9 @@ one index line; git history keeps the detail and updates.
 
 ## Promoted
 
+- 2026-10-02 An exact Herdr version pin broke the app when Herdr updated itself → check capabilities + daemon/CLI protocol match. `herdr-runtime.test.cjs`.
+- 2026-10-02 Removing dead workspaces mid-session raced close-session flows → sweep only at restore. `workspace-snapshot.test.cjs`.
+- 2026-10-02 orchd's fake-shell test flaked on Linux (ETXTBSY on a just-written script) → retry the spawn in the test.
 - 2026-10-02 Fixtures invented `gh` output (`CLOSED` + `mergedAt`), so merged cleanup never preselected → copy real CLI shapes (`MERGED`). `worktree-session.test.cjs`.
 - 2026-10-02 Git identity loading split worktree rows → wait for first-host identities before drawing.
 - 2026-10-01 A temp `$HOME` did not isolate Herdr on macOS → never stop an unowned server; test on SSH.

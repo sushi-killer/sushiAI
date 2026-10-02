@@ -64,6 +64,8 @@ echo "platform=$(uname -sm)"
 [ -x "${REMOTE_BIN}/orchd" ] && echo "installed=1"
 [ -f "${REMOTE_BIN}/orchd.hash" ] && echo "hash=$(cat "${REMOTE_BIN}/orchd.hash")"
 command -v cargo >/dev/null 2>&1 && echo "cargo=1"
+p="${REMOTE_DATA}/orchd.pid"
+[ -f "$p" ] && kill -0 "$(cat "$p")" 2>/dev/null && echo "running=1"
 exit 0`;
 
 // Installs rustup's minimal toolchain into ~/.cargo without asking anything.
@@ -395,7 +397,7 @@ class RemoteOrchd {
     if (plan !== "none") {
       // A running old daemon is asked to shut down first (its tasks resume
       // under the new one); the connection is best-effort.
-      await this.#shutdownRunning(info.home);
+      if (info.running === "1") await this.#shutdownRunning(info.home);
       // The new binary is only recorded once the old daemon is gone: a
       // still-running old pid would keep startScript from starting it.
       await this.#waitStopped();
@@ -410,7 +412,9 @@ class RemoteOrchd {
 
   async #shutdownRunning(home) {
     try {
-      const conn = await this.#connect(home, { attempts: 1 });
+      // The daemon is alive, so retry until the socket forward is up: a
+      // single early ping would skip the shutdown and stall the upgrade.
+      const conn = await this.#connect(home);
       try {
         await this.request(
           conn.socketPath,
@@ -424,7 +428,7 @@ class RemoteOrchd {
       }
       await new Promise((resolve) => setTimeout(resolve, 300));
     } catch {
-      // Nothing running: nothing to stop.
+      // Unreachable: #waitStopped reports the daemon that would not stop.
     }
   }
 

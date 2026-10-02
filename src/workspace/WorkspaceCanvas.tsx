@@ -79,7 +79,8 @@ export function WorkspaceCanvas({
   // ponytail: a plan's worktree workspace is named "<project> · <branch>";
   // match on the name until workspaces carry their branch.
   const runWorkspaces = ws.workspaces.filter(
-    (w) => w.panels.length && w.name.includes(" · "),
+    // A closed session stays in its slot marked ended; only a live one counts.
+    (w) => w.panels.some((p) => !p.ended) && w.name.includes(" · "),
   );
   const branchOf = (w: (typeof runWorkspaces)[number]) =>
     w.name.slice(w.name.indexOf(" · ") + 3);

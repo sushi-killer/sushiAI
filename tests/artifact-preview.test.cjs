@@ -392,3 +392,32 @@ test("planSegments cuts the Goal and Done when sections out of a plan", async ()
     { kind: "text", text: "No sections\n" },
   ]);
 });
+
+test("an element comment carries the picked element's selector", async () => {
+  const { commentMessage, acceptAnnotation } = await artifact;
+  const picked = acceptAnnotation(
+    {
+      sushiai: "annotate",
+      kind: "element",
+      quote: "Preview",
+      where: "How",
+      selector: "g#flowchart-P-4.node",
+      rect: {},
+    },
+    true,
+  );
+  assert.equal(picked.selector, "g#flowchart-P-4.node");
+  const text = commentMessage("/r/d.html", [
+    {
+      quote: "Preview",
+      where: "How",
+      selector: "g#flowchart-P-4.node",
+      note: "Rename",
+    },
+  ]);
+  assert.ok(
+    text.includes(
+      "1. (How) > Preview\n   element: `g#flowchart-P-4.node`\n   Rename",
+    ),
+  );
+});

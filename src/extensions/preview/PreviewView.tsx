@@ -148,6 +148,11 @@ export function PreviewView(props: CoreViewProps) {
   const [commentMode, setCommentMode] = useState(false);
   useEffect(() => setCommentMode(false), [path]);
   const frame = useRef<HTMLIFrameElement>(null);
+  // The element picked in an HTML page stays marked while its box is open.
+  useEffect(() => {
+    if (!boxFor)
+      frame.current?.contentWindow?.postMessage({ sushiai: "clear" }, "*");
+  }, [boxFor]);
   const pickMode = () =>
     frame.current?.contentWindow?.postMessage(
       { sushiai: "mode", pick: commentMode },
@@ -170,6 +175,7 @@ export function PreviewView(props: CoreViewProps) {
       setBoxFor({
         quote: note.quote,
         where: note.where,
+        selector: note.selector || undefined,
         x: Math.max(
           0,
           Math.min(
@@ -512,14 +518,11 @@ export function PreviewView(props: CoreViewProps) {
                       className="pv-icon"
                       aria-label="Copy text"
                       title="Copy text"
-                      onClick={() =>
-                        void navigator.clipboard
-                          ?.writeText(file.text)
-                          .then(() => {
-                            setCopied(true);
-                            window.setTimeout(() => setCopied(false), 1500);
-                          })
-                      }
+                      onClick={() => {
+                        copyToClipboard(file.text);
+                        setCopied(true);
+                        window.setTimeout(() => setCopied(false), 1500);
+                      }}
                     >
                       {copied ? <Check aria-hidden /> : <Copy aria-hidden />}
                     </button>
@@ -681,4 +684,16 @@ export function PreviewView(props: CoreViewProps) {
       )}
     </div>
   );
+}
+
+/** The app denies the clipboard permission, so `navigator.clipboard` rejects;
+ * a copy command whose event carries the text needs no permission. */
+function copyToClipboard(text: string) {
+  const put = (event: ClipboardEvent) => {
+    event.clipboardData?.setData("text/plain", text);
+    event.preventDefault();
+  };
+  document.addEventListener("copy", put, { once: true });
+  document.execCommand("copy");
+  document.removeEventListener("copy", put);
 }

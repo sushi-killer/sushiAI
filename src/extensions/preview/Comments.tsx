@@ -8,6 +8,7 @@ export type Selection = {
   range?: Range;
   where?: string;
   pin?: { x: number; y: number };
+  selector?: string;
   x: number;
   y: number;
 };
@@ -36,12 +37,15 @@ export function useDocSelection(ref: RefObject<HTMLElement | null>) {
       const clipped = range.toString().trim();
       if (!clipped) return setSelection(null);
       const box = root.getBoundingClientRect();
-      const end = range.getBoundingClientRect();
+      // The last line of the selection: a multi-line range's bounding box spans
+      // the whole column, which would put the button and box at its far edge.
+      const lines = range.getClientRects();
+      const last = lines[lines.length - 1] || range.getBoundingClientRect();
       setSelection({
         quote: clipped,
         range,
-        x: Math.max(0, Math.min(end.right - box.left, box.width - 90)),
-        y: end.bottom - box.top + 6,
+        x: Math.max(0, Math.min(last.left - box.left, box.width - 90)),
+        y: last.bottom - box.top + 6,
       });
     };
     const onUp = () => window.setTimeout(read, 0);
@@ -95,6 +99,7 @@ export function CommentBox({
         quote: selection.quote || undefined,
         where: selection.where || undefined,
         pin: selection.pin,
+        selector: selection.selector || undefined,
         note: note.trim(),
       });
   };

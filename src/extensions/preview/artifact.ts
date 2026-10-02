@@ -163,6 +163,8 @@ export type Comment = {
   where?: string;
   /** A pin on an image, as percentages of its size. */
   pin?: { x: number; y: number };
+  /** The CSS path of the element picked in an HTML page. */
+  selector?: string;
   note: string;
 };
 
@@ -185,10 +187,14 @@ export function commentMessage(path: string, comments: Comment[]): string {
       .trim()
       .slice(0, 120);
     const at = where ? `(${where}) ` : "";
-    if (!quote) return `${index + 1}. ${at}${note}`;
+    const selector = clean(comment.selector || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const element = selector ? `\n   element: \`${selector}\`` : "";
+    if (!quote) return `${index + 1}. ${at}${note}${element}`;
     const shown =
       quote.length > QUOTE_LIMIT ? `${quote.slice(0, QUOTE_LIMIT)}…` : quote;
-    return `${index + 1}. ${at}> ${shown}\n   ${note}`;
+    return `${index + 1}. ${at}> ${shown}${element}\n   ${note}`;
   });
   const count =
     comments.length === 1 ? "1 comment" : `${comments.length} comments`;
@@ -199,6 +205,7 @@ export type Annotation = {
   kind: "text" | "element" | "cancel";
   quote: string;
   where: string;
+  selector: string;
   rect: { x: number; y: number; w: number; h: number };
 };
 
@@ -229,6 +236,7 @@ export function acceptAnnotation(
     kind: value.kind,
     quote: clip(value.quote, 500),
     where: clip(value.where, 120),
+    selector: clip(value.selector, 300),
     rect: { x: num(rect.x), y: num(rect.y), w: num(rect.w), h: num(rect.h) },
   };
 }

@@ -15,7 +15,8 @@ import {
   readyProjectGitWorkspaceIds,
 } from "./projectGitReadiness.ts";
 
-/** Turns the many equivalent spellings of the same git remote
+/** For URLs the user types (project source, session hosts); the main process
+ * already returns normalized remotes in a project identity. Turns the many equivalent spellings of the same git remote
  * (`git@host:org/repo.git`, `ssh://git@host/org/repo`, `https://host/org/repo/`)
  * into one comparable key, so "the same project checked out twice" can be
  * detected regardless of which URL form either checkout happens to use. */
@@ -39,6 +40,8 @@ export function normalizeRemote(url: string): string {
  * workspace's cwd sits in, and `subdir` the cwd relative to it. All fields
  * are "" outside a git repository. */
 export type ProjectGit = {
+  /** The project store's id for this folder, "" when it belongs to none. */
+  projectId: string;
   remote: string;
   commonDir: string;
   checkout: string;
@@ -47,6 +50,7 @@ export type ProjectGit = {
   branch: string;
 };
 const NO_GIT: ProjectGit = {
+  projectId: "",
   remote: "",
   commonDir: "",
   checkout: "",
@@ -63,6 +67,7 @@ function inspectInto(
     key: string,
   ) => boolean | null,
   finished: () => void = () => {},
+  refresh = false,
 ) {
   const key = projectGitRequestKey(workspace);
   if (!window.bridge) {
@@ -77,14 +82,12 @@ function inspectInto(
     return;
   }
   window.bridge
-    .projectInspect(workspace.connection, {
-      operation: "git_remote",
-      root: workspace.cwd,
-    })
+    .projectIdentify(workspace.connection, workspace.cwd, { refresh })
     .then((result) => {
       if (settle(workspace, key) === null) return;
       const next: ProjectGit = {
-        remote: normalizeRemote(result?.remote || ""),
+        projectId: result?.projectId || "",
+        remote: result?.remote || "",
         commonDir: result?.commonDir || "",
         checkout: result?.checkout || "",
         linkedWorktree: result?.linkedWorktree || false,
@@ -112,9 +115,10 @@ function inspectInto(
 
 /** Fetches each workspace's git identity once per id+cwd, so the sidebar can
  * tell when two workspaces are the same project checked out in two places.
- * The branch is the one field that changes under a running workspace, so the
- * active workspace - where a checkout actually gets switched - is re-read on
- * a slow timer instead of every workspace on every poll. */
+ * The main process answers from the stored identity and reads git once per
+ * run. The branch is the one field that changes under a running workspace,
+ * so a local active workspace - where a checkout actually gets switched - is
+ * re-read from git on a slow timer; a remote host is never polled. */
 export function useProjectGit(
   workspaces: Workspace[],
   activeId: string,
@@ -161,18 +165,30 @@ export function useProjectGit(
       });
     }
   }, [workspaces, settledKeys, settle]);
+  // Answers that came from the store, and projects attached or removed while
+  // the app runs, are picked up by asking again: the main process answers
+  // from the store and reads git at most once per run per folder.
+  const workspacesRef = useRef(workspaces);
+  workspacesRef.current = workspaces;
+  useEffect(() => {
+    const timer = setInterval(() => {
+      for (const w of workspacesRef.current)
+        if (w.cwd) inspectInto(w, setProjectGit, settle);
+    }, 60000);
+    return () => clearInterval(timer);
+  }, [settle]);
   const active = workspaces.find((w) => w.id === activeId);
   const activeCwd = active?.cwd;
   const activeConnection = active?.connection;
   useEffect(() => {
-    if (!activeCwd) return;
+    if (!activeCwd || activeConnection?.startsWith("ssh:")) return;
     const workspace = {
       id: activeId,
       cwd: activeCwd,
       connection: activeConnection,
     };
     const timer = setInterval(
-      () => inspectInto(workspace, setProjectGit, settle),
+      () => inspectInto(workspace, setProjectGit, settle, undefined, true),
       15000,
     );
     return () => clearInterval(timer);

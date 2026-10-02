@@ -2,7 +2,6 @@ const { installHermesRecovery } = require("./hermes-recovery.cjs");
 const {
   installConversationSettings,
 } = require("./hermes-conversation-settings.cjs");
-const path = require("node:path");
 const { HermesScheduler } = require("./hermes-scheduler.cjs");
 const { randomUUID } = require("node:crypto");
 const { text, object } = require("./registry.cjs");
@@ -38,7 +37,7 @@ const boundedInt = (value, fallback, max) => {
 };
 
 class HermesProvider {
-  constructor({ transportFactory, transportOptions = {}, activityFile } = {}) {
+  constructor({ transportFactory, transportOptions = {}, userDataDir } = {}) {
     this.descriptor = {
       apiVersion: 1,
       id: "hermes",
@@ -68,7 +67,7 @@ class HermesProvider {
     this.dirty = new Set();
     this.timer = null;
     this.closed = false;
-    this.activityStore = new ActivityStore(activityFile);
+    this.activityStore = new ActivityStore(userDataDir);
     this.activities = this.activityStore.entries;
     this.activityIds = new Set(this.activities.map((a) => a.id));
     this.publish = () => {};
@@ -108,9 +107,7 @@ class HermesProvider {
     installHermesCommands(this);
     this.scheduler = new HermesScheduler({
       factory: this.factory,
-      file: activityFile
-        ? path.join(path.dirname(activityFile), "hermes-scheduler.json")
-        : undefined,
+      userDataDir,
       publish: (event) => this.publish(event),
     });
     this.operations.set("addons.schedules.schedulerStatus", async (input) => {

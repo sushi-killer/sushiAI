@@ -203,7 +203,7 @@ async function fixture(
       packaged,
       stopWaitSeconds,
       getConnections: () => connections,
-      hostsFile: path.join(dir, "hosts.json"),
+      userDataDir: dir,
       hostsChanged: () => changes.push(hosts.list().at(-1).state),
       spawnRetries: 60,
       spawnIntervalMs: 50,

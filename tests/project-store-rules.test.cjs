@@ -86,11 +86,15 @@ test("a project's slug is stored at creation and never follows a rename", async 
   assert.equal(renamed.slug, "my-app");
   assert.equal((await projects.get(made.id)).slug, "my-app");
   // A project stored before slugs existed gets the one its name gives, once.
-  const file = path.join(projects.projectsFile);
-  const stored = JSON.parse(await fs.readFile(file, "utf8"));
-  delete stored[made.id].slug;
-  stored[made.id].name = "Legacy Name";
-  await fs.writeFile(file, JSON.stringify(stored));
+  const row = projects.db
+    .prepare("SELECT data FROM projects WHERE id = ?")
+    .get(made.id);
+  const stored = JSON.parse(row.data);
+  delete stored.slug;
+  stored.name = "Legacy Name";
+  projects.db
+    .prepare("UPDATE projects SET data = ? WHERE id = ?")
+    .run(JSON.stringify(stored), made.id);
   const legacy = await projects.upsert({ id: made.id, name: "Renamed Later" });
   assert.equal(legacy.slug, "legacy-name");
 });

@@ -47,7 +47,7 @@ print(r)`)
   });
   workspace = created.workspace.workspace_id;
   const pane = created.root_pane.pane_id;
-  // The app restores its workspace from this file on the first paint.
+  // The app imports this file into its database on first start.
   const workspaceId = "herdr:" + endpoint + ":" + workspace,
     panelId = "herdr:" + endpoint + ":" + pane;
   await fs.writeFile(

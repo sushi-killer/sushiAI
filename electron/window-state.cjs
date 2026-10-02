@@ -1,12 +1,12 @@
-const fs = require("node:fs");
+const { readStore, writeStore } = require("./app-db.cjs");
 
 const DEFAULT_BOUNDS = { width: 1380, height: 880 };
 const MIN_WIDTH = 600;
 const MIN_HEIGHT = 440;
 
-function loadWindowState(file) {
+function loadWindowState(userDataDir) {
   try {
-    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    const raw = readStore(userDataDir, "window").value;
     const b = raw?.bounds;
     if (!b) return null;
     const bounds = { x: b.x, y: b.y, width: b.width, height: b.height };
@@ -23,10 +23,8 @@ function loadWindowState(file) {
   }
 }
 
-function saveWindowState(file, state) {
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
-  fs.renameSync(tmp, file);
+function saveWindowState(userDataDir, state) {
+  writeStore(userDataDir, "window", { value: state });
 }
 
 function overlap(a, b) {

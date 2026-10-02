@@ -47,7 +47,10 @@ const { registerSessionLaunchIpc } = require("./session-launch.cjs");
 const { assertHerdrCompatibility } = require("./herdr-compatibility.cjs");
 const { registerExtensionIpc } = require("./ipc/extensions.cjs");
 const { registerAttentionIpc } = require("./attention.cjs");
-const { registerWorkspaceSnapshot } = require("./workspace-snapshot.cjs");
+const {
+  registerWorkspaceSnapshot,
+  savedWorkspaces,
+} = require("./workspace-snapshot.cjs");
 const {
   DEFAULT_BOUNDS,
   loadWindowState,
@@ -99,16 +102,10 @@ const extensions = new ExtensionManager({
       // be opened in Finder and edited by hand.
       path.join(app.getPath("userData"), "local-extensions"),
 });
-const surfaceState = new SurfaceStateStore(
-  path.join(app.getPath("userData"), "extensions", "state"),
-);
+const surfaceState = new SurfaceStateStore(app.getPath("userData"));
 agents.register(
   new HermesProvider({
-    activityFile: path.join(
-      app.getPath("userData"),
-      "agents",
-      "hermes-activity.json",
-    ),
+    userDataDir: app.getPath("userData"),
   }),
 );
 const modelProviders = new ModelProviders({
@@ -241,11 +238,8 @@ registerSessionLaunchIpc({
     );
   },
   readSnapshot: (endpoint) => herdrExtension.snapshots.read(endpoint),
-  journalPath: path.join(app.getPath("userData"), "herdr-launches.json"),
-  workspaceStatePath: path.join(
-    app.getPath("userData"),
-    "workspace-state.json",
-  ),
+  userDataDir: app.getPath("userData"),
+  savedWorkspaces: () => savedWorkspaces(app.getPath("userData")),
   checkCompatibility: (endpoint) =>
     assertHerdrCompatibility({
       endpoint,
@@ -378,7 +372,7 @@ orchestrator = registerOrchestratorExtension({
   getProjects: () => projects,
   stopDaemonOnQuit: testMode.test,
   getConnections: () => connections,
-  hostsFile: path.join(app.getPath("userData"), "orchestrator-hosts.json"),
+  userDataDir: app.getPath("userData"),
   hostsChanged: () => send("orchestrator-hosts-changed"),
 });
 // Turning the orchestrator off also drops the notices it already queued.
@@ -443,11 +437,7 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionRequestHandler((_, __, callback) =>
     callback(false),
   );
-  const windowStateFile = path.join(
-    app.getPath("userData"),
-    "window-state.json",
-  );
-  const savedWindow = loadWindowState(windowStateFile);
+  const savedWindow = loadWindowState(app.getPath("userData"));
   const startBounds = savedWindow
     ? clampBounds(
         savedWindow,
@@ -499,7 +489,7 @@ app.whenReady().then(async () => {
     if (mainWindow.isDestroyed()) return;
     const normalBounds = mainWindow.getNormalBounds();
     try {
-      saveWindowState(windowStateFile, {
+      saveWindowState(app.getPath("userData"), {
         bounds: normalBounds,
         displayId: screen.getDisplayMatching(normalBounds).id,
         isMaximized: mainWindow.isMaximized(),

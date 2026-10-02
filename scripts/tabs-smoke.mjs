@@ -2,7 +2,7 @@ import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
 import assert from "node:assert/strict";
 const profile = await fs.mkdtemp("/tmp/sushiai-tabs-test-");
-// The app restores its workspace from this file on the first paint.
+// The app imports this file into its database on first start.
 await fs.writeFile(
   `${profile}/workspace-state.json`,
   JSON.stringify({

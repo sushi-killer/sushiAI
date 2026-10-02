@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
+const { readStore } = require("../electron/app-db.cjs");
 const { Projects } = require("../electron/projects.cjs");
 const { registerProjectIpc } = require("../electron/ipc/projects.cjs");
 
@@ -85,9 +86,9 @@ test("secrets round-trip internally and IPC exposes only a masked hint", async (
     hint: "••••alue",
   });
   assert.equal(
-    (
-      await fs.readFile(path.join(dir, "project-secrets.json"), "utf8")
-    ).includes("invented-secret-value"),
+    JSON.stringify(readStore(dir, "project-secrets")).includes(
+      "invented-secret-value",
+    ),
     false,
   );
 });
@@ -105,7 +106,7 @@ test("unavailable secure storage fails without writing a value", async (t) => {
     projects.setSecret(project.id, "TOKEN", "invented-secret"),
     /Secure storage is unavailable/,
   );
-  await assert.rejects(fs.access(path.join(dir, "project-secrets.json")));
+  assert.deepEqual({ ...readStore(dir, "project-secrets") }, {});
 });
 
 test("stage environments keep setup-only and MCP-only values out of agents", async (t) => {
@@ -144,10 +145,7 @@ test("clearing or removing a secret env entry removes its ciphertext", async (t)
   await projects.setSecret(project.id, "TOKEN", "invented-secret-value");
   await projects.updateEnv(project.id, { remove: ["TOKEN"] });
   assert.equal(await projects.secretFor(project.id, "TOKEN"), null);
-  const disk = await fs.readFile(
-    path.join(dir, "project-secrets.json"),
-    "utf8",
-  );
+  const disk = JSON.stringify(readStore(dir, "project-secrets"));
   assert.equal(disk.includes("invented-secret-value"), false);
 });
 
@@ -220,9 +218,23 @@ test("host environment overrides preserve the shared value and stay encrypted", 
     await projects.secretForHost(project.id, "API_TOKEN", "local"),
     "shared-invented-secret",
   );
-  const disk = await fs.readFile(
-    path.join(dir, "project-secrets.json"),
-    "utf8",
-  );
+  const disk = JSON.stringify(readStore(dir, "project-secrets"));
   assert.equal(disk.includes("host-invented-secret"), false);
+});
+
+test("deleting a project removes its secrets and keeps another project's", async (t) => {
+  const { dir, projects } = await fixture(t);
+  const env = [{ name: "TOKEN", secret: true }];
+  const gone = await projects.upsert({ name: "Gone", env });
+  const kept = await projects.upsert({ name: "Kept", env });
+  await projects.setSecret(gone.id, "TOKEN", "invented-gone-value");
+  await projects.setSecret(kept.id, "TOKEN", "invented-kept-value");
+  await projects.delete(gone.id);
+  assert.deepEqual(Object.keys(readStore(dir, "project-secrets")), [
+    `${kept.id}:TOKEN`,
+  ]);
+  assert.equal(
+    await projects.secretFor(kept.id, "TOKEN"),
+    "invented-kept-value",
+  );
 });

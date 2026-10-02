@@ -1,29 +1,35 @@
 const path = require("node:path");
-const { randomUUID } = require("node:crypto");
-const { mkdir, readFile, rename, rm, writeFile } = require("node:fs/promises");
+const {
+  DAMAGED,
+  appDb,
+  putStore,
+  readStore,
+  transaction,
+} = require("../app-db.cjs");
 
 const ID = /^[a-z0-9][a-z0-9._-]*$/;
 const MAX_SCOPE = 512;
 const MAX_BYTES = 512 * 1024;
 
-/** Durable state for declarative surfaces: one JSON file per extension, nested
+/** Durable state for declarative surfaces: one `surface-state` row per extension in sushiai.db, nested
  * by surface, state version and scope.
  *
  * The nesting is structural rather than a joined key because surface ids may
  * contain dots and a scope is a path - a flat key could not be parsed back
  * apart, and aggregating one surface across projects needs exactly that. */
 class SurfaceStateStore {
-  constructor(dir) {
-    if (typeof dir !== "string" || !path.isAbsolute(dir))
+  constructor(userDataDir) {
+    if (typeof userDataDir !== "string" || !path.isAbsolute(userDataDir))
       throw new Error("Surface state directory must be absolute.");
-    this.dir = dir;
+    this.userDataDir = userDataDir;
     this.queues = new Map();
   }
 
+  /** The queue key of an extension's state. */
   file(extensionId) {
     if (typeof extensionId !== "string" || !ID.test(extensionId))
       throw new Error("Invalid extension id.");
-    return path.join(this.dir, `${extensionId}.json`);
+    return extensionId;
   }
 
   static place(surfaceId, version, scope) {
@@ -47,16 +53,13 @@ class SurfaceStateStore {
   }
 
   async all(extensionId) {
-    try {
-      const value = JSON.parse(await readFile(this.file(extensionId), "utf8"));
-      if (!plain(value)) throw new DamagedSurfaceState(extensionId);
-      return value;
-    } catch (error) {
-      if (error?.code === "ENOENT") return {};
-      if (error instanceof SyntaxError)
-        throw new DamagedSurfaceState(extensionId);
-      throw error;
-    }
+    const value = readStore(this.userDataDir, "surface-state", {
+      damaged: true,
+    })[this.file(extensionId)];
+    if (value === undefined) return {};
+    if (value === DAMAGED || !plain(value))
+      throw new DamagedSurfaceState(extensionId);
+    return value;
   }
 
   async read(extensionId, surfaceId, version, scope) {
@@ -115,18 +118,13 @@ class SurfaceStateStore {
         if (!Object.keys(slice).length) delete state[at.surfaceId][at.version];
         if (!Object.keys(state[at.surfaceId]).length)
           delete state[at.surfaceId];
-        await mkdir(this.dir, { recursive: true, mode: 0o700 });
-        const temporary = `${file}.${randomUUID()}.tmp`;
-        await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, {
-          mode: 0o600,
-          flag: "wx",
-        });
-        try {
-          await rename(temporary, file);
-        } catch (error) {
-          await rm(temporary, { force: true }).catch(() => {});
-          throw error;
-        }
+        const db = appDb(this.userDataDir);
+        transaction(db, () =>
+          putStore(db, "surface-state", {
+            ...readStore(this.userDataDir, "surface-state"),
+            [file]: state,
+          }),
+        );
       });
     this.queues.set(file, run);
     await run;
@@ -138,7 +136,7 @@ class SurfaceStateStore {
 class DamagedSurfaceState extends Error {
   constructor(extensionId) {
     super(
-      `Saved state for ${extensionId} could not be read. Fix or remove its file to continue.`,
+      `Saved state for ${extensionId} could not be read. It is shown read-only.`,
     );
     this.code = "SURFACE_STATE_DAMAGED";
   }

@@ -1,7 +1,7 @@
-const fs = require("node:fs/promises");
 const path = require("node:path");
 const { existsSync } = require("node:fs");
 const { Tray, Menu, Notification, nativeImage } = require("electron");
+const { readStore, writeStore } = require("./app-db.cjs");
 const { MAX_VIEW_ID_LENGTH } = require("./ipc/panel-id.cjs");
 
 const DEFAULT_PREFERENCES = {
@@ -98,7 +98,6 @@ function registerAttentionIpc({
   hidden = false,
   onPreferences = () => {},
 }) {
-  const preferencesFile = path.join(userDataDir, "app-preferences.json");
   let preferences = { ...DEFAULT_PREFERENCES };
   let tray = null;
   let badgeCount = 0;
@@ -167,17 +166,13 @@ function registerAttentionIpc({
   }
 
   async function save() {
-    await fs.mkdir(path.dirname(preferencesFile), { recursive: true });
-    await fs.writeFile(`${preferencesFile}.tmp`, JSON.stringify(preferences), {
-      mode: 0o600,
-    });
-    await fs.rename(`${preferencesFile}.tmp`, preferencesFile);
+    writeStore(userDataDir, "preferences", { value: preferences });
   }
 
   async function init() {
     try {
       preferences = normalizePreferences(
-        JSON.parse(await fs.readFile(preferencesFile, "utf8")),
+        readStore(userDataDir, "preferences").value,
       );
     } catch {
       preferences = { ...DEFAULT_PREFERENCES };

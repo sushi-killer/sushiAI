@@ -7,14 +7,14 @@
 // plain-env attempt at this looked like from the outside (it just launches
 // Sonnet on the real Anthropic API, no error).
 //
-// Two files in userData, kept apart on purpose: `providers.json` holds
-// non-secret metadata (readable, gitignored by virtue of living outside the
-// repo), `secrets.json` holds only encrypted key material. The key never
+// Two stores in sushiai.db, kept apart on purpose: `providers` holds
+// non-secret metadata, `secrets` holds only encrypted key material. The key never
 // crosses the IPC boundary — renderer-facing methods only ever return
 // `hasKey`/`keyHint`.
 const { randomUUID } = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { appDb, putStore, readStore, transaction } = require("./app-db.cjs");
 
 const PRESETS = {
   // OpenRouter's Anthropic-compatible endpoint is a "skin" over Claude
@@ -58,29 +58,21 @@ function keyHint(key) {
 
 class ModelProviders {
   constructor({ userDataDir, safeStorage, fetchImpl = fetch }) {
-    this.providersFile = path.join(userDataDir, "providers.json");
-    this.secretsFile = path.join(userDataDir, "secrets.json");
+    this.userDataDir = userDataDir;
     this.safeStorage = safeStorage;
     this.fetchImpl = fetchImpl;
   }
 
-  async #readJson(file, strict = false) {
-    try {
-      const value = JSON.parse(await fs.readFile(file, "utf8"));
-      if (
-        strict &&
-        (!value || typeof value !== "object" || Array.isArray(value))
-      )
-        throw new TypeError("Invalid account configuration.");
-      return value;
-    } catch (error) {
-      if (strict && error.code !== "ENOENT") throw error;
-      return {};
-    }
+  #read(name) {
+    return readStore(this.userDataDir, name);
   }
-  async #writeJson(file, value) {
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.writeFile(file, JSON.stringify(value, null, 2), { mode: 0o600 });
+  /** Writes each named store in one transaction. */
+  #write(changes) {
+    const db = appDb(this.userDataDir);
+    transaction(db, () => {
+      for (const [name, value] of Object.entries(changes))
+        putStore(db, name, value);
+    });
   }
 
   #encryptedBackend() {
@@ -93,8 +85,8 @@ class ModelProviders {
   }
 
   async listProviders() {
-    const providers = await this.#readJson(this.providersFile);
-    const secrets = await this.#readJson(this.secretsFile);
+    const providers = this.#read("providers");
+    const secrets = this.#read("secrets");
     return Object.values(providers).map((p) => {
       const secret = secrets[p.id];
       return {
@@ -106,8 +98,8 @@ class ModelProviders {
   }
 
   async listClaudeAccounts() {
-    const accounts = await this.#readJson(this.accountsFileFor());
-    const secrets = await this.#readJson(this.secretsFile);
+    const accounts = this.#read("claude-accounts");
+    const secrets = this.#read("secrets");
     return Object.values(accounts).map((account) => ({
       ...account,
       hasValue: Boolean(secrets[`claude-account:${account.id}`]),
@@ -115,14 +107,10 @@ class ModelProviders {
     }));
   }
 
-  accountsFileFor() {
-    return path.join(path.dirname(this.providersFile), "claude-accounts.json");
-  }
-
   async upsertClaudeAccount({ id, label, kind }) {
     if (!["subscription", "apiKey"].includes(kind))
       throw new Error("Unknown Claude account kind.");
-    const accounts = await this.#readJson(this.accountsFileFor());
+    const accounts = this.#read("claude-accounts");
     const accountId = id && accounts[id] ? id : randomUUID();
     const existing = accounts[accountId];
     accounts[accountId] = {
@@ -130,7 +118,7 @@ class ModelProviders {
       label: String(label || "Claude account").slice(0, 80),
       kind,
     };
-    await this.#writeJson(this.accountsFileFor(), accounts);
+    this.#write({ "claude-accounts": accounts });
     return { ...accounts[accountId], hint: existing?.hint || "" };
   }
 
@@ -139,9 +127,9 @@ class ModelProviders {
       throw new Error("Paste a Claude token or API key.");
     if (!this.#encryptedBackend())
       throw new Error("Secure storage is unavailable.");
-    const accounts = await this.#readJson(this.accountsFileFor());
+    const accounts = this.#read("claude-accounts");
     if (!accounts[id]) throw new Error("Unknown Claude account.");
-    const secrets = await this.#readJson(this.secretsFile);
+    const secrets = this.#read("secrets");
     const trimmed = value.trim();
     const backend = this.#encryptedBackend();
     const key = `claude-account:${id}`;
@@ -152,25 +140,23 @@ class ModelProviders {
       hint: keyHint(trimmed),
     };
     accounts[id].hint = keyHint(trimmed);
-    await this.#writeJson(this.secretsFile, secrets);
-    await this.#writeJson(this.accountsFileFor(), accounts);
+    this.#write({ secrets, "claude-accounts": accounts });
     return { hasValue: true, hint: keyHint(trimmed) };
   }
 
   async deleteClaudeAccount(id) {
-    const accounts = await this.#readJson(this.accountsFileFor());
+    const accounts = this.#read("claude-accounts");
     delete accounts[id];
-    await this.#writeJson(this.accountsFileFor(), accounts);
-    const secrets = await this.#readJson(this.secretsFile);
+    const secrets = this.#read("secrets");
     delete secrets[`claude-account:${id}`];
-    await this.#writeJson(this.secretsFile, secrets);
+    this.#write({ "claude-accounts": accounts, secrets });
   }
 
   async stageClaudeAccount(id, dir) {
-    const accounts = await this.#readJson(this.accountsFileFor());
+    const accounts = this.#read("claude-accounts");
     const account = accounts[id];
     if (!account) throw new Error("Unknown Claude account.");
-    const secrets = await this.#readJson(this.secretsFile);
+    const secrets = this.#read("secrets");
     const secret = secrets[`claude-account:${id}`];
     if (!secret) throw new Error(`Add a value for ${account.label} first.`);
     const bytes = Buffer.from(secret.ct, "base64");
@@ -197,15 +183,13 @@ class ModelProviders {
   }
 
   async resolveClaudeAccount(id) {
-    const accounts = await this.#readJson(this.accountsFileFor(), true);
+    const accounts = this.#read("claude-accounts");
     const account = accounts[id];
     if (!account)
       throw Object.assign(new Error("Unknown Claude account."), {
         code: "ACCOUNT_NOT_CONFIGURED",
       });
-    const secret = (await this.#readJson(this.secretsFile, true))[
-      `claude-account:${id}`
-    ];
+    const secret = this.#read("secrets")[`claude-account:${id}`];
     if (!secret)
       throw Object.assign(
         new Error(`Add a value for ${account.label} first.`),
@@ -222,7 +206,7 @@ class ModelProviders {
   async upsertProvider({ id, kind, label, baseUrl }) {
     if (!PRESETS[kind] && kind !== "custom")
       throw new Error("Unknown provider kind.");
-    const providers = await this.#readJson(this.providersFile);
+    const providers = this.#read("providers");
     const preset = PRESETS[kind];
     const providerId = id && providers[id] ? id : randomUUID();
     const resolvedBaseUrl = preset ? preset.baseUrl : String(baseUrl || "");
@@ -234,29 +218,27 @@ class ModelProviders {
       label: String(label || preset?.label || "Custom provider").slice(0, 80),
       baseUrl: resolvedBaseUrl,
     };
-    await this.#writeJson(this.providersFile, providers);
+    this.#write({ providers });
     return providers[providerId];
   }
 
   async deleteProvider(id) {
-    const providers = await this.#readJson(this.providersFile);
+    const providers = this.#read("providers");
     delete providers[id];
-    await this.#writeJson(this.providersFile, providers);
-    const secrets = await this.#readJson(this.secretsFile);
+    const secrets = this.#read("secrets");
     delete secrets[id];
-    await this.#writeJson(this.secretsFile, secrets);
-    const profiles = await this.#readJson(this.profilesFileFor());
+    const profiles = this.#read("model-profiles");
     for (const [profileId, profile] of Object.entries(profiles))
       if (profile.providerId === id) delete profiles[profileId];
-    await this.#writeJson(this.profilesFileFor(), profiles);
+    this.#write({ providers, secrets, "model-profiles": profiles });
   }
 
   async setProviderKey(id, key) {
     if (typeof key !== "string" || !key.trim())
       throw new Error("Enter an API key.");
-    const providers = await this.#readJson(this.providersFile);
+    const providers = this.#read("providers");
     if (!providers[id]) throw new Error("Unknown provider.");
-    const secrets = await this.#readJson(this.secretsFile);
+    const secrets = this.#read("secrets");
     const backend = this.#encryptedBackend();
     const trimmed = key.trim();
     secrets[id] = backend
@@ -270,18 +252,18 @@ class ModelProviders {
           backend: "plain",
           ct: Buffer.from(trimmed, "utf8").toString("base64"),
         };
-    await this.#writeJson(this.secretsFile, secrets);
+    this.#write({ secrets });
     return { hasKey: true, keyPlaintext: !backend, keyHint: keyHint(trimmed) };
   }
 
   async clearProviderKey(id) {
-    const secrets = await this.#readJson(this.secretsFile);
+    const secrets = this.#read("secrets");
     delete secrets[id];
-    await this.#writeJson(this.secretsFile, secrets);
+    this.#write({ secrets });
   }
 
   async #keyFor(id) {
-    const secrets = await this.#readJson(this.secretsFile);
+    const secrets = this.#read("secrets");
     const secret = secrets[id];
     if (!secret) return null;
     const buf = Buffer.from(secret.ct, "base64");
@@ -295,12 +277,8 @@ class ModelProviders {
     }
   }
 
-  profilesFileFor() {
-    return path.join(path.dirname(this.providersFile), "model-profiles.json");
-  }
-
   async listProfiles() {
-    const profiles = await this.#readJson(this.profilesFileFor());
+    const profiles = this.#read("model-profiles");
     return Object.values(profiles);
   }
 
@@ -312,11 +290,11 @@ class ModelProviders {
     effort,
     contextWindow,
   }) {
-    const providers = await this.#readJson(this.providersFile);
+    const providers = this.#read("providers");
     if (!providers[providerId]) throw new Error("Unknown provider.");
     if (!MODEL_RE.test(String(modelId || "")))
       throw new Error("Invalid model ID.");
-    const profiles = await this.#readJson(this.profilesFileFor());
+    const profiles = this.#read("model-profiles");
     const profileId = id && profiles[id] ? id : randomUUID();
     profiles[profileId] = {
       id: profileId,
@@ -327,14 +305,14 @@ class ModelProviders {
       contextWindow:
         Number(contextWindow) > 0 ? Number(contextWindow) : undefined,
     };
-    await this.#writeJson(this.profilesFileFor(), profiles);
+    this.#write({ "model-profiles": profiles });
     return profiles[profileId];
   }
 
   async deleteProfile(id) {
-    const profiles = await this.#readJson(this.profilesFileFor());
+    const profiles = this.#read("model-profiles");
     delete profiles[id];
-    await this.#writeJson(this.profilesFileFor(), profiles);
+    this.#write({ "model-profiles": profiles });
   }
 
   /**
@@ -344,10 +322,10 @@ class ModelProviders {
    * JSON file as `{"env": settings}`.
    */
   async resolveEnv(profileId) {
-    const profiles = await this.#readJson(this.profilesFileFor());
+    const profiles = this.#read("model-profiles");
     const profile = profiles[profileId];
     if (!profile) throw new Error("Model profile not found.");
-    const providers = await this.#readJson(this.providersFile);
+    const providers = this.#read("providers");
     const provider = providers[profile.providerId];
     if (!provider) throw new Error("Provider for this model profile is gone.");
     const key = await this.#keyFor(provider.id);
@@ -404,7 +382,7 @@ class ModelProviders {
   }
 
   async testConnection(id) {
-    const providers = await this.#readJson(this.providersFile);
+    const providers = this.#read("providers");
     const provider = providers[id];
     if (!provider)
       return { ok: false, code: "unknown", message: "Unknown provider." };
@@ -449,7 +427,7 @@ class ModelProviders {
   /** Live model catalog for a provider. Never throws: an empty list just
    * falls back to a manual model-ID field in the UI. */
   async fetchModels(id) {
-    const providers = await this.#readJson(this.providersFile);
+    const providers = this.#read("providers");
     const provider = providers[id];
     const preset = provider && PRESETS[provider.kind];
     if (!preset) return [];

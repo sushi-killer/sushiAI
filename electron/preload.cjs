@@ -152,6 +152,7 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   connectionsDisconnect: invoke("connections-disconnect"),
   connectionsForward: invoke("connections-forward"),
   projectInspect: invoke("project-inspect"),
+  projectIdentify: invoke("projects:identify"),
   projectSourceInspect: invoke("projects:source-inspect"),
   projectLocalCreate: invoke("projects:local-create"),
   projectLocalInstall: invoke("projects:local-install"),

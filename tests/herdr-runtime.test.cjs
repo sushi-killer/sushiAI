@@ -92,10 +92,125 @@ test("daemon and stream CLI are checked independently before attachment", async 
       assert.equal(error.code, "HERDR_INCOMPATIBLE");
       assert.equal(error.data.daemon.compatible, true);
       assert.equal(error.data.cli.stream, false);
-      assert.match(error.message, /CLI version/);
+      assert.match(error.message, /terminal session control/);
       return true;
     },
   );
+});
+
+test("another Herdr version is used when its schema still offers the contract", async () => {
+  // 0.8.2 (protocol 20) and a later release both pass on capabilities alone.
+  for (const [version, protocol] of [
+    ["0.8.2", 20],
+    ["0.10.0", HERDR_CONTRACT.protocol + 1],
+  ]) {
+    const status = await checkHerdrCompatibility(
+      compatibilityOptions({
+        rpc: async () => ({ version, protocol }),
+        runCli: async (_, args) =>
+          cliOutput(args, { version, schema: { ...schema(), protocol } }),
+      }),
+    );
+    assert.equal(status.compatible, true, version);
+    assert.deepEqual(status.issues, []);
+  }
+});
+
+test("a terminal CLI that speaks another protocol than the daemon is not attached", async () => {
+  const status = await checkHerdrCompatibility(
+    compatibilityOptions({
+      rpc: async () => ({ version: "0.8.2", protocol: 20 }),
+    }),
+  );
+  assert.equal(status.daemon.compatible, true);
+  assert.equal(status.cli.compatible, false);
+  assert.equal(status.compatible, false);
+  assert.match(status.issues.join(" "), /does not match the daemon/);
+});
+
+test("the owner's CLI is used when sushiAI's pinned CLI speaks another protocol than their daemon", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "herdr-fallback-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const managed = path.join(directory, HERDR_CONTRACT.version, "herdr");
+  await fs.mkdir(path.dirname(managed), { recursive: true });
+  await fs.writeFile(managed, "managed CLI", { mode: 0o700 });
+  const status = await checkHerdrCompatibility(
+    compatibilityOptions({
+      connections: {
+        socket: async () => "/tmp/isolated-herdr.sock",
+        herdrInstallDirectory: directory,
+      },
+      rpc: async () => ({ version: "0.8.2", protocol: 20 }),
+      runCli: async (binary, args) =>
+        binary === managed
+          ? cliOutput(args)
+          : cliOutput(args, {
+              version: "0.8.2",
+              schema: { ...schema(), protocol: 20 },
+            }),
+    }),
+  );
+  assert.equal(status.compatible, true);
+  assert.equal(status.cli.binary, "/tmp/isolated-herdr-cli");
+});
+
+test("an earlier sushiAI-installed CLI is used while its daemon still runs", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "herdr-earlier-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const earlier = path.join(directory, "0.8.2", "herdr");
+  await fs.mkdir(path.dirname(earlier), { recursive: true });
+  await fs.writeFile(earlier, "earlier CLI", { mode: 0o700 });
+  const status = await checkHerdrCompatibility(
+    compatibilityOptions({
+      binary: undefined,
+      connections: {
+        socket: async () => "/tmp/isolated-herdr.sock",
+        herdrInstallDirectory: directory,
+      },
+      rpc: async () => ({ version: "0.8.2", protocol: 20 }),
+      runCli: async (binary, args) => {
+        assert.equal(binary, earlier);
+        return cliOutput(args, {
+          version: "0.8.2",
+          schema: { ...schema(), protocol: 20 },
+        });
+      },
+    }),
+  );
+  assert.equal(status.compatible, true);
+  assert.equal(status.cli.binary, earlier);
+});
+
+test("over SSH the host's own CLI is used when sushiAI's pinned CLI speaks another protocol", async () => {
+  const managed = `/home/user/.local/share/sushiai/herdr/${HERDR_CONTRACT.version}/herdr`;
+  const owner = "/home/user/.local/bin/herdr";
+  const status = await checkHerdrCompatibility(
+    compatibilityOptions({
+      endpoint: "ssh:host-one",
+      connections: {
+        socket: async () => "/tmp/forwarded.sock",
+        exec: async (_, command) => {
+          if (command.includes("for f in")) return `${managed}\n`;
+          if (command.includes("if [ -x")) return `${managed}\n`;
+          if (command.includes("command -v")) return `${owner}\n`;
+          const old = command.includes(`'${owner}'`);
+          const options = old
+            ? { version: "0.8.2", schema: { ...schema(), protocol: 20 } }
+            : {};
+          if (command.includes("'--version'"))
+            return cliOutput(["--version"], options);
+          if (command.includes("'api'")) return cliOutput(["api"], options);
+          return cliOutput(["terminal"]);
+        },
+      },
+      rpc: async () => ({ version: "0.8.2", protocol: 20 }),
+      runCli: async () => {
+        throw new Error("Local CLI must not be used for SSH");
+      },
+    }),
+  );
+  assert.equal(status.compatible, true);
+  assert.equal(status.cli.binary, owner);
 });
 
 test("CLI schema checks required methods, launch env and event capabilities", async () => {
@@ -178,7 +293,10 @@ test("explicit user CLI checks bypass managed preference locally and on SSH", as
       },
       runCli: async (binary, args) => {
         checked.push(binary);
-        return cliOutput(args, { version: "0.0.1" });
+        return cliOutput(args, {
+          version: "0.0.1",
+          schema: { ...schema(), protocol: 19 },
+        });
       },
     }),
   );
@@ -215,7 +333,7 @@ test("explicit user CLI checks bypass managed preference locally and on SSH", as
               : command.includes("'api'")
                 ? ["api"]
                 : ["terminal"],
-            { version: "0.0.1" },
+            { version: "0.0.1", schema: { ...schema(), protocol: 19 } },
           );
         },
       },

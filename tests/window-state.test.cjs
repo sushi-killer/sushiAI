@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { writeStore } = require("../electron/app-db.cjs");
 const {
   DEFAULT_BOUNDS,
   loadWindowState,
@@ -83,33 +84,51 @@ test("bounds never shrink below 600x440", () => {
   assert.equal(out.height, 440);
 });
 
-test("state round-trips and leaves no tmp file", () => {
+test("state round-trips through the database and leaves no tmp file", () => {
   const dir = tmp();
-  const file = path.join(dir, "window-state.json");
   const saved = {
     bounds: { x: 10, y: 20, width: 900, height: 600 },
     displayId: 7,
     isMaximized: true,
     isFullScreen: true,
   };
-  saveWindowState(file, saved);
-  assert.deepEqual(loadWindowState(file), saved);
-  assert.deepEqual(fs.readdirSync(dir), ["window-state.json"]);
+  saveWindowState(dir, saved);
+  assert.deepEqual(loadWindowState(dir), saved);
+  assert.equal(
+    fs.readdirSync(dir).some((name) => name.endsWith(".tmp")),
+    false,
+  );
 });
 
-test("missing, non-JSON and invalid files load as null", () => {
+test("missing and invalid stored states load as null", () => {
+  assert.equal(loadWindowState(tmp()), null);
+  const invalid = [
+    "nope",
+    { bounds: { x: 0, y: 0, width: "wide", height: 5 } },
+    { bounds: { x: 0, y: 0, width: null, height: 5 } },
+    { bounds: { x: 0, y: 0 } },
+  ];
+  for (const value of invalid) {
+    const dir = tmp();
+    writeStore(dir, "window", { value });
+    assert.equal(loadWindowState(dir), null, JSON.stringify(value));
+  }
   const dir = tmp();
-  assert.equal(loadWindowState(path.join(dir, "none.json")), null);
-  const bad = path.join(dir, "bad.json");
-  fs.writeFileSync(bad, "{nope");
-  assert.equal(loadWindowState(bad), null);
-  const nan = path.join(dir, "nan.json");
-  fs.writeFileSync(
-    nan,
-    JSON.stringify({ bounds: { x: 0, y: 0, width: "wide", height: null } }),
-  );
-  assert.equal(loadWindowState(nan), null);
-  const partial = path.join(dir, "partial.json");
-  fs.writeFileSync(partial, JSON.stringify({ bounds: { x: 0, y: 0 } }));
-  assert.equal(loadWindowState(partial), null);
+  writeStore(dir, "window", {
+    value: { bounds: { x: 0, y: 0, width: 800, height: 600 } },
+  });
+  assert.equal(loadWindowState(dir).bounds.width, 800);
+});
+
+test("an invalid legacy window-state.json is kept and loads as null", () => {
+  const dir = tmp();
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    fs.writeFileSync(path.join(dir, "window-state.json"), "{nope");
+    assert.equal(loadWindowState(dir), null);
+    assert.equal(fs.existsSync(path.join(dir, "window-state.json")), true);
+  } finally {
+    console.warn = warn;
+  }
 });

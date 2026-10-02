@@ -211,7 +211,7 @@ try {
   const dialog = page.getByRole("dialog", { name: "Settings" });
   await dialog.getByRole("tab", { name: "Connections", exact: true }).click();
   await dialog
-    .getByText(`Compatible · verified version ${HERDR_CONTRACT.version}`, {
+    .getByText(`Compatible · sushiAI installs ${HERDR_CONTRACT.version}`, {
       exact: true,
     })
     .waitFor();

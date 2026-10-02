@@ -3,6 +3,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const net = require("node:net");
 const { randomUUID } = require("node:crypto");
+const { appDb, transaction } = require("./app-db.cjs");
 const { request } = require("./herdr.cjs");
 const { InspectionWorker } = require("./inspection-worker.cjs");
 const quote = (text) => "'" + String(text).replaceAll("'", "'\\''") + "'";
@@ -79,7 +80,7 @@ class Connections {
   // `ssh` is the binary every connection runs; tests hand in a fake one.
   constructor(dataDir, { ssh = "/usr/bin/ssh" } = {}) {
     this.ssh = ssh;
-    this.file = path.join(dataDir, "connections.json");
+    this.dataDir = dataDir;
     this.herdrInstallDirectory = path.join(dataDir, "herdr");
     this.knownHostsFile = path.join(dataDir, "known_hosts");
     this.profiles = [];
@@ -95,14 +96,30 @@ class Connections {
   }
   async init() {
     this.temp = await fs.mkdtemp("/tmp/sushiai-ssh-");
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
-    try {
-      this.profiles = JSON.parse(await fs.readFile(this.file, "utf8")).map(
-        validate,
-      );
-    } catch (e) {
-      if (e.code !== "ENOENT") throw e;
+    this.profiles = [];
+    const rows = appDb(this.dataDir)
+      .prepare("SELECT data FROM connections ORDER BY position")
+      .all();
+    for (const row of rows) {
+      try {
+        this.profiles.push(validate(JSON.parse(row.data)));
+      } catch (error) {
+        console.warn(`Skipping a saved connection: ${error.message}`);
+      }
     }
+  }
+  /** Rewrites every profile row in one transaction. */
+  persist() {
+    const db = appDb(this.dataDir);
+    transaction(db, () => {
+      db.exec("DELETE FROM connections");
+      const insert = db.prepare(
+        "INSERT INTO connections(id, position, data) VALUES(?, ?, ?)",
+      );
+      this.profiles.forEach((profile, position) =>
+        insert.run(profile.id, position, JSON.stringify(profile)),
+      );
+    });
   }
   list() {
     return this.profiles.map((p) => ({
@@ -157,10 +174,7 @@ class Connections {
     const p = validate(profile);
     this.profiles = [...this.profiles.filter((x) => x.id !== p.id), p];
     await this.disconnect(`ssh:${p.id}`);
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
-    await fs.writeFile(this.file, JSON.stringify(this.profiles, null, 2), {
-      mode: 0o600,
-    });
+    this.persist();
     return p;
   }
   /** Hides a profile from the workspace sidebar without touching its tunnel -
@@ -170,10 +184,7 @@ class Connections {
     const p = this.get(endpoint);
     const next = { ...p, hidden: Boolean(hidden) };
     this.profiles = this.profiles.map((x) => (x.id === p.id ? next : x));
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
-    await fs.writeFile(this.file, JSON.stringify(this.profiles, null, 2), {
-      mode: 0o600,
-    });
+    this.persist();
     return next;
   }
   /** Tracks whether this profile should reconnect on the next app launch -
@@ -183,19 +194,14 @@ class Connections {
     const p = this.get(endpoint);
     const next = { ...p, autoConnect: Boolean(autoConnect) };
     this.profiles = this.profiles.map((x) => (x.id === p.id ? next : x));
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
-    await fs.writeFile(this.file, JSON.stringify(this.profiles, null, 2), {
-      mode: 0o600,
-    });
+    this.persist();
     return next;
   }
   async delete(endpoint) {
     const p = this.get(endpoint);
     this.profiles = this.profiles.filter((x) => x.id !== p.id);
     await this.disconnect(endpoint);
-    await fs.writeFile(this.file, JSON.stringify(this.profiles), {
-      mode: 0o600,
-    });
+    this.persist();
   }
   async inspect(endpoint, options) {
     if (this.closed) throw new Error("Connections are closed.");

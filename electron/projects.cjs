@@ -1,7 +1,13 @@
 const { randomUUID } = require("node:crypto");
-const fs = require("node:fs/promises");
 const path = require("node:path");
 const { remoteUrl } = require("./git-remote.cjs");
+const {
+  appDb,
+  putStore,
+  readStore,
+  transaction,
+  writeStore,
+} = require("./app-db.cjs");
 const { projectSlug, slugOf, uniqueSlug } = require("./project-slug.cjs");
 
 function normalizeRemote(url) {
@@ -25,21 +31,6 @@ function assertRemote(url) {
     throw new Error("A git URL cannot start with a dash.");
 }
 
-async function atomicWriteJson(file, value) {
-  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
-      mode: 0o600,
-      flag: "wx",
-    });
-    await fs.rename(temporary, file);
-  } catch (error) {
-    await fs.rm(temporary, { force: true }).catch(() => {});
-    throw error;
-  }
-}
-
 const STAGES = ["setup", "agent", "mcp"];
 
 /** Where a folder lives, as a project knows it: an SSH host by its endpoint,
@@ -50,16 +41,23 @@ function hostOf(endpoint) {
     : "local";
 }
 
+/** Matches the stored secret keys of variables `names` of project `id`: the
+ * value and its per-host copies (`id:NAME@host`). */
+function secretsOf(id, names) {
+  return (key) =>
+    [...names].some(
+      (name) => key === `${id}:${name}` || key.startsWith(`${id}:${name}@`),
+    );
+}
+
 function hint(value) {
   return value.length >= 12 ? `••••${value.slice(-4)}` : "••••";
 }
 
 class Projects {
   constructor({ userDataDir, safeStorage }) {
-    this.projectsFile = path.join(userDataDir, "projects.json");
-    this.secretsFile = path.join(userDataDir, "project-secrets.json");
+    this.userDataDir = userDataDir;
     this.safeStorage = safeStorage;
-    this.writeQueue = Promise.resolve();
     this.lock = Promise.resolve();
     // `onSendChange(host)` lets whoever holds values for a host replace them
     // when the owner turns sending to it off (or on again).
@@ -73,7 +71,7 @@ class Projects {
    * (`withheld`) gets none. This machine always does. */
   async sendsValues(id, host) {
     if (host === "local") return true;
-    const projects = await this.#read(this.projectsFile);
+    const projects = this.#load();
     return !this.#own(projects, id)?.hosts?.[host]?.withheld;
   }
 
@@ -94,16 +92,167 @@ class Projects {
       : undefined;
   }
 
-  #write(file, value) {
-    const operation = this.writeQueue.then(() => atomicWriteJson(file, value));
-    this.writeQueue = operation.catch(() => {});
+  /** The shared app database (appDb caches the handle per directory). */
+  get db() {
+    return appDb(this.userDataDir);
+  }
+
+  #open() {
+    return this.db;
+  }
+
+  /** Every project by id, each with `folders` from the attached folder rows. */
+  #load() {
+    const db = this.#open();
+    const projects = Object.create(null);
+    for (const row of db.prepare("SELECT id, data FROM projects").all())
+      projects[row.id] = { ...JSON.parse(row.data), id: row.id, folders: [] };
+    for (const row of db
+      .prepare(
+        "SELECT host, path, project_id FROM folders WHERE project_id IS NOT NULL ORDER BY rowid",
+      )
+      .all())
+      projects[row.project_id]?.folders.push({
+        endpoint: row.host,
+        cwd: row.path,
+      });
+    return projects;
+  }
+
+  /** Writes the project map back in one transaction: changed projects are
+   * updated, missing ones removed, and folder rows follow each project's
+   * `folders` (a folder no project lists any more is only unattached).
+   * `dropSecret(key)` names the stored secrets that go in the same
+   * transaction. */
+  #save(projects, dropSecret) {
+    const db = this.#open();
+    transaction(db, () => {
+      if (dropSecret) {
+        const kept = this.#secrets();
+        for (const key of Object.keys(kept))
+          if (dropSecret(key)) delete kept[key];
+        putStore(db, "project-secrets", kept);
+      }
+      const stored = new Map(
+        db
+          .prepare("SELECT id, data FROM projects")
+          .all()
+          .map((row) => [row.id, row.data]),
+      );
+      for (const id of stored.keys())
+        if (!Object.hasOwn(projects, id))
+          db.prepare("DELETE FROM projects WHERE id = ?").run(id);
+      const wanted = new Map();
+      for (const [id, project] of Object.entries(projects)) {
+        const { folders = [], ...rest } = project;
+        const data = JSON.stringify(rest);
+        if (stored.get(id) !== data)
+          db.prepare(
+            "INSERT INTO projects(id, data) VALUES(?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+          ).run(id, data);
+        for (const folder of folders)
+          wanted.set(JSON.stringify([folder.endpoint, folder.cwd]), id);
+      }
+      const attached = new Set();
+      for (const row of db
+        .prepare(
+          "SELECT host, path, project_id FROM folders WHERE project_id IS NOT NULL",
+        )
+        .all()) {
+        const key = JSON.stringify([row.host, row.path]);
+        attached.add(key);
+        if (wanted.get(key) !== row.project_id)
+          db.prepare(
+            "UPDATE folders SET project_id = ? WHERE host = ? AND path = ?",
+          ).run(wanted.get(key) ?? null, row.host, row.path);
+      }
+      for (const [key, id] of wanted)
+        if (!attached.has(key)) {
+          const [host, folderPath] = JSON.parse(key);
+          db.prepare(
+            "INSERT INTO folders(host, path, project_id) VALUES(?, ?, ?) ON CONFLICT(host, path) DO UPDATE SET project_id = excluded.project_id",
+          ).run(host, folderPath, id);
+        }
+    });
+    this.#changed();
+  }
+
+  /** Remembers what git said about a folder (attached or not), keeping the
+   * project it is attached to; an unchanged identity writes nothing. */
+  rememberFolder(host, cwd, identity) {
+    const db = this.#open();
+    const own = db
+      .prepare("SELECT * FROM folders WHERE host = ? AND path = ?")
+      .get(host, cwd);
+    const known = own?.seen_at != null && this.#identity(own, own.subdir || "");
+    if (
+      known &&
+      known.linkedWorktree === !!identity.linkedWorktree &&
+      ["remote", "commonDir", "checkout", "subdir", "branch"].every(
+        (field) => known[field] === identity[field],
+      )
+    )
+      return;
+    db.prepare(
+      `INSERT INTO folders(host, path, remote_key, common_dir, checkout, linked_worktree, subdir, branch, seen_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(host, path) DO UPDATE SET remote_key = excluded.remote_key,
+           common_dir = excluded.common_dir, checkout = excluded.checkout,
+           linked_worktree = excluded.linked_worktree, subdir = excluded.subdir,
+           branch = excluded.branch, seen_at = excluded.seen_at`,
+    ).run(
+      host,
+      cwd,
+      identity.remote,
+      identity.commonDir,
+      identity.checkout,
+      identity.linkedWorktree ? 1 : 0,
+      identity.subdir,
+      identity.branch,
+      Date.now(),
+    );
+  }
+
+  /** What was last stored about a folder on a host: its own row, else the row
+   * whose checkout contains it (the longest one). Null when nothing fits. */
+  storedFolder(host, cwd) {
+    const db = this.#open();
+    const own = db
+      .prepare("SELECT * FROM folders WHERE host = ? AND path = ?")
+      .get(host, cwd);
+    if (own?.seen_at != null) return this.#identity(own, own.subdir || "");
+    let best;
+    for (const row of db
+      .prepare(
+        "SELECT * FROM folders WHERE host = ? AND seen_at IS NOT NULL AND checkout != ''",
+      )
+      .all(host))
+      if (
+        (cwd === row.checkout || cwd.startsWith(`${row.checkout}/`)) &&
+        row.checkout.length > (best?.checkout.length ?? -1)
+      )
+        best = row;
+    return best
+      ? this.#identity(best, cwd.slice(best.checkout.length + 1))
+      : null;
+  }
+
+  #identity(row, subdir) {
+    return {
+      remote: row.remote_key || "",
+      commonDir: row.common_dir || "",
+      checkout: row.checkout || "",
+      linkedWorktree: !!row.linked_worktree,
+      subdir,
+      branch: row.branch || "",
+    };
+  }
+
+  #putSecrets(secrets) {
+    writeStore(this.userDataDir, "project-secrets", secrets);
     // Whatever the project holds changed: every host's copy is refreshed
     // soon, not only at the next task.
-    void operation.then(
-      () => this.#changed(),
-      () => {},
-    );
-    return operation;
+    this.#changed();
   }
 
   #changed() {
@@ -112,16 +261,8 @@ class Projects {
     this.changeTimer.unref?.();
   }
 
-  async #read(file) {
-    try {
-      const parsed = JSON.parse(await fs.readFile(file, "utf8"));
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? parsed
-        : {};
-    } catch (error) {
-      if (error?.code === "ENOENT") return {};
-      throw error;
-    }
+  #secrets() {
+    return readStore(this.userDataDir, "project-secrets");
   }
 
   #public(project) {
@@ -137,18 +278,18 @@ class Projects {
   }
 
   async list() {
-    const projects = await this.#read(this.projectsFile);
-    const secrets = await this.#read(this.secretsFile);
+    const projects = this.#load();
+    const secrets = this.#secrets();
     return Object.values(projects).map((project) =>
       this.#withHints(project, secrets),
     );
   }
 
   async get(id) {
-    const projects = await this.#read(this.projectsFile);
+    const projects = this.#load();
     const project = this.#own(projects, id);
     if (!project) return null;
-    return this.#withHints(project, await this.#read(this.secretsFile));
+    return this.#withHints(project, this.#secrets());
   }
 
   #withHints(project, secrets) {
@@ -186,7 +327,7 @@ class Projects {
   async #upsert(input) {
     if (!input || typeof input !== "object" || !String(input.name || "").trim())
       throw new Error("Project name is required.");
-    const projects = await this.#read(this.projectsFile);
+    const projects = this.#load();
     assertRemote(input.git?.url);
     // A project made again from a repository that already has one is that
     // project (the same repository is one project, like attach): creating
@@ -268,17 +409,10 @@ class Projects {
       (existing?.env || []).map((entry) => entry.name),
     );
     const nextNames = new Set(project.env.map((entry) => entry.name));
-    await this.#write(this.projectsFile, { ...projects, [id]: project });
-    if ([...previousNames].some((name) => !nextNames.has(name))) {
-      const secrets = await this.#read(this.secretsFile);
-      for (const name of previousNames)
-        if (!nextNames.has(name))
-          for (const key of Object.keys(secrets))
-            if (key === `${id}:${name}` || key.startsWith(`${id}:${name}@`))
-              delete secrets[key];
-      await this.#write(this.secretsFile, secrets);
-    }
-    return this.#withHints(project, await this.#read(this.secretsFile));
+    const removed = [...previousNames].filter((name) => !nextNames.has(name));
+    this.#save({ ...projects, [id]: project }, secretsOf(id, removed));
+    if (removed.length) this.#changed();
+    return this.#withHints(project, this.#secrets());
   }
 
   /** Adds, changes or removes variables on fresh stored state. A secret made
@@ -288,7 +422,7 @@ class Projects {
     return this.#locked(async () => {
       if (!Array.isArray(set) || !Array.isArray(remove))
         throw new Error("Variable changes must be lists.");
-      const projects = await this.#read(this.projectsFile);
+      const projects = this.#load();
       const project = this.#own(projects, id);
       if (!project) throw new Error("Unknown project.");
       const env = [...(project.env || [])];
@@ -337,14 +471,9 @@ class Projects {
           mcp: project.dismissed?.mcp || [],
           env: [...new Set([...(project.dismissed?.env || []), ...gone])],
         };
-      await this.#write(this.projectsFile, projects);
-      const secrets = await this.#read(this.secretsFile);
-      for (const name of dropped)
-        for (const key of Object.keys(secrets))
-          if (key === `${id}:${name}` || key.startsWith(`${id}:${name}@`))
-            delete secrets[key];
-      await this.#write(this.secretsFile, secrets);
-      return this.#withHints(project, secrets);
+      this.#save(projects, secretsOf(id, dropped));
+      this.#changed();
+      return this.#withHints(project, this.#secrets());
     });
   }
 
@@ -361,7 +490,7 @@ class Projects {
         [...Object.keys(set), ...remove].some((name) => name === "__proto__")
       )
         throw new Error("Invalid MCP server change.");
-      const projects = await this.#read(this.projectsFile);
+      const projects = this.#load();
       const project = this.#own(projects, id);
       if (!project) throw new Error("Unknown project.");
       const servers = { ...(project.mcp?.mcpServers || {}) };
@@ -394,10 +523,10 @@ class Projects {
           availableTo: entry.availableTo || ["mcp"],
         })),
       ];
-      await this.#write(this.projectsFile, projects);
+      this.#save(projects);
       for (const entry of added)
         await this.#setEncryptedValue(id, entry.name, entry.value);
-      return this.#withHints(project, await this.#read(this.secretsFile));
+      return this.#withHints(project, this.#secrets());
     });
   }
 
@@ -412,7 +541,7 @@ class Projects {
     { force = false } = {},
   ) {
     return this.#locked(async () => {
-      const projects = await this.#read(this.projectsFile);
+      const projects = this.#load();
       const project = this.#own(projects, id);
       if (!project) throw new Error("Unknown project.");
       const dismissed = {
@@ -424,7 +553,7 @@ class Projects {
       const filled = [];
       const skipped = [];
       const removed = [];
-      const secrets = await this.#read(this.secretsFile);
+      const secrets = this.#secrets();
       for (const entry of variables) {
         const name = String(entry.name);
         if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
@@ -474,12 +603,12 @@ class Projects {
             (name) => !addedServers.includes(name),
           ),
         };
-      await this.#write(this.projectsFile, projects);
+      this.#save(projects);
       for (const entry of [...added, ...filled])
         if (entry.value)
           await this.#setEncryptedValue(id, entry.name, entry.value);
       return {
-        project: this.#withHints(project, await this.#read(this.secretsFile)),
+        project: this.#withHints(project, this.#secrets()),
         addedVariables: added.map(({ name, secret }) => ({
           name,
           secret: !!secret,
@@ -495,17 +624,17 @@ class Projects {
   }
 
   async folders(id) {
-    const projects = await this.#read(this.projectsFile);
+    const projects = this.#load();
     return [...(this.#own(projects, id)?.folders || [])];
   }
 
   /** What importing would change, without changing it: names that would be
    * added, filled with a value, or skipped because the owner removed them. */
   async describeImport(id, { variables = [], servers = {} } = {}) {
-    const projects = await this.#read(this.projectsFile);
+    const projects = this.#load();
     const project = this.#own(projects, id);
     if (!project) throw new Error("Unknown project.");
-    const secrets = await this.#read(this.secretsFile);
+    const secrets = this.#secrets();
     const have = new Set((project.env || []).map((entry) => entry.name));
     const out = {
       newVariables: [],
@@ -531,49 +660,96 @@ class Projects {
     return out;
   }
 
-  /** The project a folder belongs to: the one with its git remote, else the
-   * one this folder was attached to. Read only. */
-  async resolveFolder({ remote, endpoint, cwd } = {}) {
-    const projects = await this.#read(this.projectsFile);
-    const found = this.#findFolder(projects, { remote, endpoint, cwd });
-    return found
-      ? this.#withHints(found.project, await this.#read(this.secretsFile))
+  /** The one place a folder is mapped to a project, in this order: the
+   * project the folder was attached to, the project of its git remote, a
+   * project with an attached folder of the same remote on any host, a project
+   * with an attached folder of the same repository (common git dir) on that
+   * host. A remote or common dir the caller does not know comes from the
+   * folder's stored identity. Null when none fits. Read only. */
+  async resolveProject(query = {}) {
+    const project = this.#find(this.#load(), query);
+    return project ? this.#withHints(project, this.#secrets()) : null;
+  }
+
+  /** The id `resolveProject` would answer, without reading secrets. */
+  projectIdFor(query = {}) {
+    return this.#find(this.#load(), query)?.id || "";
+  }
+
+  #find(projects, { host, cwd, remoteKey, commonDir } = {}) {
+    const db = this.#open();
+    const stored =
+      typeof cwd === "string" && cwd && (!remoteKey || !commonDir)
+        ? this.storedFolder(host, cwd)
+        : null;
+    remoteKey ||= stored?.remote || "";
+    commonDir ||= stored?.commonDir || "";
+    const attached = (sql, ...args) => {
+      const row = db.prepare(sql).get(...args);
+      return row && Object.hasOwn(projects, row.project_id)
+        ? projects[row.project_id]
+        : null;
+    };
+    const byFolder =
+      typeof cwd === "string" && cwd
+        ? attached(
+            "SELECT project_id FROM folders WHERE host = ? AND path = ? AND project_id IS NOT NULL",
+            host,
+            cwd,
+          )
+        : null;
+    if (byFolder) return byFolder;
+    const byRemote = remoteKey
+      ? Object.values(projects).find(
+          (item) => normalizeRemote(item.git?.url) === remoteKey,
+        )
+      : null;
+    if (byRemote) return byRemote;
+    const byAttachedRemote = remoteKey
+      ? attached(
+          "SELECT project_id FROM folders WHERE remote_key = ? AND project_id IS NOT NULL ORDER BY rowid LIMIT 1",
+          remoteKey,
+        )
+      : null;
+    if (byAttachedRemote) return byAttachedRemote;
+    return commonDir
+      ? attached(
+          "SELECT project_id FROM folders WHERE host = ? AND common_dir = ? AND project_id IS NOT NULL ORDER BY rowid LIMIT 1",
+          host,
+          commonDir,
+        )
       : null;
   }
 
-  #findFolder(projects, { remote, endpoint, cwd }) {
-    const key = normalizeRemote(remote);
-    const host = hostOf(endpoint);
-    const list = Object.values(projects);
-    const byRemote = key
-      ? list.find((item) => normalizeRemote(item.git?.url) === key)
-      : undefined;
-    const byFolder =
-      typeof cwd === "string" && cwd
-        ? list.find((item) =>
-            (item.folders || []).some(
-              (folder) => folder.endpoint === host && folder.cwd === cwd,
-            ),
-          )
-        : undefined;
-    const project = byRemote ?? byFolder;
-    return project ? { project, byRemote, byFolder } : null;
+  resolveFolder({ remote, endpoint, cwd } = {}) {
+    return this.resolveProject({
+      host: hostOf(endpoint),
+      cwd,
+      remoteKey: normalizeRemote(remote),
+    });
   }
 
   /** Opens the project of a folder, making one when it has none: a folder
    * with a git remote joins the project of that remote, any other folder is
    * known by its host and path. A folder that gains a remote later makes its
    * project follow it. */
-  attach({ remote = "", endpoint, cwd, name } = {}) {
+  attach({ remote = "", endpoint, cwd, name, commonDir } = {}) {
     if (typeof cwd !== "string" || !cwd)
       throw new Error("Choose a project folder.");
     assertRemote(remote);
     return this.#locked(async () => {
-      const projects = await this.#read(this.projectsFile);
+      const projects = this.#load();
       const host = hostOf(endpoint);
       const url = typeof remote === "string" ? remote.trim() : "";
-      const found = this.#findFolder(projects, { remote: url, endpoint, cwd });
-      let project = found?.project;
+      const known = this.#open()
+        .prepare("SELECT common_dir FROM folders WHERE host = ? AND path = ?")
+        .get(host, cwd);
+      let project = this.#find(projects, {
+        host,
+        cwd,
+        remoteKey: normalizeRemote(url),
+        commonDir: commonDir || known?.common_dir || "",
+      });
       if (!project) {
         const id = randomUUID();
         project = {
@@ -602,12 +778,7 @@ class Projects {
           dismissed: { env: [], mcp: [] },
         };
         projects[id] = project;
-      } else if (
-        url &&
-        found.byFolder &&
-        !found.byRemote &&
-        !project.git?.url
-      ) {
+      } else if (url && !project.git?.url) {
         // The folder had no remote when it was attached; now it has one.
         project.git = { ...project.git, url };
       }
@@ -620,27 +791,31 @@ class Projects {
       )
         project.folders.push({ endpoint: host, cwd });
       project.targets = [...new Set([...(project.targets || []), host])];
-      await this.#write(this.projectsFile, projects);
-      return this.#withHints(project, await this.#read(this.secretsFile));
+      this.#save(projects);
+      const key = normalizeRemote(url);
+      if (key || commonDir)
+        this.#open()
+          .prepare(
+            "UPDATE folders SET remote_key = COALESCE(NULLIF(?, ''), remote_key), common_dir = COALESCE(NULLIF(?, ''), common_dir) WHERE host = ? AND path = ?",
+          )
+          .run(key, String(commonDir || ""), host, cwd);
+      return this.#withHints(project, this.#secrets());
     });
   }
 
   delete(id) {
     return this.#locked(async () => {
-      const projects = await this.#read(this.projectsFile);
+      const projects = this.#load();
       if (!this.#own(projects, id)) return;
       delete projects[id];
-      await this.#write(this.projectsFile, projects);
-      const secrets = await this.#read(this.secretsFile);
-      for (const key of Object.keys(secrets))
-        if (key.startsWith(`${id}:`)) delete secrets[key];
-      await this.#write(this.secretsFile, secrets);
+      this.#save(projects, (key) => key.startsWith(`${id}:`));
+      this.#changed();
     });
   }
 
   setSecret(id, name, value) {
     return this.#locked(async () => {
-      const projects = await this.#read(this.projectsFile);
+      const projects = this.#load();
       const project = this.#own(projects, id);
       if (!project) throw new Error("Unknown project.");
       if (!(project.env || []).some((entry) => entry.name === name))
@@ -656,7 +831,7 @@ class Projects {
     return this.#locked(async () => {
       if (typeof value !== "string" || !value.trim())
         throw new Error("Enter a token.");
-      const projects = await this.#read(this.projectsFile);
+      const projects = this.#load();
       const project = this.#own(projects, id);
       if (!project) throw new Error("Unknown project.");
       let entry = (project.env || []).find((item) => item.name === "GIT_TOKEN");
@@ -666,23 +841,23 @@ class Projects {
       if (!entry) {
         entry = { name: "GIT_TOKEN", secret: true, availableTo: ["setup"] };
         project.env = [...(project.env || []), entry];
-        await this.#write(this.projectsFile, projects);
+        this.#save(projects);
       }
       await this.#setEncryptedValue(id, entry.name, value);
-      return this.#withHints(project, await this.#read(this.secretsFile));
+      return this.#withHints(project, this.#secrets());
     });
   }
 
   async #setEncryptedValue(id, key, value) {
     if (typeof value !== "string") throw new Error("Enter a string value.");
-    const projects = await this.#read(this.projectsFile);
+    const projects = this.#load();
     const owner = this.#own(projects, id);
     if (!owner) throw new Error("Unknown project.");
     if (!this.safeStorage?.isEncryptionAvailable?.())
       throw new Error("Secure storage is unavailable.");
     if (this.safeStorage.getSelectedStorageBackend?.() === "basic_text")
       throw new Error("Secure storage is unavailable.");
-    const secrets = await this.#read(this.secretsFile);
+    const secrets = this.#secrets();
     const entry = (owner.env || []).find(
       (item) => item.name === key.split("@")[0],
     );
@@ -693,7 +868,7 @@ class Projects {
       // decided from the variable's current secret flag when it is read.
       hint: hint(value),
     };
-    await this.#write(this.secretsFile, secrets);
+    this.#putSecrets(secrets);
     return {
       hasValue: true,
       hint: entry && !entry.secret ? value.slice(0, 200) : hint(value),
@@ -707,7 +882,7 @@ class Projects {
     )
       throw new Error("Invalid project host.");
     return this.#locked(async () => {
-      const projects = await this.#read(this.projectsFile);
+      const projects = this.#load();
       const project = this.#own(projects, id);
       if (!project) throw new Error("Unknown project.");
       if (!(project.env || []).some((entry) => entry.name === name))
@@ -718,19 +893,18 @@ class Projects {
 
   clearSecret(id, name) {
     return this.#locked(async () => {
-      const secrets = await this.#read(this.secretsFile);
+      const secrets = this.#secrets();
       for (const key of Object.keys(secrets))
-        if (key === `${id}:${name}` || key.startsWith(`${id}:${name}@`))
-          delete secrets[key];
-      await this.#write(this.secretsFile, secrets);
+        if (secretsOf(id, [name])(key)) delete secrets[key];
+      this.#putSecrets(secrets);
     });
   }
 
   async reviewEnvImport(id, entries) {
-    const projects = await this.#read(this.projectsFile);
+    const projects = this.#load();
     const project = this.#own(projects, id);
     if (!project) throw new Error("Unknown project.");
-    const secrets = await this.#read(this.secretsFile);
+    const secrets = this.#secrets();
     return entries.map(({ name, value }) => {
       const existing = (project.env || []).find((entry) => entry.name === name);
       if (!existing) return { name, status: "new" };
@@ -754,7 +928,7 @@ class Projects {
   }
 
   async secretFor(id, name) {
-    const secrets = await this.#read(this.secretsFile);
+    const secrets = this.#secrets();
     const stored = secrets[`${id}:${name}`];
     if (!stored) return null;
     try {
@@ -784,12 +958,11 @@ class Projects {
   }
 
   async resolveDirectory(directory) {
+    let remote = "";
     try {
-      const found = await this.resolve(await remoteUrl(directory, 2000));
-      if (found) return found;
+      remote = await remoteUrl(directory, 2000);
     } catch {}
-    // No remote (or none the store knows): the folder itself.
-    return this.resolveFolder({ endpoint: "local", cwd: directory });
+    return this.resolveFolder({ endpoint: "local", cwd: directory, remote });
   }
 
   /** Whether a project lives on a host: it has a folder there, or the host
@@ -805,7 +978,7 @@ class Projects {
   }
 
   async agentEnvironments(host = "local") {
-    const projects = await this.#read(this.projectsFile);
+    const projects = this.#load();
     const output = {};
     for (const project of Object.values(projects)) {
       if (!this.#onHost(project, host)) continue;
@@ -815,7 +988,7 @@ class Projects {
   }
 
   async mcpEnvironments(host = "local") {
-    const projects = await this.#read(this.projectsFile);
+    const projects = this.#load();
     const output = {};
     for (const project of Object.values(projects)) {
       if (!this.#onHost(project, host)) continue;
@@ -828,7 +1001,7 @@ class Projects {
    * without naming its project (the orchestrator agent's own) still gets that
    * project's values. */
   async repoProjects(host = "local") {
-    const projects = await this.#read(this.projectsFile);
+    const projects = this.#load();
     const output = {};
     for (const project of Object.values(projects))
       for (const folder of project.folders || [])
@@ -837,7 +1010,7 @@ class Projects {
   }
 
   async #secretValue(id, key) {
-    const secrets = await this.#read(this.secretsFile);
+    const secrets = this.#secrets();
     const stored = secrets[`${id}:${key}`];
     if (!stored) return null;
     try {
@@ -853,12 +1026,12 @@ class Projects {
     if (typeof host !== "string" || !host.startsWith("ssh:"))
       throw new Error("Invalid project host.");
     return this.#locked(async () => {
-      const projects = await this.#read(this.projectsFile);
+      const projects = this.#load();
       const project = this.#own(projects, id);
       if (!project) throw new Error("Unknown project.");
       project.hosts ||= {};
       project.hosts[host] = { ...project.hosts[host], withheld: !!withheld };
-      await this.#write(this.projectsFile, projects);
+      this.#save(projects);
       this.onSendChange?.(host);
       return { withheld: !!withheld };
     });
@@ -870,7 +1043,7 @@ class Projects {
     if (!overrides || typeof overrides !== "object" || Array.isArray(overrides))
       throw new Error("Host overrides must be an object.");
     return this.#locked(async () => {
-      const projects = await this.#read(this.projectsFile);
+      const projects = this.#load();
       const project = this.#own(projects, id);
       if (!project) throw new Error("Unknown project.");
       project.hosts ||= {};
@@ -878,7 +1051,7 @@ class Projects {
         ...project.hosts[host],
         overrides,
       };
-      await this.#write(this.projectsFile, projects);
+      this.#save(projects);
       return project.hosts[host].overrides;
     });
   }
@@ -891,14 +1064,8 @@ class Projects {
       typeof remote === "object" ? remote?.remote : remote,
     );
     if (!key) return null;
-    const projects = await this.#read(this.projectsFile);
-    const found = Object.values(projects).find(
-      (project) => normalizeRemote(project.git?.url) === key,
-    );
-    return found
-      ? this.#withHints(found, await this.#read(this.secretsFile))
-      : null;
+    return this.resolveProject({ remoteKey: key });
   }
 }
 
-module.exports = { Projects, normalizeRemote, assertRemote, atomicWriteJson };
+module.exports = { Projects, normalizeRemote, assertRemote };

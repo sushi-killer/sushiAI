@@ -1,6 +1,12 @@
 # Herdr integration: implementation and measured evidence
 
-The runtime remains the official Herdr 0.8.2 release. The owner excluded the
+sushiAI installs the official Herdr 0.9.3 release and works with any Herdr
+whose API schema still offers everything the contract names (`minProtocol` 20,
+the schema was checked on 0.8.2 and 0.9.3; the live install evidence under
+`docs/verification/herdr/` is still from 0.8.2). A version or protocol number
+alone never blocks a session. The terminal CLI must speak its daemon's
+protocol: when the pinned CLI does not, the owner's own CLI and then any
+earlier release sushiAI installed are tried. The owner excluded the
 experimental Herdr patch; no fork, patched binary, or patch is shipped by this
 change. Herdr owns running processes and terminal sessions. sushiAI owns their
 presentation, layouts, launch preparation and user actions. Conversation state

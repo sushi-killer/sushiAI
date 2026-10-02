@@ -2,11 +2,10 @@ import type { Layout, Panel, Workspace } from "./types";
 import { contains, isValidLayout, leaf, split, uid } from "./layout.ts";
 import { validRoute, type RouteRef } from "./extensions/routes.ts";
 import type { ProjectGit } from "./app/useProjectGit.ts";
-import { migrateHerdrIdentities } from "./herdrIdentity.ts";
+import { closedProjectKey, migrateHerdrIdentities } from "./herdrIdentity.ts";
 
 /** Where the snapshot lives when there is no desktop bridge (dev:web). With
- * the bridge it is <userData>/workspace-state.json, written by the main
- * process. */
+ * the bridge it is <userData>/sushiai.db, written by the main process. */
 export const BROWSER_KEY = "sushiai.workspace-state";
 // The keys the app used before the snapshot had one owner. They are named
 // here and nowhere else: `importLegacy` folds them into one snapshot once.
@@ -116,6 +115,7 @@ export function snapshotStore(): SnapshotStore {
 function normalizeGit(value: unknown): ProjectGit {
   const g = (value as Partial<ProjectGit>) || {};
   return {
+    projectId: typeof g.projectId === "string" ? g.projectId : "",
     remote: typeof g.remote === "string" ? g.remote : "",
     commonDir: typeof g.commonDir === "string" ? g.commonDir : "",
     checkout: typeof g.checkout === "string" ? g.checkout : "",
@@ -254,6 +254,57 @@ function importLegacy(store: SnapshotStore): string | null {
   return text;
 }
 
+/** A Herdr workspace saved with no live pane and nothing else open - its
+ * host dropped it, or its folder is gone - is only a dead row that repeats
+ * its project. On start it moves to Recently closed. Mid-session such a row
+ * stays, so "Session ended · Reopen" can bring it back in place. */
+export function sweepLeftovers(saved: Saved): Saved {
+  const leftover = (w: Workspace) =>
+    Boolean(w.herdrId) && w.panels.every((p) => p.herdrId && p.ended);
+  const rest = saved.workspaces.filter((w) => !leftover(w));
+  if (rest.length === saved.workspaces.length || !rest.length) return saved;
+  const closedAt = Date.now();
+  const swept = saved.workspaces
+    .filter(leftover)
+    .filter((w) => w.cwd)
+    .map((w) => ({
+      id: closedProjectKey(w.connection, w.cwd),
+      name: w.name,
+      cwd: w.cwd,
+      endpoint: w.connection,
+      herdr: true,
+      closedAt,
+      git: {
+        projectId: "",
+        remote: "",
+        commonDir: "",
+        checkout: "",
+        linkedWorktree: false,
+        subdir: "",
+        branch: "",
+      },
+    }));
+  const ids = new Set(swept.map((p) => p.id));
+  const gone = new Set(
+    saved.workspaces
+      .filter(leftover)
+      .flatMap((w) => [w.id, ...w.panels.map((p) => p.id)]),
+  );
+  const keep = (id: string | null | undefined) =>
+    id && gone.has(id) ? undefined : id;
+  return {
+    ...saved,
+    activeId: keep(saved.activeId) || rest[0].id,
+    selected: keep(saved.selected) || "",
+    zoomed: keep(saved.zoomed) || null,
+    workspaces: rest,
+    closedProjects: [
+      ...swept.filter((p, i) => swept.findIndex((q) => q.id === p.id) === i),
+      ...(saved.closedProjects || []).filter((p) => !ids.has(p.id)),
+    ],
+  };
+}
+
 export function restore(store: SnapshotStore = snapshotStore()): Saved | null {
   try {
     const value = JSON.parse(store.read() ?? importLegacy(store) ?? "null");
@@ -292,7 +343,7 @@ export function restore(store: SnapshotStore = snapshotStore()): Saved | null {
         })),
       })),
     };
-    const migrated = migrateHerdrIdentities(normalized);
+    const migrated = sweepLeftovers(migrateHerdrIdentities(normalized));
     if (migrated !== normalized) {
       try {
         store.flush(JSON.stringify(migrated));

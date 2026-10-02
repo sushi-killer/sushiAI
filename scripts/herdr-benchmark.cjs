@@ -6,6 +6,7 @@ const { spawn } = require("node:child_process");
 const { createHash } = require("node:crypto");
 const { performance } = require("node:perf_hooks");
 const { request } = require("../electron/herdr.cjs");
+const { appDb } = require("../electron/app-db.cjs");
 const { Connections, quote, run } = require("../electron/connections.cjs");
 const {
   assertHerdrCompatibility,
@@ -321,7 +322,7 @@ async function measure(binary, transport) {
       );
       const launchOptions = {
         getConnections: () => launchConnections,
-        journalPath: path.join(directory, "session-journal.json"),
+        userDataDir: directory,
         modelProviders: {
           resolveEnv: async () => ({
             key: "synthetic-benchmark-key",
@@ -495,9 +496,12 @@ async function measure(binary, transport) {
             ).read.text.includes("AGENT:service 🍣 日本語"),
           "agent worktree env",
         );
-        const journal = JSON.parse(
-          await fs.readFile(launchOptions.journalPath, "utf8"),
-        );
+        const journal = {
+          operations: appDb(directory)
+            .prepare("SELECT data FROM launches")
+            .all()
+            .map((row) => JSON.parse(row.data)),
+        };
         assert.equal(
           JSON.stringify(journal).includes("synthetic-benchmark-key"),
           false,

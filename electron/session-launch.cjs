@@ -1,6 +1,6 @@
-const fs = require("node:fs/promises");
 const path = require("node:path");
-const { randomUUID, createHash } = require("node:crypto");
+const { createHash } = require("node:crypto");
+const { appDb, validLaunchRecord } = require("./app-db.cjs");
 const { request, errorDetails } = require("./herdr.cjs");
 const { quote } = require("./connections.cjs");
 const { herdrLaunchParams } = require("./terminal-text.cjs");
@@ -122,8 +122,8 @@ class SessionLauncher {
     readSnapshot,
     checkCompatibility = async () => {},
     worktreeCreate = createWorktree,
-    journalPath,
-    workspaceStatePath,
+    userDataDir,
+    savedWorkspaces,
     resolveEnvironment = async () => ({ env: {}, project: null, sends: false }),
     prepareSession,
   }) {
@@ -136,13 +136,12 @@ class SessionLauncher {
     this.queues = new Map();
     this.operations = new Map();
     this.projects = new Map();
-    this.journalPath = journalPath;
-    this.workspaceStatePath = workspaceStatePath;
+    this.userDataDir = userDataDir;
+    this.savedWorkspaces = savedWorkspaces;
     this.resolveEnvironment = resolveEnvironment;
     this.prepareSession = prepareSession;
     this.journal = new Map();
-    this.journalLoad = null;
-    this.journalWrite = Promise.resolve();
+    this.journalLoaded = false;
   }
 
   launch(input) {
@@ -180,7 +179,7 @@ class SessionLauncher {
     if (operation?.promise) return operation.promise;
     if (
       operation?.completed &&
-      (!this.journalPath || operation.persistedCompleted)
+      (!this.userDataDir || operation.persistedCompleted)
     )
       return Promise.resolve({ ok: true, value: operation.created });
     if (!operation) {
@@ -218,51 +217,35 @@ class SessionLauncher {
   }
 
   async loadJournal() {
-    if (!this.journalPath) return;
-    if (!this.journalLoad)
-      this.journalLoad = fs
-        .readFile(this.journalPath, "utf8")
-        .then((text) => {
-          const document = JSON.parse(text);
-          if (document.version !== 1 || !Array.isArray(document.operations))
-            throw launchError(
-              "INVALID_LAUNCH_JOURNAL",
-              "The saved session launch journal is invalid.",
-            );
-          for (const record of document.operations) {
-            if (
-              typeof record.endpoint !== "string" ||
-              typeof record.operationId !== "string" ||
-              !record.created ||
-              !["workspaceId", "paneId", "cwd"].every(
-                (field) => typeof record.created[field] === "string",
-              ) ||
-              typeof record.signatureHash !== "string" ||
-              typeof record.preparationHash !== "string"
-            )
-              throw launchError(
-                "INVALID_LAUNCH_JOURNAL",
-                "The saved session launch journal is invalid.",
-              );
-            this.journal.set(
-              JSON.stringify([record.endpoint, record.operationId]),
-              record,
-            );
-          }
-        })
-        .catch((error) => {
-          if (error.code !== "ENOENT") {
-            this.journalLoad = null;
-            throw error;
-          }
-        });
-    await this.journalLoad;
+    if (!this.userDataDir || this.journalLoaded) return;
+    const rows = appDb(this.userDataDir)
+      .prepare("SELECT data FROM launches")
+      .all();
+    const db = appDb(this.userDataDir);
+    for (const row of rows) {
+      let record = null;
+      try {
+        record = JSON.parse(row.data);
+      } catch {
+        // Falls through to the invalid-row path.
+      }
+      if (!validLaunchRecord(record)) {
+        console.warn("Dropping an invalid saved session launch record.");
+        db.prepare("DELETE FROM launches WHERE data = ?").run(row.data);
+        continue;
+      }
+      this.journal.set(
+        JSON.stringify([record.endpoint, record.operationId]),
+        record,
+      );
+    }
+    this.journalLoaded = true;
   }
 
   async persist(operation) {
-    if (!this.journalPath) return;
+    if (!this.userDataDir) return;
     const input = operation.input;
-    this.journal.set(JSON.stringify([input.endpoint, input.operationId]), {
+    const record = {
       endpoint: input.endpoint,
       operationId: input.operationId,
       signatureHash: fingerprint(operation.signature),
@@ -270,28 +253,17 @@ class SessionLauncher {
       created: operation.created,
       sourceCwd: operation.sourceCwd || input.cwd,
       completed: !!operation.completed,
-    });
-    const write = this.journalWrite
-      .catch(() => {})
-      .then(async () => {
-        await fs.mkdir(path.dirname(this.journalPath), { recursive: true });
-        const temporary = `${this.journalPath}.${randomUUID()}.tmp`;
-        try {
-          await fs.writeFile(
-            temporary,
-            JSON.stringify({
-              version: 1,
-              operations: [...this.journal.values()],
-            }),
-            { mode: 0o600 },
-          );
-          await fs.rename(temporary, this.journalPath);
-        } finally {
-          await fs.unlink(temporary).catch(() => {});
-        }
-      });
-    this.journalWrite = write;
-    await write;
+    };
+    this.journal.set(
+      JSON.stringify([input.endpoint, input.operationId]),
+      record,
+    );
+    appDb(this.userDataDir)
+      .prepare(
+        "INSERT INTO launches(endpoint, operation_id, data) VALUES(?, ?, ?) " +
+          "ON CONFLICT(endpoint, operation_id) DO UPDATE SET data = excluded.data",
+      )
+      .run(record.endpoint, record.operationId, JSON.stringify(record));
     if (operation.completed) operation.persistedCompleted = true;
   }
 
@@ -332,22 +304,7 @@ class SessionLauncher {
   }
 
   async findWorkspace(endpoint, cwd, snapshot) {
-    let savedWorkspaces = [];
-    if (this.workspaceStatePath) {
-      try {
-        const saved = JSON.parse(
-          await fs.readFile(this.workspaceStatePath, "utf8"),
-        );
-        if (!Array.isArray(saved.workspaces))
-          throw launchError(
-            "INVALID_WORKSPACE_STATE",
-            "The saved workspace list is invalid.",
-          );
-        savedWorkspaces = saved.workspaces;
-      } catch (error) {
-        if (error.code !== "ENOENT") throw error;
-      }
-    }
+    const saved = this.savedWorkspaces ? this.savedWorkspaces() : [];
     const candidates = snapshot.workspaces.map((workspace) => ({
       workspace,
       pane: snapshot.panes.find(
@@ -360,14 +317,14 @@ class SessionLauncher {
           record.endpoint === endpoint &&
           record.created.workspaceId === workspace.workspace_id,
       );
-      const saved = savedWorkspaces.find(
+      const savedWorkspace = saved.find(
         (item) =>
           item.connection === endpoint &&
           item.herdrId === workspace.workspace_id,
       );
       const candidatePath =
         workspace.worktree?.checkout_path ||
-        saved?.cwd ||
+        savedWorkspace?.cwd ||
         retained?.created.cwd ||
         pane?.cwd;
       if (!candidatePath) continue;

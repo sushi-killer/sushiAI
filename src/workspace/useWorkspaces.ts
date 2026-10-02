@@ -6,7 +6,6 @@ import { applyChatEvent, startUserTurn } from "../chat-threads.ts";
 import { disposeTerminal } from "../TerminalPanel.tsx";
 import { errorText } from "../app/errors.ts";
 import { agentTitle } from "../app/agent-title.ts";
-import { normalizeRemote } from "../app/useProjectGit.ts";
 import type { ProjectGit } from "../app/useProjectGit.ts";
 import {
   closeBeforeWorktreeRemoval,
@@ -880,6 +879,7 @@ export function useWorkspaces({
       herdr: Boolean(workspace.herdrId),
       closedAt: Date.now(),
       git: {
+        projectId: "",
         remote: "",
         commonDir: "",
         checkout: "",
@@ -890,16 +890,14 @@ export function useWorkspaces({
     };
     setClosedProjects((list) => rememberProject(list, entry));
     window.bridge
-      ?.projectInspect(workspace.connection, {
-        operation: "git_remote",
-        root: workspace.cwd,
-      })
+      ?.projectIdentify(workspace.connection, workspace.cwd)
       .then((result) =>
         setClosedProjects((list) =>
           refreshProject(list, {
             ...entry,
             git: {
-              remote: normalizeRemote(result?.remote || ""),
+              projectId: result?.projectId || "",
+              remote: result?.remote || "",
               commonDir: result?.commonDir || "",
               checkout: result?.checkout || "",
               linkedWorktree: result?.linkedWorktree || false,

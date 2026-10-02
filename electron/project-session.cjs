@@ -2,6 +2,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { quote } = require("./connections.cjs");
+const { normalizeRemote } = require("./projects.cjs");
 
 /** The project a folder on a host belongs to: the one the folder was attached
  * to, else the one of its git remote. Null when it has none. */
@@ -15,8 +16,8 @@ async function projectForFolder(
     typeof endpoint === "string" && endpoint.startsWith("ssh:")
       ? endpoint
       : "local";
-  const byFolder = await projects.resolveFolder({ endpoint: host, cwd });
-  if (byFolder) return byFolder;
+  const attached = await projects.resolveProject({ host, cwd });
+  if (attached) return attached;
   const info = await connections
     ?.inspect(host === "local" ? undefined : host, {
       operation: "git_remote",
@@ -26,7 +27,14 @@ async function projectForFolder(
       if (strict) throw error;
       return null;
     });
-  return info?.remote ? projects.resolve(info.remote) : null;
+  return info
+    ? projects.resolveProject({
+        host,
+        cwd,
+        remoteKey: normalizeRemote(info.remote),
+        commonDir: info.commonDir,
+      })
+    : null;
 }
 
 /** Project values travel in the Herdr creation RPC; account files are prepared separately. */

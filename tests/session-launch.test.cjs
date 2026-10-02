@@ -4,6 +4,11 @@ const {
   SessionLauncher,
   registerSessionLaunchIpc,
 } = require("../electron/session-launch.cjs");
+const { appDb, closeAppDb } = require("../electron/app-db.cjs");
+const {
+  savedWorkspaces,
+  writeSnapshotSync,
+} = require("../electron/workspace-snapshot.cjs");
 
 const launch = (operationId, extra = {}) => ({
   operationId,
@@ -85,8 +90,8 @@ function setup(options = {}) {
     checkCompatibility: options.checkCompatibility,
     readSnapshot: options.readSnapshot,
     worktreeCreate: options.worktreeCreate,
-    journalPath: options.journalPath,
-    workspaceStatePath: options.workspaceStatePath,
+    userDataDir: options.userDataDir,
+    savedWorkspaces: options.savedWorkspaces,
     resolveEnvironment: options.resolveEnvironment,
     prepareSession: options.prepareSession,
   });
@@ -118,15 +123,14 @@ test("saved canonical checkout survives shell cd and launcher restart", async ()
     path.join(os.tmpdir(), "sushiai-canonical-journal-"),
   );
   try {
-    const journalPath = path.join(directory, "launches.json");
-    const server = setup({ journalPath });
+    const server = setup({ userDataDir: directory });
     const first = await server.launcher.launch(launch("original"));
     assert.equal(first.ok, true);
     server.panes[0].cwd = "/tmp/different-project";
     const restarted = new SessionLauncher({
       getConnections: () => server.connections,
       rpc: server.rpc,
-      journalPath,
+      userDataDir: directory,
     });
     const next = await restarted.launch(launch("separate-panel"));
     assert.equal(next.ok, true);
@@ -134,6 +138,7 @@ test("saved canonical checkout survives shell cd and launcher restart", async ()
     assert.equal(server.workspaces.length, 1);
     assert.equal(server.panes.length, 2);
   } finally {
+    closeAppDb(directory);
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
@@ -146,17 +151,19 @@ test("migrated saved checkout reuses legacy sessions after cd without a launch j
     path.join(os.tmpdir(), "sushiai-saved-checkout-"),
   );
   try {
-    const workspaceStatePath = path.join(directory, "workspace-state.json");
-    const server = setup({ workspaceStatePath });
+    const server = setup({
+      savedWorkspaces: () => savedWorkspaces(directory),
+    });
     await server.rpc("/tmp/launch-herdr.sock", "workspace.create", {
       cwd: "/tmp/checkout",
     });
     server.panes[0].cwd = "/tmp/elsewhere";
-    await fs.writeFile(
-      workspaceStatePath,
+    writeSnapshotSync(
+      directory,
       JSON.stringify({
         workspaces: [
           {
+            id: "ws-1",
             connection: "/tmp/launch-herdr.sock",
             herdrId: "w1",
             cwd: "/tmp/alias",
@@ -170,6 +177,7 @@ test("migrated saved checkout reuses legacy sessions after cd without a launch j
     assert.equal(server.workspaces.length, 1);
     assert.equal(server.panes.length, 2);
   } finally {
+    closeAppDb(directory);
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
@@ -182,8 +190,7 @@ test("project association remains after its original pane closes", async () => {
     path.join(os.tmpdir(), "sushiai-journal-project-"),
   );
   try {
-    const journalPath = path.join(directory, "launches.json");
-    const server = setup({ journalPath });
+    const server = setup({ userDataDir: directory });
     const first = await server.launcher.launch(launch("original"));
     assert.equal(first.ok, true);
     server.panes.splice(0, 1, {
@@ -194,13 +201,14 @@ test("project association remains after its original pane closes", async () => {
     const restarted = new SessionLauncher({
       getConnections: () => server.connections,
       rpc: server.rpc,
-      journalPath,
+      userDataDir: directory,
     });
     const next = await restarted.launch(launch("new-panel"));
     assert.equal(next.ok, true);
     assert.equal(server.workspaces.length, 1);
     assert.equal(server.panes.length, 2);
   } finally {
+    closeAppDb(directory);
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
@@ -539,7 +547,6 @@ test("creation journal survives application restart without persisting environme
   const directory = await fs.mkdtemp(
     path.join(os.tmpdir(), "sushiai-launch-journal-"),
   );
-  const journalPath = path.join(directory, "launches.json");
   let preparationFailed = false;
   try {
     const modelProviders = {
@@ -549,11 +556,13 @@ test("creation journal survives application restart without persisting environme
       }),
     };
     const state = setup({
-      journalPath,
+      userDataDir: directory,
       modelProviders,
       exec: async () => {
-        const saved = JSON.parse(await fs.readFile(journalPath, "utf8"));
-        assert.equal(saved.operations[0].created.paneId, "p1");
+        const saved = JSON.parse(
+          appDb(directory).prepare("SELECT data FROM launches").get().data,
+        );
+        assert.equal(saved.created.paneId, "p1");
         if (!preparationFailed) {
           preparationFailed = true;
           throw new Error("Interrupted after creation was persisted");
@@ -571,11 +580,15 @@ test("creation journal survives application restart without persisting environme
     const failure = await state.launcher.launch(input);
     assert.equal(failure.ok, false);
     assert.equal(failure.error.created.paneId, "p1");
-    const text = await fs.readFile(journalPath, "utf8");
+    const text = appDb(directory)
+      .prepare("SELECT data FROM launches")
+      .all()
+      .map((row) => row.data)
+      .join("\n");
     assert.ok(!text.includes("synthetic-key-never-in-journal"));
     assert.ok(!text.includes("synthetic-env-not-for-journal"));
     const options = {
-      journalPath,
+      userDataDir: directory,
       modelProviders,
       getConnections: () => state.connections,
       rpc: state.rpc,
@@ -592,6 +605,7 @@ test("creation journal survives application restart without persisting environme
       1,
     );
   } finally {
+    closeAppDb(directory);
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
@@ -655,6 +669,7 @@ test("canonical checkout is resolved on the host, separating symlinks, worktrees
     assert.equal(await canonical(checkout), await fs.realpath(checkout));
   } finally {
     await connections.close();
+    closeAppDb(directory);
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
@@ -709,6 +724,7 @@ test("the host worktree helper defaults to main and accepts the prepared commit"
     }
   } finally {
     await connections.close();
+    closeAppDb(directory);
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
@@ -786,7 +802,7 @@ test("project environment read failure stops creation and remains retryable", as
       sessionEnvironment(
         {
           projects: {
-            resolveFolder: async () => ({ id: "project" }),
+            resolveProject: async () => ({ id: "project" }),
             sendsValues: async () => true,
             environmentFor: async () => {
               if (fail)

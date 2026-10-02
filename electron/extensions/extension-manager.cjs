@@ -1,6 +1,5 @@
 const path = require("node:path");
-const { randomUUID } = require("node:crypto");
-const { mkdir, readFile, rename, rm, writeFile } = require("node:fs/promises");
+const { DAMAGED, readStore, writeStore } = require("../app-db.cjs");
 const { validateExtensionManifest } = require("./manifest.cjs");
 const { scanLocalExtensions } = require("./local-extensions.cjs");
 
@@ -36,28 +35,18 @@ function defaultLock() {
   return { schemaVersion: SCHEMA_VERSION, packages: {} };
 }
 
-async function readJson(file) {
-  try {
-    return { exists: true, value: JSON.parse(await readFile(file, "utf8")) };
-  } catch (error) {
-    if (error?.code === "ENOENT") return { exists: false, value: null };
-    return { exists: true, value: null, error };
-  }
+/** A document of sushiai.db (store `name`, key `value`): whether it exists
+ * and what it holds. */
+function readDoc(dataDir, name) {
+  const store = readStore(dataDir, name, { damaged: true });
+  if (!Object.hasOwn(store, "value")) return { exists: false, value: null };
+  // Present but unreadable: fail closed, never start over from defaults.
+  if (store.value === DAMAGED) return { exists: true, value: null };
+  return { exists: true, value: store.value };
 }
 
-async function writeJsonAtomic(file, value) {
-  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const temporary = `${file}.${randomUUID()}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
-    mode: 0o600,
-    flag: "wx",
-  });
-  try {
-    await rename(temporary, file);
-  } catch (error) {
-    await rm(temporary, { force: true }).catch(() => {});
-    throw error;
-  }
+function writeDoc(dataDir, name, value) {
+  writeStore(dataDir, name, { value });
 }
 
 function validState(value) {
@@ -109,8 +98,6 @@ class ExtensionManager {
       throw new Error("Extension data directory must be absolute.");
     this.dataDir = dataDir;
     this.extensionDir = path.join(dataDir, "extensions");
-    this.stateFile = path.join(this.extensionDir, "extensions.json");
-    this.lockFile = path.join(this.extensionDir, "extension-lock.json");
     this.localDir = localDir;
     this.problems = [];
     // Built-ins and installed packages come from code, so a bad one is a bug
@@ -178,7 +165,7 @@ class ExtensionManager {
   async reconcile() {
     let stateWritable = true;
     let stateChanged = false;
-    const stateFile = await readJson(this.stateFile);
+    const stateFile = readDoc(this.dataDir, "extensions");
     if (!stateFile.exists) {
       this.state = defaultState([...this.manifests.values()]);
     } else if (validState(stateFile.value)) {
@@ -194,7 +181,7 @@ class ExtensionManager {
     }
 
     let lockWritable = true;
-    const lockFile = await readJson(this.lockFile);
+    const lockFile = readDoc(this.dataDir, "extension-lock");
     if (validLock(lockFile.value)) this.lock = lockFile.value;
     else if (lockFile.exists) {
       lockWritable = false;
@@ -269,9 +256,9 @@ class ExtensionManager {
     // Existing resolved entries are never replaced from a manifest. This is
     // what keeps a lock commit stable across restarts.
     if (lockWritable && (lockChanged || !lockFile.exists))
-      await writeJsonAtomic(this.lockFile, this.lock);
+      writeDoc(this.dataDir, "extension-lock", this.lock);
     if (stateWritable && (stateChanged || !stateFile.exists))
-      await writeJsonAtomic(this.stateFile, this.state);
+      writeDoc(this.dataDir, "extensions", this.state);
   }
 
   /** The active surface behind an address, or undefined. Synchronous so IPC
@@ -367,7 +354,7 @@ class ExtensionManager {
     };
     this.revision += 1;
     this.state.revision = this.revision;
-    await writeJsonAtomic(this.stateFile, this.state);
+    writeDoc(this.dataDir, "extensions", this.state);
     for (const listener of this.listeners) listener(extensionId, enabled);
     return this.snapshot();
   }
@@ -378,6 +365,4 @@ module.exports = {
   SCHEMA_VERSION,
   defaultState,
   defaultLock,
-  readJson,
-  writeJsonAtomic,
 };

@@ -885,6 +885,60 @@ function registerProjectIpc({
         })),
       };
     });
+    // Folders whose git identity was read in this run. A repository's remote
+    // and common dir practically never change, so a stored identity answers
+    // at once and git is asked once per run, in the background - an offline
+    // host never holds up the sidebar. `refresh` (the active workspace's
+    // branch poll) reads git now.
+    const readThisRun = new Set();
+    handle("projects:identify", async (endpoint, cwd, options) => {
+      if (typeof cwd !== "string" || !cwd.trim())
+        throw new Error("Choose a project folder.");
+      const host = hostOfEndpoint(endpoint);
+      const answer = (identity, stale) => ({
+        projectId: projects.projectIdFor({
+          host,
+          cwd,
+          remoteKey: identity.remote,
+          commonDir: identity.commonDir,
+        }),
+        ...identity,
+        stale,
+      });
+      const read = async () => {
+        const info = await connections().inspect(
+          host === "local" ? undefined : host,
+          { operation: "git_remote", root: cwd },
+        );
+        const identity = {
+          remote: normalizeRemote(info?.remote),
+          commonDir: String(info?.commonDir || ""),
+          checkout: String(info?.checkout || ""),
+          linkedWorktree: !!info?.linkedWorktree,
+          subdir: String(info?.subdir || ""),
+          branch: String(info?.branch || ""),
+        };
+        projects.rememberFolder(host, cwd, identity);
+        return identity;
+      };
+      const key = JSON.stringify([host, cwd]);
+      const stored = projects.storedFolder(host, cwd);
+      if (stored && !options?.refresh) {
+        if (!readThisRun.has(key)) {
+          readThisRun.add(key);
+          // A host that cannot be asked now is asked again on a later call.
+          read().catch(() => readThisRun.delete(key));
+        }
+        return answer(stored, true);
+      }
+      readThisRun.add(key);
+      try {
+        return answer(await read(), false);
+      } catch (error) {
+        if (!stored) throw error;
+        return answer(stored, true);
+      }
+    });
     handle("projects:resolve", async (target) => {
       // A folder is asked for by host and path; its remote is read here.
       if (target && typeof target === "object" && target.cwd)

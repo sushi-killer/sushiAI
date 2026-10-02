@@ -2,6 +2,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { createHash } = require("node:crypto");
 const { createReadStream } = require("node:fs");
+const { readStore, writeStore } = require("./app-db.cjs");
 
 const REPOSITORY = "sushi-killer/sushiAI";
 const RELEASES_URL = `https://github.com/${REPOSITORY}/releases`;
@@ -118,7 +119,7 @@ class Updates {
     canInstall = false,
   }) {
     this.directory = path.join(directory, "updates");
-    this.settingsFile = path.join(directory, "updates.json");
+    this.userDataDir = directory;
     this.fetcher = fetcher;
     this.openPath = openPath;
     this.openExternal = openExternal;
@@ -152,15 +153,14 @@ class Updates {
   async init() {
     await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
     try {
-      const saved = JSON.parse(await fs.readFile(this.settingsFile, "utf8"));
+      const saved = readStore(this.userDataDir, "updates").value || {};
       for (const key of Object.keys(this.state.settings))
         if (typeof saved[key] === "boolean")
           this.state.settings[key] = saved[key];
-    } catch (e) {
-      if (e.code !== "ENOENT")
-        this.emit({
-          error: "Update preferences could not be loaded. Defaults are in use.",
-        });
+    } catch {
+      this.emit({
+        error: "Update preferences could not be loaded. Defaults are in use.",
+      });
     }
     try {
       const message = await fs.readFile(
@@ -243,10 +243,7 @@ class Updates {
         throw new Error("Invalid update preference.");
       settings[key] = value;
     }
-    await fs.writeFile(this.settingsFile + ".tmp", JSON.stringify(settings), {
-      mode: 0o600,
-    });
-    await fs.rename(this.settingsFile + ".tmp", this.settingsFile);
+    writeStore(this.userDataDir, "updates", { value: settings });
     const excluded =
       this.state.release &&
       !settings.includePrereleases &&

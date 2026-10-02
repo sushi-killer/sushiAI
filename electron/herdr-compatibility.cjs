@@ -6,10 +6,13 @@ const { run, quote } = require("./connections.cjs");
 
 const REMOTE_PATH = 'export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; ';
 
+/** What this Herdr build is missing from what sushiAI calls. A different
+ * version or a newer protocol is not on the list: Herdr adds to its API, so a
+ * build is used as long as everything the contract names is still there. */
 function schemaIssues(schema) {
   const issues = [];
-  if (schema.protocol !== HERDR_CONTRACT.protocol)
-    issues.push(`CLI protocol ${schema.protocol} is not supported.`);
+  if (!(schema.protocol >= HERDR_CONTRACT.minProtocol))
+    issues.push(`CLI protocol ${schema.protocol} is older than supported.`);
   if (schema.schema_version !== HERDR_CONTRACT.schemaVersion)
     issues.push(`CLI schema ${schema.schema_version} is not supported.`);
   const methods = new Set(
@@ -32,7 +35,69 @@ function schemaIssues(schema) {
   return issues;
 }
 
-async function checkHerdrCompatibility({
+const MANAGED_REMOTE = ".local/share/sushiai/herdr";
+
+/** Every other Herdr CLI that might speak the running daemon's protocol: the
+ * owner's own one on PATH, then the releases sushiAI installed before. */
+async function otherClis({ endpoint, connections, binary }) {
+  const ssh = endpoint.startsWith("ssh:");
+  let managed = [];
+  try {
+    managed = ssh
+      ? (
+          await connections.exec(
+            endpoint,
+            `for f in "$HOME/${MANAGED_REMOTE}"/*/herdr; do [ -x "$f" ] && printf '%s\\n' "$f"; done; true`,
+          )
+        )
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+      : connections.herdrInstallDirectory
+        ? (
+            await fs.readdir(connections.herdrInstallDirectory, {
+              withFileTypes: true,
+            })
+          )
+            .filter((entry) => entry.isDirectory())
+            .map((entry) =>
+              path.join(connections.herdrInstallDirectory, entry.name, "herdr"),
+            )
+        : [];
+  } catch {
+    /* No earlier releases. */
+  }
+  const own = (file) =>
+    path.basename(path.dirname(file)) === HERDR_CONTRACT.version;
+  // Over SSH, no binary means "the host's own `command -v herdr`".
+  return [ssh ? undefined : binary, ...managed.filter((file) => !own(file))];
+}
+
+// ponytail: no cache, a mismatched SSH host re-probes candidates on each
+// attach; cache the working CLI per endpoint+daemon generation if it shows.
+async function checkHerdrCompatibility(options) {
+  const status = await checkOnce(options);
+  // sushiAI's own pinned CLI cannot attach to a daemon of another protocol
+  // (the owner's Herdr is older or newer, or still runs a release sushiAI
+  // installed before); a CLI that speaks the daemon's protocol then may.
+  // A check of one named CLI (`preferManaged: false`) stays about that CLI.
+  if (
+    status.compatible ||
+    !status.daemon.compatible ||
+    options.preferManaged === false
+  )
+    return status;
+  const tried = new Set([status.cli.binary]);
+  for (const binary of await otherClis(options)) {
+    if (binary !== undefined && (!binary || tried.has(binary))) continue;
+    tried.add(binary);
+    const other = await checkOnce({ ...options, binary, preferManaged: false });
+    if (other.compatible) return other;
+  }
+  return status;
+}
+
+async function checkOnce({
   endpoint,
   connections,
   binary,
@@ -63,17 +128,11 @@ async function checkHerdrCompatibility({
         protocol: pong.protocol,
         capabilities: pong.capabilities,
       };
-      if (pong.version !== HERDR_CONTRACT.version)
+      status.daemon.compatible = pong.protocol >= HERDR_CONTRACT.minProtocol;
+      if (!status.daemon.compatible)
         status.issues.push(
-          `Daemon version ${pong.version} is not the verified ${HERDR_CONTRACT.version}.`,
+          `Daemon protocol ${pong.protocol} is older than supported.`,
         );
-      if (pong.protocol !== HERDR_CONTRACT.protocol)
-        status.issues.push(
-          `Daemon protocol ${pong.protocol} is not supported.`,
-        );
-      status.daemon.compatible =
-        pong.version === HERDR_CONTRACT.version &&
-        pong.protocol === HERDR_CONTRACT.protocol;
     } catch (error) {
       status.daemon.error = errorDetails(error);
       status.issues.push(`Daemon check failed: ${error.message}`);
@@ -83,7 +142,7 @@ async function checkHerdrCompatibility({
     try {
       let invoke;
       if (endpoint.startsWith("ssh:")) {
-        const managed = `.local/share/sushiai/herdr/${HERDR_CONTRACT.version}/herdr`;
+        const managed = `${MANAGED_REMOTE}/${HERDR_CONTRACT.version}/herdr`;
         if (preferManaged || !binary)
           binary = (
             await connections.exec(
@@ -142,10 +201,6 @@ async function checkHerdrCompatibility({
         /--rows\b/.test(streamHelp);
       if (!status.cli.stream)
         issues.push("CLI does not support terminal session control.");
-      if (version !== HERDR_CONTRACT.version)
-        issues.push(
-          `CLI version ${version} is not the verified ${HERDR_CONTRACT.version}.`,
-        );
       status.cli.compatible = issues.length === 0;
       status.issues.push(...issues);
     } catch (error) {
@@ -154,6 +209,18 @@ async function checkHerdrCompatibility({
     }
   })();
   await Promise.all([daemon, cli]);
+  // The terminal CLI attaches to the daemon itself, so the two must speak one
+  // protocol, whatever either number is.
+  if (
+    status.daemon.compatible &&
+    status.cli.compatible &&
+    status.daemon.protocol !== status.cli.protocol
+  ) {
+    status.cli.compatible = false;
+    status.issues.push(
+      `Terminal CLI ${status.cli.version} (protocol ${status.cli.protocol}) does not match the daemon ${status.daemon.version} (protocol ${status.daemon.protocol}).`,
+    );
+  }
   status.compatible = status.daemon.compatible && status.cli.compatible;
   return status;
 }

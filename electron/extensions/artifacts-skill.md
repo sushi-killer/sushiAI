@@ -151,3 +151,8 @@ The owner's comments arrive in your input as one message that starts with
 `[sushiAI Preview] Owner feedback, N comments on <path>`, each with the
 quoted passage. Apply them to the same
 file, then answer in one short line per comment.
+
+The owner can also edit a Markdown file in the Preview. Then you get one
+line, `[sushiAI Preview] The owner edited <path>. Reread it before you change
+it.` Read the file again before your next edit, so you never write back an
+old copy.

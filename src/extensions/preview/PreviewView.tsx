@@ -4,6 +4,7 @@ import {
   Copy,
   ExternalLink,
   MessageSquare,
+  Pencil,
   Play,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -18,11 +19,11 @@ import {
   agoText,
   clampBoxX,
   commentMessage,
+  editedMessage,
   goalPrompt,
   insideProject,
   paneRoot,
   agentEnded,
-  canStart,
   parseComments,
   kindOf,
   parseFrontmatter,
@@ -201,28 +202,31 @@ export function PreviewView(props: CoreViewProps) {
       y: event.clientY - (area?.top || 0) + 10,
     });
   };
-  const send = async (items: Comment[]) => {
+  // One bracketed paste keeps the newlines inside a single message; the
+  // Enter that submits it is a second, separate input. A closed agent pane
+  // means nothing is sent.
+  const sendToAgent = async (message: string) => {
     if (!window.bridge || !props.agentHerdrPaneId || !props.herdrEndpoint)
-      return;
+      return false;
+    const target = { pane_id: props.agentHerdrPaneId };
+    await window.bridge.herdr(props.herdrEndpoint, "pane.send_input", {
+      ...target,
+      raw: pasteOf(message),
+    });
+    // The agent TUI needs a moment to take the paste before Enter.
+    await new Promise((resolve) => window.setTimeout(resolve, 150));
+    await window.bridge.herdr(props.herdrEndpoint, "pane.send_input", {
+      ...target,
+      raw: "\r",
+    });
+    return true;
+  };
+  const send = async (items: Comment[]) => {
     const sentPath = path;
     setSending(true);
     setSendError("");
     try {
-      // One bracketed paste keeps the newlines inside a single message; the
-      // Enter that submits it is a second, separate input.
-      const target = {
-        pane_id: props.agentHerdrPaneId,
-      };
-      await window.bridge.herdr(props.herdrEndpoint, "pane.send_input", {
-        ...target,
-        raw: pasteOf(commentMessage(path, items)),
-      });
-      // The agent TUI needs a moment to take the paste before Enter.
-      await new Promise((resolve) => window.setTimeout(resolve, 150));
-      await window.bridge.herdr(props.herdrEndpoint, "pane.send_input", {
-        ...target,
-        raw: "\r",
-      });
+      if (!(await sendToAgent(commentMessage(path, items)))) return;
       onArgs({
         comments: JSON.stringify(
           withComments(parseComments(argsRef.current.comments), sentPath, []),
@@ -232,6 +236,53 @@ export function PreviewView(props: CoreViewProps) {
       setSendError(errorText(error));
     } finally {
       setSending(false);
+    }
+  };
+
+  // Edit mode (Markdown): the raw text in a textarea, saved with the hash it
+  // was read with, so a change made meanwhile is refused instead of lost.
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [editError, setEditError] = useState("");
+  const editHash = useRef("");
+  useEffect(() => {
+    setEditing(false);
+    setEditError("");
+  }, [path]);
+  const startEdit = () => {
+    if (file.state !== "ready") return;
+    editHash.current = file.hash;
+    setDraft(file.text);
+    setEditError("");
+    setCard(false);
+    setBoxFor(null);
+    setSelection(null);
+    setEditing(true);
+  };
+  const saveEdit = async () => {
+    if (!window.bridge || saving) return;
+    setSaving(true);
+    setEditError("");
+    try {
+      const { dir, base } = splitPath(path);
+      await window.bridge.projectInspect(connection, {
+        operation: "write",
+        root: dir,
+        path: base,
+        text: draft,
+        expectedHash: editHash.current,
+      });
+      setEditing(false);
+      try {
+        await sendToAgent(editedMessage(path));
+      } catch (error) {
+        setSendError(errorText(error));
+      }
+    } catch (error) {
+      setEditError(errorText(error));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -314,75 +365,52 @@ export function PreviewView(props: CoreViewProps) {
   }, [menu]);
 
   const [copied, setCopied] = useState(false);
+  // Nothing started yet: the tag row offers Start task; otherwise it shows the run.
+  const idle = !starting && !record && !failed;
   const agentLabel = props.agentLabel || "agent";
   const noAgent = props.agentHerdrPaneId
     ? ""
     : "The agent pane is closed; there is nowhere to send this.";
   const title = parsed.meta.title || "";
 
-  // The companion's header row holds only the file picker, beside its close
-  // button; the document's own tools sit in a bar inside the half.
+  // The controls live in the companion's header row, beside its close button.
   const bar = (
-    <div className="pv-select" ref={menuRef}>
-      <button
-        type="button"
-        className="pv-file"
-        aria-haspopup="menu"
-        aria-expanded={menu}
-        title={path}
-        disabled={!path}
-        onClick={() => setMenu(!menu)}
-      >
-        <span>{path ? shownPath(path, cwd) : "No file"}</span>
-        <ChevronDown size={12} aria-hidden />
-      </button>
-      {menu && (
-        <div className="pv-menu" role="menu">
-          {recent.map((item) => (
-            <button
-              key={item}
-              type="button"
-              role="menuitemradio"
-              aria-checked={item === path}
-              title={item}
-              onClick={() => {
-                setMenu(false);
-                if (item !== path) onArgs({ arg: item });
-              }}
-            >
-              {shownPath(item, cwd)}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-  const tools = (
-    <div className="pv-docbar">
-      {kind === "markdown" && parsed.meta.kind && (
-        <Tag tone="neutral" dot={false}>
-          {parsed.meta.kind.toUpperCase()}
-        </Tag>
-      )}
-      {isPlan && <VerifiedTag meta={parsed.meta} />}
-      {file.state === "ready" && <Updated since={file.changedAt} />}
-      <span className="pv-spacer" />
-      {path && (
+    <>
+      <div className="pv-select" ref={menuRef}>
         <button
           type="button"
-          className="pv-icon pv-copy"
-          aria-label="Copy path"
-          title="Copy path"
-          onClick={() =>
-            void navigator.clipboard?.writeText(path).then(() => {
-              setCopied(true);
-              window.setTimeout(() => setCopied(false), 1500);
-            })
-          }
+          className="pv-file"
+          aria-haspopup="menu"
+          aria-expanded={menu}
+          title={path}
+          disabled={!path}
+          onClick={() => setMenu(!menu)}
         >
-          {copied ? <Check aria-hidden /> : <Copy aria-hidden />}
+          <span>{path ? shownPath(path, cwd) : "No file"}</span>
+          <ChevronDown size={12} aria-hidden />
         </button>
-      )}
+        {menu && (
+          <div className="pv-menu" role="menu">
+            {recent.map((item) => (
+              <button
+                key={item}
+                type="button"
+                role="menuitemradio"
+                aria-checked={item === path}
+                title={item}
+                onClick={() => {
+                  setMenu(false);
+                  if (item !== path) onArgs({ arg: item });
+                }}
+              >
+                {shownPath(item, cwd)}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {file.state === "ready" && <Updated since={file.changedAt} />}
+      <span className="pv-spacer" />
       {(kind === "html" ||
         kind === "image" ||
         kind === "svg" ||
@@ -415,27 +443,15 @@ export function PreviewView(props: CoreViewProps) {
           <ExternalLink aria-hidden />
         </button>
       )}
-      {isPlan && !starting && canStart(record, taskStatus, ended, failed) && (
-        <button
-          type="button"
-          className="pv-icon pv-start-icon"
-          aria-label="Start task"
-          title="Start task"
-          onClick={() => setCard(true)}
-        >
-          <Play aria-hidden />
-        </button>
-      )}
-    </div>
+    </>
   );
 
   return (
     <div className="pv" ref={pane}>
       {headerSlot ? createPortal(bar, headerSlot) : null}
-      {path && !outside && tools}
-      {startError && (
+      {(startError || editError) && (
         <div className="pd-alert pv-alert" role="alert">
-          {startError}
+          {editError || startError}
         </div>
       )}
       <div className="pv-wrap" ref={wrap}>
@@ -453,7 +469,7 @@ export function PreviewView(props: CoreViewProps) {
           </div>
         ) : kind === "markdown" ? (
           <div
-            className="pv-doc"
+            className={editing ? "pv-doc editing" : "pv-doc"}
             ref={scroller}
             onScroll={(event) => {
               top.current = event.currentTarget.scrollTop;
@@ -462,19 +478,109 @@ export function PreviewView(props: CoreViewProps) {
             }}
           >
             <article className="pv-md">
-              {isPlan && (
-                <RunStatus
-                  record={record}
-                  ended={ended}
-                  starting={starting}
-                  status={taskStatus}
-                  failed={failed}
-                  onOpen={() => setCard(true)}
-                  onGo={props.runs?.open}
+              <div className="pv-head">
+                {parsed.meta.kind && (
+                  <Tag tone="neutral" dot={false}>
+                    {parsed.meta.kind.toUpperCase()}
+                  </Tag>
+                )}
+                {isPlan && <VerifiedTag meta={parsed.meta} />}
+                <span className="pv-spacer" />
+                {editing ? (
+                  <>
+                    <span className="pv-hint">⌘S save · Esc cancel</span>
+                    <button
+                      type="button"
+                      className="ui-button ghost pv-head-btn"
+                      onClick={() => setEditing(false)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="ui-button primary pv-head-btn"
+                      disabled={saving}
+                      onClick={() => void saveEdit()}
+                    >
+                      Save
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className="pv-icon"
+                      aria-label="Copy text"
+                      title="Copy text"
+                      onClick={() =>
+                        void navigator.clipboard
+                          ?.writeText(file.text)
+                          .then(() => {
+                            setCopied(true);
+                            window.setTimeout(() => setCopied(false), 1500);
+                          })
+                      }
+                    >
+                      {copied ? <Check aria-hidden /> : <Copy aria-hidden />}
+                    </button>
+                    <button
+                      type="button"
+                      className="pv-icon"
+                      aria-label="Edit"
+                      title="Edit"
+                      onClick={startEdit}
+                    >
+                      <Pencil aria-hidden />
+                    </button>
+                    {isPlan &&
+                      (idle ? (
+                        <button
+                          type="button"
+                          className="pv-start-btn"
+                          onClick={() => setCard(true)}
+                        >
+                          <Play aria-hidden />
+                          Start task
+                        </button>
+                      ) : (
+                        <RunStatus
+                          record={record}
+                          ended={ended}
+                          starting={starting}
+                          status={taskStatus}
+                          failed={failed}
+                          onOpen={() => setCard(true)}
+                          onGo={props.runs?.open}
+                        />
+                      ))}
+                  </>
+                )}
+              </div>
+              {editing ? (
+                <textarea
+                  className="pv-edit"
+                  aria-label="Edit the file"
+                  autoFocus
+                  spellCheck={false}
+                  value={draft}
+                  onChange={(event) => setDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") setEditing(false);
+                    else if (
+                      (event.metaKey || event.ctrlKey) &&
+                      event.key.toLowerCase() === "s"
+                    ) {
+                      event.preventDefault();
+                      void saveEdit();
+                    }
+                  }}
                 />
+              ) : (
+                <>
+                  {title && !/^#\s/m.test(parsed.body) && <h1>{title}</h1>}
+                  <MarkdownDoc body={parsed.body} plan={isPlan} />
+                </>
               )}
-              {title && !/^#\s/m.test(parsed.body) && <h1>{title}</h1>}
-              <MarkdownDoc body={parsed.body} />
             </article>
           </div>
         ) : kind === "html" || kind === "pdf" ? (
@@ -525,6 +631,7 @@ export function PreviewView(props: CoreViewProps) {
         )}
         {kind === "markdown" &&
           file.state === "ready" &&
+          !editing &&
           selection &&
           !boxFor && (
             <CommentButton
@@ -547,7 +654,7 @@ export function PreviewView(props: CoreViewProps) {
             onCancel={() => setBoxFor(null)}
           />
         )}
-        {card && (
+        {card && !editing && (
           <StartTaskCard
             path={path}
             body={parsed.body}

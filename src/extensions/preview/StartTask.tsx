@@ -256,8 +256,8 @@ const AGENT_NAMES: Record<string, string> = {
   codex: "Codex",
 };
 
-/** The plan's run, shown in the document under its tags: starting, running
- * (click to go to it), ended or failed (click to start again). */
+/** The plan's run, shown inline in the tag row: starting, running (Open goes
+ * to it), ended or failed (Restart and Retry open the Start task card). */
 export function RunStatus({
   record,
   ended,
@@ -284,15 +284,17 @@ export function RunStatus({
     text: string,
     action?: { label: string; run(): void },
   ) => (
-    <div className={`pv-run ${tone}`} role="status">
+    <span className={`pv-run ${tone}`} role="status">
       <span className="pv-run-dot" aria-hidden="true" />
-      <span className="pv-run-text">{text}</span>
+      <span className="pv-run-text" title={text}>
+        {text}
+      </span>
       {action && (
         <button type="button" className="pv-run-action" onClick={action.run}>
           {action.label}
         </button>
       )}
-    </div>
+    </span>
   );
   if (starting) return row("", "Starting…");
   if (failed)
@@ -300,13 +302,13 @@ export function RunStatus({
   if (record?.kind === "agent") {
     const agent = AGENT_NAMES[record.agent] || record.agent;
     if (ended)
-      return row("", `${agent} in ${record.branch} ended.`, {
+      return row("", `Ended · ${record.branch}`, {
         label: "Restart",
         run: onOpen,
       });
     return row(
       "ok",
-      `Running · ${agent} in ${record.branch}`,
+      `${agent} · ${record.branch}`,
       onGo && { label: "Open", run: () => onGo(record.branch) },
     );
   }

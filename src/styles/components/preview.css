@@ -19,6 +19,9 @@
 .pane-companion-slot > * {
   flex: none;
 }
+.pane-companion-slot > .pv-spacer {
+  flex: 1 0 0;
+}
 /* The file selector takes what the other controls leave and shrinks first. */
 .pane-companion-slot > .pv-select {
   position: relative;
@@ -55,17 +58,6 @@
 .pv-icon:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 1px;
-}
-.pv-icon.pv-start-icon {
-  width: 22px;
-  border-radius: 5px;
-  color: var(--tone-ok);
-  background: var(--tone-ok-bg);
-}
-.pv-icon.pv-start-icon:hover {
-  color: var(--tone-ok);
-  background: var(--tone-ok-bg);
-  filter: brightness(1.3);
 }
 .pv-file {
   display: inline-flex;
@@ -192,28 +184,76 @@
   line-height: 21px;
   user-select: text;
 }
-/* The document's own tools, inside the half under its header row. */
-.pv-docbar {
+/* The tag row above the title: tags, then the document's own tools. */
+.pv-head {
   display: flex;
-  flex-shrink: 0;
   align-items: center;
   gap: 6px;
-  height: 34px;
-  padding: 0 12px;
-  container-type: inline-size;
+  min-height: 22px;
+  margin-bottom: 10px;
+  white-space: nowrap;
 }
-/* The plan's run: starting, running (Open goes to it), ended or failed. */
-.pv-run {
-  display: flex;
+.pv-head > * {
+  flex: none;
+}
+.pv-head > .pv-spacer {
+  flex: 1 0 0;
+  min-width: 0;
+}
+.pv-head .pv-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+}
+.pv-head .pv-icon svg {
+  width: 13px;
+  height: 13px;
+}
+.pv-hint {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+.pv-head .pv-head-btn {
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 5px;
+  font-size: var(--text-xs);
+}
+.pv-head .pv-head-btn.primary:disabled {
+  opacity: 0.6;
+}
+.pv-start-btn {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  min-height: 32px;
-  margin-bottom: 16px;
-  padding: 0 6px 0 10px;
-  border: 1px solid var(--line-divider);
-  border-radius: 6px;
+  gap: 5px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 5px;
+  background: var(--tone-ok-bg);
+  color: var(--tone-ok);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+.pv-start-btn svg {
+  width: 11px;
+  height: 11px;
+}
+.pv-start-btn:hover {
+  filter: brightness(1.3);
+}
+.pv-start-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+/* The plan's run, inline in the tag row: it truncates before anything wraps. */
+.pv-head > .pv-run {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   color: var(--text-muted);
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
 }
 .pv-run-dot {
   flex: none;
@@ -235,16 +275,16 @@
   background: var(--tone-danger);
 }
 .pv-run-text {
-  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .pv-run-action {
+  flex: none;
   height: 22px;
-  padding: 0 8px;
-  border-radius: 4px;
+  padding: 0 6px;
+  border-radius: 5px;
   color: var(--text);
   font-size: var(--text-xs);
   font-weight: 500;
@@ -255,6 +295,29 @@
 .pv-run-action:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 1px;
+}
+/* Edit mode: the raw file in the doc column. */
+.pv-doc.editing .pv-md {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+.pv-edit {
+  flex: 1;
+  min-height: 320px;
+  padding: 12px 14px;
+  border: 1px solid var(--tone-ok);
+  border-radius: 6px;
+  background: var(--bg-control);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 19px;
+  resize: none;
+  tab-size: 2;
+}
+.pv-edit:focus-visible {
+  outline: none;
 }
 .pv-md h1,
 .pv-md h2,
@@ -291,6 +354,70 @@
 }
 .pv-md li {
   margin: 3px 0;
+}
+/* Numbered steps are rows: a card with a number badge. */
+.pv-md ol {
+  padding-left: 0;
+  list-style: none;
+  counter-reset: pv-step;
+}
+.pv-md ol > li {
+  position: relative;
+  margin: 0 0 6px;
+  padding: 7px 10px 7px 38px;
+  border-radius: 6px;
+  background: var(--bg-control);
+  counter-increment: pv-step;
+}
+.pv-md ol > li::before {
+  content: counter(pv-step);
+  position: absolute;
+  top: 7px;
+  left: 10px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--bg-count);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+.pv-md ol > li > :last-child {
+  margin-bottom: 0;
+}
+.pv-md ol > li > :first-child {
+  margin-top: 0;
+}
+/* Plans: the Goal in one card, Done when as a checklist. */
+.pv-goal {
+  margin: 0 0 14px;
+  padding: 10px 14px 4px;
+  border-radius: 6px;
+  background: var(--bg-control);
+}
+.pv-goal > .pv-eyebrow {
+  display: block;
+  margin-bottom: 6px;
+}
+.pv-done ul {
+  padding-left: 0;
+  list-style: none;
+}
+.pv-done li:not(.task-list-item) {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.pv-done li > svg {
+  flex: none;
+  margin-top: 4px;
+  color: var(--text-faint);
+}
+.pv-done li > span {
+  min-width: 0;
 }
 .pv-md li.task-list-item {
   list-style: none;

@@ -347,16 +347,48 @@ test("a plan's agent ended when no workspace runs its branch after the grace per
   assert.equal(nextBranch("feature/x-2"), "feature/x-3");
 });
 
-test("a plan can be started again only when its last start is over", async () => {
-  const { canStart } =
-    await import("../src/extensions/preview/StartTask.tsx").catch(() => ({}));
-  if (!canStart) return;
-  const agent = { kind: "agent", agent: "claude", branch: "b" };
-  const task = { kind: "orchestrator", host: "local", repo: "/r", taskId: "1" };
-  assert.equal(canStart(undefined, "", false, false), true);
-  assert.equal(canStart(agent, "", false, false), false);
-  assert.equal(canStart(agent, "", true, false), true);
-  assert.equal(canStart(task, "running", false, false), false);
-  assert.equal(canStart(task, "failed", false, false), true);
-  assert.equal(canStart(task, "running", false, true), true);
+test("editedMessage names the file and strips control characters", async () => {
+  const { editedMessage } = await artifact;
+  assert.equal(
+    editedMessage("/p/plan.md"),
+    "[sushiAI Preview] The owner edited /p/plan.md. Reread it before you change it.",
+  );
+  assert.ok(!editedMessage("/p/a\x1b[201~b.md").includes("\x1b"));
+});
+
+test("planSegments cuts the Goal and Done when sections out of a plan", async () => {
+  const { planSegments } = await artifact;
+  const body = [
+    "# Title",
+    "",
+    "## Goal",
+    "Ship it.",
+    "",
+    "### Why",
+    "Because.",
+    "",
+    "## Steps",
+    "1. one",
+    "",
+    "## Done when",
+    "- a",
+    "- b",
+    "",
+    "```",
+    "## Goal",
+    "```",
+  ].join("\n");
+  const segments = planSegments(body);
+  assert.deepEqual(
+    segments.map((segment) => segment.kind),
+    ["text", "goal", "text", "done"],
+  );
+  assert.equal(segments[0].text, "# Title\n");
+  assert.equal(segments[1].text, "Ship it.\n\n### Why\nBecause.\n");
+  assert.ok(segments[2].text.startsWith("## Steps"));
+  assert.ok(segments[3].text.startsWith("## Done when"));
+  assert.ok(segments[3].text.includes("## Goal"));
+  assert.deepEqual(planSegments("No sections\n"), [
+    { kind: "text", text: "No sections\n" },
+  ]);
 });

@@ -105,6 +105,37 @@ export function planSections(body: string): PlanSections {
   return result;
 }
 
+export type PlanSegment = { kind: "text" | "goal" | "done"; text: string };
+
+/** A plan body cut at its level-2 headings: the text under `## Goal` (without
+ * the heading) and the `## Done when` section (with it) stand apart, the rest
+ * stays as it is. Joined back, the texts are the body minus the Goal heading. */
+export function planSegments(body: string): PlanSegment[] {
+  const out: PlanSegment[] = [];
+  let kind: PlanSegment["kind"] = "text";
+  let lines: string[] = [];
+  let fenced = false;
+  const flush = () => {
+    const text = lines.join("\n");
+    if (text.trim()) out.push({ kind, text });
+    lines = [];
+  };
+  for (const line of body.split(/\r?\n/)) {
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    const heading = fenced ? null : /^##\s+(.*?)\s*#*\s*$/.exec(line);
+    if (heading) {
+      flush();
+      const name = heading[1].toLowerCase();
+      kind = name === "goal" ? "goal" : name === "done when" ? "done" : "text";
+      if (kind !== "goal") lines.push(line);
+      continue;
+    }
+    lines.push(line);
+  }
+  flush();
+  return out;
+}
+
 /** The longest plan sent as the `/goal` text itself. A longer one is read
  * from its file, so the first prompt stays small. */
 export const GOAL_INLINE_LIMIT = 12000;
@@ -240,6 +271,11 @@ export function branchFor(title: string): string {
  * and an agent TUI takes it as one message. Submitting is a separate Enter. */
 export function pasteOf(message: string): string {
   return `\x1b[200~${clean(message)}\x1b[201~`;
+}
+
+/** The line pasted into the agent's pane after the owner saved an edit. */
+export function editedMessage(path: string): string {
+  return `[sushiAI Preview] The owner edited ${clean(path)}. Reread it before you change it.`;
 }
 
 export function agoText(ms: number): string {
@@ -387,16 +423,4 @@ export function agentEnded(
 export function nextBranch(branch: string): string {
   const match = /^(.*)-(\d+)$/.exec(branch);
   return match ? `${match[1]}-${Number(match[2]) + 1}` : `${branch}-2`;
-}
-
-/** Whether a plan can be started now: never, or its last start is over. */
-export function canStart(
-  record: StartRecord | undefined,
-  status: string,
-  ended: boolean,
-  failed: boolean,
-): boolean {
-  if (!record || failed) return true;
-  if (record.kind === "agent") return ended;
-  return status === "failed";
 }

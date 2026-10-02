@@ -1,6 +1,6 @@
 ---
 name: sushiai-artifacts
-description: Show the owner a document you wrote - a plan, research, report, deck or diagram - in a sushiAI Preview pane next to your own pane. Use when the owner asks to show, open or "make it a doc", a presentation, a deck or a diagram, and after you write a plan or report the owner should read. Not for scratch notes.
+description: Show the owner a document you wrote - a plan, research, report, deck or diagram - in a sushiAI Preview half of your own pane. Works for Claude Code and Codex, in any project and on any host. Use when the owner asks to show, open or "make it a doc", a presentation, a deck or a diagram, and after you write a plan or report the owner should read. Not for scratch notes.
 ---
 
 # sushiAI artifacts

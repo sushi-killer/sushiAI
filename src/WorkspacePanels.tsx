@@ -9,7 +9,10 @@ import { RenderProfiler } from "./RenderProfiler";
 import { Icon } from "./PanelIcon";
 import type { ExtensionRegistry } from "./extensions/registry";
 import { ExtensionSurface } from "./extensions/SurfaceRenderer";
-import type { CoreViewProps } from "./extensions/coreViews.ts";
+import type {
+  CoreViewProps,
+  LaunchAgentRequest,
+} from "./extensions/coreViews.ts";
 import {
   CompanionSplit,
   CompanionToggle,
@@ -49,8 +52,11 @@ type PanelHostProps = {
   /** Opens Settings -> Connections (the Orchestrator's "Add a host"). */
   onOpenConnections?: () => void;
   extensionRegistry: ExtensionRegistry;
-  onLaunchAgent?: CoreViewProps["launchAgent"];
-  runs?: CoreViewProps["runs"];
+  onLaunchAgent?(
+    panelId: string,
+    request: LaunchAgentRequest,
+  ): Promise<boolean>;
+  worktrees?: CoreViewProps["worktrees"];
   /** Changes the companion half of an agent or terminal pane. */
   onCompanion(panelId: string, patch: CompanionPatch): void;
 };
@@ -83,7 +89,7 @@ export const PanelHost = memo(function PanelHost({
   onOpenConnections,
   extensionRegistry,
   onLaunchAgent,
-  runs,
+  worktrees,
   onCompanion,
 }: PanelHostProps) {
   const companion = companionTarget(extensionRegistry, panel.companion);
@@ -112,7 +118,7 @@ export const PanelHost = memo(function PanelHost({
                   socket={socket}
                   endpoint={endpoint}
                   onLaunchAgent={onLaunchAgent}
-                  runs={runs}
+                  worktrees={worktrees}
                   onCompanion={onCompanion}
                   onZoom={() => onZoom(panel.id)}
                 >
@@ -127,8 +133,9 @@ export const PanelHost = memo(function PanelHost({
               title={companion.title}
               args={panel.companion.args}
               cwd={cwd}
-              paneCwd={panel.paneCwd}
               connection={endpoint}
+              icon={companion.icon}
+              useChanged={companion.useChanged}
               onShow={() => onCompanion(panel.id, { open: true })}
             />
           ) : null

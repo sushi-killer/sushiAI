@@ -287,6 +287,7 @@ export function useWorkspaces({
             panel,
             restore,
             request.label,
+            request.worktree?.branch,
           ),
         );
         switchWorkspace(
@@ -515,6 +516,7 @@ export function useWorkspaces({
         );
         const w = initialWorkspace(path);
         w.localWorktree = true;
+        w.worktreeBranch = worktree.branch;
         w.name = `${current.name} · ${worktree.branch}`;
         const panel: Panel = {
           id: uid(),

@@ -694,3 +694,32 @@ test("Herdr reconciliation keeps a pane's companion and records the pane's live 
   );
   assert.deepEqual(gone[0].panels[0].companion, companion);
 });
+
+test("Herdr reconciliation keeps the worktree branch of a workspace", async () => {
+  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
+  const current = [
+    {
+      id: "saved",
+      herdrId: "ws-1",
+      connection: "/tmp/herdr.sock",
+      name: "App \u00b7 plan-1",
+      cwd: "/work/app-plan-1",
+      worktreeBranch: "plan-1",
+      panels: [],
+      layout: null,
+    },
+  ];
+  const snapshot = {
+    version: "1",
+    workspaces: [{ workspace_id: "ws-1", label: "App \u00b7 plan-1" }],
+    panes: [],
+  };
+  const next = reconcileHerdrWorkspaces(current, snapshot, "/tmp/herdr.sock");
+  assert.equal(next[0].worktreeBranch, "plan-1");
+  const gone = reconcileHerdrWorkspaces(
+    next,
+    { version: "1", workspaces: [], panes: [] },
+    "/tmp/herdr.sock",
+  );
+  assert.equal(gone[0].worktreeBranch, "plan-1");
+});

@@ -70,10 +70,8 @@ const {
   registerHerdrExtension,
 } = require("./extensions/builtin-herdr.cjs");
 const { ARTIFACTS_MANIFEST } = require("./extensions/builtin-artifacts.cjs");
-const {
-  configureArtifactsSkill,
-  installArtifactsSkillLocal,
-} = require("./artifacts-skill.cjs");
+const { configureArtifactsSkill } = require("./artifacts-skill.cjs");
+const { syncLocalBuiltinSkills } = require("./extensions/builtin-skills.cjs");
 const {
   ORCHESTRATOR_MANIFEST,
   registerOrchestratorExtension,
@@ -109,11 +107,14 @@ const extensions = new ExtensionManager({
 });
 configureArtifactsSkill({
   isEnabled: () => extensions.isEnabled(ARTIFACTS_MANIFEST.id),
+  subscribe: (listener) => extensions.onChange(listener),
+  home: os.homedir(),
+  codexAccountsDir: path.join(app.getPath("userData"), "codex-accounts"),
 });
 // After the persisted enabled state is loaded, so a disabled Artifacts
-// extension does not get its skill installed.
+// extension does not get its skill installed (and a stale one is removed).
 extensions.ready.then(() =>
-  installArtifactsSkillLocal(
+  syncLocalBuiltinSkills(
     os.homedir(),
     undefined,
     path.join(app.getPath("userData"), "codex-accounts"),

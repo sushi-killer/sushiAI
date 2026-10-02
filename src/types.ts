@@ -225,6 +225,8 @@ export type Workspace = {
   cwd: string;
   herdrId?: string;
   localWorktree?: boolean;
+  /** The branch of the new worktree this workspace was launched into. */
+  worktreeBranch?: string;
   connection?: string;
   /** Metadata tokens the host reported for this workspace; never saved. */
   herdrTokens?: Record<string, string>;

@@ -1,19 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { insideProject, kindOf, paneRoot } from "./artifact.ts";
+import { insideProject, kindOf } from "./artifact.ts";
 import { usePreviewFile } from "./usePreviewFile.ts";
 
 /** True once the file a hidden Preview showed has new content. Mount it only
  * while the Preview is hidden: it reads the file like the open view does. */
 export function useChangedWhileHidden(
   args: Record<string, string>,
-  roots: [string, string | undefined],
+  cwd: string,
   connection: string | undefined,
 ): boolean {
   const asked = args.arg || "";
-  const path =
-    insideProject(asked, roots[0], paneRoot(roots[0], roots[1])) || "";
+  const path = insideProject(asked, cwd) || "";
   const element = useRef<HTMLElement | null>(null);
-  const file = usePreviewFile(path, kindOf(asked), connection, element);
+  const file = usePreviewFile(path, cwd, kindOf(asked), connection, element);
   const first = useRef("");
   const [changed, setChanged] = useState(false);
   const hash = file.state === "ready" ? file.hash : "";

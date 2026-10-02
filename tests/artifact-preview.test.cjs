@@ -221,29 +221,10 @@ test("insideProject accepts only absolute files under the project folder", async
   ])
     assert.equal(insideProject(bad, "/w/proj"), null, bad);
   assert.equal(insideProject("/w/a.md", ""), null);
-  // The pane's own folder counts too, the workspace folder is not the only root.
-  assert.equal(
-    insideProject("/w/other/artifacts/a.md", "/w/proj", "/w/other"),
-    "/w/other/artifacts/a.md",
-  );
-  assert.equal(
-    insideProject("/w/proj/a.md", "/w/proj", "/w/other"),
-    "/w/proj/a.md",
-  );
-  assert.equal(
-    insideProject("/w/proj/a.md", "/w/proj", undefined),
-    "/w/proj/a.md",
-  );
-  assert.equal(insideProject("/w/third/a.md", "/w/proj", "/w/other"), null);
-  assert.equal(
-    insideProject("/w/other/../proj/a.md", "/w/proj", "/w/other"),
-    null,
-  );
-  assert.equal(insideProject("rel/a.md", "/w/proj", "/w/other"), null);
-  assert.equal(
-    insideProject("/w/other/a.md", "/w/proj", "/w/../w/other"),
-    null,
-  );
+  // Only the workspace folder is a root: a pane folder elsewhere widens nothing.
+  assert.equal(insideProject("/w/other/artifacts/a.md", "/w/proj"), null);
+  assert.equal(insideProject("/w/other/../proj/a.md", "/w/proj"), null);
+  assert.equal(insideProject("rel/a.md", "/w/proj"), null);
   assert.equal(insideProject("/w/a.md", "/w/../w"), null);
 });
 
@@ -315,18 +296,22 @@ test("shownPath is a name in artifacts/, relative in the project, absolute outsi
   assert.equal(shownPath("/w/pp/plan.md", "/w/p"), "/w/pp/plan.md");
 });
 
-test("paneRoot widens the scope only to the project, a folder in it or a sibling", async () => {
-  const { paneRoot, insideProject } = await artifact;
-  assert.equal(paneRoot("/w/proj", "/w/proj/sub"), "/w/proj/sub");
-  assert.equal(paneRoot("/w/proj", "/w/proj-wt/"), "/w/proj-wt");
-  for (const wide of ["/", "//", "/w", "/w/", "/other", undefined])
-    assert.equal(paneRoot("/w/proj", wide), "", String(wide));
-  assert.equal(paneRoot("/proj", "/elsewhere"), "");
-  assert.equal(insideProject("/etc/passwd", "/w/proj", "/"), null);
+test("a pane folder outside the workspace cannot widen the Preview scope", async () => {
+  const { insideProject, projectRelative } = await artifact;
+  const { absoluteArg } = await import("../src/extensions/openSignal.ts");
+  // A relative signal argument resolves from the pane folder, then must still
+  // be inside the workspace folder.
+  const inside = absoluteArg("artifacts/a.md", "/w/proj/sub");
+  assert.equal(insideProject(inside, "/w/proj"), "/w/proj/sub/artifacts/a.md");
+  const outside = absoluteArg("artifacts/a.md", "/w/proj-wt");
+  assert.equal(insideProject(outside, "/w/proj"), null);
+  assert.equal(insideProject(absoluteArg("a.md", "/"), "/w/proj"), null);
+  assert.equal(insideProject("/etc/passwd", "/w/proj"), null);
   assert.equal(
-    insideProject("/w/.ssh/id_rsa", "/w/proj", paneRoot("/w/proj", "/w")),
-    null,
+    projectRelative("/w/proj/sub/artifacts/a.md", "/w/proj/"),
+    "sub/artifacts/a.md",
   );
+  assert.equal(projectRelative("/w/other/a.md", "/w/proj"), "");
 });
 
 test("a plan's agent ended when no workspace runs its branch after the grace period", async () => {

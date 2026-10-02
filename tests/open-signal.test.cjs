@@ -84,16 +84,23 @@ test("resolveOpenSignal is unavailable for an unknown pane or host", async () =>
   );
 });
 
-test("resolveOpenSignal is unavailable for a missing or disabled surface", async () => {
+test("resolveOpenSignal ignores a disabled built-in surface and reports an unknown extension", async () => {
   const { resolveOpenSignal } = await library;
   // availableSurfaces() already drops a disabled extension's surfaces.
-  assert.equal(
-    resolveOpenSignal(registryOf(), [agent], signal).kind,
-    "unavailable",
+  assert.deepEqual(resolveOpenSignal(registryOf(), [agent], signal), {
+    kind: "ignored",
+  });
+  assert.deepEqual(
+    resolveOpenSignal(registryOf(surface({ id: "other" })), [agent], signal),
+    { kind: "ignored" },
   );
+  // Ignored even when the pane is gone: nothing to tell the owner.
+  assert.equal(resolveOpenSignal(registryOf(), [], signal).kind, "ignored");
   assert.equal(
-    resolveOpenSignal(registryOf(surface({ id: "other" })), [agent], signal)
-      .kind,
+    resolveOpenSignal(registryOf(), [agent], {
+      ...signal,
+      extensionId: "acme.tools",
+    }).kind,
     "unavailable",
   );
 });

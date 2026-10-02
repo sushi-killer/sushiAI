@@ -43,6 +43,14 @@ const allowed = new Set([
   ".pdf",
   ".avif",
 ]);
+/** A path relative to the root, subfolders allowed; never absolute and never
+ * climbing out with `..`. */
+function isRelativeFile(file) {
+  if (typeof file !== "string" || !file || file.includes("\0")) return false;
+  if (file.startsWith("/") || file.includes("\\") || /^[a-z]:/i.test(file))
+    return false;
+  return file.split("/").every((part) => part && part !== "." && part !== "..");
+}
 class PreviewServer {
   constructor(connections) {
     this.connections = connections;
@@ -54,6 +62,8 @@ class PreviewServer {
     this.port = this.server.address().port;
   }
   grant(endpoint, root, file, { annotate = false } = {}) {
+    if (!isRelativeFile(file))
+      throw new Error("Preview file must be a path inside the project");
     const token = randomBytes(24).toString("hex");
     this.grants.set(token, { endpoint, root, annotate: annotate === true });
     return `http://127.0.0.1:${this.port}/${token}/${file.split("/").map(encodeURIComponent).join("/")}`;
@@ -102,9 +112,16 @@ class PreviewServer {
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "no-store",
         "Referrer-Policy": "no-referrer",
-        // The page may be opened in the system browser: it cannot read its
-        // sibling files back with fetch, XHR or a WebSocket.
-        ...(page ? { "Content-Security-Policy": "connect-src 'none'" } : {}),
+        // The page may be opened in the system browser: a sandbox without
+        // allow-same-origin gives it an opaque origin, so it cannot read
+        // sibling files back (fetch, XHR, WebSocket) or script an iframe of
+        // them. Its own scripts and the postMessage to the pane still run.
+        ...(page
+          ? {
+              "Content-Security-Policy":
+                "sandbox allow-scripts; connect-src 'none'; frame-src 'none'",
+            }
+          : {}),
       });
       res.end(req.method === "HEAD" ? undefined : body);
     } catch {
@@ -118,4 +135,4 @@ class PreviewServer {
     this.server.close();
   }
 }
-module.exports = { PreviewServer, withAnnotations };
+module.exports = { PreviewServer, withAnnotations, isRelativeFile };

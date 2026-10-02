@@ -1,5 +1,7 @@
 import type { ComponentType } from "react";
+import { FileText, type LucideIcon } from "lucide-react";
 import { PreviewView } from "./preview/PreviewView.tsx";
+import { useChangedWhileHidden } from "./preview/useChangedWhileHidden.ts";
 
 export type LaunchAgentRequest = {
   agent: "claude" | "codex";
@@ -8,7 +10,9 @@ export type LaunchAgentRequest = {
   prompt: string;
 };
 
-export type PlanRuns = {
+/** The worktrees the app launched sessions into that are still live: their
+ * branches, and a way to go to one. */
+export type WorktreeSessions = {
   branches: string[];
   open(branch: string): void;
 };
@@ -25,9 +29,8 @@ export type CoreViewProps = {
   herdrEndpoint?: string;
   /** The title of that agent pane, for "Send to <agent>". */
   agentLabel?: string;
-  /** The agent sessions the app runs in worktrees: their branches, to tell a
-   * plan's agent ended, and a way to go to one. */
-  runs?: PlanRuns;
+  /** The live sessions the app runs in worktrees. */
+  worktrees?: WorktreeSessions;
   /** Starts an agent session in a new worktree with a first prompt, through
    * the app's own session launch. Resolves false when the launch failed (the
    * app has already told the owner why). */
@@ -37,9 +40,26 @@ export type CoreViewProps = {
   onArgs(next: Record<string, string>): void;
 };
 
+/** One core view and what the companion's "show" button needs to draw it:
+ * the icon, and an optional hook that is true when the view has something new
+ * while it is hidden. */
+export type CoreViewEntry = {
+  View: ComponentType<CoreViewProps>;
+  icon: LucideIcon;
+  useChanged?(
+    args: Record<string, string>,
+    cwd: string,
+    connection: string | undefined,
+  ): boolean;
+};
+
 /** The React views builtin extensions draw, by the `viewId` of a surface whose
  * view is `{ kind: "core" }`. A manifest cannot ship one: the validator only
  * lets builtins name a core view. */
-export const coreViews: Record<string, ComponentType<CoreViewProps>> = {
-  "artifacts.preview": PreviewView,
+export const coreViews: Record<string, CoreViewEntry> = {
+  "artifacts.preview": {
+    View: PreviewView,
+    icon: FileText,
+    useChanged: useChangedWhileHidden,
+  },
 };

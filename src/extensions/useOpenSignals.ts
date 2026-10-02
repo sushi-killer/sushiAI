@@ -26,6 +26,7 @@ export function useOpenSignals(
       const signal = parseOpenSignal(value);
       if (!signal) continue;
       const open = resolveOpenSignal(registry, workspace.panels, signal);
+      if (open.kind === "ignored") continue;
       if (open.kind === "unavailable") notify(open.reason);
       else {
         const agent = workspace.panels.find((p) => p.id === open.panelId);

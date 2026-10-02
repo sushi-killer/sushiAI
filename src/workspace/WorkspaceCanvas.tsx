@@ -1,11 +1,15 @@
-import { useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { Columns2, Plus, X } from "lucide-react";
 import { findPanelOwner } from "./workspace-actions.ts";
 import { codePanels } from "../workspaceState.ts";
+import { liveWorktreeBranches } from "./worktreeSessions.ts";
 import { Empty } from "../app/Empty.tsx";
 import { LayoutView, PanelHost } from "../WorkspacePanels.tsx";
 import { Icon } from "../PanelIcon.tsx";
-import type { CoreViewProps, PlanRuns } from "../extensions/coreViews.ts";
+import type {
+  LaunchAgentRequest,
+  WorktreeSessions,
+} from "../extensions/coreViews.ts";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import type { WorkspaceController } from "./useWorkspaces.ts";
 import type { MergedCanvas } from "./mergedLayouts.ts";
@@ -58,39 +62,41 @@ export function WorkspaceCanvas({
     resizeSplit,
     patchCompanion,
   } = ws;
-  // The agent starts in the workspace that owns the pane with the Preview, which in a
-  // merged view is not necessarily the active one.
-  const launchPlanAgent =
-    (panelId: string): CoreViewProps["launchAgent"] =>
-    (request) =>
-      ws.addPanel(
+  // Both read the controller through a ref, so their identity does not change
+  // with every render and the memoised PanelHost props stay stable.
+  const wsRef = useRef(ws);
+  wsRef.current = ws;
+  // The agent starts in the workspace that owns the pane with the companion,
+  // which in a merged view is not necessarily the active one.
+  const launchAgent = useCallback(
+    (panelId: string, request: LaunchAgentRequest) =>
+      wsRef.current.addPanel(
         "agent",
         request.agent,
         undefined,
         undefined,
         undefined,
         "herdr",
-        findPanelOwner(ws.workspaces, panelId)?.id,
+        findPanelOwner(wsRef.current.workspaces, panelId)?.id,
         { branch: request.branch, base: request.base },
         undefined,
         undefined,
         request.prompt,
-      );
-  // ponytail: a plan's worktree workspace is named "<project> · <branch>";
-  // match on the name until workspaces carry their branch.
-  const runWorkspaces = ws.workspaces.filter(
-    // A closed session stays in its slot marked ended; only a live one counts.
-    (w) => w.panels.some((p) => !p.ended) && w.name.includes(" · "),
+      ),
+    [],
   );
-  const branchOf = (w: (typeof runWorkspaces)[number]) =>
-    w.name.slice(w.name.indexOf(" · ") + 3);
-  const runs: PlanRuns = {
-    branches: runWorkspaces.map(branchOf),
-    open: (branch) => {
-      const target = runWorkspaces.find((w) => branchOf(w) === branch);
-      if (target) ws.selectWorkspace(target.id);
-    },
-  };
+  const worktrees = useMemo<WorktreeSessions>(
+    () => ({
+      branches: liveWorktreeBranches(ws.workspaces),
+      open: (branch) => {
+        const target = wsRef.current.workspaces.find(
+          (w) => w.worktreeBranch === branch && w.panels.some((p) => !p.ended),
+        );
+        if (target) wsRef.current.selectWorkspace(target.id);
+      },
+    }),
+    [ws.workspaces],
+  );
   const visitedTabs = useRef(new Set<string>());
   const group = merged.group;
   const paneById = new Map(merged.panes.map((mp) => [mp.panel.id, mp]));
@@ -136,8 +142,8 @@ export function WorkspaceCanvas({
         onCancel={cancelPanelChat}
         onAgent={setPanelAgent}
         extensionRegistry={extensionRegistry}
-        onLaunchAgent={panel.companion ? launchPlanAgent(panel.id) : undefined}
-        runs={runs}
+        onLaunchAgent={launchAgent}
+        worktrees={worktrees}
         onCompanion={patchCompanion}
       />
     );

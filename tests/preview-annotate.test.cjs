@@ -94,6 +94,8 @@ test("the script posts a text selection with its quote and nearest heading", () 
   ]);
 });
 
+const CSP = "sandbox allow-scripts; connect-src 'none'; frame-src 'none'";
+
 test("an annotated page cannot call back to the server; other grants are untouched", async () => {
   const server = new PreviewServer(fakeConnections(page));
   await server.start();
@@ -101,10 +103,7 @@ test("an annotated page cannot call back to the server; other grants are untouch
     const annotated = await fetch(
       server.grant(undefined, "/r", "a.html", { annotate: true }),
     );
-    assert.equal(
-      annotated.headers.get("content-security-policy"),
-      "connect-src 'none'",
-    );
+    assert.equal(annotated.headers.get("content-security-policy"), CSP);
     const plain = await fetch(server.grant(undefined, "/r", "a.html"));
     assert.equal(plain.headers.get("content-security-policy"), null);
   } finally {
@@ -130,11 +129,53 @@ test("a page that is not valid UTF-8 is served byte for byte, without the script
       server.grant(undefined, "/r", "a.html", { annotate: true }),
     );
     assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
-    assert.equal(
-      response.headers.get("content-security-policy"),
-      "connect-src 'none'",
-    );
+    assert.equal(response.headers.get("content-security-policy"), CSP);
   } finally {
     server.close();
   }
+});
+
+test("a nested relative file and its sibling assets are served; .., absolute and symlink escapes are refused", async (t) => {
+  const fsp = require("node:fs/promises");
+  const os = require("node:os");
+  const { Connections } = require("../electron/connections.cjs");
+  const base = await fsp.mkdtemp(path.join(os.tmpdir(), "preview-nested-"));
+  const project = path.join(base, "project");
+  const outside = path.join(base, "outside.txt");
+  await fsp.mkdir(path.join(project, "artifacts", "deck"), {
+    recursive: true,
+  });
+  await fsp.writeFile(outside, "secret");
+  await fsp.writeFile(
+    path.join(project, "artifacts", "deck", "x.html"),
+    "<html><body>deck</body></html>",
+  );
+  await fsp.writeFile(
+    path.join(project, "artifacts", "deck", "style.css"),
+    "body{}",
+  );
+  await fsp.symlink(outside, path.join(project, "artifacts", "leak.txt"));
+  const connections = new Connections(base);
+  await connections.init();
+  const server = new PreviewServer(connections);
+  await server.start();
+  t.after(async () => {
+    server.close();
+    await connections.close();
+    await fsp.rm(base, { recursive: true, force: true });
+  });
+  const url = server.grant(null, project, "artifacts/deck/x.html", {
+    annotate: true,
+  });
+  assert.match(url, /\/artifacts\/deck\/x\.html$/);
+  const page = await fetch(url);
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /deck/);
+  const css = await fetch(new URL("style.css", url));
+  assert.equal(css.status, 200);
+  assert.equal(await css.text(), "body{}");
+  for (const bad of ["../outside.txt", "/etc/hosts", "a/../b.html", ""])
+    assert.throws(() => server.grant(null, project, bad), /inside the project/);
+  const leak = server.grant(null, project, "artifacts/leak.txt");
+  assert.equal((await fetch(leak)).status, 404);
 });

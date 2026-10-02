@@ -86,76 +86,24 @@ test("restore preserves explicit Herdr connection and clears local connection", 
   assert.equal(saved.workspaces[1].connection, undefined);
 });
 
-test("restore drops a saved beside-Preview pane and its layout slot", async () => {
+test("restore keeps the worktree branch a workspace was launched on", async () => {
   const { restore } = await library;
-  const old = {
-    id: "x1",
-    kind: "extension",
-    title: "Preview",
-    extension: {
-      extensionId: "builtin.artifacts",
-      contributionId: "preview",
-      instanceId: "x1",
-      stateVersion: 1,
-      beside: "one",
-    },
-  };
-  const other = {
-    ...old,
-    id: "x2",
-    extension: {
-      ...old.extension,
-      extensionId: "acme.tools",
-      contributionId: "board",
-    },
-  };
-  const companion = {
-    extensionId: "builtin.artifacts",
-    surfaceId: "preview",
-    args: {},
-    open: true,
-  };
   const saved = restore({
     read: () =>
       JSON.stringify({
         workspaces: [
           {
             id: "w",
-            name: "W",
+            name: "Client · Q3",
             cwd: "/a",
-            panels: [{ ...panel("one"), companion }, old, other],
-            layout: {
-              type: "split",
-              id: "s",
-              axis: "row",
-              ratio: 0.5,
-              a: {
-                type: "split",
-                id: "s2",
-                axis: "row",
-                ratio: 0.5,
-                a: { type: "leaf", id: "one" },
-                b: { type: "leaf", id: "x1" },
-              },
-              b: { type: "leaf", id: "x2" },
-            },
+            worktreeBranch: "plan-1",
+            panels: [panel("one")],
+            layout: { type: "leaf", id: "one" },
           },
         ],
       }),
   });
-  assert.deepEqual(
-    saved.workspaces[0].panels.map((p) => p.id),
-    ["one", "x2"],
-  );
-  assert.deepEqual(saved.workspaces[0].panels[0].companion, companion);
-  assert.deepEqual(saved.workspaces[0].layout, {
-    type: "split",
-    id: "s",
-    axis: "row",
-    ratio: 0.5,
-    a: { type: "leaf", id: "one" },
-    b: { type: "leaf", id: "x2" },
-  });
+  assert.equal(saved.workspaces[0].worktreeBranch, "plan-1");
 });
 
 test("restore returns null for missing, malformed, or incomplete storage", async () => {

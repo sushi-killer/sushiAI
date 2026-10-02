@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { errorText } from "../../app/errors.ts";
-import { splitPath, type ArtifactKind } from "./artifact.ts";
+import { projectRelative, type ArtifactKind } from "./artifact.ts";
 
 export type PreviewFile =
   | { state: "loading" }
@@ -31,6 +31,7 @@ function failure(error: unknown, path: string): string {
  * the view only re-renders when the file really changed. */
 export function usePreviewFile(
   path: string,
+  cwd: string,
   kind: ArtifactKind,
   endpoint: string | undefined,
   element: RefObject<HTMLElement | null>,
@@ -47,11 +48,10 @@ export function usePreviewFile(
       if (busy || !window.bridge) return;
       busy = true;
       try {
-        const { dir, base } = splitPath(path);
         const data = await window.bridge.projectInspect(endpoint, {
           operation: "read",
-          root: dir,
-          path: base,
+          root: cwd,
+          path: projectRelative(path, cwd),
         });
         if (disposed || data.hash === hash.current) return;
         hash.current = data.hash;
@@ -102,6 +102,6 @@ export function usePreviewFile(
       watcher?.disconnect();
       window.clearInterval(timer);
     };
-  }, [path, kind, endpoint, element]);
+  }, [path, cwd, kind, endpoint, element]);
   return file;
 }

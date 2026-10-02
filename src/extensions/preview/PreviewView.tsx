@@ -22,7 +22,6 @@ import {
   editedMessage,
   goalPrompt,
   insideProject,
-  paneRoot,
   agentEnded,
   parseComments,
   kindOf,
@@ -32,7 +31,7 @@ import {
   pasteOf,
   pushRecent,
   shownPath,
-  splitPath,
+  projectRelative,
   startOrchestratorTask,
   withComments,
   type Comment,
@@ -70,14 +69,14 @@ function Updated({ since }: { since: number }) {
 /** The `artifacts.preview` core view: one file an agent wrote, drawn in
  * the companion half of the agent's pane, with comments and Start task going back to it. */
 export function PreviewView(props: CoreViewProps) {
-  const { args, connection, cwd, paneCwd, headerSlot, onArgs } = props;
+  const { args, connection, cwd, headerSlot, onArgs } = props;
   const asked = args.arg || "";
-  // Only a file inside the project or the pane's own folder is read or served.
-  const path = insideProject(asked, cwd, paneRoot(cwd, paneCwd)) || "";
+  // Only a file inside the project folder is read or served.
+  const path = insideProject(asked, cwd) || "";
   const outside = asked && !path ? asked : "";
   const kind = kindOf(asked);
   const pane = useRef<HTMLDivElement>(null);
-  const file = usePreviewFile(path, kind, connection, pane);
+  const file = usePreviewFile(path, cwd, kind, connection, pane);
   const argsRef = useRef(args);
   argsRef.current = args;
 
@@ -103,12 +102,11 @@ export function PreviewView(props: CoreViewProps) {
     setPreviewUrl("");
     if (!path || (kind !== "html" && kind !== "pdf") || !window.bridge) return;
     let disposed = false;
-    const { dir, base } = splitPath(path);
     window.bridge
       .projectPreview(
         connection,
-        dir,
-        base,
+        cwd,
+        projectRelative(path, cwd),
         kind === "html" ? { annotate: true } : undefined,
       )
       .then((url) => !disposed && setPreviewUrl(url))
@@ -116,7 +114,7 @@ export function PreviewView(props: CoreViewProps) {
     return () => {
       disposed = true;
     };
-  }, [path, kind, connection]);
+  }, [path, cwd, kind, connection]);
 
   // Keep the reading position when the file changes under the reader.
   const scroller = useRef<HTMLDivElement>(null);
@@ -271,11 +269,10 @@ export function PreviewView(props: CoreViewProps) {
     setSaving(true);
     setEditError("");
     try {
-      const { dir, base } = splitPath(path);
       await window.bridge.projectInspect(connection, {
         operation: "write",
-        root: dir,
-        path: base,
+        root: cwd,
+        path: projectRelative(path, cwd),
         text: draft,
         expectedHash: editHash.current,
       });
@@ -299,7 +296,7 @@ export function PreviewView(props: CoreViewProps) {
   const [failedPath, setFailedPath] = useState("");
   const record: StartRecord | undefined = parseStarts(args.starts)[path];
   const taskStatus = useTaskStatus(record);
-  const ended = agentEnded(record, props.runs?.branches, Date.now());
+  const ended = agentEnded(record, props.worktrees?.branches, Date.now());
   const failed = failedPath === path;
   const start = async (runner: Runner, branch: string, base: string) => {
     setCard(false);
@@ -553,7 +550,7 @@ export function PreviewView(props: CoreViewProps) {
                           status={taskStatus}
                           failed={failed}
                           onOpen={() => setCard(true)}
-                          onGo={props.runs?.open}
+                          onGo={props.worktrees?.open}
                         />
                       ))}
                   </>

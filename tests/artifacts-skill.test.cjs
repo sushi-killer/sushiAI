@@ -14,13 +14,29 @@ const {
 const {
   ExtensionManager,
 } = require("../electron/extensions/extension-manager.cjs");
+const { configureArtifactsSkill } = require("../electron/artifacts-skill.cjs");
 const {
-  installLocalArtifactsSkill,
-  installRemoteArtifactsSkill,
-  remoteInstallScript,
-} = require("../electron/artifacts-skill.cjs");
+  writeSkill,
+  remoteInstallScript: buildRemoteInstallScript,
+  syncBuiltinSkillsOnHost,
+  syncLocalBuiltinSkills,
+  installBuiltinSkillsInto,
+} = require("../electron/extensions/builtin-skills.cjs");
 
-const TEXT = "Skill \"quoted\" $HOME `tick` 'single'\nline two\n";
+const NAME = "sushiai-artifacts";
+configureArtifactsSkill({ isEnabled: () => true });
+const installLocalArtifactsSkill = (home, text, accounts = []) =>
+  writeSkill(
+    NAME,
+    [path.join(home, ".claude"), path.join(home, ".codex"), ...accounts],
+    text,
+  );
+const remoteInstallScript = (text) => buildRemoteInstallScript(NAME, text);
+const installRemoteArtifactsSkill = (connections, endpoint, env) =>
+  syncBuiltinSkillsOnHost(connections, endpoint, env);
+
+const TEXT =
+  "name: sushiai-artifacts\nSkill \"quoted\" $HOME `tick` 'single'\nline two\n";
 
 function tempHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "artifacts-skill-"));
@@ -164,5 +180,111 @@ test("a failing host exec never throws", async () => {
   } finally {
     console.warn = warn;
     if (saved !== undefined) process.env.SUSHIAI_TEST_WINDOW = saved;
+  }
+});
+
+function withRealEnv(fn) {
+  const saved = process.env.SUSHIAI_TEST_WINDOW;
+  delete process.env.SUSHIAI_TEST_WINDOW;
+  try {
+    return fn();
+  } finally {
+    if (saved !== undefined) process.env.SUSHIAI_TEST_WINDOW = saved;
+  }
+}
+
+test("a disabled extension installs nothing, locally or on a host", async () => {
+  const home = tempHome();
+  try {
+    configureArtifactsSkill({ isEnabled: () => false });
+    await withRealEnv(async () => {
+      assert.deepEqual(syncLocalBuiltinSkills(home), []);
+      installBuiltinSkillsInto(path.join(home, "acct"));
+      const scripts = [];
+      await syncBuiltinSkillsOnHost(
+        { exec: async (e, c, { input }) => scripts.push(input) },
+        "ssh:user@devbox",
+      );
+      assert.equal(scripts.length, 1);
+      assert.doesNotMatch(scripts[0], /base64/);
+      assert.match(scripts[0], /rm -f/);
+    });
+    assert.deepEqual(fs.readdirSync(home), []);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("turning the extension off removes only our skill, everywhere; on installs it again", () => {
+  const home = tempHome();
+  try {
+    const accounts = path.join(home, "codex-accounts");
+    const account = path.join(accounts, "a1");
+    fs.mkdirSync(account, { recursive: true });
+    let enabled = true;
+    let listener;
+    configureArtifactsSkill({
+      isEnabled: () => enabled,
+      subscribe: (fn) => (listener = fn),
+      home,
+      codexAccountsDir: accounts,
+    });
+    withRealEnv(() => {
+      syncLocalBuiltinSkills(home, undefined, accounts);
+      const ours = [
+        path.join(home, ".claude/skills", NAME, "SKILL.md"),
+        path.join(home, ".codex/skills", NAME, "SKILL.md"),
+        path.join(account, "skills", NAME, "SKILL.md"),
+      ];
+      for (const file of ours) assert.ok(fs.existsSync(file), file);
+      // A foreign folder of the same name stays.
+      const foreign = path.join(account, "skills", NAME, "SKILL.md");
+      const mine = fs.readFileSync(foreign, "utf8");
+      fs.writeFileSync(foreign, "---\nname: someone-else\n---\n");
+      enabled = false;
+      listener("builtin.artifacts", false);
+      assert.equal(fs.existsSync(ours[0]), false);
+      assert.equal(fs.existsSync(path.dirname(ours[0])), false);
+      assert.equal(fs.existsSync(ours[1]), false);
+      assert.equal(fs.existsSync(foreign), true);
+      // Another extension's change does nothing.
+      enabled = true;
+      listener("builtin.other", true);
+      assert.equal(fs.existsSync(ours[0]), false);
+      listener("builtin.artifacts", true);
+      assert.ok(fs.existsSync(ours[0]));
+      assert.equal(
+        fs.readFileSync(foreign, "utf8").includes("someone-else"),
+        true,
+      );
+      assert.ok(mine.includes(`name: ${NAME}`));
+    });
+  } finally {
+    configureArtifactsSkill({ isEnabled: () => true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("the remote removal script deletes ours and leaves a foreign skill", async () => {
+  const home = tempHome();
+  try {
+    const own = path.join(home, ".claude/skills", NAME);
+    const foreign = path.join(home, ".codex/skills", NAME);
+    fs.mkdirSync(own, { recursive: true });
+    fs.mkdirSync(foreign, { recursive: true });
+    fs.writeFileSync(path.join(own, "SKILL.md"), `---\nname: ${NAME}\n---\n`);
+    fs.writeFileSync(path.join(foreign, "SKILL.md"), "---\nname: other\n---\n");
+    configureArtifactsSkill({ isEnabled: () => false });
+    const exec = async (e, c, { input }) =>
+      execFileSync("/bin/sh", ["-s"], {
+        input,
+        env: { ...process.env, HOME: home },
+      }).toString();
+    await withRealEnv(() => syncBuiltinSkillsOnHost({ exec }, "ssh:u@h"));
+    assert.equal(fs.existsSync(own), false);
+    assert.equal(fs.existsSync(path.join(foreign, "SKILL.md")), true);
+  } finally {
+    configureArtifactsSkill({ isEnabled: () => true });
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });

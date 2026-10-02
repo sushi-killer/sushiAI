@@ -1,9 +1,19 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { FileText, X } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { X, type LucideIcon } from "lucide-react";
 import type { Companion, Panel } from "../types.ts";
 import { companionRatio } from "../workspace/workspace-actions.ts";
-import { useChangedWhileHidden } from "./preview/useChangedWhileHidden.ts";
-import { coreViews, type CoreViewProps } from "./coreViews.ts";
+import {
+  coreViews,
+  type CoreViewEntry,
+  type CoreViewProps,
+  type LaunchAgentRequest,
+} from "./coreViews.ts";
 import type { ExtensionRegistry } from "./registry.ts";
 
 export type CompanionPatch = {
@@ -26,9 +36,9 @@ export function companionTarget(
         item.extensionId === companion.extensionId &&
         item.id === companion.surfaceId,
     );
-  const View =
+  const entry =
     surface?.view.kind === "core" ? coreViews[surface.view.viewId] : undefined;
-  return surface && View ? { title: surface.title, View } : null;
+  return surface && entry ? { title: surface.title, ...entry } : null;
 }
 
 /** `shown` drives the CSS transition and `mounted` keeps the view alive while
@@ -61,7 +71,7 @@ export function CompanionSplit({
   socket,
   endpoint,
   onLaunchAgent,
-  runs,
+  worktrees,
   onCompanion,
   onZoom,
   children,
@@ -71,8 +81,11 @@ export function CompanionSplit({
   cwd: string;
   socket: string;
   endpoint?: string;
-  onLaunchAgent?: CoreViewProps["launchAgent"];
-  runs?: CoreViewProps["runs"];
+  onLaunchAgent?(
+    panelId: string,
+    request: LaunchAgentRequest,
+  ): Promise<boolean>;
+  worktrees?: CoreViewProps["worktrees"];
   onCompanion(panelId: string, patch: CompanionPatch): void;
   /** A double click on the half's header zooms the whole pane, like the
    * agent's header. */
@@ -85,6 +98,12 @@ export function CompanionSplit({
   const [dragging, setDragging] = useState(false);
   const split = useRef<HTMLDivElement>(null);
   const [slot, setSlot] = useState<HTMLElement | null>(null);
+  const panelId = panel.id;
+  const launchAgent = useCallback<NonNullable<CoreViewProps["launchAgent"]>>(
+    (request) =>
+      onLaunchAgent ? onLaunchAgent(panelId, request) : Promise.resolve(false),
+    [onLaunchAgent, panelId],
+  );
   const ratio = companionRatio(companion?.ratio);
   const resize = (value: number) => onCompanion(panel.id, { ratio: value });
   return (
@@ -158,8 +177,8 @@ export function CompanionSplit({
                   agentHerdrPaneId={panel.herdrId}
                   herdrEndpoint={socket}
                   agentLabel={panel.title}
-                  launchAgent={onLaunchAgent}
-                  runs={runs}
+                  launchAgent={onLaunchAgent ? launchAgent : undefined}
+                  worktrees={worktrees}
                   headerSlot={slot}
                   onArgs={(args) => onCompanion(panel.id, { args })}
                 />
@@ -172,24 +191,28 @@ export function CompanionSplit({
   );
 }
 
+const neverChanged = () => false;
+
 /** The header icon that brings the companion back. It exists only while the
  * companion is hidden, and shows a dot once the file changed in the meantime. */
 export function CompanionToggle({
   title,
   args,
   cwd,
-  paneCwd,
   connection,
+  icon: ToggleIcon,
+  useChanged = neverChanged,
   onShow,
 }: {
   title: string;
   args: Record<string, string>;
   cwd: string;
-  paneCwd?: string;
   connection?: string;
+  icon: LucideIcon;
+  useChanged?: CoreViewEntry["useChanged"];
   onShow(): void;
 }) {
-  const changed = useChangedWhileHidden(args, [cwd, paneCwd], connection);
+  const changed = useChanged(args, cwd, connection);
   const label = `Show ${title.toLowerCase()}`;
   return (
     <button
@@ -198,7 +221,7 @@ export function CompanionToggle({
       title={changed ? `${label} (file changed)` : label}
       onClick={onShow}
     >
-      <FileText aria-hidden="true" />
+      <ToggleIcon aria-hidden="true" />
       {changed && <span className="pane-companion-dot" aria-hidden="true" />}
     </button>
   );

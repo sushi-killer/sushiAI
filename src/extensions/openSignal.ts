@@ -18,6 +18,7 @@ export type OpenSignal = {
 
 export type OpenResolution =
   | { kind: "unavailable"; reason: string }
+  | { kind: "ignored" }
   | { kind: "companion"; panelId: string };
 
 /** "<paneId> <extensionId>/<surfaceId> <nonce> <arg>": the nonce is one word
@@ -50,18 +51,21 @@ export function resolveOpenSignal(
   panels: Panel[],
   signal: OpenSignal,
 ): OpenResolution {
-  const agent = panels.find((panel) => panel.herdrId === signal.paneId);
-  if (!agent)
-    return {
-      kind: "unavailable",
-      reason: `Pane ${signal.paneId} is not in this workspace.`,
-    };
   const surface = registry
     .availableSurfaces()
     .find(
       (item) =>
         item.extensionId === signal.extensionId && item.id === signal.surfaceId,
     );
+  // A built-in the owner turned off is a choice, not a mistake: no toast.
+  if (!surface && signal.extensionId.startsWith("builtin."))
+    return { kind: "ignored" };
+  const agent = panels.find((panel) => panel.herdrId === signal.paneId);
+  if (!agent)
+    return {
+      kind: "unavailable",
+      reason: `Pane ${signal.paneId} is not in this workspace.`,
+    };
   const name = `${signal.extensionId}/${signal.surfaceId}`;
   if (!surface)
     return { kind: "unavailable", reason: `Unavailable surface: ${name}.` };

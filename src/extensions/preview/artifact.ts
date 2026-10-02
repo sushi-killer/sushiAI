@@ -27,15 +27,12 @@ export function kindOf(path: string): ArtifactKind {
   return EXTENSIONS[name.slice(dot + 1).toLowerCase()] || "text";
 }
 
-/** Splits an absolute path into its folder and file name. The folder is the
- * root a read or preview is granted for; the name is the path inside it. */
-export function splitPath(path: string): { dir: string; base: string } {
-  const cut = path.lastIndexOf("/");
-  if (cut < 0) return { dir: ".", base: path };
-  return {
-    dir: cut === 0 ? "/" : path.slice(0, cut),
-    base: path.slice(cut + 1),
-  };
+/** An absolute path inside the project folder as the path from that folder,
+ * which is how the main process is asked for it. */
+export function projectRelative(path: string, cwd: string): string {
+  const root = cwd.replace(/\/+/g, "/").replace(/\/$/, "");
+  const file = path.replace(/\/+/g, "/");
+  return file.startsWith(`${root}/`) ? file.slice(root.length + 1) : "";
 }
 
 /** Reads `key: value` lines between two leading `---` lines. Without a closing
@@ -351,35 +348,17 @@ export function taskStatusLabel(status: string): string {
   return status;
 }
 
-/** The path when it is absolute, free of `..` and inside one of the roots
- * (the project folder, the agent pane's own folder); otherwise null. The
- * Preview reads and serves only such files. */
-export function insideProject(path: string, ...roots: string[]): string | null {
+/** The path when it is absolute, free of `..` and inside the project folder;
+ * otherwise null. The Preview reads and serves only such files. */
+export function insideProject(path: string, cwd: string): string | null {
   if (!path.startsWith("/")) return null;
   if (path.includes("\0") || path.split("/").includes("..")) return null;
   const norm = (value: string) => value.replace(/\/+/g, "/").replace(/\/$/, "");
+  if (!cwd?.startsWith("/")) return null;
+  const root = norm(cwd);
+  if (!root || root.split("/").includes("..")) return null;
   const file = norm(path);
-  for (const cwd of roots) {
-    if (!cwd?.startsWith("/")) continue;
-    const root = norm(cwd);
-    if (!root || root.split("/").includes("..")) continue;
-    if (file.startsWith(`${root}/`)) return file;
-  }
-  return null;
-}
-
-/** The agent pane's own folder as a second Preview root, only when it sits
- * inside the project's parent folder and is not that parent: the project,
- * a folder in it, or a sibling worktree. A shell that `cd`s to `/`, the home
- * folder or any other ancestor gets no wider scope. */
-export function paneRoot(cwd: string, paneCwd: string | undefined): string {
-  if (!paneCwd || !cwd.startsWith("/") || !paneCwd.startsWith("/")) return "";
-  const norm = (value: string) => value.replace(/\/+/g, "/").replace(/\/$/, "");
-  const project = norm(cwd);
-  const parent = project.slice(0, project.lastIndexOf("/"));
-  if (!parent) return "";
-  const pane = norm(paneCwd);
-  return pane.startsWith(`${parent}/`) ? pane : "";
+  return file.startsWith(`${root}/`) ? file : null;
 }
 
 type TaskClient = {

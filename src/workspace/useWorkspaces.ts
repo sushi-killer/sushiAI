@@ -36,7 +36,7 @@ import {
   launchesInWorktree,
   worktreeBranchError,
 } from "./worktree.ts";
-import { applySessionLaunch } from "./session-launch.ts";
+import { applySessionLaunch, findSessionWorkspace } from "./session-launch.ts";
 import { hostOf } from "../projectWorktrees.ts";
 import type {
   ModelProfile,
@@ -228,7 +228,7 @@ export function useWorkspaces({
   async function renameWorkspace(workspaceId: string, name: string) {
     const workspace = workspacesRef.current.find((w) => w.id === workspaceId);
     if (!workspace) return;
-    if (workspace.herdrId)
+    if (workspace.herdrId && !isVanished(workspace))
       await window.bridge!.herdr(
         workspace.connection || socket,
         "workspace.rename",
@@ -275,6 +275,8 @@ export function useWorkspaces({
         );
         switchWorkspace(
           restore?.workspaceId ||
+            findSessionWorkspace(workspacesRef.current, request.endpoint, value)
+              ?.id ||
             herdrWorkspaceKey(request.endpoint, value.workspaceId),
         );
         setSelected(panel.id);
@@ -603,7 +605,6 @@ export function useWorkspaces({
       cleanup?: WorktreeCleanupRequest,
     ) => {
       const closed = new Set<string>(),
-        keptWorktrees = new Set<string>(),
         errors: string[] = [];
       for (const { workspace, panel } of items) {
         const outcome = await closeBeforeWorktreeRemoval(
@@ -637,11 +638,10 @@ export function useWorkspaces({
         closed.add(panel.id);
         if ("cleanupError" in outcome) {
           errors.push(`Worktree kept: ${errorText(outcome.cleanupError)}`);
-          if (cleanup?.panel.id === panel.id) keptWorktrees.add(workspace.id);
         }
       }
       setWorkspaces((list) => {
-        const remaining = removeClosedSessions(list, closed, keptWorktrees);
+        const remaining = removeClosedSessions(list, closed);
         return remaining.length ? remaining : [initialWorkspace()];
       });
       if (zoomedRef.current && closed.has(zoomedRef.current)) setZoomed(null);

@@ -114,10 +114,28 @@ export function reconcileHerdrWorkspaces(
   const bySnapshotId = new Map(
     snapshot.workspaces.map((workspace) => [workspace.workspace_id, workspace]),
   );
+  const adoptedProjectIds = new Set<string>();
   function buildWorkspace(workspaceId: string): Workspace {
     const workspace = bySnapshotId.get(workspaceId)!;
     const old = existing.get(workspace.workspace_id);
     const remotePanes = panesByWorkspace.get(workspace.workspace_id) || [];
+    const cwdHint =
+      workspace.worktree?.checkout_path ||
+      remotePanes.find((pane) => pane.cwd)?.cwd;
+    const preservedProject =
+      !old && cwdHint
+        ? current.find(
+            (candidate) =>
+              candidate.herdrId &&
+              candidate.connection === connection &&
+              !bySnapshotId.has(candidate.herdrId) &&
+              candidate.panels.every((panel) => panel.kind === "chat") &&
+              !adoptedProjectIds.has(candidate.id) &&
+              candidate.cwd === cwdHint,
+          )
+        : undefined;
+    if (preservedProject) adoptedProjectIds.add(preservedProject.id);
+    const saved = old || preservedProject;
     const oldPanelsByHerdr = new Map(
       (old?.panels || [])
         .filter((panel) => panel.herdrId)
@@ -170,11 +188,15 @@ export function reconcileHerdrWorkspaces(
           inLayout.has(panel.id),
       )
       .map(endPane);
-    const extras = (old?.panels || []).filter((panel) => !panel.herdrId);
+    const extras = (old?.panels || preservedProject?.panels || []).filter(
+      (panel) => !panel.herdrId,
+    );
     const allPanels = [...panels, ...gone, ...extras];
-    let layout = old ? old.layout : tidy(allPanels.map((panel) => panel.id));
-    if (old) {
-      const oldPanelIds = new Set(old.panels.map((panel) => panel.id));
+    let layout = saved
+      ? saved.layout
+      : tidy(allPanels.map((panel) => panel.id));
+    if (saved) {
+      const oldPanelIds = new Set(saved.panels.map((panel) => panel.id));
       const addedPanels = panels.filter((panel) => !oldPanelIds.has(panel.id));
       if (addedPanels.length) {
         layout = layout
@@ -191,15 +213,15 @@ export function reconcileHerdrWorkspaces(
     // workspace never falls back to the local home.
     const cwd =
       workspace.worktree?.checkout_path ||
-      (old?.cwd && old.cwd !== systemHome ? old.cwd : "") ||
+      (saved?.cwd && saved.cwd !== systemHome ? saved.cwd : "") ||
       remotePanes.find((pane) => pane.cwd)?.cwd ||
       (connection.startsWith("ssh:") ? old?.cwd || "" : systemHome);
     return {
-      ...old,
-      id: old?.id || herdrWorkspaceKey(connection, workspace.workspace_id),
+      ...saved,
+      id: saved?.id || herdrWorkspaceKey(connection, workspace.workspace_id),
       connection,
       herdrId: workspace.workspace_id,
-      name: workspace.label,
+      name: preservedProject?.name ?? workspace.label,
       cwd,
       panels: allPanels,
       layout,
@@ -244,7 +266,11 @@ export function reconcileHerdrWorkspaces(
     if (!own(workspace) || live(workspace)) return true;
     const target = home.get(workspace.cwd)!;
     if (target === workspace) return true;
-    const extras = workspace.panels.filter((panel) => !panel.herdrId);
+    const extras = workspace.panels.filter(
+      (panel) =>
+        !panel.herdrId &&
+        !target.panels.some((existingPanel) => existingPanel.id === panel.id),
+    );
     if (extras.length)
       moved.set(target.id, [...(moved.get(target.id) || []), ...extras]);
     return false;
@@ -265,7 +291,16 @@ export function reconcileHerdrWorkspaces(
         }
       : workspace;
   });
-  return sameWorkspaces(current, next) ? current : next;
+  const byId = new Map(next.map((workspace) => [workspace.id, workspace]));
+  const currentIds = new Set(current.map((workspace) => workspace.id));
+  const ordered = [
+    ...current.flatMap((workspace) => {
+      const nextWorkspace = byId.get(workspace.id);
+      return nextWorkspace ? [nextWorkspace] : [];
+    }),
+    ...next.filter((workspace) => !currentIds.has(workspace.id)),
+  ];
+  return sameWorkspaces(current, ordered) ? current : ordered;
 }
 
 function agentTitle(agent: string): string {

@@ -250,6 +250,50 @@ test("restore accepts only a well-formed closedProjects array", async () => {
   assert.deepEqual(notAnArray.closedProjects, []);
 });
 
+test("restore keeps an empty Herdr project while sweeping an old ended-only row", async () => {
+  const { restore } = await library;
+  const empty = {
+    id: "herdr-empty",
+    herdrId: "empty",
+    connection: "ssh:devbox",
+    name: "Checkout",
+    cwd: "/tmp/checkout",
+    panels: [],
+    layout: null,
+  };
+  const ended = {
+    ...empty,
+    id: "herdr-ended",
+    herdrId: "ended",
+    cwd: "/tmp/old-checkout",
+    panels: [panel("old-pane", "terminal", { herdrId: "pane", ended: true })],
+    layout: { type: "leaf", id: "old-pane" },
+  };
+  const local = {
+    id: "local",
+    name: "Local",
+    cwd: "/tmp/local",
+    panels: [],
+    layout: null,
+  };
+  const saved = restore({
+    read: () =>
+      JSON.stringify({
+        workspaces: [empty, ended, local],
+        activeId: empty.id,
+        selected: "",
+        socket: "ssh:devbox",
+      }),
+    flush: () => {},
+  });
+  assert.equal(saved.workspaces.length, 2);
+  assert.equal(saved.workspaces[0].cwd, empty.cwd);
+  assert.deepEqual(saved.workspaces[0].panels, []);
+  assert.equal(saved.activeId, saved.workspaces[0].id);
+  assert.equal(saved.closedProjects.length, 1);
+  assert.equal(saved.closedProjects[0].cwd, ended.cwd);
+});
+
 test("initialWorkspace and codePanels preserve layout and panel identity invariants", async () => {
   const { initialWorkspace, codePanels } = await library;
   const workspace = initialWorkspace("/tmp/project");

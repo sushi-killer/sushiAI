@@ -668,7 +668,7 @@ test("the electron helper serves read, write and flush and refuses other senders
   }
 });
 
-test("a Herdr workspace saved with nothing live in it moves to Recently closed on start", async () => {
+test("empty Herdr workspaces survive restore while ended-only rows move to Recently closed", async () => {
   const { restore } = await library;
   const herdr = (id, cwd, panels, connection = "/tmp/herdr.sock") => ({
     id: herdrWorkspaceKey(connection, id),
@@ -686,8 +686,8 @@ test("a Herdr workspace saved with nothing live in it moves to Recently closed o
     herdrId: id,
     ...extra,
   });
-  // What a few host restarts left: the live project, its dropped worktree,
-  // an empty row of an unreachable SSH host, and a dropped row with a chat.
+  // What a few host restarts left: a live project, its dropped worktree, an
+  // intentionally empty row, and a dropped row with a chat.
   const workspaces = [
     herdr("w1", "/repo/app", [pane("p1")]),
     herdr("w2", "/repo/app-wt", [pane("p2", { ended: true })]),
@@ -709,20 +709,17 @@ test("a Herdr workspace saved with nothing live in it moves to Recently closed o
   assert.equal(restored.selected, "");
   assert.deepEqual(
     restored.workspaces.map((w) => w.herdrId),
-    ["w1", "w4"],
-    "before 4 rows, after 2: the live one and the one holding a chat",
+    ["w1", "w3", "w4"],
+    "the empty project and the one holding a chat stay in the workspace list",
   );
   assert.deepEqual(
     restored.closedProjects.map((p) => [p.cwd, p.endpoint]),
-    [
-      ["/repo/app-wt", "/tmp/herdr.sock"],
-      ["/repo/app", "ssh:host"],
-    ],
+    [["/repo/app-wt", "/tmp/herdr.sock"]],
   );
   assert.deepEqual(
     JSON.parse(store.text).workspaces.map((w) => w.herdrId),
-    ["w1", "w4"],
-    "the sweep is saved, so it runs once",
+    ["w1", "w3", "w4"],
+    "the ended-only row is swept while the empty project stays saved",
   );
 
   const lone = messageStore();

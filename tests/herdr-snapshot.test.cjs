@@ -499,6 +499,50 @@ test("a dropped workspace is removed once the host has a live one at the same fo
   );
 });
 
+test("a new Herdr workspace keeps the project's id, order, name, and hidden chats", async () => {
+  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
+  const host = "ssh:host-a";
+  const chat = { id: "chat", kind: "chat", title: "Transcript" };
+  const other = {
+    id: "other",
+    name: "Other project",
+    cwd: "/srv/other",
+    panels: [],
+    layout: null,
+  };
+  const empty = {
+    id: key(host, "old-workspace"),
+    herdrId: "old-workspace",
+    connection: host,
+    name: "Saved project",
+    cwd: "/srv/app",
+    panels: [chat],
+    layout: null,
+  };
+  const next = reconcileHerdrWorkspaces(
+    [other, empty],
+    snap(
+      [{ workspace_id: "new-workspace", label: "app" }],
+      [pane("new-pane", "new-workspace", { cwd: "/srv/app" })],
+    ),
+    host,
+  );
+  assert.deepEqual(
+    next.map((workspace) => workspace.id),
+    [other.id, empty.id],
+  );
+  assert.equal(next[1].herdrId, "new-workspace");
+  assert.equal(next[1].name, empty.name);
+  assert.deepEqual(
+    next[1].panels.map((panel) => panel.id),
+    [key(host, "new-pane"), chat.id],
+  );
+  assert.deepEqual(next[1].layout, {
+    type: "leaf",
+    id: key(host, "new-pane"),
+  });
+});
+
 test("a workspace keeps its folder when a pane cds away, and a remote one never gets the local home", async () => {
   const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
   const first = reconcileHerdrWorkspaces(

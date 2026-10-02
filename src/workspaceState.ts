@@ -254,13 +254,13 @@ function importLegacy(store: SnapshotStore): string | null {
   return text;
 }
 
-/** A Herdr workspace saved with no live pane and nothing else open - its
- * host dropped it, or its folder is gone - is only a dead row that repeats
- * its project. On start it moves to Recently closed. Mid-session such a row
- * stays, so "Session ended · Reopen" can bring it back in place. */
+/** A Herdr workspace with ended panes and nothing else open moves to Recently
+ * closed on start. An intentionally empty project stays in the workspace list. */
 export function sweepLeftovers(saved: Saved): Saved {
   const leftover = (w: Workspace) =>
-    Boolean(w.herdrId) && w.panels.every((p) => p.herdrId && p.ended);
+    Boolean(w.herdrId) &&
+    w.panels.length > 0 &&
+    w.panels.every((p) => p.herdrId && p.ended);
   const rest = saved.workspaces.filter((w) => !leftover(w));
   if (rest.length === saved.workspaces.length || !rest.length) return saved;
   const closedAt = Date.now();

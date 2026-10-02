@@ -24,6 +24,7 @@ const workspace = (id, connection, cwd, name = id) => ({
 /** A checkout's git identity; `repo` is the main checkout whose `.git` a
  * worktree shares (defaults to the checkout itself). */
 const git = (remote, checkout, branch = "main", repo = checkout) => ({
+  projectId: "",
   remote,
   commonDir: `${repo}/.git`,
   checkout,
@@ -65,6 +66,7 @@ test("not a git repository -> never merges", async () => {
   const local = workspace("w-local", undefined, "/Users/dev/api");
   const remote = workspace("w-lab", "ssh:lab", "/home/dev/api");
   const none = {
+    projectId: "",
     remote: "",
     commonDir: "",
     checkout: "",
@@ -546,4 +548,74 @@ test("memberTooltip adds the branch to a task title only", async () => {
   );
   assert.equal(memberTooltip(merged, tree, [], []), "task/x");
   assert.equal(memberTooltip(merged, main, [], tasks), "main");
+});
+
+/** A checkout the project store identified; `stale` answers are used like fresh ones. */
+const identified = (projectId, checkout, remote = "", extra = {}) => ({
+  ...git(remote, checkout),
+  projectId,
+  ...extra,
+});
+
+test("same projectId merges across hosts despite different folder names and no remote", async () => {
+  const { computeMergeGroups, mixedRemotes } = await library;
+  const local = workspace("w-local", undefined, "/repo/SupportDesk");
+  const remote = workspace("w-dev", "ssh:devbox", "/srv/support");
+  const projectGit = {
+    "w-local": identified("project-support", local.cwd),
+    "w-dev": identified("project-support", remote.cwd),
+  };
+  const groups = computeMergeGroups([local, remote], projectGit, [
+    profile("devbox", "Devbox"),
+  ]);
+  assert.equal(groups.size, 2);
+  assert.equal(groups.get("w-local"), groups.get("w-dev"));
+  assert.deepEqual(
+    [...mixedRemotes([local, remote], projectGit)],
+    ["project-support"],
+  );
+});
+
+test("different projectIds never merge, even with one remote", async () => {
+  const { computeMergeGroups } = await library;
+  const local = workspace("w-local", undefined, "/repo/api");
+  const remote = workspace("w-dev", "ssh:devbox", "/srv/api");
+  const groups = computeMergeGroups(
+    [local, remote],
+    {
+      "w-local": identified("project-a", local.cwd, REMOTE),
+      "w-dev": identified("project-b", remote.cwd, REMOTE),
+    },
+    [profile("devbox", "Devbox")],
+  );
+  assert.equal(groups.size, 0);
+});
+
+test("without a projectId the remote still joins checkouts", async () => {
+  const { computeMergeGroups } = await library;
+  const local = workspace("w-local", undefined, "/repo/api");
+  const remote = workspace("w-dev", "ssh:devbox", "/srv/other-name");
+  const groups = computeMergeGroups([local, remote], gitFor([local, remote]), [
+    profile("devbox", "Devbox"),
+  ]);
+  assert.equal(groups.get("w-local"), groups.get("w-dev"));
+});
+
+test("normalizeRemote agrees with the main process over every URL form", async () => {
+  const { normalizeRemote } = await import("../src/app/useProjectGit.ts");
+  const main = require("../electron/projects.cjs").normalizeRemote;
+  for (const url of [
+    "git@git.example.test:team/prototype.git",
+    "git@git.example.test:team/prototype",
+    "ssh://git@git.example.test:10022/team/prototype.git",
+    "ssh://git.example.test/team/prototype/",
+    "https://git.example.test/team/prototype.git",
+    "https://git.example.test/team/prototype/",
+    "https://deploy@git.example.test/team/prototype",
+    "http://git.example.test:8080/team/prototype.git",
+    "HTTPS://Git.Example.Test/Team/Prototype/",
+    "  git.example.test/team/prototype  ",
+    "",
+  ])
+    assert.equal(normalizeRemote(url), main(url), JSON.stringify(url));
 });

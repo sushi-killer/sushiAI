@@ -185,3 +185,48 @@ test("skills and subagents with a broken shape fail, a clean setup passes", () =
   fs.rmSync(broken, { recursive: true, force: true });
   fs.rmSync(clean, { recursive: true, force: true });
 });
+
+test("a userData JSON store named in electron/ is rejected", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "state-store-"));
+  try {
+    fs.mkdirSync(path.join(dir, "electron"));
+    fs.writeFileSync(
+      path.join(dir, "electron/store.cjs"),
+      'const file = path.join(userData, "settings.json");\n',
+    );
+    const bad = run({ STATE_STORE_ROOT_OVERRIDE: dir });
+    assert.equal(bad.status, 1);
+    assert.match(bad.stderr, /electron\/store\.cjs:1 names settings\.json/);
+    assert.match(
+      bad.stderr,
+      /app state goes in sushiai\.db \(electron\/app-db\.cjs\)/,
+    );
+    fs.writeFileSync(path.join(dir, "electron/store.cjs"), "const n = 1;\n");
+    assert.equal(run({ STATE_STORE_ROOT_OVERRIDE: dir }).status, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("template and concatenated .json names in electron/ are rejected, comments are not", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "state-store-"));
+  try {
+    fs.mkdirSync(path.join(dir, "electron"));
+    const write = (text) =>
+      fs.writeFileSync(path.join(dir, "electron/store.cjs"), text);
+    write("const file = `${userData}/state.json`;\n");
+    assert.equal(run({ STATE_STORE_ROOT_OVERRIDE: dir }).status, 1);
+    write('const file = base + ".json";\n');
+    assert.equal(run({ STATE_STORE_ROOT_OVERRIDE: dir }).status, 1);
+    write("// a note about `x.json` in a comment\n");
+    assert.equal(run({ STATE_STORE_ROOT_OVERRIDE: dir }).status, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

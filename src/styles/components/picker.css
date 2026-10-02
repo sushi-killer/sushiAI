@@ -413,6 +413,11 @@
   z-index: 1;
   flex: none;
 }
+/* Each row's chip is its own stacking context at z 1, so a later row's chip
+   would paint over this row's open menu. */
+.pk-account:has(.picker-account-menu) {
+  z-index: 2;
+}
 .picker-account-chip {
   display: inline-flex;
   align-items: center;

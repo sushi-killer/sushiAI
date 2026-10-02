@@ -1,0 +1,5 @@
+## Projects
+
+- One repository is one project in the sidebar, whatever its folder is called and on whichever host or worktree it is checked out. The flat list shows it as one row; grouping by host still splits it per host.
+- sushiAI keeps its state in one local database, `sushiai.db`: projects and each folder's git identity, the workspace list and layouts, Herdr launch records, SSH and orchestrator hosts, model providers, Claude and Codex accounts, encrypted secrets, window and update settings, and app preferences. Secrets stay encrypted, with the key in the macOS Keychain. The old JSON files are imported once on first start and kept next to it as `<name>.imported`. A Herdr workspace can be stored only once, and a crash mid-save can no longer leave a half-written host list. A checkout on an SSH host that is offline still joins its project, and git is read once per start instead of on every refresh.
+- A checkout on a host sushiAI has never reached still shows as its own row until the host answers once.

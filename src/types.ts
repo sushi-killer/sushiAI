@@ -484,10 +484,11 @@ export type MascotShortcutStatus = {
   failed: boolean;
 };
 export interface Bridge {
-  /** The workspace snapshot text from <userData>/workspace-state.json, or
+  /** The workspace snapshot text assembled from <userData>/sushiai.db, or
    * null when none is stored. Synchronous: restore() runs before first paint. */
   workspaceStateRead(): string | null;
-  /** Debounced snapshot write; the main process writes it atomically. */
+  /** Debounced snapshot write; the main process stores what changed in one
+   * transaction. */
   workspaceStateWrite(text: string): Promise<void>;
   /** Synchronous write for when the window is going away. */
   workspaceStateFlush(text: string): void;
@@ -971,6 +972,20 @@ export interface Bridge {
   projectsResolve(
     remote: string | { remote?: string; endpoint?: string; cwd?: string },
   ): Promise<Project | null>;
+  projectIdentify(
+    endpoint: string | undefined,
+    cwd: string,
+    options?: { refresh?: boolean },
+  ): Promise<{
+    projectId: string;
+    remote: string;
+    commonDir: string;
+    checkout: string;
+    linkedWorktree: boolean;
+    subdir: string;
+    branch: string;
+    stale: boolean;
+  }>;
   projectInspect(
     endpoint: string | undefined,
     options: Record<string, unknown>,

@@ -18,6 +18,7 @@ const TEST_MCP_HOME = require("node:path").join(
   "mcp-home",
 );
 const { createHash, randomUUID } = require("node:crypto");
+const { appDb, transaction } = require("./app-db.cjs");
 const { RemoteOrchd, localArtifacts } = require("./orchestrator-remote.cjs");
 
 const LOCAL_HOST = "local";
@@ -1009,7 +1010,7 @@ class OrchestratorHosts {
     local,
     connections,
     artifacts,
-    hostsFile,
+    userDataDir,
     createService,
     onChange,
     enabled = true,
@@ -1020,17 +1021,24 @@ class OrchestratorHosts {
     this.local = local;
     this.getConnections = connections;
     this.artifacts = artifacts;
-    this.hostsFile = hostsFile;
+    this.userDataDir = userDataDir;
     this.createService = createService;
     this.onChange = onChange;
     this.services = new Map();
     this.enabled = new Set();
+    this.loaded = false;
   }
 
-  async #save() {
-    if (!this.hostsFile) return;
-    await fs.writeFile(this.hostsFile, JSON.stringify([...this.enabled]), {
-      mode: 0o600,
+  #save() {
+    if (!this.userDataDir) return;
+    const db = appDb(this.userDataDir);
+    transaction(db, () => {
+      // Hosts that could not be loaded are not ours to forget.
+      if (this.loaded) db.exec("DELETE FROM orchestrator_hosts");
+      const insert = db.prepare(
+        "INSERT OR IGNORE INTO orchestrator_hosts(host) VALUES(?)",
+      );
+      for (const host of this.enabled) insert.run(host);
     });
   }
 
@@ -1078,13 +1086,15 @@ class OrchestratorHosts {
   /** Lists the hosts the owner enabled earlier; they connect on first use.
    * Never throws. */
   async init() {
-    if (!this.hostsFile) return;
+    if (!this.userDataDir) return;
     try {
-      const saved = JSON.parse(await fs.readFile(this.hostsFile, "utf8"));
-      for (const host of Array.isArray(saved) ? saved : [])
-        if (typeof host === "string") this.#serviceFor(host, false);
+      const rows = appDb(this.userDataDir)
+        .prepare("SELECT host FROM orchestrator_hosts")
+        .all();
+      for (const { host } of rows) this.#serviceFor(host, false);
+      this.loaded = true;
     } catch {
-      // No file yet, or unreadable: nothing was enabled.
+      // Unreadable store: nothing was enabled.
     }
   }
 
@@ -1098,7 +1108,12 @@ class OrchestratorHosts {
     const service = this.createService(host);
     this.services.set(host, service);
     this.enabled.add(host);
-    if (persist) void this.#save().catch(() => {});
+    if (persist)
+      try {
+        this.#save();
+      } catch {
+        // The host works this session; it just is not remembered.
+      }
     this.onChange?.();
     return service;
   }
@@ -1185,7 +1200,7 @@ function createOrchestratorHosts({
   getProjects,
   stopDaemonOnQuit,
   getConnections,
-  hostsFile,
+  userDataDir,
   hostsChanged,
   spawnRetries,
   stopWaitSeconds,
@@ -1215,7 +1230,7 @@ function createOrchestratorHosts({
     local,
     connections: getConnections ?? (() => null),
     artifacts,
-    hostsFile,
+    userDataDir,
     onChange: hostsChanged,
     enabled,
     createService: (host) =>

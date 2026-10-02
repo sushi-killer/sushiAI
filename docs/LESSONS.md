@@ -22,8 +22,15 @@ one index line; git history keeps the detail and updates.
 
 ## Open
 
+## 2026-10-02 — duplicate project rows survived three point fixes
+
+Root cause: no stored folder → project identity.
+Rule: a subsystem regressing after point fixes gets a data-model fix, not another patch.
+
 ## Promoted
 
+- 2026-10-02 Exact Herdr pin broke on self-update → check capabilities + protocol match.
+- 2026-10-02 Mid-session dead-row removal raced close flows → sweep at restore.
 - 2026-10-02 Fixtures invented `gh` output (`CLOSED` + `mergedAt`), so merged cleanup never preselected → copy real CLI shapes (`MERGED`). `worktree-session.test.cjs`.
 - 2026-10-02 Git identity loading split worktree rows → wait for first-host identities before drawing.
 - 2026-10-01 A temp `$HOME` did not isolate Herdr on macOS → never stop an unowned server; test on SSH.
@@ -36,7 +43,7 @@ one index line; git history keeps the detail and updates.
 - 2026-09-30 orchd defaults leaked repo specifics to every repo → defaults stay empty. `scoped_checks_and_chat_tools_default_to_none`.
 - 2026-09-30 A hook `allow` did not open `.claude/**` to headless `claude -p` → stage in `.orchd-staging/`, copy in before verify.
 - 2026-09-30 A plugin MCP server failed under `--strict-mcp-config` (OAuth keyed by plugin name) → keep its Claude Code name. `chat_tools::server_key`.
-- 2026-09-29 A kill lost the whole workspace snapshot (Chromium had not committed localStorage) → durable state goes in `workspace-state.json`, atomically.
+- 2026-09-29 A kill lost the whole workspace snapshot (Chromium had not committed localStorage) → durable state goes in `sushiai.db`.
 - 2026-09-30 A preselected answer plus global Enter sent answers the owner never picked → Enter needs an explicit pick or typed text. `enterAnswer` in `ownerAttention.ts`.
 - 2026-09-29 Contradicting criteria cost three attempts → cross-check criteria before launch.
 - 2026-09-28 Trusted `rtk rewrite` (`rtk read` drops code) → allowlist. `rtk_rewrite_output_*`.
@@ -47,8 +54,6 @@ one index line; git history keeps the detail and updates.
 - 2026-09-24 Orchestrator chat edited code instead of filing tasks → enforce roles with tools. `orchd/src/chat.rs`.
 - 2026-09-24 Unset `HERDR_SOCKET_PATH`/inherited `BRIDGE_DEV_URL` photographed the owner's Herdr/dev server → override both. `ui-evidence` template.
 - 2026-09-24 Real Claude/Codex output broke `orchd` while self-written fakes passed → parsers assert captured CLI lines. `parses_captured_real_cli_streams`.
-- 2026-09-14 A `flex: 1`-stretched label measured 0px wide → measure text ink with a `Range`, assert non-zero widths. `ui-evidence` skill.
 - 2026-09-14 A copied debug session leaked a real private IP/host/ports → examples use 192.0.2.0/24 (RFC 5737). `check-conventions.mjs`.
-- 2026-09-13 A wrapper printed success for a run that exited 1 → exit code is the verdict, never `npx`. `sushiai-testing` skill.
 - 2026-09-29 orchd preflights checks on a fresh checkout → check commands build what they need. `package.json`.
 - 2026-09-18 A fixture invented a Herdr status (`running`) → check vocabularies against `herdr api snapshot`. `tests/herdr-snapshot.test.cjs`.

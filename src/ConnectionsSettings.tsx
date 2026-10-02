@@ -63,7 +63,7 @@ export function ConnectionsSettings({
       setCompatibility(await window.bridge!.herdrCompatibility(endpoint));
       if (install)
         notify(
-          "Verified Herdr CLI installed. The running daemon must use the verified version too.",
+          "Herdr CLI installed. A running Herdr of another protocol keeps its own matching CLI.",
         );
     } catch (error) {
       setCompatibilityError(
@@ -114,7 +114,7 @@ export function ConnectionsSettings({
           <>
             <p role="status">
               {compatibility.compatible ? "Compatible" : "Needs attention"} ·
-              verified version {compatibility.expected.version}
+              sushiAI installs {compatibility.expected.version}
             </p>
             <p className="muted">
               Daemon: {compatibility.daemon.version || "unavailable"} · Terminal

@@ -1,43 +1,171 @@
-// The workspace snapshot: one JSON file in the profile folder that owns
-// what the renderer used to keep in localStorage. Chromium commits
-// localStorage to disk on a delay and at a clean shutdown, so a killed app
-// lost everything since the last commit; this file is written by us,
-// atomically, and flushed synchronously when the window goes away.
-const fs = require("node:fs");
-const path = require("node:path");
+// The workspace snapshot: what the renderer used to keep in localStorage,
+// owned by us in `sushiai.db` so it survives a killed app. The renderer still
+// hands over one JSON text; it is split into `workspaces` rows and `app_state`
+// keys and only what changed is written, in one transaction.
+const { appDb, transaction } = require("./app-db.cjs");
 
-const FILE = "workspace-state.json";
 // A renderer bug must not fill the disk with one runaway write.
 const MAX_BYTES = 64 * 1024 * 1024;
 
-function snapshotFile(dir) {
-  return path.join(dir, FILE);
+const isObject = (value) =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+/** Parses stored JSON; undefined (with a warning) for an unreadable row. */
+function parseRow(text, what) {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    console.warn(`Skipping an unreadable ${what}: ${error.message}`);
+    return undefined;
+  }
 }
 
 /** The stored text, or null when there is no snapshot yet. */
 function readSnapshot(dir) {
-  try {
-    return fs.readFileSync(snapshotFile(dir), "utf8");
-  } catch {
-    return null;
+  const db = appDb(dir);
+  const state = db.prepare("SELECT key, value FROM app_state").all();
+  const rows = db
+    .prepare("SELECT data FROM workspaces ORDER BY position")
+    .all();
+  if (!state.length && !rows.length) return null;
+  const snapshot = {};
+  for (const { key, value } of state) {
+    const parsed = parseRow(value, `state key ${key}`);
+    if (parsed !== undefined) snapshot[key] = parsed;
   }
+  snapshot.workspaces = rows
+    .map((row) => parseRow(row.data, "workspace"))
+    .filter((workspace) => workspace !== undefined);
+  return JSON.stringify(snapshot);
 }
 
-/** Writes the whole file to a sibling and renames it over the target, so a
- * kill mid-write leaves the previous snapshot, never half of the new one. */
+/** The saved workspaces in sidebar order. */
+function savedWorkspaces(dir) {
+  return appDb(dir)
+    .prepare("SELECT data FROM workspaces ORDER BY position")
+    .all()
+    .map((row) => parseRow(row.data, "workspace"))
+    .filter((workspace) => workspace !== undefined);
+}
+
+/** The workspaces to store. A repeated id keeps the first row. A later row
+ * claiming a (connection, herdrId) an earlier one holds is kept but loses the
+ * binding, so one Herdr workspace is never stored twice. */
+function uniqueWorkspaces(workspaces) {
+  const ids = new Set();
+  const bindings = new Set();
+  const kept = [];
+  for (const workspace of workspaces) {
+    if (!isObject(workspace) || workspace.id == null || workspace.id === "")
+      continue;
+    const id = String(workspace.id);
+    if (ids.has(id)) continue;
+    ids.add(id);
+    const endpoint =
+      typeof workspace.connection === "string" ? workspace.connection : "";
+    let herdrId =
+      typeof workspace.herdrId === "string" ? workspace.herdrId : "";
+    let stored = workspace;
+    if (herdrId) {
+      const binding = JSON.stringify([endpoint, herdrId]);
+      if (bindings.has(binding)) {
+        console.warn(`Workspace ${id} repeats a Herdr binding; unbinding it.`);
+        const { herdrId: _dropped, ...rest } = workspace;
+        stored = rest;
+        herdrId = "";
+      } else bindings.add(binding);
+    }
+    kept.push({
+      id,
+      endpoint,
+      herdrId: herdrId || null,
+      data: JSON.stringify(stored),
+    });
+  }
+  return kept;
+}
+
+/** Writes `snapshot` (a plain object) as row deltas. Runs inside a
+ * transaction opened by the caller. */
+function applyDelta(db, snapshot) {
+  const { workspaces, ...state } = snapshot;
+  if (workspaces !== undefined && !Array.isArray(workspaces))
+    throw new Error("Invalid workspace snapshot");
+
+  const storedState = new Map(
+    db
+      .prepare("SELECT key, value FROM app_state")
+      .all()
+      .map((row) => [row.key, row.value]),
+  );
+  const upsertState = db.prepare(
+    "INSERT INTO app_state(key, value) VALUES(?, ?) " +
+      "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+  );
+  const deleteState = db.prepare("DELETE FROM app_state WHERE key = ?");
+  for (const [key, value] of Object.entries(state)) {
+    const text = JSON.stringify(value);
+    if (text === undefined) continue;
+    if (storedState.get(key) !== text) upsertState.run(key, text);
+    storedState.delete(key);
+  }
+  for (const key of storedState.keys()) deleteState.run(key);
+
+  const next = uniqueWorkspaces(workspaces ?? []);
+  const stored = new Map(
+    db
+      .prepare("SELECT id, position, endpoint, herdr_id, data FROM workspaces")
+      .all()
+      .map((row) => [row.id, row]),
+  );
+  const nextIds = new Set(next.map((row) => row.id));
+  const removeRow = db.prepare("DELETE FROM workspaces WHERE id = ?");
+  for (const id of stored.keys()) if (!nextIds.has(id)) removeRow.run(id);
+  const changed = [];
+  next.forEach((row, position) => {
+    const old = stored.get(row.id);
+    if (!old || old.position !== position || old.data !== row.data)
+      changed.push({ ...row, position, existing: Boolean(old) });
+  });
+  // A binding moving between two rows of one write must not trip the unique
+  // index half way: release the changed rows' bindings first.
+  const rebound = (row) => {
+    const old = stored.get(row.id);
+    return (
+      old &&
+      old.herdr_id &&
+      (old.herdr_id !== row.herdrId || old.endpoint !== row.endpoint)
+    );
+  };
+  const release = db.prepare(
+    "UPDATE workspaces SET herdr_id = NULL WHERE id = ?",
+  );
+  for (const row of changed) if (rebound(row)) release.run(row.id);
+  const upsert = db.prepare(
+    "INSERT INTO workspaces(id, position, endpoint, herdr_id, data) " +
+      "VALUES(?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET " +
+      "position = excluded.position, endpoint = excluded.endpoint, " +
+      "herdr_id = excluded.herdr_id, data = excluded.data",
+  );
+  for (const row of changed)
+    upsert.run(row.id, row.position, row.endpoint, row.herdrId, row.data);
+}
+
+/** Stores an already parsed snapshot object (used by the one-time import,
+ * which runs in its own transaction). */
+function applySnapshot(db, snapshot) {
+  if (!isObject(snapshot)) throw new Error("Invalid workspace snapshot");
+  applyDelta(db, snapshot);
+}
+
+/** Stores the snapshot text in one transaction, writing only what changed. */
 function writeSnapshotSync(dir, text) {
   if (typeof text !== "string" || Buffer.byteLength(text) > MAX_BYTES)
     throw new Error("Invalid workspace snapshot");
-  fs.mkdirSync(dir, { recursive: true });
-  const target = snapshotFile(dir);
-  const tmp = `${target}.${process.pid}.tmp`;
-  try {
-    fs.writeFileSync(tmp, text);
-    fs.renameSync(tmp, target);
-  } catch (error) {
-    fs.rmSync(tmp, { force: true });
-    throw error;
-  }
+  const snapshot = JSON.parse(text);
+  if (!isObject(snapshot)) throw new Error("Invalid workspace snapshot");
+  const db = appDb(dir);
+  transaction(db, () => applyDelta(db, snapshot));
 }
 
 /** `handle` is main.cjs's sender-checked ipcMain.handle wrapper; the
@@ -90,9 +218,9 @@ function registerWorkspaceSnapshot({
 }
 
 module.exports = {
-  FILE,
-  snapshotFile,
   readSnapshot,
+  savedWorkspaces,
+  applySnapshot,
   writeSnapshotSync,
   registerWorkspaceSnapshot,
 };

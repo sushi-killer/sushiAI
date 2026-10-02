@@ -1,20 +1,17 @@
-const fs = require("node:fs");
-const fsp = require("node:fs/promises");
-const path = require("node:path");
-const { randomUUID } = require("node:crypto");
+const { readStore, writeStore } = require("../app-db.cjs");
 class HermesScheduler {
-  constructor({ factory, file, publish }) {
+  constructor({ factory, userDataDir, publish }) {
     this.factory = factory;
-    this.file = file;
+    this.userDataDir = userDataDir;
     this.publish = publish;
     this.transport = null;
     this.closed = false;
     this.queue = Promise.resolve();
     this.state = { enabled: false, status: "stopped", error: null };
-    if (file)
+    if (userDataDir)
       try {
         this.state.enabled =
-          JSON.parse(fs.readFileSync(file, "utf8")).enabled === true;
+          readStore(userDataDir, "hermes-scheduler").enabled === true;
       } catch {}
     if (this.state.enabled)
       queueMicrotask(() => void this.set(true).catch(() => {}));
@@ -60,22 +57,8 @@ class HermesScheduler {
           this.state.status = "stopped";
           this.state.error = null;
         }
-        if (this.file) {
-          const temporary = `${this.file}.${randomUUID()}.tmp`;
-          try {
-            await fsp.mkdir(path.dirname(this.file), {
-              recursive: true,
-              mode: 0o700,
-            });
-            await fsp.writeFile(temporary, JSON.stringify({ enabled }), {
-              mode: 0o600,
-              flag: "wx",
-            });
-            await fsp.rename(temporary, this.file);
-          } finally {
-            await fsp.rm(temporary, { force: true }).catch(() => {});
-          }
-        }
+        if (this.userDataDir)
+          writeStore(this.userDataDir, "hermes-scheduler", { enabled });
         this.publish({ type: "scheduler", state: this.snapshot() });
         return this.snapshot();
       });

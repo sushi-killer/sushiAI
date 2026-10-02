@@ -35,11 +35,11 @@ export function isHidden(
   if (!connection?.startsWith("ssh:")) return false;
   return Boolean(profiles.find((p) => `ssh:${p.id}` === connection)?.hidden);
 }
-/** Which projects (by git remote) run on both this Mac and a remote host -
- * every workspace sharing that remote gets a small "mixed" marker, since the
+/** Which projects (identity from the project store, else the remote) run on
+ * both this Mac and a remote host - every workspace sharing that identity gets a small "mixed" marker, since the
  * point is "this project spans machines," not which specific copy you're
  * looking at. This is coarser than merge identity: it only compares the
- * remote, not the subdir each checkout runs from or the same-host clone
+ * identity, not the subdir each checkout runs from or the same-host clone
  * ambiguity that keeps computeMergeGroups from joining two checkouts - so it
  * still fires for a workspace that is flagged "mixed" but does not qualify to
  * merge - that row keeps today's passive marker. */
@@ -49,12 +49,13 @@ export function mixedRemotes(
 ) {
   const mix = new Map<string, { local: boolean; remote: boolean }>();
   for (const w of visible) {
-    const remote = projectGit[w.id]?.remote;
-    if (!remote) continue;
-    const entry = mix.get(remote) || { local: false, remote: false };
+    const info = projectGit[w.id];
+    const identity = info && (info.projectId || info.remote);
+    if (!identity) continue;
+    const entry = mix.get(identity) || { local: false, remote: false };
     if (groupKey(w.connection) === LOCAL_GROUP) entry.local = true;
     else entry.remote = true;
-    mix.set(remote, entry);
+    mix.set(identity, entry);
   }
   const mixed = new Set<string>();
   for (const [remote, entry] of mix)
@@ -121,8 +122,9 @@ function distinctCheckouts(members: MergedMember[]): MergedMember[] {
 }
 
 /** Merge identity (D4): the same folder inside one repository - worktrees
- * sharing a git common dir on one host, or across hosts a non-empty
- * normalized git remote, whatever each checkout's folder is called.
+ * sharing a common dir on one host, or across hosts the same project id from
+ * the project store (else a non-empty normalized remote), whatever each
+ * checkout's folder is called.
  * Separate clones never share a common dir, so they never merge with each
  * other, and a host holding two clones cannot say which one a remote host's
  * checkout matches, so neither joins the cross-host row (product-brief edge
@@ -139,7 +141,8 @@ export function computeMergeGroups(
     const git = projectGit[w.id];
     if (!git?.commonDir || !git.checkout) continue;
     const hostKey = groupKey(w.connection);
-    const repository = git.remote || `${hostKey}::${git.commonDir}`;
+    const repository =
+      git.projectId || git.remote || `${hostKey}::${git.commonDir}`;
     const identity = `${repository}::${git.subdir}`;
     const byHost = buckets.get(identity) ?? new Map<string, MergedMember[]>();
     byHost.set(hostKey, [

@@ -1,6 +1,7 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
+const { readStore } = require("../electron/app-db.cjs");
 const os = require("node:os");
 const path = require("node:path");
 const { createHash } = require("node:crypto");
@@ -136,10 +137,7 @@ test("automatic download preferences persist and manual download still works", a
   await updater.check();
   assert.equal(updater.snapshot().phase, "available");
   assert.equal(downloads, 0);
-  assert.equal(
-    JSON.parse(await fs.readFile(path.join(dir, "updates.json"))).autoCheck,
-    false,
-  );
+  assert.equal(readStore(dir, "updates").value.autoCheck, false);
   await updater.download();
   assert.equal(downloads, 1);
   assert.equal(updater.snapshot().phase, "ready");

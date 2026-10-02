@@ -4,5 +4,5 @@
 - Select text, or point at an element of a deck or diagram, to leave a comment. **Send** delivers all your comments to the agent as one message, marked as owner feedback from the Preview. Unsent comments survive hiding the Preview.
 - Edit a Markdown document in place with the pencil, then **Save** (⌘S). The agent is told you changed the file. Copy puts the document's Markdown on the clipboard.
 - A plan has a **Start task** button next to its tags. You pick Claude Code or Codex, which opens a new pane in a new worktree and starts with `/goal <plan>`, or the orchestrator. The same spot then shows the run: **Open** goes to the running agent, and an ended session or a failed start offers **Restart** or **Retry**. Plans show whether the agent checked them for contradictions ("Verified").
-- sushiAI installs the `sushiai-artifacts` skill for Claude Code and Codex, on this Mac and on every SSH host, so any agent started from sushiAI knows how to open a Preview. You can turn Artifacts off in Extensions.
+- sushiAI installs the `sushiai-artifacts` skill globally for Claude Code, Codex and other harnesses that read `~/.agents/skills`, on this Mac and on every SSH host, so any agent started from sushiAI knows how to open a Preview. You can turn Artifacts off in Extensions.
 - Extensions: a built-in extension surface can now open as the companion half of an agent pane.

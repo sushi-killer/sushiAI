@@ -89,7 +89,6 @@ test("local install writes Claude Code, Codex and every Codex account home, idem
     ];
     assert.deepEqual(first, files);
     for (const file of files) assert.equal(fs.readFileSync(file, "utf8"), TEXT);
-    assert.equal(fs.existsSync(path.join(home, ".agents")), false);
     assert.deepEqual(installLocalArtifactsSkill(home, TEXT, [account]), []);
     assert.deepEqual(
       installLocalArtifactsSkill(home, TEXT + "x", [account]),
@@ -109,7 +108,13 @@ test("the remote script round-trips the exact content through a fake exec", asyn
       calls.push({ endpoint, command });
       return execFileSync("/bin/sh", ["-s"], {
         input,
-        env: { ...process.env, HOME: home },
+        // The host's own config folders must not leak in from this machine.
+        env: {
+          ...process.env,
+          HOME: home,
+          CODEX_HOME: "",
+          CLAUDE_CONFIG_DIR: "",
+        },
       }).toString();
     };
     const saved = process.env.SUSHIAI_TEST_WINDOW;
@@ -138,7 +143,11 @@ test("the remote script round-trips the exact content through a fake exec", asyn
         path.join(home, ".claude/skills/sushiai-artifacts/SKILL.md"),
       ),
     );
-    assert.equal(fs.existsSync(path.join(home, ".agents")), false);
+    assert.ok(
+      fs.existsSync(
+        path.join(home, ".agents/skills/sushiai-artifacts/SKILL.md"),
+      ),
+    );
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -287,4 +296,33 @@ test("the remote removal script deletes ours and leaves a foreign skill", async 
     configureArtifactsSkill({ isEnabled: () => true });
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("the skill goes into the shared agents folder and custom config folders", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const skills = require("../electron/extensions/builtin-skills.cjs");
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "skills-home-"));
+  const custom = fs.mkdtempSync(path.join(os.tmpdir(), "skills-codex-"));
+  skills.registerBuiltinSkill({
+    extensionId: "builtin.test-shared",
+    name: "test-shared-skill",
+    text: "---\nname: test-shared-skill\ndescription: x\n---\n",
+    isEnabled: () => true,
+  });
+  skills.syncLocalBuiltinSkills(home, { CODEX_HOME: custom }, undefined);
+  for (const dir of [
+    path.join(home, ".claude"),
+    path.join(home, ".codex"),
+    path.join(home, ".agents"),
+    custom,
+  ])
+    assert.ok(
+      fs.existsSync(path.join(dir, "skills", "test-shared-skill", "SKILL.md")),
+      dir,
+    );
+  const script = skills.remoteInstallScript("test-shared-skill", "x");
+  assert.match(script, /CODEX_HOME:-\$HOME\/\.codex/);
+  assert.match(script, /\$HOME\/\.agents/);
 });

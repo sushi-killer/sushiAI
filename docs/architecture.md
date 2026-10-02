@@ -48,7 +48,7 @@ flowchart TB
       wsSnap["workspace-snapshot.cjs<br/>sync read/flush + async write"]
       devRestart["dev-restart.cjs<br/>watches electron/ in npm run dev"]
       previewSrv["preview.cjs<br/>token-granted file server;<br/>comment script for annotate HTML grants"]
-      artSkill["artifacts-skill.cjs + extensions/builtin-skills.cjs<br/>global sushiai-artifacts skill in ~/.claude, ~/.codex,<br/>Codex account homes, SSH hosts; removed when disabled"]
+      artSkill["artifacts-skill.cjs + extensions/builtin-skills.cjs<br/>global sushiai-artifacts skill in ~/.claude, ~/.codex, ~/.agents,<br/>CLAUDE_CONFIG_DIR / CODEX_HOME, Codex account homes, SSH hosts; removed when disabled"]
     end
     orchPanel <--> preload <--> orchSvc
     orchSvc --> remoteSvc --> herdrIpc

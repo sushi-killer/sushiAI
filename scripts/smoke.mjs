@@ -24,6 +24,9 @@ async function until(read, ready, timeout = 10000) {
 }
 // Every label, id and storage key below is read out of the fixture, so the
 // smoke asserts the contract rather than whichever extension wrote it.
+const { readSnapshot } = createRequire(import.meta.url)(
+  "../electron/workspace-snapshot.cjs",
+);
 const { validateExtensionManifest } = createRequire(import.meta.url)(
   "../electron/extensions/manifest.cjs",
 );
@@ -706,11 +709,7 @@ try {
   await page.getByRole("button", { name: "Close Smoke routine" }).click();
   // The reload must find the close already persisted, not race its write.
   await until(async () => {
-    const saved = JSON.parse(
-      await fs
-        .readFile(`${profile}/workspace-state.json`, "utf8")
-        .catch(() => "null"),
-    );
+    const saved = JSON.parse(readSnapshot(profile) ?? "null");
     const active = saved?.workspaces.find((w) => w.id === saved.activeId);
     return Boolean(
       active && !active.panels.some((p) => p.title === "Smoke routine"),

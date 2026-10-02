@@ -5,8 +5,7 @@ import type { ProjectGit } from "./app/useProjectGit.ts";
 import { closedProjectKey, migrateHerdrIdentities } from "./herdrIdentity.ts";
 
 /** Where the snapshot lives when there is no desktop bridge (dev:web). With
- * the bridge it is <userData>/workspace-state.json, written by the main
- * process. */
+ * the bridge it is <userData>/sushiai.db, written by the main process. */
 export const BROWSER_KEY = "sushiai.workspace-state";
 // The keys the app used before the snapshot had one owner. They are named
 // here and nowhere else: `importLegacy` folds them into one snapshot once.

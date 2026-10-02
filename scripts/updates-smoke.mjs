@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import assert from "node:assert/strict";
 const profile = await fs.mkdtemp("/tmp/sushiai-updates-test-");
-// The app restores its workspace from this file on the first paint.
+// The app imports this file into its database on first start.
 await fs.writeFile(
   `${profile}/workspace-state.json`,
   JSON.stringify({

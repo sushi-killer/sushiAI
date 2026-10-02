@@ -47,7 +47,10 @@ const { registerSessionLaunchIpc } = require("./session-launch.cjs");
 const { assertHerdrCompatibility } = require("./herdr-compatibility.cjs");
 const { registerExtensionIpc } = require("./ipc/extensions.cjs");
 const { registerAttentionIpc } = require("./attention.cjs");
-const { registerWorkspaceSnapshot } = require("./workspace-snapshot.cjs");
+const {
+  registerWorkspaceSnapshot,
+  savedWorkspaces,
+} = require("./workspace-snapshot.cjs");
 const {
   DEFAULT_BOUNDS,
   loadWindowState,
@@ -241,11 +244,8 @@ registerSessionLaunchIpc({
     );
   },
   readSnapshot: (endpoint) => herdrExtension.snapshots.read(endpoint),
-  journalPath: path.join(app.getPath("userData"), "herdr-launches.json"),
-  workspaceStatePath: path.join(
-    app.getPath("userData"),
-    "workspace-state.json",
-  ),
+  userDataDir: app.getPath("userData"),
+  savedWorkspaces: () => savedWorkspaces(app.getPath("userData")),
   checkCompatibility: (endpoint) =>
     assertHerdrCompatibility({
       endpoint,
@@ -378,7 +378,7 @@ orchestrator = registerOrchestratorExtension({
   getProjects: () => projects,
   stopDaemonOnQuit: testMode.test,
   getConnections: () => connections,
-  hostsFile: path.join(app.getPath("userData"), "orchestrator-hosts.json"),
+  userDataDir: app.getPath("userData"),
   hostsChanged: () => send("orchestrator-hosts-changed"),
 });
 // Turning the orchestrator off also drops the notices it already queued.

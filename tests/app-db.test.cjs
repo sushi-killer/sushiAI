@@ -1,4 +1,4 @@
-// The project store on node:sqlite: the projects.json import, the single
+// The app database on node:sqlite: the JSON store imports, the projects.json import, the single
 // folder resolver and the stored git identity behind projects:identify.
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
@@ -6,7 +6,12 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { makeStore, registerHandlers } = require("./helpers/fake-host.cjs");
-const { openProjectDb } = require("../electron/project-db.cjs");
+const { appDb, closeAppDb } = require("../electron/app-db.cjs");
+const { Connections } = require("../electron/connections.cjs");
+const {
+  readSnapshot,
+  savedWorkspaces,
+} = require("../electron/workspace-snapshot.cjs");
 
 const project = (id, url, folders = []) => ({
   id,
@@ -26,7 +31,10 @@ const project = (id, url, folders = []) => ({
 
 async function tempDir(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "project-db-"));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  t.after(async () => {
+    closeAppDb(dir);
+    await fs.rm(dir, { recursive: true, force: true });
+  });
   return dir;
 }
 
@@ -68,19 +76,25 @@ test("first open imports projects.json with its folders and renames it", async (
   );
 });
 
-test("a failed import rolls back, keeps the file and retries on the next open", async (t) => {
+test("a failed import rolls back, keeps the file, never blocks opening and retries on the next open", async (t) => {
   const dir = await tempDir(t);
+  const warn = console.warn;
+  console.warn = () => {};
+  t.after(() => {
+    console.warn = warn;
+  });
   const file = path.join(dir, "projects.json");
   await fs.writeFile(file, '{"a": {"name": "a"}, "b": ');
-  assert.throws(() => openProjectDb(dir));
+  assert.equal(count(appDb(dir), "projects"), 0);
   assert.equal(await exists(file), true);
   assert.equal(await exists(`${file}.imported`), false);
+  closeAppDb(dir);
   await fs.writeFile(file, JSON.stringify({ a: project("a", "") }));
-  const db = openProjectDb(dir);
-  t.after(() => db.close());
+  const db = appDb(dir);
+  t.after(() => closeAppDb(dir));
   assert.equal(db.prepare("SELECT count(*) AS n FROM projects").get().n, 1);
   assert.equal(await exists(`${file}.imported`), true);
-  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 1);
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 2);
   assert.equal(
     db.prepare("PRAGMA journal_mode").get().journal_mode.toLowerCase(),
     "wal",
@@ -98,10 +112,16 @@ test("an import that fails midway leaves no rows behind", async (t) => {
       c: project("c", ""),
     }),
   );
-  assert.throws(() => openProjectDb(dir));
+  const warn = console.warn;
+  console.warn = () => {};
+  t.after(() => {
+    console.warn = warn;
+  });
+  assert.equal(count(appDb(dir), "projects"), 0);
+  closeAppDb(dir);
   await fs.writeFile(file, JSON.stringify({ a: project("a", "") }));
-  const db = openProjectDb(dir);
-  t.after(() => db.close());
+  const db = appDb(dir);
+  t.after(() => closeAppDb(dir));
   assert.equal(db.prepare("SELECT count(*) AS n FROM projects").get().n, 1);
 });
 
@@ -374,5 +394,216 @@ test("a checkout of a fork joins the project whose attached folder tracks it", a
     (await projects.resolveFolder({ endpoint: "local", cwd: "/repo/app-wt" }))
       ?.id,
     made.id,
+  );
+});
+
+const count = (db, table) =>
+  db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n;
+
+test("workspace-state.json splits into workspace rows and app state, then is renamed", async (t) => {
+  const dir = await tempDir(t);
+  const file = path.join(dir, "workspace-state.json");
+  const snapshot = {
+    activeId: "a",
+    views: { a: { zoom: 1 } },
+    workspaces: [
+      { id: "a", connection: "ssh:devbox", herdrId: "w1", cwd: "/repo/app" },
+      { id: "b", cwd: "/repo/other" },
+    ],
+  };
+  await fs.writeFile(file, JSON.stringify(snapshot));
+  const db = appDb(dir);
+  assert.equal(count(db, "workspaces"), 2);
+  assert.equal(count(db, "app_state"), 2);
+  assert.deepEqual(JSON.parse(readSnapshot(dir)), snapshot);
+  assert.deepEqual(
+    savedWorkspaces(dir).map((item) => item.id),
+    ["a", "b"],
+  );
+  assert.equal(await exists(file), false);
+  assert.equal(await exists(`${file}.imported`), true);
+});
+
+test("herdr-launches.json, connections.json and orchestrator-hosts.json are imported once", async (t) => {
+  const dir = await tempDir(t);
+  const record = {
+    endpoint: "ssh:devbox",
+    operationId: "op-1",
+    created: { workspaceId: "w1", paneId: "p1", cwd: "/repo/app" },
+    signatureHash: "s",
+    preparationHash: "p",
+  };
+  const profile = (id) => ({
+    id,
+    name: id,
+    host: "devbox",
+    socket: "~/.sushiai/herdr.sock",
+  });
+  const one = "11111111-1111-1111-1111-111111111111";
+  const two = "22222222-2222-2222-2222-222222222222";
+  const warn = console.warn;
+  console.warn = () => {};
+  t.after(() => {
+    console.warn = warn;
+  });
+  await fs.writeFile(
+    path.join(dir, "herdr-launches.json"),
+    JSON.stringify({ version: 1, operations: [record] }),
+  );
+  await fs.writeFile(
+    path.join(dir, "connections.json"),
+    JSON.stringify([profile(one), { name: "no host" }, profile(two)]),
+  );
+  await fs.writeFile(
+    path.join(dir, "orchestrator-hosts.json"),
+    JSON.stringify(["ssh:devbox"]),
+  );
+  const db = appDb(dir);
+  assert.deepEqual(
+    JSON.parse(db.prepare("SELECT data FROM launches").get().data),
+    record,
+  );
+  assert.deepEqual(
+    db
+      .prepare("SELECT id FROM connections ORDER BY position")
+      .all()
+      .map((row) => row.id),
+    [one, two],
+  );
+  const loaded = new Connections(dir);
+  await loaded.init();
+  t.after(() => loaded.close());
+  assert.equal(loaded.list().length, 2);
+  assert.equal(count(db, "orchestrator_hosts"), 1);
+  for (const name of [
+    "herdr-launches.json",
+    "connections.json",
+    "orchestrator-hosts.json",
+  ]) {
+    assert.equal(await exists(path.join(dir, name)), false);
+    assert.equal(await exists(path.join(dir, `${name}.imported`)), true);
+  }
+  // A second file never overwrites a filled table.
+  closeAppDb(dir);
+  await fs.writeFile(path.join(dir, "orchestrator-hosts.json"), '["ssh:x"]');
+  assert.equal(count(appDb(dir), "orchestrator_hosts"), 1);
+  assert.equal(await exists(path.join(dir, "orchestrator-hosts.json")), true);
+});
+
+test("an invalid legacy file is left in place and never blocks opening", async (t) => {
+  const dir = await tempDir(t);
+  const names = [
+    "workspace-state.json",
+    "herdr-launches.json",
+    "connections.json",
+    "orchestrator-hosts.json",
+  ];
+  const warn = console.warn;
+  console.warn = () => {};
+  t.after(() => {
+    console.warn = warn;
+  });
+  await fs.writeFile(path.join(dir, names[0]), "{broken");
+  await fs.writeFile(path.join(dir, names[1]), "[1]");
+  await fs.writeFile(path.join(dir, names[2]), '{"not":"a list"}');
+  await fs.writeFile(path.join(dir, names[3]), "nope");
+  const db = appDb(dir);
+  for (const table of [
+    "workspaces",
+    "app_state",
+    "launches",
+    "connections",
+    "orchestrator_hosts",
+  ])
+    assert.equal(count(db, table), 0);
+  for (const name of names) {
+    assert.equal(await exists(path.join(dir, name)), true);
+    assert.equal(await exists(path.join(dir, `${name}.imported`)), false);
+  }
+});
+
+test("a broken projects.json does not stop the other imports", async (t) => {
+  const dir = await tempDir(t);
+  const warn = console.warn;
+  console.warn = () => {};
+  t.after(() => {
+    console.warn = warn;
+  });
+  await fs.writeFile(path.join(dir, "projects.json"), "{broken");
+  await fs.writeFile(
+    path.join(dir, "workspace-state.json"),
+    JSON.stringify({ activeId: "a", workspaces: [{ id: "a" }] }),
+  );
+  const db = appDb(dir);
+  assert.equal(count(db, "projects"), 0);
+  assert.equal(count(db, "workspaces"), 1);
+  assert.equal(await exists(path.join(dir, "projects.json")), true);
+  assert.equal(
+    await exists(path.join(dir, "workspace-state.json.imported")),
+    true,
+  );
+});
+
+test("invalid launch rows are dropped on load, valid ones kept", async (t) => {
+  const dir = await tempDir(t);
+  const { SessionLauncher } = require("../electron/session-launch.cjs");
+  const warn = console.warn;
+  console.warn = () => {};
+  t.after(() => {
+    console.warn = warn;
+  });
+  const db = appDb(dir);
+  const good = {
+    endpoint: "local",
+    operationId: "ok",
+    created: { workspaceId: "w1", paneId: "p1", cwd: "/repo/app" },
+    signatureHash: "s",
+    preparationHash: "p",
+  };
+  const insert = db.prepare(
+    "INSERT INTO launches(endpoint, operation_id, data) VALUES(?, ?, ?)",
+  );
+  insert.run("local", "ok", JSON.stringify(good));
+  insert.run("local", "bad", JSON.stringify({ endpoint: "local" }));
+  insert.run("local", "junk", "{x");
+  const launcher = new SessionLauncher({ userDataDir: dir });
+  await launcher.loadJournal();
+  assert.equal(launcher.journal.size, 1);
+  assert.equal(count(db, "launches"), 1);
+});
+
+test("appDb returns one connection per directory", async (t) => {
+  const dir = await tempDir(t);
+  assert.equal(appDb(dir), appDb(dir));
+  const first = appDb(dir);
+  closeAppDb(dir);
+  assert.notEqual(appDb(dir), first);
+});
+
+test("connection profiles persist across a reopen", async (t) => {
+  const dir = await tempDir(t);
+  const socket = "~/.sushiai/herdr.sock";
+  const connections = new Connections(dir);
+  await connections.init();
+  const dev = await connections.save({ name: "Dev", host: "devbox", socket });
+  const box = await connections.save({ name: "Box", host: "user@box", socket });
+  await connections.setHidden(`ssh:${dev.id}`, true);
+  await connections.delete(`ssh:${box.id}`);
+  const again = await connections.save({
+    name: "Box",
+    host: "user@box2",
+    socket,
+  });
+  await connections.close();
+  closeAppDb(dir);
+  const reopened = new Connections(dir);
+  await reopened.init();
+  t.after(() => reopened.close());
+  assert.deepEqual(
+    reopened.list().map((item) => [item.id, item.host, item.hidden]),
+    [
+      [dev.id, "devbox", true],
+      [again.id, "user@box2", false],
+    ],
   );
 });

@@ -2,7 +2,7 @@ const { randomUUID } = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { remoteUrl } = require("./git-remote.cjs");
-const { openProjectDb, transaction } = require("./project-db.cjs");
+const { appDb, transaction } = require("./app-db.cjs");
 const { projectSlug, slugOf, uniqueSlug } = require("./project-slug.cjs");
 
 function normalizeRemote(url) {
@@ -58,7 +58,6 @@ function hint(value) {
 class Projects {
   constructor({ userDataDir, safeStorage }) {
     this.userDataDir = userDataDir;
-    this.db = null;
     this.secretsFile = path.join(userDataDir, "project-secrets.json");
     this.safeStorage = safeStorage;
     this.writeQueue = Promise.resolve();
@@ -96,10 +95,12 @@ class Projects {
       : undefined;
   }
 
-  /** The store, opened on first use (a failed import throws and is tried
-   * again on the next call). */
+  /** The shared app database (appDb caches the handle per directory). */
+  get db() {
+    return appDb(this.userDataDir);
+  }
+
   #open() {
-    this.db ||= openProjectDb(this.userDataDir);
     return this.db;
   }
 

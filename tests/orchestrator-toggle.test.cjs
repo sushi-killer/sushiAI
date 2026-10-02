@@ -10,6 +10,8 @@ const {
   registerOrchestratorExtension,
 } = require("../electron/orchestrator.cjs");
 
+const { appDb, closeAppDb } = require("../electron/app-db.cjs");
+
 const FAKE = path.join(__dirname, "fixtures", "fake-orchd.cjs");
 
 async function waitUntil(check, { timeout = 3000, interval = 10 } = {}) {
@@ -70,7 +72,7 @@ async function setup(t, { on }) {
     resourcesPath: root,
     packaged: false,
     getConnections: () => ({ get: () => ({}), list: () => [] }),
-    hostsFile: path.join(dir, "hosts.json"),
+    userDataDir: dir,
     hostsChanged: () => {},
   });
   t.after(async () => {
@@ -192,8 +194,9 @@ test("quitting stops the local daemon this app spawned", async (t) => {
 test("turning it off stops the local daemon and quits every remote host; turning it on lists the saved ones without connecting", async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "orch-toggle-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const hostsFile = path.join(dir, "hosts.json");
-  await fs.writeFile(hostsFile, JSON.stringify(["ssh:box"]));
+  appDb(dir)
+    .prepare("INSERT INTO orchestrator_hosts(host) VALUES(?)")
+    .run("ssh:box");
   const events = [];
   const hosts = new OrchestratorHosts({
     local: {
@@ -202,7 +205,7 @@ test("turning it off stops the local daemon and quits every remote host; turning
       quit: async () => events.push("local.quit"),
     },
     connections: () => ({ get: () => ({}), list: () => [] }),
-    hostsFile,
+    userDataDir: dir,
     onChange: () => {},
     createService: (host) => {
       events.push(`${host}.create`);
@@ -221,11 +224,48 @@ test("turning it off stops the local daemon and quits every remote host; turning
     message: OFF_MESSAGE,
   });
   // The saved list is left alone, so the next enable brings the host back.
-  assert.deepEqual(JSON.parse(await fs.readFile(hostsFile, "utf8")), [
-    "ssh:box",
-  ]);
+  assert.deepEqual(
+    appDb(dir)
+      .prepare("SELECT host FROM orchestrator_hosts")
+      .all()
+      .map((row) => row.host),
+    ["ssh:box"],
+  );
   await hosts.setEnabled(true);
   assert.deepEqual(events.slice(4), ["local.attach", "ssh:box.create"]);
+});
+
+test("a host list that failed to load is not erased by a later save", async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "orch-hosts-"));
+  t.after(async () => {
+    closeAppDb(dir);
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  const stored = () =>
+    appDb(dir)
+      .prepare("SELECT host FROM orchestrator_hosts ORDER BY host")
+      .all()
+      .map((row) => row.host);
+  appDb(dir)
+    .prepare("INSERT INTO orchestrator_hosts(host) VALUES(?)")
+    .run("ssh:old");
+  let known = false;
+  const hosts = new OrchestratorHosts({
+    local: { attach: async () => {} },
+    connections: () => ({
+      get: (host) => {
+        if (!known && host === "ssh:old") throw new Error("not loaded yet");
+        return {};
+      },
+      list: () => [],
+    }),
+    userDataDir: dir,
+    onChange: () => {},
+    createService: () => ({ call: async () => null }),
+  });
+  await hosts.init();
+  await hosts.call("task.list", {}, "ssh:new");
+  assert.deepEqual(stored(), ["ssh:new", "ssh:old"]);
 });
 
 async function writeTask(data, id, task) {

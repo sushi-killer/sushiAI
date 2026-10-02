@@ -7,6 +7,7 @@ const path = require("node:path");
 const library = import("../src/workspaceState.ts");
 const { herdrWorkspaceKey } = require("../src/workspace/worktree.ts");
 const helper = require("../electron/workspace-snapshot.cjs");
+const { appDb, closeAppDb } = require("../electron/app-db.cjs");
 
 const leaf = (id) => ({ type: "leaf", id });
 const split = (id, axis, ratio, a, b) => ({
@@ -413,31 +414,165 @@ test("without a snapshot or legacy data restore returns null", async () => {
   );
 });
 
-test("the electron helper writes atomically and reads back", () => {
+test("the electron helper stores row deltas and reads back", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "snapshot-test-"));
   try {
     assert.equal(helper.readSnapshot(dir), null);
     helper.writeSnapshotSync(dir, '{"a":1}');
-    assert.equal(helper.readSnapshot(dir), '{"a":1}');
+    assert.deepEqual(JSON.parse(helper.readSnapshot(dir)), {
+      ...{ a: 1 },
+      workspaces: [],
+    });
     helper.writeSnapshotSync(dir, '{"a":2}');
-    assert.equal(helper.readSnapshot(dir), '{"a":2}');
-    assert.deepEqual(fs.readdirSync(dir), [helper.FILE], "no temp file stays");
+    assert.deepEqual(JSON.parse(helper.readSnapshot(dir)), {
+      ...{ a: 2 },
+      workspaces: [],
+    });
 
     // A failed write leaves the previous snapshot whole.
     assert.throws(() => helper.writeSnapshotSync(dir, undefined), /Invalid/);
-    assert.equal(helper.readSnapshot(dir), '{"a":2}');
+    assert.throws(() => helper.writeSnapshotSync(dir, "{broken"));
+    assert.throws(() => helper.writeSnapshotSync(dir, "[1]"), /Invalid/);
+    assert.throws(
+      () => helper.writeSnapshotSync(dir, '{"a":3,"workspaces":5}'),
+      /Invalid/,
+    );
+    assert.deepEqual(JSON.parse(helper.readSnapshot(dir)), {
+      ...{ a: 2 },
+      workspaces: [],
+    });
 
-    // The file is replaced by rename, never opened in place.
-    const before = fs.statSync(helper.snapshotFile(dir)).ino;
-    helper.writeSnapshotSync(dir, '{"a":3}');
-    assert.notEqual(fs.statSync(helper.snapshotFile(dir)).ino, before);
-
-    // A rename that fails cleans its temp file up.
-    const blocked = path.join(dir, "blocked");
-    fs.mkdirSync(path.join(blocked, helper.FILE), { recursive: true });
-    assert.throws(() => helper.writeSnapshotSync(blocked, "{}"));
-    assert.deepEqual(fs.readdirSync(blocked), [helper.FILE]);
+    // A key missing from the next snapshot is deleted.
+    helper.writeSnapshotSync(dir, '{"b":true}');
+    assert.deepEqual(JSON.parse(helper.readSnapshot(dir)), {
+      ...{ b: true },
+      workspaces: [],
+    });
   } finally {
+    closeAppDb(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const ws = (id, extra = {}) => ({ id, name: id, ...extra });
+
+test("an unreadable stored row is skipped and workspaces is always emitted", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "snapshot-test-"));
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    helper.writeSnapshotSync(dir, '{"a":1,"b":2}');
+    assert.deepEqual(JSON.parse(helper.readSnapshot(dir)), {
+      a: 1,
+      b: 2,
+      workspaces: [],
+    });
+    appDb(dir)
+      .prepare("UPDATE app_state SET value = '{x' WHERE key = 'a'")
+      .run();
+    assert.deepEqual(JSON.parse(helper.readSnapshot(dir)), {
+      b: 2,
+      workspaces: [],
+    });
+  } finally {
+    console.warn = warn;
+    closeAppDb(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("workspaces round trip in order and a write touches only the changed row", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "snapshot-test-"));
+  try {
+    const first = {
+      activeId: "a",
+      views: { a: 1 },
+      workspaces: [
+        ws("a", { connection: "ssh:devbox", herdrId: "w1" }),
+        ws("b"),
+        ws("c", { connection: "ssh:devbox", herdrId: "w2" }),
+      ],
+    };
+    helper.writeSnapshotSync(dir, JSON.stringify(first));
+    assert.deepEqual(JSON.parse(helper.readSnapshot(dir)), first);
+    assert.deepEqual(
+      helper.savedWorkspaces(dir).map((item) => item.id),
+      ["a", "b", "c"],
+    );
+
+    const db = appDb(dir);
+    const total = () => db.prepare("SELECT total_changes() AS n").get().n;
+    const before = total();
+    helper.writeSnapshotSync(dir, JSON.stringify(first));
+    assert.equal(total(), before, "an identical write changes nothing");
+
+    const next = structuredClone(first);
+    next.workspaces[1].name = "renamed";
+    helper.writeSnapshotSync(dir, JSON.stringify(next));
+    assert.equal(total() - before, 1, "one workspace row, nothing else");
+    assert.deepEqual(JSON.parse(helper.readSnapshot(dir)), next);
+
+    // Reordering moves positions; removing deletes the row.
+    next.workspaces = [next.workspaces[2], next.workspaces[0]];
+    helper.writeSnapshotSync(dir, JSON.stringify(next));
+    assert.deepEqual(
+      helper.savedWorkspaces(dir).map((item) => item.id),
+      ["c", "a"],
+    );
+    assert.equal(db.prepare("SELECT count(*) AS n FROM workspaces").get().n, 2);
+  } finally {
+    closeAppDb(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a duplicate id keeps the first row; a duplicate Herdr binding keeps the row but unbinds it", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "snapshot-test-"));
+  try {
+    helper.writeSnapshotSync(
+      dir,
+      JSON.stringify({
+        workspaces: [
+          ws("a", { connection: "ssh:devbox", herdrId: "w1" }),
+          ws("b", { connection: "ssh:devbox", herdrId: "w1" }),
+          ws("a", { name: "again" }),
+          ws("c", { connection: "ssh:other", herdrId: "w1" }),
+          ws("d"),
+          ws("e"),
+        ],
+      }),
+    );
+    assert.deepEqual(
+      helper.savedWorkspaces(dir).map((item) => [item.id, item.name]),
+      [
+        ["a", "a"],
+        ["b", "b"],
+        ["c", "c"],
+        ["d", "d"],
+        ["e", "e"],
+      ],
+    );
+    assert.equal(helper.savedWorkspaces(dir)[1].herdrId, undefined);
+    assert.equal(helper.savedWorkspaces(dir)[0].herdrId, "w1");
+    // A binding may move from one row to another inside one write.
+    helper.writeSnapshotSync(
+      dir,
+      JSON.stringify({
+        workspaces: [
+          ws("c", { connection: "ssh:devbox", herdrId: "w1" }),
+          ws("a", { connection: "ssh:devbox", herdrId: "w9" }),
+        ],
+      }),
+    );
+    assert.deepEqual(
+      helper.savedWorkspaces(dir).map((item) => [item.id, item.herdrId]),
+      [
+        ["c", "w1"],
+        ["a", "w9"],
+      ],
+    );
+  } finally {
+    closeAppDb(dir);
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -489,33 +624,46 @@ test("the electron helper serves read, write and flush and refuses other senders
     assert.deepEqual(ipc.send("workspace-state-read", ipc.trusted), {
       value: null,
     });
-    await ipc.invoke("workspace-state-write", "one");
+    await ipc.invoke("workspace-state-write", '{"v":"one"}');
     assert.deepEqual(ipc.send("workspace-state-read", ipc.trusted), {
-      value: "one",
+      value: '{"v":"one","workspaces":[]}',
     });
-    assert.deepEqual(ipc.send("workspace-state-flush", ipc.trusted, "two"), {
-      value: null,
+    assert.deepEqual(
+      ipc.send("workspace-state-flush", ipc.trusted, '{"v":"two"}'),
+      {
+        value: null,
+      },
+    );
+    assert.deepEqual(JSON.parse(helper.readSnapshot(dir)), {
+      ...{ v: "two" },
+      workspaces: [],
     });
-    assert.equal(helper.readSnapshot(dir), "two");
 
     // A flush overtakes a write still waiting: the older text never lands.
-    const pending = ipc.invoke("workspace-state-write", "old");
-    ipc.send("workspace-state-flush", ipc.trusted, "newest");
+    const pending = ipc.invoke("workspace-state-write", '{"v":"old"}');
+    ipc.send("workspace-state-flush", ipc.trusted, '{"v":"newest"}');
     await pending;
-    assert.equal(helper.readSnapshot(dir), "newest");
+    assert.deepEqual(JSON.parse(helper.readSnapshot(dir)), {
+      ...{ v: "newest" },
+      workspaces: [],
+    });
 
     const stranger = { sender: {}, senderFrame: {} };
     assert.match(
-      ipc.send("workspace-state-flush", stranger, "evil").error,
+      ipc.send("workspace-state-flush", stranger, '{"v":"evil"}').error,
       /Untrusted/,
     );
     assert.match(ipc.send("workspace-state-read", stranger).error, /Untrusted/);
-    assert.equal(helper.readSnapshot(dir), "newest");
+    assert.deepEqual(JSON.parse(helper.readSnapshot(dir)), {
+      ...{ v: "newest" },
+      workspaces: [],
+    });
     assert.match(
       ipc.send("workspace-state-flush", ipc.trusted, 42).error,
       /Invalid/,
     );
   } finally {
+    closeAppDb(dir);
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

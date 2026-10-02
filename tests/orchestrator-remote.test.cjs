@@ -228,7 +228,12 @@ async function fixture(
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line));
-  return { dir, home, root, remoteData, open, sshCommands };
+  const slowForward = (forwardDelayMs) =>
+    fs.writeFile(
+      configFile,
+      JSON.stringify({ home, bin, log, forwardDelayMs }),
+    );
+  return { dir, home, root, remoteData, open, sshCommands, slowForward };
 }
 
 const alive = (pid) => {
@@ -483,9 +488,10 @@ test("an upgrade waits for the old daemon to exit before starting the new one", 
   );
   await first.hosts.quit();
   await first.connections.close();
-  // The old daemon lingers 1.5 s after it accepts the shutdown; a changed
-  // source makes the app plan an upgrade.
+  // The old daemon lingers 1.5 s after it accepts the shutdown, the socket
+  // forward comes up late, and a changed source makes the app plan an upgrade.
   await fs.writeFile(path.join(fx.remoteData, "exit-delay"), "1500");
+  await fx.slowForward(500);
   await fs.appendFile(path.join(fx.root, "orchd", "src", "main.rs"), "// v2\n");
   const second = await fx.open();
   const tasks = await second.hosts.call("task.list", {}, second.id);

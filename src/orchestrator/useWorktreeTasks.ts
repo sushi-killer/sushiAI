@@ -48,12 +48,13 @@ export function useWorktreeTasks(): WorktreeTask[] {
   }, [enabled]);
   return useMemo(
     () =>
-      tasks.map(({ title, branch, worktree, repo, updatedAt }) => ({
+      tasks.map(({ title, branch, worktree, repo, updatedAt, status }) => ({
         title,
         branch,
         worktree,
         repo,
         updatedAt,
+        status,
       })),
     [tasks],
   );

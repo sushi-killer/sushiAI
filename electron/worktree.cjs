@@ -132,7 +132,146 @@ async function createWorktree(
   return { path: targetPath, root };
 }
 
+const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
+
+// A non-interactive ssh shell often lacks the user's tool directories (as in
+// orchestrator-remote.cjs).
+const PATH_SH =
+  'export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"';
+
+/** Lists every worktree of the repository holding `cwd`, one `WT` line each
+ * (path, branch, head, last commit time, folder exists, changed files,
+ * merged, commits ahead, locked), after a `ROOT` line naming the base
+ * branch. Plain sh and git, so the same script runs on this Mac and over
+ * ssh. Merged means the head is in the base, or a commit with the same tree
+ * on the merge base is (a squash merge); `commit-tree` only writes a
+ * dangling object for that check, under an identity of its own so a host
+ * with no git user configured still answers. The base branch itself, and a branch that
+ * never had a commit of its own (its reflog holds only its creation), are
+ * never merged: removing them as merged would delete the base or a worktree
+ * just cut. */
+function worktreeListScript(cwd) {
+  return `${PATH_SH}
+cd ${quote(cwd)} 2>/dev/null || { echo NOFOLDER; exit 0; }
+git rev-parse --show-toplevel >/dev/null 2>&1 || { echo NOREPO; exit 0; }
+base=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)
+if [ -z "$base" ]; then for b in main master; do
+  if git rev-parse -q --verify "refs/heads/$b" >/dev/null; then base=$b; break; fi
+done; fi
+printf 'ROOT\t\t%s\n' "$base"
+emit() {
+  [ -n "$p" ] || return 0
+  t=$(git log -1 --format=%ct "$h" 2>/dev/null)
+  e=0; d=0; m=0; a=0
+  if [ -d "$p" ]; then e=1; d=$(git -C "$p" status --porcelain --untracked-files=all 2>/dev/null | wc -l | tr -d ' '); fi
+  own=1
+  if [ -n "$br" ]; then
+    [ "$br" = "\${base#origin/}" ] && own=0
+    [ "$(git reflog show --format=%H "refs/heads/$br" 2>/dev/null | wc -l | tr -d ' ')" -le 1 ] && own=0
+  fi
+  if [ -n "$base" ] && [ -n "$h" ]; then
+    if git merge-base --is-ancestor "$h" "$base" 2>/dev/null; then m=$own
+    else
+      a=$(git rev-list --count "$base..$h" 2>/dev/null || echo 0)
+      mb=$(git merge-base "$base" "$h" 2>/dev/null)
+      if [ "$own" = 1 ] && [ -n "$mb" ] && c=$(GIT_AUTHOR_NAME=sushiai GIT_AUTHOR_EMAIL=sushiai@localhost GIT_COMMITTER_NAME=sushiai GIT_COMMITTER_EMAIL=sushiai@localhost git commit-tree "$h^{tree}" -p "$mb" -m squash 2>/dev/null); then
+        case $(git cherry "$base" "$c" 2>/dev/null) in -*) m=1 ;; esac
+      fi
+    fi
+  fi
+  printf 'WT\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$p" "$br" "$h" "\${t:-0}" "$e" "$d" "$m" "$a" "$l"
+}
+p=; h=; br=; l=0
+git worktree list --porcelain | { while IFS= read -r line; do
+  case $line in
+    "worktree "*) p=\${line#worktree } ;;
+    "HEAD "*) h=\${line#HEAD } ;;
+    "branch "*) br=\${line#branch refs/heads/} ;;
+    locked|"locked "*) l=1 ;;
+    "") emit; p=; h=; br=; l=0 ;;
+  esac
+done; emit; }
+`;
+}
+
+/** The output of `worktreeListScript`: the repository, its base branch and
+ * its worktrees, main checkout first. Throws on a folder that is gone or is
+ * not a git repository. */
+function parseWorktreeList(output) {
+  const lines = String(output || "").split("\n");
+  if (lines.includes("NOFOLDER"))
+    throw new Error("The project folder is gone.");
+  if (lines.includes("NOREPO"))
+    throw new Error("The project folder is not a git repository.");
+  const head = lines.find((line) => line.startsWith("ROOT\t"));
+  if (!head) throw new Error("Could not list worktrees.");
+  const base = head.split("\t")[2];
+  const worktrees = lines
+    .filter((line) => line.startsWith("WT\t"))
+    .map((line) => {
+      const [
+        ,
+        path,
+        branch,
+        head,
+        time,
+        exists,
+        changes,
+        merged,
+        ahead,
+        locked,
+      ] = line.split("\t");
+      return {
+        path,
+        branch,
+        head,
+        committedAt: Number(time) * 1000 || 0,
+        exists: exists === "1",
+        changes: Number(changes) || 0,
+        merged: merged === "1",
+        ahead: Number(ahead) || 0,
+        locked: locked === "1",
+      };
+    })
+    .map((item, index) => ({ ...item, main: index === 0 }));
+  // The main checkout, not `cwd`'s own top level: that is the linked
+  // worktree itself when the project folder is one.
+  return { root: worktrees[0]?.path || "", base: base || "", worktrees };
+}
+
+/** Removes one linked worktree: its folder (with its changes only when
+ * `discardChanges` - the owner confirmed losing them), or only git's record of that one worktree when its folder is
+ * already gone (never `prune`, which would also forget a worktree on a drive
+ * that is merely unmounted), then its branch when asked. */
+function worktreeRemoveScript(root, path, branch, discardChanges = true) {
+  const drop = branch ? ` && git branch -D ${quote(branch)}` : "";
+  // Without discardChanges the checkout is checked again right before the
+  // removal, counting every untracked file whatever status.showUntrackedFiles
+  // says (git worktree remove obeys that setting), so a change made after the
+  // caller looked is never lost.
+  const force = discardChanges ? " --force" : "";
+  return `${PATH_SH}
+cd ${quote(root)} || exit 1
+if [ -d ${quote(path)} ]; then
+  ${
+    discardChanges
+      ? ""
+      : `[ -z "$(git -C ${quote(path)} status --porcelain --untracked-files=all)" ] || { echo "The worktree has uncommitted changes and was kept." >&2; exit 1; }
+  `
+  }git worktree remove${force} ${quote(path)} || exit 1
+else
+  admin=$(git rev-parse --git-common-dir)/worktrees
+  for d in "$admin"/*; do
+    if [ "$(cat "$d/gitdir" 2>/dev/null)" = ${quote(`${path}/.git`)} ]; then rm -rf "$d"; fi
+  done
+fi${drop}
+`;
+}
+
 module.exports = {
+  worktreeListScript,
+  parseWorktreeList,
+  worktreeRemoveScript,
   worktreeBranchError,
   worktreePath,
   worktreeAddArgs,

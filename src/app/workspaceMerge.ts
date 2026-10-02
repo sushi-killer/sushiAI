@@ -215,6 +215,7 @@ export type WorktreeTask = {
   worktree: string;
   repo: string;
   updatedAt: number;
+  status: string;
 };
 
 const trimSlashes = (path: string) => (path || "").replace(/\/+$/, "");

@@ -38,6 +38,7 @@ import {
   worktreeBranchError,
 } from "./worktree.ts";
 import { applySessionLaunch } from "./session-launch.ts";
+import { hostOf } from "../projectWorktrees.ts";
 import type {
   ModelProfile,
   Panel,
@@ -622,11 +623,12 @@ export function useWorkspaces({
           },
           cleanup?.panel.id === panel.id
             ? async () =>
-                window.bridge?.projectInspect(cleanup.workspace.connection, {
-                  operation: "git_worktree_remove",
-                  root: cleanup.checkout,
-                  branch: cleanup.branch,
-                })
+                window.bridge?.worktreeRemove(
+                  hostOf(cleanup.workspace.connection),
+                  cleanup.checkout,
+                  cleanup.checkout,
+                  { branch: cleanup.branch },
+                )
             : undefined,
         );
         if (!outcome.closed) {
@@ -669,7 +671,8 @@ export function useWorkspaces({
           1
         ) {
           const git = projectGitRef.current[owner.id];
-          if (!git || git.linkedWorktree) {
+          // No folder means no worktree to offer; an unread one may be.
+          if (owner.cwd && (!git || git.linkedWorktree)) {
             confirmClose({ workspace: owner, panel });
             return;
           }

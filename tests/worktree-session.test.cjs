@@ -200,31 +200,17 @@ test("a delete choice applies only to the branch and checkout that were checked"
   );
 });
 
-test("worktree cleanup defaults on only for a merged and closed pull request", async () => {
-  const { isMergedAndClosedPullRequest } = await cleanupLibrary;
+test("worktree cleanup defaults on only for a merged pull request", async () => {
+  const { isMergedPullRequest } = await cleanupLibrary;
+  // The shapes `gh pr list --json state,mergedAt` really returns.
   assert.equal(
-    isMergedAndClosedPullRequest({
-      state: "CLOSED",
-      mergedAt: "2026-10-01T00:00:00Z",
-    }),
+    isMergedPullRequest({ state: "MERGED", mergedAt: "2026-10-01T00:00:00Z" }),
     true,
   );
-  assert.equal(
-    isMergedAndClosedPullRequest({ state: "CLOSED", mergedAt: null }),
-    false,
-  );
-  assert.equal(
-    isMergedAndClosedPullRequest({ state: "CLOSED", mergedAt: "" }),
-    false,
-  );
-  assert.equal(
-    isMergedAndClosedPullRequest({
-      state: "OPEN",
-      mergedAt: "2026-10-01T00:00:00Z",
-    }),
-    false,
-  );
-  assert.equal(isMergedAndClosedPullRequest(undefined), false);
+  assert.equal(isMergedPullRequest({ state: "CLOSED", mergedAt: null }), false);
+  assert.equal(isMergedPullRequest({ state: "OPEN", mergedAt: null }), false);
+  assert.equal(isMergedPullRequest({ state: "NONE", mergedAt: null }), false);
+  assert.equal(isMergedPullRequest(undefined), false);
 });
 
 test("worktreeCreateParams builds the Herdr worktree.create payload", () => {

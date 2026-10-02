@@ -366,69 +366,7 @@ test("git_remote tells worktrees of one repository apart from separate clones", 
   }
 });
 
-test("worktree removal refuses the main checkout, changed branches and dirty worktrees", async (t) => {
-  const directory = await fs.mkdtemp("/tmp/sushiai-worktree-cleanup-test-");
-  const root = path.join(directory, "repo");
-  const worktree = path.join(directory, "repo-feature");
-  const c = new Connections(path.join(directory, "data"));
-  await c.init();
-  t.after(async () => {
-    await c.close();
-    await fs.rm(directory, { recursive: true, force: true });
-  });
-
-  await fs.mkdir(root);
-  await run("/usr/bin/git", ["init", "-q", "-b", "main", root]);
-  await commit(root, "readme.txt", "hello\n");
-  await run("/usr/bin/git", [
-    "-C",
-    root,
-    "worktree",
-    "add",
-    "-q",
-    "-b",
-    "feature/task",
-    worktree,
-  ]);
-  const resolvedWorktree = await fs.realpath(worktree);
-  const remove = (checkout, branch) =>
-    c.inspect(null, {
-      operation: "git_worktree_remove",
-      root: checkout,
-      branch,
-    });
-
-  await assert.rejects(remove(root, "main"), /main checkout/);
-  await assert.rejects(remove(worktree, "feature/changed"), /branch changed/);
-  await fs.writeFile(path.join(worktree, "draft.txt"), "keep me\n");
-  await assert.rejects(remove(worktree, "feature/task"), /uncommitted changes/);
-  assert.equal(
-    await fs.readFile(path.join(worktree, "draft.txt"), "utf8"),
-    "keep me\n",
-  );
-
-  await fs.rm(path.join(worktree, "draft.txt"));
-  assert.deepEqual(await remove(worktree, "feature/task"), {
-    removed: resolvedWorktree,
-    branch: "feature/task",
-  });
-  await assert.rejects(fs.access(worktree), { code: "ENOENT" });
-  assert.equal(
-    (
-      await run("/usr/bin/git", [
-        "-C",
-        root,
-        "branch",
-        "--list",
-        "feature/task",
-      ])
-    ).trim(),
-    "feature/task",
-    "removing a worktree keeps its branch",
-  );
-});
-
-test("PR status reads merged and closed state without prompting", async (t) => {
+test("PR status looks the branch up by head and reads MERGED without prompting", async (t) => {
   const directory = await fs.mkdtemp("/tmp/sushiai-pr-status-test-");
   const root = path.join(directory, "repo");
   const bin = path.join(directory, "bin");
@@ -442,16 +380,14 @@ test("PR status reads merged and closed state without prompting", async (t) => {
   await commit(root, "readme.txt", "hello\n");
   await run("/usr/bin/git", ["-C", root, "checkout", "-qb", "feature/task"]);
   const gh = path.join(bin, "gh");
-  const writeGh = (status) =>
+  // Answers only the lookup by head branch, as `gh pr list` prints it.
+  const writeGh = (list) =>
     fs.writeFile(
       gh,
-      `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(status)}'\n`,
+      `#!/bin/sh\n[ "$1 $2 $3 $4" = "pr list --head feature/task" ] || exit 1\nprintf '%s\\n' '${JSON.stringify(list)}'\n`,
       { mode: 0o755 },
     );
-  await writeGh({
-    state: "CLOSED",
-    mergedAt: "2026-10-01T00:00:00Z",
-  });
+  await writeGh([{ state: "MERGED", mergedAt: "2026-10-01T00:00:00Z" }]);
   const worker = new InspectionWorker({
     command: "/usr/bin/python3",
     args: (text) => ["-u", "-c", text, "--sushiai-worker"],
@@ -470,12 +406,17 @@ test("PR status reads merged and closed state without prompting", async (t) => {
   const request = (branch) =>
     worker.request({ operation: "git_pr_status", root, branch });
   assert.deepEqual(await request("feature/task"), {
-    state: "CLOSED",
+    state: "MERGED",
     mergedAt: "2026-10-01T00:00:00Z",
   });
   await assert.rejects(request("--help"), /Invalid branch/);
 
-  await writeGh({ state: "OPEN", mergedAt: null });
+  await writeGh([]);
+  assert.deepEqual(await request("feature/task"), {
+    state: "NONE",
+    mergedAt: null,
+  });
+  await writeGh([{ state: "OPEN", mergedAt: null }]);
   assert.deepEqual(await request("feature/task"), {
     state: "OPEN",
     mergedAt: null,

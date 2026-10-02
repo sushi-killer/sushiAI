@@ -189,6 +189,8 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   projectAttach: invoke("projects:attach"),
   projectPreview: invoke("project-preview"),
   worktreeCreate: invoke("worktree-create"),
+  worktreesList: invoke("worktrees:list"),
+  worktreeRemove: invoke("worktrees:remove"),
   onTerminal: (callback) => {
     const listener = (_, data) => callback(data);
     ipcRenderer.on("terminal-data", listener);

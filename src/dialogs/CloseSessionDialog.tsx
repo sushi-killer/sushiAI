@@ -2,13 +2,32 @@ import { useEffect, useState } from "react";
 import type { ProjectGit } from "../app/useProjectGit";
 import {
   isWorktreeCleanupSelected,
-  isMergedAndClosedPullRequest,
+  isMergedPullRequest,
   worktreeCleanupRequestKey,
   worktreeCleanupTarget,
   type WorktreeDeleteChoice,
   type WorktreeCleanupRequest,
 } from "../app/worktreeCleanup";
 import type { Panel, Workspace } from "../types";
+import { Tag, Toggle } from "../orchestrator/ui";
+
+/** The pull request's state as a tag at the worktree's name. */
+function PrTag({ state }: { state: string }) {
+  if (state === "MERGED") return <Tag tone="ok">PR merged</Tag>;
+  if (state === "OPEN")
+    return (
+      <Tag tone="neutral" dot={false}>
+        PR open
+      </Tag>
+    );
+  if (state === "CLOSED")
+    return (
+      <Tag tone="neutral" dot={false}>
+        PR closed
+      </Tag>
+    );
+  return null;
+}
 
 export function CloseSessionDialog({
   workspace,
@@ -50,6 +69,8 @@ export function CloseSessionDialog({
     manual: false,
   });
   const [prResultKey, setPrResultKey] = useState("");
+  const [prState, setPrState] = useState("");
+  const [ending, setEnding] = useState(false);
   const canCheckPr = Boolean(requestKey && !blocked && window.bridge);
   const checkingPr = canCheckPr && prResultKey !== requestKey;
   const deleteWorktree = isWorktreeCleanupSelected(deleteChoice, requestKey);
@@ -68,12 +89,17 @@ export function CloseSessionDialog({
       .then((status) => {
         if (!current) return;
         setPrResultKey(requestKey);
+        setPrState(
+          typeof (status as { state?: unknown })?.state === "string"
+            ? (status as { state: string }).state
+            : "",
+        );
         setDeleteChoice((choice) =>
           choice.requestKey === requestKey && choice.manual
             ? choice
             : {
                 requestKey,
-                checked: isMergedAndClosedPullRequest(status),
+                checked: isMergedPullRequest(status),
                 manual: false,
               },
         );
@@ -93,12 +119,18 @@ export function CloseSessionDialog({
   }, [workspace.connection, checkout, branch, blocked, requestKey]);
 
   async function endSession() {
-    if (checkingGit || checkingPr) return;
+    // A second click while the first is closing would close and remove twice.
+    if (checkingGit || checkingPr || ending) return;
+    setEnding(true);
     const request =
       deleteWorktree && !checkingPr && cleanupTarget && !cleanupTarget.blocked
         ? { ...cleanupTarget, workspace, panel }
         : undefined;
-    await endSessions([{ workspace, panel }], request);
+    try {
+      await endSessions([{ workspace, panel }], request);
+    } finally {
+      setEnding(false);
+    }
     onClose();
   }
 
@@ -110,50 +142,63 @@ export function CloseSessionDialog({
   return (
     <>
       <div className="dialog-eyebrow">CLOSE SESSION</div>
-      <h2>{panel.title}</h2>
-      <p>
-        {workspace.name} · {panel.herdrId}
+      <h2 className="cs-title">{panel.title}</h2>
+      <p className="cs-meta">
+        {workspace.name} · {branch || panel.herdrId || workspace.cwd}
       </p>
-      <p>
-        Hide this panel to keep its process running, or end the actual session.
+      <p className="cs-body">
+        Hide this panel to keep its process running, or end the session.
       </p>
-      {checkingGit && <p>Checking workspace Git status…</p>}
+      {checkingGit && <p className="cs-hint">Checking workspace Git status…</p>}
       {cleanupTarget && (
-        <label className="setting-check">
-          <input
-            type="checkbox"
-            checked={deleteWorktree}
-            disabled={blocked || checkingPr || !window.bridge}
-            onChange={(event) => {
-              setDeleteChoice({
-                requestKey,
-                checked: event.target.checked,
-                manual: true,
-              });
-            }}
-          />
-          <span>
-            <strong>Delete this worktree after ending the session</strong>
-            <em>
-              {blocked
-                ? "Close other panes in this worktree first."
-                : checkingPr
-                  ? "Checking whether its pull request was merged and closed…"
-                  : "The branch stays in Git. Uncommitted files keep the worktree."}
-            </em>
-          </span>
-        </label>
+        <>
+          <label
+            className={`cs-worktree ${blocked || checkingPr ? "off" : ""}`}
+          >
+            <Toggle
+              checked={deleteWorktree}
+              label={`Delete worktree ${branch}`}
+              disabled={blocked || checkingPr || !window.bridge}
+              onChange={(checked) =>
+                setDeleteChoice({ requestKey, checked, manual: true })
+              }
+            />
+            <span>Delete worktree {branch}</span>
+            {checkingPr ? (
+              <Tag tone="neutral" dot={false}>
+                checking…
+              </Tag>
+            ) : (
+              !blocked && <PrTag state={prState} />
+            )}
+          </label>
+          <p className="cs-hint">
+            {blocked
+              ? "Close the other panes in this worktree first."
+              : checkingPr
+                ? "Checking whether its pull request was merged…"
+                : "The branch stays in Git. A worktree with uncommitted changes is kept; ignored files like .env go with it."}
+          </p>
+        </>
       )}
-      <div className="dialog-actions">
-        <button className="secondary" onClick={hideSession}>
+      <div className="cs-actions">
+        <button
+          className="ui-button secondary"
+          disabled={ending}
+          onClick={hideSession}
+        >
           Hide only
         </button>
         <button
-          className="danger"
-          disabled={checkingGit || checkingPr}
+          className="ui-button danger"
+          disabled={checkingGit || checkingPr || ending}
           onClick={() => void endSession()}
         >
-          {deleteWorktree ? "End session and delete worktree" : "End session"}
+          {ending
+            ? "Ending…"
+            : deleteWorktree
+              ? "End session and delete worktree"
+              : "End session"}
         </button>
       </div>
     </>

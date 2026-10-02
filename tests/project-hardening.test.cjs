@@ -93,7 +93,7 @@ test("project inspection exposes only the explicit worktree cleanup operations",
     connections: {
       inspect: async (endpoint, options) => {
         received.push({ endpoint, options });
-        return { state: "CLOSED", mergedAt: "2026-10-01T00:00:00Z" };
+        return { state: "MERGED", mergedAt: "2026-10-01T00:00:00Z" };
       },
     },
     claudeMcp: {},
@@ -105,7 +105,7 @@ test("project inspection exposes only the explicit worktree cleanup operations",
       root: "/repo-feature",
       branch: "feature/task",
     }),
-    { state: "CLOSED", mergedAt: "2026-10-01T00:00:00Z" },
+    { state: "MERGED", mergedAt: "2026-10-01T00:00:00Z" },
   );
   assert.deepEqual(received, [
     {

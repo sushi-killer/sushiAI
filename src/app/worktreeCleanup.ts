@@ -93,12 +93,12 @@ export async function closeBeforeWorktreeRemoval(
   }
 }
 
-export function isMergedAndClosedPullRequest(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  const status = value as { state?: unknown; mergedAt?: unknown };
+/** `gh` reports a merged pull request as MERGED (OPEN and CLOSED are the
+ * other two states); a closed one that never merged is not. */
+export function isMergedPullRequest(value: unknown): boolean {
   return (
-    status.state === "CLOSED" &&
-    typeof status.mergedAt === "string" &&
-    status.mergedAt.length > 0
+    !!value &&
+    typeof value === "object" &&
+    (value as { state?: unknown }).state === "MERGED"
   );
 }

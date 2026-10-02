@@ -26,7 +26,22 @@ vm.runInNewContext(
     require: (name) =>
       name === "../app/worktreeCleanup"
         ? require("../src/app/worktreeCleanup.ts")
-        : requireSource(name),
+        : name === "../orchestrator/ui"
+          ? // JSX sources cannot be type-stripped; the dialog only needs
+            // their markup shape here.
+            {
+              Tag: ({ children }) =>
+                React.createElement("span", { className: "ui-tag" }, children),
+              Toggle: ({ checked, label, disabled }) =>
+                React.createElement("input", {
+                  type: "checkbox",
+                  "aria-label": label,
+                  checked,
+                  disabled,
+                  readOnly: true,
+                }),
+            }
+          : requireSource(name),
     window: { bridge: {} },
   },
   { filename: entry },
@@ -56,14 +71,14 @@ function render({ cwd = "/tmp/project", git } = {}) {
 test("close dialog waits for Git identity before ending a session", () => {
   const markup = render();
   assert.match(markup, /Checking workspace Git status/);
-  assert.match(markup, /<button class="danger" disabled="">/);
+  assert.match(markup, /<button class="ui-button danger" disabled="">/);
 
   const ready = render({ git: { linkedWorktree: false } });
-  assert.doesNotMatch(ready, /<button class="danger" disabled="">/);
+  assert.doesNotMatch(ready, /<button class="ui-button danger" disabled="">/);
 
   const noCwd = render({ cwd: "" });
   assert.doesNotMatch(noCwd, /Checking workspace Git status/);
-  assert.doesNotMatch(noCwd, /<button class="danger" disabled="">/);
+  assert.doesNotMatch(noCwd, /<button class="ui-button danger" disabled="">/);
 });
 
 test("close dialog waits for PR status before enabling session end", () => {
@@ -75,10 +90,7 @@ test("close dialog waits for PR status before enabling session end", () => {
       linkedWorktree: true,
     },
   });
-  assert.match(markup, /Delete this worktree after ending the session/);
-  assert.match(
-    markup,
-    /Checking whether its pull request was merged and closed/,
-  );
-  assert.match(markup, /<button class="danger" disabled="">/);
+  assert.match(markup, /Delete worktree feature\/task/);
+  assert.match(markup, /Checking whether its pull request was merged/);
+  assert.match(markup, /<button class="ui-button danger" disabled="">/);
 });

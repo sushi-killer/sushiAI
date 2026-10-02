@@ -334,7 +334,12 @@ def git_pr_status_result(base, data):
     git(base, "check-ref-format", "--branch", branch)
     try:
         result = subprocess.run(
-            ["gh", "pr", "view", branch, "--json", "state,mergedAt"],
+            # `pr list --head` names the branch; `pr view 123` would read a
+            # branch called 123 as pull request #123.
+            [
+                "gh", "pr", "list", "--head", branch, "--state", "all",
+                "--json", "state,mergedAt", "--limit", "1",
+            ],
             cwd=base,
             capture_output=True,
             stdin=subprocess.DEVNULL,
@@ -349,36 +354,11 @@ def git_pr_status_result(base, data):
         status = json.loads(result.stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return {"state": "UNKNOWN", "mergedAt": None}
-    if not isinstance(status, dict):
+    if not isinstance(status, list):
         return {"state": "UNKNOWN", "mergedAt": None}
-    return {"state": status.get("state"), "mergedAt": status.get("mergedAt")}
-
-
-def git_worktree_remove_result(base, data):
-    root = Path(base).resolve()
-    checkout = Path(git(base, "rev-parse", "--show-toplevel").strip()).resolve()
-    if root != checkout:
-        raise ValueError("Choose the worktree root")
-    common = os.path.realpath(
-        os.path.join(base, git(base, "rev-parse", "--git-common-dir").strip())
-    )
-    git_dir = os.path.realpath(
-        os.path.join(base, git(base, "rev-parse", "--git-dir").strip())
-    )
-    if git_dir == common:
-        raise ValueError("The main checkout cannot be removed as a worktree")
-    try:
-        branch = git(base, "symbolic-ref", "--short", "-q", "HEAD").strip()
-    except ValueError:
-        branch = git(base, "rev-parse", "--short", "HEAD").strip()
-    expected = data.get("branch")
-    if not isinstance(expected, str) or not expected or expected != branch:
-        raise ValueError("The worktree branch changed; refresh and try again")
-    if git(base, "status", "--porcelain=v1", "-z", "--untracked-files=all"):
-        raise ValueError("The worktree has uncommitted changes and was kept")
-    main_checkout = os.path.dirname(common)
-    git(main_checkout, "worktree", "remove", "--", str(checkout))
-    return {"removed": str(checkout), "branch": branch}
+    if not status or not isinstance(status[0], dict):
+        return {"state": "NONE", "mergedAt": None}
+    return {"state": status[0].get("state"), "mergedAt": status[0].get("mergedAt")}
 
 
 def read_json_file(filename, fallback):
@@ -832,8 +812,6 @@ def inspect(data):
         return git_remote_result(base)
     if operation == "git_pr_status":
         return git_pr_status_result(base, data)
-    if operation == "git_worktree_remove":
-        return git_worktree_remove_result(base, data)
     if operation == "checkout":
         branch = data.get("branch")
         if not isinstance(branch, str) or not branch or branch.startswith("-"):

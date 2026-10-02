@@ -280,6 +280,30 @@ export type ProjectImportPreview = {
   newServers: string[];
   removedServers: string[];
 };
+export type Worktree = {
+  path: string;
+  branch: string;
+  head: string;
+  committedAt: number;
+  exists: boolean;
+  changes: number;
+  merged: boolean;
+  ahead: number;
+  locked: boolean;
+  main: boolean;
+};
+
+/** One host's worktrees of a project, or why they could not be read. */
+export type WorktreeList =
+  | {
+      host: string;
+      cwd: string;
+      root: string;
+      base: string;
+      worktrees: Worktree[];
+    }
+  | { host: string; cwd: string; error: string };
+
 export type ProjectHostReadiness = {
   /** `uname -sm` of the host, e.g. "Linux x86_64". */
   platform?: string;
@@ -480,6 +504,28 @@ export interface Bridge {
     branch: string,
     base?: string,
   ): Promise<{ path: string }>;
+  /** The worktrees of a project on every host it has a folder on, one list
+   * per host; `id` is the project's, or null for a folder without one. */
+  worktreesList(
+    id: string | null,
+    endpoint: string | undefined,
+    cwd: string,
+  ): Promise<WorktreeList[]>;
+  /** Removes a linked worktree or forgets one whose folder is gone. It keeps
+   * a checkout with uncommitted changes unless `discardChanges`, keeps one
+   * whose branch or head moved from `branch` / `head` when those are given, and deletes the
+   * branch only when asked (never the base branch). */
+  worktreeRemove(
+    endpoint: string,
+    cwd: string,
+    path: string,
+    options?: {
+      deleteBranch?: boolean;
+      discardChanges?: boolean;
+      branch?: string;
+      head?: string;
+    },
+  ): Promise<{ removed: string; branch: string }>;
   appPreferences(): Promise<AppPreferences>;
   appPreferencesSet(patch: Partial<AppPreferences>): Promise<AppPreferences>;
   mascotShortcutStatus(): Promise<MascotShortcutStatus>;

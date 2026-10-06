@@ -28,7 +28,17 @@ test("orchestratorTarget finds the repo's Orchestrator panel, else adds one, els
   const withPanel = workspace("w2", "/repo", [
     { id: "p1", kind: "terminal", title: "zsh" },
   ]);
-  withPanel.panels.push({ id: "p2", kind: "orchestrator", title: "O" });
+  withPanel.panels.push({
+    id: "p2",
+    kind: "extension",
+    title: "O",
+    extension: {
+      extensionId: "builtin.orchestrator",
+      contributionId: "orchestration",
+      instanceId: "p2",
+      stateVersion: 1,
+    },
+  });
   withPanel.layout = {
     type: "split",
     id: "s",

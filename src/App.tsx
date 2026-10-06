@@ -36,7 +36,8 @@ import { useMergedCanvas } from "./workspace/mergedLayouts";
 import { useProjectView } from "./workspace/projectView";
 import { useSkills } from "./app/useSkills";
 import { useToast } from "./app/useToast";
-import { useOrchestratorNotices } from "./orchestrator/useOrchestratorNotices";
+import { openOrchestratorTask } from "./orchestrator/moduleShell";
+import { useModuleShell } from "./extensions/useModuleShell";
 import { useUpdates } from "./app/useUpdates";
 import {
   activePage,
@@ -162,8 +163,7 @@ export function App() {
   });
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const closeDialog = useCallback(() => setDialog(null), []);
-  const [settingsTab, setSettingsTab, openConnections] =
-    useSettingsTab(setDialog);
+  const [settingsTab, setSettingsTab] = useSettingsTab(setDialog);
   const target = resolveDialog(dialog, workspaces);
   const [workspaceQuery, setWorkspaceQuery] = useState("");
   const [compact, canvasRef] = useCompact();
@@ -191,14 +191,12 @@ export function App() {
     ws,
     saved,
   );
-  const orchestrator = useOrchestratorNotices({
-    workspaces,
+  useModuleShell({
+    ws,
+    registry: extensionRegistry,
     showWorkspace,
     switchWorkspace,
-    setSelected,
-    setZoomed,
-    addPanel: ws.addPanel,
-    createWorkspace: ws.createWorkspace,
+    notify,
   });
   const hostContext = useHostContext(
     { workspaces, projectGit, connectionProfiles, workspaceGrouping },
@@ -434,7 +432,7 @@ export function App() {
               activeEndpoint={activeEndpoint}
               home={system?.home}
               switchWorkspace={switchWorkspace}
-              openOrchestratorTask={orchestrator.openTask}
+              openOrchestratorTask={openOrchestratorTask}
               addExtensionPanel={addExtensionPanel}
               setExtensionEnabled={(extensionId, enabled) =>
                 void setExtensionEnabled(extensionId, enabled)
@@ -474,7 +472,6 @@ export function App() {
               tabMode={tabMode}
               compact={compact}
               openPanelPicker={openPanelPicker}
-              openConnections={openConnections}
               merged={merged}
             />
           )}

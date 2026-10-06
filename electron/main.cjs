@@ -71,6 +71,8 @@ const { configureArtifactsSkill } = require("./artifacts-skill.cjs");
 const { syncLocalBuiltinSkills } = require("./extensions/builtin-skills.cjs");
 const {
   ORCHESTRATOR_MANIFEST,
+} = require("./extensions/builtin-orchestrator.cjs");
+const {
   registerOrchestratorExtension,
   orchestratorNotice,
 } = require("./orchestrator.cjs");

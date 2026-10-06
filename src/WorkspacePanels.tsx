@@ -19,7 +19,6 @@ import {
   companionTarget,
   type CompanionPatch,
 } from "./extensions/Companion.tsx";
-import { OrchestratorPanel } from "./orchestrator/OrchestratorPanel";
 
 type PanelHostProps = {
   panel: Panel;
@@ -41,15 +40,13 @@ type PanelHostProps = {
   onRename(panelId: string, title: string): void;
   onStart(panelId: string): void;
   onReopen(panelId: string): void;
-  /** Saves per-pane state (Files folder, Orchestrator view) on the panel. */
+  /** Saves per-pane state (Files folder) on the panel. */
   onPatch(panelId: string, patch: Partial<Panel>): void;
   onNavigate(panelId: string, url: string): void;
   onHTML(root: string, file: string, endpoint?: string): void;
   onSend(panel: Panel, text: string): void;
   onCancel(panelId: string): void;
   onAgent(panelId: string, agent: string): void;
-  /** Opens Settings -> Connections (the Orchestrator's "Add a host"). */
-  onOpenConnections?: () => void;
   extensionRegistry: ExtensionRegistry;
   onLaunchAgent?(
     panelId: string,
@@ -84,7 +81,6 @@ export const PanelHost = memo(function PanelHost({
   onSend,
   onCancel,
   onAgent,
-  onOpenConnections,
   extensionRegistry,
   onLaunchAgent,
   worktrees,
@@ -182,24 +178,6 @@ export const PanelHost = memo(function PanelHost({
             cwd={cwd}
             connection={endpoint}
             registry={extensionRegistry}
-          />
-        ) : panel.kind === "orchestrator" ? (
-          <OrchestratorPanel
-            cwd={cwd}
-            endpoint={endpoint}
-            view={panel.orchestratorView}
-            host={panel.orchestratorHost}
-            repo={panel.orchestratorRepo}
-            onViewChange={(orchestratorView) =>
-              onPatch(panel.id, { orchestratorView })
-            }
-            onAddHost={onOpenConnections}
-            onHostChange={({ host, repo }) =>
-              onPatch(panel.id, {
-                orchestratorHost: host,
-                orchestratorRepo: repo,
-              })
-            }
           />
         ) : (
           <ChatPanel

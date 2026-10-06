@@ -1,5 +1,4 @@
-export type PanelKind =
-  "agent" | "terminal" | "browser" | "chat" | "files" | "orchestrator";
+export type PanelKind = "agent" | "terminal" | "browser" | "chat" | "files";
 export type Connector = { kind: "ssh" } | { kind: "command"; argv: string[] };
 export type ConnectorState = {
   /** "local" or a connection id. */
@@ -174,11 +173,6 @@ type PanelState = {
     edit?: boolean;
     openToken?: number;
   };
-  orchestratorView?: OrchestratorView;
-  /** The host ("local" or "ssh:<id>") and the repo path on it this Orchestrator
-   * pane was pointed at; unset follows the workspace. */
-  orchestratorHost?: string;
-  orchestratorRepo?: string;
   filesView?: FilesView;
   /** A session that is gone from its host: the slot stays in the layout
    * with a Reopen button until the user reopens or closes it. */

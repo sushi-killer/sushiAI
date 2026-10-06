@@ -420,9 +420,7 @@ export function useWorkspaces({
                   ? "Browser"
                   : kind === "files"
                     ? "Files & Git"
-                    : kind === "orchestrator"
-                      ? "Orchestrator"
-                      : "Thread",
+                    : "Thread",
           agent: kind === "agent" || kind === "chat" ? agent : undefined,
           started: kind === "agent",
           messages: kind === "chat" ? [] : undefined,

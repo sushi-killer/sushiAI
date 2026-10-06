@@ -1,7 +1,6 @@
 //! Client connections: framing, `hello`, method dispatch, attach streams.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,9 +8,10 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use sushiai_core::Screen;
 use sushiai_protocol::{
-    code, encode, method, AttachResult, Frame, Hello, HelloResult, Message, Notification, Request,
-    Response, SessionClose, SessionCreate, SessionId, SessionInfo, SessionInput, SessionResize,
-    SessionSnapshot, SessionStatus, SessionsResync, CAPABILITIES, PROTOCOL_VERSION,
+    code, encode, method, AskRespond, AttachResult, Frame, Hello, HelloResult, HookEvent,
+    HookResult, Message, Notification, Request, Response, SessionClose, SessionCreate, SessionId,
+    SessionInfo, SessionInput, SessionResize, SessionSnapshot, SessionStatus, SessionsResync,
+    CAPABILITIES, PROTOCOL_VERSION,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -19,6 +19,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
+use crate::agent;
 use crate::error::Fail;
 use crate::framed::FrameReader;
 use crate::holder::{self, HolderConn};
@@ -47,6 +48,8 @@ struct Conn {
     registry: Arc<Registry>,
     out: Outbox,
     said_hello: bool,
+    /// A hook process: it may call `hook.*` only and receives no notifications.
+    hook_only: bool,
     streams: HashMap<String, JoinHandle<()>>,
     events: Option<JoinHandle<()>>,
     /// An attach whose output stream starts once its response is queued.
@@ -74,6 +77,7 @@ async fn connection(stream: UnixStream, registry: Arc<Registry>) {
         registry,
         out,
         said_hello: false,
+        hook_only: false,
         streams: HashMap::new(),
         events: None,
         starting: None,
@@ -83,7 +87,25 @@ async fn connection(stream: UnixStream, registry: Arc<Registry>) {
         let Frame::Json(text) = frame else { continue };
         match Message::parse(&text) {
             Ok(Message::Request(request)) => {
-                let response = conn.handle(&request).await;
+                let response = if request.method == method::HOOK_EVENT {
+                    // A hook may wait for the owner's answer. If its process goes away
+                    // meanwhile, stop waiting: the actor then closes the ask.
+                    let handling = conn.handle(&request);
+                    tokio::pin!(handling);
+                    loop {
+                        tokio::select! {
+                            response = &mut handling => break Some(response),
+                            frame = reader.next() => {
+                                if !matches!(frame, Ok(Some(_))) {
+                                    break None;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Some(conn.handle(&request).await)
+                };
+                let Some(response) = response else { break };
                 if conn.out.send(encode(&response.frame())).await.is_err() {
                     break;
                 }
@@ -155,7 +177,23 @@ impl Conn {
         if !self.said_hello {
             return Err((code::NOT_INITIALIZED, "send hello first".into()));
         }
+        if self.hook_only && !request.method.starts_with("hook.") {
+            return Err((
+                code::UNAUTHORIZED,
+                "hook connections may only call hook.*".into(),
+            ));
+        }
         match request.method.as_str() {
+            method::HOOK_EVENT => self.hook(params(request)?).await,
+            method::ASK_RESPOND => {
+                let p: AskRespond = params(request)?;
+                let id = self
+                    .registry
+                    .session_of_ask(&p.ask_id)
+                    .ok_or_else(|| (code::ASK_NOT_FOUND, format!("no ask {}", p.ask_id)))?;
+                self.session(&id)?.respond(p).await?;
+                Ok(json!({}))
+            }
             method::SESSION_CREATE => create(&self.registry, params(request)?).await,
             method::SESSION_LIST => Ok(json!(self.registry.list())),
             method::SESSION_INPUT => {
@@ -196,17 +234,58 @@ impl Conn {
         }
         if !self.said_hello {
             self.said_hello = true;
-            self.events = Some(tokio::spawn(forward_events(
-                self.registry.clone(),
-                self.registry.events.subscribe(),
-                self.out.clone(),
-            )));
+            self.hook_only = hello.role.as_deref() == Some("hook");
+            if !self.hook_only {
+                self.events = Some(tokio::spawn(forward_events(
+                    self.registry.clone(),
+                    self.registry.events.subscribe(),
+                    self.out.clone(),
+                )));
+            }
         }
         Ok(json!(HelloResult {
             protocol: PROTOCOL_VERSION,
             capabilities: CAPABILITIES.iter().map(|c| (*c).to_string()).collect(),
             daemon: env!("CARGO_PKG_VERSION").into(),
         }))
+    }
+
+    async fn hook(&self, p: HookEvent) -> Result<Value, Fail> {
+        if !self.hook_only {
+            return Err((
+                code::UNAUTHORIZED,
+                "hook.event needs a connection that said hello with role hook".into(),
+            ));
+        }
+        // A wrong token, an unknown session and an exited one (its token is cleared) look
+        // the same.
+        if !self.registry.token_matches(&p.session, &p.token) {
+            return Err((code::UNAUTHORIZED, "invalid session token".into()));
+        }
+        // A nested agent inherits the variables of its parent: only the session's own agent
+        // may report.
+        if self.registry.agent_of(&p.session).as_deref() != Some(p.agent.as_str()) {
+            return Err((code::UNAUTHORIZED, "hook is from another agent".into()));
+        }
+        // The session is known from `session.create` on; its actor may still be starting.
+        let mut tries = 0;
+        let handle = loop {
+            match self.session(&p.session) {
+                Err((code::SESSION_NOT_RUNNING, _)) if tries < 100 => {
+                    tries += 1;
+                    sleep(Duration::from_millis(20)).await;
+                }
+                other => break other?,
+            }
+        };
+        let waiting = handle
+            .hook(serde_json::to_vec(&p.payload).unwrap_or_default())
+            .await?;
+        let answer = match waiting {
+            Some(rx) => rx.await.ok(),
+            None => None,
+        };
+        Ok(json!(HookResult { answer }))
     }
 
     async fn attach(&mut self, p: SessionId) -> Result<Value, Fail> {
@@ -316,25 +395,48 @@ async fn stream_output(
 }
 
 async fn create(registry: &Arc<Registry>, p: SessionCreate) -> Result<Value, Fail> {
-    if p.cmd.is_empty() || p.cols == 0 || p.rows == 0 {
+    if p.cols == 0 || p.rows == 0 {
         return Err((
             code::INVALID_PARAMS,
             "cmd, cols and rows are required".into(),
         ));
     }
     let spawn_failed = |e: &dyn std::fmt::Display| (code::SPAWN_FAILED, e.to_string());
-    let id = random_id().map_err(|e| spawn_failed(&e))?;
+    let id = agent::random_hex(8).map_err(|e| spawn_failed(&e))?;
+    let socket = registry.home.socket().to_string_lossy().into_owned();
+    let prepared = agent::prepare(&p, &socket, &id)?;
+    let info = SessionInfo {
+        id: id.clone(),
+        cmd: prepared.cmd.clone(),
+        cwd: p.cwd.clone(),
+        title: p.title.clone(),
+        status: SessionStatus::Running,
+        exit_code: None,
+        holder_pid: None,
+        cols: p.cols,
+        rows: p.rows,
+        agent: prepared.agent,
+    };
+    // Known before the child runs: its first hook may arrive before the actor does.
+    registry.update(info.clone());
     let dir = registry.home.sessions();
-    let pid = holder::spawn(&holder::Spawn {
+    let spawned = holder::spawn(&holder::Spawn {
         id: &id,
         dir: &dir,
         cols: p.cols,
         rows: p.rows,
         cwd: &p.cwd,
-        cmd: &p.cmd,
+        cmd: &prepared.cmd,
+        env: &prepared.env,
     })
-    .await
-    .map_err(|e| spawn_failed(&e))?;
+    .await;
+    let pid = match spawned {
+        Ok(pid) => pid,
+        Err(e) => {
+            registry.forget(&id);
+            return Err(spawn_failed(&e));
+        }
+    };
     // The holder is up: its socket exists. If attaching fails, take the holder down again.
     let sock = dir.join(format!("{id}.sock"));
     let mut screen = Screen::new(p.rows, p.cols);
@@ -349,28 +451,12 @@ async fn create(registry: &Arc<Registry>, p: SessionCreate) -> Result<Value, Fai
         Err(e) => {
             holder::kill_group(pid);
             let _ = std::fs::remove_file(&sock);
+            registry.forget(&id);
             return Err(spawn_failed(&e));
         }
     };
-    let info = SessionInfo {
-        id: id.clone(),
-        cmd: p.cmd,
-        cwd: p.cwd,
-        title: p.title,
-        status: SessionStatus::Running,
-        exit_code: None,
-        holder_pid: None,
-        cols: p.cols,
-        rows: p.rows,
-    };
     session::start(registry.clone(), info, conn, screen, seq, sock);
     Ok(json!({ "id": id }))
-}
-
-fn random_id() -> std::io::Result<String> {
-    let mut bytes = [0u8; 8];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 #[cfg(test)]
@@ -426,6 +512,7 @@ mod tests {
             holder_pid: None,
             cols: 80,
             rows: 24,
+            agent: Default::default(),
         };
         session::start(registry.clone(), info, holder, Screen::new(24, 80), 0, sock);
 
@@ -434,6 +521,7 @@ mod tests {
             registry,
             out,
             said_hello: true,
+            hook_only: false,
             streams: HashMap::new(),
             events: None,
             starting: None,

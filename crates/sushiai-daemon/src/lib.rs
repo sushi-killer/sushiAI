@@ -3,6 +3,8 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
+mod agent;
+mod binlink;
 mod error;
 mod framed;
 mod holder;
@@ -24,6 +26,8 @@ use sushiai_protocol::{
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
 
+pub use agent::ASK_WAIT_SECS;
+pub use binlink::{ensure_bin_link, Link};
 pub use error::{Error, Result};
 pub use home::Home;
 use registry::Registry;
@@ -48,6 +52,11 @@ async fn run(home: Home) -> Result<()> {
     home.ensure()?;
     // The lock lives as long as this function: one daemon per home, decided before any recovery.
     let _lock = lock_home(&home)?;
+    match binlink::ensure_bin_link(home.dir()) {
+        Ok(Link::Kept) => tracing::warn!("bin/sushiai exists and is not a symlink; left alone"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("cannot link bin/sushiai: {e}"),
+    }
     let socket = home.socket();
     let registry = Arc::new(Registry::new(home.clone()));
     recover(&registry).await?;
@@ -60,11 +69,12 @@ async fn run(home: Home) -> Result<()> {
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
     tokio::select! {
-        () = server::serve(listener, registry) => {}
+        () = server::serve(listener, registry.clone()) => {}
         _ = term.recv() => {}
         _ = int.recv() => {}
     }
     let _ = fs::remove_file(&socket);
+    registry.flush();
     Ok(())
 }
 
@@ -145,6 +155,7 @@ async fn probe_holders(registry: &Arc<Registry>) {
             holder_pid: None,
             cols: 80,
             rows: 24,
+            agent: Default::default(),
         };
         // A socket nobody answers on is a leftover, not a session.
         let _ = reattach(registry, info).await;
@@ -186,6 +197,7 @@ async fn status(home: Home) -> Result<String> {
         Hello {
             protocol: PROTOCOL_VERSION,
             client: "status".into(),
+            role: None,
         },
     );
     framed::write_frame(&mut write, &hello.frame()).await?;

@@ -26,6 +26,10 @@ impl Home {
         Home::new(home.join(".sushiai"))
     }
 
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     pub fn socket(&self) -> PathBuf {
         self.dir.join("daemon.sock")
     }

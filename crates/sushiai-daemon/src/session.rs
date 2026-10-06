@@ -8,14 +8,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde_json::Value;
+use sushiai_agents::hooks::{self, HookEvent};
+use sushiai_agents::status::{ExitInfo, Input, SessionStatus as AgentState};
 use sushiai_core::{mark_exited, Screen};
 use sushiai_protocol::{
-    code, method, Frame, HoldAttach, HoldAttachResult, HoldExited, Message, Notification,
-    SessionExited, SessionInfo, SessionStatus, Signal,
+    code, method, Ask, AskClosed, AskRespond, Frame, HoldAttach, HoldAttachResult, HoldExited,
+    Message, Notification, SessionExited, SessionInfo, SessionMeta, SessionStatus,
+    SessionStatusChanged, Signal,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{interval, sleep_until, timeout, Instant};
 
+use crate::agent::{self, now_ms, random_hex};
 use crate::error::Fail;
 use crate::holder::{HolderConn, SendError};
 use crate::registry::Registry;
@@ -26,6 +31,12 @@ const OUTPUT_BACKLOG: usize = 256;
 const MAX_PENDING: usize = 1024;
 const RECONNECT_FIRST: Duration = Duration::from_millis(50);
 const RECONNECT_MAX: Duration = Duration::from_secs(2);
+/// A working agent that sends no hook for this long is no longer trusted to send them.
+const HOOK_SILENCE: Duration = Duration::from_secs(15);
+/// How long the process may outlive a `SessionEnd` hook.
+const ENDING_GRACE: Duration = Duration::from_secs(3);
+/// Open permission asks per session; more are left to the agent's own terminal prompt.
+const MAX_ASKS: usize = 20;
 
 /// A piece of output and its offset in the session's stream.
 pub struct Chunk {
@@ -55,7 +66,13 @@ enum Cmd {
     Close(bool, Reply),
     Attach(oneshot::Sender<Attached>),
     Snapshot(oneshot::Sender<Snap>),
+    Hook(Vec<u8>, oneshot::Sender<HookReply>),
+    Respond(AskRespond, Reply),
 }
+
+/// Result of a hook event. For a permission ask: the receiver of the answer. The sender is
+/// dropped when the ask times out or is cancelled, which means "no decision".
+type HookReply = Result<Option<oneshot::Receiver<Value>>, Fail>;
 
 #[derive(Clone)]
 pub struct Handle {
@@ -95,6 +112,23 @@ impl Handle {
         self.ask(|r| Cmd::Close(graceful, r)).await
     }
 
+    pub async fn hook(&self, payload: Vec<u8>) -> HookReply {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Cmd::Hook(payload, tx))
+            .await
+            .map_err(|_| not_running())?;
+        match timeout(ANSWER_TIMEOUT, rx).await {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) => Err(not_running()),
+            Err(_) => Err((code::INTERNAL, "session did not answer".into())),
+        }
+    }
+
+    pub async fn respond(&self, answer: AskRespond) -> Result<(), Fail> {
+        self.ask(|r| Cmd::Respond(answer, r)).await
+    }
+
     pub async fn attach(&self) -> Option<Attached> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(Cmd::Attach(tx)).await.ok()?;
@@ -114,7 +148,24 @@ enum Pending {
     Resize(u16, u16, Reply),
 }
 
+struct OpenAsk {
+    ask: Ask,
+    tx: oneshot::Sender<Value>,
+    deadline: Instant,
+}
+
+/// What the actor tracks for a session whose agent sends hooks.
+struct Agent {
+    status: AgentState,
+    /// Stamped on each received hook; the state machine drops stale ones.
+    seq: u64,
+    last_hook: Instant,
+    ending_at: Option<Instant>,
+    asks: Vec<OpenAsk>,
+}
+
 struct Actor {
+    agent: Option<Agent>,
     info: SessionInfo,
     screen: Screen,
     seq: u64,
@@ -149,6 +200,7 @@ pub fn start(
     registry.update(info.clone());
     registry.set_handle(&info.id, handle.clone());
     let actor = Actor {
+        agent: restore_agent(&info),
         info,
         screen,
         seq,
@@ -165,6 +217,35 @@ pub fn start(
     };
     tokio::spawn(actor.run(rx));
     handle
+}
+
+/// The state machine for a hook-capable agent, resumed from the persisted record. A `blocked`
+/// status stays blocked: the agent may still show its dialog. The ask itself died with the
+/// previous daemon, so the machine is told the ask went back to the terminal.
+fn restore_agent(info: &SessionInfo) -> Option<Agent> {
+    agent::agent_of(info.agent.name.as_deref())?;
+    let a = &info.agent;
+    let mut status = AgentState::new(a.status_since.unwrap_or_else(now_ms));
+    if let Some(s) = a.agent_status {
+        status.status = agent::status_from_wire(s);
+    }
+    if let Some(s) = a.status_source {
+        status.source = agent::source_from_wire(s);
+    }
+    if status.status == sushiai_agents::status::Status::Blocked {
+        status.blocked_kind = Some(sushiai_agents::status::BlockedKind::Permission);
+        status.apply(Input::PermissionClosed { decided: false }, now_ms());
+    }
+    status.agent_session_id = a.agent_session.clone();
+    status.transcript_path = a.transcript_path.clone();
+    Some(Agent {
+        status,
+        seq: 0,
+        // A fresh start gets a full silence window.
+        last_hook: Instant::now(),
+        ending_at: None,
+        asks: Vec::new(),
+    })
 }
 
 impl Actor {
@@ -185,7 +266,7 @@ impl Actor {
                     let _ = self.holder.close(Signal::Kill);
                 }
                 () = until(self.retry.map(|(at, _)| at)) => self.reconnect().await,
-                _ = tick.tick() => {}
+                _ = tick.tick() => self.sweep(),
             }
             // An exited session with nobody attached has nothing left to serve.
             if self.info.status == SessionStatus::Exited && self.output.receiver_count() == 0 {
@@ -260,6 +341,211 @@ impl Actor {
             Cmd::Snapshot(reply) => {
                 let _ = reply.send(self.snap());
             }
+            Cmd::Hook(payload, reply) => {
+                let _ = reply.send(self.hook(&payload));
+            }
+            Cmd::Respond(answer, reply) => {
+                let _ = reply.send(self.respond(answer));
+            }
+        }
+    }
+
+    fn hook(&mut self, payload: &[u8]) -> HookReply {
+        let no_agent = || {
+            (
+                code::INVALID_PARAMS,
+                "session has no agent hooks".to_string(),
+            )
+        };
+        let parsed = hooks::parse(payload).map_err(|e| (code::INVALID_PARAMS, e.to_string()))?;
+        let agent = self.agent.as_mut().ok_or_else(no_agent)?;
+        agent.seq += 1;
+        agent.last_hook = Instant::now();
+        let ask = match &parsed.event {
+            HookEvent::PermissionRequest(r) => Some((r.tool_name.clone(), r.tool_input.clone())),
+            _ => None,
+        };
+        let input = Input::Hook {
+            seq: agent.seq,
+            payload: Box::new(parsed),
+        };
+        agent.status.apply(input, now_ms());
+        if agent.status.ending && agent.ending_at.is_none() {
+            agent.ending_at = Some(Instant::now() + ENDING_GRACE);
+        }
+        let answer = match ask {
+            Some((tool, input)) => self.open_ask(tool, input)?,
+            None => None,
+        };
+        self.publish();
+        Ok(answer)
+    }
+
+    fn open_ask(
+        &mut self,
+        tool: Option<String>,
+        input: Value,
+    ) -> Result<Option<oneshot::Receiver<Value>>, Fail> {
+        if self
+            .agent
+            .as_ref()
+            .is_some_and(|a| a.asks.len() >= MAX_ASKS)
+        {
+            // No decision: the agent asks in its terminal.
+            return Ok(None);
+        }
+        let input = agent::clip_input(input);
+        let ask_id = random_hex(8).map_err(|e| (code::INTERNAL, e.to_string()))?;
+        let ask = Ask {
+            ask_id,
+            session: self.info.id.clone(),
+            tool,
+            input,
+        };
+        let (tx, rx) = oneshot::channel();
+        if let Some(agent) = self.agent.as_mut() {
+            agent.asks.push(OpenAsk {
+                ask: ask.clone(),
+                tx,
+                deadline: Instant::now() + agent::ask_timeout(),
+            });
+        }
+        self.info.agent.asks.push(ask.clone());
+        self.registry.update(self.info.clone());
+        let _ = self
+            .registry
+            .events
+            .send(Notification::new(method::SESSION_ASK, ask));
+        Ok(Some(rx))
+    }
+
+    fn respond(&mut self, answer: AskRespond) -> Result<(), Fail> {
+        let not_found = || (code::ASK_NOT_FOUND, format!("no ask {}", answer.ask_id));
+        let agent = self.agent.as_mut().ok_or_else(not_found)?;
+        let at = agent
+            .asks
+            .iter()
+            .position(|a| a.ask.ask_id == answer.ask_id)
+            .ok_or_else(not_found)?;
+        let open = agent.asks.remove(at);
+        let _ = open.tx.send(agent::permission_answer(
+            answer.decision,
+            answer.message.as_deref(),
+        ));
+        self.asks_closed(&[open.ask.ask_id], true);
+        Ok(())
+    }
+
+    /// Asks were answered (`decided`), timed out or cancelled (handed back to the terminal).
+    /// The state machine hears about it when none is left open. Always saves the record.
+    fn asks_closed(&mut self, closed: &[String], decided: bool) {
+        let Some(agent) = self.agent.as_mut() else {
+            return;
+        };
+        let open: Vec<Ask> = agent.asks.iter().map(|a| a.ask.clone()).collect();
+        if open.is_empty() {
+            agent
+                .status
+                .apply(Input::PermissionClosed { decided }, now_ms());
+        }
+        self.info.agent.asks = open;
+        self.publish();
+        self.registry.update(self.info.clone());
+        for ask_id in closed {
+            let params = AskClosed {
+                ask_id: ask_id.clone(),
+                decided,
+            };
+            let _ = self
+                .registry
+                .events
+                .send(Notification::new(method::SESSION_ASK_CLOSED, params));
+        }
+    }
+
+    /// Once a second: expire asks, and run the silence and ending timers.
+    fn sweep(&mut self) {
+        let Some(agent) = self.agent.as_mut() else {
+            return;
+        };
+        let now = Instant::now();
+        let (live, dead): (Vec<OpenAsk>, Vec<OpenAsk>) = std::mem::take(&mut agent.asks)
+            .into_iter()
+            .partition(|a| a.deadline > now && !a.tx.is_closed());
+        agent.asks = live;
+        let expired: Vec<String> = dead.into_iter().map(|a| a.ask.ask_id).collect();
+        let silent = agent.status.source == sushiai_agents::status::StatusSource::Hook
+            && agent.status.status == sushiai_agents::status::Status::Working
+            && agent.last_hook + HOOK_SILENCE <= now;
+        if silent {
+            agent.status.apply(Input::HookSilence, now_ms());
+        }
+        if agent.ending_at.is_some_and(|at| at <= now) {
+            agent.ending_at = None;
+            agent.status.apply(Input::EndingTimeout, now_ms());
+        }
+        if !expired.is_empty() {
+            self.asks_closed(&expired, false);
+        } else {
+            self.publish();
+        }
+    }
+
+    /// Copies the state machine into the session record, saves it and announces changes.
+    fn publish(&mut self) {
+        let Some(agent) = &self.agent else {
+            return;
+        };
+        let s = &agent.status;
+        let record = &mut self.info.agent;
+        let status = (
+            Some(agent::status_to_wire(s.status)),
+            Some(agent::source_to_wire(s.source)),
+            Some(s.since),
+        );
+        let status_changed = (
+            record.agent_status,
+            record.status_source,
+            record.status_since,
+        ) != status;
+        let meta_changed = record.agent_session != s.agent_session_id
+            || record.transcript_path != s.transcript_path;
+        (
+            record.agent_status,
+            record.status_source,
+            record.status_since,
+        ) = status;
+        record.agent_session = s.agent_session_id.clone();
+        record.transcript_path = s.transcript_path.clone();
+        if !status_changed && !meta_changed {
+            return;
+        }
+        self.registry.update(self.info.clone());
+        let id = self.info.id.clone();
+        if let (true, Some(status), Some(status_source), Some(status_since)) =
+            (status_changed, status.0, status.1, status.2)
+        {
+            let params = SessionStatusChanged {
+                id: id.clone(),
+                status,
+                status_source,
+                status_since,
+            };
+            let _ = self
+                .registry
+                .events
+                .send(Notification::new(method::SESSION_STATUS, params));
+        }
+        if meta_changed {
+            let params = SessionMeta {
+                id,
+                agent_session: self.info.agent.agent_session.clone(),
+                transcript_path: self.info.agent.transcript_path.clone(),
+            };
+            let _ = self
+                .registry
+                .events
+                .send(Notification::new(method::SESSION_META, params));
         }
     }
 
@@ -412,7 +698,28 @@ impl Actor {
         self.retry = None;
         self.close_pending = None;
         mark_exited(&mut self.info, code);
+        // An exited session takes no more hooks: its token stops working.
+        self.info.agent.token_hash = None;
+        let mut dropped = Vec::new();
+        if let Some(agent) = self.agent.as_mut() {
+            dropped = agent.asks.drain(..).map(|a| a.ask.ask_id).collect();
+            agent.ending_at = None;
+            let exit = ExitInfo { code, signal: None };
+            agent.status.apply(Input::Exit(exit), now_ms());
+            self.info.agent.asks.clear();
+        }
         self.registry.update(self.info.clone());
+        self.publish();
+        for ask_id in dropped {
+            let params = AskClosed {
+                ask_id,
+                decided: false,
+            };
+            let _ = self
+                .registry
+                .events
+                .send(Notification::new(method::SESSION_ASK_CLOSED, params));
+        }
         let note = Notification::new(
             method::SESSION_EXITED,
             SessionExited {

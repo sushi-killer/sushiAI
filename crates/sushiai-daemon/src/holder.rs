@@ -143,13 +143,15 @@ pub struct Spawn<'a> {
     pub rows: u16,
     pub cwd: &'a str,
     pub cmd: &'a [String],
+    /// Variables for the child. They ride in the holder's environment, never its argv.
+    pub env: &'a [(String, String)],
 }
 
 /// Starts `sushiai hold` in its own session, so it survives this daemon, and returns its pid.
 /// The holder reports a startup failure on stderr and closes stderr once it runs, so the
 /// error text (bad command, bad cwd) reaches the caller.
 pub async fn spawn(spec: &Spawn<'_>) -> Result<u32> {
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = Command::new(crate::binlink::real_exe()?);
     command
         .args(["hold", "--id", spec.id, "--dir"])
         .arg(spec.dir)
@@ -161,6 +163,7 @@ pub async fn spawn(spec: &Spawn<'_>) -> Result<u32> {
         ])
         .args(["--cwd", spec.cwd, "--"])
         .args(spec.cmd)
+        .envs(spec.env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());

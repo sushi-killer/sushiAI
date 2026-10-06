@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const CAPABILITIES: &[&str] = &["sessions", "attach", "resync"];
+pub const CAPABILITIES: &[&str] = &["sessions", "attach", "resync", "agents"];
 
 pub mod method {
     pub const HELLO: &str = "hello";
@@ -19,6 +19,18 @@ pub mod method {
     pub const SESSION_SNAPSHOT: &str = "session.snapshot";
     /// Notification sent to a client that missed events: the full session list.
     pub const SESSION_RESYNC: &str = "session.resync";
+    /// Request from an agent's hook process (token required).
+    pub const HOOK_EVENT: &str = "hook.event";
+    /// Request: the owner's answer to an open permission ask.
+    pub const ASK_RESPOND: &str = "ask.respond";
+    /// Notification: the agent status of a session changed.
+    pub const SESSION_STATUS: &str = "session.status";
+    /// Notification: the agent's own session id or transcript path became known or changed.
+    pub const SESSION_META: &str = "session.meta";
+    /// Notification: an agent asks permission for a tool call.
+    pub const SESSION_ASK: &str = "session.ask";
+    /// Notification: an ask is closed (answered, timed out, or its agent went away).
+    pub const SESSION_ASK_CLOSED: &str = "session.askClosed";
     pub const HOLD_ATTACH: &str = "hold.attach";
     pub const HOLD_INPUT: &str = "hold.input";
     pub const HOLD_RESIZE: &str = "hold.resize";
@@ -39,6 +51,9 @@ pub mod code {
     pub const SESSION_NOT_RUNNING: i64 = 1005;
     /// The input queue of a session is full; the child is not reading.
     pub const INPUT_BACKPRESSURE: i64 = 1006;
+    /// A hook presented a wrong session token, or a hook connection called a non-hook method.
+    pub const UNAUTHORIZED: i64 = 1007;
+    pub const ASK_NOT_FOUND: i64 = 1008;
 }
 
 /// Serde adapter: `Vec<u8>` as a standard base64 string.
@@ -60,6 +75,9 @@ pub mod b64 {
 pub struct Hello {
     pub protocol: u32,
     pub client: String,
+    /// `"hook"` limits the connection to `hook.*` methods and sends it no notifications.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,13 +88,31 @@ pub struct HelloResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionCreate {
+    /// Required unless `agent` is `claude` or `codex`, which build their own command line.
+    #[serde(default)]
     pub cmd: Vec<String>,
     pub cwd: String,
     pub cols: u16,
     pub rows: u16,
     #[serde(default)]
     pub title: Option<String>,
+    /// `claude` and `codex` get hooks; any other name only labels the session.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Agent session id to resume.
+    #[serde(default)]
+    pub resume: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    /// Extra variables for the child. Never logged or persisted.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +127,59 @@ pub enum SessionStatus {
     /// The daemon lost its holder connection; the session may still run. Never persisted.
     Detached,
     Exited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentStatus {
+    Starting,
+    Working,
+    Blocked,
+    Idle,
+    Exited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusSource {
+    Hook,
+    Heuristic,
+}
+
+/// An open permission ask: a tool call the agent waits on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Ask {
+    pub ask_id: String,
+    pub session: String,
+    pub tool: Option<String>,
+    pub input: serde_json::Value,
+}
+
+/// Agent fields of a session record, flattened into `SessionInfo`. All stay empty for a
+/// plain shell. Persisted in `state.json` except `asks`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentInfo {
+    #[serde(default, rename = "agent", skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+    /// The agent's status, separate from the process `status`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_status: Option<AgentStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_source: Option<StatusSource>,
+    /// Unix milliseconds of the last status change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_since: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asks: Vec<Ask>,
+    /// SHA-256 (hex) of the session token. Only in the state file, never sent to clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -109,6 +198,8 @@ pub struct SessionInfo {
     pub holder_pid: Option<u32>,
     pub cols: u16,
     pub rows: u16,
+    #[serde(flatten)]
+    pub agent: AgentInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,4 +292,66 @@ pub struct HoldClose {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HoldExited {
     pub code: Option<i32>,
+}
+
+/// Params of `hook.event`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookEvent {
+    pub session: String,
+    pub token: String,
+    /// The hook argument (`session-start`, `permission`, ...).
+    pub event: String,
+    /// The agent that ran the hook (`claude`, `codex`); must be the session's agent.
+    pub agent: String,
+    pub payload: serde_json::Value,
+}
+
+/// Result of `hook.event`: for a permission ask, the JSON the hook prints; otherwise null.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookResult {
+    pub answer: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Decision {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskRespond {
+    pub ask_id: String,
+    pub decision: Decision,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Params of `session.status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStatusChanged {
+    pub id: String,
+    pub status: AgentStatus,
+    pub status_source: StatusSource,
+    pub status_since: u64,
+}
+
+/// Params of `session.meta`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMeta {
+    pub id: String,
+    pub agent_session: Option<String>,
+    pub transcript_path: Option<String>,
+}
+
+/// Params of `session.askClosed`. `decided` is true when the owner answered; false when the
+/// ask went back to the agent's terminal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskClosed {
+    pub ask_id: String,
+    pub decided: bool,
 }

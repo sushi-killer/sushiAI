@@ -1,16 +1,23 @@
 // Dependency rules for the Rust workspace, checked with `cargo tree`.
 // The exit code is the verdict.
-//   - sushiai-protocol, sushiai-core and sushiai-hold never pull in tokio;
+//   - sushiai-protocol, sushiai-core, sushiai-hold and sushiai-agents never pull in tokio;
+//   - sushiai-agents depends on no other workspace crate;
 //   - sushiai-protocol depends on no other workspace crate;
 //   - sushiai-core depends on no workspace crate other than sushiai-protocol;
 //   - sushiai-hold depends on no workspace crate other than sushiai-protocol.
 import { execFileSync } from "node:child_process";
 
-const NO_TOKIO = ["sushiai-protocol", "sushiai-core", "sushiai-hold"];
+const NO_TOKIO = [
+  "sushiai-protocol",
+  "sushiai-core",
+  "sushiai-hold",
+  "sushiai-agents",
+];
 const ALLOWED_WORKSPACE_DEPS = {
   "sushiai-protocol": [],
   "sushiai-core": ["sushiai-protocol"],
   "sushiai-hold": ["sushiai-protocol"],
+  "sushiai-agents": [],
 };
 
 function dependencies(crate) {

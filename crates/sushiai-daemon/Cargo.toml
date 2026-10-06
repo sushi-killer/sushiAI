@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 sushiai-protocol.workspace = true
 sushiai-core.workspace = true
+sushiai-agents = { path = "../sushiai-agents" }
+sha2 = "0.10"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

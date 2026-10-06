@@ -1,14 +1,24 @@
 use std::io::stderr;
 use std::path::PathBuf;
 
+mod hook;
+mod hooks_file;
+
 use anyhow::{bail, Context, Result};
 
-const USAGE: &str = "usage: sushiai daemon | status | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
+const USAGE: &str = "usage: sushiai daemon | status | hook EVENT | hooks install|uninstall | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_writer(stderr).init();
     let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
+    let command = args.next();
+    if command.as_deref() == Some("hook") {
+        // An agent runs this for every hook: no logging, never a failure.
+        hook::run(args);
+        return Ok(());
+    }
+    tracing_subscriber::fmt().with_writer(stderr).init();
+    match command.as_deref() {
+        Some("hooks") => hooks_file::run(args.next().as_deref())?,
         Some("daemon") => sushiai_daemon::run_blocking(sushiai_daemon::Home::from_env())?,
         Some("status") => println!(
             "{}",

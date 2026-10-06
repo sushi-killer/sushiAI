@@ -12,6 +12,7 @@ fn info(id: &str) -> SessionInfo {
         holder_pid: None,
         cols: 80,
         rows: 24,
+        agent: Default::default(),
     }
 }
 
@@ -49,4 +50,12 @@ fn unknown_schema_version_is_rejected() {
         StateFile::from_bytes(br#"{"sessions":[]}"#),
         Err(StateError::UnsupportedSchema(None))
     ));
+}
+
+#[test]
+fn a_state_file_from_before_agents_loads_with_empty_agent_fields() {
+    let old = br#"{"schemaVersion":1,"sessions":[{"id":"a","cmd":["sh"],"cwd":"/","title":null,
+        "status":"running","cols":80,"rows":24}]}"#;
+    let state = StateFile::from_bytes(old).expect("old state loads");
+    assert_eq!(state.sessions[0].agent, Default::default());
 }

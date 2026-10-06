@@ -1,0 +1,27 @@
+{
+  "session_id": "45c82c1b-a114-4291-8f22-808603b073c9",
+  "transcript_path": "/home/user/.claude/projects/-home-user-proj/45c82c1b-a114-4291-8f22-808603b073c9.jsonl",
+  "cwd": "/home/user/proj",
+  "scratchpad_dir": "/tmp/claude-1000/-home-user-proj/45c82c1b-a114-4291-8f22-808603b073c9/scratchpad",
+  "prompt_id": "8b3e2f4a-14cd-42fa-8878-93bd8c09ff18",
+  "permission_mode": "default",
+  "agent_id": "a8cbd103f005cc0e6",
+  "agent_type": "general-purpose",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "agent_transcript_path": "/home/user/.claude/projects/-home-user-proj/45c82c1b-a114-4291-8f22-808603b073c9/subagents/agent-a8cbd103f005cc0e6.jsonl",
+  "last_assistant_message": "ok",
+  "background_tasks": [
+    {
+      "id": "a8cbd103f005cc0e6",
+      "type": "subagent",
+      "status": "running",
+      "description": "Reply with ok",
+      "agent_type": "general-purpose"
+    }
+  ],
+  "session_crons": []
+}

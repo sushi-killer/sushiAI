@@ -29,3 +29,5 @@ sushiai-hold = { path = "crates/sushiai-hold" }
 
 [profile.dev]
 debug = "line-tables-only"
+# Short-lived worktrees never reuse incremental data; off lets sccache cache across them.
+incremental = false

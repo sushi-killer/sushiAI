@@ -74,16 +74,26 @@ function createCatalogSync({
           deleted: false,
         });
       }
-      const groups = spaces.map((workspace, order) => ({
-        id: String(workspace.id),
-        projectId:
-          typeof workspace.projectId === "string" ? workspace.projectId : "",
-        name: typeof workspace.name === "string" ? workspace.name : "",
-        order,
-        rev: revision,
-        updatedAt,
-        deleted: false,
-      }));
+      // A host gets the groups that belong to it: the workspace's own
+      // connection maps to it, or its project was sent to it.
+      const sent = new Set(mine.map((project) => project.id));
+      const groups = spaces
+        .map((workspace, order) => ({ workspace, order }))
+        .filter(
+          ({ workspace }) =>
+            folderHost(workspace.connection) === host ||
+            sent.has(workspace.projectId),
+        )
+        .map(({ workspace, order }) => ({
+          id: String(workspace.id),
+          projectId:
+            typeof workspace.projectId === "string" ? workspace.projectId : "",
+          name: typeof workspace.name === "string" ? workspace.name : "",
+          order,
+          rev: revision,
+          updatedAt,
+          deleted: false,
+        }));
       await manager.request(host, "projects.sync", {
         host: hello.host,
         projects: mine,

@@ -391,23 +391,57 @@ test("a dropped file on a remote host is uploaded, not typed by its Mac path", a
   }
 });
 
-test("a re-attach for the same panel carries the unacked bytes into the stale window", async () => {
+test("an overflow re-attach carries the unacked bytes into the stale window", async () => {
   const t = setup();
   await t.handlers.attach(attachInput());
   t.handlers.ack("p1", 6);
-  t.attaches[0].onBytes(Buffer.alloc(1000, "a"));
-  // 1000 bytes are out and unacked; the panel attaches again.
-  await t.handlers.attach(attachInput());
-  const { onBytes } = t.attaches[1];
-  t.handlers.ack("p1", 1000); // the old window's bytes arrive late
+  const old = t.attaches[0].onBytes;
+  old(Buffer.alloc(OUTPUT_CREDIT_BYTES, "a"));
+  for (let i = 0; i < 5; i++) old(Buffer.alloc(OUTPUT_CREDIT_BYTES, "a"));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(t.attaches.length, 2);
+  const stale = OUTPUT_CREDIT_BYTES;
+  t.handlers.ack("p1", stale); // the old window's bytes arrive late
   t.handlers.ack("p1", 6); // the new snapshot is written
-  onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES, "b"));
+  const before = t.sent.length;
+  t.attaches[1].onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES, "b"));
   const sent = t.sent
+    .slice(before)
     .filter((m) => m.data)
-    .map((m) => m.data.length)
-    .reduce((n, size) => n + size, 0);
-  // Full credit for the new window: the late acks did not eat into it.
-  assert.equal(sent, 1000 + OUTPUT_CREDIT_BYTES);
+    .reduce((n, m) => n + m.data.length, 0);
+  assert.equal(sent, OUTPUT_CREDIT_BYTES);
+});
+
+test("a renderer attach after an unacked window starts with full credit", async () => {
+  const t = setup();
+  await t.handlers.attach(attachInput());
+  t.attaches[0].onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES, "a"));
+  // The renderer reloads: the old window is never acked, the panel attaches.
+  await t.handlers.attach(attachInput());
+  const before = t.sent.length;
+  t.attaches[1].onBytes(Buffer.alloc(100, "b"));
+  // Only the new snapshot (6 bytes) is unacked, so data flows at once.
+  assert.equal(t.sent.slice(before).filter((m) => m.data).length, 1);
+  t.handlers.ack("p1", 6);
+  t.attaches[1].onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES, "c"));
+  const sent = t.sent
+    .slice(before)
+    .filter((m) => m.data)
+    .reduce((n, m) => n + m.data.length, 0);
+  // the full window, none eaten by the old one
+  assert.equal(sent, OUTPUT_CREDIT_BYTES);
+});
+
+test("detachAll releases every panel without telling the renderer", async () => {
+  const t = setup();
+  await t.handlers.attach(attachInput());
+  await t.handlers.attach(attachInput({ panelId: "p2" }));
+  const before = t.sent.length;
+  await t.handlers.detachAll();
+  assert.equal(t.detached(), 2);
+  assert.equal(t.sent.length, before);
+  await assert.rejects(t.handlers.write("p1", "x"));
 });
 
 test("a failed overflow re-attach tells the renderer the terminal ended", async () => {

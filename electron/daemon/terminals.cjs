@@ -50,13 +50,16 @@ function createTerminalHandlers({
     entry.queuedBytes = 0;
     setImmediate(() => {
       if (entry.closed || panels.get(panelId) !== entry) return;
-      attach({
-        panelId,
-        host: entry.host,
-        sessionId: entry.sessionId,
-        cols: entry.cols,
-        rows: entry.rows,
-      }).catch(() => send("daemon-terminal-data", { panelId, exited: true }));
+      attachPanel(
+        {
+          panelId,
+          host: entry.host,
+          sessionId: entry.sessionId,
+          cols: entry.cols,
+          rows: entry.rows,
+        },
+        true,
+      ).catch(() => send("daemon-terminal-data", { panelId, exited: true }));
     });
   }
 
@@ -139,11 +142,15 @@ function createTerminalHandlers({
     return entry;
   }
 
-  async function attach({ panelId, host, sessionId, cols, rows }) {
-    // Bytes the old attach sent and the renderer has not acked yet still come
-    // back as acks: they belong to the old window, not to the new one.
+  // A renderer attach starts with full credit: after a reload or a remount the
+  // acks of the old window never come. Only the overflow re-attach (`carry`),
+  // where the same renderer still acks, carries the unacked bytes: they come
+  // back as acks and belong to the old window, not to the new one.
+  const attach = (input) => attachPanel(input, false);
+
+  async function attachPanel({ panelId, host, sessionId, cols, rows }, carry) {
     const before = panels.get(panelId);
-    const owed = before ? before.inFlight + before.stale : 0;
+    const owed = carry && before ? before.inFlight + before.stale : 0;
     await detach(panelId);
     const manager = getManager();
     // A new attach always lands in an empty terminal, so it brings the history.
@@ -282,6 +289,11 @@ function createTerminalHandlers({
     }
   }
 
+  // The renderer went away (reload, crash): nothing acks its terminals any more.
+  async function detachAll() {
+    await Promise.all([...panels.keys()].map(detach));
+  }
+
   async function close() {
     if (typeof unsubscribe === "function") unsubscribe();
     await Promise.all([...panels.keys()].map(detach));
@@ -297,6 +309,7 @@ function createTerminalHandlers({
     attachData,
     handleEvent,
     closeHost,
+    detachAll,
     close,
   };
 }

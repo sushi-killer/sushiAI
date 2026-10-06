@@ -46,7 +46,8 @@ const { createDaemonManager } = require("./daemon/manager.cjs");
 const { createLocalConnector } = require("./daemon/local.cjs");
 const { remoteConnectors } = require("./daemon/connectors.cjs");
 const { createHostInstaller } = require("./daemon/install.cjs");
-const { watchHostTools } = require("./daemon/host-tools.cjs");
+const { watchHostTools, serializePerHost } = require("./daemon/host-tools.cjs");
+const { connectThroughDaemon } = require("./daemon/connect-through.cjs");
 const { registerAttentionIpc } = require("./attention.cjs");
 const {
   registerWorkspaceSnapshot,
@@ -207,17 +208,6 @@ const daemonHost = (endpoint) => {
     ? host
     : null;
 };
-const connectThroughDaemon =
-  (original) =>
-  async (endpoint, ...rest) => {
-    const host = daemonHost(endpoint);
-    if (!host) return original(endpoint, ...rest);
-    let state = daemonManager.states().find((item) => item.host === host);
-    if (state.state !== "ready" && state.state !== "connecting")
-      state = await daemonManager.retry(host);
-    await connections.setAutoConnect(endpoint, true);
-    return { connected: state.state === "ready", setup: "" };
-  };
 const disconnectThroughDaemon =
   (original) =>
   async (endpoint, ...rest) => {
@@ -227,7 +217,11 @@ const disconnectThroughDaemon =
     return original(endpoint, ...rest);
   };
 const daemonWrappers = {
-  "connections-connect": connectThroughDaemon,
+  "connections-connect": connectThroughDaemon({
+    daemonHost,
+    getManager: () => daemonManager,
+    getConnections: () => connections,
+  }),
   "connections-disconnect": disconnectThroughDaemon,
 };
 registerProjectIpc({
@@ -253,8 +247,9 @@ const hostManifest = () =>
     resourcesPath: process.resourcesPath,
   });
 // The one installer: tools, skills and sushiai, with no Herdr steps.
-const setupDaemonHost = (endpoint, options) =>
-  setupHost(connections, endpoint, "", { ...options, herdr: false });
+const setupDaemonHost = serializePerHost((endpoint, options) =>
+  setupHost(connections, endpoint, "", { ...options, herdr: false }),
+);
 // The manager is created in whenReady; subscribers registered before that
 // are served by one forwarding subscription made when it exists.
 const daemonEventListeners = new Set();
@@ -642,6 +637,12 @@ app.whenReady().then(async () => {
     if (attention.handleWindowClose(mainWindow)) event.preventDefault();
   });
   mainWindow.webContents.on("will-navigate", (event) => event.preventDefault());
+  // A reloaded or crashed renderer never acks its terminals: release them.
+  const releaseDaemonPanels = () => void daemonIpc?.terminals.detachAll();
+  mainWindow.webContents.on("did-start-navigation", (details) => {
+    if (details.isMainFrame && !details.isSameDocument) releaseDaemonPanels();
+  });
+  mainWindow.webContents.on("render-process-gone", releaseDaemonPanels);
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   mainWindow.webContents.on(
     "will-attach-webview",

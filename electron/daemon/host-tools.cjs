@@ -5,6 +5,23 @@
 // a reconnect never reruns the installers. Command hosts have no shell and are
 // skipped with a note in the log.
 
+// One setup per host at a time: the first-ready tool setup and a manual
+// install share the host's in-flight promise, so a second call starts only
+// when the first has settled (it keeps its own options).
+function serializePerHost(setup) {
+  const inFlight = new Map();
+  return (endpoint, options) => {
+    const previous = inFlight.get(endpoint) || Promise.resolve();
+    const run = previous.catch(() => {}).then(() => setup(endpoint, options));
+    const tail = run.catch(() => {});
+    inFlight.set(endpoint, tail);
+    void tail.then(() => {
+      if (inFlight.get(endpoint) === tail) inFlight.delete(endpoint);
+    });
+    return run;
+  };
+}
+
 function watchHostTools({
   manager,
   connections,
@@ -50,4 +67,4 @@ function watchHostTools({
   };
 }
 
-module.exports = { watchHostTools };
+module.exports = { watchHostTools, serializePerHost };

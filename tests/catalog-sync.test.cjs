@@ -107,6 +107,36 @@ test("a ready host gets a full projects.sync with translated folders, then group
   sync.stop();
 });
 
+test("groups.sync sends a host only the groups that belong to it", async () => {
+  const manager = fakeManager({ local: "mac", box: "box-daemon" });
+  const sync = createCatalogSync({
+    manager,
+    projects: fixtureProjects(),
+    workspaces: async () => [
+      { id: "w1", name: "Local", projectId: "" },
+      { id: "w2", name: "Remote", projectId: "", connection: "ssh:box" },
+      { id: "w3", name: "Local herdr", connection: "herdr:sock" },
+      { id: "w4", name: "By project", projectId: "p2", connection: "ssh:gone" },
+    ],
+    store: memoryStore(),
+  });
+  const groupsFor = async (host) => {
+    manager.calls.length = 0;
+    manager.ready(host);
+    await until(() => manager.calls.length === 2, `${host} calls`);
+    return manager.calls[1].params.groups.map((g) => [g.id, g.order]);
+  };
+  assert.deepEqual(await groupsFor("local"), [
+    ["w1", 0],
+    ["w3", 2],
+  ]);
+  assert.deepEqual(await groupsFor("box"), [
+    ["w2", 1],
+    ["w4", 3],
+  ]);
+  sync.stop();
+});
+
 test("a change sends one debounced full sync to every ready host and rev grows", async () => {
   const manager = fakeManager({ local: "mac", box: "box-daemon" });
   const projects = fixtureProjects();

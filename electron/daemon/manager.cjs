@@ -92,6 +92,7 @@ function createDaemonManager({
       explicit: false, // the user connected it by hand
       suspended: false, // the user disconnected it
       pending: null,
+      token: 0, // bumped when a running attempt must not take effect
       removed: false,
     };
     hosts.set(host, entry);
@@ -148,7 +149,7 @@ function createDaemonManager({
   // `now` asks for an immediate reconnect, granted once until a connection
   // succeeds, so a daemon that dies at once cannot spin.
   function schedule(entry, now = false) {
-    if (closed || entry.removed || entry.timer) return;
+    if (closed || entry.removed || entry.suspended || entry.timer) return;
     let delay = 0;
     if (now && !entry.immediateUsed) entry.immediateUsed = true;
     else {
@@ -246,14 +247,22 @@ function createDaemonManager({
     entry.client = null;
     stopPing(entry);
     client.close();
-    if (closed || entry.removed) return;
+    if (closed || entry.removed || entry.suspended) return;
+    const token = entry.token;
     const why = description ||
       (await entry.connector.describeLoss?.(client)) || {
         state: "offline",
         reason: "daemon_died",
         message: "The connection to the daemon was lost.",
       };
-    if (closed || entry.removed || entry.client) return;
+    if (
+      closed ||
+      entry.removed ||
+      entry.suspended ||
+      entry.token !== token ||
+      entry.client
+    )
+      return;
     setState(entry, why.state || "offline", why.reason, why.message, why.hint);
     if (why.retry !== false) schedule(entry, why.retryNow);
   }
@@ -275,6 +284,13 @@ function createDaemonManager({
   async function attempt(entry) {
     setState(entry, "connecting");
     const connector = entry.connector;
+    const token = entry.token;
+    const stale = () =>
+      closed ||
+      entry.removed ||
+      entry.suspended ||
+      entry.token !== token ||
+      entry.connector !== connector;
     let client = null;
     try {
       client = await connector.connect();
@@ -283,7 +299,7 @@ function createDaemonManager({
       await client.request("session.list", {});
     } catch (error) {
       client?.close();
-      if (entry.removed || entry.connector !== connector) return;
+      if (stale()) return;
       log(`${entry.host}: connect failed: ${error.message}`);
       setState(
         entry,
@@ -295,7 +311,7 @@ function createDaemonManager({
       if (error.retry !== false) schedule(entry, error.retryNow);
       return;
     }
-    if (closed || entry.removed || entry.connector !== connector) {
+    if (stale()) {
       client.close();
       return;
     }
@@ -326,6 +342,7 @@ function createDaemonManager({
   }
 
   function dropHost(entry) {
+    entry.token += 1;
     clearTimeout(entry.timer);
     entry.timer = null;
     stopPing(entry);
@@ -398,6 +415,8 @@ function createDaemonManager({
       const entry = entryFor(host);
       entry.explicit = true;
       entry.suspended = false;
+      entry.token += 1;
+      entry.pending = null;
       if (entry.state === "ready" && entry.client) {
         const client = entry.client;
         entry.client = null;

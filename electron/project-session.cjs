@@ -324,10 +324,29 @@ const remoteCodexHomeScript = (id) =>
     "printf '%s\\n' \"$h\"",
   ].join("; ");
 
+/** Who a Codex login belongs to: the ChatGPT account id or the API key; null
+ * when it cannot be read (so it never matches another login). */
+function loginIdentity(text) {
+  try {
+    const auth = JSON.parse(text);
+    if (auth.OPENAI_API_KEY) return `key:${auth.OPENAI_API_KEY}`;
+    if (auth.tokens?.account_id) return `account:${auth.tokens.account_id}`;
+  } catch {
+    // unreadable
+  }
+  return null;
+}
+
+const sameLogin = (a, b) => {
+  const id = loginIdentity(a);
+  return id !== null && id === loginIdentity(b);
+};
+
 /** The Codex home on a host for an account. The Mac login replaces the host's
- * only when it is a later login of the same ChatGPT account (or the host has
- * none): a host that refreshed its own keeps it, and `ret` lets the app
- * collect it. The login travels on stdin only. */
+ * when the host has none, when it is a later login, or when the host holds
+ * another identity (a different account or API key). The host copy stays only
+ * when it is a newer login of the same account: a host that refreshed its own
+ * keeps it, and `ret` lets the app collect it. The login travels on stdin only. */
 async function prepareRemoteCodexHome({
   exec,
   endpoint,
@@ -349,7 +368,8 @@ async function prepareRemoteCodexHome({
       { timeout: 30000 },
     ),
   ).trim();
-  const write = !hostAuth || newerLogin(auth, hostAuth);
+  const write =
+    !hostAuth || newerLogin(auth, hostAuth) || !sameLogin(auth, hostAuth);
   const out = String(
     await exec(
       endpoint,

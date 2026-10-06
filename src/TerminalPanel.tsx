@@ -25,6 +25,7 @@ type CachedTerminal = {
   disposeInteractions?: () => void;
   cols: number;
   rows: number;
+  daemon?: boolean;
 };
 const cache = new Map<string, CachedTerminal>();
 const base64 = (bytes: Uint8Array) => {
@@ -39,6 +40,7 @@ export function disposeTerminal(id: string) {
   const runtime = cache.get(id);
   if (runtime) {
     runtime.unsubscribe();
+    if (runtime.daemon) void window.bridge?.daemonTerminalDetach(id);
     runtime.disposeInteractions?.();
     runtime.terminal.dispose();
     cache.delete(id);
@@ -75,7 +77,10 @@ export function TerminalPanel({
   const [disconnected, setDisconnected] = useState(false);
   const active =
     !panel.ended &&
-    (panel.kind === "terminal" || panel.started || !!panel.herdrId);
+    (panel.kind === "terminal" ||
+      panel.started ||
+      !!panel.herdrId ||
+      !!panel.sessionId);
   useEffect(() => {
     if (!active || !host.current) return;
     if (!window.bridge) {
@@ -94,7 +99,7 @@ export function TerminalPanel({
         cursorBlink: true,
         linkHandler: { activate: openTerminalLink },
         cursorStyle: "bar",
-        scrollback: panel.herdrId ? 0 : 10000,
+        scrollback: panel.herdrId && !panel.sessionId ? 0 : 10000,
         scrollSensitivity: 1.3,
         fastScrollSensitivity: 5,
         theme: {
@@ -136,7 +141,10 @@ export function TerminalPanel({
       };
       cache.set(panel.id, runtime);
       const entry = runtime;
-      const streamId = panel.herdrId ? crypto.randomUUID() : undefined;
+      const sessionId = panel.sessionId;
+      entry.daemon = !!sessionId;
+      const herdr = !!panel.herdrId && !sessionId;
+      const streamId = herdr ? crypto.randomUUID() : undefined;
       let selecting = false;
       const delivery = createTerminalOutput({
         streamId,
@@ -160,24 +168,49 @@ export function TerminalPanel({
           void window.bridge!.terminalClose(panel.id);
         },
       });
-      entry.unsubscribe = window.bridge.onTerminal((event) => {
-        if (event.panelId !== panel.id || !delivery.accepts(event.streamId))
-          return;
-        if (event.agent !== undefined)
-          attachmentsAllowed.current = !!event.agent;
-        if (event.data || event.sequence) delivery.push(event);
-        if (event.exitCode !== undefined) {
-          entry.exited = true;
-          entry.error =
-            event.error ||
-            (panel.herdrId
-              ? "Stream disconnected. Reconnect to resume. If another app owns this terminal, detach it first."
-              : "Process exited. Reconnect to start a new shell.");
-          entry.notify?.();
-        }
-      });
+      const exitedMessage = "Session ended. Reconnect to continue.";
+      const bytesOf = (text: string) => new TextEncoder().encode(text).length;
+      const acked = (text: string) => () => {
+        window
+          .bridge!.daemonTerminalAck(panel.id, bytesOf(text))
+          .catch(() => {});
+      };
+      if (sessionId)
+        entry.unsubscribe = window.bridge.onDaemonTerminal((event) => {
+          if (event.panelId !== panel.id) return;
+          if (event.snapshot !== undefined) {
+            terminal.reset();
+            terminal.write(event.snapshot, acked(event.snapshot));
+          }
+          if (event.data) terminal.write(event.data, acked(event.data));
+          if (event.exited) {
+            entry.exited = true;
+            entry.error = exitedMessage;
+            entry.notify?.();
+          }
+        });
+      else
+        entry.unsubscribe = window.bridge.onTerminal((event) => {
+          if (event.panelId !== panel.id || !delivery.accepts(event.streamId))
+            return;
+          if (event.agent !== undefined)
+            attachmentsAllowed.current = !!event.agent;
+          if (event.data || event.sequence) delivery.push(event);
+          if (event.exitCode !== undefined) {
+            entry.exited = true;
+            entry.error =
+              event.error ||
+              (panel.herdrId
+                ? "Stream disconnected. Reconnect to resume. If another app owns this terminal, detach it first."
+                : "Process exited. Reconnect to start a new shell.");
+            entry.notify?.();
+          }
+        });
       const input = createTerminalInput(
-        (data) => window.bridge!.terminalWrite(panel.id, data),
+        (data) =>
+          sessionId
+            ? window.bridge!.daemonTerminalWrite(panel.id, data)
+            : window.bridge!.terminalWrite(panel.id, data),
         (message) => {
           entry.error = message;
           entry.notify?.();
@@ -191,7 +224,7 @@ export function TerminalPanel({
         terminal,
         element,
         sendInput,
-        panel.herdrId
+        herdr
           ? (direction, lines, position) => {
               window
                 .bridge!.terminalScroll(panel.id, direction, lines, position)
@@ -204,10 +237,10 @@ export function TerminalPanel({
         (active) => {
           if (selecting === active) return;
           selecting = active;
-          entry.selectionPaused = !!panel.herdrId && active;
+          entry.selectionPaused = herdr && active;
           entry.notify?.();
           if (!active) entry.requestFit?.();
-          if (panel.herdrId) delivery.pause(active);
+          if (herdr) delivery.pause(active);
         },
       );
       entry.disposeInteractions = () => {
@@ -237,6 +270,15 @@ export function TerminalPanel({
             for (const file of files) {
               entry.transfer = `Attaching ${file.name || "image"}…`;
               entry.notify?.();
+              if (sessionId) {
+                // The daemon writes the path on its host; only a file with a
+                // path on disk can be handed over.
+                const path = window.bridge!.pathForFile(file);
+                if (!path)
+                  throw new Error("Drop the file from Finder to attach it.");
+                await window.bridge!.daemonTerminalAttachFile(panel.id, path);
+                continue;
+              }
               const stored = await window.bridge!.terminalAttach({
                 panelId: panel.id,
                 name: file.name || "pasted.png",
@@ -288,38 +330,59 @@ export function TerminalPanel({
         },
         true,
       );
-      window.bridge
-        .terminalOpen({
-          panelId: panel.id,
-          cwd,
-          endpoint: panel.herdrId ? socket : endpoint,
-          herdrId: panel.herdrId,
-          streamId,
-          command: panel.kind === "agent" ? panel.agent || "claude" : undefined,
-          modelProfileId:
-            panel.kind === "agent" ? panel.modelProfileId : undefined,
-          claudeAccountId:
-            panel.kind === "agent" ? panel.claudeAccountId : undefined,
-          codexAccountId:
-            panel.kind === "agent" ? panel.codexAccountId : undefined,
-          cols: terminal.cols,
-          rows: terminal.rows,
-        })
-        .then((result) => {
-          if (cache.get(panel.id) !== entry) return;
-          if (result.history) delivery.push({ data: result.history });
-          entry.ready = true;
-          entry.exited = entry.exited || !!result.exited;
-          if (entry.exited)
-            entry.error = "Session ended. Reconnect to continue.";
-          delivery.start();
-          entry.requestFit?.();
-          entry.notify?.();
-        })
-        .catch((e) => {
-          entry.error = e.message;
-          entry.notify?.();
-        });
+      if (sessionId)
+        window.bridge
+          .daemonTerminalAttach({
+            panelId: panel.id,
+            host: endpoint || "local",
+            sessionId,
+            cols: terminal.cols,
+            rows: terminal.rows,
+          })
+          .then(() => {
+            if (cache.get(panel.id) !== entry) return;
+            entry.ready = true;
+            entry.requestFit?.();
+            entry.notify?.();
+          })
+          .catch((e) => {
+            entry.error = e.message;
+            entry.notify?.();
+          });
+      else
+        window.bridge
+          .terminalOpen({
+            panelId: panel.id,
+            cwd,
+            endpoint: panel.herdrId ? socket : endpoint,
+            herdrId: panel.herdrId,
+            streamId,
+            command:
+              panel.kind === "agent" ? panel.agent || "claude" : undefined,
+            modelProfileId:
+              panel.kind === "agent" ? panel.modelProfileId : undefined,
+            claudeAccountId:
+              panel.kind === "agent" ? panel.claudeAccountId : undefined,
+            codexAccountId:
+              panel.kind === "agent" ? panel.codexAccountId : undefined,
+            cols: terminal.cols,
+            rows: terminal.rows,
+          })
+          .then((result) => {
+            if (cache.get(panel.id) !== entry) return;
+            if (result.history) delivery.push({ data: result.history });
+            entry.ready = true;
+            entry.exited = entry.exited || !!result.exited;
+            if (entry.exited)
+              entry.error = "Session ended. Reconnect to continue.";
+            delivery.start();
+            entry.requestFit?.();
+            entry.notify?.();
+          })
+          .catch((e) => {
+            entry.error = e.message;
+            entry.notify?.();
+          });
     } else host.current.appendChild(runtime.element);
     const current = runtime;
     current.notify = () => {
@@ -351,7 +414,10 @@ export function TerminalPanel({
             const { cols, rows } = current.terminal;
             current.cols = cols;
             current.rows = rows;
-            window.bridge!.terminalResize(panel.id, cols, rows).catch((e) => {
+            (current.daemon
+              ? window.bridge!.daemonTerminalResize(panel.id, cols, rows)
+              : window.bridge!.terminalResize(panel.id, cols, rows)
+            ).catch((e) => {
               current.error = e.message;
               current.notify?.();
             });
@@ -475,7 +541,8 @@ export function TerminalPanel({
                   return;
                 }
                 try {
-                  await window.bridge?.terminalClose(panel.id);
+                  if (!cache.get(panel.id)?.daemon)
+                    await window.bridge?.terminalClose(panel.id);
                   disposeTerminal(panel.id);
                   setError("");
                   setAttempt((a) => a + 1);

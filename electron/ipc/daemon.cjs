@@ -4,6 +4,7 @@
 // fill them in; argument validation already runs here and stays.
 
 const { validatePanelId } = require("./panel-id.cjs");
+const { createTerminalHandlers } = require("../daemon/terminals.cjs");
 
 const NOT_IMPLEMENTED = "daemon IPC not implemented yet";
 const MAX_TEXT = 4096;
@@ -111,13 +112,36 @@ const CHANNELS = {
   "host-install": (h) => host(h),
 };
 
-function registerDaemonIpc({ handle }) {
+// daemon-terminal-* channel -> method of the terminal handlers.
+const TERMINAL_CHANNELS = {
+  "daemon-terminal-attach": (t, input) => t.attach(input),
+  "daemon-terminal-write": (t, panelId, data) => t.write(panelId, data),
+  "daemon-terminal-resize": (t, panelId, cols, rows) =>
+    t.resize(panelId, cols, rows),
+  "daemon-terminal-detach": (t, panelId) => t.detach(panelId),
+  "daemon-terminal-ack": (t, panelId, bytes) => t.ack(panelId, bytes),
+  "daemon-terminal-attach-file": (t, panelId, path) =>
+    t.attachFile(panelId, path),
+};
+
+// Terminal channels stay stubs until the caller supplies getManager.
+function registerDaemonIpc({ handle, send, getManager, onEvent }) {
+  const terminals = getManager
+    ? createTerminalHandlers({
+        getManager,
+        send: send || (() => {}),
+        onEvent,
+      })
+    : undefined;
   for (const [channel, validate] of Object.entries(CHANNELS))
     handle(channel, async (...args) => {
       validate(...args);
       if (channel === "daemon-states") return [];
+      if (terminals && TERMINAL_CHANNELS[channel])
+        return TERMINAL_CHANNELS[channel](terminals, ...args);
       throw new Error(NOT_IMPLEMENTED);
     });
+  return { terminals };
 }
 
 module.exports = { registerDaemonIpc, CHANNELS, NOT_IMPLEMENTED };

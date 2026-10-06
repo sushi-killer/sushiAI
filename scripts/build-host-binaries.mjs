@@ -3,7 +3,9 @@
 // dist/host/<target>/sushiai, dist/host/SHA256SUMS and dist/host/manifest.json.
 //
 // Usage: node scripts/build-host-binaries.mjs [--targets a,b] [--out dist/host] [--docker-smoke]
-//   Targets are keys of TARGETS below (default: all four).
+//   Targets are keys of TARGETS below (default: all four; darwin targets are skipped on a
+//   non-darwin host). Output is built in a temp directory next to --out and renamed into
+//   place only when every target succeeded.
 //
 // Linux targets use `cargo zigbuild` (musl, static). Darwin targets use `cargo build`.
 // Missing tools are reported with the install command; nothing is installed here.
@@ -15,6 +17,7 @@ import {
   copyFileSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -49,7 +52,10 @@ const TARGETS = {
   },
 };
 
+let staging = null;
+
 function fail(message) {
+  if (staging) rmSync(staging, { recursive: true, force: true });
   console.error(`build-host-binaries: ${message}`);
   process.exit(1);
 }
@@ -57,6 +63,14 @@ function fail(message) {
 function run(command, args, options = {}) {
   return spawnSync(command, args, { cwd: ROOT, encoding: "utf8", ...options });
 }
+
+const HELP = `Usage: node scripts/build-host-binaries.mjs [--targets a,b] [--out dist/host] [--docker-smoke]
+
+  --targets   comma-separated: ${Object.keys(TARGETS).join(", ")}
+              (default: all; darwin targets are skipped on a non-darwin host)
+  --out       output directory (default dist/host), replaced only if every target built
+  --docker-smoke  also run the linux binaries in an alpine container (--rm)
+  --help      this text`;
 
 function parseArgs(argv) {
   const options = {
@@ -71,7 +85,14 @@ function parseArgs(argv) {
     else if (arg === "--out")
       options.out = argv[++i] ?? fail("--out needs a value");
     else if (arg === "--docker-smoke") options.dockerSmoke = true;
-    else fail(`unknown argument ${arg}`);
+    else if (arg === "--help" || arg === "-h") {
+      console.log(HELP);
+      process.exit(0);
+    } else fail(`unknown argument ${arg}`);
+  }
+  if (options.targets.length === 0) fail("--targets is empty");
+  if (new Set(options.targets).size !== options.targets.length) {
+    fail(`duplicate target in --targets: ${options.targets.join(",")}`);
   }
   for (const target of options.targets) {
     if (!TARGETS[target])
@@ -106,6 +127,12 @@ function preflight(targets) {
     if (run("cargo", ["zigbuild", "--help"]).status !== 0) {
       missing.push("cargo-zigbuild: cargo install cargo-zigbuild");
     }
+  }
+  if (
+    targets.some((t) => TARGETS[t].os === "linux") &&
+    run("which", ["file"]).status !== 0
+  ) {
+    missing.push("file: install the file(1) utility");
   }
   if (targets.some((t) => TARGETS[t].os === "darwin")) {
     for (const tool of ["strip", "codesign"]) {
@@ -182,9 +209,32 @@ function dockerSmoke(target, binary) {
   return result.stdout.trim();
 }
 
+function targetDirectory() {
+  const result = run(
+    "cargo",
+    ["metadata", "--format-version", "1", "--no-deps"],
+    {
+      maxBuffer: 256 * 1024 * 1024,
+    },
+  );
+  if (result.status !== 0) fail(`cargo metadata failed: ${result.stderr}`);
+  return JSON.parse(result.stdout).target_directory;
+}
+
 const options = parseArgs(process.argv.slice(2));
+const skipped = options.targets.filter(
+  (t) => TARGETS[t].os === "darwin" && process.platform !== "darwin",
+);
+for (const target of skipped)
+  console.log(`skipping ${target}: darwin targets need a macOS host`);
+options.targets = options.targets.filter((t) => !skipped.includes(t));
+if (options.targets.length === 0) fail("no target left to build on this host");
 preflight(options.targets);
 const out = resolve(ROOT, options.out);
+staging = `${out}.tmp-${process.pid}`;
+rmSync(staging, { recursive: true, force: true });
+mkdirSync(staging, { recursive: true });
+const cargoTarget = targetDirectory();
 const version = workspaceVersion();
 const manifest = {};
 const sums = [];
@@ -192,11 +242,10 @@ const host = hostKey();
 
 for (const target of options.targets) {
   const seconds = build(target);
-  const dir = join(out, target);
-  rmSync(dir, { recursive: true, force: true });
+  const dir = join(staging, target);
   mkdirSync(dir, { recursive: true });
   const binary = join(dir, "sushiai");
-  copyFileSync(join(ROOT, "target", target, "release", "sushiai"), binary);
+  copyFileSync(join(cargoTarget, target, "release", "sushiai"), binary);
   chmodSync(binary, 0o755);
   finish(target, binary);
 
@@ -221,10 +270,13 @@ for (const target of options.targets) {
   );
 }
 
-mkdirSync(out, { recursive: true });
-writeFileSync(join(out, "SHA256SUMS"), `${sums.join("\n")}\n`);
+writeFileSync(join(staging, "SHA256SUMS"), `${sums.join("\n")}\n`);
 writeFileSync(
-  join(out, "manifest.json"),
+  join(staging, "manifest.json"),
   `${JSON.stringify(manifest, null, 2)}\n`,
 );
+// Every target built: replace the previous output in one step.
+rmSync(out, { recursive: true, force: true });
+renameSync(staging, out);
+staging = null;
 console.log(`wrote ${join(options.out, "manifest.json")} and SHA256SUMS`);

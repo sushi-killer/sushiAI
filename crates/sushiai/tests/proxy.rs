@@ -1,6 +1,8 @@
 //! `sushiai proxy` against real daemons under a temporary `SUSHIAI_HOME`.
 
+use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -99,7 +101,11 @@ impl Sandbox {
     }
 
     fn proxy(&mut self) -> Proxy {
-        let proxy = Proxy::start(self.home());
+        self.proxy_with(&[])
+    }
+
+    fn proxy_with(&mut self, vars: &[(&str, &str)]) -> Proxy {
+        let proxy = Proxy::start_with(self.home(), vars);
         self.proxies.push(proxy.child.id());
         proxy
     }
@@ -114,27 +120,48 @@ impl Sandbox {
             .collect()
     }
 
-    /// The daemon a proxy started is detached, so find it through the socket it listens on.
-    fn daemon_pid(&self) -> Option<u32> {
-        let out = Command::new("lsof")
-            .arg("-t")
-            .arg(self.socket())
+    /// Pids of the daemons of this home, matched by `SUSHIAI_HOME` in the process environment
+    /// (`ps eww -p`). The daemon a proxy started is detached, so there is no other handle.
+    fn daemon_pids(&self) -> Vec<u32> {
+        let listing = Command::new("ps")
+            .args(["-axo", "pid=,command="])
             .output()
-            .ok()?;
-        let rows = ps_rows();
-        String::from_utf8_lossy(&out.stdout)
+            .expect("ps");
+        let var = format!("SUSHIAI_HOME={}", self.home().display());
+        let head = format!("{BIN} daemon");
+        String::from_utf8_lossy(&listing.stdout)
             .lines()
-            .filter_map(|l| l.trim().parse::<u32>().ok())
-            .find(|pid| {
-                rows.iter()
-                    .any(|(p, _, cmd)| p == pid && cmd.ends_with("sushiai daemon"))
+            .filter_map(|line| {
+                let (pid, command) = line.trim().split_once(' ')?;
+                (command == head).then(|| pid.parse::<u32>().ok()).flatten()
             })
+            .filter(|pid| {
+                // `ps eww -p` lists the environment; the `-ax` listing does not.
+                let out = Command::new("ps")
+                    .args(["eww", "-o", "command=", "-p", &pid.to_string()])
+                    .output()
+                    .expect("ps eww");
+                let text = String::from_utf8_lossy(&out.stdout);
+                text.split_whitespace().any(|word| word == var)
+            })
+            .collect()
+    }
+
+    /// The single daemon of this home; fails loudly when there is none or several.
+    fn daemon_pid(&self) -> u32 {
+        let mut found = Vec::new();
+        wait_until("a daemon process for this home", 10, || {
+            found = self.daemon_pids();
+            !found.is_empty()
+        });
+        assert_eq!(found.len(), 1, "expected one daemon, found {found:?}");
+        found[0]
     }
 }
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
-        let daemon = self.daemon_pid();
+        let daemons = self.daemon_pids();
         for pid in &self.proxies {
             kill(*pid);
         }
@@ -142,7 +169,7 @@ impl Drop for Sandbox {
             let _ = child.kill();
             let _ = child.wait();
         }
-        if let Some(pid) = daemon {
+        for pid in daemons {
             kill(pid);
         }
         let all = ps_rows();
@@ -168,9 +195,10 @@ struct Proxy {
 }
 
 impl Proxy {
-    fn start(home: &Path) -> Proxy {
+    fn start_with(home: &Path, vars: &[(&str, &str)]) -> Proxy {
         let mut child = Command::new(BIN)
             .arg("proxy")
+            .envs(vars.iter().copied())
             .env("SUSHIAI_HOME", home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -255,6 +283,17 @@ impl Proxy {
 
     fn close_stdin(&mut self) {
         self.stdin = None;
+    }
+
+    /// Sends one request without waiting; returns its id.
+    fn send(&mut self, method: &str, params: Value) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let bytes = encode(&Request::new(id, method, params).frame());
+        let stdin = self.stdin.as_mut().expect("stdin open");
+        stdin.write_all(&bytes).expect("write");
+        stdin.flush().expect("flush");
+        id
     }
 
     fn wait_exit(&mut self) -> std::process::ExitStatus {
@@ -344,4 +383,119 @@ fn closing_stdin_ends_the_proxy_and_leaves_daemon_and_sessions() {
     again.hello();
     let listed = again.call("session.list", json!({}));
     assert!(listed.to_string().contains(&id), "{listed}");
+}
+
+#[test]
+fn stdin_closed_right_after_a_request_still_gets_the_whole_response() {
+    let sandbox = &mut Sandbox::new();
+    sandbox.start_daemon();
+    let mut proxy = sandbox.proxy();
+    let id = proxy.send("hello", json!({"protocol": 1, "client": "proxy-test"}));
+    proxy.close_stdin();
+    let frame = proxy
+        .frames
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the response must arrive after stdin closed");
+    let Frame::Json(text) = frame else {
+        panic!("expected a JSON frame")
+    };
+    match Message::parse(&text).expect("parse") {
+        Message::Response(r) => assert_eq!((r.id, r.error), (json!(id), None)),
+        other => panic!("expected a response, got {other:?}"),
+    }
+    assert_eq!(proxy.wait_exit().code(), Some(0));
+}
+
+#[test]
+fn two_proxies_on_an_empty_home_start_exactly_one_daemon() {
+    let sandbox = &mut Sandbox::new();
+    let mut a = sandbox.proxy();
+    let mut b = sandbox.proxy();
+    assert_eq!(a.hello()["protocol"], 1);
+    assert_eq!(b.hello()["protocol"], 1);
+    assert_eq!(sandbox.daemon_pids().len(), 1);
+}
+
+#[test]
+fn a_daemon_started_by_a_proxy_outlives_it_in_its_own_session() {
+    let sandbox = &mut Sandbox::new();
+    let mut proxy = sandbox.proxy();
+    proxy.hello();
+    let daemon = sandbox.daemon_pid();
+    let proxy_pid = proxy.child.id();
+    // SAFETY: getsid(2) only reads process attributes.
+    let (daemon_sid, proxy_sid) =
+        unsafe { (libc::getsid(daemon as i32), libc::getsid(proxy_pid as i32)) };
+    assert!(daemon_sid > 0 && proxy_sid > 0);
+    assert_ne!(daemon_sid, proxy_sid);
+    kill(proxy_pid);
+    let _ = proxy.child.wait();
+    sleep(Duration::from_millis(300));
+    assert!(alive(daemon));
+    let mut again = sandbox.proxy();
+    assert_eq!(again.hello()["protocol"], 1);
+}
+
+#[test]
+fn a_daemon_killed_mid_stream_ends_the_proxy_with_code_2() {
+    let sandbox = &mut Sandbox::new();
+    let mut proxy = sandbox.proxy();
+    proxy.hello();
+    let daemon = sandbox.daemon_pid();
+    kill(daemon);
+    assert_eq!(proxy.wait_exit().code(), Some(2));
+}
+
+#[test]
+fn an_unsafe_home_fails_fast_with_the_reason_on_stderr_only() {
+    let sandbox = Sandbox::new();
+    fs::set_permissions(sandbox.home(), fs::Permissions::from_mode(0o777)).expect("chmod");
+    let started = Instant::now();
+    let out = Command::new(BIN)
+        .arg("proxy")
+        .env("SUSHIAI_HOME", sandbox.home())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run proxy");
+    assert!(started.elapsed() < Duration::from_secs(8), "must fail fast");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        out.stdout.is_empty(),
+        "stdout must carry protocol bytes only"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not safe to use"), "{stderr}");
+}
+
+#[test]
+fn the_auto_started_daemon_gets_a_clean_environment_and_the_login_path() {
+    let sandbox = &mut Sandbox::new();
+    // A fake login shell makes the expected PATH exact.
+    let shell = sandbox.home().join("fake-shell");
+    fs::write(&shell, "#!/bin/sh\nprintf %s /custom/a:/custom/b\n").expect("script");
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let mut proxy = sandbox.proxy_with(&[
+        ("SSH_AUTH_SOCK", "/tmp/x"),
+        ("PATH", "/nonexistent"),
+        ("SHELL", shell.to_str().expect("utf8")),
+    ]);
+    proxy.hello();
+    let file = sandbox.home().join("vars.txt");
+    proxy.call(
+        "session.create",
+        json!({
+            "cmd": ["/bin/sh", "-c", format!("/usr/bin/env > {}", file.display())],
+            "cwd": "/tmp", "cols": 80, "rows": 24
+        }),
+    );
+    wait_until("vars file", 10, || {
+        fs::read_to_string(&file).is_ok_and(|t| t.contains("PATH="))
+    });
+    let vars = fs::read_to_string(&file).expect("vars");
+    assert!(!vars.contains("SSH_AUTH_SOCK"), "{vars}");
+    let path = vars
+        .lines()
+        .find_map(|l| l.strip_prefix("PATH="))
+        .expect("PATH");
+    assert_eq!(path, "/custom/a:/custom/b");
 }

@@ -205,3 +205,29 @@ fn a_command_that_cannot_start_leaves_no_socket() {
     assert!(err.contains("/no/such/command"), "{err}");
     assert!(!dir.path().join("t1.sock").exists());
 }
+
+#[test]
+fn a_holder_exits_when_its_session_directory_disappears() {
+    let dir = tempfile::Builder::new()
+        .prefix("hd")
+        .tempdir_in("/tmp")
+        .expect("tempdir");
+    let running = start(config(dir.path(), &["/bin/sh", "-c", "sleep 60"])).expect("start");
+    let served = thread::spawn(move || running.serve_checking(Duration::from_millis(100)));
+    thread::sleep(Duration::from_millis(400));
+    assert!(
+        !served.is_finished(),
+        "the holder left while its directory was there"
+    );
+    std::fs::remove_dir_all(dir.path()).expect("remove the directory");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !served.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "the holder kept running without its directory"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    served.join().expect("thread").expect("a clean exit");
+    // TempDir drop tolerates the missing directory.
+}

@@ -21,11 +21,9 @@ export function groupLabel(key: string, profiles: ConnectionProfile[]) {
  * whichever connection happens to be the default one. */
 export function groupStatus(
   key: string,
-  localSocket: string,
   statusByEndpoint: Record<string, string>,
 ) {
-  const endpoint = key === LOCAL_GROUP ? localSocket : key;
-  return statusByEndpoint[endpoint] || "connecting";
+  return statusByEndpoint[key] || "connecting";
 }
 /** A profile hidden from the sidebar still keeps its tunnel - this only
  * decides whether its workspaces are ever offered here. */
@@ -315,13 +313,12 @@ function stateWord(status: string): "Connected" | "Connecting" | "Offline" {
 export function mergedMarkerAccessibleName(
   group: MergeGroup,
   profiles: ConnectionProfile[],
-  localSocket: string,
   statusByEndpoint: Record<string, string>,
   claims: WorktreeClaim[] = [],
 ): string {
   const parts = group.members.map((m) => {
     const label = memberLabel(group, m, profiles, claims);
-    const status = groupStatus(m.hostKey, localSocket, statusByEndpoint);
+    const status = groupStatus(m.hostKey, statusByEndpoint);
     return `${label} (${stateWord(status)})`;
   });
   const joined =

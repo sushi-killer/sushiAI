@@ -7,7 +7,7 @@ const { createDaemonManager } = require("../electron/daemon/manager.cjs");
 const { remoteConnectors } = require("../electron/daemon/connectors.cjs");
 const { createSshConnector } = require("../electron/daemon/ssh.cjs");
 const { createCommandConnector } = require("../electron/daemon/command.cjs");
-const { createHostInstaller } = require("../electron/daemon/install.cjs");
+const { createHostInstaller } = require("../electron/host-setup.cjs");
 const { registerDaemonIpc } = require("../electron/ipc/daemon.cjs");
 const { Connections } = require("../electron/connections.cjs");
 
@@ -541,7 +541,6 @@ test("host-install without a running daemon sends no shutdown; failures are expl
   const ok = base();
   assert.equal((await ok.installer.install("h1")).status, "unchanged");
   assert.equal(ok.calls.length, 0);
-  await assert.rejects(ok.installer.install("local"), /ships with the app/);
   await assert.rejects(
     base({
       manifest: () => {
@@ -564,6 +563,75 @@ test("host-install without a running daemon sends no shutdown; failures are expl
     }).installer.install("h1"),
     /not ready: needs a key/,
   );
+});
+
+test("host-install on local restarts the daemon and waits for ready", async () => {
+  const order = [];
+  const installer = createHostInstaller({
+    manager: {
+      states: () => [],
+      retry: async () => {
+        order.push("retry");
+        return { host: "local", state: "ready", version: "0.1.0" };
+      },
+    },
+    connections: {},
+    restartLocal: async () => order.push("restart"),
+    settleMs: 1,
+  });
+  const result = await installer.install("local");
+  assert.deepEqual(order, ["restart", "retry"]);
+  assert.deepEqual(result, { status: "restarted", version: "0.1.0" });
+  const stuck = createHostInstaller({
+    manager: {
+      retry: async () => ({
+        host: "local",
+        state: "failed",
+        message: "still another build",
+      }),
+    },
+    connections: {},
+    settleMs: 1,
+    attempts: 2,
+  });
+  await assert.rejects(
+    stuck.install("local"),
+    /did not restart: still another/,
+  );
+});
+
+test("a ready host whose build differs from the bundled sha is flagged for update", async () => {
+  const { watchHostTools } = require("../electron/daemon/host-tools.cjs");
+  const sha = "a".repeat(64);
+  const run = async (build) => {
+    const listeners = [];
+    const updates = [];
+    const stored = {};
+    watchHostTools({
+      manager: {
+        on: (name, callback) => listeners.push(callback),
+        hello: () => ({ host: "h1", build }),
+        setUpdate: (host, flag) => updates.push([host, flag]),
+      },
+      connections: {
+        hasShell: () => true,
+        exec: async (endpoint, command) => {
+          assert.match(command, /uname -sm/);
+          return "Linux x86_64\n";
+        },
+      },
+      store: { read: () => stored, write: () => {} },
+      setup: async () => ({}),
+      manifest: () => ({ manifest: { "Linux x86_64": { sha256: sha } } }),
+    });
+    listeners[0]({ host: "h1", state: "ready", generation: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return updates;
+  };
+  assert.deepEqual(await run("b".repeat(64)), [["h1", true]]);
+  assert.deepEqual(await run(sha), [["h1", false]]);
+  // An older daemon reports no build at all.
+  assert.deepEqual(await run(undefined), [["h1", true]]);
 });
 
 test("host-install IPC dispatches to the installer; session updates and ask answers are type-checked", async () => {
@@ -878,7 +946,7 @@ test("an autoConnect profile connects when the manager starts", async () => {
 
 test("the old-daemon stop script signals only a daemon that holds the lock", async () => {
   const { spawn, execFileSync } = require("node:child_process");
-  const { STOP_DAEMON_COMMAND } = require("../electron/daemon/install.cjs");
+  const { STOP_DAEMON_COMMAND } = require("../electron/host-setup.cjs");
   const home = fs.mkdtempSync(path.join("/tmp", "stop-"));
   cleanups.push(() => fs.rmSync(home, { recursive: true, force: true }));
   fs.mkdirSync(path.join(home, ".sushiai"), { mode: 0o700 });

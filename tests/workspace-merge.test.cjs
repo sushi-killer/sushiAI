@@ -150,8 +150,8 @@ test("worktrees of one repository on one host merge, labelled by branch, main ch
     ["main", "feature"],
   );
   assert.equal(
-    mergedMarkerAccessibleName(group, [], "/tmp/local.sock", {
-      "/tmp/local.sock": "connected",
+    mergedMarkerAccessibleName(group, [], {
+      local: "connected",
     }),
     "Checked out as main (Connected) and feature (Connected).",
   );
@@ -436,8 +436,8 @@ test("mergedMarkerAccessibleName: two and three hosts, no Oxford comma", async (
     gitFor([local, lab]),
     profiles,
   ).get("w-local");
-  const name = mergedMarkerAccessibleName(group, profiles, "/tmp/local.sock", {
-    "/tmp/local.sock": "connected",
+  const name = mergedMarkerAccessibleName(group, profiles, {
+    local: "connected",
     "ssh:lab": "offline",
   });
   assert.equal(name, "Runs on Local (Connected) and Lab (Offline).");

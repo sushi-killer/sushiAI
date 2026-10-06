@@ -71,7 +71,6 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   },
   daemonSessionLaunch: invoke("daemon-session-launch"),
   sessionClose: invoke("daemon-session-close"),
-  sessionRemove: invoke("daemon-session-remove"),
   sessionUpdate: invoke("daemon-session-update"),
   sessionRead: invoke("daemon-session-read"),
   sessionInput: invoke("daemon-session-input"),

@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
+use sushiai_agents::heuristic::{self, ScreenAgent};
 use sushiai_agents::hooks::{self, HookEvent};
-use sushiai_agents::status::{ExitInfo, Input, SessionStatus as AgentState};
+use sushiai_agents::status::{Detected, ExitInfo, Input, SessionStatus as AgentState, Status};
 use sushiai_core::{mark_exited, Screen};
 use sushiai_protocol::{
     code, method, Ask, AskClosed, AskRespond, Frame, HoldAttach, HoldAttachResult, HoldExited,
@@ -35,6 +36,8 @@ const RECONNECT_MAX: Duration = Duration::from_secs(2);
 const HOOK_SILENCE: Duration = Duration::from_secs(15);
 /// How long the process may outlive a `SessionEnd` hook.
 const ENDING_GRACE: Duration = Duration::from_secs(3);
+/// The screen is read at most this often: output can arrive in a flood.
+const SCREEN_THROTTLE: Duration = Duration::from_millis(500);
 /// Open permission asks per session; more are left to the agent's own terminal prompt.
 const MAX_ASKS: usize = 20;
 /// Formatted history bytes one attach may carry; the oldest lines go first.
@@ -172,7 +175,8 @@ struct OpenAsk {
     deadline: Instant,
 }
 
-/// What the actor tracks for a session whose agent sends hooks.
+/// What the actor tracks for a session with an agent status: one that sends hooks, or one whose
+/// status is read from the screen (`gemini`, `cursor-agent`).
 struct Agent {
     status: AgentState,
     /// Stamped on each received hook; the state machine drops stale ones.
@@ -200,6 +204,11 @@ struct Actor {
     attaching: Option<u64>,
     /// A close asked for while detached: sent once the holder is reachable again.
     close_pending: Option<bool>,
+    /// Which screen heuristic reads this session, if any.
+    screen_agent: Option<ScreenAgent>,
+    /// When the screen was last read, and when the next read is due after output was held back.
+    screen_read: Option<Instant>,
+    screen_due: Option<Instant>,
 }
 
 /// Starts the actor for a session whose holder is attached and replayed up to `seq`.
@@ -215,6 +224,7 @@ pub fn start(
     let (tx, rx) = mpsc::channel(64);
     let handle = Handle { tx };
     let mut info = info;
+    let info_name = info.agent.name.clone();
     info.holder_pid = holder.holder_pid.or(info.holder_pid);
     registry.update(info.clone());
     if created {
@@ -223,7 +233,7 @@ pub fn start(
         registry.announce_created(&info.id);
     }
     registry.set_handle(&info.id, handle.clone());
-    let actor = Actor {
+    let mut actor = Actor {
         agent: restore_agent(&info),
         info,
         screen,
@@ -238,7 +248,12 @@ pub fn start(
         retry: None,
         attaching: None,
         close_pending: None,
+        screen_agent: agent::screen_agent_of(info_name.as_deref()),
+        screen_read: None,
+        screen_due: None,
     };
+    // The screen was replayed before the actor existed: read it once now.
+    actor.screen_changed();
     tokio::spawn(actor.run(rx));
     handle
 }
@@ -247,7 +262,13 @@ pub fn start(
 /// status stays blocked: the agent may still show its dialog. The ask itself died with the
 /// previous daemon, so the machine is told the ask went back to the terminal.
 fn restore_agent(info: &SessionInfo) -> Option<Agent> {
-    agent::agent_of(info.agent.name.as_deref())?;
+    // A screen-only agent has a status in its record; any other plain command has none.
+    if agent::agent_of(info.agent.name.as_deref()).is_none()
+        && (agent::screen_agent_of(info.agent.name.as_deref()).is_none()
+            || info.agent.agent_status.is_none())
+    {
+        return None;
+    }
     let a = &info.agent;
     let mut status = AgentState::new(a.status_since.unwrap_or_else(now_ms));
     if let Some(s) = a.agent_status {
@@ -290,6 +311,7 @@ impl Actor {
                     let _ = self.holder.close(Signal::Kill);
                 }
                 () = until(self.retry.map(|(at, _)| at)) => self.reconnect().await,
+                () = until(self.screen_due) => self.read_screen(),
                 _ = tick.tick() => self.sweep(),
             }
             // An exited session with nobody attached has nothing left to serve.
@@ -386,6 +408,10 @@ impl Actor {
                 "session has no agent hooks".to_string(),
             )
         };
+        // Only claude and codex send hooks; a screen-read agent has no token either.
+        if agent::agent_of(self.info.agent.name.as_deref()).is_none() {
+            return Err(no_agent());
+        }
         let parsed = hooks::parse(payload).map_err(|e| (code::INVALID_PARAMS, e.to_string()))?;
         let agent = self.agent.as_mut().ok_or_else(no_agent)?;
         agent.seq += 1;
@@ -752,9 +778,52 @@ impl Actor {
         }
         data.drain(..skip);
         self.screen.feed(&data);
+        self.screen_changed();
         self.seq = seq + data.len() as u64;
         // No receivers is normal when nobody is attached.
         let _ = self.output.send(Arc::new(Chunk { seq, data }));
+    }
+
+    /// Output arrived: read the screen now, or once the throttle allows when it was read lately.
+    fn screen_changed(&mut self) {
+        if self.screen_agent.is_none() || self.screen_due.is_some() {
+            return;
+        }
+        match self.screen_read {
+            Some(at) if at.elapsed() < SCREEN_THROTTLE => {
+                self.screen_due = Some(at + SCREEN_THROTTLE);
+            }
+            _ => self.read_screen(),
+        }
+    }
+
+    /// Reads the screen with the agent's heuristic. The state machine ignores it while hooks
+    /// drive the status, so a hook status always wins. Codex dialogs only ever block; for the
+    /// others a quiet screen with text on it means the agent waits for the owner.
+    fn read_screen(&mut self) {
+        self.screen_due = None;
+        self.screen_read = Some(Instant::now());
+        let (Some(kind), Some(agent)) = (self.screen_agent, self.agent.as_mut()) else {
+            return;
+        };
+        let text = self.screen.text();
+        let lines: Vec<&str> = text.lines().collect();
+        let seen = match (heuristic::detect(kind, &lines), kind) {
+            (Some(blocked @ Detected::Blocked(_)), _) => Some(blocked),
+            (Some(_), ScreenAgent::Codex) => None,
+            (Some(other), _) => Some(other),
+            (None, ScreenAgent::Codex) => {
+                (agent.status.status == Status::Blocked).then_some(Detected::Idle)
+            }
+            (None, _) => lines
+                .iter()
+                .any(|l| !l.trim().is_empty())
+                .then_some(Detected::Idle),
+        };
+        if let Some(seen) = seen {
+            agent.status.apply(Input::Screen(seen), now_ms());
+            self.publish();
+        }
     }
 
     fn exited(&mut self, code: Option<i32>) {

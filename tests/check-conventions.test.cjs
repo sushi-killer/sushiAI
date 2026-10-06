@@ -258,6 +258,56 @@ test("the retired session backend's name fails the check in any shipped tree", (
     });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /\.agents\/note\.md:1 names the retired/);
+    // promo/, crates/, README.md and AGENTS.md are scanned too.
+    fs.rmSync(path.join(root, ".agents", "note.md"));
+    fs.mkdirSync(path.join(root, "crates", "x"), { recursive: true });
+    fs.mkdirSync(path.join(root, "promo"));
+    for (const file of [
+      "crates/x/lib.rs",
+      "promo/mock.cjs",
+      "README.md",
+      "AGENTS.md",
+    ]) {
+      fs.writeFileSync(path.join(root, file), `// ${name}\n`);
+      const hit = run({
+        HEAD_BRANCH: "chore/x",
+        PR_TITLE: "chore: x",
+        RETIRED_NAME_ROOT_OVERRIDE: root,
+      });
+      assert.equal(hit.status, 1, file);
+      assert.ok(hit.stderr.includes(`${file}:1 names the retired`), file);
+      fs.writeFileSync(path.join(root, file), "// fine\n");
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a script that sets SUSHIAI_HOME without HOME is rejected", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "home-rule-"));
+  try {
+    fs.mkdirSync(path.join(root, "scripts"));
+    const vars = {
+      HEAD_BRANCH: "chore/x",
+      PR_TITLE: "chore: x",
+      HOME_RULE_ROOT_OVERRIDE: root,
+    };
+    const file = path.join(root, "scripts", "launch.mjs");
+    fs.writeFileSync(file, 'const e = { SUSHIAI_HOME: "/tmp/x/sushiai" };\n');
+    const bad = run(vars);
+    assert.equal(bad.status, 1);
+    assert.match(
+      bad.stderr,
+      /scripts\/launch\.mjs: sets SUSHIAI_HOME without HOME/,
+    );
+    fs.writeFileSync(
+      file,
+      'const e = { SUSHIAI_HOME: "/tmp/x/sushiai", HOME: "/tmp/x" };\n',
+    );
+    assert.equal(run(vars).status, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

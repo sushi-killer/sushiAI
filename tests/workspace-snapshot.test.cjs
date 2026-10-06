@@ -165,7 +165,7 @@ function busySnapshot() {
         id: "w-local",
         name: "app",
         cwd: "/work/app",
-        connection: "/tmp/local.sock",
+        connection: "local",
         panels,
         layout,
       },
@@ -173,7 +173,7 @@ function busySnapshot() {
         id: "session:w1",
         name: "remote",
         cwd: "/work/remote",
-        connection: "/tmp/local.sock",
+        connection: "local",
         panels: [
           {
             id: "solo",
@@ -187,7 +187,6 @@ function busySnapshot() {
       },
     ],
     activeId: "w-local",
-    socket: "/tmp/local.sock",
     routines: [{ id: "r1", name: "Test", command: "npm test" }],
     fontScale: 1.15,
     mode: "Agent",
@@ -669,7 +668,7 @@ test("the electron helper serves read, write and flush and refuses other senders
 
 test("empty session workspaces survive restore while ended-only rows move to Recently closed", async () => {
   const { restore } = await library;
-  const host = (id, cwd, panels, connection = "/tmp/local.sock") => ({
+  const host = (id, cwd, panels, connection = "local") => ({
     id,
     name: cwd.split("/").pop(),
     cwd,
@@ -712,7 +711,7 @@ test("empty session workspaces survive restore while ended-only rows move to Rec
   );
   assert.deepEqual(
     restored.closedProjects.map((p) => [p.cwd, p.endpoint, p.backed]),
-    [["/repo/app-wt", "/tmp/local.sock", true]],
+    [["/repo/app-wt", "local", true]],
   );
   assert.deepEqual(
     JSON.parse(store.text).workspaces.map((w) => w.id),
@@ -733,7 +732,6 @@ test("a panel that ran without a session restores ended and unbound; a session p
   const { restore } = await library;
   const store = messageStore();
   store.text = JSON.stringify({
-    socket: "/tmp/local.sock",
     workspaces: [
       {
         id: "w1",
@@ -768,5 +766,5 @@ test("a panel that ran without a session restores ended and unbound; a session p
   assert.equal(bound.sessionId, "s-1");
   assert.equal(bound.started, false);
   assert.equal(chat.ended, undefined);
-  assert.equal(workspace.connection, "/tmp/local.sock");
+  assert.equal(workspace.connection, "local");
 });

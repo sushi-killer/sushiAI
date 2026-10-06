@@ -21,6 +21,17 @@ if (cargo.error || cargo.status !== 0)
     "[dev] orchd build skipped or failed; the Orchestrator panel will say so.",
   );
 
+// The sessions live in the `sushiai` daemon the app starts from target/debug
+// (or target/release, whichever is newer): build it so the app talks to
+// current code. Without cargo the app uses whatever binary is already there.
+const daemon = spawnSync("cargo", ["build", "-p", "sushiai"], {
+  stdio: "inherit",
+});
+if (daemon.error || daemon.status !== 0)
+  console.warn(
+    "[dev] sushiai daemon build skipped or failed; sessions need a built binary.",
+  );
+
 // Renderer (src/**) hot-reloads through Vite HMR.
 // Main/preload (electron/**) can't hot-swap inside a running Electron: main
 // watches itself and offers a restart on the desktop mascot. Clicking it makes

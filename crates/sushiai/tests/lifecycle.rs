@@ -82,6 +82,49 @@ fn hello_reports_the_host_and_the_catalog_capability() {
 }
 
 #[test]
+fn catalog_get_returns_the_synced_live_records() {
+    let mut sandbox = devbox();
+    sandbox.start_daemon();
+    let mut client = Client::connect(&sandbox.socket());
+    let hello = client.call("hello", json!({"protocol": 1, "client": "test"}));
+    assert!(hello["capabilities"].to_string().contains("catalogRead"));
+    let empty = client.call("catalog.get", json!({}));
+    assert_eq!(
+        empty,
+        json!({"host": "devbox", "projects": [], "groups": []})
+    );
+
+    sync_catalog(&mut client, "/work/p1");
+    client.call(
+        "groups.sync",
+        json!({"groups": [{"id": "g2", "projectId": "p2", "name": "g2", "order": 0,
+            "rev": 2, "updatedAt": 1_700_000_000_001u64, "deleted": true}]}),
+    );
+    let got = client.call("catalog.get", json!({}));
+    assert_eq!(got["host"], "devbox");
+    assert_eq!(
+        got["projects"],
+        json!([project("p1", "/work/p1"), project("p2", "/elsewhere")])
+    );
+    assert_eq!(got["groups"], json!([group("g1", "p1")]));
+}
+
+#[test]
+fn a_hook_connection_cannot_read_the_catalog() {
+    let mut sandbox = devbox();
+    sandbox.start_daemon();
+    let mut hook = Client::connect(&sandbox.socket());
+    hook.call(
+        "hello",
+        json!({"protocol": 1, "client": "hook", "role": "hook"}),
+    );
+    let err = hook
+        .try_call("catalog.get", json!({}))
+        .expect_err("refused");
+    assert_eq!(err.code, code::UNAUTHORIZED);
+}
+
+#[test]
 fn ping_answers_even_before_hello() {
     let mut sandbox = Sandbox::new();
     sandbox.start_daemon();

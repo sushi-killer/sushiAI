@@ -28,6 +28,7 @@ import type { Routine } from "../workspaceState.ts";
 import type { ExtensionSnapshot } from "../extensions/types.ts";
 import type { ConnectionProfile, Workspace } from "../types";
 import type { SkillCatalogItem, SkillManagementAction } from "../types";
+import type { SessionsByHost } from "../daemonSessions.ts";
 import type { WorkspaceController } from "../workspace/useWorkspaces.ts";
 import type { ProjectGit } from "./useProjectGit.ts";
 import { closedMemberIds, dashboardEntries } from "./projects.ts";
@@ -102,6 +103,8 @@ export function SectionPage({
     groups: InboxGroup[];
     moduleItems: ModuleEntry[];
     markSeen(panelId: string): void;
+    /** What each daemon host runs; Inbox shows the open asks in it. */
+    daemonSessions: SessionsByHost;
   };
 }) {
   const surface =
@@ -148,6 +151,7 @@ export function SectionPage({
         cwd={cwd}
         connection={connection}
         workspaces={workspaces}
+        daemonSessions={attention.daemonSessions}
       />
     );
   const projects = dashboardEntries(

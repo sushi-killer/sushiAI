@@ -12,8 +12,7 @@ use sushiai_protocol::{
     code, encode, method, AskRespond, AttachResult, Frame, Hello, HelloResult, HookEvent, HookOpen,
     HookOpenResult, HookResult, Message, Notification, ReadResult, Request, Response,
     SessionAttach, SessionClose, SessionCreate, SessionId, SessionInfo, SessionInput, SessionOpen,
-    SessionRead, SessionResize, SessionSnapshot, SessionStatus, SessionsResync, CAPABILITIES,
-    PROTOCOL_VERSION,
+    SessionRead, SessionResize, SessionSnapshot, SessionStatus, CAPABILITIES, PROTOCOL_VERSION,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -305,6 +304,7 @@ impl Conn {
                 }
                 Ok(json!(self.registry.sync_projects(&p)))
             }
+            method::CATALOG_GET => Ok(json!(self.registry.catalog_snapshot())),
             method::GROUPS_SYNC => Ok(json!(self.registry.sync_groups(&params(request)?))),
             method::SESSION_UPDATE => {
                 let p: SessionUpdate = params(request)?;
@@ -356,7 +356,6 @@ impl Conn {
             self.hook_only = hello.role.as_deref() == Some("hook");
             if !self.hook_only {
                 self.events = Some(tokio::spawn(forward_events(
-                    self.registry.clone(),
                     self.registry.events.subscribe(),
                     self.out.clone(),
                 )));
@@ -367,6 +366,7 @@ impl Conn {
             capabilities: CAPABILITIES.iter().map(|c| (*c).to_string()).collect(),
             daemon: env!("CARGO_PKG_VERSION").into(),
             host: self.registry.host.clone(),
+            build: own_build().map(str::to_string),
         }))
     }
 
@@ -494,11 +494,7 @@ fn attach_result(snap: Snap) -> AttachResult {
     }
 }
 
-async fn forward_events(
-    registry: Arc<Registry>,
-    mut events: broadcast::Receiver<Notification>,
-    out: Outbox,
-) {
+async fn forward_events(mut events: broadcast::Receiver<Notification>, out: Outbox) {
     loop {
         match events.recv().await {
             Ok(note) => {
@@ -506,10 +502,9 @@ async fn forward_events(
                     break;
                 }
             }
-            // Missed events are replaced by the full list.
+            // Missed events: the client lists the sessions again. The note carries no list.
             Err(broadcast::error::RecvError::Lagged(_)) => {
-                let sessions = registry.list();
-                let note = Notification::new(method::SESSION_RESYNC, SessionsResync { sessions });
+                let note = Notification::new(method::SESSION_RESYNC, json!({}));
                 if out.send(encode(&note.frame())).await.is_err() {
                     break;
                 }
@@ -680,6 +675,23 @@ async fn create_new(
     Ok(json!({ "id": id }))
 }
 
+/// sha256 (hex) of the running binary, measured once: what `hello.build` reports.
+fn own_build() -> Option<&'static str> {
+    static BUILD: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILD
+        .get_or_init(|| {
+            use sha2::{Digest, Sha256};
+            let bytes = std::fs::read(crate::binlink::real_exe().ok()?).ok()?;
+            Some(
+                Sha256::digest(bytes)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect(),
+            )
+        })
+        .as_deref()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,15 +699,13 @@ mod tests {
     use sushiai_protocol::Decoder;
 
     #[tokio::test]
-    async fn a_lagging_event_subscriber_gets_a_resync_with_the_full_list() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let registry = Arc::new(Registry::new(Home::new(dir.path().to_path_buf())));
+    async fn a_lagging_event_subscriber_gets_a_resync_without_a_list() {
         let (events, receiver) = broadcast::channel(2);
         for i in 0..5 {
             let _ = events.send(Notification::new("test.event", i));
         }
         let (out, mut queue) = mpsc::channel(16);
-        tokio::spawn(forward_events(registry, receiver, out));
+        tokio::spawn(forward_events(receiver, out));
         let bytes = tokio::time::timeout(Duration::from_secs(2), queue.recv())
             .await
             .expect("no resync within 2 s")
@@ -708,7 +718,7 @@ mod tests {
             panic!("expected a notification");
         };
         assert_eq!(note.method, method::SESSION_RESYNC);
-        assert!(note.params["sessions"].is_array());
+        assert_eq!(note.params, json!({}), "the client lists again; no payload");
     }
 
     #[tokio::test]

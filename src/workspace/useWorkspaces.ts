@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { contains, leaf, remove, resize, split, uid } from "../layout.ts";
 import { initialWorkspace } from "../workspaceState.ts";
+import { LOCAL_ENDPOINT } from "../daemonSessions.ts";
 import type { ClosedProject, Routine, Saved } from "../workspaceState.ts";
 import { applyChatEvent, startUserTurn } from "../chat-threads.ts";
 import { disposeTerminal } from "../TerminalPanel.tsx";
@@ -75,8 +76,6 @@ export function useWorkspaces({
   workspaces,
   setWorkspaces,
   saved,
-  socket,
-  useEndpoint,
   notify,
   showWorkspace,
   confirmClose,
@@ -84,8 +83,6 @@ export function useWorkspaces({
   workspaces: Workspace[];
   setWorkspaces: React.Dispatch<React.SetStateAction<Workspace[]>>;
   saved: Saved | null;
-  socket: string;
-  useEndpoint(endpoint: string): void;
   notify(text: string): void;
   showWorkspace(): void;
   confirmClose(target: { workspace: Workspace; panel: Panel }): void;
@@ -208,7 +205,7 @@ export function useWorkspaces({
       const owner = findPanelOwner(workspacesRef.current, panelId);
       const panel = owner?.panels.find((item) => item.id === panelId);
       if (!owner || !panel) return;
-      const request = renameRequest(owner, panel, title, socket);
+      const request = renameRequest(owner, panel, title, LOCAL_ENDPOINT);
       if (request) {
         window.bridge
           ?.sessionUpdate(request.host, request.patch)
@@ -218,7 +215,7 @@ export function useWorkspaces({
         updatePanel(panelId, { title });
       }
     },
-    [notify, socket, updatePanel],
+    [notify, updatePanel],
   );
   /** "Hide only": drop the pane from the layout but leave its process running.
    * The session and the transcript are untouched. */
@@ -280,7 +277,7 @@ export function useWorkspaces({
     name: string,
     cwd: string,
     starter: string,
-    endpoint: string = socket,
+    endpoint: string = activeRef.current.connection || LOCAL_ENDPOINT,
     operationId?: string,
     env?: Record<string, string>,
   ): Promise<boolean> {
@@ -325,15 +322,9 @@ export function useWorkspaces({
   /** The soft variant used by the Chat list: follow the project, but leave the
    * current view and zoom alone. */
   function selectWorkspace(id: string) {
-    const target = workspacesRef.current.find((w) => w.id === id);
-    // eslint-disable-next-line react-hooks/rules-of-hooks -- useEndpoint is a plain callback prop (App.tsx passes setSocket), not a hook; the name predates this lint rule
-    if (target?.connection) useEndpoint(target.connection);
     setActiveId(id);
   }
   function switchWorkspace(id: string) {
-    const target = workspaces.find((w) => w.id === id);
-    // eslint-disable-next-line react-hooks/rules-of-hooks -- same non-hook callback, see selectWorkspace above
-    if (target?.connection) useEndpoint(target.connection);
     setActiveId(id);
     showWorkspace();
     setZoomed(null);
@@ -371,7 +362,7 @@ export function useWorkspaces({
       if (prompt && !launchesInWorktree(kind))
         throw new Error("Starting with a prompt needs an agent or terminal.");
       if (launchesInWorktree(kind)) {
-        const endpoint = current.connection || socket;
+        const endpoint = current.connection || LOCAL_ENDPOINT;
         const operation = operationId || uid();
         return await launchSession(
           {
@@ -460,7 +451,7 @@ export function useWorkspaces({
       owner,
       ended,
       operationId || uid(),
-      socket,
+      LOCAL_ENDPOINT,
     );
     const run = Promise.resolve()
       .then(() =>
@@ -486,7 +477,8 @@ export function useWorkspaces({
       for (const { workspace, panel } of items) {
         const outcome = await closeBeforeWorktreeRemoval(
           async () => {
-            if (panel.sessionId) await closeSession(workspace, panel, socket);
+            if (panel.sessionId)
+              await closeSession(workspace, panel, LOCAL_ENDPOINT);
             if (panel.busy) await window.bridge?.cancelChat(panel.id);
             disposeTerminal(panel.id);
           },
@@ -516,7 +508,7 @@ export function useWorkspaces({
       if (zoomedRef.current && closed.has(zoomedRef.current)) setZoomed(null);
       if (errors.length) notify(errors.join("; "));
     },
-    [notify, setWorkspaces, socket],
+    [notify, setWorkspaces],
   );
   const closePanel = useCallback(
     (panelId: string) => {
@@ -665,7 +657,7 @@ export function useWorkspaces({
     await launchSession(
       {
         operationId: uid(),
-        endpoint: active.connection || socket,
+        endpoint: active.connection || LOCAL_ENDPOINT,
         cwd: active.cwd,
         label: routine.name,
         kind: "terminal",
@@ -686,7 +678,8 @@ export function useWorkspaces({
     closing.current.add(workspace.id);
     try {
       for (const panel of workspace.panels)
-        if (panel.sessionId) await closeSession(workspace, panel, socket);
+        if (panel.sessionId)
+          await closeSession(workspace, panel, LOCAL_ENDPOINT);
       for (const panel of workspace.panels) {
         disposeTerminal(panel.id);
         if (panel.busy) await window.bridge?.cancelChat(panel.id);
@@ -756,7 +749,7 @@ export function useWorkspaces({
       project.name,
       project.cwd,
       "shell",
-      project.endpoint || socket,
+      project.endpoint || LOCAL_ENDPOINT,
     );
     if (ok) forgetProject(project.id);
   }

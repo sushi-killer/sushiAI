@@ -1,13 +1,12 @@
 "use strict";
 
-// IPC contract for the sushiai daemon. Lifecycle handlers dispatch to the
-// daemon manager; launch, terminal and host-install stay stubs until their
-// lanes fill them in. Argument validation runs here before any dispatch.
+// IPC contract for the sushiai daemon. Each handler validates its arguments,
+// then dispatches: lifecycle channels to the daemon manager, terminal channels
+// to the terminal handlers, launch and host-install to the injected functions.
 
 const { validatePanelId } = require("./panel-id.cjs");
 const { createTerminalHandlers } = require("../daemon/terminals.cjs");
 
-const NOT_IMPLEMENTED = "daemon IPC not implemented yet";
 const MAX_TEXT = 4096;
 
 function text(value, name, { optional = false, max = MAX_TEXT } = {}) {
@@ -69,10 +68,6 @@ const CHANNELS = {
     host(h);
     text(id, "session id");
     if (typeof graceful !== "boolean") throw new Error("Invalid graceful.");
-  },
-  "daemon-session-remove": (h, id) => {
-    host(h);
-    text(id, "session id");
   },
   "daemon-session-update": (h, patch) => {
     host(h);
@@ -145,7 +140,6 @@ const LIFECYCLE = {
     "session.close",
     { id, graceful },
   ],
-  "daemon-session-remove": (_h, id) => ["session.remove", { id }],
   "daemon-session-update": (_h, patch) => {
     const { id, project, group, title } = patch;
     return ["session.update", { id, project, group, title }];
@@ -179,13 +173,14 @@ const TERMINAL_CHANNELS = {
 
 // `launch(request)` is the session launcher (electron/session-launch.cjs,
 // createDaemonLaunch(...).launch); `installHost(host)` installs sushiai on a
-// remote host (daemon/install.cjs); `exec(endpoint, command, {input, timeout})`
-// runs a command on a host (connections.exec). main.cjs passes them in.
+// remote host or restarts the local daemon (host-setup.cjs createHostInstaller);
+// `exec(endpoint, command, {input, timeout})` runs a command on a host
+// (connections.exec). main.cjs passes them in.
 function registerDaemonIpc({
   handle,
   launch,
-  send = () => {},
-  getManager = () => null,
+  send,
+  getManager,
   onEvent,
   attachmentsDir,
   exec,
@@ -203,15 +198,12 @@ function registerDaemonIpc({
       validate(...args);
       const manager = getManager();
       if (channel === "daemon-states") return manager ? manager.states() : [];
-      if (channel === "daemon-session-launch" && launch) return launch(args[0]);
-      if (channel === "host-install" && installHost)
-        return installHost(args[0]);
-      const build = LIFECYCLE[channel];
-      const terminal = TERMINAL_CHANNELS[channel];
-      if (!build && !terminal) throw new Error(NOT_IMPLEMENTED);
+      if (channel === "daemon-session-launch") return launch(args[0]);
+      if (channel === "host-install") return installHost(args[0]);
       if (!manager) throw new Error("daemon manager is not running");
+      const terminal = TERMINAL_CHANNELS[channel];
       if (terminal) return terminal(terminals, ...args);
-      const [method, params] = build(...args);
+      const [method, params] = LIFECYCLE[channel](...args);
       const result = await manager.request(args[0], method, params);
       return RETURNS_RESULT.has(channel) ? result : undefined;
     });
@@ -227,9 +219,4 @@ function forwardDaemonEvents(manager, broadcast) {
   return () => offs.forEach((off) => off());
 }
 
-module.exports = {
-  registerDaemonIpc,
-  forwardDaemonEvents,
-  CHANNELS,
-  NOT_IMPLEMENTED,
-};
+module.exports = { registerDaemonIpc, forwardDaemonEvents, CHANNELS };

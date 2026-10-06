@@ -34,6 +34,8 @@ const {
   setupHost,
   setupSummary,
   requireHostManifest,
+  createHostInstaller,
+  serializePerHost,
 } = require("./host-setup.cjs");
 const { registerChatIpc } = require("./ipc/chat.cjs");
 const { registerAppIpc } = require("./ipc/app.cjs");
@@ -44,9 +46,7 @@ const { registerDaemonIpc, forwardDaemonEvents } = require("./ipc/daemon.cjs");
 const { createDaemonManager } = require("./daemon/manager.cjs");
 const { createLocalConnector } = require("./daemon/local.cjs");
 const { remoteConnectors } = require("./daemon/connectors.cjs");
-const { createHostInstaller } = require("./daemon/install.cjs");
-const { watchHostTools, serializePerHost } = require("./daemon/host-tools.cjs");
-const { connectThroughDaemon } = require("./daemon/connect-through.cjs");
+const { watchHostTools } = require("./daemon/host-tools.cjs");
 const { registerAttentionIpc } = require("./attention.cjs");
 const {
   registerWorkspaceSnapshot,
@@ -189,21 +189,28 @@ function handle(channel, callback) {
   });
 }
 // Connect / Retry / Disconnect on a host the daemon manager owns go to the
-// manager. Connecting a host that is ready or connecting does nothing.
+// manager ("local" is This Mac). Connecting a host that is ready or connecting
+// does nothing.
 const daemonHost = (endpoint) => {
+  if (endpoint === "local") return daemonManager ? "local" : null;
   if (typeof endpoint !== "string" || !endpoint.startsWith("ssh:")) return null;
   const host = endpoint.slice(4);
   return daemonManager?.states().some((state) => state.host === host)
     ? host
     : null;
 };
-const connectHost = connectThroughDaemon({
-  daemonHost,
-  getManager: () => daemonManager,
-  getConnections: () => connections,
-})(() => {
-  throw new Error("The sushiai daemon is not running.");
-});
+// The auto-connect flag is set before the (slow) retry is awaited: a
+// Disconnect clicked meanwhile clears it afterwards, and the late connect
+// result must not turn it back on.
+const connectHost = async (endpoint) => {
+  const host = daemonHost(endpoint);
+  if (!host) throw new Error("The sushiai daemon is not running.");
+  if (host !== "local") await connections.setAutoConnect(endpoint, true);
+  let state = daemonManager.states().find((item) => item.host === host);
+  if (state.state !== "ready" && state.state !== "connecting")
+    state = await daemonManager.retry(host);
+  return { connected: state.state === "ready" };
+};
 registerProjectIpc({
   handle,
   connectHost,
@@ -218,6 +225,7 @@ registerProjectIpc({
   projects,
 });
 let daemonManager = null;
+let localConnector = null;
 let catalogSync = null;
 let hostTools = null;
 // Host binaries and their manifest: app resources when packaged, else target/host.
@@ -252,6 +260,7 @@ daemonIpc = registerDaemonIpc({
       connections,
       manifest: hostManifest,
       setup: setupDaemonHost,
+      restartLocal: () => localConnector.restart(),
       markSetup: (name) => hostTools?.mark(name),
     }).install(host);
   },
@@ -433,6 +442,7 @@ app.whenReady().then(async () => {
       resourcesPath: process.resourcesPath,
       log: (message) => console.log(`daemon: ${message}`),
     });
+    localConnector = local;
     // One daemon host per connection profile; saving or deleting a profile
     // adds, replaces or removes its host while the app runs.
     const connectorMap = (profiles) => ({
@@ -472,6 +482,13 @@ app.whenReady().then(async () => {
           writeStore(app.getPath("userData"), "host-tools", value),
       },
       setup: setupDaemonHost,
+      manifest: () => {
+        try {
+          return hostManifest();
+        } catch {
+          return null;
+        }
+      },
       log: (message) => console.log(`daemon: ${message}`),
     });
     catalogSync = createCatalogSync({

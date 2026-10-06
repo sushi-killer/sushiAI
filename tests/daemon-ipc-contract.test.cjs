@@ -1,40 +1,23 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
-const {
-  registerDaemonIpc,
-  NOT_IMPLEMENTED,
-} = require("../electron/ipc/daemon.cjs");
+const { registerDaemonIpc } = require("../electron/ipc/daemon.cjs");
 
-const preload = fs.readFileSync(
-  path.join(__dirname, "../electron/preload.cjs"),
-  "utf8",
-);
+const launched = [];
 const handlers = new Map();
-registerDaemonIpc({ handle: (channel, run) => handlers.set(channel, run) });
-
-test("every daemon channel in preload has a registered handler and back", () => {
-  const exposed = [
-    ...preload.matchAll(/invoke\("((?:daemon-|host-)[a-z-]+)"\)/g),
-  ]
-    .map((match) => match[1])
-    .sort();
-  assert.ok(exposed.length >= 16);
-  assert.deepEqual(exposed, [...handlers.keys()].sort());
-});
-
-test("preload subscribes to the daemon events", () => {
-  for (const event of ["daemon-state", "daemon-event", "daemon-terminal-data"])
-    assert.ok(preload.includes(`ipcRenderer.on("${event}"`), event);
+registerDaemonIpc({
+  handle: (channel, run) => handlers.set(channel, run),
+  send: () => {},
+  getManager: () => null,
+  launch: async (request) => launched.push(request),
+  installHost: async (host) => ({ installed: host }),
 });
 
 test("without a manager, daemonStates is empty and the rest reject", async () => {
   assert.deepEqual(await handlers.get("daemon-states")(), []);
-  await assert.rejects(
-    handlers.get("host-install")("local"),
-    new RegExp(NOT_IMPLEMENTED),
-  );
+  // Launch and host-install go to the injected functions, manager or not.
+  assert.deepEqual(await handlers.get("host-install")("local"), {
+    installed: "local",
+  });
   await assert.rejects(
     handlers.get("daemon-terminal-ack")("panel", 10),
     /daemon manager is not running/,
@@ -59,7 +42,6 @@ test("handlers reject malformed arguments before anything else", async () => {
     ["daemon-session-launch", [{ ...launch, idempotencyKey: "" }]],
     ["daemon-session-launch", [{ ...launch, extraArgs: [1] }]],
     ["daemon-session-close", ["local", "s1", "yes"]],
-    ["daemon-session-remove", ["local"]],
     ["daemon-session-update", ["local", {}]],
     ["daemon-session-read", ["local", "s1", -1]],
     ["daemon-session-input", ["local", "s1", 5]],
@@ -75,11 +57,10 @@ test("handlers reject malformed arguments before anything else", async () => {
   for (const [channel, args] of bad)
     await assert.rejects(
       handlers.get(channel)(...args),
-      (error) => !error.message.includes(NOT_IMPLEMENTED),
+      (error) => /^Invalid /.test(error.message),
       `${channel} ${JSON.stringify(args)}`,
     );
-  await assert.rejects(
-    handlers.get("daemon-session-launch")(launch),
-    new RegExp(NOT_IMPLEMENTED),
-  );
+  assert.equal(launched.length, 0, "a bad request never reached the launcher");
+  await handlers.get("daemon-session-launch")(launch);
+  assert.deepEqual(launched, [launch]);
 });

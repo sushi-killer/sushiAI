@@ -2,6 +2,7 @@ import type { Layout, Panel, Workspace } from "./types";
 import { contains, isValidLayout, leaf, split, uid } from "./layout.ts";
 import { validRoute, type RouteRef } from "./extensions/routes.ts";
 import type { ProjectGit } from "./app/useProjectGit.ts";
+import { LOCAL_ENDPOINT } from "./daemonSessions.ts";
 
 /** Where the snapshot lives when there is no desktop bridge (dev:web). With
  * the bridge it is <userData>/sushiai.db, written by the main process. */
@@ -20,8 +21,16 @@ export function closedProjectKey(
   endpoint: string | undefined,
   cwd: string,
 ): string {
-  return `closed:${endpoint || "local"}:${cwd}`;
+  return `closed:${endpoint || LOCAL_ENDPOINT}:${cwd}`;
 }
+
+/** Snapshots saved before This Mac was the endpoint "local" named it by the
+ * daemon's socket path (or by nothing at all). Every endpoint that is not an
+ * ssh host is This Mac; an unset one stays unset. */
+const localEndpoint = (endpoint: string | undefined) =>
+  endpoint === undefined || endpoint.startsWith("ssh:")
+    ? endpoint
+    : LOCAL_ENDPOINT;
 
 export type Routine = { id: string; name: string; command: string };
 
@@ -62,7 +71,6 @@ export type AgentFocus = {
 export type Saved = {
   workspaces: Workspace[];
   activeId: string;
-  socket: string;
   routines: Routine[];
   fontScale: number;
   mode?: "Agent" | "Code" | "Chat";
@@ -362,16 +370,31 @@ function restorePanel(panel: Panel): Panel {
   } as Panel;
 }
 
+/** `socket` is the old snapshot's default endpoint: a workspace with session
+ * panels and no connection of its own was bound to it. */
 const restoreWorkspace =
-  (socket: string) =>
+  (fallback: string) =>
   (w: Workspace): Workspace => {
     const backed = w.panels.some((p) => p.sessionId || p.paneCwd);
     return {
       ...w,
-      connection: w.connection || (backed ? socket : undefined),
+      connection:
+        localEndpoint(w.connection) ?? (backed ? fallback : undefined),
       panels: w.panels.map((p) => restorePanel(convertLegacyPanel(p))),
     };
   };
+
+/** A remembered project whose endpoint was This Mac's old socket path moves to
+ * "local", and its id (`closed:<endpoint>:<cwd>`) with it. */
+function restoreClosedProject(project: ClosedProject): ClosedProject {
+  const endpoint = localEndpoint(project.endpoint);
+  if (endpoint === project.endpoint) return project;
+  return {
+    ...project,
+    endpoint,
+    id: closedProjectKey(endpoint, project.cwd),
+  };
+}
 
 export function restore(store: SnapshotStore = snapshotStore()): Saved | null {
   try {
@@ -391,14 +414,25 @@ export function restore(store: SnapshotStore = snapshotStore()): Saved | null {
       route: validRoute(value.route) ? value.route : undefined,
       workspaceGrouping:
         value.workspaceGrouping === "flat" ? "flat" : "grouped",
-      closedProjects: normalizeClosedProjects(value.closedProjects),
+      closedProjects: normalizeClosedProjects(value.closedProjects).map(
+        restoreClosedProject,
+      ),
       views: normalizeViews(value.views),
       mergedLayouts: normalizeMergedLayouts(value.mergedLayouts),
       agentTabs: normalizeAgentTabs(value.agentTabs),
       agentFocus: normalizeAgentFocus(value.agentFocus),
       chatFocus: typeof value.chatFocus === "string" ? value.chatFocus : "",
-      workspaces: value.workspaces.map(restoreWorkspace(value.socket)),
+      workspaces: value.workspaces.map(
+        restoreWorkspace(
+          typeof value.socket === "string" && value.socket.startsWith("ssh:")
+            ? value.socket
+            : LOCAL_ENDPOINT,
+        ),
+      ),
     };
+    // The old snapshots' `socket` is gone: This Mac is "local" (see localEndpoint).
+    // The next save writes the new shape; until then the remap repeats harmlessly.
+    delete (normalized as { socket?: string }).socket;
     const migrated = sweepLeftovers(normalized);
     if (migrated !== normalized) {
       try {

@@ -283,3 +283,18 @@ fn repeated_same_state_keeps_since() {
     assert!(!s.apply(Input::Screen(Detected::Working), 20));
     assert_eq!(s.since, 10);
 }
+
+#[test]
+fn session_start_ends_a_dialog_read_from_the_screen_before_any_hook() {
+    let mut s = fresh();
+    s.apply(Input::Screen(Detected::Blocked(BlockedKind::Input)), 1);
+    s.apply(hook(1, "SessionStart"), 2);
+    assert_eq!((s.status, s.source), (Status::Idle, StatusSource::Hook));
+    // A dialog the hooks reported stays: only a screen-read one ends at SessionStart.
+    let mut p = fresh();
+    p.apply(hook(1, "UserPromptSubmit"), 1);
+    p.apply(Input::HookSilence, 2);
+    p.apply(Input::Screen(Detected::Blocked(BlockedKind::Permission)), 3);
+    p.apply(hook(2, "SessionStart"), 4);
+    assert_eq!(p.status, Status::Blocked);
+}

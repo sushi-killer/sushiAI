@@ -10,6 +10,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { StringDecoder } = require("node:string_decoder");
+const { quote } = require("../connections.cjs");
 const {
   OUTPUT_CREDIT_BYTES,
   OUTPUT_CHUNK_BYTES,
@@ -21,7 +22,6 @@ const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
 // A shell reads the path as one word however the file was named.
 const shellPath = (value) => `'${value.replace(/'/g, "'\\''")}' `;
-const quote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
 
 // Stores stdin as ~/.sushiai/attachments/<name> on the host (file 0600, every
 // directory it creates 0700) and prints the absolute path.

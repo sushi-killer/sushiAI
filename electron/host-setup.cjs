@@ -1,7 +1,8 @@
 const fs = require("node:fs");
 const { execFile } = require("node:child_process");
 const path = require("node:path");
-const { installSushiai } = require("./host-install.cjs");
+const { installSushiai, REMOTE_PATH } = require("./host-install.cjs");
+const { quote } = require("./connections.cjs");
 const { syncBuiltinSkillsOnHost } = require("./extensions/builtin-skills.cjs");
 
 const HOST_PATH = `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
@@ -180,8 +181,135 @@ async function runSetup(
   return states;
 }
 
+// One setup per host at a time: the first-ready tool setup and a manual
+// install share the host's in-flight promise, so a second call starts only
+// when the first has settled (it keeps its own options).
+function serializePerHost(setup) {
+  const inFlight = new Map();
+  return (endpoint, options) => {
+    const previous = inFlight.get(endpoint) || Promise.resolve();
+    const run = previous.catch(() => {}).then(() => setup(endpoint, options));
+    const tail = run.catch(() => {});
+    inFlight.set(endpoint, tail);
+    void tail.then(() => {
+      if (inFlight.get(endpoint) === tail) inFlight.delete(endpoint);
+    });
+    return run;
+  };
+}
+
+// Stops the daemon of an older binary that cannot take `daemon.shutdown`. The
+// pid in daemon.lock is trusted only when the lock is held: taking the flock
+// fails then. After a crash the file keeps a stale pid, which must never be
+// signalled.
+const STOP_DAEMON_PY = `
+import fcntl, os, signal, sys
+path = os.path.join(os.path.expanduser("~"), ".sushiai", "daemon.lock")
+try:
+    handle = open(path, "r+")
+except OSError:
+    print("nolock")
+    sys.exit(0)
+try:
+    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    print("free")
+    sys.exit(0)
+except OSError:
+    pass
+try:
+    pid = int(handle.read().strip())
+except ValueError:
+    print("nopid")
+    sys.exit(0)
+if pid > 1:
+    os.kill(pid, signal.SIGTERM)
+    print("stopped")
+`;
+const STOP_DAEMON_COMMAND = `sh -c ${quote(
+  `${REMOTE_PATH}; python3 -c ${quote(STOP_DAEMON_PY)}`,
+)}`;
+
+const READY_ATTEMPTS = 6;
+const SETTLE_MS = 400;
+// Another attempt cannot help: the owner has to act.
+const needsOwner = (state) =>
+  state.state === "need_auth" || state.reason === "host_key_changed";
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The `host-install` handler. A remote host: setupHost with the host manifest
+ * (tools, skills, then the bundled sushiai), the old daemon stops
+ * (`daemon.shutdown` when connected; sessions live in their holders and
+ * survive), then manager.retry(host) until ready or a state that needs the
+ * owner. "local": the "Restart daemon" action, which stops whatever daemon
+ * answers on this Mac and starts this app's build. */
+function createHostInstaller({
+  manager,
+  connections,
+  manifest,
+  setup,
+  restartLocal = async () => {},
+  markSetup = () => {},
+  settleMs = SETTLE_MS,
+  attempts = READY_ATTEMPTS,
+}) {
+  async function untilReady(host, before) {
+    let state = before;
+    for (let i = 0; i < attempts; i++) {
+      state = await manager.retry(host);
+      if (state.state === "ready") return state;
+      if (needsOwner(state)) break;
+      await sleep(settleMs);
+    }
+    return state;
+  }
+  async function installOn(host) {
+    if (host === "local") {
+      await restartLocal();
+      const state = await untilReady(host);
+      if (state?.state !== "ready")
+        throw new Error(
+          `The daemon did not restart: ${state?.message || state?.state || "unknown"}`,
+        );
+      return { status: "restarted", version: state.version || "" };
+    }
+    const endpoint = `ssh:${host}`;
+    // Throws "unknown host" before anything runs.
+    if (!connections.hasShell(endpoint))
+      throw new Error(
+        "This host connects through a command. Install sushiai there yourself.",
+      );
+    const { manifest: entries, binDir } = manifest();
+    const states = await setup(endpoint, {
+      sushiai: { manifest: entries, binDir },
+    });
+    if (states.sushiai === "failed")
+      throw new Error(states.sushiaiError || "Installing sushiai failed.");
+    const result = states.sushiaiResult;
+    if (!result) throw new Error("The installer did not report sushiai.");
+    markSetup(host);
+    const before = manager.states().find((state) => state.host === host);
+    if (before?.state === "ready") {
+      await manager.request(host, "daemon.shutdown", {}).catch(() => {});
+    } else {
+      await connections
+        .exec(endpoint, STOP_DAEMON_COMMAND, { timeout: 30000 })
+        .catch(() => {});
+    }
+    await sleep(settleMs);
+    const state = await untilReady(host, before);
+    if (state?.state === "ready") return result;
+    throw new Error(
+      `sushiai was installed, but the daemon on the host is not ready: ${state?.message || state?.state || "unknown"}`,
+    );
+  }
+  return { install: installOn };
+}
+
 module.exports = {
   SETUP_SCRIPT,
+  createHostInstaller,
+  serializePerHost,
+  STOP_DAEMON_COMMAND,
   parseSetup,
   setupSummary,
   setupHost,

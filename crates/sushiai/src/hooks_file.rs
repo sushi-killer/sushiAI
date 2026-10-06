@@ -11,8 +11,16 @@ use sushiai_daemon::{ensure_bin_link, Link, ASK_WAIT_SECS};
 
 /// `$CODEX_HOME` resolved (Codex canonicalizes it and keys hook trust by the result), else
 /// `~/.codex` as is (Codex does not resolve its default home). `create` makes the directory.
-fn codex_home(home: &Path, create: bool) -> Result<PathBuf> {
+fn codex_home(home: &Path, base: &Path, create: bool) -> Result<PathBuf> {
     let Some(dir) = std::env::var_os("CODEX_HOME").filter(|d| !d.is_empty()) else {
+        // A test or a second instance (SUSHIAI_HOME elsewhere) must never write the owner's
+        // real Codex files unless it names a Codex home itself.
+        if base != home.join(".sushiai") {
+            bail!(
+                "SUSHIAI_HOME is {} (not ~/.sushiai): set CODEX_HOME too, or ~/.codex would change",
+                base.display()
+            );
+        }
         let dir = home.join(".codex");
         if create {
             std::fs::create_dir_all(&dir)
@@ -46,7 +54,8 @@ fn trust_line(verb: &str, file: &Path, outcome: &TrustOutcome) -> String {
 
 pub fn run(action: Option<&str>) -> Result<()> {
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
-    let codex = codex_home(&home, action == Some("install"))?;
+    let base = sushiai_daemon::Home::from_env().dir().to_path_buf();
+    let codex = codex_home(&home, &base, action == Some("install"))?;
     let hooks = codex.join("hooks.json");
     let config = codex.join("config.toml");
     let ts = SystemTime::now()
@@ -54,7 +63,6 @@ pub fn run(action: Option<&str>) -> Result<()> {
         .map_or(0, |d| d.as_secs());
     match action {
         Some("install") => {
-            let base = home.join(".sushiai");
             let link = ensure_bin_link(&base)?;
             if link == Link::Kept {
                 bail!(

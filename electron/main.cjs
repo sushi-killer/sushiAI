@@ -72,6 +72,7 @@ const { syncLocalBuiltinSkills } = require("./extensions/builtin-skills.cjs");
 const {
   ORCHESTRATOR_MANIFEST,
   registerOrchestratorExtension,
+  createModuleSwitch,
   orchestratorNotice,
 } = require("./orchestrator.cjs");
 const {
@@ -378,6 +379,17 @@ orchestrator = registerOrchestratorExtension({
   getConnections: () => connections,
   getManager: () => daemonManager,
   installHost: installDaemonHost,
+  // Enabling the Orchestrator registers its module on each host. A test run
+  // must never write the owner's Claude or Codex files.
+  moduleSwitch: testMode.test
+    ? null
+    : createModuleSwitch({
+        getManager: () => daemonManager,
+        runLocal: (args) => localConnector.runCli(args),
+        restartLocal: () => localConnector.restart(),
+        exec: (...args) => connections.exec(...args),
+      }),
+  log: (message) => console.log(message),
   userDataDir: app.getPath("userData"),
   hostsChanged: () => send("orchestrator-hosts-changed"),
 });

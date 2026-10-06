@@ -8,8 +8,12 @@
 // stops and installs nothing itself: the daemon manager connects hosts and the
 // host installer provisions them.
 const { appDb, transaction } = require("./app-db.cjs");
-const { posixCommand } = require("./host-install.cjs");
-const { PREFLIGHT_SCRIPT, parsePreflight } = require("./host-setup.cjs");
+const { posixCommand, REMOTE_PATH, REMOTE_BIN } = require("./host-install.cjs");
+const {
+  PREFLIGHT_SCRIPT,
+  parsePreflight,
+  reconnectUntilReady,
+} = require("./host-setup.cjs");
 
 const LOCAL_HOST = "local";
 const OFF_MESSAGE = "The orchestrator is off.";
@@ -283,6 +287,104 @@ function missingCapability(name) {
   return error;
 }
 
+const hasOrch = (state) => !!state?.capabilities?.includes(ORCH_CAPABILITY);
+
+/** The manager's state of `host` once it is not "connecting" (immediately when
+ * it already is not). Resolves undefined for a host the manager does not know. */
+function settledState(manager, host, timeoutMs, timeoutMessage) {
+  const current = () => manager.states().find((state) => state.host === host);
+  return new Promise((resolve, reject) => {
+    let off = () => {};
+    const done = (state) => {
+      clearTimeout(timer);
+      off();
+      resolve(state);
+    };
+    const timer = setTimeout(() => {
+      off();
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+    timer.unref?.();
+    off = manager.on("state", (state) => {
+      if (state.host === host && state.state !== "connecting") done(state);
+    });
+    // The state may have settled between the check and the subscription.
+    const now = current();
+    if (!now || now.state !== "connecting") done(now);
+  });
+}
+
+/** The opt-in of the `orch` module on a host (owner O1). Enabling runs
+ * `sushiai orch register` there (local: the bundled binary; remote: over the
+ * existing ssh exec path), disabling runs `sushiai orch unregister`; then the
+ * host's daemon restarts (`daemon.shutdown`, then reconnect) when it does not
+ * serve the module yet or still does. Sessions survive: they live in their
+ * holders. `host` is "local" or "ssh:<profile id>". */
+function createModuleSwitch({
+  getManager,
+  runLocal,
+  restartLocal,
+  exec,
+  readyTimeoutMs = READY_TIMEOUT_MS,
+  settleMs,
+  attempts,
+}) {
+  const enabling = new Map();
+
+  async function apply(host, on) {
+    const manager = getManager?.();
+    if (!manager) throw new Error("The sushiai daemon is not running.");
+    const name = managerHostOf(host);
+    const verb = on ? "register" : "unregister";
+    if (host === LOCAL_HOST) await runLocal(["orch", verb]);
+    else
+      await exec(
+        host,
+        posixCommand(`${REMOTE_PATH}\n"${REMOTE_BIN}/sushiai" orch ${verb}`),
+        { timeout: 60000 },
+      );
+    const state = await settledState(
+      manager,
+      name,
+      readyTimeoutMs,
+      `The sushiai daemon on ${name} did not become ready.`,
+    );
+    if (state?.state !== "ready" || hasOrch(state) === on) return;
+    if (host === LOCAL_HOST) await restartLocal();
+    else await manager.request(name, "daemon.shutdown", {}).catch(() => {});
+    // The daemon takes a moment to go; a retry that meets it still answers.
+    await new Promise((resolve) => setTimeout(resolve, settleMs ?? 400));
+    const after = await reconnectUntilReady(manager, name, {
+      attempts,
+      settleMs,
+    });
+    if (after?.state !== "ready" || hasOrch(after) !== on)
+      throw new Error(
+        `The sushiai daemon on ${name} did not restart ${on ? "with" : "without"} the orchestrator.`,
+      );
+  }
+
+  return {
+    /** Once per host until it is disabled; concurrent callers share the run. */
+    enable(host) {
+      let run = enabling.get(host);
+      if (!run) {
+        run = apply(host, true);
+        enabling.set(host, run);
+        run.catch(() => {
+          if (enabling.get(host) === run) enabling.delete(host);
+        });
+      }
+      return run;
+    },
+    async disable(host) {
+      await enabling.get(host)?.catch(() => {});
+      enabling.delete(host);
+      await apply(host, false);
+    },
+  };
+}
+
 /** One host's orchestrator: requests as `orch.*` through the daemon manager,
  * the events of that host, its notices and its secrets. `host` is "local" or
  * "ssh:<profile id>"; the manager knows the host by `managerHostOf(host)`. */
@@ -297,9 +399,11 @@ class OrchestratorService {
     getClaudeMcp,
     getModelProviders,
     getProjects,
+    moduleSwitch,
     readyTimeoutMs = READY_TIMEOUT_MS,
   }) {
     this.host = host;
+    this.moduleSwitch = moduleSwitch;
     this.remote = host !== LOCAL_HOST;
     this.managerHost = managerHostOf(host);
     this.getManager = getManager;
@@ -374,35 +478,28 @@ class OrchestratorService {
       state = await manager.retry(this.managerHost);
     }
     if (state.state === "connecting") state = await this.#whenSettled(manager);
-    if (state.state !== "ready") throw notReady(state, this.name);
+    if (state?.state !== "ready") throw notReady(state, this.name);
+    // A ready daemon without the module: the owner turned the Orchestrator on
+    // after this host's daemon started, so the host is enabled now.
+    if (!hasOrch(state) && this.moduleSwitch) {
+      try {
+        await this.moduleSwitch.enable(this.host);
+      } catch (error) {
+        throw new Error(
+          `Could not enable the orchestrator on ${this.name}: ${error.message}`,
+        );
+      }
+    }
     return this.#usable();
   }
 
   #whenSettled(manager) {
-    return new Promise((resolve, reject) => {
-      let off = () => {};
-      const timer = setTimeout(() => {
-        off();
-        reject(
-          new Error(`The sushiai daemon on ${this.name} did not become ready.`),
-        );
-      }, this.readyTimeoutMs);
-      timer.unref?.();
-      off = manager.on("state", (state) => {
-        if (state.host !== this.managerHost || state.state === "connecting")
-          return;
-        clearTimeout(timer);
-        off();
-        resolve(state);
-      });
-      // The state may have settled between the check and the subscription.
-      const now = this.#state();
-      if (now && now.state !== "connecting") {
-        clearTimeout(timer);
-        off();
-        resolve(now);
-      }
-    });
+    return settledState(
+      manager,
+      this.managerHost,
+      this.readyTimeoutMs,
+      `The sushiai daemon on ${this.name} did not become ready.`,
+    );
   }
 
   async #request(method, params, timeoutMs = 20000) {
@@ -683,10 +780,14 @@ class OrchestratorHosts {
     createService,
     getManager,
     installHost,
+    moduleSwitch,
+    log = () => {},
     onChange,
     enabled = true,
   }) {
     this.on = enabled;
+    this.moduleSwitch = moduleSwitch;
+    this.log = log;
     this.connected = false;
     this.pending = Promise.resolve();
     this.local = local;
@@ -724,18 +825,54 @@ class OrchestratorHosts {
       if (value === this.on && value === this.connected) return;
       this.on = value;
       if (!value) {
+        const reached = this.#hostsToSwitch();
         this.close();
         this.services.clear();
         this.connected = false;
+        await this.#switchModule(reached, false);
         return;
       }
       this.connected = true;
       this.#listen();
       await this.init();
+      // Remote hosts are enabled on their first request; the Mac is now.
+      await this.#switchModule([LOCAL_HOST], true);
       await this.refreshAllSecrets();
     });
     this.pending = next.catch(() => {});
     return next;
+  }
+
+  /** The local daemon plus every remote host that is connected now: a host
+   * that is down is not reached over ssh just to be switched off. */
+  #hostsToSwitch() {
+    const states = this.getManager?.()?.states() ?? [];
+    return [LOCAL_HOST, ...this.services.keys()].filter(
+      (host) =>
+        host === LOCAL_HOST ||
+        states.some(
+          (state) =>
+            state.host === managerHostOf(host) && state.state === "ready",
+        ),
+    );
+  }
+
+  /** Registers or unregisters the module on `hosts`, never throwing: a host
+   * that fails keeps the owner's toggle; its next request reports why. */
+  async #switchModule(hosts, on) {
+    if (!this.moduleSwitch) return;
+    await Promise.all(
+      hosts.map((host) =>
+        (on
+          ? this.moduleSwitch.enable(host)
+          : this.moduleSwitch.disable(host)
+        ).catch((error) =>
+          this.log(
+            `orchestrator ${on ? "enable" : "disable"} on ${host}: ${error.message}`,
+          ),
+        ),
+      ),
+    );
   }
 
   #assertOn() {
@@ -911,6 +1048,8 @@ function createOrchestratorHosts({
   getConnections,
   getManager,
   installHost,
+  moduleSwitch,
+  log,
   userDataDir,
   hostsChanged,
   readyTimeoutMs,
@@ -927,6 +1066,7 @@ function createOrchestratorHosts({
       getClaudeMcp,
       getModelProviders,
       getProjects,
+      moduleSwitch,
       readyTimeoutMs,
     });
   const hosts = new OrchestratorHosts({
@@ -935,6 +1075,8 @@ function createOrchestratorHosts({
     userDataDir,
     getManager,
     installHost,
+    moduleSwitch,
+    log,
     onChange: hostsChanged,
     enabled,
     createService: service,
@@ -984,6 +1126,7 @@ module.exports = {
   OrchestratorHosts,
   registerOrchestratorExtension,
   createOrchestratorHosts,
+  createModuleSwitch,
   OFF_MESSAGE,
   tagTasks,
   tagEvent,

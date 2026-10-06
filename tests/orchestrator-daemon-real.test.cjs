@@ -9,7 +9,10 @@ const os = require("node:os");
 const path = require("node:path");
 const { createDaemonManager } = require("../electron/daemon/manager.cjs");
 const { createLocalConnector } = require("../electron/daemon/local.cjs");
-const { createOrchestratorHosts } = require("../electron/orchestrator.cjs");
+const {
+  createOrchestratorHosts,
+  createModuleSwitch,
+} = require("../electron/orchestrator.cjs");
 
 const binary = path.join(
   process.env.CARGO_TARGET_DIR || path.join(__dirname, "../target"),
@@ -48,14 +51,14 @@ test(
       SUSHIAI_DAEMON_BIN: binary,
       SUSHIAI_LOG: "off",
     };
+    const connector = createLocalConnector({
+      env,
+      appVersion: "0.0.0-test",
+      startTimeoutMs: 20000,
+      testMode: true,
+    });
     const manager = createDaemonManager({
-      connectors: {
-        local: createLocalConnector({
-          env,
-          appVersion: "0.0.0-test",
-          startTimeoutMs: 20000,
-        }),
-      },
+      connectors: { local: connector },
       backoffMinMs: 50,
       backoffMaxMs: 500,
       random: () => 1,
@@ -81,6 +84,14 @@ test(
         agentEnvironments: async () => ({}),
         mcpEnvironments: async () => ({}),
       }),
+      moduleSwitch: createModuleSwitch({
+        getManager: () => manager,
+        runLocal: (args) => connector.runCli(args),
+        restartLocal: () => connector.restart(),
+        exec: async () => {
+          throw new Error("no ssh in this test");
+        },
+      }),
       enabled: false,
     });
     // What the daemon was asked on `orch.secrets.set`, seen from the host.
@@ -94,14 +105,19 @@ test(
 
     manager.start();
     await until(() => ready.length > 0, "the daemon to be ready");
+    // A fresh daemon does not host the module: it is opt-in.
+    const before = manager.states().find((item) => item.host === "local");
+    assert.ok(!before.capabilities.includes("orch"), "no orch before enabling");
+    const firstPid = pidOf();
+    // Enabling registers it in the temp home and restarts the daemon.
     await hosts.setEnabled(true);
+    assert.ok(fs.existsSync(path.join(home, "modules/orch.enabled")));
+    assert.notEqual(pidOf(), firstPid, "the daemon restarted");
 
     const state = manager.states().find((item) => item.host === "local");
     assert.ok(state.capabilities.includes("orch"), "orch capability");
     assert.deepEqual(await hosts.probe("local"), { pid: 0 });
-    assert.deepEqual(await manager.request("local", "orch.echo", { n: 1 }), {
-      echo: { n: 1 },
-    });
+    assert.deepEqual(await manager.request("local", "orch.task.list", {}), []);
     // A method the module does not have is the module's own error.
     await assert.rejects(manager.request("local", "orch.nope", {}), {
       message: /unknown method orch\.nope/,
@@ -110,16 +126,20 @@ test(
     await until(() => pushed.includes("orch.settings.get"), "the secrets push");
 
     // kill -9: no goodbye, no cleanup. The manager brings a daemon back.
-    const before = pidOf();
+    const doomed = pidOf();
     const pushes = pushed.length;
-    process.kill(before, "SIGKILL");
-    await until(() => !alive(before), "the old daemon to die");
+    process.kill(doomed, "SIGKILL");
+    await until(() => !alive(doomed), "the old daemon to die");
     await manager.retry("local");
     await until(() => ready.length >= 2, "the daemon to be ready again");
-    assert.notEqual(pidOf(), before);
-    assert.deepEqual(await manager.request("local", "orch.echo", { n: 2 }), {
-      echo: { n: 2 },
-    });
+    assert.notEqual(pidOf(), doomed);
+    assert.deepEqual(await manager.request("local", "orch.task.list", {}), []);
     await until(() => pushed.length > pushes, "the secrets pushed again");
+
+    // Turning it off unregisters and restarts without the module.
+    await hosts.setEnabled(false);
+    assert.ok(!fs.existsSync(path.join(home, "modules/orch.enabled")));
+    const off = manager.states().find((item) => item.host === "local");
+    assert.ok(!off.capabilities.includes("orch"), "no orch after disabling");
   },
 );

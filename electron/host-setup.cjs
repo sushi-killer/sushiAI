@@ -268,6 +268,23 @@ const needsOwner = (state) =>
   state.state === "need_auth" || state.reason === "host_key_changed";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** manager.retry(host) until the host is ready or its state needs the owner;
+ * resolves the last state (`before` when no attempt ran). */
+async function reconnectUntilReady(
+  manager,
+  host,
+  { attempts = READY_ATTEMPTS, settleMs = SETTLE_MS, before } = {},
+) {
+  let state = before;
+  for (let i = 0; i < attempts; i++) {
+    state = await manager.retry(host);
+    if (state.state === "ready") return state;
+    if (needsOwner(state)) break;
+    await sleep(settleMs);
+  }
+  return state;
+}
+
 /** The `host-install` handler. A remote host: setupHost with the host manifest
  * (tools, skills, then the bundled sushiai), the old daemon stops
  * (`daemon.shutdown` when connected; sessions live in their holders and
@@ -284,16 +301,8 @@ function createHostInstaller({
   settleMs = SETTLE_MS,
   attempts = READY_ATTEMPTS,
 }) {
-  async function untilReady(host, before) {
-    let state = before;
-    for (let i = 0; i < attempts; i++) {
-      state = await manager.retry(host);
-      if (state.state === "ready") return state;
-      if (needsOwner(state)) break;
-      await sleep(settleMs);
-    }
-    return state;
-  }
+  const untilReady = (host, before) =>
+    reconnectUntilReady(manager, host, { attempts, settleMs, before });
   async function installOn(host) {
     if (host === "local") {
       await restartLocal();
@@ -341,6 +350,7 @@ module.exports = {
   SETUP_SCRIPT,
   createHostInstaller,
   serializePerHost,
+  reconnectUntilReady,
   STOP_DAEMON_COMMAND,
   PREFLIGHT_SCRIPT,
   parsePreflight,

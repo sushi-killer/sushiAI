@@ -365,6 +365,13 @@ function createLocalConnector({
       }
       replaced = false;
     },
+    /** Runs the resolved binary with the daemon's environment and resolves its
+     * stdout: a module's own CLI (the desktop's enable flow). */
+    async runCli(args) {
+      ensureHome(home);
+      binary ||= resolveBinary({ env, isPackaged, resourcesPath, repoRoot });
+      return run(args);
+    },
     async connect() {
       await prepare();
       let client = await tryConnect();

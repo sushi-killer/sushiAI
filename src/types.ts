@@ -844,6 +844,20 @@ export interface Bridge {
     extensionId: string,
     enabled: boolean,
   ): Promise<import("./extensions/types.ts").ExtensionSnapshot>;
+  companionRead(
+    extensionId: string,
+    surfaceId: string,
+  ): Promise<import("./extensions/types.ts").CompanionResult>;
+  companionAction(
+    extensionId: string,
+    surfaceId: string,
+    actionId: string,
+  ): Promise<import("./extensions/types.ts").CompanionResult>;
+  /** Records consent to the exact path, args and permissions in the listing. */
+  extensionApprove(extensionId: string): Promise<void>;
+  onCompanionChanged(
+    callback: (change: { extensionId: string; surfaceId: string }) => void,
+  ): () => void;
   window(action: string): Promise<void>;
   connectionsList(): Promise<ConnectionProfile[]>;
   connectionsSave(

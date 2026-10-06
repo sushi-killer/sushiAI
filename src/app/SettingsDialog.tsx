@@ -2,7 +2,6 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import {
   Check,
   Globe,
-  ListTodo,
   RefreshCw,
   Server,
   Settings as SettingsIcon,
@@ -19,12 +18,16 @@ import {
   setPendingProjectTab,
   type ProjectSettingsTab,
 } from "./openSettings.ts";
-import { useOrchestratorEnabled } from "../orchestrator/enabled.ts";
-import { ExtensionSectionSlot } from "../extensions/ExtensionSlots.tsx";
+import {
+  ExtensionSectionSlot,
+  ExtensionSettingsPage,
+  ExtensionSettingsTabs,
+  settingsPageKey,
+  settingsPageSurfaces,
+} from "../extensions/ExtensionSlots.tsx";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import {
   ConnectionsSettings,
-  OrchestratorSettings,
   ProvidersSettings,
   UpdateSettings,
 } from "../dialogs/lazy-settings.ts";
@@ -37,11 +40,12 @@ import type {
   Workspace,
 } from "../types";
 
+/** A core tab, or `page:<extension>:<surface>` for one an extension adds. */
 export type SettingsTab =
-  "general" | "connections" | "providers" | "orchestration" | "updates";
+  "general" | "connections" | "providers" | "updates" | `page:${string}`;
 
 const SETTINGS_NAV: {
-  key: SettingsTab;
+  key: Exclude<SettingsTab, `page:${string}`>;
   label: string;
   icon: LucideIcon;
   description: string;
@@ -63,13 +67,6 @@ const SETTINGS_NAV: {
     label: "Providers",
     icon: Server,
     description: "Claude and Codex accounts, API keys and model profiles.",
-  },
-  {
-    key: "orchestration",
-    label: "Orchestration",
-    icon: ListTodo,
-    description:
-      "How tasks are planned, run, checked and landed. Saved to orchd for every project on this Mac.",
   },
   {
     key: "updates",
@@ -168,15 +165,19 @@ export function SettingsDialog({
       .catch((error) => notify(errorText(error)));
   }
 
-  // Off: no Orchestration tab, and a saved one falls back to General.
-  const orchestrator = useOrchestratorEnabled();
-  const tabs = SETTINGS_NAV.filter(
-    (item) => orchestrator || item.key !== "orchestration",
+  // Pages come from active extensions; a saved tab whose page is gone falls
+  // back to General.
+  const pages = settingsPageSurfaces(registry);
+  const page = pages.find(
+    (surface) => settingsPageKey(surface) === settingsTab,
   );
-  const tab = tabs.some((item) => item.key === settingsTab)
-    ? settingsTab
-    : "general";
-  const current = tabs.find((item) => item.key === tab) || tabs[0];
+  const tab: SettingsTab =
+    page || SETTINGS_NAV.some((item) => item.key === settingsTab)
+      ? settingsTab
+      : "general";
+  const current = page
+    ? { label: page.title, description: page.description || "" }
+    : SETTINGS_NAV.find((item) => item.key === tab) || SETTINGS_NAV[0];
 
   return (
     <div className="settings-shell">
@@ -185,7 +186,7 @@ export function SettingsDialog({
           <p className="settings-nav-eyebrow">PREFERENCES</p>
           <p className="settings-nav-title">Settings</p>
         </div>
-        {tabs.map(({ key, label, icon: Icon }) => (
+        {SETTINGS_NAV.map(({ key, label, icon: Icon }) => (
           <button
             key={key}
             className={`settings-nav-item${tab === key ? " current" : ""}`}
@@ -197,6 +198,11 @@ export function SettingsDialog({
             {label}
           </button>
         ))}
+        <ExtensionSettingsTabs
+          registry={registry}
+          current={tab}
+          onSelect={(key) => setSettingsTab(key as SettingsTab)}
+        />
       </nav>
       <div className="settings-main" role="tabpanel">
         <div className="settings-title">
@@ -205,7 +211,13 @@ export function SettingsDialog({
         </div>
         <Suspense fallback={<div className="loading">Loading settings…</div>}>
           <RenderProfiler id="settings">
-            {tab === "connections" ? (
+            {page ? (
+              <ExtensionSettingsPage
+                surface={page}
+                cwd={cwd}
+                connection={connection}
+              />
+            ) : tab === "connections" ? (
               <ConnectionsSettings
                 endpoint={socket}
                 localSocket={system?.socketPath || ""}
@@ -216,8 +228,6 @@ export function SettingsDialog({
               />
             ) : tab === "providers" ? (
               <ProvidersSettings />
-            ) : tab === "orchestration" ? (
-              <OrchestratorSettings />
             ) : tab === "updates" ? (
               <UpdateSettings state={updates} />
             ) : (
@@ -306,29 +316,24 @@ export function SettingsDialog({
                       </em>
                     </span>
                   </label>
-                  {orchestrator && (
-                    <label className="setting-check">
-                      <input
-                        type="checkbox"
-                        checked={appPreferences.desktopMascot}
-                        disabled={!appPreferences.notifications}
-                        onChange={(event) =>
-                          setAppPreference(
-                            "desktopMascot",
-                            event.target.checked,
-                          )
-                        }
-                      />
-                      <span>
-                        Desktop mascot
-                        <em>
-                          Shows orchestrator task notices as a mascot in the
-                          corner of your screen. Off sends a native notification
-                          instead.
-                        </em>
-                      </span>
-                    </label>
-                  )}
+                  <label className="setting-check">
+                    <input
+                      type="checkbox"
+                      checked={appPreferences.desktopMascot}
+                      disabled={!appPreferences.notifications}
+                      onChange={(event) =>
+                        setAppPreference("desktopMascot", event.target.checked)
+                      }
+                    />
+                    <span>
+                      Desktop mascot
+                      <em>
+                        Shows notices from sushiAI and its extensions as a
+                        mascot in the corner of your screen. Off sends a native
+                        notification instead.
+                      </em>
+                    </span>
+                  </label>
                   <label className="setting-check">
                     <input
                       type="checkbox"

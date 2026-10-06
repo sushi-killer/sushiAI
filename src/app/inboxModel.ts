@@ -75,6 +75,7 @@ export function inboxItems(
   allTasks: Task[],
   groups: InboxGroup[],
   orchestrator = true,
+  askPanels: ReadonlySet<string> = new Set(),
 ): Item[] {
   const out: Item[] = [];
   const task = (kind: TaskItem["kind"], t: Task, prefix: string) =>
@@ -98,7 +99,8 @@ export function inboxItems(
       out.push({
         source: "session",
         key: `panel:${row.panel.id}`,
-        kind: SESSION_KIND[group.key],
+        // A panel with an open ask needs the owner whatever its status says.
+        kind: askPanels.has(row.panel.id) ? "answer" : SESSION_KIND[group.key],
         title: `${row.workspace.name} · ${agentName(row)}`,
         project: row.workspace.name,
         host: groupKey(row.workspace.connection),

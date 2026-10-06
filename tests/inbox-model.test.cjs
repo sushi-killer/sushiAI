@@ -233,3 +233,21 @@ test("with the orchestrator off the Inbox holds exactly the session items and a 
     "Nothing needs you.",
   );
 });
+
+test("a session with an open ask is an ANSWER whatever its status says", async () => {
+  const { inboxItems } = await load();
+  const items = inboxItems(
+    [],
+    [],
+    groups([row("w", "working"), row("i", "idle")]),
+    true,
+    new Set(["w"]),
+  );
+  assert.deepEqual(
+    items.map((item) => [item.kind, item.key]),
+    [
+      ["answer", "panel:w"],
+      ["idle", "panel:i"],
+    ],
+  );
+});

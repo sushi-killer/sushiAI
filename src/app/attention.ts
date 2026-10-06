@@ -87,7 +87,7 @@ const GROUPS: { key: InboxGroupKey; label: string }[] = [
 ];
 
 /** A panel that can wait for input or finish: a dedicated agent panel, or a
- * terminal Herdr detected an agent inside. Kept in step with `bucketFor` on
+ * terminal whose session runs an agent. Kept in step with `bucketFor` on
  * purpose - a panel the Inbox lists as blocked must also be one `observe`
  * times and notifies about. */
 function isAgentPanel(panel: Panel): boolean {
@@ -98,7 +98,7 @@ function isAgentPanel(panel: Panel): boolean {
  * all. Only a session belongs in an attention queue: a terminal or an agent.
  * A browser, a file tree, a chat thread or an extension surface is a view of
  * the project, nothing that can wait for you or finish. Terminal and agent
- * are handled alike, because a terminal Herdr detected an agent inside can
+ * are handled alike, because a terminal whose session runs an agent can
  * be `working` or `blocked` just like a dedicated agent panel. */
 function bucketFor(panel: Panel, unseen: Set<string>): InboxGroupKey | null {
   if (panel.kind !== "terminal" && panel.kind !== "agent") return null;
@@ -112,7 +112,9 @@ function bucketFor(panel: Panel, unseen: Set<string>): InboxGroupKey | null {
   return "idle";
 }
 
-/** Advances the tracked state one tick: records every agent panel's status,
+/** Advances the tracked state one tick. The status is the panel's own, which
+ * the daemon's `agentStatus` drives (see `reconcileSessions`): `blocked` waits
+ * for the owner, and `working` then idle arrives here as `done`. It records every agent panel's status,
  * silently the first time (no startup spam), and returns an event for every
  * real transition into `blocked` or `done`. A panel entering `done` becomes
  * unseen; leaving `blocked` clears its reminder schedule (bundled into the

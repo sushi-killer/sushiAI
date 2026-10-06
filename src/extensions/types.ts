@@ -239,9 +239,22 @@ export type ExtensionManifest = {
 
 export type ExtensionStatus = "active" | "disabled";
 
+/** What the app knows about an extension's companion process. */
+export type CompanionStatus = {
+  state: "off" | "needs-approval" | "starting" | "running" | "failed";
+  /** Where the command resolved; what an approval binds. */
+  resolvedPath?: string;
+  args: string[];
+  permissions: string[];
+  /** The last lines the process wrote to stderr, or why it was refused. */
+  stderrTail?: string;
+};
+
 export type ExtensionRecord = {
   manifest: ExtensionManifest;
   status: ExtensionStatus;
+  /** Present only when the manifest declares a companion. */
+  companion?: CompanionStatus;
   /** False for the built-ins that are part of the shell. */
   canDisable?: boolean;
   error?: string;

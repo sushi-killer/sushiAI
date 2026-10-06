@@ -915,7 +915,7 @@ mod tests {
     #[test]
     fn the_test_profile_fixture_lists_only_example_servers() {
         let fixture =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../electron/test-fixtures/mcp-home");
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../electron/test-fixtures/mcp-home");
         let listed = available_json(&Settings::default(), &fixture);
         let refs: Vec<&str> = listed["servers"]
             .as_array()

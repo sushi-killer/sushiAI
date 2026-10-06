@@ -9,6 +9,7 @@ mod error;
 mod framed;
 mod holder;
 mod home;
+mod module;
 mod registry;
 mod server;
 mod session;
@@ -32,15 +33,16 @@ pub use agent::ASK_WAIT_SECS;
 pub use binlink::{ensure_bin_link, Link};
 pub use error::{Error, Result};
 pub use home::Home;
+pub use module::{BoxFuture, Module, ModuleNotify, ModuleSlot, Reply};
 use registry::Registry;
 
 /// Runs the daemon until SIGTERM, SIGINT or `daemon.shutdown`. Holders keep running.
 ///
 /// The home lock is released last: after the runtime has stopped every task, and after a
 /// final flush of the state file, so the next daemon never starts on a stale file.
-pub fn run_blocking(home: Home) -> Result<()> {
+pub fn run_blocking(home: Home, modules: Vec<ModuleSlot>) -> Result<()> {
     let runtime = runtime()?;
-    let (lock, registry) = runtime.block_on(run(home))?;
+    let (lock, registry) = runtime.block_on(run(home, modules))?;
     drop(runtime);
     registry.flush();
     drop(lock);
@@ -58,7 +60,7 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
         .build()?)
 }
 
-async fn run(home: Home) -> Result<(fs::File, Arc<Registry>)> {
+async fn run(home: Home, modules: Vec<ModuleSlot>) -> Result<(fs::File, Arc<Registry>)> {
     home.ensure()?;
     // The lock lives until the daemon stops: one daemon per home, decided before any recovery.
     let lock = lock_home(&home)?;
@@ -79,6 +81,7 @@ async fn run(home: Home) -> Result<(fs::File, Arc<Registry>)> {
     // The socket answers while the holders come back. Sessions are listed `detached` until their
     // holder answered (running) or was given up on (exited); `session.updated` follows.
     reattach_all(&registry, pending);
+    start_modules(&registry, modules)?;
 
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
@@ -92,8 +95,51 @@ async fn run(home: Home) -> Result<(fs::File, Arc<Registry>)> {
         _ = int.recv() => {}
     }
     let _ = fs::remove_file(&socket);
+    stop_modules(&registry).await;
     registry.flush();
     Ok((lock, registry))
+}
+
+/// Builds the hosted modules once the socket answers. Two modules with one namespace are a
+/// programming error and stop the daemon before it serves.
+fn start_modules(registry: &Arc<Registry>, slots: Vec<ModuleSlot>) -> Result<()> {
+    let mut seen = Vec::new();
+    let mut modules = Vec::new();
+    for slot in slots {
+        if seen.contains(&slot.namespace) {
+            return Err(Error::Holder(format!(
+                "two modules use the namespace {}",
+                slot.namespace
+            )));
+        }
+        seen.push(slot.namespace);
+        let notify = ModuleNotify::new(slot.namespace, registry.events.clone());
+        let module = (slot.build)(notify);
+        if module.namespace() != slot.namespace {
+            return Err(Error::Holder(format!(
+                "module built for {} answers to {}",
+                slot.namespace,
+                module.namespace()
+            )));
+        }
+        modules.push(module);
+    }
+    registry.set_modules(modules);
+    Ok(())
+}
+
+/// How long modules get to stop.
+const MODULE_STOP: std::time::Duration = std::time::Duration::from_secs(12);
+
+async fn stop_modules(registry: &Registry) {
+    for module in registry.modules() {
+        if tokio::time::timeout(MODULE_STOP, module.shutdown())
+            .await
+            .is_err()
+        {
+            tracing::warn!("module {} did not stop in time", module.namespace());
+        }
+    }
 }
 
 /// How long a stopping daemon lets queued responses go out.

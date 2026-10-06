@@ -1,0 +1,26 @@
+[package]
+name = "sushiai-orch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "sushiAI task orchestration pipeline"
+
+[lib]
+name = "sushiai_orch"
+path = "src/lib.rs"
+
+# Transitional: the standalone orchd CLI stays until L1/L3 move it into the `sushiai` bin.
+[[bin]]
+name = "orchd"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -23,6 +23,7 @@ pub struct LoopHit {
     pub detail: String,
 }
 
+#[derive(Default)]
 pub struct LoopDetector {
     last_call: Option<(String, String)>,
     call_run: u32,
@@ -32,12 +33,7 @@ pub struct LoopDetector {
 
 impl LoopDetector {
     pub fn new() -> Self {
-        LoopDetector {
-            last_call: None,
-            call_run: 0,
-            error_run: 0,
-            edits: BTreeMap::new(),
-        }
+        Self::default()
     }
 
     /// Folds one stdout line of a Claude or Codex run; `Some` when a rule

@@ -10,7 +10,7 @@ test("the packaged orchd source carries every include_str! file outside src/", (
     path.join(root, "scripts/pack-orchd-src.mjs"),
     "utf8",
   );
-  const srcDir = path.join(root, "orchd/src");
+  const srcDir = path.join(root, "crates/sushiai-orch/src");
   const files = fs
     .readdirSync(srcDir, { recursive: true })
     .filter((f) => f.endsWith(".rs"));
@@ -22,12 +22,12 @@ test("the packaged orchd source carries every include_str! file outside src/", (
         root,
         path.resolve(path.dirname(path.join(srcDir, file)), m[1]),
       );
-      // orchd/tests fixtures are read only by #[cfg(test)] code, never by a build.
+      // orch tests fixtures are read only by #[cfg(test)] code, never by a build.
       if (
-        !target.startsWith("orchd/src/") &&
-        !target.startsWith("orchd/tests/")
+        !target.startsWith("crates/sushiai-orch/src/") &&
+        !target.startsWith("crates/sushiai-orch/tests/")
       )
-        outside.add(target.split("/").slice(0, 2).join("/"));
+        outside.add(target.split("/").slice(0, 3).join("/"));
     }
   }
   assert.ok(outside.size > 0);

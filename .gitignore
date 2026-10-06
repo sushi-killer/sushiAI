@@ -19,7 +19,6 @@ promo/assets/frame-*.png
 .claude/worktrees/
 
 # Rust build output of the orchestrator daemon.
-orchd/target/
 
 # orchd task worktrees live inside the repo; the main checkout never walks them.
 .sushiai/

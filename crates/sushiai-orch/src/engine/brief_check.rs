@@ -356,7 +356,15 @@ mod tests {
     fn the_check_brief_carries_goal_and_criteria_as_json() {
         let b = build_check_brief("g", &["a".to_string()], &json!({"mcp": []}));
         assert!(b.starts_with("You check a coding task brief"));
-        assert!(b.contains(r#"{"criteria":["a"],"goal":"g","tools":{"mcp":[]}}"#));
+        // Key order depends on serde_json's `preserve_order` (enabled by another workspace
+        // crate): check each member, not the whole object.
+        for part in [
+            r#""criteria":["a"]"#,
+            r#""goal":"g""#,
+            r#""tools":{"mcp":[]}"#,
+        ] {
+            assert!(b.contains(part), "{part}");
+        }
     }
 
     #[test]

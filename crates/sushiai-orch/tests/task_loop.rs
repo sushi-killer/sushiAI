@@ -747,7 +747,9 @@ fn a_claude_implement_run_trims_delegation_tools_and_keeps_the_configured_mcp_se
     assert!(argv.contains("--disallowedTools"), "{argv}");
     let settings: serde_json::Value =
         serde_json::from_str(&run_file(&daemon, &task_id, "settings.json")).unwrap();
-    let hooks: Vec<&String> = settings["hooks"].as_object().unwrap().keys().collect();
+    // Sorted: key order follows serde_json's `preserve_order`, which another workspace crate enables.
+    let mut hooks: Vec<&String> = settings["hooks"].as_object().unwrap().keys().collect();
+    hooks.sort();
     assert_eq!(hooks, ["PreToolUse", "Stop"], "{settings}");
     let mcp: serde_json::Value =
         serde_json::from_str(&run_file(&daemon, &task_id, "mcp.json")).unwrap();

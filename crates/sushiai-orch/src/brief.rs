@@ -807,9 +807,13 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
                 .map(|item| match item {
                     serde_json::Value::String(s) => s.clone(),
                     serde_json::Value::Object(o) => {
-                        let text = o
-                            .iter()
-                            .filter(|(k, _)| k.as_str() != "repeat")
+                        // Key order, not document order: another crate in the
+                        // workspace turns on serde_json's `preserve_order`.
+                        let mut fields: Vec<_> =
+                            o.iter().filter(|(k, _)| k.as_str() != "repeat").collect();
+                        fields.sort_by(|a, b| a.0.cmp(b.0));
+                        let text = fields
+                            .into_iter()
                             .map(|(_, x)| {
                                 x.as_str()
                                     .map(str::to_string)
@@ -2017,12 +2021,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(unverified.verdict, Verdict::Fail, "\"no\" is unmet");
+        // The object's key order depends on serde_json's `preserve_order`, which another
+        // workspace crate enables: compare the parsed text.
+        assert_eq!(unverified.findings.len(), 2);
         assert_eq!(
-            unverified.findings,
-            vec![
-                "Not checked by review: Looks right (cannot run the UI)".to_string(),
-                "Unmet criterion: {\"met\":\"no\",\"name\":\"n\"}".to_string(),
-            ]
+            unverified.findings[0],
+            "Not checked by review: Looks right (cannot run the UI)"
+        );
+        let unmet = unverified.findings[1]
+            .strip_prefix("Unmet criterion: ")
+            .expect("prefix");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(unmet).expect("json"),
+            serde_json::json!({"name": "n", "met": "no"})
         );
         let only_unverified = parse_review(
             "```sushi-review\n{\"verdict\":\"PASS\",\"criteria\":[{\"criterion\":\"x\",\"met\":null}]}\n```",

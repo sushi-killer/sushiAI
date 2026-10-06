@@ -76,7 +76,7 @@ const daemonPid = async () =>
   Number(
     (await fs.readFile(path.join(daemonHome, "daemon.lock"), "utf8")).trim(),
   );
-const orchdBuilt = existsSync(path.join(root, "orchd/target/release/orchd"));
+const orchdBuilt = existsSync(path.join(root, "target/release/orchd"));
 // Polls `ps` until a daemon for this profile's data dir is (or is no longer)
 // running; true when the wanted state was reached in time.
 async function pollOrchd(wantRunning, timeoutMs) {

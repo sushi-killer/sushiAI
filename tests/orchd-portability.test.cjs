@@ -20,7 +20,7 @@ function rustFiles(directory) {
 }
 
 test('orchd has no macOS-only code outside cfg(target_os = "macos")', () => {
-  const root = path.join(__dirname, "..", "orchd");
+  const root = path.join(__dirname, "..", "crates", "sushiai-orch");
   const offenders = [];
   for (const file of rustFiles(root)) {
     const lines = fs.readFileSync(file, "utf8").split("\n");

@@ -157,7 +157,7 @@ const FAILED_TO_START = "The orchestrator daemon failed to start.";
 function orchdBinaryPath({ root, resourcesPath, packaged }) {
   return packaged
     ? path.join(resourcesPath, "orchd")
-    : path.join(root, "orchd", "target", "release", "orchd");
+    : path.join(root, "target", "release", "orchd");
 }
 
 // A unix socket path is capped around 100 bytes on macOS; userData can nest

@@ -85,6 +85,8 @@ pub mod code {
     pub const SESSION_STILL_RUNNING: i64 = 1010;
     /// The daemon is stopping and takes no more changes.
     pub const SHUTTING_DOWN: i64 = 1011;
+    /// A hosted module is still starting; the request waited and gave up.
+    pub const MODULE_STARTING: i64 = 1100;
 }
 
 /// Serde adapter: `Vec<u8>` as a standard base64 string.

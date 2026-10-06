@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 sushiai-daemon.workspace = true
 sushiai-hold.workspace = true
+sushiai-orch.workspace = true
 sushiai-agents = { path = "../sushiai-agents" }
 sushiai-protocol.workspace = true
 serde_json.workspace = true

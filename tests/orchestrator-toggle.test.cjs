@@ -37,7 +37,7 @@ const alive = (pid) => {
 async function setup(t, { on }) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "orch-toggle-"));
   const root = path.join(dir, "root");
-  const binary = path.join(root, "orchd", "target", "release", "orchd");
+  const binary = path.join(root, "target", "release", "orchd");
   await fs.mkdir(path.dirname(binary), { recursive: true });
   await fs.writeFile(
     binary,

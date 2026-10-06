@@ -1,6 +1,5 @@
 [workspace]
 members = ["crates/*"]
-exclude = ["orchd"]
 resolver = "2"
 
 [workspace.package]
@@ -14,7 +13,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 anyhow = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "signal", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "signal", "macros", "process", "fs"] }
 vt100 = "0.15"
 portable-pty = "0.9"
 tracing = "0.1"
@@ -22,10 +21,12 @@ tracing-subscriber = "0.3"
 tempfile = "3"
 base64 = "0.22"
 libc = "0.2"
+uuid = { version = "1", features = ["v4"] }
 sushiai-protocol = { path = "crates/sushiai-protocol" }
 sushiai-core = { path = "crates/sushiai-core" }
 sushiai-daemon = { path = "crates/sushiai-daemon" }
 sushiai-hold = { path = "crates/sushiai-hold" }
+sushiai-orch = { path = "crates/sushiai-orch" }
 
 [profile.dev]
 debug = "line-tables-only"

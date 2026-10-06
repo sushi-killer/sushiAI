@@ -16,12 +16,11 @@ const result = spawnSync(
     out,
     "-C",
     root,
-    "orchd/Cargo.toml",
-    "orchd/Cargo.lock",
-    "orchd/src",
+    "crates/sushiai-orch/Cargo.toml",
+    "crates/sushiai-orch/src",
     // `include_str!` targets outside src/ (tests/orchd-src-pack.test.cjs).
-    "orchd/prompts",
-    "orchd/skills",
+    "crates/sushiai-orch/prompts",
+    "crates/sushiai-orch/skills",
   ],
   { stdio: "inherit", env: { ...process.env, COPYFILE_DISABLE: "1" } },
 );

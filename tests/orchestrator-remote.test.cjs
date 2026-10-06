@@ -90,9 +90,9 @@ async function fixture(
     path.join(__dirname, "fixtures", "fake-orchd.cjs"),
     "utf8",
   );
-  const binary = path.join(root, "orchd", "target", "release", "orchd");
+  const binary = path.join(root, "target", "release", "orchd");
   await fs.mkdir(path.dirname(binary), { recursive: true });
-  await fs.mkdir(path.join(root, "orchd", "src"));
+  await fs.mkdir(path.join(root, "orchd", "src"), { recursive: true });
   await fs.writeFile(path.join(root, "orchd", "Cargo.toml"), "[package]\n");
   await fs.writeFile(
     path.join(root, "orchd", "src", "main.rs"),
@@ -420,7 +420,7 @@ test("one button says so when the host has neither curl nor wget, and Retry runs
   );
   // A downloader appears; the same button now succeeds.
   const cargo = path.join(fx.dir, "bin", "wget");
-  const orchd = path.join(fx.root, "orchd", "target", "release", "orchd");
+  const orchd = path.join(fx.root, "target", "release", "orchd");
   const installer = `mkdir -p "$HOME/.cargo/bin"; printf '#!/bin/sh\\nmkdir -p target/release && cp ${orchd} target/release/orchd\\n' > "$HOME/.cargo/bin/cargo"; chmod 755 "$HOME/.cargo/bin/cargo"`;
   await fs.writeFile(
     cargo,

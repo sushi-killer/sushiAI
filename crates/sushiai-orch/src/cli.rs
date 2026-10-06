@@ -1,3 +1,5 @@
+//! The `orchd` command line (transitional; L1/L3 move it into the `sushiai` bin).
+//!
 //! `orchd serve --data <dir> [--socket <path>]` (also the default with no
 //! subcommand), `orchd hook stop|edit --socket <path> --token <t>`,
 //! `orchd mcp --data <dir> [--socket <path>]`, `orchd ab --data <dir> [--eval <set>]`, `orchd failures --data <dir>`, and
@@ -6,28 +8,11 @@
 //! `orchd costs [backfill] --data <dir> [--since <days>] [--by stage,model] [--json]` (see `costs.rs`), and
 //! `orchd evolve --data <dir> [--socket <sock>] [--adopt <id>]` (see `evolve.rs`).
 
-mod ab;
-mod brief;
-mod costs;
-mod engine;
-mod eval;
-mod evolve;
-mod git;
-mod harness;
-mod hook;
-mod loop_detect;
-mod mcp;
-mod model;
-mod prompts;
-mod protocol;
-mod report;
-mod skill;
-mod store;
-mod timeline;
-
 use std::path::{Path, PathBuf};
 
-fn main() {
+use crate::{ab, costs, engine, eval, evolve, mcp, protocol, skill, timeline};
+
+pub fn main() {
     let args: Vec<String> = std::env::args().collect();
     let rt = tokio::runtime::Runtime::new().expect("failed to start the tokio runtime");
     let code = rt.block_on(run(args));

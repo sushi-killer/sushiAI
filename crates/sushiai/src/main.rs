@@ -4,6 +4,7 @@ use std::path::PathBuf;
 mod hook;
 mod hooks_file;
 mod open;
+mod orch_module;
 
 use anyhow::{bail, Context, Result};
 use tracing_subscriber::filter::LevelFilter;
@@ -36,7 +37,10 @@ fn main() -> Result<()> {
         .init();
     match command.as_deref() {
         Some("hooks") => hooks_file::run(args.next().as_deref())?,
-        Some("daemon") => sushiai_daemon::run_blocking(sushiai_daemon::Home::from_env())?,
+        Some("daemon") => sushiai_daemon::run_blocking(
+            sushiai_daemon::Home::from_env(),
+            vec![orch_module::slot()],
+        )?,
         Some("status") => println!(
             "{}",
             sushiai_daemon::status_blocking(sushiai_daemon::Home::from_env())?

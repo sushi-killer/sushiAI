@@ -11,7 +11,7 @@ const { exitAction } = createRequire(import.meta.url)(
 // window, with the panel showing its "not built" state.
 const cargo = spawnSync(
   "cargo",
-  ["build", "--release", "--manifest-path", "orchd/Cargo.toml"],
+  ["build", "--release", "-p", "sushiai-orch", "--bin", "orchd"],
   {
     stdio: "inherit",
   },

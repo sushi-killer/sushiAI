@@ -132,7 +132,7 @@ test("socketPathFor keeps a short data dir, falls back for a long one", () => {
 test("orchdBinaryPath resolves dev vs packaged locations", () => {
   assert.equal(
     orchdBinaryPath({ root: "/repo", packaged: false }),
-    path.join("/repo", "orchd", "target", "release", "orchd"),
+    path.join("/repo", "target", "release", "orchd"),
   );
   assert.equal(
     orchdBinaryPath({ resourcesPath: "/App/Resources", packaged: true }),

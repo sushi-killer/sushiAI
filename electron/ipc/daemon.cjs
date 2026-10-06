@@ -47,7 +47,18 @@ const CHANNELS = {
     text(r.cwd, "cwd");
     text(r.idempotencyKey, "idempotencyKey", { max: 256 });
     size(r.cols, r.rows);
-    for (const key of ["agent", "title", "model", "prompt", "resume"])
+    for (const key of [
+      "agent",
+      "title",
+      "model",
+      "prompt",
+      "resume",
+      "project",
+      "group",
+      "claudeAccountId",
+      "codexAccountId",
+      "modelProfileId",
+    ])
       if (r[key] !== undefined && typeof r[key] !== "string")
         throw new Error(`Invalid ${key}.`);
     strings(r.extraArgs, "extraArgs");
@@ -111,11 +122,14 @@ const CHANNELS = {
   "host-install": (h) => host(h),
 };
 
-function registerDaemonIpc({ handle }) {
+// `launch(request)` is the session launcher (electron/session-launch.cjs,
+// createDaemonLaunch(...).launch); main.cjs passes it in.
+function registerDaemonIpc({ handle, launch }) {
   for (const [channel, validate] of Object.entries(CHANNELS))
     handle(channel, async (...args) => {
       validate(...args);
       if (channel === "daemon-states") return [];
+      if (channel === "daemon-session-launch" && launch) return launch(args[0]);
       throw new Error(NOT_IMPLEMENTED);
     });
 }

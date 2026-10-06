@@ -552,7 +552,7 @@ test("a broken projects.json does not stop the other imports", async (t) => {
 
 test("invalid launch rows are dropped on load, valid ones kept", async (t) => {
   const dir = await tempDir(t);
-  const { SessionLauncher } = require("../electron/session-launch.cjs");
+  const { SessionLauncher } = require("../electron/herdr-session-launch.cjs");
   const warn = console.warn;
   console.warn = () => {};
   t.after(() => {

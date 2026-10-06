@@ -303,7 +303,65 @@ async function sessionEnvPrefix(
   };
 }
 
+/** What a daemon session needs besides its command: process variables and
+ * the Claude `--settings` keys the daemon allows (`apiKeyHelper`, `model`).
+ * Every secret rides in `env`; claudeSettings holds only a helper command that
+ * reads a key from an env variable. Local host only (remote launch is slice 2).
+ * Error messages never carry a value. */
+async function sessionLaunchEnv(
+  { projects, connections, resolveAccount, resolveCodexAccount, resolveModel },
+  { host, cwd, agent, claudeAccountId, codexAccountId, modelProfileId },
+) {
+  if (host !== "local")
+    throw Object.assign(new Error("Remote launch comes later."), {
+      code: "REMOTE_LAUNCH_LATER",
+    });
+  const environment = await sessionEnvironment(
+    { projects, connections },
+    { endpoint: undefined, cwd },
+  );
+  const { project, sends, withheld } = environment;
+  const env = { ...environment.env };
+  const claudeSettings = {};
+  if (agent === "codex" && !withheld) {
+    const account = await codexAccountFor(
+      resolveCodexAccount,
+      sessionAccountId(project, sends, codexAccountId, "codexAccount"),
+      codexAccountId,
+      undefined,
+      true,
+    );
+    if (account) {
+      if (!path.isAbsolute(account.home))
+        throw new Error("The Codex account home is not an absolute path.");
+      env.CODEX_HOME = account.home;
+    }
+  }
+  if (agent === "claude" && modelProfileId) {
+    const model = await resolveModel(modelProfileId);
+    Object.assign(env, model.settings, { CLAUDE_HELPER_MODEL_KEY: model.key });
+    claudeSettings.apiKeyHelper = 'printf %s "$CLAUDE_HELPER_MODEL_KEY"';
+  } else if (agent === "claude") {
+    const accountId = sessionAccountId(project, sends, claudeAccountId);
+    if (accountId && resolveAccount) {
+      const account = await resolveAccount(accountId).catch((error) => {
+        if (claudeAccountId || error.code !== "ACCOUNT_NOT_CONFIGURED")
+          throw error;
+        return null;
+      });
+      if (account?.value && account.kind === "subscription")
+        env.CLAUDE_CODE_OAUTH_TOKEN = account.value;
+      else if (account?.value) {
+        env.CLAUDE_HELPER_ACCOUNT_KEY = account.value;
+        claudeSettings.apiKeyHelper = 'printf %s "$CLAUDE_HELPER_ACCOUNT_KEY"';
+      }
+    }
+  }
+  return { env, claudeSettings, project };
+}
+
 module.exports = {
+  sessionLaunchEnv,
   projectForFolder,
   sessionEnvironment,
   sessionEnvPrefix,

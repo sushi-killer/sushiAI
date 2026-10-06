@@ -207,28 +207,6 @@ export function ProjectGeneralTab({
           ))}
         </select>
       </Field>
-      <Field
-        label="Session backend"
-        hint="Herdr keeps sessions running after the app closes."
-      >
-        <select
-          className="pd-input"
-          aria-label="Session backend"
-          value={project.sessions.backend || "herdr"}
-          onChange={(event) =>
-            void save({
-              ...project,
-              sessions: {
-                ...project.sessions,
-                backend: event.target.value as "herdr" | "local",
-              },
-            })
-          }
-        >
-          <option value="herdr">Herdr</option>
-          <option value="local">Local</option>
-        </select>
-      </Field>
       <h3 className="pd-group">Setup</h3>
       <Field
         label="Install"

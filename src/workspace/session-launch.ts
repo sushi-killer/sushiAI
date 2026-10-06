@@ -1,6 +1,65 @@
 import { herdrWorkspaceKey } from "../herdrIdentity.ts";
 import { appendPanel, isVanished, reopenInSlot } from "./workspace-actions.ts";
-import type { Panel, SessionLaunchValue, Workspace } from "../types";
+import type {
+  DaemonLaunchRequest,
+  Panel,
+  SessionLaunchRequest,
+  SessionLaunchValue,
+  Workspace,
+} from "../types";
+
+/** The daemon host a launch endpoint belongs to. */
+export const daemonHost = (endpoint: string) =>
+  endpoint.startsWith("ssh:") ? endpoint : "local";
+
+/** One daemon launch from a UI launch request. `operationId` is the
+ * idempotency key: the renderer makes one per launch and reuses it on retry. */
+export function toDaemonLaunch(
+  request: SessionLaunchRequest,
+  size = { cols: 120, rows: 32 },
+): DaemonLaunchRequest {
+  return {
+    host: daemonHost(request.endpoint),
+    cwd: request.cwd,
+    ...size,
+    ...(request.kind === "agent" && request.agent
+      ? { agent: request.agent }
+      : {}),
+    title: request.label,
+    ...(request.prompt ? { prompt: request.prompt } : {}),
+    ...(request.workspaceId ? { group: request.workspaceId } : {}),
+    ...(request.claudeAccountId !== undefined
+      ? { claudeAccountId: request.claudeAccountId }
+      : {}),
+    ...(request.codexAccountId !== undefined
+      ? { codexAccountId: request.codexAccountId }
+      : {}),
+    ...(request.modelProfileId
+      ? { modelProfileId: request.modelProfileId }
+      : {}),
+    ...(request.worktree ? { worktree: request.worktree } : {}),
+    idempotencyKey: request.operationId,
+  };
+}
+
+/** Launches through the daemon and returns the panel to place: the template
+ * bound to the new session. A failure throws; retry with the same request. */
+export async function launchDaemonSession(
+  bridge: {
+    daemonSessionLaunch(
+      request: DaemonLaunchRequest,
+    ): Promise<{ host: string; sessionId: string }>;
+  },
+  request: SessionLaunchRequest,
+  template: Panel,
+): Promise<{ host: string; sessionId: string; panel: Panel }> {
+  const { host, sessionId } = await bridge.daemonSessionLaunch(
+    toDaemonLaunch(request),
+  );
+  const panel: Panel = { ...template, sessionId };
+  delete panel.ended;
+  return { host, sessionId, panel };
+}
 
 export function findSessionWorkspace(
   workspaces: Workspace[],

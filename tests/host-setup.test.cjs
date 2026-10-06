@@ -11,6 +11,8 @@ const net = require("node:net");
 const {
   setupHost,
   loadHostManifest,
+  hostManifestFile,
+  requireHostManifest,
   setupSummary,
   cleanEnvironment,
   SETUP_SCRIPT,
@@ -455,6 +457,58 @@ test("fake ssh: a host without sushiai gets it installed, linked and hooked, the
   );
   const second = await setupHost(host.connections, host.endpoint, "", options);
   assert.equal(second.sushiai, "unchanged");
+});
+
+test("herdr:false runs the tools and sushiai steps and nothing of Herdr; a command host is skipped with a note", async (t) => {
+  const host = await makeSetupHost(t, {
+    bin: {
+      ...tools,
+      uname:
+        '#!/bin/sh\n[ "$1" = "-sm" ] && echo "Linux x86_64" || echo Linux\n',
+    },
+  });
+  const dir = await sushiaiDist(t);
+  const sushiai = loadHostManifest(path.join(dir, "manifest.json"));
+  const states = await setupHost(host.connections, host.endpoint, "", {
+    sushiai,
+    herdr: false,
+    checkCompatibility: () => {
+      throw new Error("Herdr must not be probed");
+    },
+  });
+  assert.equal(states.sushiai, "installed", states.sushiaiError);
+  assert.equal(states.sushiaiResult.status, "installed");
+  assert.equal(states.sushiaiResult.version, "0.1.0");
+  assert.equal(states.herdr, undefined);
+  assert.equal(states.compatibility, undefined);
+  const command = await host.connections.save({
+    name: "Tunnel",
+    connector: { kind: "command", argv: ["my-tunnel"] },
+  });
+  const skipped = await setupHost(host.connections, `ssh:${command.id}`, "", {
+    herdr: false,
+  });
+  assert.match(skipped.note, /no shell/);
+});
+
+test("the host manifest is read from the resources when packaged and target/host in a checkout", () => {
+  assert.equal(
+    hostManifestFile({ isPackaged: true, resourcesPath: "/app/Resources" }),
+    "/app/Resources/host/manifest.json",
+  );
+  assert.equal(
+    hostManifestFile({ isPackaged: false, repoRoot: "/repo" }),
+    "/repo/target/host/manifest.json",
+  );
+  assert.throws(
+    () => requireHostManifest({ repoRoot: "/nonexistent-repo" }),
+    /Run npm run build:host first/,
+  );
+  assert.throws(
+    () =>
+      requireHostManifest({ isPackaged: true, resourcesPath: "/nonexistent" }),
+    /no sushiai binaries/,
+  );
 });
 
 test("a failed sushiai install is reported without stopping the rest of the setup", async (t) => {

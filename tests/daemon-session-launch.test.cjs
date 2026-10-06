@@ -205,21 +205,8 @@ test("the renderer request keeps one key per launch and maps the workspace to gr
   assert.equal(first.resume, undefined);
 });
 
-test("a remote host is refused and no error carries a secret", async (t) => {
-  const { launcher, requests, cwd } = setup(t, {
-    accounts: { claude: { a1: { kind: "subscription", value: TOKEN } } },
-  });
-  await assert.rejects(
-    launcher.launch(
-      base(cwd, { host: "ssh:box", agent: "claude", claudeAccountId: "a1" }),
-    ),
-    (error) =>
-      error.code === "REMOTE_LAUNCH_LATER" && /later/.test(error.message),
-  );
-  await assert.rejects(
-    sessionLaunchEnv({}, { host: "ssh:box", cwd, agent: "claude" }),
-    /Remote launch comes later/,
-  );
+test("no launch error carries a secret", async (t) => {
+  const { requests, cwd } = setup(t);
   const failing = createSessionLauncher({
     manager: {
       request: async () => {
@@ -236,6 +223,233 @@ test("a remote host is refused and no error carries a secret", async (t) => {
     (error) => !error.message.includes(TOKEN),
   );
   assert.equal(requests.length, 0);
+});
+
+// Remote hosts ---------------------------------------------------------------
+
+function remoteSetup({ missing = [], project = null, hasShell = true } = {}) {
+  const requests = [];
+  const commands = [];
+  const exec = async (endpoint, command, options) => {
+    commands.push({ endpoint, command, options });
+    if (command.includes("test -d")) {
+      const dir = /sh '(.*)'$/.exec(command)[1];
+      if (missing.includes(dir)) throw new Error("exit 1");
+      return `${dir}\n`;
+    }
+    const id = /codex-accounts.*?(acc-[\w-]+)/.exec(command)?.[1];
+    return `/home/dev/.sushiai/codex-accounts/${id}\n`;
+  };
+  const projects = {
+    resolveProject: async () => project,
+    sendsValues: async () => true,
+    environmentFor: async () => ({ PROJECT_VALUE: "pv" }),
+  };
+  const connections = {
+    hasShell: () => hasShell,
+    inspect: async () => null,
+  };
+  const launcher = createSessionLauncher({
+    manager: {
+      request: async (host, method, params) => {
+        requests.push({ host, method, params });
+        return { id: "r1" };
+      },
+    },
+    exec,
+    environment: (input) =>
+      sessionLaunchEnv(
+        {
+          projects,
+          connections,
+          exec,
+          resolveAccount: async () => ({ kind: "subscription", value: TOKEN }),
+          resolveCodexAccount: async () => ({
+            home: "/local/home",
+            auth: '{"tokens":"synthetic-auth"}',
+          }),
+          resolveModel: async () => ({ key: MODEL_KEY, settings: {} }),
+        },
+        input,
+      ),
+  });
+  return { launcher, requests, commands };
+}
+const remoteBase = (extra = {}) => ({
+  host: "host-1",
+  cwd: "/srv/app",
+  cols: 90,
+  rows: 20,
+  idempotencyKey: "k-remote",
+  ...extra,
+});
+
+test("a remote launch goes to session.create on that host with the remote folder and env", async () => {
+  const { launcher, requests, commands } = remoteSetup({
+    project: { id: "proj-1" },
+  });
+  const out = await launcher.launch(
+    remoteBase({ agent: "claude", claudeAccountId: "a1", group: "g1" }),
+  );
+  assert.deepEqual(out, { host: "host-1", sessionId: "r1", cwd: "/srv/app" });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].host, "host-1");
+  assert.equal(requests[0].method, "session.create");
+  assert.equal(requests[0].params.cwd, "/srv/app");
+  assert.equal(requests[0].params.env.CLAUDE_CODE_OAUTH_TOKEN, TOKEN);
+  assert.equal(requests[0].params.env.PROJECT_VALUE, "pv");
+  assert.equal(requests[0].params.group, "g1");
+  assert.equal(commands[0].endpoint, "ssh:host-1");
+  // The secret never travels in a command line.
+  assert.ok(commands.every((c) => !c.command.includes(TOKEN)));
+});
+
+test("a remote folder that is missing is refused before the daemon is asked", async () => {
+  const { launcher, requests } = remoteSetup({ missing: ["/srv/app"] });
+  await assert.rejects(
+    launcher.launch(remoteBase()),
+    (error) => error.code === "CHECKOUT_MISSING",
+  );
+  assert.equal(requests.length, 0);
+});
+
+test("a remote worktree is used when it exists and refused clearly otherwise", async () => {
+  const worktree = { branch: "feat/x" };
+  const have = remoteSetup();
+  const out = await have.launcher.launch(remoteBase({ worktree }));
+  assert.equal(out.cwd, "/srv/app-feat-x");
+  assert.equal(have.requests[0].params.cwd, "/srv/app-feat-x");
+  const none = remoteSetup({ missing: ["/srv/app-feat-x"] });
+  await assert.rejects(
+    none.launcher.launch(remoteBase({ worktree })),
+    (error) =>
+      error.code === "REMOTE_WORKTREE_MISSING" &&
+      /not supported yet/.test(error.message) &&
+      error.message.includes("/srv/app-feat-x"),
+  );
+  assert.equal(none.requests.length, 0);
+});
+
+const chatgpt = (refresh) =>
+  JSON.stringify({
+    tokens: { refresh_token: "r", account_id: "acct-1" },
+    last_refresh: refresh,
+  });
+
+function codexRemote({ hostAuth = "", ret = "tok-1" } = {}) {
+  const commands = [];
+  const exec = async (endpoint, command, options) => {
+    commands.push({ endpoint, command, options });
+    if (!command.includes("umask 077")) return hostAuth;
+    return "/home/dev/.sushiai/codex-accounts/acc-1\n";
+  };
+  const projects = {
+    resolveProject: async () => null,
+    sendsValues: async () => true,
+    environmentFor: async () => ({}),
+  };
+  const resolved = [];
+  return {
+    commands,
+    resolved,
+    run: () =>
+      sessionLaunchEnv(
+        {
+          projects,
+          connections: { hasShell: () => true, inspect: async () => null },
+          exec,
+          resolveCodexAccount: async (id, endpoint) => {
+            resolved.push({ id, endpoint });
+            return {
+              home: "/local/home",
+              auth: chatgpt("2026-02-01T00:00:00Z"),
+              ret,
+            };
+          },
+        },
+        {
+          host: "host-1",
+          cwd: "/srv/app",
+          agent: "codex",
+          codexAccountId: "acc-1",
+        },
+      ),
+  };
+}
+
+test("a Codex account on a remote host prepares CODEX_HOME there; the login rides on stdin only", async () => {
+  const t = codexRemote();
+  const { env } = await t.run();
+  assert.equal(env.CODEX_HOME, "/home/dev/.sushiai/codex-accounts/acc-1");
+  // The endpoint reaches resolve, so the account records a return token.
+  assert.deepEqual(t.resolved, [{ id: "acc-1", endpoint: "ssh:host-1" }]);
+  const prepare = t.commands.find(
+    (c) => c.command.includes("codex-accounts") && c.options.input,
+  );
+  assert.ok(prepare);
+  assert.equal(prepare.options.input, chatgpt("2026-02-01T00:00:00Z"));
+  assert.ok(!prepare.command.includes("refresh_token"));
+  assert.match(prepare.command, /umask 077/);
+  assert.match(prepare.command, /auth\.json/);
+  // The return token links codex-sessions/<token> to the home, for CODEX_COLLECT.
+  assert.match(prepare.command, /codex-sessions/);
+  assert.match(prepare.command, /tok-1/);
+});
+
+test("the host's Codex login is replaced only when the Mac login is newer", async () => {
+  const older = codexRemote({ hostAuth: chatgpt("2026-01-01T00:00:00Z") });
+  await older.run();
+  assert.equal(
+    older.commands.at(-1).options.input,
+    chatgpt("2026-02-01T00:00:00Z"),
+  );
+  assert.match(older.commands.at(-1).command, / 1 '/);
+  const newer = codexRemote({ hostAuth: chatgpt("2026-03-01T00:00:00Z") });
+  await newer.run();
+  assert.equal(newer.commands.at(-1).options.input, "");
+  assert.match(newer.commands.at(-1).command, / 0 '/);
+});
+
+test("the collect script keeps a fresh home with no pid live", () => {
+  const { CODEX_COLLECT } = require("../electron/project-session.cjs");
+  const script = CODEX_COLLECT(["tok-1"]);
+  assert.match(script, /find "\$d" -maxdepth 0 -mmin \+5/);
+  assert.match(script, /codex-sessions\/\$t/);
+});
+
+test("a command-connector host launches with its folder as given and refuses a worktree", async () => {
+  const requests = [];
+  const launcher = createSessionLauncher({
+    manager: {
+      request: async (host, method, params) => {
+        requests.push({ host, method, params });
+        return { id: "c1" };
+      },
+    },
+    exec: async () => {
+      throw new Error("a command host has no shell");
+    },
+    hasShell: () => false,
+    environment: async () => ({ env: {}, claudeSettings: {} }),
+  });
+  const out = await launcher.launch(remoteBase({ cwd: "/work/app" }));
+  assert.deepEqual(out, { host: "host-1", sessionId: "c1", cwd: "/work/app" });
+  assert.equal(requests[0].params.cwd, "/work/app");
+  await assert.rejects(
+    launcher.launch(remoteBase({ worktree: { branch: "feat/x" } })),
+    (error) =>
+      error.code === "REMOTE_WORKTREE_MISSING" &&
+      /no shell/.test(error.message),
+  );
+  assert.equal(requests.length, 1);
+});
+
+test("a remote cwd must be an absolute posix path", async () => {
+  const { launcher } = remoteSetup();
+  await assert.rejects(
+    launcher.launch(remoteBase({ cwd: "srv/app" })),
+    (error) => error.code === "INVALID_LAUNCH",
+  );
 });
 
 test("the IPC handler dispatches a validated launch to the launcher", async () => {

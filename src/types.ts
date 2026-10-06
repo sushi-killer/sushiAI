@@ -13,6 +13,8 @@ export type ConnectorState = {
     | "daemon_died"
     | (string & {});
   message?: string;
+  /** A command the owner can copy to fix the problem (e.g. forget a changed host key). */
+  hint?: string;
   version?: string;
   capabilities?: string[];
   /** Bumps on every reconnect; events of an older generation are stale. */
@@ -109,7 +111,8 @@ export type ConnectionProfile = {
   name: string;
   host: string;
   port?: number;
-  socket: string;
+  /** Only orchd and Herdr read it (until step 6); daemon hosts ignore it. */
+  socket?: string;
   /** How the desktop reaches the sushiai daemon on this host; ssh when unset. */
   connector?: Connector;
   connected?: boolean;

@@ -1,5 +1,7 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
+  Check,
+  Copy,
   Eye,
   EyeOff,
   Globe,
@@ -10,12 +12,115 @@ import {
   Trash2,
   Unplug,
 } from "lucide-react";
-import type { ConnectionProfile, HerdrCompatibility } from "./types";
+import type { ConnectionProfile, DaemonState } from "./types";
+import {
+  actionLabel,
+  connectorFromLine,
+  describeHost,
+  formatArgv,
+  type HostAction,
+} from "./connectionState";
+
+/** Daemon states by host, kept current by the bridge. */
+function useDaemonStates(): Map<string, DaemonState> {
+  const [states, setStates] = useState<Map<string, DaemonState>>(new Map());
+  const accept = useCallback((next: DaemonState) => {
+    setStates((current) => {
+      const old = current.get(next.host);
+      if (old && old.generation > next.generation) return current;
+      return new Map(current).set(next.host, next);
+    });
+  }, []);
+  useEffect(() => {
+    let stopped = false;
+    window.bridge
+      ?.daemonStates()
+      .then((all) => {
+        if (!stopped) all.forEach(accept);
+      })
+      .catch(() => {});
+    const off = window.bridge?.onDaemonState(accept);
+    return () => {
+      stopped = true;
+      off?.();
+    };
+  }, [accept]);
+  return states;
+}
+
+function CopyText({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <span className="copy-text">
+      <code>{text}</code>
+      <button
+        type="button"
+        title="Copy command"
+        aria-label="Copy command"
+        onClick={() => {
+          void navigator.clipboard?.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        }}
+      >
+        {copied ? <Check size={12} /> : <Copy size={12} />}
+      </button>
+    </span>
+  );
+}
+
+type InstallState =
+  | { phase: "running" }
+  | { phase: "done"; version: string }
+  | { phase: "error"; message: string };
+
+function HostStatus({
+  state,
+  install,
+  onAction,
+}: {
+  state: DaemonState | undefined;
+  install?: InstallState;
+  onAction(action: HostAction): void;
+}) {
+  const view = describeHost(state);
+  const running = install?.phase === "running";
+  return (
+    <div className={`host-status tone-${view.tone}`}>
+      <div className="host-status-line" role="status">
+        <i className="status-dot" />
+        <span>{view.label}</span>
+        {view.detail && <small>{view.detail}</small>}
+      </div>
+      {view.hint && <p className="muted">{view.hint}</p>}
+      {view.command && <CopyText text={view.command} />}
+      {running && <p className="muted">Installing sushiai on the host…</p>}
+      {install?.phase === "done" && (
+        <p className="muted">Installed sushiai {install.version}.</p>
+      )}
+      {install?.phase === "error" && (
+        <p className="inline-error" role="alert">
+          {install.message}
+        </p>
+      )}
+      {view.action && (
+        <button
+          type="button"
+          className="secondary"
+          disabled={running}
+          onClick={() => onAction(view.action!)}
+        >
+          {actionLabel(view.action)}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function ConnectionsSettings({
   endpoint,
   localSocket,
   onSelect,
-  socketForm,
   profiles,
   onRefresh,
   notify,
@@ -23,54 +128,30 @@ export function ConnectionsSettings({
   endpoint: string;
   localSocket: string;
   onSelect(endpoint: string): void;
-  /** The Herdr socket form, owned by App because it drives the connection. */
-  socketForm?: ReactNode;
   /** Shared with the Sidebar, which labels workspace groups by the same profiles. */
   profiles: ConnectionProfile[];
   onRefresh(): Promise<void>;
   notify(text: string): void;
 }) {
-  const [compatibility, setCompatibility] = useState<HerdrCompatibility | null>(
-    null,
-  );
-  const [checking, setChecking] = useState(false);
-  const [compatibilityError, setCompatibilityError] = useState("");
-  useEffect(() => {
-    let stopped = false;
-    setCompatibility(null);
-    setCompatibilityError("");
-    setChecking(true);
-    window.bridge
-      ?.herdrCompatibility(endpoint)
-      .then((status) => {
-        if (!stopped) setCompatibility(status);
-      })
-      .catch((error) => {
-        if (!stopped) setCompatibilityError(error.message);
-      })
-      .finally(() => {
-        if (!stopped) setChecking(false);
-      });
-    return () => {
-      stopped = true;
-    };
-  }, [endpoint]);
-  async function checkCompatibility(install = false) {
-    setChecking(true);
-    setCompatibilityError("");
+  const states = useDaemonStates();
+  const [installs, setInstalls] = useState<Record<string, InstallState>>({});
+  async function install(id: string) {
+    setInstalls((all) => ({ ...all, [id]: { phase: "running" } }));
     try {
-      if (install) await window.bridge!.herdrInstall(endpoint);
-      setCompatibility(await window.bridge!.herdrCompatibility(endpoint));
-      if (install)
-        notify(
-          "Herdr CLI installed. A running Herdr of another protocol keeps its own matching CLI.",
-        );
-    } catch (error) {
-      setCompatibilityError(
-        error instanceof Error ? error.message : String(error),
-      );
-    } finally {
-      setChecking(false);
+      const result = await window.bridge!.hostInstall(id);
+      setInstalls((all) => ({
+        ...all,
+        [id]: { phase: "done", version: result.version },
+      }));
+      await window.bridge!.connectionsConnect(`ssh:${id}`).catch(() => null);
+    } catch (e) {
+      setInstalls((all) => ({
+        ...all,
+        [id]: {
+          phase: "error",
+          message: e instanceof Error ? e.message : String(e),
+        },
+      }));
     }
   }
   const [editing, setEditing] = useState<ConnectionProfile | "new" | null>(
@@ -84,15 +165,7 @@ export function ConnectionsSettings({
     try {
       const { setup } = await window.bridge!.connectionsConnect(value);
       onSelect(value);
-      const response = await window
-        .bridge!.herdr(value, "session.snapshot")
-        .catch(() => null);
-      const count = (response?.snapshot ?? response)?.workspaces?.length;
-      notify(
-        (typeof count === "number"
-          ? `Connected to ${label}: ${count} workspace${count === 1 ? "" : "s"}.`
-          : `Connected to ${label}.`) + (setup ? ` Set up: ${setup}.` : ""),
-      );
+      notify(`Connecting to ${label}.` + (setup ? ` Set up: ${setup}.` : ""));
       await onRefresh();
     } catch (e) {
       setError(String(e));
@@ -102,65 +175,21 @@ export function ConnectionsSettings({
   }
   return (
     <div className="connections-settings">
-      {socketForm}
-      <div className="herdr-compatibility">
-        <strong>Herdr compatibility</strong>
-        {checking && (
-          <p className="muted" role="status">
-            Checking daemon and terminal CLI…
-          </p>
-        )}
-        {compatibility && (
-          <>
-            <p role="status">
-              {compatibility.compatible ? "Compatible" : "Needs attention"} ·
-              sushiAI installs {compatibility.expected.version}
-            </p>
-            <p className="muted">
-              Daemon: {compatibility.daemon.version || "unavailable"} · Terminal
-              CLI: {compatibility.cli.version || "unavailable"}
-            </p>
-            {compatibility.issues.length > 0 && (
-              <p className="inline-error" role="alert">
-                {compatibility.issues.join(" ")}
-              </p>
-            )}
-          </>
-        )}
-        {compatibilityError && (
-          <p className="inline-error" role="alert">
-            {compatibilityError}
-          </p>
-        )}
-        <div className="dialog-actions">
-          <button
-            className="secondary"
-            disabled={checking}
-            onClick={() => checkCompatibility()}
-          >
-            Check compatibility
-          </button>
-          <button
-            className="secondary"
-            disabled={checking}
-            onClick={() => checkCompatibility(true)}
-          >
-            Install verified Herdr CLI
-          </button>
-        </div>
-      </div>
       <div className="connections-hosts">
-        <button
+        <div
           className={`connection-card ${!endpoint.startsWith("ssh:") ? "selected" : ""}`}
-          onClick={() => onSelect(localSocket)}
         >
           <Server size={17} />
-          <div>
+          <button
+            className="connection-info"
+            onClick={() => onSelect(localSocket)}
+          >
             <strong>This Mac</strong>
-            <small>Local Herdr</small>
-          </div>
+            <small>Local sushiai daemon</small>
+          </button>
           {!endpoint.startsWith("ssh:") && <span>Active</span>}
-        </button>
+          <HostStatus state={states.get("local")} onAction={() => {}} />
+        </div>
         {profiles.map((p) => (
           <div
             className={`connection-card ${endpoint === `ssh:${p.id}` ? "selected" : ""} ${p.hidden ? "hidden-from-sidebar" : ""}`}
@@ -174,7 +203,8 @@ export function ConnectionsSettings({
               <strong>{p.name}</strong>
               <small>
                 {p.host}
-                {p.port ? `:${p.port}` : ""} · {p.socket}
+                {p.port ? `:${p.port}` : ""}
+                {p.connector?.kind === "command" ? " · custom command" : ""}
                 {p.hidden ? " · hidden from Workspaces" : ""}
               </small>
             </button>
@@ -224,6 +254,15 @@ export function ConnectionsSettings({
             >
               <Trash2 size={13} />
             </button>
+            <HostStatus
+              state={states.get(p.id)}
+              install={installs[p.id]}
+              onAction={(action) =>
+                action === "retry"
+                  ? void connect(`ssh:${p.id}`, p.name)
+                  : void install(p.id)
+              }
+            />
           </div>
         ))}
         {editing ? (
@@ -239,7 +278,11 @@ export function ConnectionsSettings({
                   name: String(form.get("name")),
                   host: String(form.get("host")),
                   port: Number(form.get("port")) || undefined,
-                  socket: String(form.get("socket")),
+                  // The daemon connector has no socket; an existing profile
+                  // keeps the one orchd may still read.
+                  socket:
+                    typeof editing === "object" ? editing.socket : undefined,
+                  connector: connectorFromLine(String(form.get("command"))),
                 });
                 setEditing(null);
                 await onRefresh();
@@ -286,18 +329,32 @@ export function ConnectionsSettings({
                 />
               </label>
             </div>
-            <label>
-              Remote Herdr socket
-              <input
-                name="socket"
-                defaultValue={
-                  typeof editing === "object"
-                    ? editing.socket
-                    : "~/.config/herdr/herdr.sock"
-                }
-                required
-              />
-            </label>
+            <details
+              className="advanced"
+              open={
+                typeof editing === "object" &&
+                editing.connector?.kind === "command"
+              }
+            >
+              <summary>Advanced</summary>
+              <label>
+                Connect with a command
+                <input
+                  name="command"
+                  placeholder="Leave empty to use SSH"
+                  defaultValue={
+                    typeof editing === "object" &&
+                    editing.connector?.kind === "command"
+                      ? formatArgv(editing.connector.argv)
+                      : ""
+                  }
+                />
+              </label>
+              <p className="muted">
+                Runs the command and talks to the daemon over its input and
+                output. Use quotes around arguments with spaces.
+              </p>
+            </details>
             <p className="muted">
               Uses your SSH config, keys and agent. Connect once in Terminal to
               verify a new host’s key. Remote file browsing requires Python 3.

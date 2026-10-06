@@ -14,6 +14,7 @@ const { sessionLaunchEnv } = require("./project-session.cjs");
 const SHELL_CMD = ["/bin/sh", "-lc", 'exec "${SHELL:-/bin/sh}" -l'];
 const NATIVE_AGENTS = ["claude", "codex"];
 const CMD_AGENTS = ["gemini", "cursor-agent"];
+const quote = (text) => `'${String(text).replaceAll("'", "'\\''")}'`;
 
 function launchError(code, message) {
   return Object.assign(new Error(message), { code });
@@ -22,12 +23,11 @@ function launchError(code, message) {
 function validate(request) {
   if (!request || typeof request !== "object")
     throw launchError("INVALID_LAUNCH", "Invalid session launch.");
-  if (request.host !== "local")
-    throw launchError(
-      "REMOTE_LAUNCH_LATER",
-      "Remote launch comes later. Start sessions on this Mac for now.",
-    );
-  if (typeof request.cwd !== "string" || !path.isAbsolute(request.cwd))
+  if (typeof request.host !== "string" || !request.host)
+    throw launchError("INVALID_LAUNCH", "Choose a host.");
+  const absolute =
+    request.host === "local" ? path.isAbsolute : path.posix.isAbsolute;
+  if (typeof request.cwd !== "string" || !absolute(request.cwd))
     throw launchError("INVALID_LAUNCH", "Choose an absolute project folder.");
   if (
     typeof request.idempotencyKey !== "string" ||
@@ -66,11 +66,64 @@ function createSessionLauncher({
   manager,
   environment,
   worktreeCreate = createWorktree,
+  exec,
+  hasShell = () => true,
 }) {
   // A retry with the same key reuses its worktree instead of failing on it.
   const worktrees = new Map();
 
+  // The real path of a folder on a remote host, or "" when it is not there.
+  async function remoteDirectory(host, directory) {
+    if (!exec) throw launchError("INVALID_LAUNCH", "This host has no shell.");
+    try {
+      const out = await exec(
+        `ssh:${host}`,
+        `sh -c ${quote('test -d "$1" && cd "$1" && pwd -P')} sh ${quote(directory)}`,
+        { timeout: 20000 },
+      );
+      return String(out).trim();
+    } catch {
+      return "";
+    }
+  }
+
+  // A remote folder is used as it is. A remote worktree is used when it exists
+  // (the sibling `<repo>-<branch>` a local launch would create); sushiAI does
+  // not create one on a host yet.
+  async function remoteCheckout(request) {
+    // A command connector has no shell to probe with: the folder is taken as
+    // given, and a worktree cannot be looked up.
+    if (!hasShell(request.host)) {
+      if (request.worktree)
+        throw launchError(
+          "REMOTE_WORKTREE_MISSING",
+          "This host connects through a command and has no shell, so a worktree cannot be used. Launch without a worktree.",
+        );
+      return request.cwd;
+    }
+    const cwd = await remoteDirectory(request.host, request.cwd);
+    if (!cwd)
+      throw launchError(
+        "CHECKOUT_MISSING",
+        "The folder is not present on the host, or the host cannot be reached.",
+      );
+    if (!request.worktree) return cwd;
+    const slug = request.worktree.branch.replace(/\//g, "-");
+    const target = path.posix.join(
+      path.posix.dirname(cwd),
+      `${path.posix.basename(cwd)}-${slug}`,
+    );
+    const existing = await remoteDirectory(request.host, target);
+    if (!existing)
+      throw launchError(
+        "REMOTE_WORKTREE_MISSING",
+        `Creating a worktree on a remote host is not supported yet. Create ${target} on the host first, or launch without a worktree.`,
+      );
+    return existing;
+  }
+
   async function checkout(request) {
+    if (request.host !== "local") return remoteCheckout(request);
     let cwd;
     try {
       cwd = await fs.realpath(request.cwd);
@@ -123,7 +176,11 @@ function createSessionLauncher({
     if (request.group) params.group = request.group;
     if (request.agent === "claude" && Object.keys(claudeSettings).length)
       params.claudeSettings = claudeSettings;
-    const result = await manager.request("local", "session.create", params);
+    const result = await manager.request(
+      request.host,
+      "session.create",
+      params,
+    );
     const sessionId = result?.id ?? result?.sessionId;
     if (typeof sessionId !== "string" || !sessionId)
       throw launchError(
@@ -147,11 +204,14 @@ function createDaemonLaunch({
 }) {
   return createSessionLauncher({
     manager,
+    exec: (...args) => connections.exec(...args),
+    hasShell: (host) => host === "local" || connections.hasShell(`ssh:${host}`),
     environment: (input) =>
       sessionLaunchEnv(
         {
           projects,
           connections,
+          exec: (...args) => connections.exec(...args),
           resolveAccount: (id) => modelProviders.resolveClaudeAccount(id),
           resolveCodexAccount: (id, endpoint) =>
             codexAccounts.resolve(id, endpoint),

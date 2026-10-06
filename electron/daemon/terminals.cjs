@@ -16,19 +16,26 @@ const {
 } = require("../terminal-flow.cjs");
 
 const FIRST_ATTACH_SCROLLBACK = 2000;
+const MAX_QUEUED_BYTES = 4 * OUTPUT_CREDIT_BYTES;
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
 // A shell reads the path as one word however the file was named.
 const shellPath = (value) => `'${value.replace(/'/g, "'\\''")}' `;
+const quote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
+
+// Stores stdin as ~/.sushiai/attachments/<name> on the host (file 0600, every
+// directory it creates 0700) and prints the absolute path.
+const uploadScript = (name) =>
+  `umask 077; d="$HOME/.sushiai/attachments"; mkdir -p "$d" && chmod 700 "$d" && f="$d"/${quote(name)} && cat > "$f" && chmod 600 "$f" && printf '%s\\n' "$f"`;
 
 function createTerminalHandlers({
   getManager,
   send,
   onEvent,
   attachmentsDir = path.join(os.tmpdir(), "sushiai-attachments"),
+  exec,
 }) {
   const panels = new Map(); // panelId -> entry
-  const attachedBefore = new Set(); // host\0sessionId attached in this app run
 
   function entryFor(panelId) {
     const entry = panels.get(panelId);
@@ -36,7 +43,24 @@ function createTerminalHandlers({
     return entry;
   }
 
-  function createEntry(panelId, host, sessionId, cols, rows) {
+  function overflow(panelId, entry) {
+    if (entry.resyncing) return;
+    entry.resyncing = true;
+    entry.queue = [];
+    entry.queuedBytes = 0;
+    setImmediate(() => {
+      if (entry.closed || panels.get(panelId) !== entry) return;
+      attach({
+        panelId,
+        host: entry.host,
+        sessionId: entry.sessionId,
+        cols: entry.cols,
+        rows: entry.rows,
+      }).catch(() => send("daemon-terminal-data", { panelId, exited: true }));
+    });
+  }
+
+  function createEntry(panelId, host, sessionId, cols, rows, stale = 0) {
     const decoder = new StringDecoder("utf8");
     const entry = {
       host,
@@ -46,8 +70,12 @@ function createTerminalHandlers({
       rows,
       closed: false,
       queue: [], // ordered strings waiting for credit
-      inFlight: 0,
+      queuedBytes: 0,
+      inFlight: 0, // bytes sent and not acked, snapshot included
+      stale, // unacked bytes sent before the last snapshot
     };
+    // Sends queued text while credit lasts. A piece is cut on a code point and
+    // by UTF-8 bytes; when not even the next character fits, it waits for an ack.
     function flush() {
       while (
         !entry.closed &&
@@ -59,15 +87,20 @@ function createTerminalHandlers({
           OUTPUT_CHUNK_BYTES,
           OUTPUT_CREDIT_BYTES - entry.inFlight,
         );
-        // A character takes at most 3 bytes in UTF-16 units, so this never overshoots.
-        let end = Math.max(1, Math.floor(room / 3));
-        let piece = head;
-        if (end < head.length) {
-          if (/^[\uDC00-\uDFFF]$/.test(head[end])) end--;
-          piece = head.slice(0, end);
-          entry.queue[0] = head.slice(end);
-        } else entry.queue.shift();
-        entry.inFlight += Buffer.byteLength(piece);
+        let end = 0;
+        let bytes = 0;
+        for (const character of head) {
+          const size = Buffer.byteLength(character);
+          if (bytes + size > room) break;
+          bytes += size;
+          end += character.length;
+        }
+        if (end === 0) break;
+        const piece = head.slice(0, end);
+        if (end < head.length) entry.queue[0] = head.slice(end);
+        else entry.queue.shift();
+        entry.queuedBytes -= bytes;
+        entry.inFlight += bytes;
         send("daemon-terminal-data", { panelId, data: piece });
       }
     }
@@ -75,10 +108,13 @@ function createTerminalHandlers({
     entry.onBytes = (buffer, info = {}) => {
       if (entry.closed) return;
       if (info.snapshot) {
-        // The snapshot replaces everything older, queued or not.
+        // The snapshot replaces everything older, queued or not. Bytes sent
+        // before it and not yet acked still come back as acks: they must not
+        // shrink the credit of the new window (`stale`).
         decoder.end();
         entry.queue = [];
-        entry.inFlight = 0;
+        entry.queuedBytes = 0;
+        entry.stale += entry.inFlight;
         const text = buffer.toString("utf8");
         entry.cols = info.cols ?? entry.cols;
         entry.rows = info.rows ?? entry.rows;
@@ -92,20 +128,27 @@ function createTerminalHandlers({
         return;
       }
       const text = decoder.write(buffer);
-      if (text) {
-        entry.queue.push(text);
-        flush();
-      }
+      if (!text) return;
+      entry.queue.push(text);
+      entry.queuedBytes += Buffer.byteLength(text);
+      flush();
+      // A renderer that stopped acking (closed or throttled window) must not
+      // grow this queue without bound: drop it and take a fresh snapshot.
+      if (entry.queuedBytes > MAX_QUEUED_BYTES) overflow(panelId, entry);
     };
     return entry;
   }
 
   async function attach({ panelId, host, sessionId, cols, rows }) {
+    // Bytes the old attach sent and the renderer has not acked yet still come
+    // back as acks: they belong to the old window, not to the new one.
+    const before = panels.get(panelId);
+    const owed = before ? before.inFlight + before.stale : 0;
     await detach(panelId);
     const manager = getManager();
-    const key = `${host}\0${sessionId}`;
-    const scrollback = attachedBefore.has(key) ? 0 : FIRST_ATTACH_SCROLLBACK;
-    const entry = createEntry(panelId, host, sessionId, cols, rows);
+    // A new attach always lands in an empty terminal, so it brings the history.
+    const scrollback = FIRST_ATTACH_SCROLLBACK;
+    const entry = createEntry(panelId, host, sessionId, cols, rows, owed);
     panels.set(panelId, entry);
     try {
       const handle = await manager.attach(
@@ -119,7 +162,6 @@ function createTerminalHandlers({
         return;
       }
       entry.handle = handle;
-      attachedBefore.add(key);
       entry.cols = handle.cols ?? entry.cols;
       entry.rows = handle.rows ?? entry.rows;
     } catch (error) {
@@ -169,20 +211,30 @@ function createTerminalHandlers({
   function ack(panelId, bytes) {
     const entry = panels.get(panelId);
     if (!entry) return;
-    entry.inFlight = Math.max(0, entry.inFlight - bytes);
+    const old = Math.min(entry.stale, bytes);
+    entry.stale -= old;
+    entry.inFlight = Math.max(0, entry.inFlight - (bytes - old));
     entry.flush();
   }
 
-  async function attachFile(panelId, path) {
-    await write(panelId, shellPath(path));
+  const typePath = (panelId, file) => write(panelId, shellPath(file));
+
+  // A dropped file: typed by its path on this Mac; on a remote host the Mac
+  // path means nothing, so the file is uploaded like pasted data (20 MB cap).
+  async function attachFile(panelId, file) {
+    const entry = entryFor(panelId);
+    if (entry.host === "local") return typePath(panelId, file);
+    const stat = await fs.stat(file);
+    if (!stat.isFile() || !stat.size || stat.size > MAX_ATTACHMENT_BYTES)
+      throw new Error("Choose non-empty files up to 20 MB.");
+    return attachData(panelId, path.basename(file), await fs.readFile(file));
   }
 
-  // Pasted data without a path on disk: stored as a private temp file on this
-  // Mac, then its path is handed over like a dropped file. Local host only.
+  // Pasted data without a path on disk: stored as a private file (a temp file
+  // on this Mac, or ~/.sushiai/attachments on a remote host, uploaded over the
+  // connection's ssh stdin), then its path is handed over like a dropped file.
   async function attachData(panelId, name, bytes) {
     const entry = entryFor(panelId);
-    if (entry.host !== "local")
-      throw new Error("attaching pasted data to a remote host comes later");
     if (!bytes.length || bytes.length > MAX_ATTACHMENT_BYTES)
       throw new Error("Choose non-empty files up to 20 MB.");
     const safe =
@@ -190,10 +242,24 @@ function createTerminalHandlers({
         .basename(name)
         .replace(/[^\w.\- ]+/g, "_")
         .slice(-80) || "pasted";
+    const unique = `${randomUUID()}-${safe}`;
+    if (entry.host !== "local") {
+      if (!exec) throw new Error("This host cannot receive pasted data.");
+      const out = await exec(
+        `ssh:${entry.host}`,
+        `sh -c ${quote(uploadScript(unique))}`,
+        { input: Buffer.from(bytes), timeout: 120000 },
+      );
+      const remote = String(out).trim();
+      if (!path.posix.isAbsolute(remote) || /[\r\n\0]/.test(remote))
+        throw new Error("The host did not confirm the upload.");
+      await typePath(panelId, remote);
+      return;
+    }
     await fs.mkdir(attachmentsDir, { recursive: true, mode: 0o700 });
-    const file = path.join(attachmentsDir, `${randomUUID()}-${safe}`);
+    const file = path.join(attachmentsDir, unique);
     await fs.writeFile(file, bytes, { flag: "wx", mode: 0o600 });
-    await attachFile(panelId, file);
+    await typePath(panelId, file);
   }
 
   function handleEvent(event) {
@@ -204,6 +270,17 @@ function createTerminalHandlers({
         send("daemon-terminal-data", { panelId, exited: true });
   }
   const unsubscribe = onEvent ? onEvent(handleEvent) : undefined;
+
+  // A host was removed or disconnected: its terminals end.
+  async function closeHost(host) {
+    const ids = [...panels]
+      .filter(([, e]) => e.host === host)
+      .map(([id]) => id);
+    for (const panelId of ids) {
+      send("daemon-terminal-data", { panelId, exited: true });
+      await detach(panelId);
+    }
+  }
 
   async function close() {
     if (typeof unsubscribe === "function") unsubscribe();
@@ -219,6 +296,7 @@ function createTerminalHandlers({
     attachFile,
     attachData,
     handleEvent,
+    closeHost,
     close,
   };
 }

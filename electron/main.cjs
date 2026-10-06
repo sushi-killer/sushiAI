@@ -17,6 +17,7 @@ const fs = require("node:fs/promises");
 const { existsSync } = require("node:fs");
 const pty = require("node-pty");
 const { Connections } = require("./connections.cjs");
+const { readStore, writeStore } = require("./app-db.cjs");
 const { PreviewServer } = require("./preview.cjs");
 const { Updates } = require("./updates.cjs");
 const { scanLocalSkills } = require("./skills-catalog.cjs");
@@ -30,7 +31,11 @@ const { AgentRegistry } = require("./agents/registry.cjs");
 const { HermesProvider } = require("./agents/hermes-provider.cjs");
 const { registerProjectIpc } = require("./ipc/projects.cjs");
 const { registerTerminalIpc } = require("./ipc/terminals.cjs");
-const { setupHost, setupSummary } = require("./host-setup.cjs");
+const {
+  setupHost,
+  setupSummary,
+  requireHostManifest,
+} = require("./host-setup.cjs");
 const { registerChatIpc } = require("./ipc/chat.cjs");
 const { registerAppIpc } = require("./ipc/app.cjs");
 const { ipcResult } = require("./ipc/errors.cjs");
@@ -39,6 +44,9 @@ const { registerExtensionIpc } = require("./ipc/extensions.cjs");
 const { registerDaemonIpc, forwardDaemonEvents } = require("./ipc/daemon.cjs");
 const { createDaemonManager } = require("./daemon/manager.cjs");
 const { createLocalConnector } = require("./daemon/local.cjs");
+const { remoteConnectors } = require("./daemon/connectors.cjs");
+const { createHostInstaller } = require("./daemon/install.cjs");
+const { watchHostTools } = require("./daemon/host-tools.cjs");
 const { registerAttentionIpc } = require("./attention.cjs");
 const { registerWorkspaceSnapshot } = require("./workspace-snapshot.cjs");
 const {
@@ -185,8 +193,45 @@ function handle(channel, callback) {
     return ipcResult(callback, args);
   });
 }
+// Connect / Retry / Disconnect on a host the daemon manager owns go to the
+// manager; the Herdr tunnel path only serves hosts the manager does not know.
+// Connecting a host that is ready or connecting does nothing.
+const daemonHost = (endpoint) => {
+  if (typeof endpoint !== "string" || !endpoint.startsWith("ssh:")) return null;
+  const host = endpoint.slice(4);
+  return daemonManager?.states().some((state) => state.host === host)
+    ? host
+    : null;
+};
+const connectThroughDaemon =
+  (original) =>
+  async (endpoint, ...rest) => {
+    const host = daemonHost(endpoint);
+    if (!host) return original(endpoint, ...rest);
+    let state = daemonManager.states().find((item) => item.host === host);
+    if (state.state !== "ready" && state.state !== "connecting")
+      state = await daemonManager.retry(host);
+    await connections.setAutoConnect(endpoint, true);
+    return { connected: state.state === "ready", setup: "" };
+  };
+const disconnectThroughDaemon =
+  (original) =>
+  async (endpoint, ...rest) => {
+    const host = daemonHost(endpoint);
+    // The manager closes the host's terminals when it reports "disconnected".
+    if (host) daemonManager.disconnect(host);
+    return original(endpoint, ...rest);
+  };
+const daemonWrappers = {
+  "connections-connect": connectThroughDaemon,
+  "connections-disconnect": disconnectThroughDaemon,
+};
 registerProjectIpc({
-  handle,
+  handle: (channel, callback) =>
+    handle(
+      channel,
+      daemonWrappers[channel] ? daemonWrappers[channel](callback) : callback,
+    ),
   getConnections: () => connections,
   getPreview: () => preview,
   getClaudeMcp: () => claudeMcp,
@@ -195,19 +240,41 @@ registerProjectIpc({
   projects,
 });
 let daemonManager = null;
+let hostTools = null;
+// Host binaries and their manifest: app resources when packaged, else target/host.
+const hostManifest = () =>
+  requireHostManifest({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+  });
+// The one installer: tools, skills and sushiai, with no Herdr steps.
+const setupDaemonHost = (endpoint, options) =>
+  setupHost(connections, endpoint, "", { ...options, herdr: false });
 // The manager is created in whenReady; subscribers registered before that
 // are served by one forwarding subscription made when it exists.
 const daemonEventListeners = new Set();
+let daemonIpc = null;
 const onDaemonEvent = (listener) => {
   daemonEventListeners.add(listener);
   return () => daemonEventListeners.delete(listener);
 };
-registerDaemonIpc({
+daemonIpc = registerDaemonIpc({
   handle,
   send,
   getManager: () => daemonManager,
   onEvent: onDaemonEvent,
   attachmentsDir: path.join(app.getPath("temp"), "sushiai-attachments"),
+  exec: (...args) => connections.exec(...args),
+  installHost: (host) => {
+    if (!daemonManager) throw new Error("daemon manager is not running");
+    return createHostInstaller({
+      manager: daemonManager,
+      connections,
+      manifest: hostManifest,
+      setup: setupDaemonHost,
+      markSetup: (name) => hostTools?.mark(name),
+    }).install(host);
+  },
   launch: createDaemonLaunch({
     manager: {
       request: (...args) => {
@@ -216,8 +283,12 @@ registerDaemonIpc({
       },
     },
     projects,
-    // `connections` is created in whenReady; the launcher only needs inspect.
-    connections: { inspect: (...args) => connections.inspect(...args) },
+    // `connections` is created in whenReady.
+    connections: {
+      inspect: (...args) => connections.inspect(...args),
+      exec: (...args) => connections.exec(...args),
+      hasShell: (endpoint) => connections.hasShell(endpoint),
+    },
     modelProviders,
     codexAccounts,
   }).launch,
@@ -393,15 +464,24 @@ app.whenReady().then(async () => {
       .catch((error) => console.error("Environment setup failed:", error));
   // A test run starts a daemon only when it brings its own SUSHIAI_HOME.
   if (!testMode.test || process.env.SUSHIAI_HOME) {
+    const local = createLocalConnector({
+      appVersion: app.getVersion(),
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      log: (message) => console.log(`daemon: ${message}`),
+    });
+    // One daemon host per connection profile; saving or deleting a profile
+    // adds, replaces or removes its host while the app runs.
+    const connectorMap = (profiles) => ({
+      local,
+      ...remoteConnectors(profiles, {
+        ssh: connections.ssh,
+        args: (profile) => connections.args(profile),
+        knownHostsFile: connections.knownHostsFile,
+      }),
+    });
     daemonManager = createDaemonManager({
-      connectors: {
-        local: createLocalConnector({
-          appVersion: app.getVersion(),
-          isPackaged: app.isPackaged,
-          resourcesPath: process.resourcesPath,
-          log: (message) => console.log(`daemon: ${message}`),
-        }),
-      },
+      connectors: connectorMap(connections.profiles),
       powerMonitor,
       log: (message) => console.log(`daemon: ${message}`),
     });
@@ -411,6 +491,25 @@ app.whenReady().then(async () => {
     forwardDaemonEvents(daemonManager, (channel, value) => {
       for (const window of BrowserWindow.getAllWindows())
         if (!window.isDestroyed()) window.webContents.send(channel, value);
+    });
+    connections.onProfilesChange((profiles) =>
+      daemonManager?.setConnectors(connectorMap(profiles)),
+    );
+    // A host that is removed or disconnected ends its terminals.
+    daemonManager.on("state", (state) => {
+      if (state.reason === "removed" || state.reason === "disconnected")
+        void daemonIpc?.terminals.closeHost(state.host);
+    });
+    hostTools = watchHostTools({
+      manager: daemonManager,
+      connections,
+      store: {
+        read: () => readStore(app.getPath("userData"), "host-tools") || {},
+        write: (value) =>
+          writeStore(app.getPath("userData"), "host-tools", value),
+      },
+      setup: setupDaemonHost,
+      log: (message) => console.log(`daemon: ${message}`),
     });
     daemonManager.start();
   }

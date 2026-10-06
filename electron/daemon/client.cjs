@@ -261,8 +261,11 @@ function connectDaemon({
           if (result.protocol !== PROTOCOL_VERSION) {
             close();
             reject(
-              new Error(
-                `daemon speaks protocol ${result.protocol}, expected ${PROTOCOL_VERSION}`,
+              Object.assign(
+                new Error(
+                  `daemon speaks protocol ${result.protocol}, expected ${PROTOCOL_VERSION}`,
+                ),
+                { reason: "incompatible", retry: false },
               ),
             );
             return;

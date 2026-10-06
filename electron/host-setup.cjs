@@ -59,6 +59,30 @@ function loadHostManifest(file) {
   }
 }
 
+/** Where the host binaries and their manifest live: the app's resources when
+ * packaged, else the repo's target/host (`npm run build:host`). */
+function hostManifestFile({
+  isPackaged = false,
+  resourcesPath = process.resourcesPath,
+  repoRoot = path.join(__dirname, ".."),
+} = {}) {
+  return isPackaged && resourcesPath
+    ? path.join(resourcesPath, "host", "manifest.json")
+    : path.join(repoRoot, "target", "host", "manifest.json");
+}
+
+/** `loadHostManifest` that throws a message the owner can act on. */
+function requireHostManifest(options = {}) {
+  const file = hostManifestFile(options);
+  const loaded = loadHostManifest(file);
+  if (loaded) return loaded;
+  throw new Error(
+    options.isPackaged
+      ? "This build of sushiAI has no sushiai binaries for remote hosts."
+      : `No host manifest at ${file}. Run npm run build:host first.`,
+  );
+}
+
 /** `{ herdr: "installed", claude: "present", ... }` from the script's output. */
 function parseSetup(output) {
   const states = {};
@@ -185,12 +209,17 @@ async function runSetup(
     checkCompatibility = checkHerdrCompatibility,
     runLocalScript = localScript,
     installSkill = syncBuiltinSkillsOnHost,
-    sushiai = null,
+    sushiai,
+    herdr = true,
     installSushiaiBinary = installSushiai,
   } = {},
 ) {
   const timeout = 10 * 60 * 1000;
   const remote = endpoint.startsWith("ssh:");
+  if (remote && connections.hasShell && !connections.hasShell(endpoint))
+    return {
+      note: "This host connects through a command and has no shell: set up sushiai, Claude Code and Codex on it yourself.",
+    };
   if (remote) void installSkill(connections, endpoint);
   const runScript = (script) =>
     remote
@@ -208,11 +237,14 @@ async function runSetup(
       });
       states.sushiai = result.status;
       states.sushiaiVersion = result.version;
+      states.sushiaiResult = result;
     } catch (error) {
       states.sushiai = "failed";
       states.sushiaiError = error.message;
     }
   }
+  // A daemon host needs none of the Herdr steps below.
+  if (herdr === false) return states;
   const probe = () =>
     checkCompatibility({
       endpoint,
@@ -277,4 +309,6 @@ module.exports = {
   setupHost,
   cleanEnvironment,
   loadHostManifest,
+  hostManifestFile,
+  requireHostManifest,
 };

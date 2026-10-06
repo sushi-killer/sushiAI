@@ -5,6 +5,7 @@ mod hook;
 mod hooks_file;
 
 use anyhow::{bail, Context, Result};
+use tracing_subscriber::filter::LevelFilter;
 
 mod proxy;
 
@@ -18,7 +19,15 @@ fn main() -> Result<()> {
         hook::run(args);
         return Ok(());
     }
-    tracing_subscriber::fmt().with_writer(stderr).init();
+    // WARN keeps daemon.log small; `SUSHIAI_LOG=info|debug|trace|off` changes it.
+    let level = std::env::var("SUSHIAI_LOG")
+        .ok()
+        .and_then(|v| v.parse::<LevelFilter>().ok())
+        .unwrap_or(LevelFilter::WARN);
+    tracing_subscriber::fmt()
+        .with_max_level(level)
+        .with_writer(stderr)
+        .init();
     match command.as_deref() {
         Some("hooks") => hooks_file::run(args.next().as_deref())?,
         Some("daemon") => sushiai_daemon::run_blocking(sushiai_daemon::Home::from_env())?,

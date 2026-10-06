@@ -97,6 +97,61 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
   separates sessions' hooks; this is not a security boundary on a single-user
   machine.
 
+## Catalog, notifications and daemon control
+
+- **Replica rule.** The desktop is the master of projects and groups; a daemon
+  holds only the projects that have a folder on its own host. The daemon's host
+  name is `$SUSHIAI_HOST`, else the first line of `<home>/host`, else the machine
+  hostname; `hello` returns it as `host`, and `projects.sync {host}` for another
+  host fails with `INVALID_PARAMS` "daemon is <host>". `projects.sync {host, projects,
+  full}` and `groups.sync {groups, full}` answer `{applied, ignored, rev}`. A partial
+  sync merges by last writer (higher `rev`, then `updatedAt`). A `full` sync is
+  authoritative: every record in the payload replaces the stored one whatever its
+  `rev`, and live records absent from it become tombstones without a `rev` bump (so
+  do the groups of a removed project). A project removed and added again is live
+  with the next full projects sync, and its groups come back with the next full
+  groups sync. The groups replica is write-only until a catalog read exists: nothing
+  in the daemon reads it back. The replica is
+  saved as `<home>/catalog.json` (mode 0600, own `catalogVersion` 1) by the same
+  writer thread as `state.json`. A catalog file that cannot be read is renamed to
+  `catalog.json.unreadable-<ts>` and the desktop syncs again. Bindings are opaque
+  to the daemon (below), so a lost or unsynced catalog never blocks a launch.
+- **Bindings.** `SessionInfo.project` / `group` are owned by the registry, as is
+  `title`: `Registry::update` keeps the stored values, so an actor's stale copy
+  never overwrites them. Bindings are opaque: `session.create {project?, group?}` and
+  `session.update {id, project?, group?, title?}` store the ids as given and never
+  check them against the catalog, because a fresh daemon, or one whose catalog file
+  was set aside, may not have the desktop's projects yet. The desktop reconciles
+  bindings. Only an absent `project` on create is filled in, from `project_for_cwd`.
+  `session.update` leaves a missing field, clears on `null`, and returns the new
+  `SessionInfo`.
+- **Notifications** to every non-hook client: `session.created {SessionInfo}`
+  (before any other notification about that session), `session.updated {SessionInfo}` (title or binding
+  changed), `session.removed {id}` (`session.remove`, or the
+  oldest exited record dropped past 50). `session.remove {id}` accepts only an
+  exited session (`SESSION_STILL_RUNNING` otherwise).
+- **Keepalive.** `$/ping` answers `{}` at any time. `hello.client` is a plain string
+  for audit only.
+- **Daemon control.** `daemon.shutdown` (no params) is refused on a `role: "hook"`
+  connection. The daemon waits 200 ms so the response goes out, removes its socket,
+  flushes the state and, once the runtime has stopped every task, flushes again and
+  releases the lock. From the moment it is requested the daemon refuses requests that
+  change anything (`SHUTTING_DOWN`: create, input, resize, close, update, remove and
+  both syncs), so nothing is lost between the final flush and the exit. Holders and sessions are untouched. The
+  daemon never starts a replacement: whoever connects next does (`sushiai proxy`
+  over SSH, the desktop locally), so only clients start daemons and the `bin`
+  symlink has one writer at a time.
+- **Connector exit code** `sushiai_protocol::connector::DAEMON_DIED` (2) is what
+  `sushiai proxy` exits with when the daemon closes first
+  (`tests/connector-vectors/exit-codes.json` mirrors it).
+- **Reconnect** (client side): a lost link is a new connector, a new `hello`
+  (compare `daemon` and `capabilities`), `session.list`, and for each open
+  terminal `session.attach`, whose result carries a snapshot and `seq`; output
+  frames after it continue from `seq`. A `session.resync` or `session.snapshot`
+  notification means the client missed events and replaces its view.
+- **Log.** The binary logs at WARN by default; `SUSHIAI_LOG=info|debug|trace|off`
+  changes it (`sushiai proxy` passes it on to an auto-started daemon).
+
 ## Invariants
 
 - A frame is `u32` BE length of (kind + payload), a kind byte (`J` JSON-RPC,
@@ -118,8 +173,20 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
 - A subscriber that falls behind gets a `session.snapshot` notification (screen
   plus `seq`) instead of the bytes it missed.
 - One daemon per home: an exclusive `flock` on `daemon.lock`, taken before
-  recovery. The daemon opens its socket only after it has reattached to the
-  surviving holders. An unreachable holder marks its session `exited`.
+  recovery; the holder of the lock writes its pid into the file. A reader must first fail
+  `flock(LOCK_EX|LOCK_NB)` on the file before it trusts that pid: after a crash the
+  file keeps the old number. The daemon binds
+  its socket first (under `umask 077`, so it is never connectable by others, not
+  even briefly) and answers `hello` while the holders reattach. Sessions of
+  the state file that were running are listed at once as `detached` (still `running`
+  in the file), so a reconnecting client never sees one vanish. As each holder
+  answers, the session turns `running`; one that never answers turns `exited`.
+  Either way `session.updated` announces the settled status. The holders
+  reattach concurrently, each with its own 10 s limit. A request for such a session
+  (`attach`, `input`, `resize`, `close`, `ask.respond`) waits for its holder (at most
+  12 s) and then runs, so a client that reconnects at once loses nothing; after a
+  timeout or an exit it gets the normal `SESSION_NOT_RUNNING`. A newer `state.json` schema is
+  detected before the bind and stops the daemon.
 - Holder EOF is not an exit. The session becomes `detached` in memory and stays
   `running` in the state file. The actor reconnects with backoff (50 ms up to
   2 s) and re-attaches from its last `seq`; it gives up only when the socket
@@ -133,8 +200,16 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
   the directory is fsynced. It carries `schemaVersion`; an unknown version stops the daemon. A
   corrupt file is renamed to `state.json.corrupt-<ts>` and the catalog is
   rebuilt by probing `sessions/*.sock` (command, title and size are lost).
-- Directories the code creates get mode `0700`. An existing directory is never
-  chmod-ed; it must be owned by the current user and not group/other writable.
+- Directories the code creates get mode `0700`. An existing home (and its
+  `sessions` directory) must be a real directory, not a symlink, owned by the
+  current user; if group or others can enter it, the daemon tightens it to `0700`
+  and goes on (an installer may have created it under umask 022). Another owner, a
+  symlink or a file is refused.
+- On a client's EOF the connection stops its stream tasks, drops its sender and
+  waits (at most 2 s) for the writer to send what is queued: a client that
+  half-closes after its last request still gets every answer. `sushiai proxy`
+  relies on this: after stdin ends it half-closes the socket and waits for the
+  daemon's close; it has no idle timer.
 - A holder reports a startup error (bad command, bad directory) on stderr and
   closes stderr once it runs, so `session.create` returns the real reason.
 - Holder sockets live in a `0700` directory with mode `0600`. Env values and

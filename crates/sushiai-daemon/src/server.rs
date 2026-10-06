@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use sushiai_core::Screen;
+use sushiai_protocol::catalog::{ProjectsSync, SessionUpdate};
 use sushiai_protocol::{
     code, encode, method, AskRespond, AttachResult, Frame, Hello, HelloResult, HookEvent,
     HookResult, Message, Notification, Request, Response, SessionClose, SessionCreate, SessionId,
@@ -17,18 +18,22 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 use crate::agent;
 use crate::error::Fail;
 use crate::framed::FrameReader;
 use crate::holder::{self, HolderConn};
-use crate::registry::Registry;
+use crate::registry::{Registry, RemoveError};
 use crate::session::{self, Chunk, Handle, Snap};
 
 type Outbox = mpsc::Sender<Vec<u8>>;
 
 const OUTBOX: usize = 256;
+/// After the client's EOF: how long queued responses may take to reach it.
+const WRITER_GRACE: Duration = Duration::from_secs(2);
+/// How long a request waits for a restored session's holder: the reattach limit plus slack.
+const RECOVERY_WAIT: Duration = Duration::from_secs(12);
 
 pub async fn serve(listener: UnixListener, registry: Arc<Registry>) {
     loop {
@@ -43,6 +48,19 @@ pub async fn serve(listener: UnixListener, registry: Arc<Registry>) {
         }
     }
 }
+
+/// Requests that change something: refused once the daemon is stopping, so nothing is lost
+/// between the final state flush and the exit.
+const CHANGES: &[&str] = &[
+    method::SESSION_CREATE,
+    method::SESSION_INPUT,
+    method::SESSION_RESIZE,
+    method::SESSION_CLOSE,
+    method::SESSION_UPDATE,
+    method::SESSION_REMOVE,
+    method::PROJECTS_SYNC,
+    method::GROUPS_SYNC,
+];
 
 struct Conn {
     registry: Arc<Registry>,
@@ -66,7 +84,7 @@ struct Stream {
 async fn connection(stream: UnixStream, registry: Arc<Registry>) {
     let (read, mut write) = stream.into_split();
     let (out, mut queue) = mpsc::channel::<Vec<u8>>(OUTBOX);
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         while let Some(bytes) = queue.recv().await {
             if write.write_all(&bytes).await.is_err() {
                 break;
@@ -119,10 +137,25 @@ async fn connection(stream: UnixStream, registry: Arc<Registry>) {
             }
         }
     }
-    for task in conn.streams.values().chain(conn.events.iter()) {
+    // The client is gone or has half-closed. Responses already queued still go out: stop the
+    // tasks that hold a sender, drop ours, and let the writer drain its queue (bounded).
+    let Conn {
+        out,
+        streams,
+        events,
+        ..
+    } = conn;
+    let tasks: Vec<JoinHandle<()>> = streams.into_values().chain(events).collect();
+    for task in &tasks {
         task.abort();
     }
-    writer.abort();
+    for task in tasks {
+        let _ = task.await;
+    }
+    drop(out);
+    if timeout(WRITER_GRACE, &mut writer).await.is_err() {
+        writer.abort();
+    }
 }
 
 fn params<T: DeserializeOwned>(request: &Request) -> Result<T, Fail> {
@@ -138,13 +171,27 @@ impl Conn {
         }
     }
 
-    fn session(&self, id: &str) -> Result<Handle, Fail> {
-        match self.registry.handle(id) {
-            Some(handle) => Ok(handle),
-            None if self.registry.known(id) => {
-                Err((code::SESSION_NOT_RUNNING, "session is not running".into()))
+    /// The session's handle. A restored session whose holder has not answered yet is waited
+    /// for (at most `RECOVERY_WAIT`), so a client that reconnects at once can attach, type,
+    /// resize and close. After a timeout or an exit the normal error is returned.
+    async fn session(&self, id: &str) -> Result<Handle, Fail> {
+        let deadline = tokio::time::Instant::now() + RECOVERY_WAIT;
+        loop {
+            // Subscribe before looking, so a settle between the look and the wait is not lost.
+            let settled = self.registry.settled().notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            match self.registry.handle(id) {
+                Some(handle) => return Ok(handle),
+                None if self.registry.recovering(id) => {}
+                None if self.registry.known(id) => {
+                    return Err((code::SESSION_NOT_RUNNING, "session is not running".into()))
+                }
+                None => return Err((code::SESSION_NOT_FOUND, format!("no session {id}"))),
             }
-            None => Err((code::SESSION_NOT_FOUND, format!("no session {id}"))),
+            if tokio::time::timeout_at(deadline, settled).await.is_err() {
+                return Err((code::SESSION_NOT_RUNNING, "session is not running".into()));
+            }
         }
     }
 
@@ -174,6 +221,9 @@ impl Conn {
         if request.method == method::HELLO {
             return self.hello(request);
         }
+        if request.method == method::PING {
+            return Ok(json!({}));
+        }
         if !self.said_hello {
             return Err((code::NOT_INITIALIZED, "send hello first".into()));
         }
@@ -183,6 +233,9 @@ impl Conn {
                 "hook connections may only call hook.*".into(),
             ));
         }
+        if self.registry.stopping() && CHANGES.contains(&request.method.as_str()) {
+            return Err((code::SHUTTING_DOWN, "the daemon is stopping".into()));
+        }
         match request.method.as_str() {
             method::HOOK_EVENT => self.hook(params(request)?).await,
             method::ASK_RESPOND => {
@@ -191,24 +244,60 @@ impl Conn {
                     .registry
                     .session_of_ask(&p.ask_id)
                     .ok_or_else(|| (code::ASK_NOT_FOUND, format!("no ask {}", p.ask_id)))?;
-                self.session(&id)?.respond(p).await?;
+                self.session(&id).await?.respond(p).await?;
                 Ok(json!({}))
             }
             method::SESSION_CREATE => create(&self.registry, params(request)?).await,
             method::SESSION_LIST => Ok(json!(self.registry.list())),
             method::SESSION_INPUT => {
                 let p: SessionInput = params(request)?;
-                self.session(&p.id)?.input(p.data.into_bytes()).await?;
+                self.session(&p.id)
+                    .await?
+                    .input(p.data.into_bytes())
+                    .await?;
                 Ok(json!({}))
             }
             method::SESSION_RESIZE => {
                 let p: SessionResize = params(request)?;
-                self.session(&p.id)?.resize(p.cols, p.rows).await?;
+                self.session(&p.id).await?.resize(p.cols, p.rows).await?;
                 Ok(json!({}))
             }
             method::SESSION_CLOSE => {
                 let p: SessionClose = params(request)?;
-                self.session(&p.id)?.close(p.graceful).await?;
+                self.session(&p.id).await?.close(p.graceful).await?;
+                Ok(json!({}))
+            }
+            method::PROJECTS_SYNC => {
+                let p: ProjectsSync = params(request)?;
+                if p.host != self.registry.host {
+                    let message = format!("daemon is {}", self.registry.host);
+                    return Err((code::INVALID_PARAMS, message));
+                }
+                Ok(json!(self.registry.sync_projects(&p)))
+            }
+            method::GROUPS_SYNC => Ok(json!(self.registry.sync_groups(&params(request)?))),
+            method::SESSION_UPDATE => {
+                let p: SessionUpdate = params(request)?;
+                match self.registry.update_session(p) {
+                    Some(info) => Ok(json!(info)),
+                    None => Err((code::SESSION_NOT_FOUND, "no such session".into())),
+                }
+            }
+            method::SESSION_REMOVE => {
+                let p: SessionId = params(request)?;
+                match self.registry.remove(&p.id) {
+                    Ok(()) => Ok(json!({})),
+                    Err(RemoveError::NotFound) => {
+                        Err((code::SESSION_NOT_FOUND, format!("no session {}", p.id)))
+                    }
+                    Err(RemoveError::StillRunning) => Err((
+                        code::SESSION_STILL_RUNNING,
+                        "only an exited session can be removed".into(),
+                    )),
+                }
+            }
+            method::DAEMON_SHUTDOWN => {
+                self.registry.request_stop();
                 Ok(json!({}))
             }
             method::SESSION_ATTACH => self.attach(params(request)?).await,
@@ -247,6 +336,7 @@ impl Conn {
             protocol: PROTOCOL_VERSION,
             capabilities: CAPABILITIES.iter().map(|c| (*c).to_string()).collect(),
             daemon: env!("CARGO_PKG_VERSION").into(),
+            host: self.registry.host.clone(),
         }))
     }
 
@@ -270,7 +360,7 @@ impl Conn {
         // The session is known from `session.create` on; its actor may still be starting.
         let mut tries = 0;
         let handle = loop {
-            match self.session(&p.session) {
+            match self.session(&p.session).await {
                 Err((code::SESSION_NOT_RUNNING, _)) if tries < 100 => {
                     tries += 1;
                     sleep(Duration::from_millis(20)).await;
@@ -289,7 +379,7 @@ impl Conn {
     }
 
     async fn attach(&mut self, p: SessionId) -> Result<Value, Fail> {
-        let handle = self.session(&p.id)?;
+        let handle = self.session(&p.id).await?;
         let attached = handle
             .attach()
             .await
@@ -405,6 +495,7 @@ async fn create(registry: &Arc<Registry>, p: SessionCreate) -> Result<Value, Fai
     let id = agent::random_hex(8).map_err(|e| spawn_failed(&e))?;
     let socket = registry.home.socket().to_string_lossy().into_owned();
     let prepared = agent::prepare(&p, &socket, &id)?;
+    let binding = registry.bind_for_create(p.project.clone(), p.group.clone(), &p.cwd);
     let info = SessionInfo {
         id: id.clone(),
         cmd: prepared.cmd.clone(),
@@ -415,6 +506,8 @@ async fn create(registry: &Arc<Registry>, p: SessionCreate) -> Result<Value, Fai
         holder_pid: None,
         cols: p.cols,
         rows: p.rows,
+        project: binding.project,
+        group: binding.group,
         agent: prepared.agent,
     };
     // Known before the child runs: its first hook may arrive before the actor does.
@@ -455,7 +548,8 @@ async fn create(registry: &Arc<Registry>, p: SessionCreate) -> Result<Value, Fai
             return Err(spawn_failed(&e));
         }
     };
-    session::start(registry.clone(), info, conn, screen, seq, sock);
+    // Announced inside `start`, before the actor can broadcast anything about the session.
+    session::start(registry.clone(), info, conn, screen, seq, sock, true);
     Ok(json!({ "id": id }))
 }
 
@@ -512,9 +606,19 @@ mod tests {
             holder_pid: None,
             cols: 80,
             rows: 24,
+            project: None,
+            group: None,
             agent: Default::default(),
         };
-        session::start(registry.clone(), info, holder, Screen::new(24, 80), 0, sock);
+        session::start(
+            registry.clone(),
+            info,
+            holder,
+            Screen::new(24, 80),
+            0,
+            sock,
+            false,
+        );
 
         let (out, _queue) = mpsc::channel(8);
         let mut conn = Conn {

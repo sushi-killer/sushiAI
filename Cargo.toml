@@ -26,3 +26,6 @@ sushiai-protocol = { path = "crates/sushiai-protocol" }
 sushiai-core = { path = "crates/sushiai-core" }
 sushiai-daemon = { path = "crates/sushiai-daemon" }
 sushiai-hold = { path = "crates/sushiai-hold" }
+
+[profile.dev]
+debug = "line-tables-only"

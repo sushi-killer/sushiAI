@@ -1,8 +1,9 @@
 //! `sushiai proxy`: relays stdin/stdout to the daemon socket, byte for byte. It never parses
 //! frames. If nobody answers on the socket it starts a detached daemon first.
 //!
-//! Exit codes: 0 after stdin ended and the daemon's last bytes were drained, 2 when the
-//! daemon closed the connection first, 1 for every other failure.
+//! Exit codes: 0 after stdin ended and the daemon's last bytes were drained,
+//! `connector::DAEMON_DIED` (2) when the daemon closed the connection first, 1 for every
+//! other failure.
 
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
@@ -16,14 +17,23 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use sushiai_protocol::connector;
 
 const START_WAIT: Duration = Duration::from_secs(15);
-/// After stdin ends: at most this long in total, and until the daemon was quiet for `IDLE`.
-const DRAIN_WAIT: Duration = Duration::from_secs(2);
-const IDLE: Duration = Duration::from_millis(500);
+/// After stdin ends and the socket is half-closed: at most this long for the daemon to send
+/// what is queued and close.
+const DRAIN_WAIT: Duration = Duration::from_secs(5);
 const PATH_WAIT: Duration = Duration::from_secs(3);
 const FALLBACK_PATH: &str = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin";
-const ENV_ALLOW: &[&str] = &["HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR"];
+const ENV_ALLOW: &[&str] = &[
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "TMPDIR",
+    "SUSHIAI_LOG",
+];
 
 pub fn run(home: &sushiai_daemon::Home) -> Result<()> {
     let socket = home.socket();
@@ -208,7 +218,7 @@ fn relay(stream: UnixStream) -> ! {
             Ok(Event::StdinEnded) => break drain(&closer, &rx),
             Ok(Event::DaemonClosed) => {
                 eprintln!("sushiai proxy: the daemon closed the connection");
-                break 2;
+                break connector::DAEMON_DIED;
             }
             Ok(Event::Failed(message)) => break failure(&message),
             Err(_) => break 1,
@@ -217,25 +227,14 @@ fn relay(stream: UnixStream) -> ! {
     std::process::exit(code);
 }
 
-/// Stdin has ended. The daemon drops answers still queued when it sees the half-close, so
-/// first wait until it has been quiet for `IDLE` (at most `DRAIN_WAIT`), then half-close and
-/// give it the rest of the time to finish. The proxy never parses frames, so quiet is the
-/// only signal it has.
+/// Stdin has ended: half-close the socket. The daemon answers what it has read, then closes
+/// its side; that close ends the proxy.
 fn drain(socket: &UnixStream, rx: &Receiver<Event>) -> i32 {
-    let deadline = Instant::now() + DRAIN_WAIT;
-    let left = || deadline.saturating_duration_since(Instant::now());
-    loop {
-        match rx.recv_timeout(IDLE.min(left())) {
-            Ok(Event::Data) => {}
-            Ok(Event::DaemonClosed) => return 0,
-            Ok(Event::Failed(message)) => return failure(&message),
-            Ok(Event::StdinEnded) => {}
-            Err(_) => break,
-        }
-    }
     let _ = socket.shutdown(std::net::Shutdown::Write);
+    let deadline = Instant::now() + DRAIN_WAIT;
     loop {
-        match rx.recv_timeout(left()) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
             Ok(Event::Data | Event::StdinEnded) => {}
             Ok(Event::Failed(message)) => return failure(&message),
             Ok(Event::DaemonClosed) | Err(_) => return 0,

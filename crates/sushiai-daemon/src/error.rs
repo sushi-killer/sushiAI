@@ -10,7 +10,7 @@ pub enum Error {
     State(#[from] sushiai_core::StateError),
     #[error("a daemon is already running on {0}")]
     AlreadyRunning(String),
-    #[error("{0} is not safe to use: it must be owned by you and not writable by others")]
+    #[error("{0} is not safe to use: it must be a directory (not a symlink) owned by you")]
     UnsafeDir(String),
     #[error("holder: {0}")]
     Holder(String),

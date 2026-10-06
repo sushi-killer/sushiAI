@@ -198,11 +198,35 @@ impl Sandbox {
     }
 }
 
+impl Sandbox {
+    /// The pid the running daemon wrote into `daemon.lock`.
+    pub fn lock_pid(&self) -> Option<u32> {
+        std::fs::read_to_string(self.home().join("daemon.lock"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+}
+
 impl Drop for Sandbox {
     fn drop(&mut self) {
         for daemon in &mut self.daemons {
             let _ = daemon.kill();
             let _ = daemon.wait();
+        }
+        // A daemon started by hand elsewhere is nobody's child: find it through the lock file, and
+        // only kill it when the pid still names a daemon of this binary or home.
+        if let Some(pid) = self.lock_pid() {
+            let home = self.home().display().to_string();
+            let is_daemon = processes().iter().any(|(p, _, cmd)| {
+                *p == pid
+                    && cmd.ends_with(" daemon")
+                    && (cmd.starts_with(BIN) || cmd.contains(&home))
+            });
+            if is_daemon {
+                kill(pid, "-KILL");
+            }
         }
         let all = processes();
         for pid in self.holders() {
@@ -361,6 +385,33 @@ pub fn base64_decode(text: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Waits until `session.list` shows `id` as running: after a daemon restart a session is
+/// listed `detached` until its holder answered.
+pub fn wait_listed(client: &mut Client, id: &str) {
+    wait_until("the session to be running", 15, || {
+        client
+            .call("session.list", Value::Null)
+            .as_array()
+            .is_some_and(|list| {
+                list.iter()
+                    .any(|s| s["id"] == id && s["status"] == "running")
+            })
+    });
+}
+
+/// Waits until `id` is listed and no longer `detached` (running or exited).
+pub fn wait_settled(client: &mut Client, id: &str) {
+    wait_until("the session to settle", 15, || {
+        client
+            .call("session.list", Value::Null)
+            .as_array()
+            .is_some_and(|list| {
+                list.iter()
+                    .any(|s| s["id"] == id && s["status"] != "detached")
+            })
+    });
 }
 
 pub fn wait_snapshot_contains(client: &mut Client, id: &str, needle: &str) {

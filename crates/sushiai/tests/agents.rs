@@ -162,6 +162,8 @@ fn wait_file(path: &Path, needle: &str) {
 }
 
 fn list_entry(client: &mut Client, id: &str) -> Value {
+    // After a daemon restart a session is `detached` until its holder answered.
+    wait_settled(client, id);
     let list = client.call("session.list", Value::Null);
     list.as_array()
         .and_then(|l| l.iter().find(|s| s["id"] == id))

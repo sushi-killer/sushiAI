@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const CAPABILITIES: &[&str] = &["sessions", "attach", "resync", "agents"];
+pub const CAPABILITIES: &[&str] = &["sessions", "attach", "resync", "agents", "catalog"];
 
 pub mod method {
     pub const HELLO: &str = "hello";
@@ -36,6 +36,27 @@ pub mod method {
     pub const HOLD_RESIZE: &str = "hold.resize";
     pub const HOLD_CLOSE: &str = "hold.close";
     pub const HOLD_EXITED: &str = "hold.exited";
+
+    // Catalog, lifecycle notifications and daemon control (step 3b / 5). Additive.
+    /// Request: replace or merge the projects of this host (desktop is master).
+    pub const PROJECTS_SYNC: &str = "projects.sync";
+    /// Request: replace or merge the groups.
+    pub const GROUPS_SYNC: &str = "groups.sync";
+    /// Request: change a session's project, group or title.
+    pub const SESSION_UPDATE: &str = "session.update";
+    /// Request: forget an exited session.
+    pub const SESSION_REMOVE: &str = "session.remove";
+    /// Notification: a session was created. Params: `SessionInfo`.
+    pub const SESSION_CREATED: &str = "session.created";
+    /// Notification: a session's title or binding changed. Params: `SessionInfo`.
+    pub const SESSION_UPDATED: &str = "session.updated";
+    /// Notification: a session was forgotten. Params: `SessionRemoved`.
+    pub const SESSION_REMOVED: &str = "session.removed";
+    /// Request: liveness check for connectors. Answers `{}`, even before `hello`.
+    pub const PING: &str = "$/ping";
+    /// Request: stop the daemon; holders and sessions keep running and the next client starts
+    /// a new daemon. Not available to a hook connection.
+    pub const DAEMON_SHUTDOWN: &str = "daemon.shutdown";
 }
 
 pub mod code {
@@ -54,6 +75,10 @@ pub mod code {
     /// A hook presented a wrong session token, or a hook connection called a non-hook method.
     pub const UNAUTHORIZED: i64 = 1007;
     pub const ASK_NOT_FOUND: i64 = 1008;
+    /// The session is still running or detached; only an exited one can be removed.
+    pub const SESSION_STILL_RUNNING: i64 = 1010;
+    /// The daemon is stopping and takes no more changes.
+    pub const SHUTTING_DOWN: i64 = 1011;
 }
 
 /// Serde adapter: `Vec<u8>` as a standard base64 string.
@@ -85,6 +110,9 @@ pub struct HelloResult {
     pub protocol: u32,
     pub capabilities: Vec<String>,
     pub daemon: String,
+    /// The host name this daemon is the replica of (see `projects.sync`).
+    #[serde(default)]
+    pub host: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +141,11 @@ pub struct SessionCreate {
     /// Extra variables for the child. Never logged or persisted.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+    /// Project to bind to. Without it the daemon picks the project whose folder holds `cwd`.
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,6 +231,11 @@ pub struct SessionInfo {
     pub holder_pid: Option<u32>,
     pub cols: u16,
     pub rows: u16,
+    /// Bound project (catalog id). Owned by the daemon's registry: `session.update` changes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     #[serde(flatten)]
     pub agent: AgentInfo,
 }
@@ -354,4 +392,10 @@ pub struct SessionMeta {
 pub struct AskClosed {
     pub ask_id: String,
     pub decided: bool,
+}
+
+/// Params of `session.removed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRemoved {
+    pub id: String,
 }

@@ -36,6 +36,7 @@ fn sessions_survive_a_killed_daemon() {
     // c. a new daemon finds the session again
     sandbox.start_daemon();
     let mut client = sandbox.client();
+    wait_listed(&mut client, &id);
     let list = client.call("session.list", Value::Null);
     assert_eq!(list[0]["id"], id.as_str());
     assert_eq!(list[0]["status"], "running");
@@ -196,6 +197,7 @@ fn a_corrupt_state_file_is_set_aside_and_sessions_are_found_again() {
     fs::write(sandbox.home().join("state.json"), b"{ not json").expect("corrupt");
     sandbox.start_daemon();
     let mut client = sandbox.client();
+    wait_listed(&mut client, &id);
     let list = client.call("session.list", Value::Null);
     assert_eq!(list[0]["id"], id.as_str());
     assert_eq!(list[0]["status"], "running");
@@ -225,17 +227,25 @@ fn a_newer_state_schema_stops_the_daemon() {
 }
 
 #[test]
-fn an_unsafe_home_is_refused_and_left_alone() {
-    let mut sandbox = Sandbox::new();
-    fs::set_permissions(sandbox.home(), fs::Permissions::from_mode(0o777)).expect("chmod");
-    let (status, stderr) = sandbox.daemon_that_exits();
-    assert!(!status.success());
+fn a_home_that_is_a_symlink_is_refused_and_left_alone() {
+    let sandbox = Sandbox::new();
+    let target = sandbox.home().join("real");
+    fs::create_dir(&target).expect("mkdir");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let link = sandbox.home().join("link");
+    std::os::unix::fs::symlink(&target, &link).expect("symlink");
+    let out = std::process::Command::new(BIN)
+        .arg("daemon")
+        .env("SUSHIAI_HOME", &link)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run daemon");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("not safe"), "stderr: {stderr}");
-    let mode = fs::metadata(sandbox.home())
-        .expect("meta")
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o777, "the directory was chmod-ed");
+    let mode = fs::metadata(&target).expect("meta").permissions().mode();
+    assert_eq!(mode & 0o777, 0o755, "the target was chmod-ed");
+    assert!(!target.join("daemon.lock").exists());
 }
 
 #[test]
@@ -299,6 +309,7 @@ fn output_written_while_the_daemon_is_dead_appears_after_reattach() {
     sleep(Duration::from_secs(3));
     sandbox.start_daemon();
     let mut client = sandbox.client();
+    wait_listed(&mut client, &id);
     wait_snapshot_contains(&mut client, &id, "late-out");
     client.call("session.close", json!({"id": id, "graceful": false}));
 }

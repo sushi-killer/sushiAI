@@ -14,8 +14,10 @@ mod server;
 mod session;
 
 use std::fs;
+use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -32,9 +34,17 @@ pub use error::{Error, Result};
 pub use home::Home;
 use registry::Registry;
 
-/// Runs the daemon until SIGTERM or SIGINT. Holders keep running.
+/// Runs the daemon until SIGTERM, SIGINT or `daemon.shutdown`. Holders keep running.
+///
+/// The home lock is released last: after the runtime has stopped every task, and after a
+/// final flush of the state file, so the next daemon never starts on a stale file.
 pub fn run_blocking(home: Home) -> Result<()> {
-    runtime()?.block_on(run(home))
+    let runtime = runtime()?;
+    let (lock, registry) = runtime.block_on(run(home))?;
+    drop(runtime);
+    registry.flush();
+    drop(lock);
+    Ok(())
 }
 
 /// Prints one line about the running daemon; errors when none answers.
@@ -48,10 +58,10 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
         .build()?)
 }
 
-async fn run(home: Home) -> Result<()> {
+async fn run(home: Home) -> Result<(fs::File, Arc<Registry>)> {
     home.ensure()?;
-    // The lock lives as long as this function: one daemon per home, decided before any recovery.
-    let _lock = lock_home(&home)?;
+    // The lock lives until the daemon stops: one daemon per home, decided before any recovery.
+    let lock = lock_home(&home)?;
     match binlink::ensure_bin_link(home.dir()) {
         Ok(Link::Kept) => tracing::warn!("bin/sushiai exists and is not a symlink; left alone"),
         Ok(_) => {}
@@ -59,28 +69,50 @@ async fn run(home: Home) -> Result<()> {
     }
     let socket = home.socket();
     let registry = Arc::new(Registry::new(home.clone()));
-    recover(&registry).await?;
-    // The socket exists only once the sessions are back, so a client never sees a partial list.
+    load_catalog(&registry);
+    // A newer state schema stops the daemon here, before anything listens.
+    let pending = load_state(&registry)?;
     let _ = fs::remove_file(&socket);
-    let listener = UnixListener::bind(&socket)?;
+    let listener = bind_private(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     tracing::info!("daemon listening on {}", socket.display());
+    // The socket answers while the holders come back. Sessions are listed `detached` until their
+    // holder answered (running) or was given up on (exited); `session.updated` follows.
+    reattach_all(&registry, pending);
 
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
     tokio::select! {
         () = server::serve(listener, registry.clone()) => {}
+        () = registry.stopped() => {
+            // The response to `daemon.shutdown` is queued; give its connection time to send it.
+            tokio::time::sleep(STOP_GRACE).await;
+        }
         _ = term.recv() => {}
         _ = int.recv() => {}
     }
     let _ = fs::remove_file(&socket);
     registry.flush();
-    Ok(())
+    Ok((lock, registry))
 }
 
-/// Takes an exclusive, non-blocking `flock` on `<home>/daemon.lock`.
+/// How long a stopping daemon lets queued responses go out.
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Binds the socket with umask 077, so it is never connectable by others, not even briefly.
+/// The umask is process-wide: it is restored right after the bind.
+fn bind_private(path: &Path) -> Result<UnixListener> {
+    // SAFETY: umask(2) has no preconditions.
+    let old = unsafe { libc::umask(0o077) };
+    let bound = UnixListener::bind(path);
+    // SAFETY: as above.
+    unsafe { libc::umask(old) };
+    Ok(bound?)
+}
+
+/// Takes an exclusive, non-blocking `flock` on `<home>/daemon.lock` and writes the pid into it.
 fn lock_home(home: &Home) -> Result<fs::File> {
-    let file = fs::OpenOptions::new()
+    let mut file = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
@@ -90,53 +122,84 @@ fn lock_home(home: &Home) -> Result<fs::File> {
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(Error::AlreadyRunning(home.socket().display().to_string()));
     }
+    // Only the lock holder writes, so a refused second daemon never clobbers the pid.
+    file.set_len(0)?;
+    writeln!(file, "{}", std::process::id())?;
     Ok(file)
 }
 
-/// Loads the state file and reattaches to every holder that still answers.
-/// A newer schema stops the daemon. A corrupt file is set aside and the catalog is rebuilt
-/// from the holder sockets.
-async fn recover(registry: &Arc<Registry>) -> Result<()> {
-    let path = registry.home.state();
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
+/// Loads `catalog.json`. The desktop is the master of that replica, so a file that cannot be
+/// read (corrupt, or from a newer daemon) is set aside and the desktop syncs again.
+fn load_catalog(registry: &Registry) {
+    let path = registry.home.catalog();
+    let Ok(bytes) = fs::read(&path) else {
+        return;
     };
-    match StateFile::from_bytes(&bytes) {
-        Ok(state) => {
-            for info in state.sessions {
-                if info.status == SessionStatus::Running {
-                    if let Err(mut info) = reattach(registry, info).await {
-                        mark_exited(&mut info, None);
-                        registry.update(info);
-                    }
-                } else {
-                    registry.update(info);
-                }
-            }
-            Ok(())
-        }
-        Err(e @ StateError::UnsupportedSchema(_)) => Err(e.into()),
-        Err(StateError::Invalid(e)) => {
-            let ts = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
-            let aside = path.with_extension(format!("json.corrupt-{ts}"));
-            tracing::warn!("state file is corrupt ({e}); moved to {}", aside.display());
-            fs::rename(&path, aside)?;
-            probe_holders(registry).await;
-            Ok(())
-        }
+    if let Err(e) = registry.load_directory(&bytes) {
+        let aside = path.with_extension(format!("json.unreadable-{}", now_secs()));
+        tracing::warn!(
+            "catalog file is unreadable ({e}); moved to {}",
+            aside.display()
+        );
+        let _ = fs::rename(&path, aside);
     }
 }
 
-/// Rebuilds the catalog from `sessions/*.sock`. What the state file knew (command, title,
-/// size) is lost; the sessions themselves are found again.
-async fn probe_holders(registry: &Arc<Registry>) {
-    let Ok(entries) = fs::read_dir(registry.home.sessions()) else {
-        return;
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// A session found in the state file whose holder is not connected yet.
+struct Pending {
+    info: SessionInfo,
+    /// Found only by its holder socket (the state file was corrupt): dropped, not marked
+    /// exited, when nobody answers.
+    probed: bool,
+}
+
+/// Loads the state file. Finished sessions go straight into the registry; running ones go in
+/// as `detached` entries and come back as the returned list. A newer schema stops the daemon. A
+/// corrupt file is set aside and the catalog is rebuilt from the holder sockets.
+fn load_state(registry: &Arc<Registry>) -> Result<Vec<Pending>> {
+    let path = registry.home.state();
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
     };
+    let (infos, probed) = match StateFile::from_bytes(&bytes) {
+        Ok(state) => (state.sessions, false),
+        Err(e @ StateError::UnsupportedSchema(_)) => return Err(e.into()),
+        Err(StateError::Invalid(e)) => {
+            let aside = path.with_extension(format!("json.corrupt-{}", now_secs()));
+            tracing::warn!("state file is corrupt ({e}); moved to {}", aside.display());
+            fs::rename(&path, aside)?;
+            (probe_holders(registry), true)
+        }
+    };
+    let mut pending = Vec::new();
+    for info in infos {
+        if info.status == SessionStatus::Running {
+            let mut listed = info.clone();
+            listed.status = SessionStatus::Detached;
+            registry.update(listed);
+            pending.push(Pending { info, probed });
+        } else {
+            registry.update(info);
+        }
+    }
+    Ok(pending)
+}
+
+/// What `sessions/*.sock` can tell without the state file: the ids. Command, title and size are
+/// lost; the sessions themselves are found again.
+fn probe_holders(registry: &Registry) -> Vec<SessionInfo> {
+    let Ok(entries) = fs::read_dir(registry.home.sessions()) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("sock") {
@@ -145,7 +208,7 @@ async fn probe_holders(registry: &Arc<Registry>) {
         let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        let info = SessionInfo {
+        found.push(SessionInfo {
             id: id.to_string(),
             cmd: Vec::new(),
             cwd: String::new(),
@@ -155,10 +218,35 @@ async fn probe_holders(registry: &Arc<Registry>) {
             holder_pid: None,
             cols: 80,
             rows: 24,
+            project: None,
+            group: None,
             agent: Default::default(),
-        };
-        // A socket nobody answers on is a leftover, not a session.
-        let _ = reattach(registry, info).await;
+        });
+    }
+    found
+}
+
+/// Reattaches every holder at the same time, in the background: one slow holder delays only
+/// its own session, never the socket or the others.
+fn reattach_all(registry: &Arc<Registry>, pending: Vec<Pending>) {
+    for Pending { info, probed } in pending {
+        let registry = registry.clone();
+        tokio::spawn(async move {
+            let id = info.id.clone();
+            let outcome = reattach(&registry, info).await;
+            if let Err(mut info) = outcome {
+                if probed {
+                    // A socket nobody answers on is a leftover, not a session.
+                    registry.forget_announced(&id);
+                    registry.settle();
+                    return;
+                }
+                mark_exited(&mut info, None);
+                registry.update(info);
+            }
+            registry.announce_updated(&id);
+            registry.settle();
+        });
     }
 }
 
@@ -177,7 +265,7 @@ async fn reattach(
     .await;
     match attached {
         Ok((conn, screen, seq)) => {
-            session::start(registry.clone(), info, conn, screen, seq, sock);
+            session::start(registry.clone(), info, conn, screen, seq, sock, false);
             Ok(())
         }
         Err(e) => {
@@ -228,4 +316,28 @@ async fn status(home: Home) -> Result<String> {
         }
     }
     Err(Error::Holder("daemon closed the connection".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    #[tokio::test]
+    async fn the_socket_is_never_group_or_world_accessible_even_under_umask_zero() {
+        let dir = tempfile::Builder::new()
+            .prefix("sb")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
+        let path = dir.path().join("s.sock");
+        // SAFETY: umask(2) has no preconditions; restored below.
+        let old = unsafe { libc::umask(0) };
+        let bound = bind_private(&path);
+        // SAFETY: as above.
+        let restored = unsafe { libc::umask(old) };
+        let _listener = bound.expect("bind");
+        assert_eq!(restored, 0, "bind_private left the umask changed");
+        let mode = fs::metadata(&path).expect("meta").mode();
+        assert_eq!(mode & 0o077, 0, "socket mode {mode:o} before any chmod");
+    }
 }

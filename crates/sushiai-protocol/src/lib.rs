@@ -1,6 +1,8 @@
 //! Wire protocol shared by the daemon, the holder and clients.
 //! No IO and no async runtime: bytes in, values out.
 
+pub mod catalog;
+pub mod connector;
 mod frame;
 mod methods;
 mod rpc;

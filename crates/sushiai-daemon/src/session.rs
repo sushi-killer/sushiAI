@@ -192,12 +192,18 @@ pub fn start(
     screen: Screen,
     seq: u64,
     sock: PathBuf,
+    created: bool,
 ) -> Handle {
     let (tx, rx) = mpsc::channel(64);
     let handle = Handle { tx };
     let mut info = info;
     info.holder_pid = holder.holder_pid.or(info.holder_pid);
     registry.update(info.clone());
+    if created {
+        // Before the handle exists and the actor runs: `session.created` precedes any
+        // `session.status`, `session.ask` or `session.exited` of this session.
+        registry.announce_created(&info.id);
+    }
     registry.set_handle(&info.id, handle.clone());
     let actor = Actor {
         agent: restore_agent(&info),

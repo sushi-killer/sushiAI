@@ -12,6 +12,8 @@ fn info(id: &str) -> SessionInfo {
         holder_pid: None,
         cols: 80,
         rows: 24,
+        project: None,
+        group: None,
         agent: Default::default(),
     }
 }
@@ -58,4 +60,18 @@ fn a_state_file_from_before_agents_loads_with_empty_agent_fields() {
         "status":"running","cols":80,"rows":24}]}"#;
     let state = StateFile::from_bytes(old).expect("old state loads");
     assert_eq!(state.sessions[0].agent, Default::default());
+}
+
+#[test]
+fn a_state_file_keeps_the_binding_and_old_files_load_without_it() {
+    let mut bound = info("a");
+    bound.project = Some("p1".into());
+    bound.group = Some("g1".into());
+    let state = StateFile::new(vec![bound]);
+    let back = StateFile::from_bytes(&state.to_bytes().expect("serialize")).expect("load");
+    assert_eq!(back.sessions[0].project.as_deref(), Some("p1"));
+    assert_eq!(back.sessions[0].group.as_deref(), Some("g1"));
+    let old = br#"{"schemaVersion":1,"sessions":[{"id":"a","cmd":["sh"],"cwd":"/","status":"running","cols":80,"rows":24}]}"#;
+    let loaded = StateFile::from_bytes(old).expect("old state loads");
+    assert_eq!(loaded.sessions[0].project, None);
 }

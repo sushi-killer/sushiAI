@@ -443,17 +443,24 @@ fn a_daemon_killed_mid_stream_ends_the_proxy_with_code_2() {
     proxy.hello();
     let daemon = sandbox.daemon_pid();
     kill(daemon);
-    assert_eq!(proxy.wait_exit().code(), Some(2));
+    assert_eq!(
+        proxy.wait_exit().code(),
+        Some(sushiai_protocol::connector::DAEMON_DIED)
+    );
 }
 
 #[test]
 fn an_unsafe_home_fails_fast_with_the_reason_on_stderr_only() {
+    // A symlinked home is refused.
     let sandbox = Sandbox::new();
-    fs::set_permissions(sandbox.home(), fs::Permissions::from_mode(0o777)).expect("chmod");
+    let target = sandbox.home().join("real");
+    fs::create_dir(&target).expect("mkdir");
+    let link = sandbox.home().join("link");
+    std::os::unix::fs::symlink(&target, &link).expect("symlink");
     let started = Instant::now();
     let out = Command::new(BIN)
         .arg("proxy")
-        .env("SUSHIAI_HOME", sandbox.home())
+        .env("SUSHIAI_HOME", &link)
         .stdin(Stdio::null())
         .output()
         .expect("run proxy");

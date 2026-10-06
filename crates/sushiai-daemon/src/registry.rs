@@ -7,9 +7,14 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicBool, Ordering};
+use sushiai_core::catalog::project_for_cwd;
+use sushiai_core::catalog::{Catalog as Directory, CatalogError};
 use sushiai_core::StateFile;
-use sushiai_protocol::{Notification, SessionInfo, SessionStatus};
-use tokio::sync::broadcast;
+use sushiai_protocol::catalog::SyncResult;
+use sushiai_protocol::catalog::{GroupsSync, ProjectsSync, SessionBinding, SessionUpdate};
+use sushiai_protocol::{method, Notification, SessionInfo, SessionRemoved, SessionStatus};
+use tokio::sync::{broadcast, Notify};
 
 use crate::home::Home;
 use crate::session::Handle;
@@ -66,6 +71,8 @@ struct Writer {
 #[derive(Default)]
 struct Slot {
     next: Option<StateFile>,
+    /// The serialized project and group replica.
+    catalog: Option<Vec<u8>>,
     busy: bool,
 }
 
@@ -79,10 +86,15 @@ impl Writer {
         self.changed.notify_all();
     }
 
+    fn submit_catalog(&self, bytes: Vec<u8>) {
+        self.slot().catalog = Some(bytes);
+        self.changed.notify_all();
+    }
+
     /// Waits until everything submitted so far is on disk.
     fn flush(&self) {
         let mut slot = self.slot();
-        while slot.next.is_some() || slot.busy {
+        while slot.next.is_some() || slot.catalog.is_some() || slot.busy {
             slot = self
                 .changed
                 .wait(slot)
@@ -92,11 +104,11 @@ impl Writer {
 }
 
 /// Runs until the registry (the only other owner) is gone.
-fn write_loop(writer: Arc<Writer>, path: PathBuf) {
+fn write_loop(writer: Arc<Writer>, path: PathBuf, catalog_path: PathBuf) {
     loop {
-        let state = {
+        let (state, catalog) = {
             let mut slot = writer.slot();
-            while slot.next.is_none() {
+            while slot.next.is_none() && slot.catalog.is_none() {
                 if Arc::strong_count(&writer) == 1 {
                     return;
                 }
@@ -107,11 +119,20 @@ fn write_loop(writer: Arc<Writer>, path: PathBuf) {
                     .0;
             }
             slot.busy = true;
-            slot.next.take()
+            (slot.next.take(), slot.catalog.take())
         };
         if let Some(state) = state {
-            if let Err(e) = write_state(&path, &state) {
+            let written = state
+                .to_bytes()
+                .map_err(std::io::Error::other)
+                .and_then(|bytes| write_atomic(&path, &bytes));
+            if let Err(e) = written {
                 tracing::warn!("cannot write state file: {e}");
+            }
+        }
+        if let Some(bytes) = catalog {
+            if let Err(e) = write_atomic(&catalog_path, &bytes) {
+                tracing::warn!("cannot write catalog file: {e}");
             }
         }
         writer.slot().busy = false;
@@ -121,8 +142,7 @@ fn write_loop(writer: Arc<Writer>, path: PathBuf) {
 
 /// Temp file, fsync, rename, fsync of the directory: a crash leaves the old or the new
 /// file, never a partial one. An error never writes an empty file.
-fn write_state(path: &std::path::Path, state: &StateFile) -> std::io::Result<()> {
-    let bytes = state.to_bytes().map_err(std::io::Error::other)?;
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     // The file holds commands and directories: owner only.
     let mut file = fs::OpenOptions::new()
@@ -131,7 +151,7 @@ fn write_state(path: &std::path::Path, state: &StateFile) -> std::io::Result<()>
         .truncate(true)
         .mode(0o600)
         .open(&tmp)?;
-    file.write_all(&bytes)?;
+    file.write_all(bytes)?;
     file.sync_all()?;
     fs::rename(&tmp, path)?;
     if let Some(dir) = path.parent() {
@@ -155,29 +175,199 @@ struct Catalog {
     exited: VecDeque<String>,
 }
 
+/// Why `remove` failed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RemoveError {
+    NotFound,
+    StillRunning,
+}
+
+/// The session as clients see it: without the token hash.
+fn public(info: &SessionInfo) -> SessionInfo {
+    let mut info = info.clone();
+    info.agent.token_hash = None;
+    info
+}
+
 /// The session catalog: what exists, its last known info, and the state file that mirrors it.
 /// Session state itself (screen, seq) lives in the session actors.
 ///
 /// ponytail: step-1 shortcut. A `Mutex` that is never held across an await or an fsync (the
 /// state file goes to a writer thread). Upgrade path: a catalog actor that owns this map.
+///
+/// The registry owns `title`, `project` and `group` of a record: an actor's
+/// copy of those fields may be stale, so `update` keeps the stored values.
 pub struct Registry {
     pub home: Home,
+    /// This host's name in the desktop's catalog (the replica rule of `projects.sync`).
+    pub host: String,
     pub events: broadcast::Sender<Notification>,
     catalog: Mutex<Catalog>,
+    /// Projects and groups, a replica of the desktop's.
+    directory: Mutex<Directory>,
     writer: Arc<Writer>,
+    stop: Notify,
+    stopping: AtomicBool,
+    /// Signalled whenever a restored session settles (reattached, or given up on).
+    settled: Notify,
 }
 
 impl Registry {
     pub fn new(home: Home) -> Self {
+        let host = home.host_name();
+        Registry::with_host(home, host)
+    }
+
+    pub fn with_host(home: Home, host: String) -> Self {
         let writer = Arc::new(Writer::default());
-        let (thread_writer, path) = (writer.clone(), home.state());
-        std::thread::spawn(move || write_loop(thread_writer, path));
+        let (thread_writer, path, catalog_path) = (writer.clone(), home.state(), home.catalog());
+        std::thread::spawn(move || write_loop(thread_writer, path, catalog_path));
         Registry {
             home,
+            host,
             events: broadcast::channel(256).0,
             catalog: Mutex::new(Catalog::default()),
+            directory: Mutex::new(Directory::new()),
             writer,
+            stop: Notify::new(),
+            stopping: AtomicBool::new(false),
+            settled: Notify::new(),
         }
+    }
+
+    /// Asks the daemon to stop. Holders and sessions keep running.
+    pub fn request_stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        self.stop.notify_one();
+    }
+
+    /// True once a stop was requested: requests that change anything are refused.
+    pub fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+
+    /// True for a restored session whose holder has not answered yet: listed `detached`, and
+    /// without an actor. A session whose actor lost its holder keeps its handle.
+    pub fn recovering(&self, id: &str) -> bool {
+        self.catalog()
+            .sessions
+            .get(id)
+            .is_some_and(|e| e.handle.is_none() && e.info.status == SessionStatus::Detached)
+    }
+
+    /// Wakes the requests that wait for a restored session.
+    pub fn settle(&self) {
+        self.settled.notify_waiters();
+    }
+
+    pub fn settled(&self) -> &Notify {
+        &self.settled
+    }
+
+    pub async fn stopped(&self) {
+        self.stop.notified().await;
+    }
+
+    fn notify(&self, name: &str, params: impl serde::Serialize) {
+        // No receivers is normal when nobody is connected.
+        let _ = self.events.send(Notification::new(name, params));
+    }
+
+    fn directory(&self) -> MutexGuard<'_, Directory> {
+        self.directory
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn save_directory(&self, directory: &Directory) {
+        match directory.to_bytes() {
+            Ok(bytes) => self.writer.submit_catalog(bytes),
+            Err(e) => tracing::warn!("cannot serialize the catalog: {e}"),
+        }
+    }
+
+    /// Replaces the replica with a saved one (daemon start).
+    pub fn load_directory(&self, bytes: &[u8]) -> Result<(), CatalogError> {
+        *self.directory() = Directory::from_bytes(bytes)?;
+        Ok(())
+    }
+
+    pub fn sync_projects(&self, sync: &ProjectsSync) -> SyncResult {
+        let mut directory = self.directory();
+        let result = directory.apply_projects(sync, &self.host);
+        if result.applied > 0 {
+            self.save_directory(&directory);
+        }
+        result
+    }
+
+    pub fn sync_groups(&self, sync: &GroupsSync) -> SyncResult {
+        let mut directory = self.directory();
+        let result = directory.apply_groups(sync);
+        if result.applied > 0 {
+            self.save_directory(&directory);
+        }
+        result
+    }
+
+    /// The binding a new session gets. The project and group are stored as given (opaque: the
+    /// desktop owns their meaning, and may not have synced them yet); only an absent project
+    /// is filled in, from the folder that holds `cwd`.
+    pub fn bind_for_create(
+        &self,
+        project: Option<String>,
+        group: Option<String>,
+        cwd: &str,
+    ) -> SessionBinding {
+        let project = project.or_else(|| project_for_cwd(&self.directory(), &self.host, cwd));
+        SessionBinding { project, group }
+    }
+
+    /// Applies `session.update`: a missing field is left, `null` clears, anything else is
+    /// stored as given. `None` means no such session.
+    pub fn update_session(&self, update: SessionUpdate) -> Option<SessionInfo> {
+        let mut catalog = self.catalog();
+        let entry = catalog.sessions.get_mut(&update.id)?;
+        let mut next = entry.info.clone();
+        if let Some(project) = update.project {
+            next.project = project;
+        }
+        if let Some(group) = update.group {
+            next.group = group;
+        }
+        if let Some(title) = update.title {
+            next.title = Some(title).filter(|t| !t.trim().is_empty());
+        }
+        if next == entry.info {
+            return Some(public(&next));
+        }
+        entry.info = next;
+        let info = public(&entry.info);
+        self.save(&catalog);
+        self.notify(method::SESSION_UPDATED, &info);
+        Some(info)
+    }
+
+    /// Sends `session.created` for a session that is up.
+    pub fn announce_created(&self, id: &str) {
+        let info = self.catalog().sessions.get(id).map(|e| public(&e.info));
+        if let Some(info) = info {
+            self.notify(method::SESSION_CREATED, &info);
+        }
+    }
+
+    /// Forgets an exited session.
+    pub fn remove(&self, id: &str) -> Result<(), RemoveError> {
+        let mut catalog = self.catalog();
+        let entry = catalog.sessions.get(id).ok_or(RemoveError::NotFound)?;
+        if entry.info.status != SessionStatus::Exited {
+            return Err(RemoveError::StillRunning);
+        }
+        catalog.sessions.remove(id);
+        catalog.exited.retain(|e| e != id);
+        self.save(&catalog);
+        self.notify(method::SESSION_REMOVED, SessionRemoved { id: id.into() });
+        Ok(())
     }
 
     /// Blocks until the state file shows every change made so far.
@@ -215,8 +405,15 @@ impl Registry {
         let mut catalog = self.catalog();
         let id = info.id.clone();
         let exited = info.status == SessionStatus::Exited;
+        let mut info = info;
         match catalog.sessions.get_mut(&id) {
-            Some(entry) => entry.info = info,
+            Some(entry) => {
+                let kept = &entry.info;
+                info.title = kept.title.clone();
+                info.project = kept.project.clone();
+                info.group = kept.group.clone();
+                entry.info = info;
+            }
             None => {
                 catalog
                     .sessions
@@ -229,9 +426,24 @@ impl Registry {
         while catalog.exited.len() > MAX_EXITED {
             if let Some(old) = catalog.exited.pop_front() {
                 catalog.sessions.remove(&old);
+                self.notify(method::SESSION_REMOVED, SessionRemoved { id: old });
             }
         }
         self.save(&catalog);
+    }
+
+    /// Sends `session.updated` for a session whose status just settled (after a reattach).
+    pub fn announce_updated(&self, id: &str) {
+        let info = self.catalog().sessions.get(id).map(|e| public(&e.info));
+        if let Some(info) = info {
+            self.notify(method::SESSION_UPDATED, &info);
+        }
+    }
+
+    /// Drops a session found only by its holder socket that nobody answers for.
+    pub fn forget_announced(&self, id: &str) {
+        self.forget(id);
+        self.notify(method::SESSION_REMOVED, SessionRemoved { id: id.into() });
     }
 
     /// Drops a session that never got going. Rewrites the state file.
@@ -246,11 +458,7 @@ impl Registry {
         self.catalog()
             .sessions
             .values()
-            .map(|e| {
-                let mut info = e.info.clone();
-                info.agent.token_hash = None;
-                info
-            })
+            .map(|e| public(&e.info))
             .collect()
     }
 
@@ -307,6 +515,8 @@ mod tests {
             holder_pid: None,
             cols: 80,
             rows: 24,
+            project: None,
+            group: None,
             agent: Default::default(),
         }
     }
@@ -362,6 +572,185 @@ mod tests {
         assert_eq!(saved.sessions.len(), 1);
         assert_eq!(saved.sessions[0].status, SessionStatus::Running);
         assert!(saved.sessions[0].agent.asks.is_empty());
+    }
+
+    fn directory(registry: &Registry) {
+        let project = |id: &str, host: &str, path: &str| sushiai_protocol::catalog::Project {
+            id: id.into(),
+            name: id.into(),
+            folders: vec![sushiai_protocol::catalog::ProjectFolder {
+                host: host.into(),
+                path: path.into(),
+            }],
+            rev: 1,
+            updated_at: 1,
+            deleted: false,
+        };
+        let group = |id: &str, project: &str| sushiai_protocol::catalog::Group {
+            id: id.into(),
+            project_id: project.into(),
+            name: id.into(),
+            order: 0,
+            rev: 1,
+            updated_at: 1,
+            deleted: false,
+        };
+        let sync = ProjectsSync {
+            host: registry.host.clone(),
+            projects: vec![
+                project("p1", &registry.host, "/w/a"),
+                project("p2", &registry.host, "/w/b"),
+            ],
+            full: true,
+        };
+        assert_eq!(registry.sync_projects(&sync).applied, 2);
+        let sync = GroupsSync {
+            groups: vec![group("g1", "p1"), group("g2", "p2")],
+            full: true,
+        };
+        assert_eq!(registry.sync_groups(&sync).applied, 2);
+    }
+
+    fn registry(dir: &tempfile::TempDir) -> Registry {
+        Registry::with_host(Home::new(dir.path().to_path_buf()), "devbox".into())
+    }
+
+    fn running(id: &str) -> SessionInfo {
+        SessionInfo {
+            status: SessionStatus::Running,
+            exit_code: None,
+            ..exited(0)
+        }
+        .with_id(id)
+    }
+
+    trait WithId {
+        fn with_id(self, id: &str) -> Self;
+    }
+
+    impl WithId for SessionInfo {
+        fn with_id(mut self, id: &str) -> Self {
+            self.id = id.into();
+            self
+        }
+    }
+
+    fn update(id: &str) -> SessionUpdate {
+        SessionUpdate {
+            id: id.into(),
+            project: None,
+            group: None,
+            title: None,
+        }
+    }
+
+    #[test]
+    fn the_registry_owns_title_and_binding_against_stale_actor_updates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = registry(&dir);
+        directory(&registry);
+        registry.update(running("s1"));
+        let set = SessionUpdate {
+            project: Some(Some("p1".into())),
+            group: Some(Some("g1".into())),
+            title: Some("kept".into()),
+            ..update("s1")
+        };
+        registry.update_session(set).expect("update");
+        // An actor still holds the old copy and saves it.
+        registry.update(running("s1"));
+        let info = &registry.list()[0];
+        assert_eq!(info.project.as_deref(), Some("p1"));
+        assert_eq!(info.group.as_deref(), Some("g1"));
+        assert_eq!(info.title.as_deref(), Some("kept"));
+    }
+
+    #[test]
+    fn a_binding_is_stored_as_given_even_when_the_catalog_does_not_know_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A fresh daemon: nothing synced yet.
+        let registry = registry(&dir);
+        registry.update(running("s1"));
+        let set = SessionUpdate {
+            project: Some(Some("unsynced".into())),
+            group: Some(Some("also-unsynced".into())),
+            ..update("s1")
+        };
+        let info = registry.update_session(set).expect("update");
+        assert_eq!(info.project.as_deref(), Some("unsynced"));
+        assert_eq!(info.group.as_deref(), Some("also-unsynced"));
+        let clear = SessionUpdate {
+            project: Some(None),
+            ..update("s1")
+        };
+        let info = registry.update_session(clear).expect("update");
+        assert_eq!(info.project, None);
+        assert_eq!(info.group.as_deref(), Some("also-unsynced"));
+        assert!(registry.update_session(update("missing")).is_none());
+    }
+
+    #[test]
+    fn create_binds_by_cwd_only_when_no_project_is_given() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = registry(&dir);
+        directory(&registry);
+        let by_cwd = registry.bind_for_create(None, None, "/w/a/src");
+        assert_eq!(by_cwd.project.as_deref(), Some("p1"));
+        let given = registry.bind_for_create(Some("p2".into()), None, "/w/a/src");
+        assert_eq!(given.project.as_deref(), Some("p2"));
+        let none = registry.bind_for_create(None, None, "/w/abc");
+        assert_eq!(none.project, None);
+        // A group the catalog has never seen is kept as given.
+        let opaque = registry.bind_for_create(None, Some("gx".into()), "/w/a");
+        assert_eq!(opaque.group.as_deref(), Some("gx"));
+    }
+
+    #[test]
+    fn the_catalog_is_saved_next_to_the_state_file_and_loads_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = registry(&dir);
+        directory(&first);
+        first.flush();
+        let bytes = fs::read(dir.path().join("catalog.json")).expect("catalog file");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("\"catalogVersion\": 1"), "{text}");
+        let second = registry(&dir);
+        second.load_directory(&bytes).expect("load");
+        let bound = second.bind_for_create(None, None, "/w/b");
+        assert_eq!(bound.project.as_deref(), Some("p2"));
+        // A file without the catalog version is refused.
+        assert!(second.load_directory(b"{}").is_err());
+    }
+
+    #[test]
+    fn only_an_exited_session_is_removed_and_listeners_hear_about_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = registry(&dir);
+        let mut events = registry.events.subscribe();
+        registry.update(running("live"));
+        registry.update(exited(1));
+        assert_eq!(registry.remove("live"), Err(RemoveError::StillRunning));
+        assert_eq!(registry.remove("nope"), Err(RemoveError::NotFound));
+        registry.remove("s001").expect("remove");
+        let note = events.try_recv().expect("notification");
+        assert_eq!(note.method, method::SESSION_REMOVED);
+        assert_eq!(note.params["id"], "s001");
+        assert!(!registry.known("s001") && registry.known("live"));
+    }
+
+    #[test]
+    fn forgetting_the_oldest_exited_sessions_announces_removal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = registry(&dir);
+        let mut events = registry.events.subscribe();
+        for id in 0..=MAX_EXITED {
+            registry.update(exited(id));
+        }
+        let note = events.try_recv().expect("notification");
+        assert_eq!(
+            (note.method.as_str(), note.params["id"].as_str()),
+            (method::SESSION_REMOVED, Some("s000"))
+        );
     }
 
     #[test]

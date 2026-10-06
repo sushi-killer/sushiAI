@@ -12,10 +12,10 @@
 //       wraps every script as `sh -c '<script>'` itself (posixExec), so a
 //       fish login shell never parses the POSIX script (csh/tcsh still fail:
 //       they reject a newline inside quotes).
-//   manifest   parsed dist/host/manifest.json, keyed by `uname -sm`
+//   manifest   parsed target/host/manifest.json, keyed by `uname -sm`
 //       ("Linux x86_64", "Linux aarch64", "Darwin arm64", ...) with
 //       { target, path, version, size, sha256 }.
-//   binDir     directory the manifest `path` values are relative to (dist/host).
+//   binDir     directory the manifest `path` values are relative to (target/host).
 //   upload(command, buffer, { timeout }) optional, given the already wrapped
 //       command line; defaults to exec(command, { input: buffer }), i.e. the bytes travel over the ssh stdin.
 //

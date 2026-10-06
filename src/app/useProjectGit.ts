@@ -243,7 +243,6 @@ export function useHostContext(
   createWorkspace: (
     name: string,
     cwd: string,
-    backend: string,
     starter: string,
     endpoint?: string,
   ) => Promise<boolean>,
@@ -258,7 +257,6 @@ export function useHostContext(
       const started = await latest.current.createWorkspace(
         name,
         cwd,
-        "herdr",
         starter,
         endpoint,
       );

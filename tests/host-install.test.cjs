@@ -224,16 +224,16 @@ test("rejects a manifest sha256 or path that is unsafe in a shell", async (t) =>
   );
 });
 
-// Skips unless `npm run build:host` produced dist/host. The host side gets an
+// Skips unless `npm run build:host` produced target/host. The host side gets an
 // allowlist (PATH, SHELL, and HOME set to the temp dir), so CODEX_HOME,
 // SUSHIAI_HOME and CLAUDE_CONFIG_DIR of the developer never reach the binary.
-test("smoke: installs the real dist/host binary when it was built", async (t) => {
-  const dist = path.join(__dirname, "..", "dist", "host");
+test("smoke: installs the real target/host binary when it was built", async (t) => {
+  const dist = path.join(__dirname, "..", "target", "host");
   const file = path.join(dist, "manifest.json");
-  if (!fs.existsSync(file)) return t.skip("dist/host not built");
+  if (!fs.existsSync(file)) return t.skip("target/host not built");
   const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
   const key = `${os.type()} ${os.arch() === "x64" ? "x86_64" : os.arch()}`;
-  if (!manifest[key]) return t.skip(`no dist/host entry for ${key}`);
+  if (!manifest[key]) return t.skip(`no target/host entry for ${key}`);
   const f = fixture(key, []);
   t.after(f.cleanup);
   // The shim keeps the real uname answer; the real binary runs hooks install

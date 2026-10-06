@@ -76,7 +76,6 @@ export function WorkspaceCanvas({
         undefined,
         undefined,
         undefined,
-        "herdr",
         findPanelOwner(wsRef.current.workspaces, panelId)?.id,
         { branch: request.branch, base: request.base },
         undefined,

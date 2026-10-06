@@ -81,7 +81,6 @@ export function WorkspaceDialog({
   onCreate(
     name: string,
     cwd: string,
-    backend: string,
     starter: string,
     endpoint?: string,
     operationId?: string,
@@ -398,7 +397,6 @@ export function WorkspaceDialog({
       const created = await onCreate(
         project.name,
         target,
-        project.sessions.backend || "local",
         "shell",
         host.local ? undefined : host.endpoint,
         operationId,
@@ -451,7 +449,6 @@ export function WorkspaceDialog({
         setup: { install, check: "" },
         sessions: {
           claudeAccount: accountId || undefined,
-          backend: selected.some((host) => !host.local) ? "herdr" : "local",
         },
       });
       setProjectRef(project.id);

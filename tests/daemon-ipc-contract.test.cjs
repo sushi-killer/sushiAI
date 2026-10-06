@@ -29,7 +29,7 @@ test("preload subscribes to the daemon events", () => {
     assert.ok(preload.includes(`ipcRenderer.on("${event}"`), event);
 });
 
-test("stubs answer daemonStates and reject everything else", async () => {
+test("without a manager, daemonStates is empty and the rest reject", async () => {
   assert.deepEqual(await handlers.get("daemon-states")(), []);
   await assert.rejects(
     handlers.get("host-install")("local"),
@@ -37,7 +37,7 @@ test("stubs answer daemonStates and reject everything else", async () => {
   );
   await assert.rejects(
     handlers.get("daemon-terminal-ack")("panel", 10),
-    new RegExp(NOT_IMPLEMENTED),
+    /daemon manager is not running/,
   );
 });
 
@@ -52,6 +52,8 @@ test("handlers reject malformed arguments before anything else", async () => {
   const bad = [
     ["daemon-sessions-list", []],
     ["daemon-sessions-list", [7]],
+    ["daemon-terminal-attach-data", ["p1", "a.png", "not bytes"]],
+    ["daemon-terminal-attach-data", ["p1", "", new Uint8Array(1)]],
     ["daemon-session-launch", [null]],
     ["daemon-session-launch", [{ ...launch, cols: 1.5 }]],
     ["daemon-session-launch", [{ ...launch, idempotencyKey: "" }]],

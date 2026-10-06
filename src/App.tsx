@@ -30,7 +30,7 @@ import { Sidebar } from "./app/Sidebar";
 import { TitleBar } from "./app/TitleBar";
 import { useExtensions } from "./app/useExtensions";
 import { useConnectionProfiles } from "./app/useConnectionProfiles";
-import { useHerdr } from "./app/useHerdr";
+import { useDaemon } from "./app/useDaemon";
 import { useHostContext, useProjectGit } from "./app/useProjectGit";
 import { useMergedCanvas } from "./workspace/mergedLayouts";
 import { useProjectView } from "./workspace/projectView";
@@ -97,14 +97,12 @@ export function App() {
     connection,
     connectionError,
     refreshHerdr,
-    invalidateHerdr,
     statusByEndpoint,
-  } = useHerdr({
+  } = useDaemon({
     savedSocket: saved?.socket || "",
     notify,
     setWorkspaces,
     connectionProfiles,
-    workspaces,
   });
   const skills = useSkills(sectionName, notify);
   const [sidebar, setSidebar] = useState(
@@ -127,7 +125,6 @@ export function App() {
     socket,
     refreshHerdr,
     useEndpoint: setSocket,
-    invalidateHerdr,
     notify,
     showWorkspace,
     confirmClose: ({ workspace, panel }) =>

@@ -187,6 +187,8 @@ type PanelState = {
   ended?: boolean;
   /** The daemon session this panel is bound to. */
   sessionId?: string;
+  /** The agent CLI's own session id, kept so Reopen can resume it. */
+  agentSession?: string;
   pinned?: boolean;
   updatedAt?: number;
   note?: string;
@@ -271,6 +273,8 @@ export type SessionLaunchRequest = {
   worktree?: { branch: string; base?: string };
   /** The agent CLI's first prompt (agent sessions only). */
   prompt?: string;
+  /** The agent CLI session to resume (Reopen). */
+  resume?: string;
 };
 export type SessionLaunchValue = {
   operationId: string;
@@ -726,7 +730,7 @@ export interface Bridge {
   onDaemonEvent(callback: (event: DaemonEvent) => void): () => void;
   daemonSessionLaunch(
     request: DaemonLaunchRequest,
-  ): Promise<{ host: string; sessionId: string }>;
+  ): Promise<{ host: string; sessionId: string; cwd: string }>;
   sessionClose(host: string, id: string, graceful: boolean): Promise<void>;
   sessionRemove(host: string, id: string): Promise<void>;
   sessionUpdate(
@@ -765,6 +769,12 @@ export interface Bridge {
   daemonTerminalDetach(panelId: string): Promise<void>;
   daemonTerminalAck(panelId: string, bytes: number): Promise<void>;
   daemonTerminalAttachFile(panelId: string, path: string): Promise<void>;
+  /** Pasted data with no path on disk (local host only in slice 1). */
+  daemonTerminalAttachData(
+    panelId: string,
+    name: string,
+    bytes: Uint8Array,
+  ): Promise<void>;
   onDaemonTerminal(callback: (event: DaemonTerminalEvent) => void): () => void;
   hostInstall(host: string): Promise<HostInstallResult>;
   herdr(
@@ -773,7 +783,6 @@ export interface Bridge {
     params?: Record<string, unknown>,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic RPC passthrough, callers narrow the result themselves
   ): Promise<any>;
-  sessionLaunch(request: SessionLaunchRequest): Promise<SessionLaunchResult>;
   herdrCompatibility(endpoint: string): Promise<HerdrCompatibility>;
   herdrInstall(endpoint: string): Promise<{ binary: string }>;
   herdrSubscribe(

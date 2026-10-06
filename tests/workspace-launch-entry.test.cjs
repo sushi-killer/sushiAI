@@ -5,9 +5,12 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { createRequire } = require("node:module");
 const ts = require("typescript");
-const { SessionLauncher } = require("../electron/session-launch.cjs");
 const { herdrWorkspaceKey } = require("../src/herdrIdentity.ts");
-const { applySessionLaunch } = require("../src/workspace/session-launch.ts");
+const { sessionPanelId } = require("../src/daemonSessions.ts");
+const {
+  launchTarget,
+  placeLaunchedPanel,
+} = require("../src/workspace/session-launch.ts");
 const { leafIds } = require("../src/layout.ts");
 
 function controller(
@@ -92,57 +95,38 @@ function controller(
   };
 }
 
-function daemon(options = {}) {
-  const workspaces = [],
-    panes = [],
-    calls = [];
-  const connections = {
-    socket: async (endpoint) => endpoint,
-    inspect: async (_, input) => ({ cwd: input.root }),
-  };
-  const rpc = async (_, method, params) => {
-    calls.push({ method, params });
-    if (method === "session.snapshot")
-      return { snapshot: { workspaces: [...workspaces], panes: [...panes] } };
-    if (method === "workspace.create") {
-      const workspace = { workspace_id: `w${workspaces.length + 1}` };
-      const root_pane = {
-        pane_id: `p${panes.length + 1}`,
-        workspace_id: workspace.workspace_id,
-        cwd: params.cwd,
+// A fake daemon bridge: one session per idempotency key, like the real one.
+function daemon({ fail } = {}) {
+  const sessions = new Map();
+  const requests = [];
+  const bridge = {
+    daemonSessionLaunch: async (request) => {
+      requests.push(request);
+      if (fail?.(request)) throw new Error("Launch failed");
+      if (!sessions.has(request.idempotencyKey))
+        sessions.set(request.idempotencyKey, `s${sessions.size + 1}`);
+      return {
+        host: request.host,
+        sessionId: sessions.get(request.idempotencyKey),
+        cwd: request.worktree
+          ? `${request.cwd}-${request.worktree.branch}`
+          : request.cwd,
       };
-      workspaces.push(workspace);
-      panes.push(root_pane);
-      return { workspace, root_pane };
-    }
-    if (method === "pane.split") {
-      const pane = {
-        pane_id: `p${panes.length + 1}`,
-        workspace_id: params.workspace_id,
-        cwd: params.cwd,
-      };
-      panes.push(pane);
-      return { pane };
-    }
-    if (method === "pane.send_input") return {};
-    throw new Error(`Unexpected method ${method}`);
-  };
-  const launcher = new SessionLauncher({
-    getConnections: () => connections,
-    rpc,
-    ...options,
-  });
-  return {
-    bridge: {
-      sessionLaunch: (input) => launcher.launch(input),
-      herdr: rpc,
-      terminalClose: async () => {},
     },
-    workspaces,
-    panes,
-    calls,
+    terminalClose: async () => {},
   };
+  return { bridge, requests, sessions };
 }
+
+const entry = "/tmp/entry.sock";
+const hostWorkspace = (panels = [], layout = null) => ({
+  id: "w1",
+  connection: entry,
+  cwd: "/tmp/checkout",
+  name: "Checkout",
+  panels,
+  layout,
+});
 
 const initial = () => [
   {
@@ -154,142 +138,82 @@ const initial = () => [
   },
 ];
 
-test("new UI clicks and explicit intents do not consume a failed panel's retry", async () => {
-  for (const operationId of [undefined, "new-request"]) {
-    for (const action of ["create", "add"]) {
-      const server = daemon();
-      const first = controller(server.bridge, initial());
-      await first.ws.createWorkspace(
-        "Project",
-        "/tmp/checkout",
-        "herdr",
-        "claude",
-        "/tmp/entry.sock",
-        "old-request",
-      );
-      const workspace = first.current().find((item) => item.herdrId);
-      workspace.panels[0].launchError = "Preparation failed";
-      workspace.panels[0].launchOperationId = "old-request";
-      const app = controller(server.bridge, [workspace]);
-      if (action === "create")
-        await app.ws.createWorkspace(
-          "Project",
-          "/tmp/checkout",
-          "herdr",
-          "claude",
-          "/tmp/entry.sock",
-          operationId,
-        );
-      else
-        await app.ws.addPanel(
-          "agent",
-          "claude",
-          undefined,
-          undefined,
-          undefined,
-          "herdr",
-          workspace.id,
-          undefined,
-          operationId,
-        );
-      assert.equal(server.workspaces.length, 1);
-      assert.equal(server.panes.length, 2, action);
-      assert.equal(
-        server.calls.filter((call) => call.method === "pane.split").length,
-        1,
-        action,
-      );
-      assert.equal(app.current()[0].panels[0].launchOperationId, "old-request");
-      assert.equal(
-        app.current()[0].panels[0].launchError,
-        "Preparation failed",
-      );
-    }
-  }
+test("a failed launch keeps its operation id for the retry and leaves no panel", async () => {
+  let failing = true;
+  const server = daemon({ fail: () => failing });
+  const app = controller(server.bridge, initial());
+  const create = (operationId) =>
+    app.ws.createWorkspace(
+      "Project",
+      "/tmp/checkout",
+      "claude",
+      entry,
+      operationId,
+    );
+  assert.equal(await create("old-request"), false);
+  assert.equal(app.errors.length, 1);
+  assert.equal(app.current().filter((item) => item.connection).length, 0);
+  failing = false;
+  assert.equal(await create("old-request"), true);
+  assert.equal(server.sessions.size, 1);
+  assert.deepEqual(
+    server.requests.map((request) => request.idempotencyKey),
+    ["old-request", "old-request"],
+  );
+  await create(undefined);
+  assert.equal(server.sessions.size, 2);
+  assert.notEqual(server.requests[2].idempotencyKey, "old-request");
 });
 
-test("actual sushiAI project launch entry retains all 20 independent concurrent intentions", async () => {
+test("20 concurrent new-project launches each get their own session and workspace", async () => {
   const server = daemon();
   const app = controller(server.bridge, initial());
   const results = await Promise.all(
     Array.from({ length: 20 }, () =>
-      app.ws.createWorkspace("Checkout", "/tmp/checkout", "herdr", "shell"),
+      app.ws.createWorkspace("Checkout", "/tmp/checkout", "shell"),
     ),
   );
   assert.ok(results.every(Boolean));
-  assert.equal(server.workspaces.length, 1);
-  assert.equal(server.panes.length, 20);
-  assert.equal(
-    app.current().filter((workspace) => workspace.herdrId).length,
-    1,
-  );
-  assert.equal(
-    app.current().find((workspace) => workspace.herdrId).panels.length,
-    20,
-  );
-  assert.equal(app.invalidations.length, 40);
+  assert.equal(server.sessions.size, 20);
+  const hosted = app.current().filter((workspace) => workspace.connection);
+  assert.equal(hosted.length, 20);
+  assert.ok(hosted.every((workspace) => workspace.panels.length === 1));
   assert.equal(app.snapshots.length, 20);
+  assert.equal(server.requests[0].host, "local");
 });
 
-test("actual project entry request replay is idempotent while the next click creates a panel", async () => {
+test("a replayed project launch is idempotent while the next click creates a session", async () => {
   const server = daemon();
   const app = controller(server.bridge, initial());
-  await Promise.all([
-    app.ws.createWorkspace(
-      "Checkout",
-      "/tmp/checkout",
-      "herdr",
-      "shell",
-      "/tmp/entry.sock",
-      "same-id",
+  await Promise.all(
+    [0, 1].map(() =>
+      app.ws.createWorkspace(
+        "Checkout",
+        "/tmp/checkout",
+        "shell",
+        entry,
+        "same-id",
+      ),
     ),
-    app.ws.createWorkspace(
-      "Checkout",
-      "/tmp/checkout",
-      "herdr",
-      "shell",
-      "/tmp/entry.sock",
-      "same-id",
-    ),
-  ]);
-  assert.equal(server.workspaces.length, 1);
-  assert.equal(server.panes.length, 1);
-  await app.ws.createWorkspace("Checkout", "/tmp/checkout", "herdr", "shell");
-  assert.equal(server.panes.length, 2);
+  );
+  assert.equal(server.sessions.size, 1);
+  const hosted = app.current().filter((workspace) => workspace.connection);
+  assert.equal(hosted.length, 1);
+  assert.equal(hosted[0].panels.length, 1);
+  assert.equal(hosted[0].panels[0].id, sessionPanelId(entry, "s1"));
+  await app.ws.createWorkspace("Checkout", "/tmp/checkout", "shell");
+  assert.equal(server.sessions.size, 2);
 });
 
-test("actual add entry keeps 20 additions and explicit repeat opens one panel", async () => {
+test("20 additions land in one workspace and an explicit replay opens one panel", async () => {
   const server = daemon();
-  const result = await server.bridge.herdr(
-    "/tmp/entry.sock",
-    "workspace.create",
-    { cwd: "/tmp/checkout" },
-  );
-  const workspace = {
-    id: herdrWorkspaceKey("/tmp/entry.sock", result.workspace.workspace_id),
-    herdrId: result.workspace.workspace_id,
-    connection: "/tmp/entry.sock",
-    cwd: "/tmp/checkout",
-    name: "Checkout",
-    panels: [
-      {
-        id: herdrWorkspaceKey("/tmp/entry.sock", result.root_pane.pane_id),
-        herdrId: result.root_pane.pane_id,
-        kind: "terminal",
-        title: "Shell",
-      },
-    ],
-    layout: {
-      type: "leaf",
-      id: herdrWorkspaceKey("/tmp/entry.sock", result.root_pane.pane_id),
-    },
-  };
-  const app = controller(server.bridge, [workspace]);
+  const app = controller(server.bridge, [hostWorkspace()]);
   await Promise.all(
     Array.from({ length: 20 }, () => app.ws.addPanel("terminal")),
   );
-  assert.equal(server.panes.length, 21);
-  await Promise.all([
+  assert.equal(server.sessions.size, 20);
+  assert.equal(app.current()[0].panels.length, 20);
+  const replay = () =>
     app.ws.addPanel(
       "terminal",
       undefined,
@@ -298,182 +222,114 @@ test("actual add entry keeps 20 additions and explicit repeat opens one panel", 
       undefined,
       undefined,
       undefined,
-      undefined,
       "same-add",
-    ),
-    app.ws.addPanel(
-      "terminal",
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      "same-add",
-    ),
-  ]);
-  assert.equal(server.panes.length, 22);
+    );
+  await Promise.all([replay(), replay()]);
+  assert.equal(server.sessions.size, 21);
+  assert.equal(app.current()[0].panels.length, 21);
 });
 
-test("actual restore entry shares pending restoration and replaces the selected slot", async () => {
+test("Reopen shares one pending launch and replaces the selected slot", async () => {
   const server = daemon();
   const panel = {
     id: "old",
-    herdrId: "gone",
+    sessionId: "gone",
     kind: "terminal",
     title: "Shell",
     ended: true,
   };
   const workspace = {
-    id: "workspace-old",
-    herdrId: "workspace-gone",
-    connection: "/tmp/entry.sock",
-    cwd: "/tmp/checkout",
-    name: "Checkout",
-    panels: [
-      panel,
+    ...hostWorkspace(
+      [
+        panel,
+        {
+          id: "chat",
+          kind: "chat",
+          title: "Thread",
+          messages: [{ id: "m", role: "user", text: "Keep this conversation" }],
+        },
+      ],
       {
-        id: "chat",
-        kind: "chat",
-        title: "Thread",
-        messages: [{ id: "m", role: "user", text: "Keep this conversation" }],
+        type: "split",
+        id: "split",
+        axis: "row",
+        ratio: 0.35,
+        a: { type: "leaf", id: "old" },
+        b: { type: "leaf", id: "chat" },
       },
-    ],
-    layout: {
-      type: "split",
-      id: "split",
-      axis: "row",
-      ratio: 0.35,
-      a: { type: "leaf", id: "old" },
-      b: { type: "leaf", id: "chat" },
-    },
+    ),
+    id: "workspace-old",
   };
-  const original = server.bridge.herdr;
-  server.bridge.herdr = (endpoint, method, params) =>
-    method === "pane.split"
-      ? Promise.reject(
-          Object.assign(new Error("Missing"), { code: "workspace_not_found" }),
-        )
-      : original(endpoint, method, params);
-  const launcher = new SessionLauncher({
-    getConnections: () => ({
-      socket: async (endpoint) => endpoint,
-      inspect: async (_, input) => ({ cwd: input.root }),
-    }),
-    rpc: server.bridge.herdr,
-  });
-  server.bridge.sessionLaunch = (input) => launcher.launch(input);
   const app = controller(server.bridge, [workspace]);
   const first = app.ws.reopenPanel("old");
   const second = app.ws.reopenPanel("old");
   assert.equal(first, second);
   await first;
-  assert.equal(server.workspaces.length, 1);
-  assert.equal(server.panes.length, 1);
+  assert.equal(server.sessions.size, 1);
   const current = app.current()[0];
   assert.equal(current.layout.ratio, 0.35);
   assert.deepEqual(leafIds(current.layout), [
-    herdrWorkspaceKey("/tmp/entry.sock", "p1"),
+    sessionPanelId(entry, "s1"),
     "chat",
   ]);
   assert.equal(current.panels[1].messages[0].text, "Keep this conversation");
-  assert.equal(app.states[1], herdrWorkspaceKey("/tmp/entry.sock", "p1"));
+  assert.equal(app.states[1], sessionPanelId(entry, "s1"));
 });
 
-test("actual add and restore retain the upstream fifth account argument for Claude and Codex", async () => {
-  const requests = [];
-  const server = daemon({
-    prepareSession: async (input) => {
-      requests.push(input);
-      return { prefix: "", settings: "", launch: "" };
-    },
-  });
-  const opened = controller(server.bridge, initial());
-  await opened.ws.createWorkspace(
-    "Checkout",
-    "/tmp/checkout",
-    "herdr",
-    "shell",
-  );
-  const workspace = opened.current().find((item) => item.herdrId);
+test("add and Reopen carry the Claude and Codex account to the daemon launch", async () => {
+  const server = daemon();
   for (const [agent, accountId, field] of [
     ["claude", "claude-work", "claudeAccountId"],
     ["codex", "", "codexAccountId"],
   ]) {
-    const app = controller(server.bridge, [workspace]);
+    const app = controller(server.bridge, [hostWorkspace()]);
     await app.ws.addPanel(
       "agent",
       agent,
       undefined,
       undefined,
       accountId,
-      "herdr",
-      workspace.id,
+      "w1",
     );
-    assert.equal(requests.at(-1)[field], accountId);
+    assert.equal(server.requests.at(-1)[field], accountId);
     const current = app.current()[0];
     const panel = current.panels.at(-1);
     assert.equal(panel[field], accountId);
     panel.ended = true;
     const restored = controller(server.bridge, [current]);
     await restored.ws.reopenPanel(panel.id);
-    assert.equal(requests.at(-1)[field], accountId);
-    assert.equal(
-      restored
-        .current()[0]
-        .panels.find((item) => item.herdrId === requests.at(-1).targetPaneId)
-        ?.kind,
-      "terminal",
-    );
+    assert.equal(server.requests.at(-1)[field], accountId);
     assert.equal(restored.current()[0].panels.at(-1)[field], accountId);
   }
 });
 
-test("actual add forwards the selected worktree base and marks local worktree sessions", async () => {
-  const workspace = {
-    id: herdrWorkspaceKey("/tmp/entry.sock", "w1"),
-    herdrId: "w1",
-    connection: "/tmp/entry.sock",
-    name: "Checkout",
-    cwd: "/tmp/checkout",
-    panels: [{ id: "p1", herdrId: "p1", kind: "terminal", title: "Shell" }],
-    layout: { type: "leaf", id: "p1" },
-  };
+test("add forwards the selected worktree base into a workspace of its own", async () => {
+  const server = daemon();
+  const workspace = hostWorkspace(
+    [{ id: "p1", sessionId: "p1", kind: "terminal", title: "Shell" }],
+    { type: "leaf", id: "p1" },
+  );
   const chosen = {
     branch: "probe",
     base: "refs/remotes/origin/release/stable",
   };
-  let request;
-  const app = controller(
-    {
-      sessionLaunch: async (input) => {
-        request = input;
-        return {
-          ok: true,
-          value: {
-            operationId: input.operationId,
-            workspaceId: "worktree",
-            paneId: "worktree-pane",
-            cwd: "/tmp/checkout-probe",
-            createdWorkspace: true,
-          },
-        };
-      },
-    },
-    [workspace],
-  );
+  const app = controller(server.bridge, [workspace]);
   await app.ws.addPanel(
     "terminal",
     "claude",
     undefined,
     undefined,
     undefined,
-    "herdr",
     workspace.id,
     chosen,
   );
-  assert.deepEqual(request.worktree, chosen);
+  assert.deepEqual(server.requests[0].worktree, chosen);
+  const [original, created] = app.current();
+  assert.equal(original.panels.length, 1);
+  assert.equal(created.cwd, "/tmp/checkout-probe");
+  assert.equal(created.worktreeBranch, "probe");
+  assert.equal(created.connection, entry);
+  assert.equal(created.panels[0].sessionId, "s1");
   let creation;
   const local = controller(
     {
@@ -491,7 +347,6 @@ test("actual add forwards the selected worktree base and marks local worktree se
     undefined,
     undefined,
     "local",
-    "local",
     chosen,
   );
   assert.deepEqual(Array.from(creation), [
@@ -506,13 +361,12 @@ test("closing the last Herdr session keeps the project with no open panes", asyn
   for (const chats of [false, true]) {
     const panel = {
       id: "live-pane",
-      herdrId: "live-pane",
+      sessionId: "live-pane",
       kind: "terminal",
       title: "Shell",
     };
     const workspace = {
       id: herdrWorkspaceKey("/tmp/entry.sock", "w1"),
-      herdrId: "w1",
       connection: "/tmp/entry.sock",
       name: "Checkout",
       cwd: "/tmp/checkout",
@@ -525,7 +379,7 @@ test("closing the last Herdr session keeps the project with no open panes", asyn
     const calls = [];
     const app = controller(
       {
-        herdr: async (...args) => calls.push(args),
+        sessionClose: async (...args) => calls.push(args),
         terminalClose: async () => {},
       },
       [workspace],
@@ -535,7 +389,7 @@ test("closing the last Herdr session keeps the project with no open panes", asyn
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(app.confirmations.length, 0);
     assert.equal(calls.length, 1);
-    assert.equal(calls[0][1], "pane.close");
+    assert.deepEqual(calls[0], ["local", "live-pane", true]);
     const remaining = app.current().find((item) => item.id === workspace.id);
     assert.ok(remaining);
     assert.equal(remaining.cwd, workspace.cwd);
@@ -552,9 +406,10 @@ test("closing the last Herdr session keeps the project with no open panes", asyn
   const pending = {
     ...initial()[0],
     id: herdrWorkspaceKey("/tmp/entry.sock", "pending-git"),
-    herdrId: "pending-git",
     connection: "/tmp/entry.sock",
-    panels: [{ id: "pending-pane", herdrId: "pending-pane", kind: "terminal" }],
+    panels: [
+      { id: "pending-pane", sessionId: "pending-pane", kind: "terminal" },
+    ],
     layout: { type: "leaf", id: "pending-pane" },
   };
   const pendingApp = controller({ herdr: async () => {} }, [pending]);
@@ -565,9 +420,8 @@ test("closing the last Herdr session keeps the project with no open panes", asyn
   const linked = {
     ...initial()[0],
     id: herdrWorkspaceKey("/tmp/entry.sock", "linked"),
-    herdrId: "linked",
     connection: "/tmp/entry.sock",
-    panels: [{ id: "linked-pane", herdrId: "linked-pane", kind: "terminal" }],
+    panels: [{ id: "linked-pane", sessionId: "linked-pane", kind: "terminal" }],
     layout: { type: "leaf", id: "linked-pane" },
   };
   const linkedApp = controller({ herdr: async () => {} }, [linked]);
@@ -677,7 +531,6 @@ test("renaming an empty retained Herdr project does not call its vanished host w
   const workspace = {
     ...initial()[0],
     id: herdrWorkspaceKey("/tmp/entry.sock", "old-workspace"),
-    herdrId: "old-workspace",
     connection: "/tmp/entry.sock",
     panels: [],
     layout: null,
@@ -694,61 +547,10 @@ test("renaming an empty retained Herdr project does not call its vanished host w
   assert.equal(calls.length, 0);
 });
 
-test("a reconciled new Herdr session and its launch result keep the saved project id", async () => {
-  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
-  const endpoint = "/tmp/entry.sock";
-  const workspace = {
-    ...initial()[0],
-    id: herdrWorkspaceKey(endpoint, "old-workspace"),
-    herdrId: "old-workspace",
-    connection: endpoint,
-    name: "Saved project",
-    panels: [{ id: "chat", kind: "chat", title: "Transcript" }],
-    layout: null,
-  };
-  const snapshot = {
-    version: "1",
-    workspaces: [{ workspace_id: "new-workspace", label: "Remote label" }],
-    panes: [
-      {
-        pane_id: "new-pane",
-        workspace_id: "new-workspace",
-        cwd: workspace.cwd,
-      },
-    ],
-  };
-  const reconciled = reconcileHerdrWorkspaces([workspace], snapshot, endpoint);
-  const value = {
-    operationId: "retry",
-    workspaceId: "new-workspace",
-    paneId: "new-pane",
-    cwd: workspace.cwd,
-  };
-  const reopened = applySessionLaunch(reconciled, endpoint, value, {
-    id: herdrWorkspaceKey(endpoint, "new-pane"),
-    herdrId: "new-pane",
-    kind: "terminal",
-    title: "Shell",
-  });
-  assert.equal(reopened.length, 1);
-  assert.equal(reopened[0].id, workspace.id);
-  assert.equal(reopened[0].herdrId, "new-workspace");
-  assert.equal(reopened[0].name, workspace.name);
-  assert.deepEqual(
-    reopened[0].panels.map((panel) => panel.id),
-    [herdrWorkspaceKey(endpoint, "new-pane"), "chat"],
-  );
-  assert.deepEqual(reopened[0].layout, {
-    type: "leaf",
-    id: herdrWorkspaceKey(endpoint, "new-pane"),
-  });
-});
-
 test("Close Project removes an empty retained Herdr project", async () => {
   const workspace = {
     ...initial()[0],
     id: herdrWorkspaceKey("/tmp/entry.sock", "old-workspace"),
-    herdrId: "old-workspace",
     connection: "/tmp/entry.sock",
     panels: [],
     layout: null,
@@ -771,7 +573,7 @@ test("Close Project removes an empty retained Herdr project", async () => {
 test("closing a sole ended Herdr pane keeps the project empty", () => {
   const panel = {
     id: "ended-pane",
-    herdrId: "ended-pane",
+    sessionId: "ended-pane",
     kind: "terminal",
     title: "Shell",
     ended: true,
@@ -779,7 +581,6 @@ test("closing a sole ended Herdr pane keeps the project empty", () => {
   const workspace = {
     ...initial()[0],
     id: herdrWorkspaceKey("/tmp/entry.sock", "w1"),
-    herdrId: "w1",
     connection: "/tmp/entry.sock",
     panels: [panel],
     layout: { type: "leaf", id: panel.id },
@@ -793,34 +594,12 @@ test("closing a sole ended Herdr pane keeps the project empty", () => {
   assert.equal(remaining[0].layout, null);
 });
 
-test("adding a session to an empty retained Herdr project reuses its record", async () => {
+test("adding a session to an empty retained project reuses its record", async () => {
   const server = daemon();
-  const original = server.bridge.herdr;
-  server.bridge.herdr = (endpoint, method, params) => {
-    if (
-      method === "pane.split" &&
-      !server.workspaces.some(
-        (workspace) => workspace.workspace_id === params.workspace_id,
-      )
-    )
-      return Promise.reject(
-        Object.assign(new Error("Missing"), { code: "workspace_not_found" }),
-      );
-    return original(endpoint, method, params);
-  };
-  server.bridge.sessionLaunch = (input) =>
-    new SessionLauncher({
-      getConnections: () => ({
-        socket: async (endpoint) => endpoint,
-        inspect: async (_, request) => ({ cwd: request.root }),
-      }),
-      rpc: server.bridge.herdr,
-    }).launch(input);
   const workspace = {
     ...initial()[0],
-    id: herdrWorkspaceKey("/tmp/entry.sock", "old-workspace"),
-    herdrId: "old-workspace",
-    connection: "/tmp/entry.sock",
+    id: herdrWorkspaceKey(entry, "old-workspace"),
+    connection: entry,
     panels: [],
     layout: null,
   };
@@ -829,8 +608,8 @@ test("adding a session to an empty retained Herdr project reuses its record", as
   const remaining = app.current();
   assert.equal(remaining.length, 1);
   assert.equal(remaining[0].id, workspace.id);
-  assert.equal(remaining[0].herdrId, "w1");
   assert.equal(remaining[0].panels.length, 1);
+  assert.equal(remaining[0].panels[0].id, sessionPanelId(entry, "s1"));
   assert.deepEqual(leafIds(remaining[0].layout), [remaining[0].panels[0].id]);
   assert.equal(app.states[0], workspace.id);
 });
@@ -838,9 +617,8 @@ test("adding a session to an empty retained Herdr project reuses its record", as
 test("actual workspace close shares concurrent intent and allows retry after failure", async () => {
   const workspace = {
     ...initial()[0],
-    herdrId: "w1",
     connection: "/tmp/entry.sock",
-    panels: [{ id: "p1", herdrId: "p1", kind: "terminal", title: "Shell" }],
+    panels: [{ id: "p1", sessionId: "p1", kind: "terminal", title: "Shell" }],
     layout: { type: "leaf", id: "p1" },
   };
   let release;
@@ -849,7 +627,7 @@ test("actual workspace close shares concurrent intent and allows retry after fai
   const gate = new Promise((resolve) => (release = resolve));
   const app = controller(
     {
-      herdr: async () => {
+      sessionClose: async () => {
         closes += 1;
         await gate;
         if (fail) throw new Error("Close failed");
@@ -876,17 +654,16 @@ test("actual workspace close shares concurrent intent and allows retry after fai
   assert.equal(app.currentClosedProjects()[0].cwd, workspace.cwd);
 });
 
-test("launch result adoption preserves layout, local panels and separately listed sessions", () => {
+test("a launched panel takes the ended slot, joins its workspace or opens a new one", () => {
   const owner = {
     id: "ended-workspace",
     name: "Name",
-    connection: "/tmp/entry.sock",
+    connection: entry,
     cwd: "/tmp/checkout",
-    herdrId: "old-w",
     panels: [
       {
         id: "ended",
-        herdrId: "ended",
+        sessionId: "gone",
         title: "Session",
         kind: "terminal",
         ended: true,
@@ -907,53 +684,134 @@ test("launch result adoption preserves layout, local panels and separately liste
       b: { type: "leaf", id: "chat" },
     },
   };
-  const value = {
-    operationId: "restore",
-    workspaceId: "new-w",
-    paneId: "new-p",
-    cwd: owner.cwd,
-    createdWorkspace: true,
-  };
+  const unrelated = { ...owner, id: "separate", panels: [], layout: null };
   const panel = {
-    id: herdrWorkspaceKey(owner.connection, "new-p"),
-    herdrId: "new-p",
+    id: sessionPanelId(entry, "new"),
+    sessionId: "new",
     title: "Session",
     kind: "terminal",
   };
-  const listed = {
-    ...owner,
-    id: herdrWorkspaceKey(owner.connection, "new-w"),
-    herdrId: "new-w",
-    panels: [
-      panel,
-      {
-        id: "other-live",
-        herdrId: "other-live",
-        kind: "terminal",
-        title: "Other",
-      },
-    ],
-    layout: null,
-  };
-  const unrelated = {
-    ...owner,
-    id: "separate",
-    herdrId: "independent",
-    panels: [
-      { id: "living", herdrId: "living", kind: "terminal", title: "Keep" },
-    ],
-  };
-  const output = applySessionLaunch(
-    [owner, listed, unrelated],
-    owner.connection,
-    value,
+  const request = { endpoint: entry, label: "Name", cwd: owner.cwd };
+  const all = [owner, unrelated];
+  const restore = { workspaceId: owner.id, panelId: "ended" };
+  assert.equal(launchTarget(all, request, panel.id, restore), owner.id);
+  const reopened = placeLaunchedPanel(all, {
+    targetId: owner.id,
+    request,
     panel,
-    { workspaceId: owner.id, panelId: "ended" },
+    cwd: owner.cwd,
+    restore,
+  });
+  assert.equal(reopened.length, 2);
+  assert.equal(reopened[0].panels[1].messages[0].text, "keep");
+  assert.deepEqual(leafIds(reopened[0].layout), [panel.id, "chat"]);
+  assert.equal(reopened[1], unrelated);
+  // A new panel joins the workspace that asked; a replay finds it again.
+  const asked = { ...request, workspaceId: "separate" };
+  assert.equal(launchTarget(all, asked, panel.id), "separate");
+  const joined = placeLaunchedPanel(all, {
+    targetId: "separate",
+    request: asked,
+    panel,
+    cwd: owner.cwd,
+  });
+  assert.deepEqual(leafIds(joined[1].layout), [panel.id]);
+  assert.equal(launchTarget(joined, asked, panel.id), "separate");
+  assert.equal(
+    placeLaunchedPanel(joined, {
+      targetId: "other",
+      request: asked,
+      panel,
+      cwd: owner.cwd,
+    }).length,
+    2,
   );
-  assert.equal(output.length, 2);
-  assert.equal(output[0].id, owner.id);
-  assert.equal(output[0].panels.length, 3);
-  assert.equal(output[0].panels[1].messages[0].text, "keep");
-  assert.deepEqual(leafIds(output[0].layout), [panel.id, "chat", "other-live"]);
-  assert.equal(output[1], unrelated);
+  // A worktree launch never joins the asking workspace.
+  const worktree = { ...asked, worktree: { branch: "probe" } };
+  assert.equal(launchTarget(all, worktree, panel.id), undefined);
+  const created = placeLaunchedPanel(all, {
+    targetId: "fresh",
+    request: worktree,
+    panel,
+    cwd: "/tmp/checkout-probe",
+  });
+  assert.equal(created.length, 3);
+  assert.deepEqual(
+    { ...created[2], panels: undefined, layout: undefined },
+    {
+      id: "fresh",
+      name: "Name",
+      cwd: "/tmp/checkout-probe",
+      connection: entry,
+      worktreeBranch: "probe",
+      panels: undefined,
+      layout: undefined,
+    },
+  );
+});
+
+test("renaming a session panel tells the daemon, a local panel renames in place", async () => {
+  const calls = [];
+  const workspace = {
+    id: "w1",
+    connection: "ssh:devbox",
+    name: "Checkout",
+    cwd: "/tmp/checkout",
+    panels: [
+      { id: "bound", sessionId: "s-1", kind: "terminal", title: "zsh" },
+      { id: "plain", kind: "terminal", title: "zsh" },
+    ],
+    layout: { type: "leaf", id: "bound" },
+  };
+  const app = controller(
+    {
+      sessionUpdate: async (...args) => {
+        calls.push(args);
+      },
+    },
+    [workspace],
+  );
+  app.ws.renamePanel("bound", "Build");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, [["devbox", { id: "s-1", title: "Build" }]]);
+  assert.equal(app.current()[0].panels[0].title, "Build");
+  app.ws.renamePanel("plain", "Notes");
+  assert.equal(calls.length, 1);
+  assert.equal(app.current()[0].panels[1].title, "Notes");
+});
+
+test("Reopen of an ended agent panel launches with resume and the workspace as group", async () => {
+  const requests = [];
+  const ended = {
+    id: "old",
+    sessionId: "s-gone",
+    kind: "agent",
+    agent: "claude",
+    title: "Claude Code",
+    ended: true,
+    agentSession: "thread-3",
+  };
+  const workspace = hostWorkspace([ended], { type: "leaf", id: "old" });
+  const app = controller(
+    {
+      daemonSessionLaunch: async (input) => {
+        requests.push(input);
+        return { host: "local", sessionId: "s-new", cwd: "/tmp/checkout" };
+      },
+      terminalClose: async () => {},
+    },
+    [workspace],
+  );
+  await app.ws.reopenPanel("old");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].resume, "thread-3");
+  assert.equal(requests[0].group, "w1");
+  assert.equal(requests[0].agent, "claude");
+  assert.equal(requests[0].host, "local");
+  assert.ok(requests[0].idempotencyKey);
+  const [panel] = app.current()[0].panels;
+  assert.equal(panel.sessionId, "s-new");
+  assert.equal(panel.ended, undefined);
+  assert.equal(panel.id, sessionPanelId(entry, "s-new"));
+  assert.deepEqual(leafIds(app.current()[0].layout), [panel.id]);
 });

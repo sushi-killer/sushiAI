@@ -48,7 +48,7 @@ fi
 `;
 
 /** `{ manifest, binDir }` from the manifest file `npm run build:host` writes
- * into dist/host, or null when it is not there. The caller passes the result
+ * into target/host, or null when it is not there. The caller passes the result
  * as the `sushiai` option of setupHost. */
 function loadHostManifest(file) {
   try {

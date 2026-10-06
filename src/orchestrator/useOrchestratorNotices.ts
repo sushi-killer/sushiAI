@@ -17,15 +17,9 @@ type Shell = {
     filesTarget?: undefined,
     modelProfile?: undefined,
     accountId?: string,
-    backend?: "herdr" | "local",
     targetWorkspaceId?: string,
   ): Promise<boolean>;
-  createWorkspace(
-    name: string,
-    cwd: string,
-    backend: string,
-    starter: string,
-  ): Promise<boolean>;
+  createWorkspace(name: string, cwd: string, starter: string): Promise<boolean>;
 };
 
 /** The open path a desktop-mascot Open button and a native notification
@@ -77,10 +71,9 @@ export function useOrchestratorNotices(shell: Shell) {
         undefined,
         undefined,
         undefined,
-        "local",
         target.workspaceId,
       );
-    else void createWorkspace(target.name, target.cwd, "local", "shell");
+    else void createWorkspace(target.name, target.cwd, "shell");
   }, [
     pending,
     workspaces,

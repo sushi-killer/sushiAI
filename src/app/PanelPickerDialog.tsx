@@ -110,7 +110,6 @@ export function PanelPickerDialog({
   addPanel,
   addExtensionPanel,
   extensionRegistry,
-  connected,
   hostContext,
 }: {
   active: Workspace;
@@ -122,7 +121,6 @@ export function PanelPickerDialog({
     filesTarget?: undefined,
     modelProfile?: ModelProfile,
     claudeAccountId?: string,
-    backend?: "herdr" | "local",
     targetWorkspaceId?: string,
     worktree?: { branch: string; base: string },
   ): void;
@@ -151,9 +149,6 @@ export function PanelPickerDialog({
   const [selectedCodexAccountId, setSelectedCodexAccountId] = useState("");
   const codexTouched = useRef(false);
   const [codexMenu, setCodexMenu] = useState(false);
-  // Only a Herdr-backed workspace has a choice to offer.
-  const herdrWorkspace = Boolean(active.herdrId) && connected;
-  const [backend, setBackend] = useState<"herdr" | "local">("herdr");
   const [selectedModelProfileId, setSelectedModelProfileId] = useState("");
   const [selectedClaudeAccountId, setSelectedClaudeAccountId] = useState("");
   const accountTouched = useRef(false);
@@ -291,13 +286,8 @@ export function PanelPickerDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active.id, hostsKey, projectId]);
   const targetIsSsh = Boolean(targetWorkspace.connection?.startsWith("ssh:"));
-  const canHerdrWorktree =
-    Boolean(targetWorkspace.herdrId) && connected && backend === "herdr";
-  // A worktree launched without Herdr becomes a plain local process on this
-  // Mac, so it needs the target workspace's own checkout to be local too.
-  const canLocalWorktree =
-    !targetIsSsh && (!targetWorkspace.herdrId || backend === "local");
-  const canWorktree = !setupPick && (canHerdrWorktree || canLocalWorktree);
+  // Slice 1 launches on this Mac only, so a worktree needs a local checkout.
+  const canWorktree = !setupPick && !targetIsSsh;
   const [checkout, setCheckout] = useState<"current" | "worktree">("current");
   const [branch, setBranch] = useState(() => suggestWorktreeBranch(new Date()));
   const [base, setBase] = useState("main");
@@ -307,7 +297,7 @@ export function PanelPickerDialog({
     branches: BaseBranch[];
     error: string;
   } | null>(null);
-  // A backend or host switch can take the worktree option away while it is
+  // A host switch can take the worktree option away while it is
   // selected; the radiogroup unmounts, so the choice has to lapse with it or a
   // remote path reaches the local git.
   const wantsWorktree = canWorktree && checkout === "worktree";
@@ -405,7 +395,6 @@ export function PanelPickerDialog({
             : // Untouched: the main process applies the project's account,
               // and the host's login when that one cannot run.
               undefined,
-        backend,
         targetWorkspaceId,
         worktreeArg,
       );
@@ -413,7 +402,6 @@ export function PanelPickerDialog({
     [
       addPanel,
       setupPick,
-      backend,
       modelProfiles,
       selectedClaudeAccountId,
       selectedCodexAccountId,
@@ -475,7 +463,6 @@ export function PanelPickerDialog({
             undefined,
             undefined,
             undefined,
-            backend,
             targetWorkspaceId,
             launchesInWorktree(tool.kind) ? worktreeArg : undefined,
           );
@@ -498,7 +485,6 @@ export function PanelPickerDialog({
     focusedAgent,
     orchestrator,
     extensionRegistry,
-    backend,
     targetWorkspaceId,
     worktreeArg,
     worktreeInvalid,
@@ -704,25 +690,6 @@ export function PanelPickerDialog({
             </button>
           ))}
         </div>
-        {herdrWorkspace && (
-          <div className="pk-backend" role="group" aria-label="Session backend">
-            {(
-              [
-                ["herdr", "Herdr"],
-                ["local", "Local"],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                className={backend === value ? "selected" : ""}
-                aria-pressed={backend === value}
-                onClick={() => setBackend(value)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        )}
         {canWorktree && (
           <label className={`pk-worktree${wantsWorktree ? " on" : ""}`}>
             <input
@@ -1058,7 +1025,6 @@ export function PanelPickerDialog({
                     undefined,
                     undefined,
                     undefined,
-                    backend,
                     targetWorkspaceId,
                     launchesInWorktree(item.kind) ? worktreeArg : undefined,
                   )

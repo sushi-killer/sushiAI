@@ -239,12 +239,11 @@ test("a session for a project on a host reuses its workspace, and an IPC wrapper
   const { findHostWorkspace } =
     await import("../src/workspace/workspace-actions.ts");
   const { errorText, isGone } = await import("../src/app/errors.ts");
-  const ws = (id, connection, cwd, herdrId = "h") => ({
+  const ws = (id, connection, cwd) => ({
     id,
     connection,
     cwd,
-    herdrId,
-    panels: [{ herdrId: "live" }],
+    panels: [{ sessionId: "live" }],
   });
   const list = [
     ws("a", "ssh:lab", "/srv/app"),
@@ -262,9 +261,9 @@ test("a session for a project on a host reuses its workspace, and an IPC wrapper
     findHostWorkspace(list, "local", "ssh:lab", "/srv/new"),
     undefined,
   );
-  // A workspace Herdr no longer lists (all its panes ended) is not reused.
+  // A workspace the host no longer lists (all its sessions ended) is not reused.
   const gone = ws("g", "ssh:lab", "/srv/gone");
-  gone.panels = [{ herdrId: "p", ended: true }];
+  gone.panels = [{ sessionId: "p", ended: true }];
   assert.equal(
     findHostWorkspace([gone], "local", "ssh:lab", "/srv/gone"),
     undefined,
@@ -285,11 +284,13 @@ test("a session for a project on a host reuses its workspace, and an IPC wrapper
   assert.equal(
     isGone(
       Object.assign(new Error("arbitrary host text"), {
-        code: "pane_not_found",
+        code: 1003,
       }),
     ),
     true,
   );
-  assert.equal(isGone({ code: "workspace_not_found" }), true);
+  assert.equal(isGone({ code: "SESSION_NOT_RUNNING" }), true);
+  assert.equal(isGone({ code: 1005 }), true);
+  assert.equal(isGone({ code: 1004 }), false);
   assert.equal(isGone(new Error("boom")), false);
 });

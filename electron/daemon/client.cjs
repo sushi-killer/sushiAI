@@ -177,7 +177,12 @@ function connectDaemon({
     events.emit("disconnect", error);
   }
 
-  async function attach(id, onBytes) {
+  // onBytes(data, info): `info.snapshot === true` means `data` is the whole
+  // screen (first attach, resync or a lagging subscriber) and replaces what the
+  // consumer shows; otherwise `data` is live output continuing from `info.seq`.
+  // `scrollback` asks the daemon to prepend that many history lines to the
+  // first snapshot.
+  async function attach(id, onBytes, { scrollback } = {}) {
     if (attached.has(id)) throw new Error(`session ${id} is already attached`);
     const state = {
       onBytes,
@@ -188,7 +193,7 @@ function connectDaemon({
     };
     attached.set(id, state);
     try {
-      const snap = await request("session.attach", { id });
+      const snap = await request("session.attach", { id, scrollback });
       applySnapshot(id, state, snap);
       return {
         cols: snap.cols,

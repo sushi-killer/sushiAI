@@ -47,11 +47,11 @@ test("findPanelOwner finds a panel's real owner, not just the active workspace",
   assert.equal(findPanelOwner([first, second], "missing"), undefined);
 });
 
-test("removePanel drops a terminal but keeps Herdr panes and chat threads", async () => {
+test("removePanel drops a terminal but keeps session panes and chat threads", async () => {
   const { removePanel } = await library;
   const { contains } = await layoutLibrary;
   const terminal = panel("t");
-  const pane = panel("p", "terminal", { herdrId: "pane-1" });
+  const pane = panel("p", "terminal", { sessionId: "pane-1" });
   const thread = panel("c", "chat", {
     messages: [{ role: "user", text: "hi" }],
   });
@@ -68,7 +68,7 @@ test("removePanel drops a terminal but keeps Herdr panes and chat threads", asyn
   const withoutPane = removePanel(before, pane);
   assert.ok(
     withoutPane.panels.some((item) => item.id === "p"),
-    "a Herdr pane survives: closing the view never kills the session",
+    "a session pane survives: closing the view never kills the session",
   );
   assert.equal(contains(withoutPane.layout, "p"), false);
 
@@ -114,19 +114,19 @@ test("removeClosedPanels applies to the workspace list as it is now", async () =
   );
 });
 
-test("ending a last Herdr session keeps its project and clears its pane", async () => {
+test("ending a last session session keeps its project and clears its pane", async () => {
   const { removeClosedSessions } = await library;
   const sole = {
     ...(await workspace([
-      panel("p", "terminal", { herdrId: "w1:p1" }),
+      panel("p", "terminal", { sessionId: "w1:p1" }),
       panel("files", "files"),
     ])),
-    herdrId: "w1",
+    connection: "local",
   };
   const linked = {
-    ...(await workspace([panel("linked", "terminal", { herdrId: "w2:p1" })])),
+    ...(await workspace([panel("linked", "terminal", { sessionId: "w2:p1" })])),
     id: "w2",
-    herdrId: "w2",
+    connection: "local",
   };
   const afterLast = removeClosedSessions([sole, linked], new Set(["p"]));
   assert.equal(afterLast.length, 2);
@@ -138,7 +138,7 @@ test("ending a last Herdr session keeps its project and clears its pane", async 
   assert.deepEqual(afterLast[0].layout, { type: "leaf", id: "files" });
   assert.equal(afterLast[1], linked);
   for (const survivor of [
-    panel("q", "terminal", { herdrId: "w1:p2" }),
+    panel("q", "terminal", { sessionId: "w1:p2" }),
     panel("local", "terminal"),
     panel("chat", "chat"),
   ]) {
@@ -200,13 +200,13 @@ test("ending the last local worktree session keeps its project", async () => {
   }
 });
 
-test("closing a sole ended Herdr pane leaves its empty project ready to reopen", async () => {
+test("closing a sole ended session pane leaves its empty project ready to reopen", async () => {
   const { removeClosedSessions } = await library;
   const ended = {
     ...(await workspace([
-      panel("ended", "terminal", { herdrId: "w1:p1", ended: true }),
+      panel("ended", "terminal", { sessionId: "w1:p1", ended: true }),
     ])),
-    herdrId: "w1",
+    connection: "local",
   };
   const after = removeClosedSessions([ended], new Set(["ended"]));
   assert.equal(after.length, 1);
@@ -371,7 +371,7 @@ test("groupPanelIds drops a pane a member hid (still in panels, removed from tha
   const { groupPanelIds } = await library;
   const { remove } = await layoutLibrary;
   const { group, local } = await mergeGroupFixture();
-  // "b" stays in local.panels (its Herdr session/terminal survives "hide
+  // "b" stays in local.panels (its session session/terminal survives "hide
   // only") but is gone from local's own layout, the way hidePanel leaves it.
   const hiddenLocal = { ...local, layout: remove(local.layout, "b") };
   const hiddenGroup = {
@@ -413,7 +413,7 @@ test("resolveGroupPanes resolves each pane to its own owner's cwd, endpoint and 
   assert.equal(c.hostLabel, "Lab");
 });
 
-test("reconcileGroupLayout drops panels a Herdr poll removed and appends new ones, without touching a workspace outside the group", async () => {
+test("reconcileGroupLayout drops panels a session poll removed and appends new ones, without touching a workspace outside the group", async () => {
   const { reconcileGroupLayout } = await library;
   const { tidy, contains, leafIds } = await layoutLibrary;
   const first = reconcileGroupLayout(undefined, ["a", "b", "c"]);
@@ -461,31 +461,30 @@ test("fixSelection widens aliveness across an active merge group's members, but 
 test("reopenInSlot puts the new pane in the ended pane's layout slot and list position", async () => {
   const { reopenInSlot } = await library;
   const { contains, leafIds } = await layoutLibrary;
-  const ended = panel("herdr:local:old", "agent", {
-    herdrId: "old",
+  const ended = panel("session:local:old", "agent", {
+    sessionId: "old",
     agent: "claude",
     ended: true,
   });
   const before = await workspace([
     panel("a"),
     ended,
-    panel("herdr:local:live", "terminal", { herdrId: "live" }),
+    panel("session:local:live", "terminal", { sessionId: "live" }),
   ]);
-  const next = panel("herdr:local:new", "agent", {
-    herdrId: "new",
+  const next = panel("session:local:new", "agent", {
+    sessionId: "new",
     agent: "claude",
   });
   const after = reopenInSlot(before, ended.id, next);
   assert.deepEqual(
     after.panels.map((item) => item.id),
-    ["a", "herdr:local:new", "herdr:local:live"],
+    ["a", "session:local:new", "session:local:live"],
   );
   assert.deepEqual(
     leafIds(after.layout),
     leafIds(before.layout).map((id) => (id === ended.id ? next.id : id)),
     "the leaf keeps its place in the tree",
   );
-  assert.equal(after.herdrId, undefined);
   assert.equal(contains(before.layout, ended.id), true, "input untouched");
   // Ratios and split ids survive the swap.
   assert.equal(after.layout.id, before.layout.id);
@@ -495,17 +494,16 @@ test("reopenInSlot puts the new pane in the ended pane's layout slot and list po
 test("reopenInSlot rebinds a vanished workspace and folds in a pane a poll already listed", async () => {
   const { reopenInSlot, isVanished } = await library;
   const { leafIds } = await layoutLibrary;
-  const ended = panel("herdr:local:old", "terminal", {
-    herdrId: "old",
+  const ended = panel("session:local:old", "terminal", {
+    sessionId: "old",
     ended: true,
   });
   const before = {
     ...(await workspace([ended])),
-    herdrId: "w-old",
     connection: "local",
   };
   assert.equal(isVanished(before), true);
-  const next = panel("herdr:local:new", "terminal", { herdrId: "new" });
+  const next = panel("session:local:new", "terminal", { sessionId: "new" });
   // The poll got there first: the new pane is already in the list and layout.
   const polled = {
     ...before,
@@ -520,32 +518,31 @@ test("reopenInSlot rebinds a vanished workspace and folds in a pane a poll alrea
     },
   };
   const after = reopenInSlot(polled, ended.id, next, "w-new");
-  assert.equal(after.herdrId, "w-new");
   assert.deepEqual(
     after.panels.map((item) => item.id),
-    ["herdr:local:new"],
+    ["session:local:new"],
   );
-  assert.deepEqual(leafIds(after.layout), ["herdr:local:new"]);
+  assert.deepEqual(leafIds(after.layout), ["session:local:new"]);
   assert.equal(
     isVanished({
       ...before,
-      panels: [panel("t", "terminal", { herdrId: "x" }), ended],
+      panels: [panel("t", "terminal", { sessionId: "x" }), ended],
     }),
     false,
-    "a workspace with a live Herdr pane is not vanished",
+    "a workspace with a live session pane is not vanished",
   );
   assert.equal(
     isVanished({ ...before, panels: [panel("t"), ended] }),
     true,
-    "local panes do not keep a Herdr workspace alive",
+    "local panes do not keep a session workspace alive",
   );
   assert.equal(
     isVanished({ ...before, panels: [] }),
     true,
-    "a Herdr workspace whose last session closed is gone with it",
+    "a session workspace whose last session closed is gone with it",
   );
   assert.equal(
-    isVanished({ ...before, herdrId: undefined, panels: [] }),
+    isVanished({ ...before, connection: undefined, panels: [] }),
     false,
   );
 });
@@ -553,8 +550,74 @@ test("reopenInSlot rebinds a vanished workspace and folds in a pane a poll alrea
 test("reopenInSlot adds a pane whose ended predecessor had left the layout", async () => {
   const { reopenInSlot } = await library;
   const { leafIds } = await layoutLibrary;
-  const ended = panel("old", "terminal", { herdrId: "old", ended: true });
+  const ended = panel("old", "terminal", { sessionId: "old", ended: true });
   const before = await workspace([panel("a"), ended], ["a"]);
   const after = reopenInSlot(before, "old", panel("new"));
   assert.deepEqual(leafIds(after.layout), ["a", "new"]);
+});
+
+test("rename, close and reopen map a panel onto daemon calls", async () => {
+  const { renameRequest, closeRequest, reopenRequest } = await library;
+  const live = panel("p1", "agent", {
+    sessionId: "s1",
+    agent: "codex",
+    codexAccountId: "work",
+    agentSession: "thread-9",
+  });
+  const local = { ...(await workspace([live])), connection: "local" };
+  const remote = { ...local, connection: "ssh:devbox", name: "app" };
+
+  assert.deepEqual(renameRequest(local, live, "Build", "/tmp/sock"), {
+    host: "local",
+    patch: { id: "s1", title: "Build" },
+  });
+  assert.equal(
+    renameRequest(remote, live, "Build", "/tmp/sock").host,
+    "devbox",
+    "an ssh connection is the daemon host id without its prefix",
+  );
+  assert.equal(
+    renameRequest({ ...local, connection: undefined }, live, "x", "ssh:lab")
+      .host,
+    "lab",
+    "a workspace without a connection uses the app's default endpoint",
+  );
+  assert.equal(renameRequest(local, panel("t"), "x", "/tmp/sock"), null);
+  assert.equal(
+    renameRequest(local, { ...live, ended: true }, "x", "/tmp/sock"),
+    null,
+    "an ended panel has no session to rename",
+  );
+
+  assert.deepEqual(closeRequest(remote, live, "/tmp/sock"), {
+    host: "devbox",
+    id: "s1",
+    graceful: true,
+  });
+  assert.equal(closeRequest(local, { ...live, ended: true }, "x"), null);
+  assert.equal(closeRequest(local, panel("t"), "x"), null);
+
+  const ended = { ...live, ended: true };
+  assert.deepEqual(reopenRequest(remote, ended, "op-1", "/tmp/sock"), {
+    operationId: "op-1",
+    endpoint: "ssh:devbox",
+    cwd: "/tmp",
+    label: "app",
+    kind: "agent",
+    agent: "codex",
+    modelProfileId: undefined,
+    claudeAccountId: undefined,
+    codexAccountId: "work",
+    workspaceId: "w1",
+    resume: "thread-9",
+    restore: true,
+  });
+  const shell = reopenRequest(
+    local,
+    panel("t", "terminal", { sessionId: "s2", ended: true }),
+    "op-2",
+    "/tmp/sock",
+  );
+  assert.equal(shell.kind, "terminal");
+  assert.equal("resume" in shell, false, "a shell has nothing to resume");
 });

@@ -1,0 +1,281 @@
+import type { DaemonEvent, DaemonSession, Panel, Workspace } from "./types";
+
+/** What the desktop knows about one host's sessions. */
+export type HostSessions = {
+  /** The host's connection is up. Nothing ends while this is false. */
+  ready: boolean;
+  /** A full `session.list` was applied for the current connection. Absence
+   * from `sessions` means "gone" only after this is true. */
+  listed: boolean;
+  sessions: Record<string, DaemonSession>;
+};
+export type SessionsByHost = Record<string, HostSessions>;
+
+type StatusParams = {
+  id: string;
+  status?: DaemonSession["agentStatus"];
+  statusSource?: DaemonSession["statusSource"];
+  statusSince?: number;
+};
+type MetaParams = {
+  id: string;
+  agentSession?: string | null;
+  transcriptPath?: string | null;
+};
+
+export const emptyHost = (): HostSessions => ({
+  ready: false,
+  listed: false,
+  sessions: {},
+});
+
+/** The daemon host of a workspace connection: "local" for this Mac (any
+ * non-ssh endpoint), else the connection id. */
+export function daemonHost(connection: string | undefined): string {
+  return connection?.startsWith("ssh:") ? connection.slice(4) : "local";
+}
+
+/** The stable panel id of a daemon session on an endpoint. */
+export function sessionPanelId(endpoint: string, sessionId: string): string {
+  return `session:${encodeURIComponent(endpoint)}:${encodeURIComponent(sessionId)}`;
+}
+
+/** The full list of a host replaces what was known; events that arrived while
+ * the list was in flight are replayed on top by the caller. */
+export function applySessionList(
+  host: HostSessions,
+  sessions: DaemonSession[],
+): HostSessions {
+  return {
+    ...host,
+    listed: true,
+    sessions: Object.fromEntries(sessions.map((s) => [s.id, s])),
+  };
+}
+
+/** One notification applied to a host's sessions. Returns the same object when
+ * the event changes nothing. `session.resync` and the ask/open events are the
+ * caller's business, not session state. */
+export function applyDaemonEvent(
+  host: HostSessions,
+  event: Pick<DaemonEvent, "method" | "params">,
+): HostSessions {
+  const { sessions } = host;
+  switch (event.method) {
+    case "session.created":
+    case "session.updated": {
+      const session = event.params as DaemonSession;
+      return { ...host, sessions: { ...sessions, [session.id]: session } };
+    }
+    case "session.removed": {
+      const { id } = event.params as { id: string };
+      if (!(id in sessions)) return host;
+      const rest = { ...sessions };
+      delete rest[id];
+      return { ...host, sessions: rest };
+    }
+    case "session.exited": {
+      const { id, code } = event.params as { id: string; code: number | null };
+      const known = sessions[id];
+      if (!known) return host;
+      return {
+        ...host,
+        sessions: {
+          ...sessions,
+          [id]: {
+            ...known,
+            status: "exited",
+            agentStatus: known.agentStatus && "exited",
+            ...(code === null ? {} : { exitCode: code }),
+          },
+        },
+      };
+    }
+    case "session.status": {
+      const p = event.params as StatusParams;
+      const known = sessions[p.id];
+      if (!known) return host;
+      return {
+        ...host,
+        sessions: {
+          ...sessions,
+          [p.id]: {
+            ...known,
+            agentStatus: p.status,
+            statusSource: p.statusSource,
+            statusSince: p.statusSince,
+          },
+        },
+      };
+    }
+    case "session.meta": {
+      const p = event.params as MetaParams;
+      const known = sessions[p.id];
+      if (!known) return host;
+      return {
+        ...host,
+        sessions: {
+          ...sessions,
+          [p.id]: {
+            ...known,
+            agentSession: p.agentSession ?? undefined,
+            transcriptPath: p.transcriptPath ?? undefined,
+          },
+        },
+      };
+    }
+    default:
+      return host;
+  }
+}
+
+/** The event stream of one host: the newest connection generation seen, the
+ * id of the latest full list, and the events that arrived while that list was
+ * in flight (the list is a snapshot from before them, so they are replayed on
+ * top of it). Immutable: every step returns the next feed. */
+export type HostFeed = {
+  generation: number;
+  token: number;
+  pending: DaemonEvent[] | null;
+};
+export const emptyFeed = (): HostFeed => ({
+  generation: -1,
+  token: 0,
+  pending: null,
+});
+
+/** One event for a host. An older generation is dropped. `session.resync`
+ * asks the caller to list again. Anything else applies now and, while a list
+ * is in flight, is also kept for replay. */
+export function feedEvent(
+  feed: HostFeed,
+  host: HostSessions,
+  event: DaemonEvent,
+): { feed: HostFeed; host: HostSessions; relist: boolean } {
+  if (event.generation < feed.generation) return { feed, host, relist: false };
+  if (event.method === "session.resync") return { feed, host, relist: true };
+  return {
+    feed: feed.pending ? { ...feed, pending: [...feed.pending, event] } : feed,
+    host: applyDaemonEvent(host, event),
+    relist: false,
+  };
+}
+
+/** A full list starts: later events are kept until it lands. */
+export function startList(feed: HostFeed): { feed: HostFeed; token: number } {
+  const token = feed.token + 1;
+  return { feed: { ...feed, token, pending: [] }, token };
+}
+
+/** A full list landed. A list that a newer one replaced is dropped (undefined);
+ * otherwise it replaces what was known and the kept events replay on top. */
+export function finishList(
+  feed: HostFeed,
+  token: number,
+  host: HostSessions,
+  sessions: DaemonSession[],
+): { feed: HostFeed; host: HostSessions } | undefined {
+  if (feed.token !== token) return undefined;
+  let next = applySessionList(host, sessions);
+  for (const event of feed.pending ?? []) next = applyDaemonEvent(next, event);
+  return { feed: { ...feed, pending: null }, host: next };
+}
+
+/** A full list failed: stop keeping events, unless a newer list took over. */
+export function failList(feed: HostFeed, token: number): HostFeed {
+  return feed.token === token ? { ...feed, pending: null } : feed;
+}
+
+/** The panel status the UI draws. A finished turn reads "done" until the
+ * attention layer has seen it, then "idle". Terminals have no status. */
+function panelStatus(
+  session: DaemonSession,
+  previous: string | undefined,
+): string | undefined {
+  switch (session.agentStatus) {
+    case "starting":
+    case "working":
+      return "working";
+    case "blocked":
+      return "blocked";
+    case "idle":
+      return previous === "working" ||
+        previous === "blocked" ||
+        previous === "done"
+        ? "done"
+        : "idle";
+    default:
+      return undefined;
+  }
+}
+
+/** A session the host no longer runs. The panel keeps its slot and its saved
+ * state; it shows "Session ended" with Reopen until it is reopened or closed. */
+function endPanel(panel: Panel, session?: DaemonSession): Panel {
+  const agentSession = session?.agentSession || panel.agentSession;
+  if (
+    panel.ended &&
+    panel.status === undefined &&
+    panel.agentSession === agentSession
+  )
+    return panel;
+  const next: Panel = {
+    ...panel,
+    ended: true,
+    ...(agentSession ? { agentSession } : {}),
+  };
+  delete next.status;
+  return next;
+}
+
+function livePanel(panel: Panel, session: DaemonSession): Panel {
+  const next: Panel = { ...panel };
+  delete next.ended;
+  const status = panelStatus(session, panel.status);
+  if (status === undefined) delete next.status;
+  else next.status = status;
+  const title = session.title?.trim();
+  if (title && !panel.launchError) next.title = title;
+  if (session.cwd) next.paneCwd = session.cwd;
+  if (session.agentSession) next.agentSession = session.agentSession;
+  const keys = new Set([...Object.keys(panel), ...Object.keys(next)]);
+  for (const key of keys)
+    if (
+      (panel as Record<string, unknown>)[key] !==
+      (next as Record<string, unknown>)[key]
+    )
+      return next;
+  return panel;
+}
+
+/** Brings the panels bound to a daemon session in line with what each host
+ * lists. Known panels take the session's status, title and folder; a session
+ * that exited or is gone ends its panel; `detached` is still live. A host that
+ * is not ready, or whose full list has not arrived, changes nothing. A session
+ * the desktop did not create is never adopted: panels are only updated. Returns
+ * the same array when nothing changes. */
+export function reconcileSessions(
+  workspaces: Workspace[],
+  hosts: SessionsByHost,
+): Workspace[] {
+  let changed = false;
+  const next = workspaces.map((workspace) => {
+    const host = hosts[daemonHost(workspace.connection)];
+    if (!host?.ready || !host.listed) return workspace;
+    let touched = false;
+    const panels = workspace.panels.map((panel) => {
+      if (!panel.sessionId) return panel;
+      const session = host.sessions[panel.sessionId];
+      const updated =
+        !session || session.status === "exited"
+          ? endPanel(panel, session)
+          : livePanel(panel, session);
+      if (updated !== panel) touched = true;
+      return updated;
+    });
+    if (!touched) return workspace;
+    changed = true;
+    return { ...workspace, panels };
+  });
+  return changed ? next : workspaces;
+}

@@ -69,6 +69,19 @@ const MIGRATIONS = [
     value TEXT NOT NULL,
     PRIMARY KEY(name, key)
   );`,
+  // v4: a workspace is bound to its daemon sessions through its panels and
+  // its id is the daemon group, so the Herdr binding column and its unique
+  // index go. The rows keep their order and data.
+  `CREATE TABLE workspaces_v4(
+    id TEXT PRIMARY KEY,
+    position INTEGER NOT NULL,
+    endpoint TEXT NOT NULL DEFAULT '',
+    data TEXT NOT NULL
+  );
+  INSERT INTO workspaces_v4(id, position, endpoint, data)
+    SELECT id, position, endpoint, data FROM workspaces;
+  DROP TABLE workspaces;
+  ALTER TABLE workspaces_v4 RENAME TO workspaces;`,
 ];
 
 function migrate(db) {

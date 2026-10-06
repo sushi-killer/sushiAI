@@ -420,7 +420,7 @@ function PanelFrame({
               {zoomed ? "Restore layout" : "Focus panel"}
             </button>
             <button onClick={onClose}>
-              {panel.herdrId ? "Close / end session…" : "Close panel"}
+              {panel.sessionId ? "Close / end session…" : "Close panel"}
             </button>
           </div>
         )}

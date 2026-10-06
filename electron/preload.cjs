@@ -66,7 +66,6 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   terminalScroll: invoke("terminal-scroll"),
   terminalAck: invoke("terminal-ack"),
   herdr: invoke("herdr"),
-  sessionLaunch: invoke("session-launch"),
   herdrCompatibility: invoke("herdr-compatibility"),
   herdrInstall: invoke("herdr-install"),
   herdrSubscribe: invoke("herdr-events-subscribe"),
@@ -101,6 +100,7 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   daemonTerminalDetach: invoke("daemon-terminal-detach"),
   daemonTerminalAck: invoke("daemon-terminal-ack"),
   daemonTerminalAttachFile: invoke("daemon-terminal-attach-file"),
+  daemonTerminalAttachData: invoke("daemon-terminal-attach-data"),
   onDaemonTerminal: (callback) => {
     const listener = (_, data) => callback(data);
     ipcRenderer.on("daemon-terminal-data", listener);

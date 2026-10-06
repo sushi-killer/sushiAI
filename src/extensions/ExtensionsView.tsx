@@ -1,7 +1,16 @@
-import { Check, ChevronRight, ListTodo, Power, RefreshCw } from "lucide-react";
-import { useState } from "react";
+import {
+  Check,
+  ChevronRight,
+  ListTodo,
+  Power,
+  RefreshCw,
+  X,
+} from "lucide-react";
+import { useEffect, useState } from "react";
 import type {
+  CompanionState,
   ExtensionManifest,
+  ExtensionRecord,
   ExtensionSnapshot,
   ExtensionSource,
 } from "./types.ts";
@@ -14,7 +23,124 @@ const HOST_LABELS: Record<string, string> = {
   "sessions.section": "Inbox section",
   "skills.section": "Skills section",
   "settings.section": "Settings section",
+  "settings.page": "Settings tab",
 };
+
+const COMPANION_STATE_LABELS: Record<CompanionState, string> = {
+  off: "Not running",
+  "needs-approval": "Needs your approval",
+  starting: "Starting",
+  running: "Running",
+  failed: "Failed",
+};
+
+/** Shows exactly what would run, and records consent to it. The approval is
+ * bound to this path, these arguments and these permissions: if any changes,
+ * the extension asks again. */
+function CompanionApproval({
+  extension,
+  onClose,
+  onApproved,
+}: {
+  extension: ExtensionRecord;
+  onClose(): void;
+  onApproved(): void;
+}) {
+  const companion = extension.companion;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  if (!companion) return null;
+  const approve = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await window.bridge?.extensionApprove(extension.manifest.id);
+      onApproved();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+      setBusy(false);
+    }
+  };
+  return (
+    <div
+      className="modal-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        className="modal extension-approval"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Approve ${extension.manifest.name}`}
+      >
+        <button
+          className="modal-close icon-button"
+          aria-label="Close dialog"
+          onClick={onClose}
+        >
+          <X size={17} />
+        </button>
+        <h2>{extension.manifest.name} wants to run a program</h2>
+        <p>
+          It runs on this computer with your account's permissions. sushiAI
+          limits what the extension can ask the app for, but it does not sandbox
+          the program.
+        </p>
+        <dl className="extension-approval-facts">
+          <dt>Program</dt>
+          <dd>
+            <code>
+              {companion.resolvedPath || "Not found on this computer"}
+            </code>
+          </dd>
+          <dt>Arguments</dt>
+          <dd>
+            {companion.args.length ? (
+              <code>{companion.args.join(" ")}</code>
+            ) : (
+              "None"
+            )}
+          </dd>
+          <dt>App access</dt>
+          <dd>
+            {companion.permissions.length
+              ? companion.permissions.map((permission) => (
+                  <code key={permission}>{permission}</code>
+                ))
+              : "None"}
+          </dd>
+          <dt>State</dt>
+          <dd>{COMPANION_STATE_LABELS[companion.state]}</dd>
+        </dl>
+        {companion.stderrTail && (
+          <pre className="extension-approval-stderr" aria-label="Last errors">
+            {companion.stderrTail}
+          </pre>
+        )}
+        {error && (
+          <p role="alert" className="settings-error">
+            {error}
+          </p>
+        )}
+        <div className="extension-approval-actions">
+          <button className="secondary" onClick={onClose}>
+            Close
+          </button>
+          {companion.state === "needs-approval" && (
+            <button
+              className="primary"
+              disabled={busy || !companion.resolvedPath}
+              onClick={() => void approve()}
+            >
+              {busy ? "Approving…" : "Approve"}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 const PLACEMENT_LABELS: Record<string, string> = {
   "mode.primary": "top bar",
@@ -97,8 +223,28 @@ export function ExtensionsView({
   onRefresh(): void;
 }) {
   const [open, setOpen] = useState<string | null>(null);
+  const [reviewing, setReviewing] = useState<string | null>(null);
+  // A companion changes state on its own (starting, failed), and the listing
+  // only says so when it is read again.
+  useEffect(
+    () => window.bridge?.onCompanionChanged(() => onRefresh()),
+    [onRefresh],
+  );
+  const reviewed = snapshot.extensions.find(
+    (extension) => extension.manifest.id === reviewing,
+  );
   return (
     <div className="extensions-view">
+      {reviewed && (
+        <CompanionApproval
+          extension={reviewed}
+          onClose={() => setReviewing(null)}
+          onApproved={() => {
+            setReviewing(null);
+            onRefresh();
+          }}
+        />
+      )}
       {snapshot.localDir && (
         <section className="extensions-local">
           <div className="extensions-local-head">
@@ -158,8 +304,27 @@ export function ExtensionsView({
                   <small className="settings-error">{extension.error}</small>
                 )}
                 <small>{extensionSourceLabel(extension.manifest.source)}</small>
+                {extension.companion && (
+                  <small
+                    className="extension-companion-state"
+                    data-state={extension.companion.state}
+                  >
+                    Program: {COMPANION_STATE_LABELS[extension.companion.state]}
+                  </small>
+                )}
               </div>
               <div className="extension-card-actions">
+                {extension.companion && (
+                  <button
+                    className="extension-toggle"
+                    aria-label={`Review the program of ${extension.manifest.name}`}
+                    onClick={() => setReviewing(extension.manifest.id)}
+                  >
+                    {extension.companion.state === "needs-approval"
+                      ? "Review"
+                      : "Details"}
+                  </button>
+                )}
                 {extension.manifest.source.kind === "builtin" &&
                 extension.canDisable !== true ? (
                   <span className="extension-toggle static">

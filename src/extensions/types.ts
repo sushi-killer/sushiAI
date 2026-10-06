@@ -239,10 +239,13 @@ export type ExtensionManifest = {
 
 export type ExtensionStatus = "active" | "disabled";
 
-/** What the app knows about an extension's companion process. */
+export type CompanionState =
+  "off" | "needs-approval" | "starting" | "running" | "failed";
+
+/** What the listing says about an extension's companion process. */
 export type CompanionStatus = {
-  state: "off" | "needs-approval" | "starting" | "running" | "failed";
-  /** Where the command resolved; what an approval binds. */
+  state: CompanionState;
+  /** The command as the app resolved it on this machine. */
   resolvedPath?: string;
   args: string[];
   permissions: string[];

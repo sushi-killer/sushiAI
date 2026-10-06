@@ -1,7 +1,7 @@
 // Pure logic behind the orchd task notices: which workspace a notice opens. No React, no bridge.
 import { contains } from "../layout.ts";
 import { elapsedLabel, projectName } from "./ownerAttention.ts";
-import type { Workspace } from "../types.ts";
+import type { Panel, Workspace } from "../types.ts";
 import type { AskedBy } from "./types.ts";
 
 export type TaskNoticeFocus = "question" | "summary" | "report";
@@ -40,6 +40,20 @@ export type TaskTarget = {
   host?: string;
 };
 
+/** The surface id of the orchestrator pane in the extension manifest. The
+ * extension id literal is `enabled.ts`'s ORCHESTRATOR_EXTENSION_ID, kept here
+ * as text because that module pulls in React state. */
+export const ORCHESTRATION_SURFACE = "orchestration";
+
+/** A pane of the orchestrator's `orchestration` surface. */
+export function isOrchestrationPane(panel: Panel): boolean {
+  return (
+    panel.kind === "extension" &&
+    panel.extension.extensionId === "builtin.orchestrator" &&
+    panel.extension.contributionId === ORCHESTRATION_SURFACE
+  );
+}
+
 export type OrchestratorTarget =
   | { kind: "panel"; workspaceId: string; panelId: string }
   | { kind: "add-panel"; workspaceId: string }
@@ -61,7 +75,7 @@ function remoteTarget(
   for (const workspace of ordered) {
     const panel = workspace.panels.find(
       (item) =>
-        item.kind === "orchestrator" && contains(workspace.layout, item.id),
+        isOrchestrationPane(item) && contains(workspace.layout, item.id),
     );
     if (panel)
       return { kind: "panel", workspaceId: workspace.id, panelId: panel.id };
@@ -84,7 +98,7 @@ export function orchestratorTarget(
   for (const workspace of matching) {
     const panel = workspace.panels.find(
       (item) =>
-        item.kind === "orchestrator" && contains(workspace.layout, item.id),
+        isOrchestrationPane(item) && contains(workspace.layout, item.id),
     );
     if (panel)
       return { kind: "panel", workspaceId: workspace.id, panelId: panel.id };

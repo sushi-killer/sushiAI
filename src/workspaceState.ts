@@ -313,6 +313,32 @@ export function sweepLeftovers(saved: Saved): Saved {
   };
 }
 
+/** A panel saved before the orchestrator became a built-in extension pane:
+ * `kind: "orchestrator"` with its view, host and repo on the panel. It loads
+ * as the extension's pane with the same state as args. Data migration only;
+ * the next save writes the new shape. */
+function convertLegacyPanel(panel: Panel): Panel {
+  const legacy = panel as unknown as Record<string, unknown>;
+  if (legacy.kind !== "orchestrator") return panel;
+  const { orchestratorView, orchestratorHost, orchestratorRepo, ...rest } =
+    legacy;
+  const args: Record<string, string> = {};
+  if (orchestratorView) args.view = JSON.stringify(orchestratorView);
+  if (typeof orchestratorHost === "string") args.host = orchestratorHost;
+  if (typeof orchestratorRepo === "string") args.repo = orchestratorRepo;
+  return {
+    ...rest,
+    kind: "extension",
+    extension: {
+      extensionId: "builtin.orchestrator",
+      contributionId: "orchestration",
+      instanceId: String(legacy.id),
+      stateVersion: 1,
+      ...(Object.keys(args).length ? { args } : {}),
+    },
+  } as Panel;
+}
+
 /** A terminal or agent panel that ran without a daemon session (the host had
  * reported its state, or the agent was started) has nothing to bind to: it
  * comes back ended, with Reopen, and keeps its agent so Reopen starts the same
@@ -343,7 +369,7 @@ const restoreWorkspace =
     return {
       ...w,
       connection: w.connection || (backed ? socket : undefined),
-      panels: w.panels.map(restorePanel),
+      panels: w.panels.map((p) => restorePanel(convertLegacyPanel(p))),
     };
   };
 

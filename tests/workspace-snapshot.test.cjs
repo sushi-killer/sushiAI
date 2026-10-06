@@ -92,9 +92,19 @@ function busySnapshot() {
     },
     {
       id: "orch",
-      kind: "orchestrator",
+      kind: "extension",
       title: "Orchestrator",
-      orchestratorView: { kind: "task", id: "task-7" },
+      extension: {
+        extensionId: "builtin.orchestrator",
+        contributionId: "orchestration",
+        instanceId: "orch",
+        stateVersion: 1,
+        args: {
+          view: '{"kind":"task","id":"task-7"}',
+          host: "ssh:lab",
+          repo: "/work/repo",
+        },
+      },
       ...runtime,
     },
     {
@@ -238,10 +248,10 @@ test("a busy snapshot round-trips through the store, deep-equal", async () => {
   // Ratios are the point: a default would be 0.5.
   assert.equal(restored.workspaces[0].layout.ratio, 0.37);
   assert.equal(restored.workspaces[0].panels[5].filesView.directory, "src/sub");
-  assert.deepEqual(restored.workspaces[0].panels[7].orchestratorView, {
-    kind: "task",
-    id: "task-7",
-  });
+  assert.deepEqual(
+    JSON.parse(restored.workspaces[0].panels[7].extension.args.view),
+    { kind: "task", id: "task-7" },
+  );
 });
 
 test("restore resets what only makes sense while a process runs", async () => {

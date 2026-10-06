@@ -1,4 +1,4 @@
-import { Check, GitBranch, Monitor, Play, X } from "lucide-react";
+import { Check, GitBranch, ListChecks, Monitor, Play, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Icon } from "../../PanelIcon.tsx";
 import { Tag } from "../../orchestrator/ui/index.ts";
@@ -158,10 +158,11 @@ export function StartTaskCard({
               onClick={() => setRunner(item.id)}
             >
               <span className="pv-tile-name">
-                <Icon
-                  kind={item.id === "orchestrator" ? "orchestrator" : "agent"}
-                  agent={item.id === "orchestrator" ? undefined : item.id}
-                />
+                {item.id === "orchestrator" ? (
+                  <ListChecks size={13} aria-hidden />
+                ) : (
+                  <Icon kind="agent" agent={item.id} />
+                )}
                 {item.label}
               </span>
               <small>{item.hint}</small>

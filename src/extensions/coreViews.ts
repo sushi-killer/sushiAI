@@ -1,7 +1,9 @@
 import type { ComponentType } from "react";
-import { FileText, type LucideIcon } from "lucide-react";
+import { FileText, ListTodo, type LucideIcon } from "lucide-react";
 import { PreviewView } from "./preview/PreviewView.tsx";
 import { useChangedWhileHidden } from "./preview/useChangedWhileHidden.ts";
+import { OrchestrationView } from "../orchestrator/OrchestrationView.tsx";
+import { OrchestratorSettingsView } from "../orchestrator/OrchestratorSettingsView.tsx";
 
 export type LaunchAgentRequest = {
   agent: "claude" | "codex";
@@ -61,5 +63,10 @@ export const coreViews: Record<string, CoreViewEntry> = {
     View: PreviewView,
     icon: FileText,
     useChanged: useChangedWhileHidden,
+  },
+  "orchestrator.panel": { View: OrchestrationView, icon: ListTodo },
+  "orchestrator.settings": {
+    View: OrchestratorSettingsView,
+    icon: ListTodo,
   },
 };

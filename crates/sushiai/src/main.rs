@@ -3,13 +3,14 @@ use std::path::PathBuf;
 
 mod hook;
 mod hooks_file;
+mod open;
 
 use anyhow::{bail, Context, Result};
 use tracing_subscriber::filter::LevelFilter;
 
 mod proxy;
 
-const USAGE: &str = "usage: sushiai daemon | status | proxy | hook EVENT | hooks install|uninstall | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
+const USAGE: &str = "usage: sushiai daemon | status | proxy | hook EVENT | open TARGET PATH | hooks install|uninstall | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -17,6 +18,11 @@ fn main() -> Result<()> {
     if command.as_deref() == Some("hook") {
         // An agent runs this for every hook: no logging, never a failure.
         hook::run(args);
+        return Ok(());
+    }
+    if command.as_deref() == Some("open") {
+        // Run by an agent: a missing session or daemon is a note on stderr, never a failure.
+        open::run(args);
         return Ok(());
     }
     // WARN keeps daemon.log small; `SUSHIAI_LOG=info|debug|trace|off` changes it.

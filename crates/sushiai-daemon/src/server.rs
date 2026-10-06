@@ -9,10 +9,11 @@ use serde_json::{json, Value};
 use sushiai_core::Screen;
 use sushiai_protocol::catalog::{ProjectsSync, SessionUpdate};
 use sushiai_protocol::{
-    code, encode, method, AskRespond, AttachResult, Frame, Hello, HelloResult, HookEvent,
-    HookResult, Message, Notification, Request, Response, SessionClose, SessionCreate, SessionId,
-    SessionInfo, SessionInput, SessionResize, SessionSnapshot, SessionStatus, SessionsResync,
-    CAPABILITIES, PROTOCOL_VERSION,
+    code, encode, method, AskRespond, AttachResult, Frame, Hello, HelloResult, HookEvent, HookOpen,
+    HookOpenResult, HookResult, Message, Notification, ReadResult, Request, Response,
+    SessionAttach, SessionClose, SessionCreate, SessionId, SessionInfo, SessionInput, SessionOpen,
+    SessionRead, SessionResize, SessionSnapshot, SessionStatus, SessionsResync, CAPABILITIES,
+    PROTOCOL_VERSION,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -158,9 +159,23 @@ async fn connection(stream: UnixStream, registry: Arc<Registry>) {
     }
 }
 
+/// Parses the params. A bad request never echoes what the caller sent (params can hold
+/// secrets such as `claudeSettings`): the message names the method and, for a missing or
+/// unknown field, the field name, and nothing else.
 fn params<T: DeserializeOwned>(request: &Request) -> Result<T, Fail> {
-    serde_json::from_value(request.params.clone())
-        .map_err(|e| (code::INVALID_PARAMS, e.to_string()))
+    serde_json::from_value(request.params.clone()).map_err(|e| {
+        let text = e.to_string();
+        let field = ["missing field `", "unknown field `"]
+            .iter()
+            .find_map(|lead| text.strip_prefix(lead))
+            .and_then(|rest| rest.split('`').next())
+            .filter(|name| name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+        let message = match field {
+            Some(name) => format!("invalid {} params: field {name}", request.method),
+            None => format!("invalid {} params", request.method),
+        };
+        (code::INVALID_PARAMS, message)
+    })
 }
 
 impl Conn {
@@ -238,6 +253,21 @@ impl Conn {
         }
         match request.method.as_str() {
             method::HOOK_EVENT => self.hook(params(request)?).await,
+            method::HOOK_OPEN => self.open(params(request)?).await,
+            method::SESSION_READ => {
+                let p: SessionRead = params(request)?;
+                let text = self
+                    .session(&p.id)
+                    .await?
+                    .read(scrollback(p.scrollback))
+                    .await
+                    .ok_or_else(|| (code::INTERNAL, "session actor is gone".to_string()))?;
+                Ok(json!(ReadResult {
+                    text: text.text,
+                    rows: text.rows,
+                    cols: text.cols,
+                }))
+            }
             method::ASK_RESPOND => {
                 let p: AskRespond = params(request)?;
                 let id = self
@@ -378,10 +408,51 @@ impl Conn {
         Ok(json!(HookResult { answer }))
     }
 
-    async fn attach(&mut self, p: SessionId) -> Result<Value, Fail> {
+    /// `hook.open`: an agent's `sushiai open` asks the desktop to open `arg` with `target`.
+    async fn open(&self, p: HookOpen) -> Result<Value, Fail> {
+        if !self.hook_only {
+            return Err((
+                code::UNAUTHORIZED,
+                "hook.open needs a connection that said hello with role hook".into(),
+            ));
+        }
+        if !self.registry.token_matches(&p.session, &p.token) {
+            return Err((code::UNAUTHORIZED, "invalid session token".into()));
+        }
+        // A restored session whose holder has not answered yet is waited for.
+        self.session(&p.session).await?;
+        if !valid_target(&p.target) {
+            return Err((
+                code::INVALID_PARAMS,
+                "target must look like extension/surface (a-z, 0-9, -)".into(),
+            ));
+        }
+        if !p.arg.starts_with('/') || p.arg.len() > 4096 || p.arg.chars().any(char::is_control) {
+            return Err((
+                code::INVALID_PARAMS,
+                "arg must be an absolute path of at most 4096 bytes without control characters"
+                    .into(),
+            ));
+        }
+        let nonce = agent::random_hex(8).map_err(|e| (code::INTERNAL, e.to_string()))?;
+        let note = SessionOpen {
+            id: p.session,
+            target: p.target,
+            arg: p.arg,
+            nonce: nonce.clone(),
+        };
+        // No subscriber is fine: the request is then simply not seen.
+        let _ = self
+            .registry
+            .events
+            .send(Notification::new(method::SESSION_OPEN, note));
+        Ok(json!(HookOpenResult { nonce }))
+    }
+
+    async fn attach(&mut self, p: SessionAttach) -> Result<Value, Fail> {
         let handle = self.session(&p.id).await?;
         let attached = handle
-            .attach()
+            .attach(scrollback(p.scrollback))
             .await
             .ok_or_else(|| (code::INTERNAL, "session actor is gone".to_string()))?;
         if let Some(old) = self.streams.remove(&p.id) {
@@ -395,6 +466,23 @@ impl Conn {
         });
         Ok(json!(attach_result(attached.snap)))
     }
+}
+
+/// `^[a-z0-9-]+/[a-z0-9-]+$`.
+fn valid_target(target: &str) -> bool {
+    let part = |p: &str| {
+        !p.is_empty()
+            && p.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    target
+        .split_once('/')
+        .is_some_and(|(a, b)| part(a) && part(b))
+}
+
+/// Most history lines a client may ask for (the screen model keeps 2000).
+fn scrollback(requested: Option<u32>) -> usize {
+    (requested.unwrap_or(0) as usize).min(sushiai_core::SCROLLBACK_LINES)
 }
 
 fn attach_result(snap: Snap) -> AttachResult {
@@ -485,6 +573,40 @@ async fn stream_output(
 }
 
 async fn create(registry: &Arc<Registry>, p: SessionCreate) -> Result<Value, Fail> {
+    let Some(key) = p.idempotency_key.clone() else {
+        return create_new(registry, p, None).await;
+    };
+    if key.is_empty() || key.len() > 256 {
+        return Err((
+            code::INVALID_PARAMS,
+            "idempotencyKey must be 1 to 256 bytes".into(),
+        ));
+    }
+    // One keyed launch at a time, so two requests with one key cannot both start a session.
+    let _one_at_a_time = registry.keyed_create.lock().await;
+    // The stop may have been requested while this launch waited its turn.
+    if registry.stopping() {
+        return Err((code::SHUTTING_DOWN, "the daemon is stopping".into()));
+    }
+    keyed_create(registry, p, &key).await
+}
+
+async fn keyed_create(
+    registry: &Arc<Registry>,
+    p: SessionCreate,
+    key: &str,
+) -> Result<Value, Fail> {
+    if let Some(id) = registry.by_key(key) {
+        return Ok(json!({ "id": id }));
+    }
+    create_new(registry, p, Some(key.to_string())).await
+}
+
+async fn create_new(
+    registry: &Arc<Registry>,
+    p: SessionCreate,
+    key: Option<String>,
+) -> Result<Value, Fail> {
     if p.cols == 0 || p.rows == 0 {
         return Err((
             code::INVALID_PARAMS,
@@ -494,8 +616,13 @@ async fn create(registry: &Arc<Registry>, p: SessionCreate) -> Result<Value, Fai
     let spawn_failed = |e: &dyn std::fmt::Display| (code::SPAWN_FAILED, e.to_string());
     let id = agent::random_hex(8).map_err(|e| spawn_failed(&e))?;
     let socket = registry.home.socket().to_string_lossy().into_owned();
-    let prepared = agent::prepare(&p, &socket, &id)?;
     let binding = registry.bind_for_create(p.project.clone(), p.group.clone(), &p.cwd);
+    let mut prepared = agent::prepare(&p, &socket, &id)?;
+    let (home_dir, request) = (registry.home.dir().to_path_buf(), p.clone());
+    tokio::task::spawn_blocking(move || agent::ensure_codex_home(&request, &home_dir))
+        .await
+        .map_err(|e| (code::INTERNAL, e.to_string()))??;
+    prepared.agent.idempotency_key = key;
     let info = SessionInfo {
         id: id.clone(),
         cmd: prepared.cmd.clone(),
@@ -519,7 +646,7 @@ async fn create(registry: &Arc<Registry>, p: SessionCreate) -> Result<Value, Fai
         cols: p.cols,
         rows: p.rows,
         cwd: &p.cwd,
-        cmd: &prepared.cmd,
+        cmd: &prepared.run_cmd,
         env: &prepared.env,
     })
     .await;
@@ -630,9 +757,12 @@ mod tests {
             events: None,
             starting: None,
         };
-        conn.attach(SessionId { id: "s1".into() })
-            .await
-            .expect("attach");
+        conn.attach(SessionAttach {
+            id: "s1".into(),
+            scrollback: None,
+        })
+        .await
+        .expect("attach");
         assert!(
             conn.streams.is_empty(),
             "the stream started before the response"

@@ -268,7 +268,14 @@ fn write_atomic(path: &Path, value: &Value, ts: u64) -> Result<(), HooksFileErro
 /// Temp file in the same directory, fsync, mode copied from the old file,
 /// rename over it.
 pub(crate) fn write_text_atomic(path: &Path, text: &str, ts: u64) -> Result<(), HooksFileError> {
-    let tmp = path.with_file_name(format!(".{}.tmp-{ts}", file_name(path)));
+    // Unique per process and call: two installs at once must not share a temp file.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(
+        ".{}.tmp-{ts}-{}-{n}",
+        file_name(path),
+        std::process::id()
+    ));
     let res = (|| {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(text.as_bytes())?;

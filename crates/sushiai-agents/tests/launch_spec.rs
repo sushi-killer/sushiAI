@@ -24,6 +24,7 @@ fn params<'a>(
         extra_args: extra,
         prompt: None,
         permission_wait_secs: 600,
+        claude_settings: None,
     }
 }
 
@@ -202,4 +203,52 @@ fn a_relative_hook_path_is_rejected() {
         err,
         LaunchError::RelativeHookPath("~/.sushiai/bin/sushiai".into())
     );
+}
+
+#[test]
+fn caller_settings_merge_into_the_one_settings_flag_and_a_hooks_key_is_rejected() {
+    let caller: serde_json::Map<String, Value> =
+        serde_json::from_str(r#"{"apiKeyHelper": "/h.sh", "env": {"K": "v"}}"#).unwrap();
+    let mut p = params(Agent::Claude, AgentSession::New("abc"), BIN, &[]);
+    p.claude_settings = Some(&caller);
+    let spec = build(&p).unwrap();
+    assert_eq!(spec.argv.iter().filter(|a| *a == "--settings").count(), 1);
+    let at = spec.argv.iter().position(|a| a == "--settings").unwrap();
+    let settings: Value = serde_json::from_str(&spec.argv[at + 1]).unwrap();
+    assert_eq!(settings["apiKeyHelper"], "/h.sh");
+    assert_eq!(settings["env"]["K"], "v");
+    assert!(settings["hooks"]["Stop"].is_array());
+
+    let bad: serde_json::Map<String, Value> =
+        serde_json::from_str(r#"{"hooks": {"Stop": []}}"#).unwrap();
+    p.claude_settings = Some(&bad);
+    assert_eq!(build(&p).unwrap_err(), LaunchError::SettingsHooks);
+}
+
+#[test]
+fn caller_settings_outside_the_allowlist_or_with_bad_vars_are_rejected() {
+    let reject = |json: &str| {
+        let caller: serde_json::Map<String, Value> = serde_json::from_str(json).unwrap();
+        let mut p = params(Agent::Claude, AgentSession::New("abc"), BIN, &[]);
+        p.claude_settings = Some(&caller);
+        build(&p).unwrap_err()
+    };
+    assert_eq!(
+        reject(r#"{"disableAllHooks": true}"#),
+        LaunchError::SettingsKey("disableAllHooks".into())
+    );
+    assert_eq!(
+        reject(r#"{"statusLine": {"command": "x"}}"#),
+        LaunchError::SettingsKey("statusLine".into())
+    );
+    assert_eq!(
+        reject(r#"{"env": {"SUSHIAI_SESSION_TOKEN": "x"}}"#),
+        LaunchError::SettingsEnv
+    );
+    assert_eq!(
+        reject(r#"{"env": {"sushiai_socket": "x"}}"#),
+        LaunchError::SettingsEnv
+    );
+    assert_eq!(reject(r#"{"env": {"A": 1}}"#), LaunchError::SettingsEnv);
+    assert_eq!(reject(r#"{"env": "A=1"}"#), LaunchError::SettingsEnv);
 }

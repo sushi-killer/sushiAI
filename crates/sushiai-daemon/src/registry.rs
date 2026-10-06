@@ -186,6 +186,7 @@ pub enum RemoveError {
 fn public(info: &SessionInfo) -> SessionInfo {
     let mut info = info.clone();
     info.agent.token_hash = None;
+    info.agent.idempotency_key = None;
     info
 }
 
@@ -210,6 +211,8 @@ pub struct Registry {
     stopping: AtomicBool,
     /// Signalled whenever a restored session settles (reattached, or given up on).
     settled: Notify,
+    /// Serializes launches that carry an idempotency key (check, create).
+    pub keyed_create: tokio::sync::Mutex<()>,
 }
 
 impl Registry {
@@ -232,6 +235,7 @@ impl Registry {
             stop: Notify::new(),
             stopping: AtomicBool::new(false),
             settled: Notify::new(),
+            keyed_create: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -460,6 +464,16 @@ impl Registry {
             .values()
             .map(|e| public(&e.info))
             .collect()
+    }
+
+    /// The session launched under `key`, while its record exists.
+    pub fn by_key(&self, key: &str) -> Option<String> {
+        let catalog = self.catalog();
+        let found = catalog
+            .sessions
+            .values()
+            .find(|e| e.info.agent.idempotency_key.as_deref() == Some(key));
+        found.map(|e| e.info.id.clone())
     }
 
     /// True when `token` is the one the session was created with. Only a hash is kept.
@@ -751,6 +765,24 @@ mod tests {
             (note.method.as_str(), note.params["id"].as_str()),
             (method::SESSION_REMOVED, Some("s000"))
         );
+    }
+
+    #[test]
+    fn a_key_finds_its_session_while_the_record_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = Registry::new(Home::new(dir.path().to_path_buf()));
+        let mut info = exited(1);
+        info.status = SessionStatus::Running;
+        info.agent.idempotency_key = Some("a".into());
+        registry.update(info);
+        assert_eq!(registry.by_key("a"), Some("s001".into()));
+        assert_eq!(registry.by_key("b"), None);
+        assert!(registry
+            .list()
+            .iter()
+            .all(|i| i.agent.idempotency_key.is_none()));
+        registry.forget("s001");
+        assert_eq!(registry.by_key("a"), None);
     }
 
     #[test]

@@ -632,3 +632,49 @@ fn a_request_for_a_session_that_never_comes_back_gets_the_normal_error() {
         .expect_err("not running");
     assert_eq!(err.code, code::SESSION_NOT_RUNNING);
 }
+
+#[test]
+fn a_keyed_launch_is_announced_once_and_refused_while_stopping() {
+    let mut sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    let mut watcher = sandbox.client();
+    let mut client = sandbox.client();
+    let create = json!({"cmd": ["/bin/sh", "-c", "sleep 300"], "cwd": "/tmp", "cols": 80,
+                        "rows": 24, "idempotencyKey": "k1"});
+    let first = client.call("session.create", create.clone());
+    let again = client.call("session.create", create.clone());
+    assert_eq!(first["id"], again["id"]);
+    watcher.wait_note("session.created");
+    // A later notification marks the end of what the watcher will hear.
+    client.call("session.update", json!({"id": first["id"], "title": "t"}));
+    watcher.wait_note("session.updated");
+    let created = watcher
+        .notes
+        .iter()
+        .filter(|n| n.0 == "session.created")
+        .count();
+    assert_eq!(created, 1, "the idempotent return was announced again");
+
+    client.call("daemon.shutdown", Value::Null);
+    let keyed = json!({"cmd": ["/bin/sh", "-c", "sleep 300"], "cwd": "/tmp", "cols": 80,
+                       "rows": 24, "idempotencyKey": "k2"});
+    let err = client
+        .try_call("session.create", keyed)
+        .expect_err("a stopping daemon takes no keyed launch");
+    assert_eq!(err.code, code::SHUTTING_DOWN);
+}
+
+#[test]
+fn session_read_waits_for_a_restored_session() {
+    let mut sandbox = Sandbox::new();
+    let first = sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let id = sandbox.create_shell(&mut client);
+    print_marker(&mut client, &id, 9);
+    wait_snapshot_contains(&mut client, &id, "marker-9");
+    let holder = sandbox.holder_pid(&id);
+    restart_with_a_slow_holder(&mut sandbox, first, holder, Duration::from_millis(1500));
+    let mut client = sandbox.client();
+    let read = client.call("session.read", json!({"id": id}));
+    assert!(read["text"].as_str().expect("text").contains("marker-9"));
+}

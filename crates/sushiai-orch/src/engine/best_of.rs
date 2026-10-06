@@ -92,10 +92,10 @@ pub(super) fn prepare_run(
             Some(serde_json::Value::Object(profile_obj))
         };
 
-        let socket_path_str = app.socket_path.to_string_lossy().to_string();
+        let home_str = app.home.to_string_lossy().to_string();
         let stop_hook = harness::StopHook {
-            orchd_path: &app.orchd_path,
-            socket_path: &socket_path_str,
+            exe_path: &app.exe_path,
+            home: &home_str,
             token: &token,
         };
         let mut claude_settings = harness::build_claude_settings(

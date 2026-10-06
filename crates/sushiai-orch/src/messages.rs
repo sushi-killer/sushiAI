@@ -1,5 +1,5 @@
 //! Agent-to-agent messages: task agents list their peers, message each
-//! other and ask the orchestrator questions through `orchd mcp --task`.
+//! other and ask the orchestrator questions through `sushiai mcp --task`.
 //! Every message waits in `<data>/messages.json` until the recipient's next
 //! turn -- a task's next attempt brief, the orchestrator's next chat turn --
 //! and is marked delivered only then. Sending never stops or restarts the
@@ -13,20 +13,13 @@ const MAX_TEXT: usize = 8000;
 /// The MCP server name an implement attempt reaches the other agents by.
 pub(super) const SERVER: &str = "sushiai-messages";
 
-/// `orchd mcp --task <id>`: the bridge offers only the messaging tools and
+/// `sushiai mcp --task <id>`: the bridge offers only the messaging tools and
 /// always sends as this task, whatever the agent passes.
 pub(super) fn task_server(app: &App, task_id: &str) -> serde_json::Value {
     json!({
-        "command": app.orchd_path,
-        "args": [
-            "mcp",
-            "--data",
-            app.data_dir.to_string_lossy(),
-            "--socket",
-            app.socket_path.to_string_lossy(),
-            "--task",
-            task_id,
-        ],
+        "command": app.exe_path,
+        "args": ["mcp", "--task", task_id],
+        "env": {"SUSHIAI_HOME": app.home.to_string_lossy()},
     })
 }
 
@@ -387,11 +380,24 @@ mod tests {
 
     fn app_with_tasks(dir: &Path, tasks: &[Task]) -> Arc<App> {
         let orchd = "/nonexistent/orchd".to_string();
-        let app = App::new(dir.into(), dir.join("orchd.sock"), orchd).unwrap();
+        let app = App::new(dir.into(), dir.join("home"), orchd).unwrap();
         for t in tasks {
             app.store.save_task(t).unwrap();
         }
         app
+    }
+
+    #[test]
+    fn a_task_agent_reaches_the_daemon_through_sushiai_mcp_with_its_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_tasks(dir.path(), &[]);
+        let server = task_server(&app, "t1");
+        assert_eq!(server["command"], "/nonexistent/orchd");
+        assert_eq!(server["args"], json!(["mcp", "--task", "t1"]));
+        assert_eq!(
+            server["env"]["SUSHIAI_HOME"],
+            dir.path().join("home").to_string_lossy().as_ref()
+        );
     }
 
     const A: &str = "11111111-1111-4111-8111-111111111111";

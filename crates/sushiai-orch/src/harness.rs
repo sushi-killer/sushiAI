@@ -192,12 +192,12 @@ pub fn build_argv(req: &RunRequest) -> Vec<String> {
     }
 }
 
-/// The Stop hook wiring for a Claude run: `orchd`'s own path, the daemon's
-/// socket, and the token that maps this run's `hook.stop` calls back to its
-/// task/attempt.
+/// The Stop hook wiring for a Claude run: the `sushiai` executable, the home
+/// whose daemon it calls, and the token that maps this run's `hook.stop`
+/// calls back to its task/attempt.
 pub struct StopHook<'a> {
-    pub orchd_path: &'a str,
-    pub socket_path: &'a str,
+    pub exe_path: &'a str,
+    pub home: &'a str,
     pub token: &'a str,
 }
 
@@ -215,7 +215,7 @@ pub const DENIED_BASH_COMMANDS: [&str; 2] = ["git commit", "git push"];
 
 /// The `settings.json` written alongside a Claude run: profile
 /// env/apiKeyHelper (opaque, passed through) + sandbox block (omitted for
-/// `host`) + the Stop hook wired to `orchd hook stop` (omitted when
+/// `host`) + the Stop hook wired to `sushiai orch hook stop` (omitted when
 /// `stop_hook` is `None` -- a review session has no registered token, so
 /// installing a hook for it would just be a guaranteed no-op fail-open
 /// round trip).
@@ -249,8 +249,8 @@ pub fn build_claude_settings(
                 "network": {
                     "allowedDomains": allowed_domains,
                 },
-                // Keeps the agent from reading `control.token` / per-run key
-                // files even if it somehow finds the data dir's path.
+                // Keeps the agent from reading per-run key files even if it
+                // somehow finds the data dir's path.
                 "filesystem": {
                     "denyRead": deny_read,
                 },
@@ -276,11 +276,13 @@ pub fn build_claude_settings(
 
     if let Some(hook) = stop_hook {
         let command = |kind: &str| {
+            // The token and home travel as environment assignments the hook's
+            // shell understands, so the command line needs no flags.
             format!(
-                "{} hook {kind} --socket {} --token {}",
-                shell_quote(hook.orchd_path),
-                shell_quote(hook.socket_path),
-                shell_quote(hook.token)
+                "SUSHIAI_HOME={} SUSHIAI_ORCH_TOKEN={} {} orch hook {kind}",
+                shell_quote(hook.home),
+                shell_quote(hook.token),
+                shell_quote(hook.exe_path),
             )
         };
         let hooks = serde_json::json!({
@@ -1021,8 +1023,8 @@ mod tests {
         let profile = serde_json::json!({"env": {"ANTHROPIC_API_KEY_HELPER": "x"}, "apiKeyHelper": "helper.sh"});
         let domains = vec!["github.com".to_string()];
         let hook = StopHook {
-            orchd_path: "/usr/local/bin/orchd",
-            socket_path: "/tmp/orchd.sock",
+            exe_path: "/usr/local/bin/sushiai",
+            home: "/h/.sushiai",
             token: "tok-1",
         };
         let deny_read = vec!["/data".to_string()];
@@ -1048,15 +1050,15 @@ mod tests {
         assert!(native["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
-            .contains("hook edit --socket '/tmp/orchd.sock' --token 'tok-1'"));
+            .contains("SUSHIAI_HOME='/h/.sushiai' SUSHIAI_ORCH_TOKEN='tok-1' '/usr/local/bin/sushiai' orch hook edit"));
         assert!(native["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
-            .contains("hook stop --socket '/tmp/orchd.sock' --token 'tok-1'"));
+            .contains("SUSHIAI_HOME='/h/.sushiai' SUSHIAI_ORCH_TOKEN='tok-1' '/usr/local/bin/sushiai' orch hook stop"));
 
         let hook2 = StopHook {
-            orchd_path: "/usr/local/bin/orchd",
-            socket_path: "/tmp/orchd.sock",
+            exe_path: "/usr/local/bin/sushiai",
+            home: "/h/.sushiai",
             token: "tok-1",
         };
         let host =

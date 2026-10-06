@@ -15,7 +15,7 @@ pub(super) fn test_app() -> (Arc<App>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let app = App::new(
         dir.path().join("data"),
-        dir.path().join("orchd.sock"),
+        dir.path().join("home"),
         "orchd".to_string(),
     )
     .unwrap();
@@ -94,7 +94,7 @@ pub(super) fn test_app_parallel_one() -> (Arc<App>, tempfile::TempDir) {
     let mut settings = store.load_settings().unwrap();
     settings.parallel = 1;
     store.save_settings(&settings).unwrap();
-    let app = App::new(data_dir, dir.path().join("orchd.sock"), "orchd".to_string()).unwrap();
+    let app = App::new(data_dir, dir.path().join("home"), "orchd".to_string()).unwrap();
     (app, dir)
 }
 

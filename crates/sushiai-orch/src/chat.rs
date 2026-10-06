@@ -1417,14 +1417,9 @@ pub(super) fn orchestrator_route(settings: &Settings) -> Option<Route> {
 
 fn mcp_server(app: &App, task_mcp_file: Option<&Path>, mode: ChatMode) -> serde_json::Value {
     let mut server = json!({
-        "command": app.orchd_path,
-        "args": [
-            "mcp",
-            "--data",
-            app.data_dir.to_string_lossy(),
-            "--socket",
-            app.socket_path.to_string_lossy(),
-        ],
+        "command": app.exe_path,
+        "args": ["mcp"],
+        "env": {"SUSHIAI_HOME": app.home.to_string_lossy()},
     });
     if mode.read_only() {
         server["args"]
@@ -1433,7 +1428,7 @@ fn mcp_server(app: &App, task_mcp_file: Option<&Path>, mode: ChatMode) -> serde_
             .push(json!("--read-only"));
     }
     if let Some(file) = task_mcp_file {
-        server["env"] = json!({"ORCHD_TASK_MCP": file.to_string_lossy()});
+        server["env"]["ORCHD_TASK_MCP"] = json!(file.to_string_lossy());
     }
     server
 }
@@ -2189,7 +2184,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let app = App::new(
             dir.path().join("data"),
-            dir.path().join("orchd.sock"),
+            dir.path().join("home"),
             "orchd".to_string(),
         )
         .unwrap();

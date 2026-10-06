@@ -15,11 +15,11 @@ If the `sushiai-orchestrator` tools are missing in this session, the owner (or y
 OK) registers the server once for every project:
 
 ```
-claude mcp add --scope user sushiai-orchestrator -- "{{ORCHD}}" mcp --data "{{DATA}}"
+claude mcp add --scope user sushiai-orchestrator -- "{{ORCHD}}" mcp
 ```
 
 For Codex, add the same command/args under `[mcp_servers.sushiai-orchestrator]` in
-`~/.codex/config.toml`. The orchd daemon must be running; the sushiAI app starts it.
+`~/.codex/config.toml`. The sushiAI daemon hosts the orchestrator; the first `mcp` call starts it.
 
 ## Make work
 

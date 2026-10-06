@@ -73,9 +73,9 @@ fn claude_settings_join_our_hooks_in_the_single_settings_argument() {
     fakes.add(
         "claude",
         &format!(
-            "printf '%s' \"$ANTHROPIC_API_KEY\" > {}.var\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {}; done\nsleep 60",
-            out.display(),
-            out.display()
+            // The argv lands in one rename, so the wait never sees half of it.
+            "printf '%s' \"$ANTHROPIC_API_KEY\" > {out}.var\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > {out}.tmp && mv {out}.tmp {out}\nsleep 60",
+            out = out.display()
         ),
     );
     let mut sandbox = fakes.sandbox();

@@ -19,6 +19,7 @@ sushiai-protocol.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 libc.workspace = true
+toml_edit = "0.22"
 tracing-subscriber.workspace = true
 
 [dev-dependencies]

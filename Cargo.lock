@@ -485,6 +485,7 @@ dependencies = [
  "sushiai-orch",
  "sushiai-protocol",
  "tempfile",
+ "toml_edit",
  "tracing-subscriber",
 ]
 

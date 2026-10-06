@@ -316,15 +316,18 @@ test("hosts are added, replaced and removed live from the profile list", async (
     ["local"],
   );
 
-  manager.setConnectors(build([{ id: "h1", host: "a" }], one));
+  manager.setConnectors(
+    build([{ id: "h1", host: "a", autoConnect: true }], one),
+  );
   await until(() => stateOf(manager, "h1")?.state === "ready");
   manager.setConnectors(
     build(
       [
-        { id: "h1", host: "a" },
+        { id: "h1", host: "a", autoConnect: true },
         {
           id: "h2",
           host: "b",
+          autoConnect: true,
           connector: { kind: "command", argv: [two.script] },
         },
       ],
@@ -340,10 +343,11 @@ test("hosts are added, replaced and removed live from the profile list", async (
   manager.setConnectors(
     build(
       [
-        { id: "h1", host: "other" },
+        { id: "h1", host: "other", autoConnect: true },
         {
           id: "h2",
           host: "b",
+          autoConnect: true,
           connector: { kind: "command", argv: [two.script] },
         },
       ],
@@ -359,6 +363,7 @@ test("hosts are added, replaced and removed live from the profile list", async (
         {
           id: "h2",
           host: "b",
+          autoConnect: true,
           connector: { kind: "command", argv: [two.script] },
         },
       ],
@@ -386,7 +391,7 @@ test("saving an unchanged profile retries a host that stopped without a retry", 
     exit: 255,
     stderr: "Permission denied (publickey).\n",
   });
-  const profile = { id: "h1", host: "a" };
+  const profile = { id: "h1", host: "a", autoConnect: true };
   const build = () => ({
     ...remoteConnectors([profile], { ssh: proxy.script, args: () => [] }),
   });
@@ -482,20 +487,24 @@ test("the host-install handler installs, shuts the old daemon down and waits for
     manager,
     connections,
     manifest: () => ({ manifest: { "Linux x86_64": {} }, binDir: "/m" }),
-    install: async ({ exec, manifest, binDir }) => {
-      assert.equal(binDir, "/m");
-      assert.deepEqual(Object.keys(manifest), ["Linux x86_64"]);
-      await exec("echo 1", {});
-      order.push("install");
-      return { status: "installed", version: "0.1.0" };
+    setup: async (endpoint, { sushiai }) => {
+      assert.equal(endpoint, "ssh:h1");
+      assert.equal(sushiai.binDir, "/m");
+      assert.deepEqual(Object.keys(sushiai.manifest), ["Linux x86_64"]);
+      order.push("setup");
+      return {
+        sushiai: "installed",
+        sushiaiResult: { status: "installed", version: "0.1.0" },
+      };
     },
+    markSetup: (host) => order.push(`mark ${host}`),
     settleMs: 1,
   });
   const result = await installer.install("h1");
   assert.equal(result.status, "installed");
   assert.deepEqual(order, [
-    "exec ssh:h1",
-    "install",
+    "setup",
+    "mark h1",
     "request daemon.shutdown",
     "retry",
     "retry",
@@ -519,7 +528,11 @@ test("host-install without a running daemon sends no shutdown; failures are expl
           exec: async () => "",
         },
         manifest: over.manifest || (() => ({ manifest: {}, binDir: "/m" })),
-        install: async () => ({ status: "unchanged" }),
+        setup: async () => ({
+          sushiai: over.setupFailed ? "failed" : "unchanged",
+          sushiaiError: "disk full",
+          sushiaiResult: { status: "unchanged" },
+        }),
         settleMs: 1,
         attempts: 3,
       }),
@@ -540,6 +553,10 @@ test("host-install without a running daemon sends no shutdown; failures are expl
   await assert.rejects(
     base({ shell: false }).installer.install("h1"),
     /command/,
+  );
+  await assert.rejects(
+    base({ setupFailed: true }).installer.install("h1"),
+    /disk full/,
   );
   await assert.rejects(
     base({
@@ -604,7 +621,7 @@ test("connection profiles keep the connector, need no socket, and tell listeners
     seen.push(profiles.map((p) => p.id)),
   );
   const plain = await connections.save({ host: "user@devbox" });
-  assert.equal(plain.socket, "~/.config/herdr/herdr.sock");
+  assert.equal(plain.socket, undefined);
   const withSsh = await connections.save({
     host: "b",
     connector: { kind: "ssh" },
@@ -649,4 +666,317 @@ test("connection profiles keep the connector, need no socket, and tell listeners
   await connections.delete(`ssh:${plain.id}`);
   assert.equal(seen.length, 4);
   assert.ok(!seen.at(-1).includes(plain.id));
+});
+
+// Slice 2 review fixes -----------------------------------------------------
+
+test("a daemon that dies right after ready cannot spin: the retry budget refills only after a stable connection", async () => {
+  const proxy = fakeProxy({ dieAfterMs: 80, dieCode: 2 });
+  const { manager } = sshManager(proxy, {
+    backoffMinMs: 300,
+    backoffMaxMs: 300,
+  });
+  manager.start();
+  await sleep(1500);
+  // Immediate once, then 300 ms backoffs. Resetting on every "ready" gave
+  // a new spawn every ~100 ms (about 15 here).
+  assert.ok(proxy.spawns() <= 5, `spawns ${proxy.spawns()}`);
+  assert.ok(proxy.spawns() >= 2);
+});
+
+test("a connection that stays up refills the budget", async () => {
+  const proxy = fakeProxy({});
+  const manager = createDaemonManager({
+    connectors: {
+      [PROFILE.id]: createSshConnector({
+        profile: PROFILE,
+        ssh: proxy.script,
+        helloTimeoutMs: 3000,
+      }),
+    },
+    backoffMinMs: 5000,
+    stableMs: 50,
+    random: () => 1,
+  });
+  cleanups.push(() => manager.close());
+  manager.start();
+  await until(() => stateOf(manager).state === "ready");
+  await sleep(150); // stable now
+  proxy.setMode({ dieAfterMs: 60, dieCode: 2 });
+  await manager.retry(PROFILE.id);
+  await until(() => proxy.spawns() >= 3, 2500, "immediate reconnect again");
+});
+
+test("a daemon speaking another protocol is failed/incompatible and never retried", async () => {
+  const proxy = fakeProxy({ protocol: 99 });
+  const { manager } = sshManager(proxy);
+  manager.start();
+  await until(
+    () =>
+      stateOf(manager).state === "failed" &&
+      stateOf(manager).reason === "incompatible",
+  );
+  assert.match(stateOf(manager).message, /protocol 99/);
+  await sleep(400);
+  assert.equal(proxy.spawns(), 1);
+});
+
+test("a changed host key carries the exact ssh-keygen command for the resolved name and the app known_hosts file", async () => {
+  const hostKey = {
+    exit: 255,
+    stderr: "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\n",
+  };
+  const build = (proxy, profile) =>
+    createDaemonManager({
+      connectors: {
+        h: createSshConnector({
+          profile,
+          ssh: proxy.script,
+          args: () => ["-T"],
+          knownHostsFile: "/data/known hosts",
+        }),
+      },
+      backoffMinMs: 20,
+    });
+  // A non-default port reported by ssh -G: bracketed, plus the file.
+  const proxy = fakeProxy({ ...hostKey, gPort: 2222 });
+  const manager = build(proxy, { id: "h", host: "user@devbox" });
+  cleanups.push(() => manager.close());
+  manager.start();
+  await until(() => stateOf(manager, "h").reason === "host_key_changed");
+  assert.equal(
+    stateOf(manager, "h").hint,
+    "ssh-keygen -R '[devbox.example.test]:2222' -f '/data/known hosts'",
+  );
+  assert.equal(proxy.spawns(), 1); // -G is not a spawn of the proxy
+  // The default port: the plain resolved name.
+  const plain = fakeProxy({ ...hostKey, gPort: 22 });
+  const second = build(plain, { id: "h", host: "devbox" });
+  cleanups.push(() => second.close());
+  second.start();
+  await until(() => stateOf(second, "h").reason === "host_key_changed");
+  assert.equal(
+    stateOf(second, "h").hint,
+    "ssh-keygen -R 'devbox.example.test' -f '/data/known hosts'",
+  );
+  // A port saved in the profile wins.
+  const saved = fakeProxy({ ...hostKey, gPort: 22 });
+  const third = build(saved, { id: "h", host: "devbox", port: 2200 });
+  cleanups.push(() => third.close());
+  third.start();
+  await until(() => stateOf(third, "h").reason === "host_key_changed");
+  assert.match(
+    stateOf(third, "h").hint,
+    /^ssh-keygen -R '\[devbox\.example\.test\]:2200' -f /,
+  );
+});
+
+test("need_auth asks for a key or the agent and 'No such file' counts only for the sushiai path", async () => {
+  const { classifyExit } = require("../electron/daemon/ssh.cjs");
+  const auth = classifyExit({
+    code: 255,
+    stderr: "Permission denied (publickey).",
+  });
+  assert.equal(auth.state, "need_auth");
+  assert.match(auth.message, /key or the ssh agent/);
+  assert.doesNotMatch(auth.message, /password/i);
+  assert.equal(
+    classifyExit({
+      code: 1,
+      stderr: "/home/dev/.sushiai/bin/sushiai: No such file or directory",
+    }).reason,
+    "not_installed",
+  );
+  assert.equal(
+    classifyExit({
+      code: 1,
+      stderr:
+        "ssh: Could not open /home/dev/.ssh/id: No such file or directory",
+    }).reason,
+    undefined,
+  );
+});
+
+test("hosts of profiles without autoConnect wait for a connect; disconnect suspends until the next one", async () => {
+  const proxy = fakeProxy({});
+  const profile = { id: "h1", host: "a", autoConnect: false };
+  const build = (p) =>
+    remoteConnectors([p], { ssh: proxy.script, args: () => [] });
+  const manager = createDaemonManager({
+    connectors: build(profile),
+    backoffMinMs: 20,
+  });
+  cleanups.push(() => manager.close());
+  const seen = [];
+  manager.on("state", (state) => seen.push({ ...state }));
+  manager.start();
+  await sleep(150);
+  assert.equal(proxy.spawns(), 0);
+  assert.equal(stateOf(manager, "h1").state, "offline");
+  // Saving the profile again does not connect it either.
+  manager.setConnectors(build(profile));
+  await sleep(100);
+  assert.equal(proxy.spawns(), 0);
+
+  const state = await manager.retry("h1");
+  assert.equal(state.state, "ready");
+  manager.disconnect("h1");
+  assert.equal(stateOf(manager, "h1").state, "offline");
+  assert.equal(stateOf(manager, "h1").reason, "disconnected");
+  assert.equal(seen.at(-1).reason, "disconnected");
+  manager.setConnectors(build({ ...profile, autoConnect: true }));
+  await sleep(150);
+  // Suspended: not even an autoConnect profile reconnects until a connect.
+  assert.equal(proxy.spawns(), 1);
+  await manager.retry("h1");
+  assert.equal(proxy.spawns(), 2);
+  assert.equal(stateOf(manager, "h1").state, "ready");
+});
+
+test("an autoConnect profile connects when the manager starts", async () => {
+  const proxy = fakeProxy({});
+  const manager = createDaemonManager({
+    connectors: remoteConnectors([{ id: "h1", host: "a", autoConnect: true }], {
+      ssh: proxy.script,
+      args: () => [],
+    }),
+  });
+  cleanups.push(() => manager.close());
+  manager.start();
+  await until(() => stateOf(manager, "h1").state === "ready");
+});
+
+test("the old-daemon stop script signals only a daemon that holds the lock", async () => {
+  const { spawn, execFileSync } = require("node:child_process");
+  const { STOP_DAEMON_COMMAND } = require("../electron/daemon/install.cjs");
+  const home = fs.mkdtempSync(path.join("/tmp", "stop-"));
+  cleanups.push(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(home, ".sushiai"), { mode: 0o700 });
+  const run = () =>
+    execFileSync("/bin/sh", ["-c", STOP_DAEMON_COMMAND], {
+      env: { HOME: home, PATH: process.env.PATH },
+      encoding: "utf8",
+    }).trim();
+  assert.equal(run(), "nolock");
+  // A stale pid in an unheld lock is never signalled.
+  const bystander = spawn("sleep", ["30"]);
+  cleanups.push(() => bystander.kill());
+  const lock = path.join(home, ".sushiai", "daemon.lock");
+  fs.writeFileSync(lock, String(bystander.pid));
+  assert.equal(run(), "free");
+  await sleep(100);
+  assert.equal(bystander.exitCode, null);
+  assert.equal(bystander.signalCode, null);
+  // A held lock names a live daemon: it gets SIGTERM.
+  const holder = spawn(
+    "python3",
+    [
+      "-c",
+      `import fcntl,os,sys,time
+f=open(${JSON.stringify(lock)},"r+")
+fcntl.flock(f,fcntl.LOCK_EX)
+f.seek(0); f.truncate(); f.write(str(os.getpid())); f.flush()
+print("held",flush=True)
+time.sleep(30)`,
+    ],
+    { stdio: ["ignore", "pipe", "inherit"] },
+  );
+  cleanups.push(() => holder.kill());
+  await new Promise((resolve) => holder.stdout.once("data", resolve));
+  assert.equal(run(), "stopped");
+  await until(() => holder.signalCode === "SIGTERM", 3000, "holder stopped");
+});
+
+test("a port forward is its own process and never needs the Herdr tunnel", async () => {
+  const net = require("node:net");
+  const { EventEmitter } = require("node:events");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fwd-"));
+  const connections = new Connections(dir, { ssh: "/nonexistent/ssh" });
+  const servers = [];
+  cleanups.push(async () => {
+    for (const server of servers) server.close();
+    await connections.close().catch(() => {});
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await connections.init();
+  const profile = await connections.save({ host: "user@devbox" });
+  const endpoint = `ssh:${profile.id}`;
+  connections.socket = async () => {
+    throw new Error("the Herdr socket must not be needed");
+  };
+  const specs = [];
+  const killed = [];
+  connections.forwardProcess = async (_profile, spec) => {
+    specs.push(spec);
+    const [, local] = spec.split(":");
+    const server = net.createServer((c) => c.destroy());
+    servers.push(server);
+    await new Promise((resolve) =>
+      server.listen(Number(local), "127.0.0.1", resolve),
+    );
+    const proc = new EventEmitter();
+    proc.stderr = new EventEmitter();
+    proc.kill = async () => {
+      killed.push(spec);
+      server.close();
+      proc.emit("exit");
+    };
+    return proc;
+  };
+  const local = await connections.forward(endpoint, 5173);
+  assert.equal(specs.length, 1);
+  assert.match(
+    specs[0],
+    new RegExp(`^127\\.0\\.0\\.1:${local}:127\\.0\\.0\\.1:5173$`),
+  );
+  assert.equal(await connections.forward(endpoint, 5173), local);
+  assert.equal(specs.length, 1);
+  await connections.disconnect(endpoint);
+  assert.equal(killed.length, 1);
+  assert.equal(connections.forwards.has(profile.id), false);
+});
+
+test("tool setup runs once per host, when it first becomes ready, and command hosts are skipped", async () => {
+  const { EventEmitter } = require("node:events");
+  const { watchHostTools } = require("../electron/daemon/host-tools.cjs");
+  const bus = new EventEmitter();
+  const manager = {
+    on: (name, cb) => (bus.on(name, cb), () => bus.off(name, cb)),
+  };
+  const calls = [];
+  const logs = [];
+  let stored = {};
+  const tools = watchHostTools({
+    manager,
+    connections: {
+      hasShell: (endpoint) => {
+        if (endpoint === "ssh:gone") throw new Error("unknown");
+        return endpoint !== "ssh:cmd";
+      },
+    },
+    store: { read: () => stored, write: (value) => (stored = value) },
+    setup: async (endpoint, options) => {
+      calls.push({ endpoint, options });
+    },
+    log: (message) => logs.push(message),
+  });
+  cleanups.push(() => tools.off());
+  const ready = (host) => bus.emit("state", { host, state: "ready" });
+  ready("local");
+  ready("devbox");
+  await sleep(20);
+  ready("devbox"); // a reconnect
+  ready("cmd");
+  ready("gone");
+  await sleep(20);
+  assert.deepEqual(calls, [
+    { endpoint: "ssh:devbox", options: { sushiai: null } },
+  ]);
+  assert.deepEqual(stored, { devbox: true });
+  assert.ok(logs.some((line) => /cmd.*command/.test(line)));
+  // The installer records it too, so a later ready does nothing.
+  tools.mark("other");
+  ready("other");
+  await sleep(20);
+  assert.equal(calls.length, 1);
 });

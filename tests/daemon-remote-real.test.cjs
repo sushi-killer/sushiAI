@@ -10,6 +10,7 @@ const { execFileSync } = require("node:child_process");
 const { createDaemonManager } = require("../electron/daemon/manager.cjs");
 const { remoteConnectors } = require("../electron/daemon/connectors.cjs");
 const { createHostInstaller } = require("../electron/daemon/install.cjs");
+const { setupHost } = require("../electron/host-setup.cjs");
 const { makeHost } = require("./helpers/fake-host.cjs");
 
 function realBinary() {
@@ -91,6 +92,8 @@ test(
     });
     const state = () => manager.states().find((s) => s.host === hostName);
     manager.start();
+    // The profile has no autoConnect: the user connects it by hand.
+    await manager.retry(hostName);
     await until(() => state().state === "failed", 20000, "not installed");
     assert.equal(state().reason, "not_installed");
 
@@ -98,6 +101,8 @@ test(
       manager,
       connections: host.connections,
       manifest: () => ({ manifest, binDir: dist }),
+      setup: (endpoint, options) =>
+        setupHost(host.connections, endpoint, "", { ...options, herdr: false }),
     });
     const result = await installer.install(hostName);
     assert.equal(result.status, "installed");

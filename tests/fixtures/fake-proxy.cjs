@@ -4,11 +4,22 @@
 //   {exit, stderr}          print stderr, exit with the code (no protocol)
 //   {dieAfterMs, dieCode}   serve, then exit (default code 2) after the delay
 //   {noPing}                serve, but never answer `$/ping`
+//   {protocol}              hello answers with this protocol number
+//   {gPort}                 the port `ssh -G` reports (default 22)
 const fs = require("node:fs");
 const path = require("node:path");
 const { createDecoder, encode } = require("../../electron/daemon/frame.cjs");
 
 const dir = process.env.FAKE_PROXY_DIR;
+// `ssh -G host`: print the resolved config, and do not count as a spawn.
+if (process.argv.includes("-G")) {
+  const mode = JSON.parse(fs.readFileSync(path.join(dir, "mode.json"), "utf8"));
+  process.stdout.write(
+    `user dev\nhostname devbox.example.test\nport ${mode.gPort ?? 22}\n`,
+    () => process.exit(0),
+  );
+  return;
+}
 fs.appendFileSync(
   path.join(dir, "spawns.log"),
   JSON.stringify(process.argv.slice(2)) + "\n",
@@ -31,7 +42,7 @@ if (mode.exit !== undefined) {
       const message = JSON.parse(frame.json);
       if (message.method === "hello")
         reply(message.id, {
-          protocol: 1,
+          protocol: mode.protocol ?? 1,
           capabilities: ["sessions", "attach"],
           daemon: "1.0.0",
           host: "devbox",

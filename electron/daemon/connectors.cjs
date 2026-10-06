@@ -86,11 +86,19 @@ async function connectOverPipe({
     return client;
   } catch (error) {
     pipe.destroy();
+    // The daemon answered but cannot be used (e.g. another protocol): keep the
+    // reason and never retry, the host needs an update.
+    if (error.reason)
+      throw failure(error.message, {
+        state: "failed",
+        reason: error.reason,
+        retry: error.retry,
+      });
     const exit = await Promise.race([
       pipe.exited,
       new Promise((resolve) => setTimeout(resolve, EXIT_GRACE_MS, null)),
     ]);
-    throw classify({ ...(exit || { code: null, stderr: "" }), error });
+    throw await classify({ ...(exit || { code: null, stderr: "" }), error });
   }
 }
 
@@ -113,10 +121,14 @@ function remoteConnectors(profiles, options) {
   const { createCommandConnector } = require("./command.cjs");
   const out = {};
   for (const profile of profiles) {
-    out[profile.id] =
+    const connector =
       profile.connector?.kind === "command"
         ? createCommandConnector({ profile, ...options })
         : createSshConnector({ profile, ...options });
+    // Only profiles with autoConnect connect on their own (see the manager).
+    out[profile.id] = Object.assign(connector, {
+      auto: Boolean(profile.autoConnect),
+    });
   }
   return out;
 }

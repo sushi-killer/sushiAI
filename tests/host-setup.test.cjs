@@ -13,7 +13,6 @@ const {
   loadHostManifest,
   hostManifestFile,
   requireHostManifest,
-  setHostManifestSource,
   setupSummary,
   cleanEnvironment,
   SETUP_SCRIPT,
@@ -460,35 +459,36 @@ test("fake ssh: a host without sushiai gets it installed, linked and hooked, the
   assert.equal(second.sushiai, "unchanged");
 });
 
-test("a registered manifest source supplies the sushiai option; a missing manifest is a clear failure", async (t) => {
+test("herdr:false runs the tools and sushiai steps and nothing of Herdr; a command host is skipped with a note", async (t) => {
   const host = await makeSetupHost(t, {
     bin: {
       ...tools,
       uname:
         '#!/bin/sh\n[ "$1" = "-sm" ] && echo "Linux x86_64" || echo Linux\n',
-      herdr: herdrCli(),
     },
   });
   const dir = await sushiaiDist(t);
-  t.after(() => setHostManifestSource(null));
-  const options = { checkCompatibility: checks(host) };
-  setHostManifestSource(() =>
-    loadHostManifest(path.join(dir, "manifest.json")),
-  );
-  const first = await setupHost(host.connections, host.endpoint, "", options);
-  assert.equal(first.sushiai, "installed", first.sushiaiError);
-  // An explicit null still means "no sushiai install".
-  const none = await setupHost(host.connections, host.endpoint, "", {
-    ...options,
-    sushiai: null,
+  const sushiai = loadHostManifest(path.join(dir, "manifest.json"));
+  const states = await setupHost(host.connections, host.endpoint, "", {
+    sushiai,
+    herdr: false,
+    checkCompatibility: () => {
+      throw new Error("Herdr must not be probed");
+    },
   });
-  assert.equal(none.sushiai, undefined);
-  setHostManifestSource(() => {
-    throw new Error("No host manifest. Run npm run build:host first.");
+  assert.equal(states.sushiai, "installed", states.sushiaiError);
+  assert.equal(states.sushiaiResult.status, "installed");
+  assert.equal(states.sushiaiResult.version, "0.1.0");
+  assert.equal(states.herdr, undefined);
+  assert.equal(states.compatibility, undefined);
+  const command = await host.connections.save({
+    name: "Tunnel",
+    connector: { kind: "command", argv: ["my-tunnel"] },
   });
-  const failed = await setupHost(host.connections, host.endpoint, "", options);
-  assert.equal(failed.sushiai, "failed");
-  assert.match(failed.sushiaiError, /npm run build:host first/);
+  const skipped = await setupHost(host.connections, `ssh:${command.id}`, "", {
+    herdr: false,
+  });
+  assert.match(skipped.note, /no shell/);
 });
 
 test("the host manifest is read from the resources when packaged and target/host in a checkout", () => {

@@ -30,28 +30,35 @@ test("connecting, offline and missing state", async () => {
   assert.equal(describeHost(undefined, profile).label, "Not connected");
 });
 
-test("need_auth offers retry and the ssh command with the port", async () => {
+test("need_auth offers retry and asks for a key or the agent, not a password", async () => {
   const { describeHost } = await load();
-  const v = describeHost(st("need_auth", { message: "Password needed" }), {
+  const v = describeHost(st("need_auth", { message: "No key" }), {
     host: "user@devbox",
     port: 2222,
   });
   assert.equal(v.action, "retry");
-  assert.equal(v.detail, "Password needed");
-  assert.equal(v.command, "ssh -p 2222 user@devbox");
+  assert.equal(v.detail, "No key");
+  assert.equal(v.command, undefined);
+  assert.match(v.hint, /ssh agent/);
+  assert.doesNotMatch(v.hint, /password/i);
 });
 
-test("host key change has no action and names the known_hosts entry", async () => {
+test("host key change has no action and copies the command the app built", async () => {
   const { describeHost } = await load();
-  const v = describeHost(st("failed", { reason: "host_key_changed" }), profile);
+  const hint =
+    "ssh-keygen -R '[devbox.example.test]:2222' -f '/data/known_hosts'";
+  const v = describeHost(
+    st("failed", { reason: "host_key_changed", hint }),
+    profile,
+  );
   assert.equal(v.tone, "danger");
   assert.equal(v.action, undefined);
-  assert.equal(v.command, "ssh-keygen -R devbox");
-  const p = describeHost(st("failed", { reason: "host_key_changed" }), {
-    host: "devbox",
-    port: 2222,
-  });
-  assert.equal(p.command, "ssh-keygen -R '[devbox]:2222'");
+  assert.equal(v.command, hint);
+  const none = describeHost(
+    st("failed", { reason: "host_key_changed" }),
+    profile,
+  );
+  assert.equal(none.command, undefined);
 });
 
 test("not installed and incompatible map to install and update", async () => {
@@ -64,12 +71,6 @@ test("not installed and incompatible map to install and update", async () => {
   assert.equal(actionLabel(i.action), "Update sushiai");
   const f = describeHost(st("failed", { reason: "daemon_died" }), profile);
   assert.equal(f.action, "retry");
-});
-
-test("a hostile host name is quoted in the suggested command", async () => {
-  const { describeHost } = await load();
-  const v = describeHost(st("need_auth"), { host: "a b;rm -rf" });
-  assert.equal(v.command, "ssh 'a b;rm -rf'");
 });
 
 test("parseArgv splits on spaces and honours quotes", async () => {

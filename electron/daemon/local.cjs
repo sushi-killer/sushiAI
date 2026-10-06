@@ -198,6 +198,19 @@ function createLocalConnector({
     }
   }
 
+  // The pid the running daemon wrote into its lock (the lock is held, so the
+  // file is its own); null when it is missing or not a number.
+  function readLockPid() {
+    try {
+      const pid = Number(
+        fs.readFileSync(path.join(home, "daemon.lock"), "utf8").trim(),
+      );
+      return Number.isInteger(pid) && pid > 1 ? pid : null;
+    } catch {
+      return null;
+    }
+  }
+
   function writeStamp(pid) {
     fs.writeFileSync(
       path.join(home, BINARY_STAMP),
@@ -240,7 +253,7 @@ function createLocalConnector({
       );
       failed.catch(() => {});
       child.unref?.();
-      writeStamp(child.pid);
+      failed.pid = child.pid;
       return failed;
     } finally {
       fs.closeSync(fd);
@@ -287,20 +300,33 @@ function createLocalConnector({
     async connect() {
       await prepare();
       let client = await tryConnect();
-      if (client && !isCurrent(client)) {
-        if (restarts >= 1) throw incompatible(client);
-        restarts += 1;
-        log(
-          `daemon ${client.hello.daemon} is not the bundled binary; replacing`,
-        );
-        // Sessions live in their holders and survive the restart (D5).
-        await client.request("daemon.shutdown", {}).catch(() => {});
-        await waitGone(client);
-        client = null;
+      let fresh = false; // started by this call
+      let ours = false; // and it is the daemon of the binary we started
+      for (;;) {
+        if (client && isCurrent(client)) return client;
+        if (client) {
+          // Another version, or no daemon of this binary is running.
+          if (restarts >= 1 || (fresh && ours)) throw incompatible(client);
+          restarts += 1;
+          log(
+            `daemon ${client.hello.daemon} is not the bundled binary; replacing`,
+          );
+          // Sessions live in their holders and survive the restart (D5).
+          await client.request("daemon.shutdown", {}).catch(() => {});
+          await waitGone(client);
+        }
+        const starting = startDaemon();
+        client = await connectWithin(startTimeoutMs, starting);
+        fresh = true;
+        // Another app may have started its own daemon first: the lock names
+        // the process that won. Only a daemon we started gets our stamp.
+        const lockPid = readLockPid();
+        ours =
+          typeof starting.pid !== "number" ||
+          lockPid === null ||
+          lockPid === starting.pid;
+        if (ours) writeStamp(lockPid ?? starting.pid ?? null);
       }
-      if (!client) client = await connectWithin(startTimeoutMs, startDaemon());
-      if (!isCurrent(client)) throw incompatible(client);
-      return client;
     },
   };
 }

@@ -356,3 +356,95 @@ test("a renderer that stops acking cannot grow the queue: it is dropped and a fr
   assert.equal(t.detached(), 1);
   assert.equal(t.sent.filter((m) => m.snapshot !== undefined).length, 2);
 });
+
+test("a dropped file on a remote host is uploaded, not typed by its Mac path", async () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "drop-"));
+  try {
+    const file = path.join(dir, "shot.png");
+    fs.writeFileSync(file, "png-bytes");
+    const calls = [];
+    const t = setup({
+      exec: async (endpoint, command, options) => {
+        calls.push({ endpoint, command, options });
+        return "/home/dev/.sushiai/attachments/u-shot.png\n";
+      },
+    });
+    await t.handlers.attach(attachInput({ host: "host-1" }));
+    await t.handlers.attachFile("p1", file);
+    assert.equal(calls.length, 1);
+    assert.equal(Buffer.from(calls[0].options.input).toString(), "png-bytes");
+    assert.match(calls[0].command, /shot\.png/);
+    const typed = t.requests.at(-1).params.data;
+    assert.equal(typed, "'/home/dev/.sushiai/attachments/u-shot.png' ");
+    assert.ok(!typed.includes(dir));
+    // The cap applies; a directory is no file.
+    const big = path.join(dir, "big.bin");
+    fs.writeFileSync(big, Buffer.alloc(20 * 1024 * 1024 + 1));
+    await assert.rejects(t.handlers.attachFile("p1", big), /20 MB/);
+    await assert.rejects(t.handlers.attachFile("p1", dir), /Choose/);
+    assert.equal(calls.length, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a re-attach for the same panel carries the unacked bytes into the stale window", async () => {
+  const t = setup();
+  await t.handlers.attach(attachInput());
+  t.handlers.ack("p1", 6);
+  t.attaches[0].onBytes(Buffer.alloc(1000, "a"));
+  // 1000 bytes are out and unacked; the panel attaches again.
+  await t.handlers.attach(attachInput());
+  const { onBytes } = t.attaches[1];
+  t.handlers.ack("p1", 1000); // the old window's bytes arrive late
+  t.handlers.ack("p1", 6); // the new snapshot is written
+  onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES, "b"));
+  const sent = t.sent
+    .filter((m) => m.data)
+    .map((m) => m.data.length)
+    .reduce((n, size) => n + size, 0);
+  // Full credit for the new window: the late acks did not eat into it.
+  assert.equal(sent, 1000 + OUTPUT_CREDIT_BYTES);
+});
+
+test("a failed overflow re-attach tells the renderer the terminal ended", async () => {
+  const sent = [];
+  let attaches = 0;
+  let onBytes;
+  const handlers = createTerminalHandlers({
+    getManager: () => ({
+      attach: async (host, id, options, callback) => {
+        attaches++;
+        if (attaches > 1) throw new Error("host not ready");
+        onBytes = callback;
+        callback(Buffer.from("screen"), { snapshot: true });
+        return { cols: 80, rows: 24, seq: 0, detach: async () => {} };
+      },
+      request: async () => {},
+    }),
+    send: (channel, value) => sent.push(value),
+  });
+  await handlers.attach(attachInput({ cols: 80, rows: 24 }));
+  for (let i = 0; i < 6; i++) onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES, "c"));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(sent.at(-1), { panelId: "p1", exited: true });
+});
+
+test("closing a host ends and detaches only its terminals", async () => {
+  const t = setup();
+  await t.handlers.attach(attachInput({ panelId: "p1", host: "host-1" }));
+  await t.handlers.attach(attachInput({ panelId: "p2", host: "host-2" }));
+  await t.handlers.closeHost("host-1");
+  assert.deepEqual(
+    t.sent
+      .filter((m) => m.exited)
+      .map(({ panelId, exited }) => ({ panelId, exited })),
+    [{ panelId: "p1", exited: true }],
+  );
+  assert.equal(t.detached(), 1);
+  await assert.rejects(t.handlers.write("p1", "x"), /not attached/);
+  await t.handlers.write("p2", "x");
+});

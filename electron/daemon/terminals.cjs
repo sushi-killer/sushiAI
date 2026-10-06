@@ -56,11 +56,11 @@ function createTerminalHandlers({
         sessionId: entry.sessionId,
         cols: entry.cols,
         rows: entry.rows,
-      }).catch(() => {});
+      }).catch(() => send("daemon-terminal-data", { panelId, exited: true }));
     });
   }
 
-  function createEntry(panelId, host, sessionId, cols, rows) {
+  function createEntry(panelId, host, sessionId, cols, rows, stale = 0) {
     const decoder = new StringDecoder("utf8");
     const entry = {
       host,
@@ -72,7 +72,7 @@ function createTerminalHandlers({
       queue: [], // ordered strings waiting for credit
       queuedBytes: 0,
       inFlight: 0, // bytes sent and not acked, snapshot included
-      stale: 0, // unacked bytes sent before the last snapshot
+      stale, // unacked bytes sent before the last snapshot
     };
     // Sends queued text while credit lasts. A piece is cut on a code point and
     // by UTF-8 bytes; when not even the next character fits, it waits for an ack.
@@ -114,7 +114,7 @@ function createTerminalHandlers({
         decoder.end();
         entry.queue = [];
         entry.queuedBytes = 0;
-        entry.stale = entry.inFlight;
+        entry.stale += entry.inFlight;
         const text = buffer.toString("utf8");
         entry.cols = info.cols ?? entry.cols;
         entry.rows = info.rows ?? entry.rows;
@@ -140,11 +140,15 @@ function createTerminalHandlers({
   }
 
   async function attach({ panelId, host, sessionId, cols, rows }) {
+    // Bytes the old attach sent and the renderer has not acked yet still come
+    // back as acks: they belong to the old window, not to the new one.
+    const before = panels.get(panelId);
+    const owed = before ? before.inFlight + before.stale : 0;
     await detach(panelId);
     const manager = getManager();
     // A new attach always lands in an empty terminal, so it brings the history.
     const scrollback = FIRST_ATTACH_SCROLLBACK;
-    const entry = createEntry(panelId, host, sessionId, cols, rows);
+    const entry = createEntry(panelId, host, sessionId, cols, rows, owed);
     panels.set(panelId, entry);
     try {
       const handle = await manager.attach(
@@ -213,8 +217,17 @@ function createTerminalHandlers({
     entry.flush();
   }
 
-  async function attachFile(panelId, path) {
-    await write(panelId, shellPath(path));
+  const typePath = (panelId, file) => write(panelId, shellPath(file));
+
+  // A dropped file: typed by its path on this Mac; on a remote host the Mac
+  // path means nothing, so the file is uploaded like pasted data (20 MB cap).
+  async function attachFile(panelId, file) {
+    const entry = entryFor(panelId);
+    if (entry.host === "local") return typePath(panelId, file);
+    const stat = await fs.stat(file);
+    if (!stat.isFile() || !stat.size || stat.size > MAX_ATTACHMENT_BYTES)
+      throw new Error("Choose non-empty files up to 20 MB.");
+    return attachData(panelId, path.basename(file), await fs.readFile(file));
   }
 
   // Pasted data without a path on disk: stored as a private file (a temp file
@@ -240,13 +253,13 @@ function createTerminalHandlers({
       const remote = String(out).trim();
       if (!path.posix.isAbsolute(remote) || /[\r\n\0]/.test(remote))
         throw new Error("The host did not confirm the upload.");
-      await attachFile(panelId, remote);
+      await typePath(panelId, remote);
       return;
     }
     await fs.mkdir(attachmentsDir, { recursive: true, mode: 0o700 });
     const file = path.join(attachmentsDir, unique);
     await fs.writeFile(file, bytes, { flag: "wx", mode: 0o600 });
-    await attachFile(panelId, file);
+    await typePath(panelId, file);
   }
 
   function handleEvent(event) {
@@ -257,6 +270,17 @@ function createTerminalHandlers({
         send("daemon-terminal-data", { panelId, exited: true });
   }
   const unsubscribe = onEvent ? onEvent(handleEvent) : undefined;
+
+  // A host was removed or disconnected: its terminals end.
+  async function closeHost(host) {
+    const ids = [...panels]
+      .filter(([, e]) => e.host === host)
+      .map(([id]) => id);
+    for (const panelId of ids) {
+      send("daemon-terminal-data", { panelId, exited: true });
+      await detach(panelId);
+    }
+  }
 
   async function close() {
     if (typeof unsubscribe === "function") unsubscribe();
@@ -272,6 +296,7 @@ function createTerminalHandlers({
     attachFile,
     attachData,
     handleEvent,
+    closeHost,
     close,
   };
 }

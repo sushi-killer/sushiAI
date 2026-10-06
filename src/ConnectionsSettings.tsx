@@ -76,16 +76,14 @@ type InstallState =
 
 function HostStatus({
   state,
-  profile,
   install,
   onAction,
 }: {
   state: DaemonState | undefined;
-  profile: Pick<ConnectionProfile, "host" | "port">;
   install?: InstallState;
   onAction(action: HostAction): void;
 }) {
-  const view = describeHost(state, profile);
+  const view = describeHost(state);
   const running = install?.phase === "running";
   return (
     <div className={`host-status tone-${view.tone}`}>
@@ -190,11 +188,7 @@ export function ConnectionsSettings({
             <small>Local sushiai daemon</small>
           </button>
           {!endpoint.startsWith("ssh:") && <span>Active</span>}
-          <HostStatus
-            state={states.get("local")}
-            profile={{ host: "localhost" }}
-            onAction={() => {}}
-          />
+          <HostStatus state={states.get("local")} onAction={() => {}} />
         </div>
         {profiles.map((p) => (
           <div
@@ -262,7 +256,6 @@ export function ConnectionsSettings({
             </button>
             <HostStatus
               state={states.get(p.id)}
-              profile={p}
               install={installs[p.id]}
               onAction={(action) =>
                 action === "retry"
@@ -285,11 +278,10 @@ export function ConnectionsSettings({
                   name: String(form.get("name")),
                   host: String(form.get("host")),
                   port: Number(form.get("port")) || undefined,
-                  // The daemon connector ignores the socket; the saved value
-                  // only keeps older profile validation satisfied.
+                  // The daemon connector has no socket; an existing profile
+                  // keeps the one orchd may still read.
                   socket:
-                    (typeof editing === "object" && editing.socket) ||
-                    "~/.sushiai/sushiai.sock",
+                    typeof editing === "object" ? editing.socket : undefined,
                   connector: connectorFromLine(String(form.get("command"))),
                 });
                 setEditing(null);

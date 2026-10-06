@@ -67,6 +67,7 @@ function createSessionLauncher({
   environment,
   worktreeCreate = createWorktree,
   exec,
+  hasShell = () => true,
 }) {
   // A retry with the same key reuses its worktree instead of failing on it.
   const worktrees = new Map();
@@ -90,6 +91,16 @@ function createSessionLauncher({
   // (the sibling `<repo>-<branch>` a local launch would create); sushiAI does
   // not create one on a host yet.
   async function remoteCheckout(request) {
+    // A command connector has no shell to probe with: the folder is taken as
+    // given, and a worktree cannot be looked up.
+    if (!hasShell(request.host)) {
+      if (request.worktree)
+        throw launchError(
+          "REMOTE_WORKTREE_MISSING",
+          "This host connects through a command and has no shell, so a worktree cannot be used. Launch without a worktree.",
+        );
+      return request.cwd;
+    }
     const cwd = await remoteDirectory(request.host, request.cwd);
     if (!cwd)
       throw launchError(
@@ -194,6 +205,7 @@ function createDaemonLaunch({
   return createSessionLauncher({
     manager,
     exec: (...args) => connections.exec(...args),
+    hasShell: (host) => host === "local" || connections.hasShell(`ssh:${host}`),
     environment: (input) =>
       sessionLaunchEnv(
         {

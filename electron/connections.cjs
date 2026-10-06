@@ -54,7 +54,6 @@ function run(binary, args, input = "", timeout = 20000) {
 function declaresForwards(config) {
   return /^(localforward|remoteforward|dynamicforward)\s/m.test(config);
 }
-const DEFAULT_SOCKET = "~/.config/herdr/herdr.sock";
 const MAX_ARGV = 64;
 const MAX_ARG_LENGTH = 4096;
 /** How the desktop reaches the sushiai daemon: ssh (the default, stored as
@@ -97,9 +96,9 @@ function validate(profile) {
       Number(profile.port) > 65535)
   )
     throw new Error("Invalid SSH port");
-  // The Herdr socket only serves orchd until step 6; daemon hosts never read it.
-  const socket = profile.socket || DEFAULT_SOCKET;
-  if (!/^(\/|~\/)[^\r\n\0:]+$/.test(socket))
+  // Only orchd and Herdr read the socket (until step 6); daemon hosts do not.
+  const socket = profile.socket || undefined;
+  if (socket !== undefined && !/^(\/|~\/)[^\r\n\0:]+$/.test(socket))
     throw new Error("Enter an absolute remote socket path or ~/path.");
   const connector = validateConnector(profile.connector);
   return {
@@ -129,6 +128,7 @@ class Connections {
     this.endpointGenerations = new Map();
     this.stateListeners = new Set();
     this.profileListeners = new Set();
+    this.forwards = new Map();
     this.closed = false;
     this.closePromise = null;
   }
@@ -492,7 +492,7 @@ class Connections {
     const state = {
       proc,
       socket: socketPath,
-      forwards: new Map(),
+      forwards: this.forwardsFor(profile.id),
       home: home.home,
     };
     proc.on("exit", () => {
@@ -522,12 +522,18 @@ class Connections {
         "SSH connected, but Herdr is not running at this socket. Start Herdr on the host or choose another session socket.",
     );
   }
+  /** The live port forwards of a profile: remote port -> {port, proc}. */
+  forwardsFor(id) {
+    if (!this.forwards.has(id)) this.forwards.set(id, new Map());
+    return this.forwards.get(id);
+  }
   async forward(endpoint, port) {
     if (!Number.isInteger(port) || port < 1 || port > 65535)
       throw new Error("Invalid port");
-    await this.socket(endpoint);
-    const p = this.get(endpoint),
-      state = this.runtime.get(p.id);
+    // Independent of the Herdr tunnel: a forward is its own ssh process.
+    const p = this.get(endpoint);
+    this.#needShell(endpoint);
+    const state = { forwards: this.forwardsFor(p.id) };
     if (state.forwards.has(port)) return state.forwards.get(port).port;
     const reservation = net.createServer();
     await new Promise((resolve) => reservation.listen(0, "127.0.0.1", resolve));
@@ -578,11 +584,13 @@ class Connections {
     clearTimeout(this.retryTimers.get(id));
     this.retryTimers.delete(id);
     if (this.pending.has(id)) await this.pending.get(id).catch(() => {});
+    const forwards = this.forwards.get(id);
+    this.forwards.delete(id);
+    for (const forward of forwards?.values() ?? []) await forward.proc.kill();
     const state = this.runtime.get(id);
     if (state) {
       this.runtime.delete(id);
       this.changed(endpoint, false);
-      for (const forward of state.forwards.values()) await forward.proc.kill();
       await state.proc.kill();
     }
   }
@@ -596,7 +604,10 @@ class Connections {
       this.inspectionWorkers.clear();
       await Promise.allSettled(inspectors.map((worker) => worker.close()));
       await Promise.allSettled([...this.pending.values()]);
-      for (const id of [...this.runtime.keys()])
+      for (const id of new Set([
+        ...this.runtime.keys(),
+        ...this.forwards.keys(),
+      ]))
         await this.disconnect(`ssh:${id}`);
       if (this.temp) await fs.rm(this.temp, { recursive: true, force: true });
       this.stateListeners.clear();

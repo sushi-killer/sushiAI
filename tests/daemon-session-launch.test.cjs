@@ -330,21 +330,118 @@ test("a remote worktree is used when it exists and refused clearly otherwise", a
   assert.equal(none.requests.length, 0);
 });
 
+const chatgpt = (refresh) =>
+  JSON.stringify({
+    tokens: { refresh_token: "r", account_id: "acct-1" },
+    last_refresh: refresh,
+  });
+
+function codexRemote({ hostAuth = "", ret = "tok-1" } = {}) {
+  const commands = [];
+  const exec = async (endpoint, command, options) => {
+    commands.push({ endpoint, command, options });
+    if (!command.includes("umask 077")) return hostAuth;
+    return "/home/dev/.sushiai/codex-accounts/acc-1\n";
+  };
+  const projects = {
+    resolveProject: async () => null,
+    sendsValues: async () => true,
+    environmentFor: async () => ({}),
+  };
+  const resolved = [];
+  return {
+    commands,
+    resolved,
+    run: () =>
+      sessionLaunchEnv(
+        {
+          projects,
+          connections: { hasShell: () => true, inspect: async () => null },
+          exec,
+          resolveCodexAccount: async (id, endpoint) => {
+            resolved.push({ id, endpoint });
+            return {
+              home: "/local/home",
+              auth: chatgpt("2026-02-01T00:00:00Z"),
+              ret,
+            };
+          },
+        },
+        {
+          host: "host-1",
+          cwd: "/srv/app",
+          agent: "codex",
+          codexAccountId: "acc-1",
+        },
+      ),
+  };
+}
+
 test("a Codex account on a remote host prepares CODEX_HOME there; the login rides on stdin only", async () => {
-  const { launcher, requests, commands } = remoteSetup();
-  await launcher.launch(
-    remoteBase({ agent: "codex", codexAccountId: "acc-1" }),
+  const t = codexRemote();
+  const { env } = await t.run();
+  assert.equal(env.CODEX_HOME, "/home/dev/.sushiai/codex-accounts/acc-1");
+  // The endpoint reaches resolve, so the account records a return token.
+  assert.deepEqual(t.resolved, [{ id: "acc-1", endpoint: "ssh:host-1" }]);
+  const prepare = t.commands.find(
+    (c) => c.command.includes("codex-accounts") && c.options.input,
   );
-  const prepare = commands.find((c) => c.command.includes("codex-accounts"));
   assert.ok(prepare);
-  assert.equal(prepare.options.input, '{"tokens":"synthetic-auth"}');
-  assert.ok(!prepare.command.includes("synthetic-auth"));
+  assert.equal(prepare.options.input, chatgpt("2026-02-01T00:00:00Z"));
+  assert.ok(!prepare.command.includes("refresh_token"));
   assert.match(prepare.command, /umask 077/);
   assert.match(prepare.command, /auth\.json/);
+  // The return token links codex-sessions/<token> to the home, for CODEX_COLLECT.
+  assert.match(prepare.command, /codex-sessions/);
+  assert.match(prepare.command, /tok-1/);
+});
+
+test("the host's Codex login is replaced only when the Mac login is newer", async () => {
+  const older = codexRemote({ hostAuth: chatgpt("2026-01-01T00:00:00Z") });
+  await older.run();
   assert.equal(
-    requests[0].params.env.CODEX_HOME,
-    "/home/dev/.sushiai/codex-accounts/acc-1",
+    older.commands.at(-1).options.input,
+    chatgpt("2026-02-01T00:00:00Z"),
   );
+  assert.match(older.commands.at(-1).command, / 1 '/);
+  const newer = codexRemote({ hostAuth: chatgpt("2026-03-01T00:00:00Z") });
+  await newer.run();
+  assert.equal(newer.commands.at(-1).options.input, "");
+  assert.match(newer.commands.at(-1).command, / 0 '/);
+});
+
+test("the collect script keeps a fresh home with no pid live", () => {
+  const { CODEX_COLLECT } = require("../electron/project-session.cjs");
+  const script = CODEX_COLLECT(["tok-1"]);
+  assert.match(script, /find "\$d" -maxdepth 0 -mmin \+5/);
+  assert.match(script, /codex-sessions\/\$t/);
+});
+
+test("a command-connector host launches with its folder as given and refuses a worktree", async () => {
+  const requests = [];
+  const launcher = createSessionLauncher({
+    manager: {
+      request: async (host, method, params) => {
+        requests.push({ host, method, params });
+        return { id: "c1" };
+      },
+    },
+    exec: async () => {
+      throw new Error("a command host has no shell");
+    },
+    hasShell: () => false,
+    environment: async () => ({ env: {}, claudeSettings: {} }),
+  });
+  const out = await launcher.launch(remoteBase({ cwd: "/work/app" }));
+  assert.deepEqual(out, { host: "host-1", sessionId: "c1", cwd: "/work/app" });
+  assert.equal(requests[0].params.cwd, "/work/app");
+  await assert.rejects(
+    launcher.launch(remoteBase({ worktree: { branch: "feat/x" } })),
+    (error) =>
+      error.code === "REMOTE_WORKTREE_MISSING" &&
+      /no shell/.test(error.message),
+  );
+  assert.equal(requests.length, 1);
 });
 
 test("a remote cwd must be an absolute posix path", async () => {

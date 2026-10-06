@@ -526,6 +526,47 @@ test("a daemon without this binary's stamp is replaced once per app run, then re
   assert.equal(started, 1);
 });
 
+test("the stamp takes its pid from the daemon lock, and a daemon another app started first is not stamped", async () => {
+  const f = localFixture();
+  fs.mkdirSync(f.home, { mode: 0o700 });
+  const connector = createLocalConnector(
+    f.options({
+      spawn: () => {
+        fs.writeFileSync(path.join(f.home, "daemon.lock"), String(process.pid));
+        fakeDaemon(f.socketPath);
+        return Object.assign(new EventEmitter(), { unref() {}, pid: 999999 });
+      },
+    }),
+  );
+  // The lock names another process than the one we spawned: not ours, so no
+  // stamp, and with nothing running before it is reported incompatible.
+  await assert.rejects(
+    connector.connect(),
+    (error) => error.reason === "incompatible" && error.retry === false,
+  );
+  assert.equal(fs.existsSync(path.join(f.home, BINARY_STAMP)), false);
+
+  const g = localFixture();
+  fs.mkdirSync(g.home, { mode: 0o700 });
+  const ours = createLocalConnector(
+    g.options({
+      spawn: () => {
+        fs.writeFileSync(path.join(g.home, "daemon.lock"), String(process.pid));
+        fakeDaemon(g.socketPath);
+        return Object.assign(new EventEmitter(), {
+          unref() {},
+          pid: process.pid,
+        });
+      },
+    }),
+  );
+  (await ours.connect()).close();
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(g.home, BINARY_STAMP), "utf8")).pid,
+    process.pid,
+  );
+});
+
 test("a daemon stamped with a dead pid is not current", async () => {
   const f = localFixture();
   fs.mkdirSync(f.home, { mode: 0o700 });

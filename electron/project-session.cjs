@@ -103,7 +103,7 @@ const CODEX_SESSION = [
  * read and left), `ended` (read and removed) or `gone`, then the file. A
  * session of another host sharing this home counts as live. */
 const CODEX_COLLECT = (tokens) =>
-  `me=$(uname -n); for t in ${tokens.join(" ")}; do d="$HOME/.sushiai/codex-sessions/$t"; echo "@@ $t"; if [ ! -d "$d" ]; then echo gone; continue; fi; p=$(cat "$d/pid" 2>/dev/null); h=$(cat "$d/host" 2>/dev/null); if [ ! -f "$d/.ret" ] && { { [ -n "$h" ] && [ "$h" != "$me" ]; } || { [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }; }; then echo live; cat "$d/auth.json"; else echo ended; cat "$d/auth.json" 2>/dev/null; rm -rf "$d"; fi; echo; done`;
+  `me=$(uname -n); for t in ${tokens.join(" ")}; do d="$HOME/.sushiai/codex-sessions/$t"; echo "@@ $t"; if [ ! -d "$d" ]; then echo gone; continue; fi; p=$(cat "$d/pid" 2>/dev/null); h=$(cat "$d/host" 2>/dev/null); if [ ! -f "$d/.ret" ] && { { [ -n "$h" ] && [ "$h" != "$me" ]; } || { [ -n "$p" ] && kill -0 "$p" 2>/dev/null; } || { [ -z "$p" ] && [ -z "$(find "$d" -maxdepth 0 -mmin +5)" ]; }; }; then echo live; cat "$d/auth.json"; else echo ended; cat "$d/auth.json" 2>/dev/null; rm -rf "$d"; fi; echo; done`;
 
 const codexSessionLaunch = () => `sh -c ${quote(CODEX_SESSION)}`;
 
@@ -307,10 +307,10 @@ const SAFE_ID = /^[A-Za-z0-9_-]+$/;
 
 // Prepares a Codex account's home on a host: ~/.sushiai/codex-accounts/<id>
 // with the host's own ~/.codex linked in (like the local account home), and
-// the account's auth.json from stdin when the home has none yet (Codex
-// refreshes that file itself; a refresh token is single-use, so a login the
-// host already refreshed is never overwritten). Hooks and trust are the
-// daemon's job. Prints the absolute home.
+// the account's auth.json from stdin when `write` is "1". Hooks and trust are
+// the daemon's job. A return token `$2` links ~/.sushiai/codex-sessions/<token>
+// to the home, which is where CODEX_COLLECT looks for a login the host
+// refreshed. Prints the absolute home.
 const remoteCodexHomeScript = (id) =>
   [
     "umask 077",
@@ -319,21 +319,43 @@ const remoteCodexHomeScript = (id) =>
     'chmod 700 "$h"',
     'c="$HOME/.codex"; mkdir -p "$c/sessions"',
     'for f in "$c"/* "$c"/.[!.]*; do { [ -e "$f" ] || [ -L "$f" ]; } || continue; n=${f##*/}; [ "$n" = auth.json ] && continue; [ -e "$h/$n" ] || [ -L "$h/$n" ] || ln -s "$f" "$h/$n"; done',
-    'if [ -s "$h/auth.json" ]; then cat >/dev/null; else cat > "$h/auth.json.new" && mv "$h/auth.json.new" "$h/auth.json"; fi',
+    'if [ "$1" = 1 ]; then cat > "$h/auth.json.new" && mv "$h/auth.json.new" "$h/auth.json"; else cat >/dev/null; fi',
+    'if [ -n "$2" ]; then mkdir -p "$HOME/.sushiai/codex-sessions" && ln -sfn "$h" "$HOME/.sushiai/codex-sessions/$2"; fi',
     "printf '%s\\n' \"$h\"",
   ].join("; ");
 
-/** The Codex home on a host for an account; the login travels on stdin. */
-async function prepareRemoteCodexHome({ exec, endpoint, accountId, auth }) {
+/** The Codex home on a host for an account. The Mac login replaces the host's
+ * only when it is a later login of the same ChatGPT account (or the host has
+ * none): a host that refreshed its own keeps it, and `ret` lets the app
+ * collect it. The login travels on stdin only. */
+async function prepareRemoteCodexHome({
+  exec,
+  endpoint,
+  accountId,
+  auth,
+  ret,
+}) {
   if (!exec) throw new Error("This host cannot prepare a Codex account.");
   if (!SAFE_ID.test(accountId || "")) throw new Error("Invalid Codex account.");
+  if (ret !== undefined && !SAFE_ID.test(ret))
+    throw new Error("Invalid return token.");
   if (typeof auth !== "string" || !auth)
     throw new Error("The Codex account has no login to place on the host.");
+  const { newerLogin } = require("./codex-accounts.cjs");
+  const hostAuth = String(
+    await exec(
+      endpoint,
+      `sh -c ${quote('cat "$HOME/.sushiai/codex-accounts"/"$1"/auth.json 2>/dev/null; true')} sh ${quote(accountId)}`,
+      { timeout: 30000 },
+    ),
+  ).trim();
+  const write = !hostAuth || newerLogin(auth, hostAuth);
   const out = String(
-    await exec(endpoint, `sh -c ${quote(remoteCodexHomeScript(accountId))}`, {
-      input: auth,
-      timeout: 30000,
-    }),
+    await exec(
+      endpoint,
+      `sh -c ${quote(remoteCodexHomeScript(accountId))} sh ${write ? 1 : 0} ${quote(ret || "")}`,
+      { input: write ? auth : "", timeout: 30000 },
+    ),
   ).trim();
   if (!path.posix.isAbsolute(out) || /[\r\n\0]/.test(out))
     throw new Error("The host did not confirm the Codex home.");
@@ -380,7 +402,7 @@ async function sessionLaunchEnv(
       resolveCodexAccount,
       accountId,
       codexAccountId,
-      undefined,
+      endpoint,
       true,
     );
     if (account && remote)
@@ -389,6 +411,7 @@ async function sessionLaunchEnv(
         endpoint,
         accountId,
         auth: account.auth,
+        ret: account.ret,
       });
     else if (account) {
       if (!path.isAbsolute(account.home))

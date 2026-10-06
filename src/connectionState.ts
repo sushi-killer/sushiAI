@@ -1,4 +1,4 @@
-import type { Connector, ConnectionProfile, DaemonState } from "./types";
+import type { Connector, DaemonState } from "./types";
 
 export type HostAction = "retry" | "install" | "update";
 export type HostView = {
@@ -13,29 +13,8 @@ export type HostView = {
   action?: HostAction;
 };
 
-/** Quote one shell word only when it needs it. */
-function shellWord(value: string): string {
-  return /^[\w.@:/+=,-]+$/.test(value)
-    ? value
-    : `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function sshTarget(profile: Pick<ConnectionProfile, "host" | "port">) {
-  return profile.port
-    ? `ssh -p ${profile.port} ${shellWord(profile.host)}`
-    : `ssh ${shellWord(profile.host)}`;
-}
-
-function knownHostsEntry(profile: Pick<ConnectionProfile, "host" | "port">) {
-  const name = profile.host.replace(/^.*@/, "");
-  return profile.port ? `[${name}]:${profile.port}` : name;
-}
-
 /** Maps one daemon state to the label, hint and action a connection row shows. */
-export function describeHost(
-  state: DaemonState | undefined,
-  profile: Pick<ConnectionProfile, "host" | "port">,
-): HostView {
+export function describeHost(state: DaemonState | undefined): HostView {
   if (!state) return { tone: "neutral", label: "Not connected" };
   switch (state.state) {
     case "ready":
@@ -57,8 +36,7 @@ export function describeHost(
         tone: "warning",
         label: "Needs sign-in",
         detail: state.message,
-        hint: "Run this in a terminal to accept the host key or enter a password, then retry.",
-        command: sshTarget(profile),
+        hint: "sushiAI connects without a prompt, so the host needs a key. Add your key to the ssh agent (ssh-add) or set an IdentityFile for this host in ~/.ssh/config, then retry.",
         action: "retry",
       };
     case "failed":
@@ -68,7 +46,7 @@ export function describeHost(
           label: "Host key changed",
           detail: state.message,
           hint: "The host presented a different key. Do not retry until you trust the change. To forget the old key, run this in a terminal.",
-          command: `ssh-keygen -R ${shellWord(knownHostsEntry(profile))}`,
+          command: state.hint,
         };
       if (state.reason === "not_installed")
         return {

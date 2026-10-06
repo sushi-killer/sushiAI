@@ -4,14 +4,16 @@
 // remote `sushiai proxy` (which auto-starts the daemon there), as a byte pipe
 // into client.cjs. Failures are classified from ssh's exit code and stderr:
 //
-//   255 + "Permission denied"                          need_auth     (no retry)
+//   255 + "Permission denied"                          need_auth     (no retry; a key
+//                                                       or the ssh agent is needed)
 //   "REMOTE HOST IDENTIFICATION HAS CHANGED" /
 //     "Host key verification failed"                   failed host_key_changed (no retry)
-//   127 or "No such file"                              failed not_installed    (no retry)
+//   127 or "No such file" for the sushiai path         failed not_installed    (no retry)
+//   a daemon speaking another protocol                 failed incompatible     (no retry)
 //   2 (the proxy: the daemon closed first)             reconnect at once
 //   anything else                                      failed, backoff
 
-const { quote } = require("../connections.cjs");
+const { quote, run } = require("../connections.cjs");
 const {
   spawnPipe,
   connectOverPipe,
@@ -39,15 +41,18 @@ function classifyExit({ code, signal, stderr = "", error } = {}) {
       reason: "host_key_changed",
       retry: false,
       message:
-        "The host key changed. Check the host, then remove its old key from the sushiAI known_hosts file.",
+        "The host key changed. If you trust the change, remove the old key with the command below and connect again.",
     };
   if (code === 255 && /Permission denied/i.test(text))
     return {
       state: "need_auth",
       retry: false,
-      message: `SSH needs authentication: ${detail}`,
+      message: `SSH needs a key or the ssh agent: sushiAI connects in batch mode, without a prompt. ${detail}`,
     };
-  if (code === 127 || (code !== 255 && /No such file/i.test(text)))
+  if (
+    code === 127 ||
+    (code !== 255 && /\.sushiai\/bin\/sushiai[^\n]*No such file/i.test(text))
+  )
     return {
       state: "failed",
       reason: "not_installed",
@@ -69,16 +74,42 @@ function classifyExit({ code, signal, stderr = "", error } = {}) {
   };
 }
 
+/** `hostname` and `port` of `ssh -G`, as ssh resolves the alias. */
+async function resolveWithSsh(ssh, args, profile) {
+  const out = await run(ssh, [...args(profile), "-G", profile.host], "", 3000);
+  const value = (key) =>
+    new RegExp(`^${key} (\\S+)$`, "m").exec(out)?.[1] || undefined;
+  return { hostname: value("hostname"), port: value("port") };
+}
+
 function createSshConnector({
   profile,
   ssh = "/usr/bin/ssh",
   args = () => [],
+  knownHostsFile,
+  resolveHost = () => resolveWithSsh(ssh, args, profile),
   spawnProcess = spawnPipe,
   helloTimeoutMs = HELLO_TIMEOUT_MS,
 }) {
   const argv = [...args(profile), profile.host, PROXY_COMMAND];
-  const describe = (exit) => {
+  // The exact command that removes the changed key from the app's own
+  // known_hosts file, for the name ssh stores it under.
+  async function keygenHint() {
+    let name = profile.host.replace(/^.*@/, "");
+    let port = profile.port;
+    try {
+      const resolved = await resolveHost();
+      name = resolved.hostname || name;
+      port = port || (resolved.port !== "22" ? resolved.port : undefined);
+    } catch {
+      // Keep the alias: it is what ssh was given.
+    }
+    const entry = port && Number(port) !== 22 ? `[${name}]:${port}` : name;
+    return `ssh-keygen -R ${quote(entry)}${knownHostsFile ? ` -f ${quote(knownHostsFile)}` : ""}`;
+  }
+  const describe = async (exit) => {
     const { state, ...rest } = classifyExit(exit);
+    if (rest.reason === "host_key_changed") rest.hint = await keygenHint();
     return { state, ...rest };
   };
   return {
@@ -89,17 +120,17 @@ function createSshConnector({
       return connectOverPipe({
         pipe: spawnProcess(ssh, argv),
         helloTimeoutMs,
-        classify(exit) {
-          const { message, ...rest } = describe(exit);
+        async classify(exit) {
+          const { message, ...rest } = await describe(exit);
           return failure(message, rest);
         },
       });
     },
     /** Why a connected client was lost: null while its exit is unknown. */
-    describeLoss(client) {
+    async describeLoss(client) {
       const exit = client.exit?.();
       if (!exit) return null;
-      const lost = describe(exit);
+      const lost = await describe(exit);
       if (lost.reason === "daemon_died" || lost.reason === undefined)
         return {
           ...lost,
@@ -115,4 +146,9 @@ function createSshConnector({
   };
 }
 
-module.exports = { createSshConnector, classifyExit, PROXY_COMMAND };
+module.exports = {
+  createSshConnector,
+  classifyExit,
+  resolveWithSsh,
+  PROXY_COMMAND,
+};

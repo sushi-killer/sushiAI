@@ -303,35 +303,94 @@ async function sessionEnvPrefix(
   };
 }
 
+const SAFE_ID = /^[A-Za-z0-9_-]+$/;
+
+// Prepares a Codex account's home on a host: ~/.sushiai/codex-accounts/<id>
+// with the host's own ~/.codex linked in (like the local account home), and
+// the account's auth.json from stdin when the home has none yet (Codex
+// refreshes that file itself; a refresh token is single-use, so a login the
+// host already refreshed is never overwritten). Hooks and trust are the
+// daemon's job. Prints the absolute home.
+const remoteCodexHomeScript = (id) =>
+  [
+    "umask 077",
+    `h="$HOME/.sushiai/codex-accounts"/${quote(id)}`,
+    'mkdir -p "$h" || exit 1',
+    'chmod 700 "$h"',
+    'c="$HOME/.codex"; mkdir -p "$c/sessions"',
+    'for f in "$c"/* "$c"/.[!.]*; do { [ -e "$f" ] || [ -L "$f" ]; } || continue; n=${f##*/}; [ "$n" = auth.json ] && continue; [ -e "$h/$n" ] || [ -L "$h/$n" ] || ln -s "$f" "$h/$n"; done',
+    'if [ -s "$h/auth.json" ]; then cat >/dev/null; else cat > "$h/auth.json.new" && mv "$h/auth.json.new" "$h/auth.json"; fi',
+    "printf '%s\\n' \"$h\"",
+  ].join("; ");
+
+/** The Codex home on a host for an account; the login travels on stdin. */
+async function prepareRemoteCodexHome({ exec, endpoint, accountId, auth }) {
+  if (!exec) throw new Error("This host cannot prepare a Codex account.");
+  if (!SAFE_ID.test(accountId || "")) throw new Error("Invalid Codex account.");
+  if (typeof auth !== "string" || !auth)
+    throw new Error("The Codex account has no login to place on the host.");
+  const out = String(
+    await exec(endpoint, `sh -c ${quote(remoteCodexHomeScript(accountId))}`, {
+      input: auth,
+      timeout: 30000,
+    }),
+  ).trim();
+  if (!path.posix.isAbsolute(out) || /[\r\n\0]/.test(out))
+    throw new Error("The host did not confirm the Codex home.");
+  return out;
+}
+
 /** What a daemon session needs besides its command: process variables and
  * the Claude `--settings` keys the daemon allows (`apiKeyHelper`, `model`).
  * Every secret rides in `env`; claudeSettings holds only a helper command that
- * reads a key from an env variable. Local host only (remote launch is slice 2).
+ * reads a key from an env variable. `host` is "local" or a connection id; a
+ * Codex account on a remote host gets its home prepared there over `exec`.
  * Error messages never carry a value. */
 async function sessionLaunchEnv(
-  { projects, connections, resolveAccount, resolveCodexAccount, resolveModel },
+  {
+    projects,
+    connections,
+    exec,
+    resolveAccount,
+    resolveCodexAccount,
+    resolveModel,
+  },
   { host, cwd, agent, claudeAccountId, codexAccountId, modelProfileId },
 ) {
-  if (host !== "local")
-    throw Object.assign(new Error("Remote launch comes later."), {
-      code: "REMOTE_LAUNCH_LATER",
-    });
+  const remote = host !== "local";
+  const endpoint = remote ? `ssh:${host}` : undefined;
+  // A command connector has no shell to inspect folders with.
+  const inspectable =
+    !remote || !connections?.hasShell || connections.hasShell(endpoint);
   const environment = await sessionEnvironment(
-    { projects, connections },
-    { endpoint: undefined, cwd },
+    { projects, connections: inspectable ? connections : undefined },
+    { endpoint, cwd },
   );
   const { project, sends, withheld } = environment;
   const env = { ...environment.env };
   const claudeSettings = {};
   if (agent === "codex" && !withheld) {
+    const accountId = sessionAccountId(
+      project,
+      sends,
+      codexAccountId,
+      "codexAccount",
+    );
     const account = await codexAccountFor(
       resolveCodexAccount,
-      sessionAccountId(project, sends, codexAccountId, "codexAccount"),
+      accountId,
       codexAccountId,
       undefined,
       true,
     );
-    if (account) {
+    if (account && remote)
+      env.CODEX_HOME = await prepareRemoteCodexHome({
+        exec,
+        endpoint,
+        accountId,
+        auth: account.auth,
+      });
+    else if (account) {
       if (!path.isAbsolute(account.home))
         throw new Error("The Codex account home is not an absolute path.");
       env.CODEX_HOME = account.home;
@@ -362,6 +421,7 @@ async function sessionLaunchEnv(
 
 module.exports = {
   sessionLaunchEnv,
+  prepareRemoteCodexHome,
   projectForFolder,
   sessionEnvironment,
   sessionEnvPrefix,

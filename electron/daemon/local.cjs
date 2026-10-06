@@ -6,13 +6,18 @@
 //
 //   home    $SUSHIAI_HOME, else ~/.sushiai, created 0700
 //   binary  $SUSHIAI_DAEMON_BIN, else <resources>/sushiai when packaged,
-//           else the repo's target/release, then target/debug
-//   link    <home>/bin/sushiai -> binary (what agent hooks and `sushiai open` call)
+//           else the newer (mtime) of the repo's target/release and target/debug
+//   stamp   <home>/daemon-binary {sha256, pid}: the binary this app started. A
+//           running daemon whose stamp differs from the resolved binary is
+//           shut down and replaced, once per app run (two apps with different
+//           binaries must not fight); after that a mismatch is "incompatible"
+//           and not retried. <home>/bin/sushiai belongs to the daemon itself.
 //   hooks   `sushiai hooks install` once per app version (stamp file in home)
 
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
 const childProcess = require("node:child_process");
 const { connectDaemon } = require("./client.cjs");
 
@@ -20,6 +25,7 @@ const START_TIMEOUT_MS = 15000;
 const STOP_TIMEOUT_MS = 8000;
 const POLL_MS = 100;
 const HOOKS_STAMP = "hooks-installed";
+const BINARY_STAMP = "daemon-binary";
 // What a detached daemon (and every session it starts) may see of the app's
 // own environment: nothing of Electron, npm or the shell the app came from.
 const DAEMON_ENV_KEYS = [
@@ -30,6 +36,7 @@ const DAEMON_ENV_KEYS = [
   "SHELL",
   "LANG",
   "LC_ALL",
+  "LC_CTYPE",
   "TMPDIR",
   "SSH_AUTH_SOCK",
   "CODEX_HOME",
@@ -54,7 +61,9 @@ function ensureHome(home) {
   }
   if (!stat) fs.mkdirSync(home, { recursive: true, mode: 0o700 });
   else if (!stat.isDirectory() || stat.isSymbolicLink())
-    throw new Error(`${home} must be a real directory`);
+    throw new Error(
+      `${home} must be a real directory with mode 0700, not a symlink or a file.`,
+    );
   fs.chmodSync(home, 0o700);
   return home;
 }
@@ -65,49 +74,48 @@ function resolveBinary({
   resourcesPath = process.resourcesPath,
   repoRoot = path.join(__dirname, "..", ".."),
   exists = fs.existsSync,
+  mtimeOf = (file) => fs.statSync(file).mtimeMs,
 } = {}) {
   if (env.SUSHIAI_DAEMON_BIN) return env.SUSHIAI_DAEMON_BIN;
   if (isPackaged && resourcesPath) return path.join(resourcesPath, "sushiai");
+  let best = null;
   for (const profile of ["release", "debug"]) {
     const candidate = path.join(repoRoot, "target", profile, "sushiai");
-    if (exists(candidate)) return candidate;
+    if (!exists(candidate)) continue;
+    const mtime = mtimeOf(candidate);
+    if (!best || mtime > best.mtime) best = { candidate, mtime };
   }
+  if (best) return best.candidate;
   throw new Error(
     "sushiai binary not found: run `npm run build:daemon` or set SUSHIAI_DAEMON_BIN",
   );
 }
 
-/** Points <home>/bin/sushiai at `binary` through a temp link and a rename. A
- * regular file (or directory) already there is the owner's and is left alone.
- * Returns "created", "updated", "unchanged" or "kept". */
-function ensureBinLink(home, binary) {
-  const dir = path.join(home, "bin");
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const link = path.join(dir, "sushiai");
-  let current = null;
-  try {
-    current = fs.lstatSync(link);
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
-  if (current && !current.isSymbolicLink()) return "kept";
-  if (current && fs.readlinkSync(link) === binary) return "unchanged";
-  const temp = `${link}.tmp-${process.pid}`;
-  fs.rmSync(temp, { force: true });
-  fs.symlinkSync(binary, temp);
-  try {
-    fs.renameSync(temp, link);
-  } catch (error) {
-    fs.rmSync(temp, { force: true });
-    throw error;
-  }
-  return current ? "updated" : "created";
+function sha256File(file) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    fs.createReadStream(file)
+      .on("data", (chunk) => hash.update(chunk))
+      .on("error", reject)
+      .on("end", () => resolve(hash.digest("hex")));
+  });
 }
+
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+};
 
 function daemonEnv(env, home) {
   const out = {};
   for (const key of DAEMON_ENV_KEYS) if (env[key]) out[key] = env[key];
   out.SUSHIAI_HOME = home;
+  // Sessions inherit this: without a locale a terminal garbles non-ASCII text.
+  if (!out.LANG && !out.LC_ALL) out.LANG = "en_US.UTF-8";
   return out;
 }
 
@@ -129,6 +137,9 @@ function createLocalConnector({
   const socketPath = path.join(home, "daemon.sock");
   let binary = "";
   let bundledVersion = "";
+  let binarySha = "";
+  let shaOf = "";
+  let restarts = 0; // replacements this app run made (at most one)
 
   function run(args) {
     return new Promise((resolve, reject) => {
@@ -165,13 +176,53 @@ function createLocalConnector({
     binary = resolveBinary({ env, isPackaged, resourcesPath, repoRoot });
     if (!bundledVersion)
       bundledVersion = (await run(["--version"])).trim().split(/\s+/).pop();
-    ensureBinLink(home, binary);
+    const stat = fs.statSync(binary);
+    const key = `${binary}:${stat.size}:${stat.mtimeMs}`;
+    if (shaOf !== key) {
+      binarySha = await sha256File(binary);
+      shaOf = key;
+    }
     try {
       await installHooksOnce();
     } catch (error) {
       // Hooks are not needed to run sessions; retried on the next connect.
       log(`hooks install failed: ${error.message}`);
     }
+  }
+
+  function readStamp() {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(home, BINARY_STAMP), "utf8"));
+    } catch {
+      return null;
+    }
+  }
+
+  function writeStamp(pid) {
+    fs.writeFileSync(
+      path.join(home, BINARY_STAMP),
+      JSON.stringify({ sha256: binarySha, pid: pid ?? null }),
+      { mode: 0o600 },
+    );
+  }
+
+  // Does the running daemon come from the binary resolved now? A daemon with no
+  // stamp, a dead stamped pid or another sha is not the one this app starts.
+  function isCurrent(client) {
+    if (client.hello.daemon !== bundledVersion) return false;
+    const stamp = readStamp();
+    if (!stamp || stamp.sha256 !== binarySha) return false;
+    return typeof stamp.pid !== "number" || alive(stamp.pid);
+  }
+
+  function incompatible(client) {
+    client.close();
+    return Object.assign(
+      new Error(
+        `The running sushiai daemon is not the one bundled with this app (${client.hello.daemon}, bundled ${bundledVersion}). Another sushiAI window may have started its own; quit it and restart.`,
+      ),
+      { reason: "incompatible", retry: false },
+    );
   }
 
   function startDaemon() {
@@ -189,6 +240,7 @@ function createLocalConnector({
       );
       failed.catch(() => {});
       child.unref?.();
+      writeStamp(child.pid);
       return failed;
     } finally {
       fs.closeSync(fd);
@@ -235,23 +287,19 @@ function createLocalConnector({
     async connect() {
       await prepare();
       let client = await tryConnect();
-      if (client && client.hello.daemon !== bundledVersion) {
-        log(`daemon ${client.hello.daemon} != bundled ${bundledVersion}`);
+      if (client && !isCurrent(client)) {
+        if (restarts >= 1) throw incompatible(client);
+        restarts += 1;
+        log(
+          `daemon ${client.hello.daemon} is not the bundled binary; replacing`,
+        );
         // Sessions live in their holders and survive the restart (D5).
         await client.request("daemon.shutdown", {}).catch(() => {});
         await waitGone(client);
         client = null;
       }
       if (!client) client = await connectWithin(startTimeoutMs, startDaemon());
-      if (client.hello.daemon !== bundledVersion) {
-        client.close();
-        throw Object.assign(
-          new Error(
-            `sushiai daemon ${client.hello.daemon} does not match the bundled ${bundledVersion}`,
-          ),
-          { reason: "incompatible" },
-        );
-      }
+      if (!isCurrent(client)) throw incompatible(client);
       return client;
     },
   };
@@ -262,6 +310,6 @@ module.exports = {
   resolveHome,
   ensureHome,
   resolveBinary,
-  ensureBinLink,
   HOOKS_STAMP,
+  BINARY_STAMP,
 };

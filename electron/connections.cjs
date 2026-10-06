@@ -54,8 +54,41 @@ function run(binary, args, input = "", timeout = 20000) {
 function declaresForwards(config) {
   return /^(localforward|remoteforward|dynamicforward)\s/m.test(config);
 }
+const DEFAULT_SOCKET = "~/.config/herdr/herdr.sock";
+const MAX_ARGV = 64;
+const MAX_ARG_LENGTH = 4096;
+/** How the desktop reaches the sushiai daemon: ssh (the default, stored as
+ * nothing) or a local command that speaks the daemon protocol on stdio. */
+function validateConnector(connector) {
+  if (connector === undefined || connector === null) return undefined;
+  if (typeof connector !== "object" || Array.isArray(connector))
+    throw new Error("Invalid connector.");
+  if (connector.kind === "ssh") return { kind: "ssh" };
+  if (connector.kind !== "command")
+    throw new Error("The connector must be ssh or a command.");
+  const { argv } = connector;
+  if (
+    !Array.isArray(argv) ||
+    !argv.length ||
+    argv.length > MAX_ARGV ||
+    argv.some(
+      (arg) =>
+        typeof arg !== "string" ||
+        arg.length > MAX_ARG_LENGTH ||
+        arg.includes("\0"),
+    ) ||
+    !argv[0].trim()
+  )
+    throw new Error("Enter the command that connects to the daemon.");
+  return { kind: "command", argv: [...argv] };
+}
 function validate(profile) {
-  if (!profile || !/^[a-zA-Z0-9_][a-zA-Z0-9_.@-]*$/.test(profile.host || ""))
+  // A command connector never runs ssh, so its host is only a label.
+  const commandHost =
+    profile?.connector?.kind === "command" && !profile.host
+      ? "command"
+      : profile?.host;
+  if (!profile || !/^[a-zA-Z0-9_][a-zA-Z0-9_.@-]*$/.test(commandHost || ""))
     throw new Error("Enter an SSH alias or user@hostname.");
   if (
     profile.port &&
@@ -64,14 +97,18 @@ function validate(profile) {
       Number(profile.port) > 65535)
   )
     throw new Error("Invalid SSH port");
-  if (!/^(\/|~\/)[^\r\n\0:]+$/.test(profile.socket || ""))
+  // The Herdr socket only serves orchd until step 6; daemon hosts never read it.
+  const socket = profile.socket || DEFAULT_SOCKET;
+  if (!/^(\/|~\/)[^\r\n\0:]+$/.test(socket))
     throw new Error("Enter an absolute remote socket path or ~/path.");
+  const connector = validateConnector(profile.connector);
   return {
     id: /^[a-f0-9-]{36}$/.test(profile.id || "") ? profile.id : randomUUID(),
-    name: String(profile.name || profile.host).slice(0, 80),
-    host: profile.host,
+    name: String(profile.name || commandHost).slice(0, 80),
+    host: commandHost,
     port: Number(profile.port) || undefined,
-    socket: profile.socket,
+    socket,
+    ...(connector ? { connector } : {}),
     hidden: Boolean(profile.hidden),
     autoConnect: Boolean(profile.autoConnect),
   };
@@ -91,6 +128,7 @@ class Connections {
     this.inspectionSourcePromise = null;
     this.endpointGenerations = new Map();
     this.stateListeners = new Set();
+    this.profileListeners = new Set();
     this.closed = false;
     this.closePromise = null;
   }
@@ -107,6 +145,33 @@ class Connections {
         console.warn(`Skipping a saved connection: ${error.message}`);
       }
     }
+    this.profilesChanged();
+  }
+  /** Calls `listener(profiles)` after the profile list changed (loaded, saved
+   * or deleted); the daemon manager builds its connectors from it. */
+  onProfilesChange(listener) {
+    this.profileListeners.add(listener);
+    return () => this.profileListeners.delete(listener);
+  }
+  profilesChanged() {
+    for (const listener of this.profileListeners) {
+      try {
+        listener(this.profiles);
+      } catch (error) {
+        console.warn(`Connection listener failed: ${error.message}`);
+      }
+    }
+  }
+  /** False for a host reached through a command connector: there is no ssh
+   * shell to run commands or inspections on. */
+  hasShell(endpoint) {
+    return this.get(endpoint).connector?.kind !== "command";
+  }
+  #needShell(endpoint) {
+    if (!this.hasShell(endpoint))
+      throw new Error(
+        "This host connects through a command and has no shell access.",
+      );
   }
   /** Rewrites every profile row in one transaction. */
   persist() {
@@ -175,6 +240,7 @@ class Connections {
     this.profiles = [...this.profiles.filter((x) => x.id !== p.id), p];
     await this.disconnect(`ssh:${p.id}`);
     this.persist();
+    this.profilesChanged();
     return p;
   }
   /** Hides a profile from the workspace sidebar without touching its tunnel -
@@ -202,9 +268,11 @@ class Connections {
     this.profiles = this.profiles.filter((x) => x.id !== p.id);
     await this.disconnect(endpoint);
     this.persist();
+    this.profilesChanged();
   }
   async inspect(endpoint, options) {
     if (this.closed) throw new Error("Connections are closed.");
+    if (endpoint?.startsWith("ssh:")) this.#needShell(endpoint);
     return this.inspectionWorker(endpoint).request(options);
   }
   async inspectionSource() {
@@ -245,6 +313,7 @@ class Connections {
    * stdin) and resolves with its stdout. */
   exec(endpoint, command, { input = "", timeout = 20000 } = {}) {
     const profile = this.get(endpoint);
+    this.#needShell(endpoint);
     return run(
       this.ssh,
       [...this.args(profile), profile.host, command],

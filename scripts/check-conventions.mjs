@@ -106,6 +106,9 @@ const JSON_ALLOWED = {
   "electron/extensions/local-extensions.cjs": [
     [/^manifest\.json$/, "extension manifest"],
   ],
+  "electron/host-setup.cjs": [
+    [/^manifest\.json$/, "host binary manifest written by build:host"],
+  ],
   "electron/ipc/app.cjs": [[/^skills-catalog\.json$/, "regenerable cache"]],
   "electron/orchestrator.cjs": [[/^task\.json$/, "orchd task file"]],
   "electron/project-hosts.cjs": [[/^package-lock\.json$/, "repo lockfile"]],

@@ -72,7 +72,7 @@ test("snapshot is sent before bytes with the attach size", async () => {
   );
 });
 
-test("scrollback is requested on the first attach of a session only", async () => {
+test("every attach asks for the history, because the terminal it feeds is empty", async () => {
   const t = setup();
   await t.handlers.attach(attachInput());
   await t.handlers.attach(attachInput());
@@ -80,7 +80,7 @@ test("scrollback is requested on the first attach of a session only", async () =
   await t.handlers.attach(attachInput({ panelId: "p3", sessionId: "s2" }));
   assert.deepEqual(
     t.attaches.map((a) => a.options.scrollback),
-    [FIRST_ATTACH_SCROLLBACK, 0, FIRST_ATTACH_SCROLLBACK, 0],
+    Array(4).fill(FIRST_ATTACH_SCROLLBACK),
   );
   assert.equal(FIRST_ATTACH_SCROLLBACK, 2000);
 });
@@ -267,16 +267,92 @@ test("pasted data is stored privately on this Mac and its path is typed", async 
   }
 });
 
-test("pasted data for a remote host is refused until remote upload exists", async () => {
-  const t = setup();
-  await t.handlers.attach(attachInput({ host: "devbox" }));
-  await assert.rejects(
-    t.handlers.attachData("p1", "a.png", Buffer.from("x")),
-    /attaching pasted data to a remote host comes later/,
+test("pasted data for a remote host is uploaded over exec and its remote path typed", async () => {
+  const calls = [];
+  const t = setup({
+    exec: async (endpoint, command, options) => {
+      calls.push({ endpoint, command, options });
+      return "/home/dev/.sushiai/attachments/abc-a.png\n";
+    },
+  });
+  await t.handlers.attach(attachInput({ host: "host-1" }));
+  await t.handlers.attachData("p1", "../a b.png", Buffer.from("xyz"));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].endpoint, "ssh:host-1");
+  assert.equal(Buffer.from(calls[0].options.input).toString(), "xyz");
+  assert.match(calls[0].command, /^sh -c '/);
+  assert.match(calls[0].command, /umask 077/);
+  assert.match(calls[0].command, /\.sushiai\/attachments/);
+  assert.match(calls[0].command, /chmod 700/);
+  assert.match(calls[0].command, /chmod 600/);
+  assert.match(calls[0].command, /[0-9a-f-]{36}-a b\.png/);
+  assert.equal(
+    t.requests[0].params.data,
+    "'/home/dev/.sushiai/attachments/abc-a.png' ",
   );
-  assert.equal(t.requests.length, 0);
+  await assert.rejects(
+    t.handlers.attachData("p1", "big.bin", Buffer.alloc(20 * 1024 * 1024 + 1)),
+    /20 MB/,
+  );
+  assert.equal(calls.length, 1);
   await assert.rejects(
     t.handlers.attachData("missing", "a.png", Buffer.from("x")),
     /not attached/,
   );
+});
+
+test("a host that does not return an absolute path is an upload failure", async () => {
+  const t = setup({ exec: async () => "oops" });
+  await t.handlers.attach(attachInput({ host: "host-1" }));
+  await assert.rejects(
+    t.handlers.attachData("p1", "a.png", Buffer.from("x")),
+    /did not confirm/,
+  );
+});
+
+test("a surrogate pair that does not fit the credit waits for an ack instead of spinning", async () => {
+  const t = setup();
+  await t.handlers.attach(attachInput());
+  t.handlers.ack("p1", 6);
+  const { onBytes } = t.attaches[0];
+  onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES - 2, "a"));
+  onBytes(Buffer.from("\u{1F680}xyz"));
+  const text = () =>
+    t.sent
+      .filter((m) => m.data)
+      .map((m) => m.data)
+      .join("");
+  assert.equal(text().length, OUTPUT_CREDIT_BYTES - 2);
+  t.handlers.ack("p1", OUTPUT_CREDIT_BYTES);
+  assert.ok(text().endsWith("\u{1F680}xyz"));
+  assert.equal(text().length, OUTPUT_CREDIT_BYTES - 2 + 5);
+});
+
+test("acks of bytes sent before a snapshot do not shrink the new window", async () => {
+  const t = setup();
+  await t.handlers.attach(attachInput());
+  const { onBytes } = t.attaches[0];
+  t.handlers.ack("p1", 6);
+  onBytes(Buffer.alloc(1000, "a"));
+  onBytes(Buffer.from("screen"), { snapshot: true });
+  t.handlers.ack("p1", 1000); // the old 1000 bytes
+  onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES, "b"));
+  const sent = t.sent
+    .filter((m) => m.data)
+    .reduce((n, m) => n + m.data.length, 0);
+  // The snapshot's 6 bytes are still unacked: the window is CREDIT - 6.
+  assert.equal(sent, 1000 + OUTPUT_CREDIT_BYTES - 6);
+});
+
+test("a renderer that stops acking cannot grow the queue: it is dropped and a fresh snapshot taken", async () => {
+  const t = setup();
+  await t.handlers.attach(attachInput());
+  const { onBytes } = t.attaches[0];
+  for (let i = 0; i < 6; i++) onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES, "c"));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(t.attaches.length, 2);
+  assert.equal(t.attaches[1].options.scrollback, FIRST_ATTACH_SCROLLBACK);
+  assert.equal(t.detached(), 1);
+  assert.equal(t.sent.filter((m) => m.snapshot !== undefined).length, 2);
 });

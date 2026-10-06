@@ -10,8 +10,10 @@ const { createDecoder, encode } = require("../electron/daemon/frame.cjs");
 const { createDaemonManager } = require("../electron/daemon/manager.cjs");
 const {
   createLocalConnector,
-  ensureBinLink,
+  resolveBinary,
+  ensureHome,
   HOOKS_STAMP,
+  BINARY_STAMP,
 } = require("../electron/daemon/local.cjs");
 
 const cleanups = [];
@@ -251,7 +253,7 @@ test("a lost connection goes offline, backs off, reconnects with generation+1 an
   assert.match(received[1].text, /^screen-/);
   const attaches = daemon.log.filter((m) => m.method === "session.attach");
   assert.equal(attaches.length, 2);
-  assert.equal(attaches[1].params.scrollback, undefined);
+  assert.equal(attaches[1].params.scrollback, 2000);
 
   // After detach the handle is no longer re-attached.
   await handle.detach();
@@ -340,6 +342,18 @@ function fakeBinary(dir, version) {
   return file;
 }
 
+const sha256 = (file) =>
+  require("node:crypto")
+    .createHash("sha256")
+    .update(fs.readFileSync(file))
+    .digest("hex");
+// Marks the daemon already running as started from the fixture's binary.
+const stampCurrent = (f, pid = null) =>
+  fs.writeFileSync(
+    path.join(f.home, BINARY_STAMP),
+    JSON.stringify({ sha256: sha256(f.binary), pid }),
+  );
+
 function localFixture({ bundled = "1.0.0", appVersion = "app-1" } = {}) {
   const dir = tmp();
   const home = path.join(dir, "home");
@@ -362,7 +376,7 @@ function localFixture({ bundled = "1.0.0", appVersion = "app-1" } = {}) {
   return { dir, home, binary, socketPath, spawned, env, options };
 }
 
-test("local connector creates the home 0700, links the binary and starts a missing daemon detached", async () => {
+test("local connector creates the home 0700, stamps the binary and starts a missing daemon detached", async () => {
   const f = localFixture();
   let daemon;
   const connector = createLocalConnector(
@@ -387,7 +401,11 @@ test("local connector creates the home 0700, links the binary and starts a missi
   assert.equal(f.spawned[0].opts.env.SUSHIAI_HOME, f.home);
   assert.equal(f.spawned[0].opts.env.SECRET_APP_VAR, undefined);
   assert.equal(fs.existsSync(path.join(f.home, "daemon.log")), true);
-  assert.equal(fs.readlinkSync(path.join(f.home, "bin", "sushiai")), f.binary);
+  assert.equal(fs.existsSync(path.join(f.home, "bin")), false);
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(f.home, BINARY_STAMP), "utf8")).sha256,
+    sha256(f.binary),
+  );
   assert.ok(daemon);
   // A daemon that is already up and current is reused, not spawned again.
   const again = await connector.connect();
@@ -441,6 +459,7 @@ test("a binary that stays on the wrong version is reported incompatible", async 
 test("hooks install runs once per app version", async () => {
   const f = localFixture({ appVersion: "app-1" });
   fs.mkdirSync(f.home, { mode: 0o700 });
+  stampCurrent(f);
   await fakeDaemon(f.socketPath);
   const hooksLog = () => {
     try {
@@ -468,21 +487,123 @@ test("hooks install runs once per app version", async () => {
   assert.equal(hooksLog().length, 2);
 });
 
-test("the bin link never replaces a regular file and is replaced atomically otherwise", () => {
-  const home = tmp();
-  const link = path.join(home, "bin", "sushiai");
-  fs.mkdirSync(path.dirname(link), { mode: 0o700 });
-  fs.writeFileSync(link, "mine");
-  assert.equal(ensureBinLink(home, "/opt/a/sushiai"), "kept");
-  assert.equal(fs.readFileSync(link, "utf8"), "mine");
-  assert.equal(fs.lstatSync(link).isSymbolicLink(), false);
+test("a daemon without this binary's stamp is replaced once per app run, then reported incompatible", async () => {
+  const f = localFixture();
+  fs.mkdirSync(f.home, { mode: 0o700 });
+  const old = await fakeDaemon(f.socketPath, { version: "1.0.0" });
+  let started = 0;
+  const connector = createLocalConnector(
+    f.options({
+      spawn: () => {
+        started++;
+        fakeDaemon(f.socketPath, { version: "1.0.0" });
+        return Object.assign(new EventEmitter(), {
+          unref() {},
+          pid: process.pid,
+        });
+      },
+    }),
+  );
+  const client = await connector.connect();
+  assert.equal(started, 1);
+  assert.ok(old.log.some((m) => m.method === "daemon.shutdown"));
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(f.home, BINARY_STAMP), "utf8")).pid,
+    process.pid,
+  );
+  client.close();
+  // Another app replaced the daemon with its own binary: no second shutdown.
+  fs.writeFileSync(
+    path.join(f.home, BINARY_STAMP),
+    JSON.stringify({ sha256: "0".repeat(64), pid: process.pid }),
+  );
+  const other = await fakeDaemon(path.join(f.home, "x.sock"));
+  void other;
+  await assert.rejects(
+    connector.connect(),
+    (error) => error.reason === "incompatible" && error.retry === false,
+  );
+  assert.equal(started, 1);
+});
 
-  fs.rmSync(link);
-  assert.equal(ensureBinLink(home, "/opt/a/sushiai"), "created");
-  assert.equal(ensureBinLink(home, "/opt/a/sushiai"), "unchanged");
-  assert.equal(ensureBinLink(home, "/opt/b/sushiai"), "updated");
-  assert.equal(fs.readlinkSync(link), "/opt/b/sushiai");
-  assert.deepEqual(fs.readdirSync(path.dirname(link)), ["sushiai"]);
+test("a daemon stamped with a dead pid is not current", async () => {
+  const f = localFixture();
+  fs.mkdirSync(f.home, { mode: 0o700 });
+  stampCurrent(f, 2 ** 22 + 12345);
+  const old = await fakeDaemon(f.socketPath);
+  let started = 0;
+  const connector = createLocalConnector(
+    f.options({
+      spawn: () => {
+        started++;
+        fakeDaemon(f.socketPath);
+        return Object.assign(new EventEmitter(), {
+          unref() {},
+          pid: process.pid,
+        });
+      },
+    }),
+  );
+  (await connector.connect()).close();
+  assert.equal(started, 1);
+  assert.ok(old.log.some((m) => m.method === "daemon.shutdown"));
+});
+
+test("the daemon environment keeps LC_CTYPE and defaults the locale to UTF-8", async () => {
+  for (const [env, expect] of [
+    [{}, { LANG: "en_US.UTF-8" }],
+    [
+      { LC_ALL: "de_DE.UTF-8", LC_CTYPE: "de_DE.UTF-8" },
+      { LC_ALL: "de_DE.UTF-8", LC_CTYPE: "de_DE.UTF-8", LANG: undefined },
+    ],
+    [{ LANG: "fr_FR.UTF-8" }, { LANG: "fr_FR.UTF-8" }],
+  ]) {
+    const f = localFixture();
+    const spawned = [];
+    const connector = createLocalConnector(
+      f.options({
+        env: { ...f.env, ...env },
+        spawn: (bin, args, opts) => {
+          spawned.push(opts.env);
+          fakeDaemon(f.socketPath);
+          return Object.assign(new EventEmitter(), { unref() {} });
+        },
+      }),
+    );
+    (await connector.connect()).close();
+    for (const [key, value] of Object.entries(expect))
+      assert.equal(spawned[0][key], value, key);
+  }
+});
+
+test("a symlinked home is refused with a message that names the path", () => {
+  const dir = tmp();
+  const real = path.join(dir, "real");
+  fs.mkdirSync(real);
+  const link = path.join(dir, "link");
+  fs.symlinkSync(real, link);
+  assert.throws(
+    () => ensureHome(link),
+    (error) => error.message.includes(link) && /0700/.test(error.message),
+  );
+});
+
+test("in a checkout the newer of the release and debug binaries is used", () => {
+  const times = {
+    "/r/target/release/sushiai": 5,
+    "/r/target/debug/sushiai": 9,
+  };
+  const pick = (extra) =>
+    resolveBinary({
+      env: {},
+      repoRoot: "/r",
+      exists: (file) => file in times,
+      mtimeOf: (file) => times[file],
+      ...extra,
+    });
+  assert.equal(pick(), "/r/target/debug/sushiai");
+  times["/r/target/release/sushiai"] = 20;
+  assert.equal(pick(), "/r/target/release/sushiai");
 });
 
 // Real daemon -------------------------------------------------------------

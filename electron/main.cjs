@@ -30,7 +30,12 @@ const { AgentRegistry } = require("./agents/registry.cjs");
 const { HermesProvider } = require("./agents/hermes-provider.cjs");
 const { registerProjectIpc } = require("./ipc/projects.cjs");
 const { registerTerminalIpc } = require("./ipc/terminals.cjs");
-const { setupHost, setupSummary } = require("./host-setup.cjs");
+const {
+  setupHost,
+  setupSummary,
+  requireHostManifest,
+  setHostManifestSource,
+} = require("./host-setup.cjs");
 const { registerChatIpc } = require("./ipc/chat.cjs");
 const { registerAppIpc } = require("./ipc/app.cjs");
 const { ipcResult } = require("./ipc/errors.cjs");
@@ -39,6 +44,8 @@ const { registerExtensionIpc } = require("./ipc/extensions.cjs");
 const { registerDaemonIpc, forwardDaemonEvents } = require("./ipc/daemon.cjs");
 const { createDaemonManager } = require("./daemon/manager.cjs");
 const { createLocalConnector } = require("./daemon/local.cjs");
+const { remoteConnectors } = require("./daemon/connectors.cjs");
+const { createHostInstaller } = require("./daemon/install.cjs");
 const { registerAttentionIpc } = require("./attention.cjs");
 const { registerWorkspaceSnapshot } = require("./workspace-snapshot.cjs");
 const {
@@ -185,8 +192,29 @@ function handle(channel, callback) {
     return ipcResult(callback, args);
   });
 }
+// Connect / Retry on a host the daemon manager owns is a manager retry; the
+// Herdr tunnel path only serves hosts the manager does not know.
+const connectThroughDaemon =
+  (original) =>
+  async (endpoint, ...rest) => {
+    if (typeof endpoint === "string" && endpoint.startsWith("ssh:")) {
+      const host = endpoint.slice(4);
+      if (daemonManager?.states().some((state) => state.host === host)) {
+        const state = await daemonManager.retry(host);
+        await connections.setAutoConnect(endpoint, true);
+        return { connected: state.state === "ready", setup: "" };
+      }
+    }
+    return original(endpoint, ...rest);
+  };
 registerProjectIpc({
-  handle,
+  handle: (channel, callback) =>
+    handle(
+      channel,
+      channel === "connections-connect"
+        ? connectThroughDaemon(callback)
+        : callback,
+    ),
   getConnections: () => connections,
   getPreview: () => preview,
   getClaudeMcp: () => claudeMcp,
@@ -195,6 +223,13 @@ registerProjectIpc({
   projects,
 });
 let daemonManager = null;
+// Host binaries and their manifest: app resources when packaged, else target/host.
+const hostManifest = () =>
+  requireHostManifest({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+  });
+setHostManifestSource(hostManifest);
 // The manager is created in whenReady; subscribers registered before that
 // are served by one forwarding subscription made when it exists.
 const daemonEventListeners = new Set();
@@ -208,6 +243,15 @@ registerDaemonIpc({
   getManager: () => daemonManager,
   onEvent: onDaemonEvent,
   attachmentsDir: path.join(app.getPath("temp"), "sushiai-attachments"),
+  exec: (...args) => connections.exec(...args),
+  installHost: (host) => {
+    if (!daemonManager) throw new Error("daemon manager is not running");
+    return createHostInstaller({
+      manager: daemonManager,
+      connections,
+      manifest: hostManifest,
+    }).install(host);
+  },
   launch: createDaemonLaunch({
     manager: {
       request: (...args) => {
@@ -216,8 +260,12 @@ registerDaemonIpc({
       },
     },
     projects,
-    // `connections` is created in whenReady; the launcher only needs inspect.
-    connections: { inspect: (...args) => connections.inspect(...args) },
+    // `connections` is created in whenReady.
+    connections: {
+      inspect: (...args) => connections.inspect(...args),
+      exec: (...args) => connections.exec(...args),
+      hasShell: (endpoint) => connections.hasShell(endpoint),
+    },
     modelProviders,
     codexAccounts,
   }).launch,
@@ -393,15 +441,23 @@ app.whenReady().then(async () => {
       .catch((error) => console.error("Environment setup failed:", error));
   // A test run starts a daemon only when it brings its own SUSHIAI_HOME.
   if (!testMode.test || process.env.SUSHIAI_HOME) {
+    const local = createLocalConnector({
+      appVersion: app.getVersion(),
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      log: (message) => console.log(`daemon: ${message}`),
+    });
+    // One daemon host per connection profile; saving or deleting a profile
+    // adds, replaces or removes its host while the app runs.
+    const connectorMap = (profiles) => ({
+      local,
+      ...remoteConnectors(profiles, {
+        ssh: connections.ssh,
+        args: (profile) => connections.args(profile),
+      }),
+    });
     daemonManager = createDaemonManager({
-      connectors: {
-        local: createLocalConnector({
-          appVersion: app.getVersion(),
-          isPackaged: app.isPackaged,
-          resourcesPath: process.resourcesPath,
-          log: (message) => console.log(`daemon: ${message}`),
-        }),
-      },
+      connectors: connectorMap(connections.profiles),
       powerMonitor,
       log: (message) => console.log(`daemon: ${message}`),
     });
@@ -412,6 +468,9 @@ app.whenReady().then(async () => {
       for (const window of BrowserWindow.getAllWindows())
         if (!window.isDestroyed()) window.webContents.send(channel, value);
     });
+    connections.onProfilesChange((profiles) =>
+      daemonManager?.setConnectors(connectorMap(profiles)),
+    );
     daemonManager.start();
   }
   await orchestrator.start();

@@ -59,6 +59,37 @@ function loadHostManifest(file) {
   }
 }
 
+/** Where the host binaries and their manifest live: the app's resources when
+ * packaged, else the repo's target/host (`npm run build:host`). */
+function hostManifestFile({
+  isPackaged = false,
+  resourcesPath = process.resourcesPath,
+  repoRoot = path.join(__dirname, ".."),
+} = {}) {
+  return isPackaged && resourcesPath
+    ? path.join(resourcesPath, "host", "manifest.json")
+    : path.join(repoRoot, "target", "host", "manifest.json");
+}
+
+/** `loadHostManifest` that throws a message the owner can act on. */
+function requireHostManifest(options = {}) {
+  const file = hostManifestFile(options);
+  const loaded = loadHostManifest(file);
+  if (loaded) return loaded;
+  throw new Error(
+    options.isPackaged
+      ? "This build of sushiAI has no sushiai binaries for remote hosts."
+      : `No host manifest at ${file}. Run npm run build:host first.`,
+  );
+}
+
+/** main.cjs registers where `setupHost` finds the manifest when its caller
+ * passes no `sushiai` option, so every remote setup installs sushiai alike. */
+let hostManifestSource = null;
+function setHostManifestSource(source) {
+  hostManifestSource = source;
+}
+
 /** `{ herdr: "installed", claude: "present", ... }` from the script's output. */
 function parseSetup(output) {
   const states = {};
@@ -185,7 +216,7 @@ async function runSetup(
     checkCompatibility = checkHerdrCompatibility,
     runLocalScript = localScript,
     installSkill = syncBuiltinSkillsOnHost,
-    sushiai = null,
+    sushiai,
     installSushiaiBinary = installSushiai,
   } = {},
 ) {
@@ -199,6 +230,16 @@ async function runSetup(
   const states = parseSetup(await runScript(SETUP_SCRIPT));
   // `sushiai` is `{ manifest, binDir }` (loadHostManifest). Remote hosts only:
   // the local machine runs the bundled daemon itself.
+  if (remote && connections.hasShell && !connections.hasShell(endpoint))
+    sushiai = null;
+  if (remote && sushiai === undefined && hostManifestSource) {
+    try {
+      sushiai = hostManifestSource();
+    } catch (error) {
+      states.sushiai = "failed";
+      states.sushiaiError = error.message;
+    }
+  }
   if (remote && sushiai) {
     try {
       const result = await installSushiaiBinary({
@@ -277,4 +318,7 @@ module.exports = {
   setupHost,
   cleanEnvironment,
   loadHostManifest,
+  hostManifestFile,
+  requireHostManifest,
+  setHostManifestSource,
 };

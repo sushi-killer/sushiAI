@@ -76,7 +76,15 @@ const CHANNELS = {
   },
   "daemon-session-update": (h, patch) => {
     host(h);
-    text(object(patch, "update").id, "session id");
+    const update = object(patch, "update");
+    text(update.id, "session id");
+    for (const key of ["project", "group", "title"])
+      if (
+        update[key] !== undefined &&
+        update[key] !== null &&
+        (typeof update[key] !== "string" || update[key].length > MAX_TEXT)
+      )
+        throw new Error(`Invalid ${key}.`);
   },
   "daemon-session-read": (h, id, scrollback) => {
     host(h);
@@ -93,6 +101,7 @@ const CHANNELS = {
     const r = object(response, "ask response");
     text(r.sessionId, "session id");
     text(r.askId, "ask id");
+    text(r.message, "message", { optional: true });
     if (r.decision !== "allow" && r.decision !== "deny")
       throw new Error("Invalid decision.");
   },
@@ -169,7 +178,9 @@ const TERMINAL_CHANNELS = {
 };
 
 // `launch(request)` is the session launcher (electron/session-launch.cjs,
-// createDaemonLaunch(...).launch); main.cjs passes it in.
+// createDaemonLaunch(...).launch); `installHost(host)` installs sushiai on a
+// remote host (daemon/install.cjs); `exec(endpoint, command, {input, timeout})`
+// runs a command on a host (connections.exec). main.cjs passes them in.
 function registerDaemonIpc({
   handle,
   launch,
@@ -177,12 +188,15 @@ function registerDaemonIpc({
   getManager = () => null,
   onEvent,
   attachmentsDir,
+  exec,
+  installHost,
 }) {
   const terminals = createTerminalHandlers({
     getManager,
     send,
     onEvent,
     attachmentsDir,
+    exec,
   });
   for (const [channel, validate] of Object.entries(CHANNELS))
     handle(channel, async (...args) => {
@@ -190,6 +204,8 @@ function registerDaemonIpc({
       const manager = getManager();
       if (channel === "daemon-states") return manager ? manager.states() : [];
       if (channel === "daemon-session-launch" && launch) return launch(args[0]);
+      if (channel === "host-install" && installHost)
+        return installHost(args[0]);
       const build = LIFECYCLE[channel];
       const terminal = TERMINAL_CHANNELS[channel];
       if (!build && !terminal) throw new Error(NOT_IMPLEMENTED);

@@ -3,15 +3,30 @@
 // Daemon manager: one entry per host, each with a connector that yields a
 // connected, hello-checked client (client.cjs). The manager owns the state of
 // every host, forwards daemon notifications, reconnects with backoff and
-// re-attaches open terminal handles. Only host "local" exists in slice 1;
-// slice 2 adds connectors (ssh, command) by adding entries to `connectors`.
+// re-attaches open terminal handles. Hosts: "local" plus one per connection
+// profile (ssh or command connector, see connectors.cjs); `setConnectors` adds,
+// replaces and removes hosts while the manager runs.
 //
-// connector = { kind, connect(): Promise<client> }  (rejects with an Error that
-//   may carry `reason`, e.g. "incompatible")
+// connector = { kind, signature?, ping?, connect(), describeLoss?(client) }
+//   connect() resolves a client or rejects with an Error that may carry
+//     state ("failed" default | "need_auth"), reason ("incompatible",
+//     "host_key_changed", "not_installed", ...), retry === false (no automatic
+//     retry: the user has to act) and retryNow (reconnect at once, once).
+//   describeLoss(client) -> {state, reason, message, retry?, retryNow?} | null
+//     says why a connected client went away.
+//   ping = {intervalMs, timeoutMs}: the manager sends `$/ping` and drops the
+//     connection when it is not answered in time.
+//   signature: setConnectors replaces a host's connector when it changes.
 //
 // manager API
 //   start()                          connect every host; idempotent
 //   close()                          drop connections and timers; never stops a daemon
+//   setConnectors({host: connector}) add, replace (changed signature) and remove
+//                                    hosts; a removed host ends with state
+//                                    offline, reason "removed"; a host whose
+//                                    connector is unchanged but stopped without
+//                                    a retry (need_auth, ...) is retried
+//   retry(host): Promise<ConnectorState>  reconnect now (one attempt)
 //   states(): ConnectorState[]       {host, state, generation, reason?, message?, version?, capabilities?}
 //   hello(host): {host, version, capabilities} | null   `host` is the daemon's own
 //                                    host name (projects.sync must use it)
@@ -34,6 +49,8 @@ const { EventEmitter } = require("node:events");
 
 const BACKOFF_MIN_MS = 250;
 const BACKOFF_MAX_MS = 30000;
+const PING_METHOD = "$/ping";
+const REATTACH_SCROLLBACK = 2000;
 
 function createDaemonManager({
   connectors,
@@ -49,8 +66,8 @@ function createDaemonManager({
   let started = false;
   let closed = false;
 
-  for (const [host, connector] of Object.entries(connectors))
-    hosts.set(host, {
+  function addHost(host, connector) {
+    const entry = {
       host,
       connector,
       state: "offline",
@@ -61,9 +78,17 @@ function createDaemonManager({
       hello: null,
       handles: new Set(),
       attempt: 0,
+      immediateUsed: false,
       timer: null,
-      connecting: false,
-    });
+      pingTimer: null,
+      pending: null,
+      removed: false,
+    };
+    hosts.set(host, entry);
+    return entry;
+  }
+  for (const [host, connector] of Object.entries(connectors))
+    addHost(host, connector);
 
   function publicState(entry) {
     const out = {
@@ -108,11 +133,17 @@ function createDaemonManager({
     return entry;
   }
 
-  function schedule(entry) {
-    if (closed || entry.timer) return;
-    const base = Math.min(backoffMaxMs, backoffMinMs * 2 ** entry.attempt);
-    entry.attempt += 1;
-    const delay = Math.round(base * (0.75 + random() * 0.25));
+  // `now` asks for an immediate reconnect, granted once until a connection
+  // succeeds, so a daemon that dies at once cannot spin.
+  function schedule(entry, now = false) {
+    if (closed || entry.removed || entry.timer) return;
+    let delay = 0;
+    if (now && !entry.immediateUsed) entry.immediateUsed = true;
+    else {
+      const base = Math.min(backoffMaxMs, backoffMinMs * 2 ** entry.attempt);
+      entry.attempt += 1;
+      delay = Math.round(base * (0.75 + random() * 0.25));
+    }
     entry.timer = setTimeout(() => {
       entry.timer = null;
       void connect(entry);
@@ -131,51 +162,120 @@ function createDaemonManager({
     };
   }
 
+  // Every reattach asks for the history again: the consumer's screen was reset
+  // by the snapshot that comes back. A failure that is not the daemon refusing
+  // (RpcError) is tried again with backoff while this connection lasts.
+  async function reattachOne(entry, client, generation, handle, tries = 0) {
+    if (handle.closed || entry.client !== client) return;
+    handle.inner = null;
+    try {
+      handle.inner = await client.attach(
+        handle.id,
+        wrap(handle, generation, true),
+        { scrollback: REATTACH_SCROLLBACK },
+      );
+      if (handle.closed) await handle.inner.detach().catch(() => {});
+    } catch (error) {
+      log(`re-attach ${handle.id} failed: ${error.message}`);
+      if (error?.name === "RpcError") {
+        entry.handles.delete(handle);
+        return;
+      }
+      const delay = Math.min(backoffMaxMs, backoffMinMs * 2 ** tries);
+      const timer = setTimeout(
+        () => void reattachOne(entry, client, generation, handle, tries + 1),
+        delay,
+      );
+      timer.unref?.();
+    }
+  }
+
   async function reattach(entry, client, generation) {
     await Promise.all(
-      [...entry.handles].map(async (handle) => {
-        try {
-          handle.inner = await client.attach(
-            handle.id,
-            wrap(handle, generation, true),
-          );
-          if (handle.closed) await handle.inner.detach().catch(() => {});
-        } catch (error) {
-          if (error?.name === "RpcError") entry.handles.delete(handle);
-          log(`re-attach ${handle.id} failed: ${error.message}`);
-        }
-      }),
+      [...entry.handles].map((handle) =>
+        reattachOne(entry, client, generation, handle),
+      ),
     );
   }
 
-  async function connect(entry) {
-    if (closed || entry.connecting) return;
-    entry.connecting = true;
+  function stopPing(entry) {
+    clearInterval(entry.pingTimer);
+    entry.pingTimer = null;
+  }
+
+  function startPing(entry, client) {
+    const ping = entry.connector.ping;
+    if (!ping) return;
+    entry.pingTimer = setInterval(async () => {
+      try {
+        await client.request(PING_METHOD, {}, { timeoutMs: ping.timeoutMs });
+      } catch (error) {
+        if (entry.client !== client) return;
+        log(`${entry.host}: ping failed: ${error.message}`);
+        lost(entry, client, {
+          state: "offline",
+          reason: "ping_timeout",
+          message: "The daemon stopped answering.",
+        });
+      }
+    }, ping.intervalMs);
+    entry.pingTimer.unref?.();
+  }
+
+  // The connected client is gone: drop it and decide how to reconnect.
+  function lost(entry, client, description) {
+    if (entry.client !== client) return;
+    entry.client = null;
+    stopPing(entry);
+    client.close();
+    if (closed || entry.removed) return;
+    const why = description ||
+      entry.connector.describeLoss?.(client) || {
+        state: "offline",
+        reason: "daemon_died",
+        message: "The connection to the daemon was lost.",
+      };
+    setState(entry, why.state || "offline", why.reason, why.message);
+    if (why.retry !== false) schedule(entry, why.retryNow);
+  }
+
+  function connect(entry) {
+    if (closed || entry.removed) return Promise.resolve();
+    if (entry.pending) return entry.pending;
     if (entry.timer) {
       clearTimeout(entry.timer);
       entry.timer = null;
     }
+    const pending = attempt(entry).finally(() => {
+      if (entry.pending === pending) entry.pending = null;
+    });
+    entry.pending = pending;
+    return pending;
+  }
+
+  async function attempt(entry) {
     setState(entry, "connecting");
+    const connector = entry.connector;
     let client = null;
     try {
-      client = await entry.connector.connect();
+      client = await connector.connect();
       // The list verifies the daemon serves requests before it is called ready;
       // consumers read the sessions themselves.
       await client.request("session.list", {});
     } catch (error) {
       client?.close();
-      entry.connecting = false;
+      if (entry.removed || entry.connector !== connector) return;
       log(`${entry.host}: connect failed: ${error.message}`);
-      setState(entry, "failed", error.reason, error.message);
-      schedule(entry);
+      setState(entry, error.state || "failed", error.reason, error.message);
+      if (error.retry !== false) schedule(entry, error.retryNow);
       return;
     }
-    entry.connecting = false;
-    if (closed) {
+    if (closed || entry.removed || entry.connector !== connector) {
       client.close();
       return;
     }
     entry.attempt = 0;
+    entry.immediateUsed = false;
     entry.client = client;
     entry.hello = {
       host: client.hello.host || entry.host,
@@ -188,29 +288,33 @@ function createDaemonManager({
       if (entry.client !== client || method === "session.snapshot") return;
       emit("event", { host: entry.host, generation, method, params });
     });
-    client.on("disconnect", () => {
-      if (entry.client !== client) return;
-      entry.client = null;
-      if (closed) return;
-      setState(
-        entry,
-        "offline",
-        "daemon_died",
-        "The connection to the daemon was lost.",
-      );
-      schedule(entry);
-    });
+    client.on("disconnect", () => lost(entry, client));
     client.on("callback-error", (error) => log(`callback: ${error.message}`));
     client.on("protocol-error", (error) => log(`protocol: ${error.message}`));
     setState(entry, "ready");
+    startPing(entry, client);
     await reattach(entry, client, generation);
   }
+
+  function dropHost(entry) {
+    clearTimeout(entry.timer);
+    entry.timer = null;
+    stopPing(entry);
+    const client = entry.client;
+    entry.client = null;
+    client?.close();
+  }
+
+  // Terminal states that stop without a retry, which a new save may retry.
+  const stopped = (entry) =>
+    !entry.timer && !entry.pending && entry.state !== "ready";
 
   if (powerMonitor)
     powerMonitor.on("resume", () => {
       for (const entry of hosts.values())
-        if (entry.timer || entry.state === "failed") {
+        if (entry.timer || stopped(entry)) {
           entry.attempt = 0;
+          entry.immediateUsed = false;
           void connect(entry);
         }
     });
@@ -223,14 +327,54 @@ function createDaemonManager({
     },
     close() {
       closed = true;
-      for (const entry of hosts.values()) {
-        clearTimeout(entry.timer);
-        entry.timer = null;
+      for (const entry of hosts.values()) dropHost(entry);
+      emitter.removeAllListeners();
+    },
+    setConnectors(next) {
+      if (closed) return;
+      for (const [host, entry] of [...hosts]) {
+        if (Object.hasOwn(next, host)) continue;
+        entry.removed = true;
+        dropHost(entry);
+        hosts.delete(host);
+        setState(entry, "offline", "removed", "This host was removed.");
+      }
+      for (const [host, connector] of Object.entries(next)) {
+        const entry = hosts.get(host);
+        if (!entry) {
+          const added = addHost(host, connector);
+          if (started) void connect(added);
+          continue;
+        }
+        const changed =
+          connector.signature === undefined ||
+          connector.signature !== entry.connector.signature;
+        if (changed && entry.connector !== connector) {
+          dropHost(entry);
+          entry.pending = null;
+          entry.connector = connector;
+          entry.attempt = 0;
+          entry.immediateUsed = false;
+          if (started) void connect(entry);
+        } else if (started && stopped(entry)) {
+          entry.attempt = 0;
+          entry.immediateUsed = false;
+          void connect(entry);
+        }
+      }
+    },
+    async retry(host) {
+      const entry = entryFor(host);
+      if (entry.state === "ready" && entry.client) {
         const client = entry.client;
         entry.client = null;
-        client?.close();
+        stopPing(entry);
+        client.close();
       }
-      emitter.removeAllListeners();
+      entry.attempt = 0;
+      entry.immediateUsed = false;
+      await connect(entry);
+      return publicState(entry);
     },
     states: () => [...hosts.values()].map(publicState),
     hello(host) {

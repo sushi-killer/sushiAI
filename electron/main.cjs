@@ -48,7 +48,11 @@ const { remoteConnectors } = require("./daemon/connectors.cjs");
 const { createHostInstaller } = require("./daemon/install.cjs");
 const { watchHostTools } = require("./daemon/host-tools.cjs");
 const { registerAttentionIpc } = require("./attention.cjs");
-const { registerWorkspaceSnapshot } = require("./workspace-snapshot.cjs");
+const {
+  registerWorkspaceSnapshot,
+  savedWorkspaces,
+} = require("./workspace-snapshot.cjs");
+const { createCatalogSync, revStore } = require("./catalog-sync.cjs");
 const {
   DEFAULT_BOUNDS,
   loadWindowState,
@@ -240,6 +244,7 @@ registerProjectIpc({
   projects,
 });
 let daemonManager = null;
+let catalogSync = null;
 let hostTools = null;
 // Host binaries and their manifest: app resources when packaged, else target/host.
 const hostManifest = () =>
@@ -311,6 +316,7 @@ registerWorkspaceSnapshot({
   handle,
   getMainWindow: () => mainWindow,
   userDataDir: () => app.getPath("userData"),
+  onWrite: () => catalogSync?.notifyChanged(),
 });
 const terminalIpc = registerTerminalIpc({
   handle,
@@ -510,6 +516,12 @@ app.whenReady().then(async () => {
       },
       setup: setupDaemonHost,
       log: (message) => console.log(`daemon: ${message}`),
+    });
+    catalogSync = createCatalogSync({
+      manager: daemonManager,
+      projects,
+      workspaces: () => savedWorkspaces(app.getPath("userData")),
+      store: revStore(app.getPath("userData")),
     });
     daemonManager.start();
   }
@@ -732,6 +744,7 @@ app.on("before-quit", (event) => {
   preview?.close();
   terminalIpc.close();
   herdrExtension.close();
+  catalogSync?.stop();
   daemonManager?.close();
   for (const pending of terminalPending.values()) pending.cancelled = true;
   for (const terminal of terminals.values())

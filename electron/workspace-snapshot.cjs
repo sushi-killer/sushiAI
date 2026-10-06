@@ -145,6 +145,7 @@ function registerWorkspaceSnapshot({
   handle,
   getMainWindow,
   userDataDir,
+  onWrite = () => {},
 }) {
   const trusted = (event) => {
     const window = getMainWindow();
@@ -174,6 +175,7 @@ function registerWorkspaceSnapshot({
   sync("workspace-state-flush", (text) => {
     version += 1;
     writeSnapshotSync(userDataDir(), text);
+    onWrite();
     return null;
   });
   handle("workspace-state-write", (text) => {
@@ -181,7 +183,9 @@ function registerWorkspaceSnapshot({
     queue = queue
       .catch(() => {})
       .then(() => {
-        if (mine === version) writeSnapshotSync(userDataDir(), text);
+        if (mine !== version) return;
+        writeSnapshotSync(userDataDir(), text);
+        onWrite();
       });
     return queue;
   });

@@ -22,25 +22,26 @@ one index line; git history keeps the detail and updates.
 
 ## Open
 
-## 2026-10-02 — duplicate project rows survived three point fixes
+## 2026-10-06 — a platform API grew before one real caller
 
-Root cause: no stored folder → project identity.
-Rule: a subsystem regressing after point fixes gets a data-model fix, not another patch.
+Root cause: schema and fairness harness built before any real plugin used them.
+Rule: land one working end-to-end path first, then generalize.
 
 ## Promoted
 
+- 2026-10-02 Duplicate project rows survived three point fixes → data-model fix, not another patch.
 - 2026-10-02 herdr cuts token values at 80 chars → path in `sushiai_open_arg`. `open-signal.test.cjs`.
 - 2026-10-02 herdr ignored a lower `--seq` and repeats → signals carry a nonce. `open-signal.test.cjs`.
 - 2026-10-02 Exact Herdr pin broke on self-update → check capabilities + protocol match.
 - 2026-10-02 Mid-session dead-row removal raced close flows → sweep at restore.
-- 2026-10-02 Fixtures invented `gh` output (`CLOSED` + `mergedAt`), so merged cleanup never preselected → copy real CLI shapes (`MERGED`). `worktree-session.test.cjs`.
+- 2026-10-02 Fixtures invented `gh` output → copy real CLI shapes (`MERGED`). `worktree-session.test.cjs`.
 - 2026-10-02 Git identity loading split worktree rows → wait for first-host identities before drawing.
 - 2026-10-01 A temp `$HOME` did not isolate Herdr on macOS → never stop an unowned server; test on SSH.
 - 2026-10-01 Herdr 0.8.2 closed linked sessions with the primary's last pane → detach first. `herdr-pane-close.test.cjs`.
 - 2026-10-01 Prepare lost SSH recovery between callers → preserve structured failures; reuse recovery UI. `GitRecovery` and `project-git-ssh.test.cjs`.
 - 2026-10-01 contextBridge discards Error fields → transport tagged values; reconstruct before App restores state. `tests/bridge.test.cjs`.
 
-- 2026-10-01 "0 unexplained diffs" hid defects → a fresh critic compares Figma and app PNGs; revert each fix once to see its test fail. `design-critic`.
+- 2026-10-01 "0 unexplained diffs" hid defects → a fresh critic compares PNGs; revert each fix once to see its test fail. `design-critic`.
 - 2026-09-30 orchd defaults leaked repo specifics to every repo → defaults stay empty. `scoped_checks_and_chat_tools_default_to_none`.
 - 2026-09-30 A hook `allow` did not open `.claude/**` to headless `claude -p` → stage in `.orchd-staging/`, copy in before verify.
 - 2026-09-30 A plugin MCP server failed under `--strict-mcp-config` (OAuth keyed by plugin name) → keep its Claude Code name. `chat_tools::server_key`.

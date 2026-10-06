@@ -28,10 +28,11 @@
     "test:contracts": "node --test tests/app-ipc.test.cjs tests/navigation.test.cjs tests/extension-manifest.test.cjs tests/extension-registry.test.cjs tests/extension-routes.test.cjs tests/extension-contract-coverage.test.cjs tests/extension-records.test.cjs",
     "test:extensions": "node --test tests/extension-manager.test.cjs tests/extension-manifest.test.cjs tests/extension-registry.test.cjs tests/local-extensions.test.cjs tests/surface-state.test.cjs",
     "test:core": "node --test tests/layout.test.cjs tests/navigation.test.cjs tests/workspace-actions.test.cjs tests/chat-threads.test.cjs tests/dialog-state.test.cjs tests/app-boundary.test.cjs tests/workspace-state.test.cjs tests/herdr-snapshot.test.cjs tests/inspection-worker.test.cjs tests/git-history.test.cjs",
-    "ci": "npm run build && npm test && npm run test:orchd && npm run check:conventions && npm run lint && prettier --check src electron scripts tests *.json *.ts *.html README.md && git diff --check",
+    "ci": "npm run build && npm test && npm run test:orchd && npm run test:daemon && npm run check:conventions && npm run lint && prettier --check src electron scripts tests *.json *.ts *.html README.md && git diff --check",
     "release:prepare": "node scripts/release.mjs",
     "pack:orchd-src": "node scripts/pack-orchd-src.mjs",
     "build:orchd": "cargo build --release --manifest-path orchd/Cargo.toml",
+    "test:daemon": "cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && node scripts/check-crate-deps.mjs",
     "test:orchd": "cargo fmt --check --manifest-path orchd/Cargo.toml && cargo clippy --all-targets --manifest-path orchd/Cargo.toml -- -D warnings && cargo test --manifest-path orchd/Cargo.toml"
   },
   "dependencies": {

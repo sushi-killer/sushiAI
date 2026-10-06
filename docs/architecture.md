@@ -127,6 +127,7 @@ flowchart TB
 
   herdr[("Herdr daemon")]
   repo[("Git repo<br/>base branch + worktrees")]
+  sushiaiDaemon["sushiai daemon (crates/, not wired into the app yet)<br/>sessions held by sushiai hold processes that outlive it"]
 
   owner --> shell
   orchSvc <-->|socket| proto

@@ -1,0 +1,19 @@
+[package]
+name = "sushiai-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+sushiai-protocol.workspace = true
+sushiai-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

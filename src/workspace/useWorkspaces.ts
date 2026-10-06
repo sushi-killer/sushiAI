@@ -35,14 +35,13 @@ import {
   tidyWorkspace,
 } from "./workspace-actions.ts";
 import type { GroupCanvasContext } from "./workspace-actions.ts";
+import { launchesInWorktree, worktreeBranchError } from "./worktree.ts";
 import {
-  herdrWorkspaceKey,
-  launchesInWorktree,
-  worktreeBranchError,
-} from "./worktree.ts";
-import { applySessionLaunch, findSessionWorkspace } from "./session-launch.ts";
+  launchDaemonSession,
+  launchTarget,
+  placeLaunchedPanel,
+} from "./session-launch.ts";
 import { hostOf } from "../projectWorktrees.ts";
-import { sessionPanelId } from "../daemonSessions.ts";
 import type {
   ModelProfile,
   Panel,
@@ -78,7 +77,6 @@ export function useWorkspaces({
   saved,
   socket,
   refreshHerdr,
-  invalidateHerdr,
   useEndpoint,
   notify,
   showWorkspace,
@@ -89,7 +87,6 @@ export function useWorkspaces({
   saved: Saved | null;
   socket: string;
   refreshHerdr(path: string): Promise<void>;
-  invalidateHerdr?(path: string): void;
   useEndpoint(endpoint: string): void;
   notify(text: string): void;
   showWorkspace(): void;
@@ -272,52 +269,31 @@ export function useWorkspaces({
     ]);
     launches.current += 1;
     setAdding(true);
-    invalidateHerdr?.(request.endpoint);
     try {
       if (!window.bridge) throw new Error("Open the desktop app first.");
-      const result = await window.bridge.sessionLaunch(request);
-      const value = result.ok ? result.value : result.error.created;
-      if (value) {
-        const panel: Panel = {
-          ...template,
-          id: sessionPanelId(request.endpoint, value.paneId),
-          sessionId: value.paneId,
-          started: result.ok && request.kind === "agent",
-          launchOperationId: result.ok ? undefined : request.operationId,
-          launchError: result.ok ? undefined : result.error.message,
-        };
-        delete panel.ended;
-        invalidateHerdr?.(request.endpoint);
-        setWorkspaces((items) =>
-          applySessionLaunch(
-            items,
-            request.endpoint,
-            value,
-            panel,
-            restore,
-            request.label,
-            request.worktree?.branch,
-          ),
-        );
-        switchWorkspace(
-          restore?.workspaceId ||
-            findSessionWorkspace(workspacesRef.current, request.endpoint, value)
-              ?.id ||
-            herdrWorkspaceKey(request.endpoint, value.workspaceId),
-        );
-        setSelected(panel.id);
-        if (restore) {
-          disposeTerminal(restore.panelId);
-          window.bridge.terminalClose(restore.panelId).catch(() => {});
-          if (zoomedRef.current === restore.panelId) setZoomed(panel.id);
-        }
-      }
-      if (!result.ok) {
-        if (result.error.retryable)
-          failedLaunches.current.set(operationKey, request);
-        else failedLaunches.current.delete(operationKey);
-        notify(result.error.message);
-        return false;
+      const { cwd, panel: bound } = await launchDaemonSession(
+        window.bridge,
+        request,
+        template,
+      );
+      const panel: Panel = {
+        ...bound,
+        started: request.kind === "agent",
+        launchOperationId: undefined,
+        launchError: undefined,
+      };
+      const targetId =
+        launchTarget(workspacesRef.current, request, panel.id, restore) ||
+        uid();
+      setWorkspaces((items) =>
+        placeLaunchedPanel(items, { targetId, request, panel, cwd, restore }),
+      );
+      switchWorkspace(targetId);
+      setSelected(panel.id);
+      if (restore) {
+        disposeTerminal(restore.panelId);
+        window.bridge.terminalClose(restore.panelId).catch(() => {});
+        if (zoomedRef.current === restore.panelId) setZoomed(panel.id);
       }
       failedLaunches.current.delete(operationKey);
       await refreshHerdr(request.endpoint).catch((error) =>
@@ -336,68 +312,30 @@ export function useWorkspaces({
   async function createWorkspace(
     name: string,
     cwd: string,
-    backend: string,
     starter: string,
     endpoint: string = socket,
     operationId?: string,
     env?: Record<string, string>,
   ): Promise<boolean> {
-    if (backend === "herdr") {
-      const kind = starter === "shell" ? "terminal" : "agent";
-      const pending = workspacesRef.current
-        .flatMap((workspace) =>
-          workspace.connection === endpoint && workspace.cwd === cwd
-            ? workspace.panels
-            : [],
-        )
-        .find(
-          (panel) =>
-            panel.launchError &&
-            panel.launchOperationId &&
-            operationId &&
-            panel.launchOperationId === operationId &&
-            panel.kind === kind &&
-            panel.agent === (kind === "agent" ? starter : undefined),
-        );
-      const owner =
-        pending && findPanelOwner(workspacesRef.current, pending.id);
-      const request: SessionLaunchRequest = {
-        operationId: operationId || pending?.launchOperationId || uid(),
+    const kind = starter === "shell" ? "terminal" : "agent";
+    return launchSession(
+      {
+        operationId: operationId || uid(),
         endpoint,
         cwd,
         label: name,
         kind,
         agent: kind === "agent" ? starter : undefined,
-        ...(pending && owner
-          ? { workspaceId: owner.id, paneId: pending.sessionId }
-          : {}),
         env,
-      };
-      return launchSession(
-        request,
-        {
-          id: "",
-          kind,
-          title: kind === "terminal" ? "zsh" : agentTitle(starter),
-          agent: kind === "agent" ? starter : undefined,
-        },
-        undefined,
-      );
-    }
-    const w = initialWorkspace(cwd);
-    w.name = name;
-    const panel: Panel = {
-      id: uid(),
-      kind: starter === "shell" ? "terminal" : "agent",
-      title: starter === "shell" ? "zsh" : agentTitle(starter),
-      agent: starter === "shell" ? undefined : starter,
-      started: starter !== "shell",
-    };
-    w.panels = [panel];
-    w.layout = leaf(panel.id);
-    setWorkspaces((items) => [...items, w]);
-    switchWorkspace(w.id);
-    return true;
+      },
+      {
+        id: "",
+        kind,
+        title: kind === "terminal" ? "zsh" : agentTitle(starter),
+        agent: kind === "agent" ? starter : undefined,
+      },
+      undefined,
+    );
   }
   /** Places a panel App already built (an extension surface) into a
    * workspace - the merged row's chosen host (D2) when given, else the
@@ -437,7 +375,6 @@ export function useWorkspaces({
     filesTarget?: Panel["filesTarget"],
     modelProfile?: ModelProfile,
     accountId?: string,
-    backend?: "herdr" | "local",
     targetWorkspaceId?: string,
     worktree?: { branch: string; base?: string },
     operationId?: string,
@@ -460,26 +397,16 @@ export function useWorkspaces({
         workspacesRef.current.find((w) => w.id === targetWorkspaceId)) ||
       activeRef.current;
     try {
-      // A host-backed workspace runs its sessions in the daemon unless this
-      // panel was asked to be local. Nothing else can start a process.
-      const viaHerdr = current.connection && (backend ?? "herdr") === "herdr";
-      if (prompt && !(viaHerdr && launchesInWorktree(kind)))
+      // A host-backed workspace runs its sessions in the daemon. Nothing else
+      // can start a process.
+      const viaDaemon = !!current.connection;
+      if (prompt && !(viaDaemon && launchesInWorktree(kind)))
         throw new Error("Starting with a prompt needs a host workspace.");
-      if (viaHerdr && launchesInWorktree(kind)) {
+      if (viaDaemon && launchesInWorktree(kind)) {
         const endpoint = current.connection || socket;
-        const pending = current.panels.find(
-          (panel) =>
-            panel.launchError &&
-            panel.launchOperationId &&
-            operationId &&
-            panel.launchOperationId === operationId &&
-            panel.kind === kind &&
-            panel.agent === (kind === "agent" ? agent : undefined) &&
-            panel.modelProfileId === modelProfileId,
-        );
         return await launchSession(
           {
-            operationId: operationId || pending?.launchOperationId || uid(),
+            operationId: operationId || uid(),
             endpoint,
             cwd: current.cwd,
             label: worktree
@@ -491,7 +418,6 @@ export function useWorkspaces({
             ...accounts,
             env,
             workspaceId: current.id,
-            ...(pending ? { paneId: pending.sessionId } : {}),
             worktree,
             ...(prompt ? { prompt } : {}),
           },
@@ -510,8 +436,7 @@ export function useWorkspaces({
         );
       } else if (worktree && launchesInWorktree(kind)) {
         // The local counterpart of the branch above: no daemon involved, so
-        // the new checkout runs as a plain local process on this Mac (also
-        // reached from a host workspace whose picker backend was "local").
+        // the new checkout runs as a plain local process on this Mac.
         if (!window.bridge) throw new Error("Open the desktop app first.");
         const branchError = worktreeBranchError(worktree.branch);
         if (branchError) throw new Error(branchError);

@@ -6,7 +6,7 @@ const {
 } = require("../electron/daemon/terminals.cjs");
 const { OUTPUT_CREDIT_BYTES } = require("../electron/terminal-flow.cjs");
 
-function setup() {
+function setup(options = {}) {
   const sent = [];
   const requests = [];
   const attaches = [];
@@ -31,6 +31,7 @@ function setup() {
     },
   };
   const handlers = createTerminalHandlers({
+    ...options,
     getManager: () => manager,
     send: (channel, value) => sent.push({ channel, ...value }),
     onEvent: (callback) => {
@@ -236,5 +237,46 @@ test("daemon IPC channels dispatch to the handlers after validation", async () =
   await assert.rejects(
     channels.get("daemon-terminal-write")("p1", 5),
     /Invalid data/,
+  );
+});
+
+test("pasted data is stored privately on this Mac and its path is typed", async () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attach-data-"));
+  const attachmentsDir = path.join(dir, "attachments");
+  try {
+    const t = setup({ attachmentsDir });
+    await t.handlers.attach(attachInput());
+    await t.handlers.attachData("p1", "../shot 1.png", Buffer.from("png"));
+    const [write] = t.requests;
+    assert.equal(write.method, "session.input");
+    const typed = write.params.data.trim().slice(1, -1);
+    assert.equal(path.dirname(typed), attachmentsDir);
+    assert.match(path.basename(typed), /^[0-9a-f-]{36}-shot 1\.png$/);
+    assert.equal(fs.readFileSync(typed, "utf8"), "png");
+    assert.equal(fs.statSync(typed).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(attachmentsDir).mode & 0o777, 0o700);
+    await assert.rejects(
+      t.handlers.attachData("p1", "empty.png", Buffer.alloc(0)),
+      /non-empty/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pasted data for a remote host is refused until remote upload exists", async () => {
+  const t = setup();
+  await t.handlers.attach(attachInput({ host: "devbox" }));
+  await assert.rejects(
+    t.handlers.attachData("p1", "a.png", Buffer.from("x")),
+    /attaching pasted data to a remote host comes later/,
+  );
+  assert.equal(t.requests.length, 0);
+  await assert.rejects(
+    t.handlers.attachData("missing", "a.png", Buffer.from("x")),
+    /not attached/,
   );
 });

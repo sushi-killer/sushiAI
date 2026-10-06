@@ -130,7 +130,7 @@ function createSessionLauncher({
         "INVALID_CREATION_RESPONSE",
         "The daemon did not report the new session.",
       );
-    return { host: request.host, sessionId };
+    return { host: request.host, sessionId, cwd };
   }
 
   return { launch };
@@ -162,13 +162,8 @@ function createDaemonLaunch({
   });
 }
 
-// The Herdr-era `session-launch` channel is gone; main.cjs (owned by another
-// lane) still calls this and must drop the call at merge.
-function registerSessionLaunchIpc() {}
-
 module.exports = {
   createSessionLauncher,
   createDaemonLaunch,
-  registerSessionLaunchIpc,
   SHELL_CMD,
 };

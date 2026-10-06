@@ -29,31 +29,18 @@ const { Projects } = require("./projects.cjs");
 const { AgentRegistry } = require("./agents/registry.cjs");
 const { HermesProvider } = require("./agents/hermes-provider.cjs");
 const { registerProjectIpc } = require("./ipc/projects.cjs");
-const {
-  registerTerminalIpc,
-  uploadRemoteFile,
-  removeRemoteFiles,
-  remoteFileCommand,
-} = require("./ipc/terminals.cjs");
-const {
-  sessionEnvironment,
-  sessionEnvPrefix,
-} = require("./project-session.cjs");
+const { registerTerminalIpc } = require("./ipc/terminals.cjs");
 const { setupHost, setupSummary } = require("./host-setup.cjs");
 const { registerChatIpc } = require("./ipc/chat.cjs");
 const { registerAppIpc } = require("./ipc/app.cjs");
 const { ipcResult } = require("./ipc/errors.cjs");
-const { registerSessionLaunchIpc } = require("./session-launch.cjs");
-const { assertHerdrCompatibility } = require("./herdr-compatibility.cjs");
+const { createDaemonLaunch } = require("./session-launch.cjs");
 const { registerExtensionIpc } = require("./ipc/extensions.cjs");
 const { registerDaemonIpc, forwardDaemonEvents } = require("./ipc/daemon.cjs");
 const { createDaemonManager } = require("./daemon/manager.cjs");
 const { createLocalConnector } = require("./daemon/local.cjs");
 const { registerAttentionIpc } = require("./attention.cjs");
-const {
-  registerWorkspaceSnapshot,
-  savedWorkspaces,
-} = require("./workspace-snapshot.cjs");
+const { registerWorkspaceSnapshot } = require("./workspace-snapshot.cjs");
 const {
   DEFAULT_BOUNDS,
   loadWindowState,
@@ -208,9 +195,32 @@ registerProjectIpc({
   projects,
 });
 let daemonManager = null;
+// The manager is created in whenReady; subscribers registered before that
+// are served by one forwarding subscription made when it exists.
+const daemonEventListeners = new Set();
+const onDaemonEvent = (listener) => {
+  daemonEventListeners.add(listener);
+  return () => daemonEventListeners.delete(listener);
+};
 registerDaemonIpc({
   handle,
+  send,
   getManager: () => daemonManager,
+  onEvent: onDaemonEvent,
+  attachmentsDir: path.join(app.getPath("temp"), "sushiai-attachments"),
+  launch: createDaemonLaunch({
+    manager: {
+      request: (...args) => {
+        if (!daemonManager) throw new Error("daemon manager is not running");
+        return daemonManager.request(...args);
+      },
+    },
+    projects,
+    // `connections` is created in whenReady; the launcher only needs inspect.
+    connections: { inspect: (...args) => connections.inspect(...args) },
+    modelProviders,
+    codexAccounts,
+  }).launch,
 });
 registerExtensionIpc({
   handle,
@@ -224,54 +234,6 @@ const herdrExtension = registerHerdrExtension({
   id,
   send,
   executable,
-});
-registerSessionLaunchIpc({
-  handle,
-  getConnections: () => connections,
-  modelProviders,
-  resolveEnvironment: (input) =>
-    sessionEnvironment({ projects, connections }, input),
-  prepareSession: (input, environment) => {
-    const sshBinary =
-      (testMode.hidden && process.env.SUSHIAI_TEST_SSH) || connections.ssh;
-    const sshArgs = (endpoint) => {
-      const remote = connections.get(endpoint);
-      return [...connections.args(remote), "-T", remote.host];
-    };
-    return sessionEnvPrefix(
-      {
-        projects,
-        connections,
-        upload: (endpoint, payload) =>
-          uploadRemoteFile(
-            sshBinary,
-            [...sshArgs(endpoint), remoteFileCommand()],
-            payload,
-          ),
-        remove: (endpoint, file) =>
-          removeRemoteFiles(sshBinary, sshArgs(endpoint), [file]),
-        resolveAccount: (accountId) =>
-          modelProviders.resolveClaudeAccount(accountId),
-        resolveCodexAccount: (accountId, endpoint) =>
-          codexAccounts.resolve(accountId, endpoint),
-        resolveModel: async () => environment.model,
-      },
-      {
-        ...input,
-        agent: input.kind === "agent" ? input.agent : undefined,
-        nativeEnvironment: environment,
-      },
-    );
-  },
-  readSnapshot: (endpoint) => herdrExtension.snapshots.read(endpoint),
-  userDataDir: app.getPath("userData"),
-  savedWorkspaces: () => savedWorkspaces(app.getPath("userData")),
-  checkCompatibility: (endpoint) =>
-    assertHerdrCompatibility({
-      endpoint,
-      connections,
-      binary: executable("herdr"),
-    }),
 });
 registerWorkspaceSnapshot({
   ipcMain,
@@ -442,6 +404,9 @@ app.whenReady().then(async () => {
       },
       powerMonitor,
       log: (message) => console.log(`daemon: ${message}`),
+    });
+    daemonManager.on("event", (event) => {
+      for (const listener of [...daemonEventListeners]) listener(event);
     });
     forwardDaemonEvents(daemonManager, (channel, value) => {
       for (const window of BrowserWindow.getAllWindows())

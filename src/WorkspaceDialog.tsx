@@ -81,7 +81,6 @@ export function WorkspaceDialog({
   onCreate(
     name: string,
     cwd: string,
-    backend: string,
     starter: string,
     endpoint?: string,
     operationId?: string,
@@ -398,7 +397,6 @@ export function WorkspaceDialog({
       const created = await onCreate(
         project.name,
         target,
-        "local",
         "shell",
         host.local ? undefined : host.endpoint,
         operationId,

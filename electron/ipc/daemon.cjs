@@ -121,6 +121,11 @@ const CHANNELS = {
     validatePanelId(panelId);
     text(path, "path");
   },
+  "daemon-terminal-attach-data": (panelId, name, bytes) => {
+    validatePanelId(panelId);
+    text(name, "name", { max: 256 });
+    if (!(bytes instanceof Uint8Array)) throw new Error("Invalid data.");
+  },
   "host-install": (h) => host(h),
 };
 
@@ -159,6 +164,8 @@ const TERMINAL_CHANNELS = {
   "daemon-terminal-ack": (t, panelId, bytes) => t.ack(panelId, bytes),
   "daemon-terminal-attach-file": (t, panelId, path) =>
     t.attachFile(panelId, path),
+  "daemon-terminal-attach-data": (t, panelId, name, bytes) =>
+    t.attachData(panelId, name, bytes),
 };
 
 // `launch(request)` is the session launcher (electron/session-launch.cjs,
@@ -169,8 +176,14 @@ function registerDaemonIpc({
   send = () => {},
   getManager = () => null,
   onEvent,
+  attachmentsDir,
 }) {
-  const terminals = createTerminalHandlers({ getManager, send, onEvent });
+  const terminals = createTerminalHandlers({
+    getManager,
+    send,
+    onEvent,
+    attachmentsDir,
+  });
   for (const [channel, validate] of Object.entries(CHANNELS))
     handle(channel, async (...args) => {
       validate(...args);

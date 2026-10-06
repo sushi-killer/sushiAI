@@ -77,7 +77,11 @@ test("shell launch sends a login shell command with no agent and the workspace a
   const out = await launcher.launch(
     base(cwd, { group: "ws-1", title: "Shell" }),
   );
-  assert.deepEqual(out, { host: "local", sessionId: "s1" });
+  assert.deepEqual(out, {
+    host: "local",
+    sessionId: "s1",
+    cwd: require("node:fs").realpathSync(cwd),
+  });
   const [call] = requests;
   assert.equal(call.host, "local");
   assert.equal(call.method, "session.create");
@@ -195,7 +199,10 @@ test("the renderer request keeps one key per launch and maps the workspace to gr
   assert.equal(first.host, "local");
   assert.equal(first.group, "w1");
   assert.equal(first.claudeAccountId, "");
-  assert.equal(toDaemonLaunch({ ...request, endpoint: "ssh:x" }).host, "ssh:x");
+  // One host name everywhere: the connection id without its `ssh:` prefix.
+  assert.equal(toDaemonLaunch({ ...request, endpoint: "ssh:x" }).host, "x");
+  assert.equal(toDaemonLaunch({ ...request, resume: "r-1" }).resume, "r-1");
+  assert.equal(first.resume, undefined);
 });
 
 test("a remote host is refused and no error carries a secret", async (t) => {

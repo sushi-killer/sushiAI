@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { errorText } from "./errors.ts";
 import {
-  applyDaemonEvent,
-  applySessionList,
   daemonHost,
+  emptyFeed,
   emptyHost,
+  failList,
+  feedEvent,
+  finishList,
   reconcileSessions,
+  startList,
+  type HostFeed,
   type SessionsByHost,
 } from "../daemonSessions.ts";
 import type {
@@ -45,11 +49,7 @@ export function useDaemon({
   const [states, setStates] = useState<Record<string, DaemonState>>({});
   const [errorByHost, setErrorByHost] = useState<Record<string, string>>({});
   const hosts = useRef<SessionsByHost>({});
-  const generations = useRef<Record<string, number>>({});
-  const listTokens = useRef<Record<string, number>>({});
-  /** Events that arrive while a host's full list is in flight; the list is a
-   * snapshot from before them, so they are replayed on top of it. */
-  const buffered = useRef(new Map<string, DaemonEvent[]>());
+  const feeds = useRef<Record<string, HostFeed>>({});
 
   const reconcile = useCallback(
     () => setWorkspaces((items) => reconcileSessions(items, hosts.current)),
@@ -59,25 +59,25 @@ export function useDaemon({
   const list = useCallback(
     async (host: string) => {
       if (!window.bridge) return;
-      const token = (listTokens.current[host] ?? 0) + 1;
-      listTokens.current[host] = token;
-      buffered.current.set(host, []);
+      const started = startList(feeds.current[host] ?? emptyFeed());
+      feeds.current[host] = started.feed;
       try {
         const sessions = await window.bridge.sessionsList(host);
-        if (listTokens.current[host] !== token) return;
-        let entry = applySessionList(
+        const done = finishList(
+          feeds.current[host],
+          started.token,
           hosts.current[host] ?? emptyHost(),
           sessions,
         );
-        for (const event of buffered.current.get(host) ?? [])
-          entry = applyDaemonEvent(entry, event);
-        buffered.current.delete(host);
-        hosts.current[host] = entry;
+        if (!done) return;
+        feeds.current[host] = done.feed;
+        hosts.current[host] = done.host;
         setErrorByHost((e) => (e[host] ? { ...e, [host]: "" } : e));
         reconcile();
       } catch (error) {
-        if (listTokens.current[host] !== token) return;
-        buffered.current.delete(host);
+        const feed = feeds.current[host];
+        if (feed.token !== started.token) return;
+        feeds.current[host] = failList(feed, started.token);
         setErrorByHost((e) => ({ ...e, [host]: errorText(error) }));
         throw error;
       }
@@ -110,9 +110,10 @@ export function useDaemon({
         if (!stopped) notify(errorText(error));
       });
     const onState = (state: DaemonState) => {
-      const known = generations.current[state.host] ?? -1;
+      const feed = feeds.current[state.host] ?? emptyFeed();
+      const known = feed.generation;
       if (state.generation < known) return;
-      generations.current[state.host] = state.generation;
+      feeds.current[state.host] = { ...feed, generation: state.generation };
       setStates((s) => ({ ...s, [state.host]: state }));
       const entry = hosts.current[state.host] ?? emptyHost();
       if (state.state !== "ready") {
@@ -125,16 +126,16 @@ export function useDaemon({
       void list(state.host).catch(() => {});
     };
     const onEvent = (event: DaemonEvent) => {
-      if (event.generation < (generations.current[event.host] ?? -1)) return;
-      if (event.method === "session.resync") {
-        void list(event.host).catch(() => {});
-        return;
-      }
-      buffered.current.get(event.host)?.push(event);
       const entry = hosts.current[event.host] ?? emptyHost();
-      const next = applyDaemonEvent(entry, event);
-      if (next === entry) return;
-      hosts.current[event.host] = next;
+      const step = feedEvent(
+        feeds.current[event.host] ?? emptyFeed(),
+        entry,
+        event,
+      );
+      feeds.current[event.host] = step.feed;
+      if (step.relist) void list(event.host).catch(() => {});
+      if (step.host === entry) return;
+      hosts.current[event.host] = step.host;
       reconcile();
     };
     const offState = bridge.onDaemonState(onState);
@@ -161,10 +162,6 @@ export function useDaemon({
         : Promise.resolve(),
     [list],
   );
-  // Sessions are pushed, so there is no cached snapshot to invalidate.
-  const invalidateHerdr = useCallback((endpoint: string) => {
-    void endpoint;
-  }, []);
 
   const statusByEndpoint = useMemo(() => {
     const status: Record<string, DaemonConnection> = {};
@@ -190,7 +187,6 @@ export function useDaemon({
         ? state.message || state.reason || state.state
         : ""),
     refreshHerdr,
-    invalidateHerdr,
     statusByEndpoint,
     /** The connection state of each host the manager reports. */
     daemonStates: states,

@@ -52,6 +52,8 @@ test("handlers reject malformed arguments before anything else", async () => {
   const bad = [
     ["daemon-sessions-list", []],
     ["daemon-sessions-list", [7]],
+    ["daemon-terminal-attach-data", ["p1", "a.png", "not bytes"]],
+    ["daemon-terminal-attach-data", ["p1", "", new Uint8Array(1)]],
     ["daemon-session-launch", [null]],
     ["daemon-session-launch", [{ ...launch, cols: 1.5 }]],
     ["daemon-session-launch", [{ ...launch, idempotencyKey: "" }]],

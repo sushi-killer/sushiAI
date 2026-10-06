@@ -3,6 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { ArrowUpRight, Command, Play, RotateCcw } from "lucide-react";
 import { agentTitle } from "./app/agent-title";
+import { daemonHost } from "./daemonSessions";
 import type { Panel } from "./types";
 import { fitTerminal, queueTerminalFit } from "./terminal-sizing";
 import { installTerminalInteractions } from "./terminal-interactions";
@@ -271,12 +272,17 @@ export function TerminalPanel({
               entry.transfer = `Attaching ${file.name || "image"}…`;
               entry.notify?.();
               if (sessionId) {
-                // The daemon writes the path on its host; only a file with a
-                // path on disk can be handed over.
+                // The daemon writes the path on its host. A file with a path
+                // on disk is handed over by path; pasted data goes to main.
                 const path = window.bridge!.pathForFile(file);
-                if (!path)
-                  throw new Error("Drop the file from Finder to attach it.");
-                await window.bridge!.daemonTerminalAttachFile(panel.id, path);
+                if (path)
+                  await window.bridge!.daemonTerminalAttachFile(panel.id, path);
+                else
+                  await window.bridge!.daemonTerminalAttachData(
+                    panel.id,
+                    file.name || "pasted.png",
+                    new Uint8Array(await file.arrayBuffer()),
+                  );
                 continue;
               }
               const stored = await window.bridge!.terminalAttach({
@@ -334,7 +340,7 @@ export function TerminalPanel({
         window.bridge
           .daemonTerminalAttach({
             panelId: panel.id,
-            host: endpoint || "local",
+            host: daemonHost(endpoint),
             sessionId,
             cols: terminal.cols,
             rows: terminal.rows,

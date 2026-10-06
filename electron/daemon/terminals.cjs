@@ -5,6 +5,10 @@
 // resyncs; a fresh snapshot arrives through the same callback and replaces
 // whatever the renderer shows.
 
+const fs = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
+const { randomUUID } = require("node:crypto");
 const { StringDecoder } = require("node:string_decoder");
 const {
   OUTPUT_CREDIT_BYTES,
@@ -12,11 +16,17 @@ const {
 } = require("../terminal-flow.cjs");
 
 const FIRST_ATTACH_SCROLLBACK = 2000;
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
 // A shell reads the path as one word however the file was named.
 const shellPath = (value) => `'${value.replace(/'/g, "'\\''")}' `;
 
-function createTerminalHandlers({ getManager, send, onEvent }) {
+function createTerminalHandlers({
+  getManager,
+  send,
+  onEvent,
+  attachmentsDir = path.join(os.tmpdir(), "sushiai-attachments"),
+}) {
   const panels = new Map(); // panelId -> entry
   const attachedBefore = new Set(); // host\0sessionId attached in this app run
 
@@ -167,6 +177,25 @@ function createTerminalHandlers({ getManager, send, onEvent }) {
     await write(panelId, shellPath(path));
   }
 
+  // Pasted data without a path on disk: stored as a private temp file on this
+  // Mac, then its path is handed over like a dropped file. Local host only.
+  async function attachData(panelId, name, bytes) {
+    const entry = entryFor(panelId);
+    if (entry.host !== "local")
+      throw new Error("attaching pasted data to a remote host comes later");
+    if (!bytes.length || bytes.length > MAX_ATTACHMENT_BYTES)
+      throw new Error("Choose non-empty files up to 20 MB.");
+    const safe =
+      path
+        .basename(name)
+        .replace(/[^\w.\- ]+/g, "_")
+        .slice(-80) || "pasted";
+    await fs.mkdir(attachmentsDir, { recursive: true, mode: 0o700 });
+    const file = path.join(attachmentsDir, `${randomUUID()}-${safe}`);
+    await fs.writeFile(file, bytes, { flag: "wx", mode: 0o600 });
+    await attachFile(panelId, file);
+  }
+
   function handleEvent(event) {
     if (event?.method !== "session.exited") return;
     const id = event.params?.id;
@@ -181,7 +210,17 @@ function createTerminalHandlers({ getManager, send, onEvent }) {
     await Promise.all([...panels.keys()].map(detach));
   }
 
-  return { attach, write, resize, detach, ack, attachFile, handleEvent, close };
+  return {
+    attach,
+    write,
+    resize,
+    detach,
+    ack,
+    attachFile,
+    attachData,
+    handleEvent,
+    close,
+  };
 }
 
 module.exports = { createTerminalHandlers, FIRST_ATTACH_SCROLLBACK };

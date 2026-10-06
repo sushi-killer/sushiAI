@@ -131,10 +131,10 @@ export function closeRequest(
  * workspace id is the daemon group (one id for both). */
 export function reopenRequest(
   owner: Workspace,
-  ended: Panel & { agentSession?: string },
+  ended: Panel,
   operationId: string,
   defaultEndpoint: string,
-): SessionLaunchRequest & { resume?: string } {
+): SessionLaunchRequest {
   const agent = ended.kind === "agent";
   return {
     operationId,

@@ -97,7 +97,6 @@ export function App() {
     connection,
     connectionError,
     refreshHerdr,
-    invalidateHerdr,
     statusByEndpoint,
   } = useDaemon({
     savedSocket: saved?.socket || "",
@@ -126,7 +125,6 @@ export function App() {
     socket,
     refreshHerdr,
     useEndpoint: setSocket,
-    invalidateHerdr,
     notify,
     showWorkspace,
     confirmClose: ({ workspace, panel }) =>

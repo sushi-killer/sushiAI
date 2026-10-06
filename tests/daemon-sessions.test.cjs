@@ -233,3 +233,79 @@ test("the daemon host of a connection and the panel id of a session", async () =
   assert.equal(daemonHost("ssh:devbox"), "devbox");
   assert.notEqual(sessionPanelId("ssh:a", "s1"), sessionPanelId("ssh:b", "s1"));
 });
+
+const event = (method, params, generation = 1) => ({
+  host: "local",
+  generation,
+  method,
+  params,
+});
+
+test("events that arrive during a list are replayed on top of it", async () => {
+  const lib = await library;
+  const { feed: listing, token } = lib.startList(lib.emptyFeed());
+  // A session the list does not know yet is created while it is in flight.
+  const step = lib.feedEvent(
+    listing,
+    lib.emptyHost(),
+    event("session.created", session("s2")),
+  );
+  assert.equal(step.relist, false);
+  assert.ok("s2" in step.host.sessions);
+  assert.equal(step.feed.pending.length, 1);
+  const done = lib.finishList(step.feed, token, step.host, [session("s1")]);
+  assert.deepEqual(Object.keys(done.host.sessions).sort(), ["s1", "s2"]);
+  assert.equal(done.host.listed, true);
+  assert.equal(done.feed.pending, null);
+  // An exit that arrived during the list also wins over the older snapshot.
+  const second = lib.startList(done.feed);
+  const exited = lib.feedEvent(
+    second.feed,
+    done.host,
+    event("session.exited", { id: "s1", code: 0 }),
+  );
+  const again = lib.finishList(exited.feed, second.token, exited.host, [
+    session("s1"),
+    session("s2"),
+  ]);
+  assert.equal(again.host.sessions.s1.status, "exited");
+  assert.equal(again.host.sessions.s2.status, "running");
+});
+
+test("an event from an older generation is dropped", async () => {
+  const lib = await library;
+  const feed = { ...lib.emptyFeed(), generation: 3 };
+  const host = lib.applySessionList(lib.emptyHost(), [session("s1")]);
+  const stale = lib.feedEvent(
+    feed,
+    host,
+    event("session.removed", { id: "s1" }, 2),
+  );
+  assert.equal(stale.host, host);
+  assert.equal(stale.feed, feed);
+  assert.equal(stale.relist, false);
+  const current = lib.feedEvent(
+    feed,
+    host,
+    event("session.removed", { id: "s1" }, 3),
+  );
+  assert.deepEqual(current.host.sessions, {});
+});
+
+test("a resync asks for a new list and a replaced list is dropped", async () => {
+  const lib = await library;
+  const host = lib.applySessionList(lib.emptyHost(), [session("s1")]);
+  const resync = lib.feedEvent(
+    lib.emptyFeed(),
+    host,
+    event("session.resync", {}),
+  );
+  assert.equal(resync.relist, true);
+  assert.equal(resync.host, host);
+  const first = lib.startList(lib.emptyFeed());
+  const second = lib.startList(first.feed);
+  assert.equal(lib.finishList(second.feed, first.token, host, []), undefined);
+  assert.equal(lib.failList(second.feed, first.token), second.feed);
+  assert.equal(lib.failList(second.feed, second.token).pending, null);
+  assert.ok(lib.finishList(second.feed, second.token, host, []));
+});

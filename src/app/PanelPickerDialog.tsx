@@ -121,7 +121,6 @@ export function PanelPickerDialog({
     filesTarget?: undefined,
     modelProfile?: ModelProfile,
     claudeAccountId?: string,
-    backend?: "herdr" | "local",
     targetWorkspaceId?: string,
     worktree?: { branch: string; base: string },
   ): void;
@@ -396,7 +395,6 @@ export function PanelPickerDialog({
             : // Untouched: the main process applies the project's account,
               // and the host's login when that one cannot run.
               undefined,
-        "local",
         targetWorkspaceId,
         worktreeArg,
       );
@@ -465,7 +463,6 @@ export function PanelPickerDialog({
             undefined,
             undefined,
             undefined,
-            "local",
             targetWorkspaceId,
             launchesInWorktree(tool.kind) ? worktreeArg : undefined,
           );
@@ -1028,7 +1025,6 @@ export function PanelPickerDialog({
                     undefined,
                     undefined,
                     undefined,
-                    "local",
                     targetWorkspaceId,
                     launchesInWorktree(item.kind) ? worktreeArg : undefined,
                   )

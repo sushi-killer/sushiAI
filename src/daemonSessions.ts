@@ -1,10 +1,5 @@
 import type { DaemonEvent, DaemonSession, Panel, Workspace } from "./types";
 
-/** A panel as the daemon binding sees it: `agentSession` is the agent CLI's own
- * session id, kept on the panel so Reopen can resume it after the daemon has
- * forgotten the session. */
-export type BoundPanel = Panel & { agentSession?: string };
-
 /** What the desktop knows about one host's sessions. */
 export type HostSessions = {
   /** The host's connection is up. Nothing ends while this is false. */
@@ -134,6 +129,63 @@ export function applyDaemonEvent(
   }
 }
 
+/** The event stream of one host: the newest connection generation seen, the
+ * id of the latest full list, and the events that arrived while that list was
+ * in flight (the list is a snapshot from before them, so they are replayed on
+ * top of it). Immutable: every step returns the next feed. */
+export type HostFeed = {
+  generation: number;
+  token: number;
+  pending: DaemonEvent[] | null;
+};
+export const emptyFeed = (): HostFeed => ({
+  generation: -1,
+  token: 0,
+  pending: null,
+});
+
+/** One event for a host. An older generation is dropped. `session.resync`
+ * asks the caller to list again. Anything else applies now and, while a list
+ * is in flight, is also kept for replay. */
+export function feedEvent(
+  feed: HostFeed,
+  host: HostSessions,
+  event: DaemonEvent,
+): { feed: HostFeed; host: HostSessions; relist: boolean } {
+  if (event.generation < feed.generation) return { feed, host, relist: false };
+  if (event.method === "session.resync") return { feed, host, relist: true };
+  return {
+    feed: feed.pending ? { ...feed, pending: [...feed.pending, event] } : feed,
+    host: applyDaemonEvent(host, event),
+    relist: false,
+  };
+}
+
+/** A full list starts: later events are kept until it lands. */
+export function startList(feed: HostFeed): { feed: HostFeed; token: number } {
+  const token = feed.token + 1;
+  return { feed: { ...feed, token, pending: [] }, token };
+}
+
+/** A full list landed. A list that a newer one replaced is dropped (undefined);
+ * otherwise it replaces what was known and the kept events replay on top. */
+export function finishList(
+  feed: HostFeed,
+  token: number,
+  host: HostSessions,
+  sessions: DaemonSession[],
+): { feed: HostFeed; host: HostSessions } | undefined {
+  if (feed.token !== token) return undefined;
+  let next = applySessionList(host, sessions);
+  for (const event of feed.pending ?? []) next = applyDaemonEvent(next, event);
+  return { feed: { ...feed, pending: null }, host: next };
+}
+
+/** A full list failed: stop keeping events, unless a newer list took over. */
+export function failList(feed: HostFeed, token: number): HostFeed {
+  return feed.token === token ? { ...feed, pending: null } : feed;
+}
+
 /** The panel status the UI draws. A finished turn reads "done" until the
  * attention layer has seen it, then "idle". Terminals have no status. */
 function panelStatus(
@@ -159,7 +211,7 @@ function panelStatus(
 
 /** A session the host no longer runs. The panel keeps its slot and its saved
  * state; it shows "Session ended" with Reopen until it is reopened or closed. */
-function endPanel(panel: BoundPanel, session?: DaemonSession): BoundPanel {
+function endPanel(panel: Panel, session?: DaemonSession): Panel {
   const agentSession = session?.agentSession || panel.agentSession;
   if (
     panel.ended &&
@@ -167,7 +219,7 @@ function endPanel(panel: BoundPanel, session?: DaemonSession): BoundPanel {
     panel.agentSession === agentSession
   )
     return panel;
-  const next: BoundPanel = {
+  const next: Panel = {
     ...panel,
     ended: true,
     ...(agentSession ? { agentSession } : {}),
@@ -176,8 +228,8 @@ function endPanel(panel: BoundPanel, session?: DaemonSession): BoundPanel {
   return next;
 }
 
-function livePanel(panel: BoundPanel, session: DaemonSession): BoundPanel {
-  const next: BoundPanel = { ...panel };
+function livePanel(panel: Panel, session: DaemonSession): Panel {
+  const next: Panel = { ...panel };
   delete next.ended;
   const status = panelStatus(session, panel.status);
   if (status === undefined) delete next.status;

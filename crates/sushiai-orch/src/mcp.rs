@@ -360,11 +360,14 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
 /// only (`--task <id>`), where every message is sent as that task, or the
 /// read-only tools of a Brainstorm or Plan turn (`--read-only`).
 struct Bridge {
-    socket: PathBuf,
-    token: String,
+    /// One request to the orchestration backend: `(method, params)` to its result or message.
+    call: Caller,
     task: Option<String>,
     read_only: bool,
 }
+
+/// How the bridge reaches the backend; the transport is the caller's choice.
+pub type Caller = Box<dyn Fn(&str, Value) -> Result<Value, String>>;
 
 impl Bridge {
     fn offers(&self, tool_name: &str) -> bool {
@@ -499,7 +502,7 @@ fn handle_tools_call(bridge: &Bridge, params: &Value) -> Value {
     let args = with_task_mcp(method, args, task_mcp);
     let args = with_source(method, args, bridge.task.is_some());
     let args = message_params(&p.name, args, bridge.task.as_deref());
-    match call_orchd(&bridge.socket, &bridge.token, method, args) {
+    match (bridge.call)(method, args) {
         Ok(result) => tool_ok(result),
         Err(message) => tool_error(message),
     }
@@ -686,16 +689,32 @@ pub fn run(args: &[String]) -> i32 {
             return 1;
         }
     };
+    let call: Caller = Box::new(move |method, params| call_orchd(&socket, &token, method, params));
+    serve_stdio(
+        task,
+        read_only,
+        call,
+        std::io::stdin().lock(),
+        std::io::stdout(),
+    );
+    0
+}
+
+/// The stdio MCP server loop: one JSON-RPC line in, at most one line out, until `input` ends
+/// or `output` closes. `task` / `read_only` pick the tool scope; `call` is the transport.
+pub fn serve_stdio(
+    task: Option<String>,
+    read_only: bool,
+    call: Caller,
+    input: impl BufRead,
+    mut output: impl Write,
+) {
     let bridge = Bridge {
-        socket,
-        token,
+        call,
         task,
         read_only,
     };
-
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    for line in stdin.lock().lines() {
+    for line in input.lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
@@ -703,16 +722,11 @@ pub fn run(args: &[String]) -> i32 {
         if let Some(response) = handle_line(&bridge, &line) {
             let mut out = response.to_string();
             out.push('\n');
-            let mut handle = stdout.lock();
-            if handle.write_all(out.as_bytes()).is_err() {
-                break;
-            }
-            if handle.flush().is_err() {
+            if output.write_all(out.as_bytes()).is_err() || output.flush().is_err() {
                 break;
             }
         }
     }
-    0
 }
 
 #[cfg(test)]
@@ -728,8 +742,7 @@ mod tests {
             // Never dialed by the branches under test here (`initialize`,
             // `ping`, `tools/list`, and the invalid-params/unknown-tool
             // exits out of `tools/call`); a bogus path just documents that.
-            socket: PathBuf::from("/nonexistent/orchd.sock"),
-            token: "t".to_string(),
+            call: Box::new(|_, _| Err("no backend".to_string())),
             task: task.map(str::to_string),
             read_only: false,
         }
@@ -993,8 +1006,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (socket, token) = live_daemon(dir.path()).await;
         let bridge = |task: Option<&str>| Bridge {
-            socket: socket.clone(),
-            token: token.clone(),
+            call: {
+                let (socket, token) = (socket.clone(), token.clone());
+                Box::new(move |method, params| call_orchd(&socket, &token, method, params))
+            },
             task: task.map(str::to_string),
             read_only: false,
         };

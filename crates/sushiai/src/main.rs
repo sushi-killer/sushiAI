@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 mod hook;
 mod hooks_file;
+mod mcp;
 mod open;
+mod orch_cli;
 mod orch_module;
 
 use anyhow::{bail, Context, Result};
@@ -11,7 +13,7 @@ use tracing_subscriber::filter::LevelFilter;
 
 mod proxy;
 
-const USAGE: &str = "usage: sushiai daemon | status | proxy | hook EVENT | open TARGET PATH | hooks install|uninstall | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
+const USAGE: &str = "usage: sushiai daemon | status | proxy | mcp [--task ID | --read-only] | orch hook|ab|eval|costs|failures|evolve|gc|register|unregister | hook EVENT | open TARGET PATH | hooks install|uninstall | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -46,6 +48,8 @@ fn main() -> Result<()> {
             "{}",
             sushiai_daemon::status_blocking(sushiai_daemon::Home::from_env())?
         ),
+        Some("mcp") => std::process::exit(mcp::run(args)),
+        Some("orch") => std::process::exit(orch_cli::run(args)),
         Some("proxy") => proxy::run(&sushiai_daemon::Home::from_env())?,
         Some("--version") => println!("sushiai {}", env!("CARGO_PKG_VERSION")),
         Some("hold") => {

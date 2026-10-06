@@ -486,6 +486,7 @@ dependencies = [
  "sushiai-protocol",
  "tempfile",
  "tokio",
+ "toml_edit",
  "tracing-subscriber",
 ]
 

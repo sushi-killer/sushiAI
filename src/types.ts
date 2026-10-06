@@ -209,6 +209,8 @@ export type ExtensionPanel = PanelState & {
     contributionId: string;
     instanceId: string;
     stateVersion: number;
+    /** Opaque per-pane arguments a core view reads and may rewrite. */
+    args?: Record<string, string>;
   };
 };
 export type Panel = CorePanel | ExtensionPanel;

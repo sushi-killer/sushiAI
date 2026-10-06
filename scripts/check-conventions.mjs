@@ -192,7 +192,7 @@ for await (const file of walk("src/styles")) {
 // nothing else.
 const SHELL_DIR = "src/app";
 const SHELL_ALLOWED =
-  /^\.\.\/extensions\/(ExtensionSlots\.tsx|registry\.ts|routes\.ts|types\.ts)$/;
+  /^\.\.\/extensions\/(ExtensionSlots\.tsx|modules\.ts|registry\.ts|routes\.ts|types\.ts)$/;
 const SHELL_IMPORT =
   /(?:\bfrom\s+|\brequire\(\s*|\bimport\(\s*)["']([^"']+)["']/g;
 const shellFiles = (await readdir(path.join(root, SHELL_DIR)))

@@ -291,10 +291,10 @@ export function Sidebar({
             {tag}
           </span>
         )}
-        {w.herdrId && (
+        {w.connection && (
           <i
             className={`status-dot ${live ? "green" : ""}`}
-            title={tag ? `${tag} workspace` : "Herdr workspace"}
+            title={tag ? `${tag} workspace` : "Session workspace"}
           />
         )}
       </button>
@@ -753,7 +753,7 @@ export function Sidebar({
           </div>
           <footer className="sidebar-footer">
             <button className="backend-status" onClick={() => openSettings()}>
-              <span>Herdr</span>
+              <span>Daemon</span>
               <span className={`status-pill ${connected ? "live" : ""}`}>
                 <i />
                 {connected

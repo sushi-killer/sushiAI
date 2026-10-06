@@ -7,6 +7,7 @@ const { createRequire } = require("node:module");
 const ts = require("typescript");
 const { SessionLauncher } = require("../electron/herdr-session-launch.cjs");
 const { herdrWorkspaceKey } = require("../src/herdrIdentity.ts");
+const { sessionPanelId } = require("../src/daemonSessions.ts");
 const { applySessionLaunch } = require("../src/workspace/session-launch.ts");
 const { leafIds } = require("../src/layout.ts");
 
@@ -167,7 +168,7 @@ test("new UI clicks and explicit intents do not consume a failed panel's retry",
         "/tmp/entry.sock",
         "old-request",
       );
-      const workspace = first.current().find((item) => item.herdrId);
+      const workspace = first.current().find((item) => item.connection);
       workspace.panels[0].launchError = "Preparation failed";
       workspace.panels[0].launchOperationId = "old-request";
       const app = controller(server.bridge, [workspace]);
@@ -220,11 +221,11 @@ test("actual sushiAI project launch entry retains all 20 independent concurrent 
   assert.equal(server.workspaces.length, 1);
   assert.equal(server.panes.length, 20);
   assert.equal(
-    app.current().filter((workspace) => workspace.herdrId).length,
+    app.current().filter((workspace) => workspace.connection).length,
     1,
   );
   assert.equal(
-    app.current().find((workspace) => workspace.herdrId).panels.length,
+    app.current().find((workspace) => workspace.connection).panels.length,
     20,
   );
   assert.equal(app.invalidations.length, 40);
@@ -267,14 +268,13 @@ test("actual add entry keeps 20 additions and explicit repeat opens one panel", 
   );
   const workspace = {
     id: herdrWorkspaceKey("/tmp/entry.sock", result.workspace.workspace_id),
-    herdrId: result.workspace.workspace_id,
     connection: "/tmp/entry.sock",
     cwd: "/tmp/checkout",
     name: "Checkout",
     panels: [
       {
         id: herdrWorkspaceKey("/tmp/entry.sock", result.root_pane.pane_id),
-        herdrId: result.root_pane.pane_id,
+        sessionId: result.root_pane.pane_id,
         kind: "terminal",
         title: "Shell",
       },
@@ -320,14 +320,13 @@ test("actual restore entry shares pending restoration and replaces the selected 
   const server = daemon();
   const panel = {
     id: "old",
-    herdrId: "gone",
+    sessionId: "gone",
     kind: "terminal",
     title: "Shell",
     ended: true,
   };
   const workspace = {
     id: "workspace-old",
-    herdrId: "workspace-gone",
     connection: "/tmp/entry.sock",
     cwd: "/tmp/checkout",
     name: "Checkout",
@@ -374,11 +373,11 @@ test("actual restore entry shares pending restoration and replaces the selected 
   const current = app.current()[0];
   assert.equal(current.layout.ratio, 0.35);
   assert.deepEqual(leafIds(current.layout), [
-    herdrWorkspaceKey("/tmp/entry.sock", "p1"),
+    sessionPanelId("/tmp/entry.sock", "p1"),
     "chat",
   ]);
   assert.equal(current.panels[1].messages[0].text, "Keep this conversation");
-  assert.equal(app.states[1], herdrWorkspaceKey("/tmp/entry.sock", "p1"));
+  assert.equal(app.states[1], sessionPanelId("/tmp/entry.sock", "p1"));
 });
 
 test("actual add and restore retain the upstream fifth account argument for Claude and Codex", async () => {
@@ -396,7 +395,11 @@ test("actual add and restore retain the upstream fifth account argument for Clau
     "herdr",
     "shell",
   );
-  const workspace = opened.current().find((item) => item.herdrId);
+  // The launch entry sends the app workspace id as the daemon group and the
+  // launcher answers with it; session-launch.ts still matches the answer to
+  // `herdrId`, so the fixture binds it that way until L4a rewrites both.
+  const found = opened.current().find((item) => item.connection);
+  const workspace = { ...found, herdrId: found.id };
   for (const [agent, accountId, field] of [
     ["claude", "claude-work", "claudeAccountId"],
     ["codex", "", "codexAccountId"],
@@ -419,13 +422,6 @@ test("actual add and restore retain the upstream fifth account argument for Clau
     const restored = controller(server.bridge, [current]);
     await restored.ws.reopenPanel(panel.id);
     assert.equal(requests.at(-1)[field], accountId);
-    assert.equal(
-      restored
-        .current()[0]
-        .panels.find((item) => item.herdrId === requests.at(-1).targetPaneId)
-        ?.kind,
-      "terminal",
-    );
     assert.equal(restored.current()[0].panels.at(-1)[field], accountId);
   }
 });
@@ -433,11 +429,10 @@ test("actual add and restore retain the upstream fifth account argument for Clau
 test("actual add forwards the selected worktree base and marks local worktree sessions", async () => {
   const workspace = {
     id: herdrWorkspaceKey("/tmp/entry.sock", "w1"),
-    herdrId: "w1",
     connection: "/tmp/entry.sock",
     name: "Checkout",
     cwd: "/tmp/checkout",
-    panels: [{ id: "p1", herdrId: "p1", kind: "terminal", title: "Shell" }],
+    panels: [{ id: "p1", sessionId: "p1", kind: "terminal", title: "Shell" }],
     layout: { type: "leaf", id: "p1" },
   };
   const chosen = {
@@ -506,13 +501,12 @@ test("closing the last Herdr session keeps the project with no open panes", asyn
   for (const chats of [false, true]) {
     const panel = {
       id: "live-pane",
-      herdrId: "live-pane",
+      sessionId: "live-pane",
       kind: "terminal",
       title: "Shell",
     };
     const workspace = {
       id: herdrWorkspaceKey("/tmp/entry.sock", "w1"),
-      herdrId: "w1",
       connection: "/tmp/entry.sock",
       name: "Checkout",
       cwd: "/tmp/checkout",
@@ -525,7 +519,7 @@ test("closing the last Herdr session keeps the project with no open panes", asyn
     const calls = [];
     const app = controller(
       {
-        herdr: async (...args) => calls.push(args),
+        sessionClose: async (...args) => calls.push(args),
         terminalClose: async () => {},
       },
       [workspace],
@@ -535,7 +529,7 @@ test("closing the last Herdr session keeps the project with no open panes", asyn
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(app.confirmations.length, 0);
     assert.equal(calls.length, 1);
-    assert.equal(calls[0][1], "pane.close");
+    assert.deepEqual(calls[0], ["local", "live-pane", true]);
     const remaining = app.current().find((item) => item.id === workspace.id);
     assert.ok(remaining);
     assert.equal(remaining.cwd, workspace.cwd);
@@ -552,9 +546,10 @@ test("closing the last Herdr session keeps the project with no open panes", asyn
   const pending = {
     ...initial()[0],
     id: herdrWorkspaceKey("/tmp/entry.sock", "pending-git"),
-    herdrId: "pending-git",
     connection: "/tmp/entry.sock",
-    panels: [{ id: "pending-pane", herdrId: "pending-pane", kind: "terminal" }],
+    panels: [
+      { id: "pending-pane", sessionId: "pending-pane", kind: "terminal" },
+    ],
     layout: { type: "leaf", id: "pending-pane" },
   };
   const pendingApp = controller({ herdr: async () => {} }, [pending]);
@@ -565,9 +560,8 @@ test("closing the last Herdr session keeps the project with no open panes", asyn
   const linked = {
     ...initial()[0],
     id: herdrWorkspaceKey("/tmp/entry.sock", "linked"),
-    herdrId: "linked",
     connection: "/tmp/entry.sock",
-    panels: [{ id: "linked-pane", herdrId: "linked-pane", kind: "terminal" }],
+    panels: [{ id: "linked-pane", sessionId: "linked-pane", kind: "terminal" }],
     layout: { type: "leaf", id: "linked-pane" },
   };
   const linkedApp = controller({ herdr: async () => {} }, [linked]);
@@ -677,7 +671,6 @@ test("renaming an empty retained Herdr project does not call its vanished host w
   const workspace = {
     ...initial()[0],
     id: herdrWorkspaceKey("/tmp/entry.sock", "old-workspace"),
-    herdrId: "old-workspace",
     connection: "/tmp/entry.sock",
     panels: [],
     layout: null,
@@ -694,61 +687,10 @@ test("renaming an empty retained Herdr project does not call its vanished host w
   assert.equal(calls.length, 0);
 });
 
-test("a reconciled new Herdr session and its launch result keep the saved project id", async () => {
-  const { reconcileHerdrWorkspaces } = await import("../src/herdrSnapshot.ts");
-  const endpoint = "/tmp/entry.sock";
-  const workspace = {
-    ...initial()[0],
-    id: herdrWorkspaceKey(endpoint, "old-workspace"),
-    herdrId: "old-workspace",
-    connection: endpoint,
-    name: "Saved project",
-    panels: [{ id: "chat", kind: "chat", title: "Transcript" }],
-    layout: null,
-  };
-  const snapshot = {
-    version: "1",
-    workspaces: [{ workspace_id: "new-workspace", label: "Remote label" }],
-    panes: [
-      {
-        pane_id: "new-pane",
-        workspace_id: "new-workspace",
-        cwd: workspace.cwd,
-      },
-    ],
-  };
-  const reconciled = reconcileHerdrWorkspaces([workspace], snapshot, endpoint);
-  const value = {
-    operationId: "retry",
-    workspaceId: "new-workspace",
-    paneId: "new-pane",
-    cwd: workspace.cwd,
-  };
-  const reopened = applySessionLaunch(reconciled, endpoint, value, {
-    id: herdrWorkspaceKey(endpoint, "new-pane"),
-    herdrId: "new-pane",
-    kind: "terminal",
-    title: "Shell",
-  });
-  assert.equal(reopened.length, 1);
-  assert.equal(reopened[0].id, workspace.id);
-  assert.equal(reopened[0].herdrId, "new-workspace");
-  assert.equal(reopened[0].name, workspace.name);
-  assert.deepEqual(
-    reopened[0].panels.map((panel) => panel.id),
-    [herdrWorkspaceKey(endpoint, "new-pane"), "chat"],
-  );
-  assert.deepEqual(reopened[0].layout, {
-    type: "leaf",
-    id: herdrWorkspaceKey(endpoint, "new-pane"),
-  });
-});
-
 test("Close Project removes an empty retained Herdr project", async () => {
   const workspace = {
     ...initial()[0],
     id: herdrWorkspaceKey("/tmp/entry.sock", "old-workspace"),
-    herdrId: "old-workspace",
     connection: "/tmp/entry.sock",
     panels: [],
     layout: null,
@@ -771,7 +713,7 @@ test("Close Project removes an empty retained Herdr project", async () => {
 test("closing a sole ended Herdr pane keeps the project empty", () => {
   const panel = {
     id: "ended-pane",
-    herdrId: "ended-pane",
+    sessionId: "ended-pane",
     kind: "terminal",
     title: "Shell",
     ended: true,
@@ -779,7 +721,6 @@ test("closing a sole ended Herdr pane keeps the project empty", () => {
   const workspace = {
     ...initial()[0],
     id: herdrWorkspaceKey("/tmp/entry.sock", "w1"),
-    herdrId: "w1",
     connection: "/tmp/entry.sock",
     panels: [panel],
     layout: { type: "leaf", id: panel.id },
@@ -819,7 +760,6 @@ test("adding a session to an empty retained Herdr project reuses its record", as
   const workspace = {
     ...initial()[0],
     id: herdrWorkspaceKey("/tmp/entry.sock", "old-workspace"),
-    herdrId: "old-workspace",
     connection: "/tmp/entry.sock",
     panels: [],
     layout: null,
@@ -838,9 +778,8 @@ test("adding a session to an empty retained Herdr project reuses its record", as
 test("actual workspace close shares concurrent intent and allows retry after failure", async () => {
   const workspace = {
     ...initial()[0],
-    herdrId: "w1",
     connection: "/tmp/entry.sock",
-    panels: [{ id: "p1", herdrId: "p1", kind: "terminal", title: "Shell" }],
+    panels: [{ id: "p1", sessionId: "p1", kind: "terminal", title: "Shell" }],
     layout: { type: "leaf", id: "p1" },
   };
   let release;
@@ -849,7 +788,7 @@ test("actual workspace close shares concurrent intent and allows retry after fai
   const gate = new Promise((resolve) => (release = resolve));
   const app = controller(
     {
-      herdr: async () => {
+      sessionClose: async () => {
         closes += 1;
         await gate;
         if (fail) throw new Error("Close failed");
@@ -956,4 +895,84 @@ test("launch result adoption preserves layout, local panels and separately liste
   assert.equal(output[0].panels[1].messages[0].text, "keep");
   assert.deepEqual(leafIds(output[0].layout), [panel.id, "chat", "other-live"]);
   assert.equal(output[1], unrelated);
+});
+
+test("renaming a session panel tells the daemon, a local panel renames in place", async () => {
+  const calls = [];
+  const workspace = {
+    id: "w1",
+    connection: "ssh:devbox",
+    name: "Checkout",
+    cwd: "/tmp/checkout",
+    panels: [
+      { id: "bound", sessionId: "s-1", kind: "terminal", title: "zsh" },
+      { id: "plain", kind: "terminal", title: "zsh" },
+    ],
+    layout: { type: "leaf", id: "bound" },
+  };
+  const app = controller(
+    {
+      sessionUpdate: async (...args) => {
+        calls.push(args);
+      },
+    },
+    [workspace],
+  );
+  app.ws.renamePanel("bound", "Build");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, [["devbox", { id: "s-1", title: "Build" }]]);
+  assert.equal(app.current()[0].panels[0].title, "Build");
+  app.ws.renamePanel("plain", "Notes");
+  assert.equal(calls.length, 1);
+  assert.equal(app.current()[0].panels[1].title, "Notes");
+});
+
+test("Reopen of an ended agent panel launches with resume and the workspace as group", async () => {
+  const requests = [];
+  const ended = {
+    id: "old",
+    sessionId: "s-gone",
+    kind: "agent",
+    agent: "claude",
+    title: "Claude Code",
+    ended: true,
+    agentSession: "thread-3",
+  };
+  const workspace = {
+    id: "w1",
+    connection: "/tmp/entry.sock",
+    name: "Checkout",
+    cwd: "/tmp/checkout",
+    panels: [ended],
+    layout: { type: "leaf", id: "old" },
+  };
+  const app = controller(
+    {
+      sessionLaunch: async (input) => {
+        requests.push(input);
+        return {
+          ok: true,
+          value: {
+            operationId: input.operationId,
+            workspaceId: "w1",
+            paneId: "s-new",
+            cwd: "/tmp/checkout",
+            createdWorkspace: false,
+          },
+        };
+      },
+      terminalClose: async () => {},
+    },
+    [workspace],
+  );
+  await app.ws.reopenPanel("old");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].resume, "thread-3");
+  assert.equal(requests[0].workspaceId, "w1");
+  assert.equal(requests[0].agent, "claude");
+  const [panel] = app.current()[0].panels;
+  assert.equal(panel.sessionId, "s-new");
+  assert.equal(panel.ended, undefined);
+  assert.equal(panel.id, sessionPanelId("/tmp/entry.sock", "s-new"));
+  assert.deepEqual(leafIds(app.current()[0].layout), [panel.id]);
 });

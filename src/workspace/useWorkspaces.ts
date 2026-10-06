@@ -4,7 +4,7 @@ import { initialWorkspace } from "../workspaceState.ts";
 import type { ClosedProject, Routine, Saved } from "../workspaceState.ts";
 import { applyChatEvent, startUserTurn } from "../chat-threads.ts";
 import { disposeTerminal } from "../TerminalPanel.tsx";
-import { errorText } from "../app/errors.ts";
+import { errorText, isGone } from "../app/errors.ts";
 import { agentTitle } from "../app/agent-title.ts";
 import type { ProjectGit } from "../app/useProjectGit.ts";
 import {
@@ -22,12 +22,14 @@ import {
   findPanelOwner,
   fixSelection,
   groupPanelIds,
-  isVanished,
+  closeRequest,
   movePanel as moveInLayout,
   openCompanion as openCompanionIn,
   patchCompanion as patchCompanionIn,
   removeClosedSessions,
   removePanel,
+  renameRequest,
+  reopenRequest,
   retitleTerminal,
   tidyGroupLayout,
   tidyWorkspace,
@@ -40,6 +42,7 @@ import {
 } from "./worktree.ts";
 import { applySessionLaunch, findSessionWorkspace } from "./session-launch.ts";
 import { hostOf } from "../projectWorktrees.ts";
+import { sessionPanelId } from "../daemonSessions.ts";
 import type {
   ModelProfile,
   Panel,
@@ -50,8 +53,24 @@ import type {
 
 export type WorkspaceController = ReturnType<typeof useWorkspaces>;
 
+/** Ends a panel's live session gracefully; a session that is already gone is
+ * the outcome asked for. */
+async function closeSession(
+  workspace: Workspace,
+  panel: Panel,
+  endpoint: string,
+) {
+  const request = closeRequest(workspace, panel, endpoint);
+  if (!request) return;
+  await window
+    .bridge!.sessionClose(request.host, request.id, request.graceful)
+    .catch((error) => {
+      if (!isGone(error)) throw error;
+    });
+}
+
 /** Owns everything about the panel and workspace lifecycle. The workspace list
- * itself lives in App because the Herdr controller writes into it too; this hook
+ * itself lives in App because the daemon controller writes into it too; this hook
  * and that one are its only mutators. */
 export function useWorkspaces({
   workspaces,
@@ -213,23 +232,20 @@ export function useWorkspaces({
       const owner = findPanelOwner(workspacesRef.current, panelId);
       const panel = owner?.panels.find((item) => item.id === panelId);
       if (!owner || !panel) return;
-      if (panel.herdrId) {
-        const endpoint = owner.connection || socket;
+      const request = renameRequest(owner, panel, title, socket);
+      if (request) {
         window.bridge
-          ?.herdr(endpoint, "pane.rename", {
-            pane_id: panel.herdrId,
-            label: title,
-          })
-          .then(() => refreshHerdr(endpoint))
+          ?.sessionUpdate(request.host, request.patch)
+          .then(() => updatePanel(panelId, { title }))
           .catch((error) => notify(errorText(error)));
       } else {
         updatePanel(panelId, { title });
       }
     },
-    [notify, refreshHerdr, socket, updatePanel],
+    [notify, socket, updatePanel],
   );
   /** "Hide only": drop the pane from the layout but leave its process running.
-   * The Herdr session and the transcript are untouched. */
+   * The session and the transcript are untouched. */
   function hidePanel(workspaceId: string, panelId: string) {
     updateWorkspace(workspaceId, (w) => ({
       ...w,
@@ -239,17 +255,10 @@ export function useWorkspaces({
     disposeTerminal(panelId);
     setZoomed(null);
   }
-  /** Renames a workspace, telling Herdr first when the workspace is one of its
-   * sessions so the two names never drift. */
+  /** Renames a workspace. The name is the desktop's; daemons learn it with the
+   * catalog sync, which is not part of this slice. */
   async function renameWorkspace(workspaceId: string, name: string) {
-    const workspace = workspacesRef.current.find((w) => w.id === workspaceId);
-    if (!workspace) return;
-    if (workspace.herdrId && !isVanished(workspace))
-      await window.bridge!.herdr(
-        workspace.connection || socket,
-        "workspace.rename",
-        { workspace_id: workspace.herdrId, label: name },
-      );
+    if (!workspacesRef.current.some((w) => w.id === workspaceId)) return;
     updateWorkspace(workspaceId, (w) => ({ ...w, name }));
   }
   async function launchSession(
@@ -271,8 +280,8 @@ export function useWorkspaces({
       if (value) {
         const panel: Panel = {
           ...template,
-          id: herdrWorkspaceKey(request.endpoint, value.paneId),
-          herdrId: value.paneId,
+          id: sessionPanelId(request.endpoint, value.paneId),
+          sessionId: value.paneId,
           started: result.ok && request.kind === "agent",
           launchOperationId: result.ok ? undefined : request.operationId,
           launchError: result.ok ? undefined : result.error.message,
@@ -360,7 +369,7 @@ export function useWorkspaces({
         kind,
         agent: kind === "agent" ? starter : undefined,
         ...(pending && owner
-          ? { workspaceId: owner.herdrId, paneId: pending.herdrId }
+          ? { workspaceId: owner.id, paneId: pending.sessionId }
           : {}),
         env,
       };
@@ -451,11 +460,11 @@ export function useWorkspaces({
         workspacesRef.current.find((w) => w.id === targetWorkspaceId)) ||
       activeRef.current;
     try {
-      // A Herdr workspace runs its sessions in Herdr unless this panel was
-      // asked to be local. Nothing else can start a process.
-      const viaHerdr = current.herdrId && (backend ?? "herdr") === "herdr";
+      // A host-backed workspace runs its sessions in the daemon unless this
+      // panel was asked to be local. Nothing else can start a process.
+      const viaHerdr = current.connection && (backend ?? "herdr") === "herdr";
       if (prompt && !(viaHerdr && launchesInWorktree(kind)))
-        throw new Error("Starting with a prompt needs a Herdr workspace.");
+        throw new Error("Starting with a prompt needs a host workspace.");
       if (viaHerdr && launchesInWorktree(kind)) {
         const endpoint = current.connection || socket;
         const pending = current.panels.find(
@@ -481,11 +490,8 @@ export function useWorkspaces({
             modelProfileId,
             ...accounts,
             env,
-            workspaceId: current.herdrId,
-            targetPaneId: current.panels.find(
-              (panel) => panel.herdrId && !panel.ended,
-            )?.herdrId,
-            ...(pending ? { paneId: pending.herdrId } : {}),
+            workspaceId: current.id,
+            ...(pending ? { paneId: pending.sessionId } : {}),
             worktree,
             ...(prompt ? { prompt } : {}),
           },
@@ -503,9 +509,9 @@ export function useWorkspaces({
           undefined,
         );
       } else if (worktree && launchesInWorktree(kind)) {
-        // The local counterpart of the branch above: no Herdr involved, so
+        // The local counterpart of the branch above: no daemon involved, so
         // the new checkout runs as a plain local process on this Mac (also
-        // reached from a Herdr workspace whose picker backend was "local").
+        // reached from a host workspace whose picker backend was "local").
         if (!window.bridge) throw new Error("Open the desktop app first.");
         const branchError = worktreeBranchError(worktree.branch);
         if (branchError) throw new Error(branchError);
@@ -577,7 +583,12 @@ export function useWorkspaces({
     if (queued) return queued;
     const owner = findPanelOwner(workspacesRef.current, panelId);
     const ended = owner?.panels.find((item) => item.id === panelId);
-    if (!owner || !ended?.herdrId || (!ended.ended && !ended.launchError))
+    if (
+      !owner ||
+      !ended ||
+      (ended.kind !== "agent" && ended.kind !== "terminal") ||
+      (!ended.ended && !ended.launchError)
+    )
       return Promise.resolve();
     const endpoint = owner.connection || socket;
     const cached = ended.launchOperationId
@@ -590,26 +601,12 @@ export function useWorkspaces({
       !ended.ended &&
       (!operationId || cached.operationId === operationId)
         ? cached
-        : {
-            operationId:
-              operationId || (!ended.ended && ended.launchOperationId) || uid(),
-            endpoint,
-            cwd: owner.cwd,
-            label: owner.name,
-            kind: ended.kind === "agent" ? "agent" : "terminal",
-            agent: ended.kind === "agent" ? ended.agent || "claude" : undefined,
-            modelProfileId: ended.modelProfileId,
-            claudeAccountId: ended.claudeAccountId,
-            codexAccountId: ended.codexAccountId,
-            workspaceId: owner.herdrId,
-            targetPaneId: owner.panels.find(
-              (panel) => panel.herdrId && !panel.ended && panel.id !== panelId,
-            )?.herdrId,
-            ...(ended.launchError && !ended.ended
-              ? { paneId: ended.herdrId }
-              : {}),
-            restore: true,
-          };
+        : reopenRequest(
+            owner,
+            ended,
+            operationId || (!ended.ended && ended.launchOperationId) || uid(),
+            socket,
+          );
     const run = Promise.resolve()
       .then(() =>
         launchSession(request, ended, { workspaceId: owner.id, panelId }),
@@ -632,14 +629,8 @@ export function useWorkspaces({
       for (const { workspace, panel } of items) {
         const outcome = await closeBeforeWorktreeRemoval(
           async () => {
-            if (panel.herdrId) {
-              if (!panel.ended)
-                await window.bridge!.herdr(
-                  workspace.connection || socket,
-                  "pane.close",
-                  { pane_id: panel.herdrId },
-                );
-            } else await window.bridge?.terminalClose(panel.id);
+            if (panel.sessionId) await closeSession(workspace, panel, socket);
+            else await window.bridge?.terminalClose(panel.id);
             if (panel.busy) await window.bridge?.cancelChat(panel.id);
             await window.bridge?.terminalClose(panel.id);
             disposeTerminal(panel.id);
@@ -670,7 +661,7 @@ export function useWorkspaces({
       if (zoomedRef.current && closed.has(zoomedRef.current)) setZoomed(null);
       for (const endpoint of new Set(
         items
-          .filter((i) => i.panel.herdrId)
+          .filter((i) => i.panel.sessionId)
           .map((i) => i.workspace.connection || socket),
       ))
         await refreshHerdr(endpoint);
@@ -687,10 +678,10 @@ export function useWorkspaces({
         confirmClose({ workspace: owner, panel });
         return;
       }
-      if (panel.herdrId && !panel.ended) {
+      if (panel.sessionId && !panel.ended) {
         if (
-          owner.panels.filter((item) => item.herdrId && !item.ended).length ===
-          1
+          owner.panels.filter((item) => item.sessionId && !item.ended)
+            .length === 1
         ) {
           const git = projectGitRef.current[owner.id];
           // No folder means no worktree to offer; an unread one may be.
@@ -714,8 +705,8 @@ export function useWorkspaces({
         if (zoomedRef.current === panel.id) setZoomed(null);
         return;
       }
-      // Closing an imported panel hides it locally; it never kills a Herdr process.
-      if (!panel.herdrId)
+      // Closing a session panel hides it locally; it never kills the session.
+      if (!panel.sessionId)
         window.bridge
           ?.terminalClose(panel.id)
           .catch((error) => notify(errorText(error)));
@@ -864,12 +855,8 @@ export function useWorkspaces({
     if (closing.current.has(workspace.id)) return;
     closing.current.add(workspace.id);
     try {
-      if (workspace.herdrId && !isVanished(workspace))
-        await window.bridge!.herdr(
-          workspace.connection || socket,
-          "workspace.close",
-          { workspace_id: workspace.herdrId },
-        );
+      for (const panel of workspace.panels)
+        if (panel.sessionId) await closeSession(workspace, panel, socket);
       for (const panel of workspace.panels) {
         await window.bridge?.terminalClose(panel.id);
         disposeTerminal(panel.id);
@@ -891,15 +878,13 @@ export function useWorkspaces({
    * identity read the same way `useProjectGit` reads one, since the
    * workspace is about to disappear and can no longer be looked up by id. */
   function rememberClosed(workspace: Workspace) {
-    const endpoint = workspace.herdrId
-      ? workspace.connection || socket
-      : undefined;
+    const endpoint = workspace.connection;
     const entry: ClosedProject = {
       id: closedProjectId(endpoint, workspace.cwd),
       name: workspace.name,
       cwd: workspace.cwd,
       endpoint,
-      herdr: Boolean(workspace.herdrId),
+      backed: Boolean(endpoint),
       closedAt: Date.now(),
       git: {
         projectId: "",
@@ -933,7 +918,7 @@ export function useWorkspaces({
       .catch(() => {});
   }
   /** Reopens a remembered project through the path a fresh workspace already
-   * uses - Herdr on its original host when it had one, else local - and
+   * uses - the daemon on its original host when it had one, else local - and
    * forgets it only once that succeeds, so a host that cannot be reached
    * (surfaced via `notify` inside `createWorkspace`) leaves the entry in
    * place to retry. */
@@ -941,7 +926,7 @@ export function useWorkspaces({
     const ok = await createWorkspace(
       project.name,
       project.cwd,
-      project.herdr ? "herdr" : "local",
+      project.backed ? "herdr" : "local",
       "shell",
       project.endpoint || socket,
     );

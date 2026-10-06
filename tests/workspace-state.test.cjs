@@ -15,9 +15,9 @@ test("restore normalizes durable state and resets transient panel runtime", asyn
     id: "remote",
     name: "Remote",
     cwd: "/remote",
-    herdrId: "herdr-1",
     panels: [
       panel("terminal", "terminal", {
+        sessionId: "s-1",
         busy: true,
         started: true,
         status: "working",
@@ -58,23 +58,29 @@ test("restore normalizes durable state and resets transient panel runtime", asyn
   );
 });
 
-test("restore preserves explicit Herdr connection and clears local connection", async () => {
+test("restore keeps a workspace's connection and binds a legacy host workspace to the saved socket", async () => {
   const { restore } = await library;
   const workspaces = [
     {
       id: "explicit",
       name: "Explicit",
       cwd: "/a",
-      herdrId: "one",
       connection: "ssh:one",
-      panels: [panel("one")],
+      panels: [panel("one", "terminal", { sessionId: "s-one" })],
       layout: { type: "leaf", id: "one" },
+    },
+    {
+      id: "legacy",
+      name: "Legacy",
+      cwd: "/c",
+      herdrId: "old",
+      panels: [panel("three")],
+      layout: { type: "leaf", id: "three" },
     },
     {
       id: "local",
       name: "Local",
       cwd: "/b",
-      connection: "stale",
       panels: [panel("two")],
       layout: { type: "leaf", id: "two" },
     },
@@ -83,7 +89,8 @@ test("restore preserves explicit Herdr connection and clears local connection", 
     read: () => JSON.stringify({ workspaces, socket: "ssh:fallback" }),
   });
   assert.equal(saved.workspaces[0].connection, "ssh:one");
-  assert.equal(saved.workspaces[1].connection, undefined);
+  assert.equal(saved.workspaces[1].connection, "ssh:fallback");
+  assert.equal(saved.workspaces[2].connection, undefined);
 });
 
 test("restore keeps the worktree branch a workspace was launched on", async () => {
@@ -219,7 +226,7 @@ test("restore accepts only a well-formed closedProjects array", async () => {
     name: "app",
     cwd: "/home/dev/app",
     endpoint: "ssh:devbox",
-    herdr: true,
+    backed: true,
     closedAt: 1700000000000,
     git: {
       projectId: "project-app",
@@ -270,11 +277,10 @@ test("restore accepts only a well-formed closedProjects array", async () => {
   assert.deepEqual(notAnArray.closedProjects, []);
 });
 
-test("restore keeps an empty Herdr project while sweeping an old ended-only row", async () => {
+test("restore keeps an empty session project while sweeping an old ended-only row", async () => {
   const { restore } = await library;
   const empty = {
-    id: "herdr-empty",
-    herdrId: "empty",
+    id: "host-empty",
     connection: "ssh:devbox",
     name: "Checkout",
     cwd: "/tmp/checkout",
@@ -283,10 +289,9 @@ test("restore keeps an empty Herdr project while sweeping an old ended-only row"
   };
   const ended = {
     ...empty,
-    id: "herdr-ended",
-    herdrId: "ended",
+    id: "host-ended",
     cwd: "/tmp/old-checkout",
-    panels: [panel("old-pane", "terminal", { herdrId: "pane", ended: true })],
+    panels: [panel("old-pane", "terminal", { sessionId: "gone", ended: true })],
     layout: { type: "leaf", id: "old-pane" },
   };
   const local = {

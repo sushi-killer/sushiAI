@@ -11,9 +11,8 @@ import {
   type AttentionState,
 } from "./attention.ts";
 import { groupKey, groupLabel } from "./workspaceMerge.ts";
-import { ownerTasks } from "../orchestrator/ownerAttention.ts";
-import { useOrchestratorTasks } from "./useOrchestratorTasks.ts";
-import { useOrchestratorEnabled } from "../orchestrator/enabled.ts";
+import { moduleUis } from "../extensions/modules.ts";
+import type { ModuleEntry } from "./inboxModel.ts";
 import type { SectionRef } from "./navigation.ts";
 import type { ConnectionProfile, Workspace } from "../types";
 
@@ -48,9 +47,11 @@ export function useAttention({
   setSelected(id: string): void;
   setZoomed(id: string | null): void;
 }) {
-  // The orchd tasks waiting on the owner count and get Inbox rows.
-  const orchestrator = useOrchestratorEnabled();
-  const orchdTasks = useOrchestratorTasks();
+  // Modules put rows in the Inbox. `moduleUis` is a constant list, so the
+  // hooks below run in the same order on every render.
+  const moduleItems: ModuleEntry[] = moduleUis.flatMap((ui) =>
+    ui.useAttention().map((item) => ({ extensionId: ui.extensionId, item })),
+  );
   const [state, setState] = useState<AttentionState>(createAttentionState);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -133,8 +134,7 @@ export function useAttention({
     workspaces,
     state,
     connectionProfiles,
-    orchdTasks,
-    orchestrator,
+    moduleItems.length,
   );
   const working = workingCount(workspaces, state, connectionProfiles);
   const lastBadge = useRef("");
@@ -167,10 +167,7 @@ export function useAttention({
 
   return {
     groups: inboxGroups(workspaces, state, connectionProfiles),
-    ownerTasks: orchestrator ? ownerTasks(orchdTasks) : [],
-    /** Every orchd task: the Inbox's LAND group and zero-state summary read
-     * this one subscription instead of opening a second. */
-    tasks: orchdTasks,
+    moduleItems,
     waiting,
     markSeen: (panelId: string) =>
       setState((current) => markSeen(current, panelId)),

@@ -1,16 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowUpRight,
-  ChevronDown,
-  ChevronRight,
-  GitBranch,
-  ListChecks,
-  RefreshCw,
-} from "lucide-react";
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { ArrowUpRight, ChevronDown, ChevronRight } from "lucide-react";
 import {
   ExtensionNavSlot,
   ExtensionSectionSlot,
 } from "../extensions/ExtensionSlots.tsx";
+import { moduleUis } from "../extensions/modules.ts";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import type { InboxGroup, InboxRow } from "./attention.ts";
 import { LOCAL_GROUP, groupKey, groupLabel } from "./workspaceMerge.ts";
@@ -22,24 +23,25 @@ import {
 } from "./daemonAsks.ts";
 import { useDaemonAsks } from "./useDaemonAsks.ts";
 import { daemonHost } from "../daemonSessions.ts";
+import { errorText } from "./errors.ts";
 import {
   KINDS,
   ageLabel,
   agentName,
   cleanupCandidates,
-  diffFacts,
   inScope,
-  inboxEnterAnswer,
   inboxItems,
-  landTargets,
   needsYou,
+  ownsKey,
   plural,
+  reviewTargets,
   scopedHeadline,
-  zeroLine,
+  stepSelection,
   type Item,
   type Kind,
+  type ModuleEntry,
+  type ModuleItem,
   type SessionItem,
-  type TaskItem,
 } from "./inboxModel.ts";
 import {
   parseSessionPrompt,
@@ -48,47 +50,16 @@ import {
 } from "./sessionPrompt.ts";
 import { Icon } from "../PanelIcon.tsx";
 import { Character } from "../mascot/Character.tsx";
-import { orchestratorClientFor } from "../orchestrator/client.ts";
-import { useOrchestratorEnabled } from "../orchestrator/enabled.ts";
-import { hostOf } from "../orchestrator/hosts.ts";
-import {
-  criteriaMet,
-  errorText,
-  formatCost,
-  implementAttemptCount,
-  latestImplementAttempt,
-  reviewOf,
-  stageTrack,
-  taskReason,
-} from "../orchestrator/helpers.ts";
-import { shortBranch } from "../orchestrator/taskDetailModel.ts";
-import {
-  clickAnswer,
-  ownerTarget,
-  shownPick,
-  stepSelection,
-  togglePick,
-  type AnswerChoice,
-} from "../orchestrator/ownerAttention.ts";
-import type { TaskTarget } from "../orchestrator/notices.ts";
-import type { Task } from "../orchestrator/types.ts";
-import {
-  AttentionItem,
-  Chip,
-  Criterion,
-  GroupLabel,
-  StageTrack,
-} from "../orchestrator/ui/index.ts";
 import type { ConnectionProfile, Workspace } from "../types";
 import type { WorkspaceController } from "../workspace/useWorkspaces.ts";
 import "./inbox.css";
 
-type Filter = "all" | "answer" | "decide" | "land" | "panels";
+type Filter = "all" | "answer" | "decide" | "review" | "panels";
 
 const LABELS: Record<Kind, string> = {
   answer: "ANSWER",
   decide: "DECIDE",
-  land: "LAND & REVIEW",
+  review: "REVIEW",
   panels: "PANELS",
   working: "WORKING",
   idle: "IDLE",
@@ -97,23 +68,100 @@ const CHIPS: { filter: Filter; label: string }[] = [
   { filter: "all", label: "All" },
   { filter: "answer", label: "Answer" },
   { filter: "decide", label: "Decide" },
-  { filter: "land", label: "Land" },
+  { filter: "review", label: "Review" },
   { filter: "panels", label: "Panels" },
 ];
 const TONE = {
   answer: "warning",
   decide: "danger",
-  land: "ok",
+  review: "ok",
   panels: "info",
 } as const;
+
+/** One pickable option or filter (the shared `ui-chip` look). */
+function Chip({
+  selected = false,
+  disabled,
+  onClick,
+  children,
+}: {
+  selected?: boolean;
+  disabled?: boolean;
+  onClick?: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className={`ui-chip${selected ? " selected" : ""}`}
+      aria-pressed={selected}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** An uppercase group heading with a count badge. */
+function GroupLabel({ label, count }: { label: string; count: number }) {
+  return (
+    <div className="ui-group-label">
+      <span className="ui-group-label-text">{label}</span>
+      <span className="ui-count">{count}</span>
+    </div>
+  );
+}
+
+/** One queue row: a toned marker, the title and its age, a context line, the
+ * actions and a muted meta line. */
+function QueueRow({
+  tone,
+  title,
+  time,
+  context,
+  question = false,
+  actions,
+  meta,
+  selected = false,
+  onOpen,
+}: {
+  tone: (typeof TONE)[keyof typeof TONE];
+  title: string;
+  time?: string;
+  context?: ReactNode;
+  question?: boolean;
+  actions?: ReactNode;
+  meta?: string;
+  selected?: boolean;
+  onOpen(): void;
+}) {
+  return (
+    <article className={`ui-attention${selected ? " selected" : ""}`}>
+      <span className="ui-attention-marker">
+        <span className={`ui-attention-dot ui-tone-${tone}`} />
+      </span>
+      <div className="ui-attention-body">
+        <div className="ui-attention-head">
+          <button type="button" className="ui-attention-title" onClick={onOpen}>
+            {title}
+          </button>
+          {time && <span className="ui-attention-time">{time}</span>}
+        </div>
+        {context && (
+          <div className={`ui-attention-context${question ? " question" : ""}`}>
+            {context}
+          </div>
+        )}
+        {actions && <div className="ui-attention-actions">{actions}</div>}
+        {meta && <span className="ui-attention-meta">{meta}</span>}
+      </div>
+    </article>
+  );
+}
+
 /** How often a blocked session's screen is re-read while it waits. */
 const SCREEN_REFRESH_MS = 2500;
-
-/** orchd's `diffStat`: the task's branch against its base, absent until
- * its first implement attempt. */
-type DiffStat = { files: number; added: number; removed: number };
-const diffOf = (task: Task): DiffStat | undefined =>
-  (task as Task & { diffStat?: DiffStat }).diffStat;
 
 /** A session whose screen has not been read yet: free text only. */
 const NO_PROMPT: SessionPrompt = {
@@ -130,18 +178,6 @@ const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 /** A daemon session the Inbox can read and type into. */
 const answerable = (row: InboxRow) => !!row.panel.sessionId && !row.panel.ended;
 const hostOfRow = (row: InboxRow) => daemonHost(row.workspace.connection);
-
-/** Whether a global key belongs to something else: an open dialog, a text
- * field, or - for anything but J/K - a focused button or link, where Enter is
- * that button's own click, not a second answer. */
-function ownsKey(target: EventTarget | null, key: string): boolean {
-  if (document.querySelector("[role=dialog], dialog[open]")) return true;
-  const el = target as HTMLElement | null;
-  if (!el?.closest) return false;
-  if (el.isContentEditable || el.closest("input, textarea, select"))
-    return true;
-  return key !== "j" && key !== "k" && !!el.closest("button, a");
-}
 
 /** The visible text of every blocked session, re-read while it waits. */
 function usePaneScreens(rows: InboxRow[]) {
@@ -173,15 +209,13 @@ function usePaneScreens(rows: InboxRow[]) {
 }
 
 /** Everything that needs you, across every project and host: agent sessions
- * waiting on an answer or finished unseen, orchestrator questions and
- * decisions, finished work waiting to land - then what is still working or
- * idle. One queue on the left, the selected item on the right. */
+ * waiting on an answer or finished unseen, and the rows modules put in the
+ * Inbox (each drawn by its module's `AttentionDetail`) - then what is still
+ * working or idle. One queue on the left, the selected item on the right. */
 export function InboxPage({
   groups,
   markSeen,
-  ownerTasks,
-  allTasks,
-  openOrchestratorTask,
+  moduleItems,
   switchWorkspace,
   ws,
   connectionProfiles,
@@ -193,9 +227,7 @@ export function InboxPage({
 }: {
   groups: InboxGroup[];
   markSeen(panelId: string): void;
-  ownerTasks: Task[];
-  allTasks: Task[];
-  openOrchestratorTask(target: TaskTarget): void;
+  moduleItems: ModuleEntry[];
   switchWorkspace(id: string): void;
   ws: WorkspaceController;
   connectionProfiles: ConnectionProfile[];
@@ -210,17 +242,13 @@ export function InboxPage({
     [hostFilter, setHostFilter] = useState(""),
     [filter, setFilter] = useState<Filter>("all"),
     [selectedKey, setSelectedKey] = useState<string | null>(null),
-    [picks, setPicks] = useState<Record<string, string>>({}),
     [notes, setNotes] = useState<Record<string, string>>({}),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
-    [landAll, setLandAll] = useState(false),
+    [reviewAll, setReviewAll] = useState<string | null>(null),
     [cleanup, setCleanup] = useState<Set<string> | null>(null),
-    [fixing, setFixing] = useState<string | null>(null),
-    [fixNote, setFixNote] = useState(""),
     [idleOpen, setIdleOpen] = useState(false);
   const inFlight = useRef(false);
-  const orchestrator = useOrchestratorEnabled();
 
   const sessionRows = useMemo(
     () =>
@@ -240,15 +268,8 @@ export function InboxPage({
     return out;
   }, [sessionRows, asks]);
   const items = useMemo(
-    () =>
-      inboxItems(
-        ownerTasks,
-        allTasks,
-        groups,
-        orchestrator,
-        new Set(Object.keys(asksByPanel)),
-      ),
-    [ownerTasks, allTasks, groups, orchestrator, asksByPanel],
+    () => inboxItems(moduleItems, groups, new Set(Object.keys(asksByPanel))),
+    [moduleItems, groups, asksByPanel],
   );
   const blockedRows = useMemo(
     () =>
@@ -315,44 +336,6 @@ export function InboxPage({
     visible.find((item) => item.key === selectedKey) ??
     visible.find((item) => item.key === keys[0]) ??
     null;
-  // When the selected item last changed (or the page opened): Enter is
-  // ignored for a moment after, so a held or doubled Enter never answers the
-  // item the selection moved to.
-  const selectedAt = useRef(0);
-  const shownKey = selected?.key ?? null;
-  useEffect(() => {
-    selectedAt.current = Date.now();
-  }, [shownKey]);
-  /** When the owner last picked an option on each item, by digit or click. */
-  const pickedAt = useRef<Record<string, number>>({});
-  const pickOption = (item: TaskItem, option: string) => {
-    pickedAt.current[item.key] = Date.now();
-    setPicks((old) => ({ ...old, [item.key]: option }));
-  };
-
-  /** The selected task's host's attempt cap, for "attempt 1/4". */
-  const [maxAttempts, setMaxAttempts] = useState<Record<string, number>>({});
-  const selectedHost =
-    selected?.source === "task" ? hostOf(selected.task) : undefined;
-  const selectedHostKey = selected?.source === "task" ? selected.host : null;
-  useEffect(() => {
-    if (selectedHostKey == null || maxAttempts[selectedHostKey] != null) return;
-    let live = true;
-    orchestratorClientFor(selectedHost)
-      .settingsGet()
-      .then((settings) => {
-        if (live)
-          setMaxAttempts((old) => ({
-            ...old,
-            [selectedHostKey]: settings.maxAttempts,
-          }));
-      })
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [selectedHostKey, selectedHost, maxAttempts]);
-
   const needs = items.filter(needsYou);
   const headline = scopedHeadline(
     scoped.filter(needsYou),
@@ -378,43 +361,9 @@ export function InboxPage({
       setBusy(false);
     }
   }
-  const openTask = (task: Task) => openOrchestratorTask(ownerTarget(task));
-  /** A task is acted on through the daemon of the host it runs on. */
-  const clientOf = (task: Task) => orchestratorClientFor(hostOf(task));
   const noteOf = (item: Item) => notes[item.key] ?? "";
   const setNote = (item: Item, text: string) =>
     setNotes((old) => ({ ...old, [item.key]: text }));
-  /** The first option shows picked until the owner picks or unpicks one;
-   * only a click on Answer takes that preselection, Enter never does. */
-  const choiceOf = (item: TaskItem): AnswerChoice => ({
-    pick: picks[item.key],
-    preselected: item.task.question?.options[0] ?? "",
-    note: noteOf(item),
-  });
-  const answerTask = (item: TaskItem, text: string) => {
-    if (!text) return;
-    void act(async () => {
-      await clientOf(item.task).taskAnswer(item.task.id, text);
-      const drop = (old: Record<string, string>) => {
-        const next = { ...old };
-        delete next[item.key];
-        return next;
-      };
-      setNotes(drop);
-      setPicks(drop);
-      delete pickedAt.current[item.key];
-    });
-  };
-  const answerByKey = (item: TaskItem) =>
-    answerTask(
-      item,
-      inboxEnterAnswer(
-        choiceOf(item),
-        selectedAt.current,
-        pickedAt.current[item.key],
-        Date.now(),
-      ),
-    );
   /** Types into the session, one step at a time, then re-reads its screen. */
   const send = (item: SessionItem, steps: string[], clearNote = false) =>
     void act(async () => {
@@ -441,22 +390,19 @@ export function InboxPage({
       const [host, response] = askDecision(ask, decision);
       return window.bridge!.askRespond(host, response);
     });
-  const runAgain = (task: Task) =>
-    void act(() => clientOf(task).taskStart(task.id));
-  const archive = (task: Task) =>
-    void act(() => clientOf(task).taskArchive(task.id));
-  const land = (task: Task) => void act(() => clientOf(task).taskLand(task.id));
   const jump = (row: InboxRow) => {
     switchWorkspace(row.workspace.id);
     ws.setSelected(row.panel.id);
     ws.setZoomed(row.panel.id);
   };
-  const landEverything = (targets: Task[]) => {
-    if (!landAll) return setLandAll(true);
-    setLandAll(false);
-    void act(async () => {
-      for (const task of targets) await clientOf(task).taskLand(task.id);
-    });
+  /** A module's "review all": the first click arms it, the second runs it
+   * on the review rows on screen. */
+  const reviewEverything = (extensionId: string, keys: string[]) => {
+    const ui = moduleUis.find((m) => m.extensionId === extensionId);
+    if (!ui?.reviewAll) return;
+    if (reviewAll !== extensionId) return setReviewAll(extensionId);
+    setReviewAll(null);
+    void act(() => ui.reviewAll!.run(keys));
   };
 
   const handlers = useRef<(event: KeyboardEvent) => void>(() => {});
@@ -472,35 +418,20 @@ export function InboxPage({
     if (key === "j") return move(1);
     if (key === "k") return move(-1);
     if (!item || busy) return;
-    if (item.source === "session") {
-      const prompt = prompts[item.row.panel.id];
-      if (item.kind === "answer" && prompt && /^[1-9]$/.test(key)) {
-        const option = prompt.options[Number(key) - 1];
-        if (option) send(item, option.steps);
-      } else if (key === "e" && item.kind === "panels")
-        markSeen(item.row.panel.id);
-      return;
-    }
-    const { task } = item;
-    if (item.kind === "answer" && /^[1-9]$/.test(key)) {
-      const option = task.question?.options[Number(key) - 1];
-      if (option) pickOption(item, option);
-    } else if (key === "enter" && item.kind === "answer") answerByKey(item);
-    else if (key === "l" && item.kind === "land") land(task);
-    else if (key === "r" && item.kind === "decide" && task.status !== "landing")
-      runAgain(task);
-    else if (key === "e" && item.kind !== "answer") archive(task);
+    // A module's own keys are handled by its detail.
+    if (item.source !== "session") return;
+    const prompt = prompts[item.row.panel.id];
+    if (item.kind === "answer" && prompt && /^[1-9]$/.test(key)) {
+      const option = prompt.options[Number(key) - 1];
+      if (option) send(item, option.steps);
+    } else if (key === "e" && item.kind === "panels")
+      markSeen(item.row.panel.id);
   };
   useEffect(() => {
     const listener = (event: KeyboardEvent) => handlers.current(event);
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
   }, []);
-
-  const recent = (predicate: (task: Task) => boolean) =>
-    allTasks
-      .filter((task) => !task.archived && predicate(task))
-      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
 
   const hostName = (item: Item) => groupLabel(item.host, connectionProfiles);
   const sessionKind = (row: InboxRow) =>
@@ -509,78 +440,6 @@ export function InboxPage({
       : row.panel.kind === "terminal"
         ? "terminal"
         : "agent panel";
-
-  /** Needed a fix / Clean, as in the task view: a fix takes a note (the
-   * follow-up task is made from it), pressing an active mark clears it. */
-  function landMarks(task: Task) {
-    const mark = task.leadTouch;
-    if (fixing === task.id)
-      return (
-        <form
-          className="inbox-fix"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void act(async () => {
-              await clientOf(task).taskLeadTouch(task.id, true, fixNote.trim());
-              setFixing(null);
-              setFixNote("");
-            });
-          }}
-        >
-          <input
-            aria-label="What had to be fixed"
-            placeholder="What is missing or wrong? A follow-up task will be created."
-            value={fixNote}
-            autoFocus
-            onChange={(event) => setFixNote(event.target.value)}
-          />
-          <button type="submit" className="ui-button primary" disabled={busy}>
-            Save
-          </button>
-          <button
-            type="button"
-            className="ui-button ghost"
-            onClick={() => setFixing(null)}
-          >
-            Cancel
-          </button>
-        </form>
-      );
-    return (
-      <>
-        <button
-          className="ui-button ghost"
-          disabled={busy}
-          aria-pressed={mark?.touched === true}
-          onClick={() => {
-            if (mark?.touched === true)
-              void act(() => clientOf(task).taskLeadTouch(task.id));
-            else {
-              setFixNote("");
-              setFixing(task.id);
-            }
-          }}
-        >
-          Needed a fix
-        </button>
-        <button
-          className="ui-button ghost"
-          disabled={busy}
-          aria-pressed={mark?.touched === false}
-          onClick={() =>
-            void act(() =>
-              clientOf(task).taskLeadTouch(
-                task.id,
-                mark?.touched === false ? undefined : false,
-              ),
-            )
-          }
-        >
-          Clean
-        </button>
-      </>
-    );
-  }
 
   function optionChips(item: SessionItem, prompt: SessionPrompt) {
     return prompt.options.map((option, index) => (
@@ -664,90 +523,21 @@ export function InboxPage({
     return { meta, context, actions };
   }
 
-  function taskView(item: TaskItem) {
-    const { task } = item;
-    const choice = choiceOf(item);
-    const attempts = implementAttemptCount(task);
-    const meta =
-      item.kind === "land"
-        ? `${item.project} · orchestrator → ${task.baseRef}`
-        : `${item.project} · orchestrator${item.kind === "answer" && attempts > 0 ? ` · attempt ${attempts}` : ""}`;
-    let context: string;
-    if (item.kind === "answer")
-      context = (task.question?.text ?? "").split("\n")[0];
-    else if (item.kind === "land") {
-      const files = latestImplementAttempt(task)?.changedFiles.length;
-      const review = reviewOf(task);
-      context = [
-        review ? `review ${review.verdict}` : "done",
-        files ? plural(files, "file") : "",
-        formatCost(task.costUsd),
-        "not landed",
-      ]
-        .filter(Boolean)
-        .join(" · ");
-    } else
-      context = `${taskReason(task, allTasks)} · ${formatCost(task.costUsd)}`;
-
-    let actions;
-    if (item.kind === "answer")
-      actions = (task.question?.options ?? []).map((option) => (
-        <Chip
-          key={option}
-          selected={shownPick(choice) === option}
-          onClick={() => {
-            pickOption(item, togglePick(choice, option));
-            setNote(item, "");
-          }}
-        >
-          {option}
-        </Chip>
-      ));
-    else if (item.kind === "decide")
-      actions = (
-        <>
-          {task.status !== "landing" && (
-            <button
-              className="ui-button secondary"
-              disabled={busy}
-              onClick={() => runAgain(task)}
-            >
-              <RefreshCw size={14} /> Run again
-            </button>
-          )}
-          <button className="ui-button ghost" onClick={() => openTask(task)}>
-            Run with a note
-          </button>
-          <button
-            className="ui-button ghost"
-            disabled={busy}
-            onClick={() => archive(task)}
-          >
-            Archive
-          </button>
-        </>
-      );
-    else
-      actions = (
-        <>
-          <button
-            className="ui-button primary"
-            disabled={busy}
-            onClick={() => land(task)}
-          >
-            Land
-          </button>
-          {landMarks(task)}
-        </>
-      );
-    return { meta, context, actions };
+  /** A module row: title, age and where it comes from. What to do with it
+   * is in the detail. */
+  function moduleView(item: ModuleItem) {
+    return {
+      meta: `${item.project} · ${hostName(item)}`,
+      context: undefined,
+      actions: undefined,
+    };
   }
 
   function itemView(item: Item) {
     if (item.kind === "working" || item.kind === "idle")
       return compactRow(item);
     const { meta, context, actions } =
-      item.source === "session" ? sessionView(item) : taskView(item);
+      item.source === "session" ? sessionView(item) : moduleView(item);
     return (
       <div
         key={item.key}
@@ -755,7 +545,7 @@ export function InboxPage({
         title={item.title}
         onClick={() => setSelectedKey(item.key)}
       >
-        <AttentionItem
+        <QueueRow
           tone={TONE[item.kind]}
           title={item.title}
           time={item.at != null ? ageLabel(Date.now() - item.at) : undefined}
@@ -810,23 +600,32 @@ export function InboxPage({
   function group(kind: Kind, rows: Item[]) {
     if (kind === "idle") return idleSection(rows as SessionItem[]);
     if (rows.length === 0) return null;
-    const targets = kind === "land" ? landTargets(rows) : [];
+    const targets =
+      kind === "review"
+        ? reviewTargets(rows).filter((target) => target.keys.length > 1)
+        : [];
     return (
       <section key={kind} className="inbox-group">
         <div className="inbox-group-head">
           <GroupLabel label={LABELS[kind]} count={rows.length} />
-          {targets.length > 1 && (
-            <button
-              className="inbox-link"
-              disabled={busy}
-              onClick={() => landEverything(targets)}
-              onBlur={() => setLandAll(false)}
-            >
-              {landAll
-                ? `Confirm: land ${targets.length}`
-                : `Land ${targets.length}`}
-            </button>
-          )}
+          {targets.map(({ extensionId, keys: targetKeys }) => {
+            const label = moduleUis.find((m) => m.extensionId === extensionId)
+              ?.reviewAll?.label;
+            if (!label) return null;
+            return (
+              <button
+                key={extensionId}
+                className="inbox-link"
+                disabled={busy}
+                onClick={() => reviewEverything(extensionId, targetKeys)}
+                onBlur={() => setReviewAll(null)}
+              >
+                {reviewAll === extensionId
+                  ? `Confirm: ${label.toLowerCase()} ${targetKeys.length}`
+                  : `${label} ${targetKeys.length}`}
+              </button>
+            );
+          })}
         </div>
         {rows.map(itemView)}
       </section>
@@ -967,79 +766,10 @@ export function InboxPage({
 
   function preview(item: Item) {
     if (item.source === "session") return sessionPreview(item);
-    const { task } = item;
-    const attempts = implementAttemptCount(task);
-    const diff = diffOf(task);
-    const files =
-      diff?.files ?? latestImplementAttempt(task)?.changedFiles.length;
-    const met = criteriaMet(task);
-    const facts = diffFacts(
-      files,
-      attempts,
-      maxAttempts[item.host],
-      task.costUsd,
-    );
-    return (
-      <>
-        <div className="inbox-preview-head">
-          <h2 title={task.title}>{task.title}</h2>
-          <button className="inbox-link" onClick={() => openTask(task)}>
-            Open task
-            <ArrowUpRight size={12} />
-          </button>
-        </div>
-        <StageTrack steps={stageTrack(task)} />
-        {task.criteria.length > 0 && (
-          <div className="inbox-criteria">
-            <span className="inbox-eyebrow">ACCEPTANCE</span>
-            {task.criteria.map((text) => (
-              <Criterion key={text} state={met ? "met" : "pending"}>
-                {text}
-              </Criterion>
-            ))}
-          </div>
-        )}
-        <div className="inbox-diff">
-          <GitBranch size={13} />
-          <span className="inbox-diff-branch" title={task.branch}>
-            {shortBranch(task.branch)}
-          </span>
-          {!!diff?.added && (
-            <span className="inbox-diff-add">+{diff.added}</span>
-          )}
-          {!!diff?.removed && (
-            <span className="inbox-diff-del">{`−${diff.removed}`}</span>
-          )}
-          {facts && <span className="inbox-diff-rest">{`· ${facts}`}</span>}
-        </div>
-        <div className="inbox-preview-spacer" />
-        {item.kind === "answer" && (
-          <form
-            className="inbox-reply"
-            onSubmit={(event) => {
-              // Enter in the field: typed text or an explicit pick only.
-              event.preventDefault();
-              answerByKey(item);
-            }}
-          >
-            <input
-              aria-label="Answer note"
-              placeholder="Answer with a note, or pick above…"
-              value={noteOf(item)}
-              onChange={(event) => setNote(item, event.target.value)}
-            />
-            <button
-              type="button"
-              className="ui-button primary"
-              disabled={busy || !clickAnswer(choiceOf(item))}
-              onClick={() => answerTask(item, clickAnswer(choiceOf(item)))}
-            >
-              Answer
-            </button>
-          </form>
-        )}
-      </>
-    );
+    const ui = moduleUis.find((m) => m.extensionId === item.entry.extensionId);
+    if (!ui) return null;
+    const Detail = ui.AttentionDetail;
+    return <Detail item={item.entry.item} />;
   }
 
   const errorLine = error && (
@@ -1049,8 +779,6 @@ export function InboxPage({
   );
 
   function zero() {
-    const latest = recent(() => true);
-    const landed = recent((task) => task.status === "done" && !!task.landedSha);
     const running = visible.filter((item) => !needsYou(item));
     return (
       <div className="inbox-zero-page">
@@ -1060,42 +788,7 @@ export function InboxPage({
             <span className="inbox-zero-shadow" />
           </div>
           <h2>Inbox zero</h2>
-          <p>{zeroLine(allTasks, Date.now(), orchestrator)}</p>
-          {orchestrator && (
-            <div className="inbox-zero-actions">
-              <button
-                className="ui-button secondary"
-                onClick={() =>
-                  openOrchestratorTask(
-                    latest
-                      ? {
-                          taskId: latest.id,
-                          repo: latest.repo,
-                          focus: "summary",
-                        }
-                      : { taskId: "", repo: cwd, focus: "summary" },
-                  )
-                }
-              >
-                <ListChecks size={14} /> Open orchestrator
-              </button>
-              <button
-                className="ui-button ghost"
-                disabled={!landed}
-                title={landed ? undefined : "Nothing has landed yet"}
-                onClick={() =>
-                  landed &&
-                  openOrchestratorTask({
-                    taskId: landed.id,
-                    repo: landed.repo,
-                    focus: "report",
-                  })
-                }
-              >
-                See what landed
-              </button>
-            </div>
-          )}
+          <p>Nothing needs you.</p>
           {errorLine}
         </div>
         {(running.length > 0 ||
@@ -1305,7 +998,9 @@ export function InboxPage({
           <div className="inbox-filters">
             {CHIPS.filter(
               ({ filter: value }) =>
-                orchestrator || (value !== "decide" && value !== "land"),
+                // A group no module fills is not offered.
+                (value !== "decide" && value !== "review") ||
+                items.some((item) => item.source === "module"),
             ).map(({ filter: value, label }) => (
               <Chip
                 key={value}
@@ -1338,12 +1033,6 @@ export function InboxPage({
               ["J K", "move"],
               ["1–9", "pick"],
               ["⏎", "answer"],
-              ...(orchestrator
-                ? [
-                    ["L", "land"],
-                    ["R", "run again"],
-                  ]
-                : []),
               ["E", "done"],
             ].map(([key, text]) => (
               <span key={text}>

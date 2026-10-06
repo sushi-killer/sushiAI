@@ -3,7 +3,8 @@ import {
   ORCHESTRATOR_EXTENSION_ID,
   useOrchestratorEnabled,
 } from "./enabled.ts";
-import { useOrchestratorAttention } from "./moduleAttention.ts";
+import { InboxTaskDetail } from "./InboxTaskDetail.tsx";
+import { reviewAllTasks, useOrchestratorAttention } from "./moduleAttention.ts";
 import { useOrchestratorShell } from "./moduleShell.ts";
 import { useOrchestratorWorktreeClaims } from "./moduleWorktrees.ts";
 
@@ -12,7 +13,8 @@ import { useOrchestratorWorktreeClaims } from "./moduleWorktrees.ts";
 export const orchestratorModule: ModuleUi = {
   extensionId: ORCHESTRATOR_EXTENSION_ID,
   useAttention: () => useOrchestratorAttention(useOrchestratorEnabled()),
-  AttentionDetail: () => null,
+  AttentionDetail: InboxTaskDetail,
+  reviewAll: reviewAllTasks,
   useWorktreeClaims: () =>
     useOrchestratorWorktreeClaims(useOrchestratorEnabled()),
   useShell: (shell: ModuleShell) =>

@@ -2,17 +2,18 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const load = () => import("../src/app/inboxModel.ts");
-const task = (over = {}) => ({
-  id: "t1",
-  title: "T",
-  repo: "/w/app",
-  status: "done",
-  archived: false,
-  decisions: [],
-  attempts: [],
-  updatedAt: 1000,
-  baseRef: "main",
-  ...over,
+const entry = (kind, key, over = {}) => ({
+  extensionId: "builtin.test",
+  item: {
+    key,
+    kind,
+    title: key,
+    project: "app",
+    host: "local",
+    at: 1000,
+    search: key,
+    ...over,
+  },
 });
 const row = (id, group, over = {}) => ({
   workspace: { id: `w-${id}`, name: "app", panels: [], ...over.workspace },
@@ -30,7 +31,6 @@ const groups = (rows) =>
 test("sessions alone fill the Inbox: blocked answers, unseen done, working and idle - shells stay out", async () => {
   const { inboxItems, needsYou } = await load();
   const items = inboxItems(
-    [],
     [],
     groups([
       row("b", "blocked"),
@@ -53,45 +53,48 @@ test("sessions alone fill the Inbox: blocked answers, unseen done, working and i
   assert.equal(items.filter(needsYou).length, 2);
 });
 
-test("orchestrator answers mix into the same ANSWER group as sessions", async () => {
+test("module answers mix into the same ANSWER group as sessions", async () => {
   const { inboxItems } = await load();
   const items = inboxItems(
-    [task({ id: "q", status: "waiting", updatedAt: 5 })],
-    [task({ id: "done1" })],
+    [entry("answer", "q", { at: 5 }), entry("review", "done1")],
     groups([row("b", "blocked", { since: 9 })]),
   );
   assert.deepEqual(
     items.map((item) => [item.kind, item.source]),
     [
       ["answer", "session"],
-      ["answer", "task"],
-      ["land", "task"],
+      ["answer", "module"],
+      ["review", "module"],
     ],
   );
+  assert.equal(items[1].key, "builtin.test:q");
 });
 
-test("Land N lands exactly the LAND rows a filter leaves on screen", async () => {
-  const { inboxItems, inScope, landTargets } = await load();
-  const all = [
-    task({ id: "a", repo: "/w/app" }),
-    task({ id: "b", repo: "/w/site" }),
-    task({ id: "c", repo: "/w/app", title: "Other" }),
-  ];
-  const items = inboxItems([], all, groups([]));
+test("Review all covers exactly the review rows a filter leaves on screen, per module", async () => {
+  const { inboxItems, inScope, reviewTargets } = await load();
+  const items = inboxItems(
+    [
+      entry("review", "a", { search: "a app" }),
+      entry("review", "b", { project: "site", search: "b site" }),
+      entry("review", "c", { search: "c other" }),
+      entry("answer", "q"),
+      { ...entry("review", "x"), extensionId: "builtin.other" },
+    ],
+    groups([]),
+  );
   const visible = items.filter((item) =>
     inScope(item, { project: "app", host: "", query: "" }),
   );
-  assert.deepEqual(
-    landTargets(visible).map((t) => t.id),
-    ["a", "c"],
-  );
+  assert.deepEqual(reviewTargets(visible), [
+    { extensionId: "builtin.test", keys: ["a", "c"] },
+    { extensionId: "builtin.other", keys: ["x"] },
+  ]);
   const searched = items.filter((item) =>
-    inScope(item, { project: "", host: "", query: "other" }),
+    inScope(item, { project: "", host: "", query: "OTHER" }),
   );
-  assert.deepEqual(
-    landTargets(searched).map((t) => t.id),
-    ["c"],
-  );
+  assert.deepEqual(reviewTargets(searched), [
+    { extensionId: "builtin.test", keys: ["c"] },
+  ]);
 });
 
 test("Clean up offers idle agents and shells apart, within the host filter", async () => {
@@ -132,46 +135,10 @@ test("Inbox counts read singular for one and plural otherwise", async () => {
   assert.equal(plural(0, "file"), "0 files");
 });
 
-test("a remote-host task is filed under its host, not Local", async () => {
-  const { inboxItems } = await import("../src/app/inboxModel.ts");
-  const task = {
-    id: "t1",
-    title: "Remote question",
-    repo: "/srv/app",
-    status: "waiting",
-    updatedAt: 1,
-    host: "ssh:lab",
-    question: { text: "Which?", options: ["a", "b"] },
-    attempts: [],
-  };
-  const items = inboxItems([task], [task], []);
+test("a module item keeps the host it reports", async () => {
+  const { inboxItems } = await load();
+  const items = inboxItems([entry("answer", "t1", { host: "ssh:lab" })], []);
   assert.equal(items[0].host, "ssh:lab");
-});
-
-test("Enter after a digit pick sends it, even right after the selection moved; Enter alone never sends the preselection", async () => {
-  const { inboxEnterAnswer } = await load();
-  const picked = {
-    pick: "Keep behind a flag",
-    preselected: "Remove",
-    note: "",
-  };
-  const none = { pick: undefined, preselected: "Remove", note: "" };
-  // Selection moved at 1000, "2" at 1150, Enter at 1350: inside the arm window.
-  assert.equal(
-    inboxEnterAnswer(picked, 1000, 1150, 1350),
-    "Keep behind a flag",
-  );
-  // Digit, then Enter well after the window.
-  assert.equal(
-    inboxEnterAnswer(picked, 1000, 1150, 1700),
-    "Keep behind a flag",
-  );
-  // Enter alone: the preselection is not an answer, early or late.
-  assert.equal(inboxEnterAnswer(none, 1000, undefined, 1200), "");
-  assert.equal(inboxEnterAnswer(none, 1000, undefined, 5000), "");
-  // A pick made before the selection moved back here does not arm Enter.
-  assert.equal(inboxEnterAnswer(picked, 1000, 900, 1200), "");
-  assert.equal(inboxEnterAnswer(picked, 1000, 900, 1600), "Keep behind a flag");
 });
 
 test("times under a minute read <1m, and the subtitle counts only what the filters show", async () => {
@@ -196,51 +163,19 @@ test("times under a minute read <1m, and the subtitle counts only what the filte
   assert.equal(scopedHeadline([], true, now), "Nothing here needs you");
 });
 
-test("the branch box facts omit a zero cost and an unknown cap", async () => {
-  const { diffFacts } = await load();
-  assert.equal(diffFacts(3, 1, 4, 0.04), "3 files · attempt 1/4 · $0.04");
-  assert.equal(diffFacts(1, 1, undefined, 0), "1 file · attempt 1");
-  assert.equal(diffFacts(undefined, 0, 4, undefined), "");
-});
-
-test("Inbox zero always says how the day went", async () => {
-  const { zeroLine } = await load();
-  const now = Date.now();
-  assert.equal(
-    zeroLine([], now),
-    "Nothing needs you. Nothing landed today yet.",
-  );
-  assert.equal(
-    zeroLine([task({ landedSha: "abc", updatedAt: now })], now),
-    "Nothing needs you. 1 task landed today.",
-  );
-});
-
-test("with the orchestrator off the Inbox holds exactly the session items and a plain zero line", async () => {
-  const { inboxItems, zeroLine } = await load();
+test("with no module items the Inbox holds exactly the session items", async () => {
+  const { inboxItems } = await load();
   const sessions = groups([row("b", "blocked"), row("w", "working")]);
-  const before = inboxItems([], [], sessions);
-  const off = inboxItems(
-    [task({ id: "q", status: "waiting" })],
-    [task({ id: "done1" })],
-    sessions,
-    false,
-  );
-  assert.deepEqual(off, before);
-  assert.ok(off.every((item) => item.source === "session"));
-  assert.equal(
-    zeroLine([task({ id: "done1", landedSha: "abc" })], Date.now(), false),
-    "Nothing needs you.",
-  );
+  const items = inboxItems([], sessions);
+  assert.ok(items.length === 2);
+  assert.ok(items.every((item) => item.source === "session"));
 });
 
 test("a session with an open ask is an ANSWER whatever its status says", async () => {
   const { inboxItems } = await load();
   const items = inboxItems(
     [],
-    [],
     groups([row("w", "working"), row("i", "idle")]),
-    true,
     new Set(["w"]),
   );
   assert.deepEqual(

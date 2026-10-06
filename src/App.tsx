@@ -435,7 +435,6 @@ export function App() {
               activeEndpoint={activeEndpoint}
               home={system?.home}
               switchWorkspace={switchWorkspace}
-              openOrchestratorTask={orchestrator.openTask}
               addExtensionPanel={addExtensionPanel}
               setExtensionEnabled={(extensionId, enabled) =>
                 void setExtensionEnabled(extensionId, enabled)

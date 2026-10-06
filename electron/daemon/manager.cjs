@@ -34,7 +34,8 @@
 //                                    `build` is the sha256 of its binary
 //   setUpdate(host, bool)            flags a ready host whose binary differs
 //                                    from the bundled one (`update: true`)
-//   request(host, method, params)    rejects with RpcError, or Error when not ready
+//   request(host, method, params, {timeoutMs}?)
+//                                    rejects with RpcError, or Error when not ready
 //   attach(host, id, {scrollback}, onBytes)
 //        -> Promise<{cols, rows, seq, detach()}>
 //   on("state", cb(ConnectorState)), on("event", cb(DaemonEvent)) -> unsubscribe
@@ -464,8 +465,8 @@ function createDaemonManager({
       entry.update = update;
       emit("state", publicState(entry));
     },
-    async request(host, method, params = {}) {
-      return readyClient(host).client.request(method, params);
+    async request(host, method, params = {}, options) {
+      return readyClient(host).client.request(method, params, options);
     },
     async attach(host, id, { scrollback } = {}, onBytes) {
       const entry = readyClient(host);

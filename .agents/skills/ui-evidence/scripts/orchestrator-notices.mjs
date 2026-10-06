@@ -2,7 +2,7 @@
 // done/failed/needs-input bubbles, the quick answer and the two "Open"
 // landings, Run again, Answer all in Inbox and the pill (Option-Space).
 // Builds nothing itself; run
-//   npm run build && npm run build:orchd && node .agents/skills/ui-evidence/scripts/orchestrator-notices.mjs
+//   npm run build && npm run build:sushiai && node .agents/skills/ui-evidence/scripts/orchestrator-notices.mjs
 // It seeds one landed done task with a fresh report, one failed task (last
 // attempt failed with kind "verify") and one waiting task (options Delete it,
 // Keep behind a flag, Stop) into a throwaway profile and opens the Evidence

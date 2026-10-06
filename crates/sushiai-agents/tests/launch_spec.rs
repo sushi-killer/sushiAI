@@ -208,7 +208,7 @@ fn a_relative_hook_path_is_rejected() {
 #[test]
 fn caller_settings_merge_into_the_one_settings_flag_and_a_hooks_key_is_rejected() {
     let caller: serde_json::Map<String, Value> =
-        serde_json::from_str(r#"{"apiKeyHelper": "/h.sh", "env": {"K": "v"}}"#).unwrap();
+        serde_json::from_str(r#"{"apiKeyHelper": "/h.sh", "model": "opus"}"#).unwrap();
     let mut p = params(Agent::Claude, AgentSession::New("abc"), BIN, &[]);
     p.claude_settings = Some(&caller);
     let spec = build(&p).unwrap();
@@ -216,7 +216,7 @@ fn caller_settings_merge_into_the_one_settings_flag_and_a_hooks_key_is_rejected(
     let at = spec.argv.iter().position(|a| a == "--settings").unwrap();
     let settings: Value = serde_json::from_str(&spec.argv[at + 1]).unwrap();
     assert_eq!(settings["apiKeyHelper"], "/h.sh");
-    assert_eq!(settings["env"]["K"], "v");
+    assert_eq!(settings["model"], "opus");
     assert!(settings["hooks"]["Stop"].is_array());
 
     let bad: serde_json::Map<String, Value> =
@@ -226,7 +226,7 @@ fn caller_settings_merge_into_the_one_settings_flag_and_a_hooks_key_is_rejected(
 }
 
 #[test]
-fn caller_settings_outside_the_allowlist_or_with_bad_vars_are_rejected() {
+fn caller_settings_outside_the_allowlist_are_rejected() {
     let reject = |json: &str| {
         let caller: serde_json::Map<String, Value> = serde_json::from_str(json).unwrap();
         let mut p = params(Agent::Claude, AgentSession::New("abc"), BIN, &[]);
@@ -241,14 +241,16 @@ fn caller_settings_outside_the_allowlist_or_with_bad_vars_are_rejected() {
         reject(r#"{"statusLine": {"command": "x"}}"#),
         LaunchError::SettingsKey("statusLine".into())
     );
-    assert_eq!(
-        reject(r#"{"env": {"SUSHIAI_SESSION_TOKEN": "x"}}"#),
-        LaunchError::SettingsEnv
-    );
-    assert_eq!(
-        reject(r#"{"env": {"sushiai_socket": "x"}}"#),
-        LaunchError::SettingsEnv
-    );
-    assert_eq!(reject(r#"{"env": {"A": 1}}"#), LaunchError::SettingsEnv);
-    assert_eq!(reject(r#"{"env": "A=1"}"#), LaunchError::SettingsEnv);
+    // Secrets and variables belong in the session environment, not in argv.
+    for json in [
+        r#"{"env": {"ANTHROPIC_API_KEY": "x"}}"#,
+        r#"{"env": {"SUSHIAI_SESSION_TOKEN": "x"}}"#,
+        r#"{"env": "A=1"}"#,
+    ] {
+        assert_eq!(
+            reject(json),
+            LaunchError::SettingsKey("env".into()),
+            "{json}"
+        );
+    }
 }

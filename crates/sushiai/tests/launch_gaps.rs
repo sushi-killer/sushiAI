@@ -59,11 +59,9 @@ const SECRET: &str = "sk-test-secret-0123456789";
 
 fn settings_params() -> Value {
     let mut p = agent_params("claude");
-    p["claudeSettings"] = json!({
-        "apiKeyHelper": "/opt/helper.sh",
-        "env": {"ANTHROPIC_API_KEY": SECRET},
-        "model": "opus",
-    });
+    p["claudeSettings"] = json!({"apiKeyHelper": "/opt/helper.sh", "model": "opus"});
+    // The secret travels in the session variables, which reach the holder, not argv.
+    p["env"] = json!({"ANTHROPIC_API_KEY": SECRET});
     p
 }
 
@@ -75,7 +73,8 @@ fn claude_settings_join_our_hooks_in_the_single_settings_argument() {
     fakes.add(
         "claude",
         &format!(
-            "for a in \"$@\"; do printf '%s\\n' \"$a\" >> {}; done\nsleep 60",
+            "printf '%s' \"$ANTHROPIC_API_KEY\" > {}.var\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {}; done\nsleep 60",
+            out.display(),
             out.display()
         ),
     );
@@ -93,7 +92,13 @@ fn claude_settings_join_our_hooks_in_the_single_settings_argument() {
     let at = lines.iter().position(|l| *l == "--settings").expect("flag");
     let settings: Value = serde_json::from_str(lines[at + 1]).expect("settings json");
     assert_eq!(settings["apiKeyHelper"], "/opt/helper.sh");
-    assert_eq!(settings["env"]["ANTHROPIC_API_KEY"], SECRET);
+    assert!(
+        settings.get("env").is_none(),
+        "no variables in the settings: {settings}"
+    );
+    assert!(!argv.contains(SECRET), "the secret reached argv: {argv}");
+    let var_file = format!("{}.var", out.display());
+    assert_eq!(fs::read_to_string(var_file).expect("var file"), SECRET);
     assert_eq!(settings["model"], "opus");
     assert!(
         settings["hooks"]["PermissionRequest"].is_array(),
@@ -140,11 +145,7 @@ fn claude_settings_with_a_hooks_key_or_a_non_claude_agent_are_rejected() {
     for (what, settings) in [
         ("disableAllHooks", json!({"disableAllHooks": true})),
         ("unknown key", json!({"statusLine": {"command": "x"}})),
-        (
-            "session variable",
-            json!({"env": {"SUSHIAI_SESSION_TOKEN": "x"}}),
-        ),
-        ("env value type", json!({"env": {"A": 1}})),
+        ("variables key", json!({"env": {"ANTHROPIC_API_KEY": "x"}})),
     ] {
         let mut p = agent_params("claude");
         p["claudeSettings"] = settings;

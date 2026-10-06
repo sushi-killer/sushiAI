@@ -678,3 +678,116 @@ fn session_read_waits_for_a_restored_session() {
     let read = client.call("session.read", json!({"id": id}));
     assert!(read["text"].as_str().expect("text").contains("marker-9"));
 }
+
+/// A proxy that starts while the old daemon still holds the lock gets a daemon that waits for
+/// it instead of failing.
+#[test]
+fn a_daemon_started_while_the_lock_is_still_held_waits_for_it() {
+    use std::os::fd::AsRawFd;
+    let sandbox = Sandbox::new();
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(sandbox.home().join("daemon.lock"))
+        .expect("lock file");
+    // SAFETY: flock(2) on a descriptor this test owns.
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let releaser = std::thread::spawn(move || {
+        sleep(Duration::from_millis(800));
+        drop(lock);
+    });
+    let started = Instant::now();
+    let mut proxy = Command::new(BIN)
+        .arg("proxy")
+        .env("SUSHIAI_HOME", sandbox.home())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn proxy");
+    let hello = Request::new(1, "hello", json!({"protocol": 1, "client": "test"}));
+    let mut stdin = proxy.stdin.take().expect("stdin");
+    stdin.write_all(&encode(&hello.frame())).expect("write");
+    let mut stdout = proxy.stdout.take().expect("stdout");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        if let Ok(n) = stdout.read(&mut buf) {
+            let _ = tx.send(buf[..n].to_vec());
+        }
+    });
+    let answered = rx.recv_timeout(Duration::from_secs(2));
+    let waited = started.elapsed();
+    drop(stdin);
+    let _ = proxy.kill();
+    let _ = proxy.wait();
+    releaser.join().expect("releaser");
+    let bytes = answered.expect("no hello answer within 2 s of starting the proxy");
+    assert!(!bytes.is_empty());
+    assert!(
+        waited >= Duration::from_millis(700),
+        "the lock was not waited for"
+    );
+}
+
+#[test]
+fn a_proxy_started_right_after_shutdown_reaches_the_new_daemon() {
+    let mut sandbox = Sandbox::new();
+    let daemon = sandbox.start_daemon();
+    sandbox.client().call("daemon.shutdown", Value::Null);
+    wait_until("the socket to go", 5, || !sandbox.socket().exists());
+    let started = Instant::now();
+    let mut proxy = Command::new(BIN)
+        .arg("proxy")
+        .env("SUSHIAI_HOME", sandbox.home())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn proxy");
+    let hello = Request::new(1, "hello", json!({"protocol": 1, "client": "test"}));
+    let mut stdin = proxy.stdin.take().expect("stdin");
+    stdin.write_all(&encode(&hello.frame())).expect("write");
+    let mut stdout = proxy.stdout.take().expect("stdout");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        if let Ok(n) = stdout.read(&mut buf) {
+            let _ = tx.send(buf[..n].to_vec());
+        }
+    });
+    let answered = rx.recv_timeout(Duration::from_secs(2));
+    drop(stdin);
+    let _ = proxy.kill();
+    let _ = proxy.wait();
+    assert!(answered.is_ok(), "no answer in {:?}", started.elapsed());
+    assert!(!alive(daemon) || sandbox.lock_pid() != Some(daemon));
+}
+
+#[test]
+fn an_attach_snapshot_carries_the_bytes_the_daemon_still_holds() {
+    let mut sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let id = sandbox.create(&mut client, "printf 'abc\\033[3'; sleep 60");
+    let wait = |client: &mut Client, scrollback: u64| {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let result = client.call(
+                "session.attach",
+                json!({"id": id, "scrollback": scrollback}),
+            );
+            let snapshot = base64_decode(result["snapshot"].as_str().expect("snapshot"));
+            if String::from_utf8_lossy(&snapshot).contains("abc") {
+                return snapshot;
+            }
+            assert!(Instant::now() < deadline, "no output");
+            sleep(Duration::from_millis(100));
+        }
+    };
+    // Plain attach, and attach with history: both end in the unfinished sequence.
+    assert!(wait(&mut client, 0).ends_with(b"\x1b[3"));
+    assert!(wait(&mut client, 10).ends_with(b"\x1b[3"));
+    client.call("session.close", json!({"id": id, "graceful": false}));
+}

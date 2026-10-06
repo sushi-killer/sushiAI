@@ -110,7 +110,14 @@ fn bind_private(path: &Path) -> Result<UnixListener> {
     Ok(bound?)
 }
 
-/// Takes an exclusive, non-blocking `flock` on `<home>/daemon.lock` and writes the pid into it.
+/// How long a starting daemon waits for the home lock: the daemon that is stopping releases
+/// it a moment after its socket is gone, and a client that starts a daemon right away must not
+/// lose that race.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Takes an exclusive `flock` on `<home>/daemon.lock` (retried for up to `LOCK_WAIT`) and
+/// writes the pid into it. Another running daemon makes this fail with `AlreadyRunning`.
 fn lock_home(home: &Home) -> Result<fs::File> {
     let mut file = fs::OpenOptions::new()
         .create(true)
@@ -118,9 +125,13 @@ fn lock_home(home: &Home) -> Result<fs::File> {
         .write(true)
         .mode(0o600)
         .open(home.lock())?;
+    let deadline = std::time::Instant::now() + LOCK_WAIT;
     // SAFETY: flock(2) on a descriptor this function owns.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(Error::AlreadyRunning(home.socket().display().to_string()));
+    while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::AlreadyRunning(home.socket().display().to_string()));
+        }
+        std::thread::sleep(LOCK_POLL);
     }
     // Only the lock holder writes, so a refused second daemon never clobbers the pid.
     file.set_len(0)?;

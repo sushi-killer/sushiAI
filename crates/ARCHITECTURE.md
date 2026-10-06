@@ -155,12 +155,13 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
 ## Launch and read additions
 
 - `session.create` also takes `claudeSettings` (Claude only) and `idempotencyKey`.
-  - `claudeSettings` is merged into the single `--settings`. Only these top-level keys
-    pass: `apiKeyHelper`, `env`, `model`. Our `hooks` always
-    win; `hooks`, `disableAllHooks` and every other key are `INVALID_PARAMS`, as is an
-    `env` name that starts with `SUSHIAI_`. The recorded `cmd` keeps our settings only, so
-    the caller's keys are never persisted or listed. They do reach the holder's argv, so
-    the same user can see them in `ps`.
+  - `claudeSettings` is merged into the single `--settings`. It carries no secrets: it
+    goes into argv, which the same user can read in `ps`. Only the top-level keys
+    `apiKeyHelper` and `model` pass; `apiKeyHelper` should read the key from an
+    environment variable. Variables and secrets go in the session `env`, which reaches
+    the holder's environment, not argv. Our `hooks` always win; `hooks`,
+    `disableAllHooks`, `env` and every other key are `INVALID_PARAMS`. The recorded
+    `cmd` keeps our settings only, so the caller's keys are never persisted or listed.
   - Request errors never echo what the caller sent.
   - `idempotencyKey` (1 to 256 bytes) is key-only: a key that matches an existing session
     record returns that session's id, whatever the other params. The key is kept in the
@@ -201,9 +202,12 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
   answers `INPUT_BACKPRESSURE`, a client that falls too far behind is shut down
   and reattaches.
 - A subscriber that falls behind gets a `session.snapshot` notification (screen
-  plus `seq`) instead of the bytes it missed.
+  plus `seq`) instead of the bytes it missed. Every snapshot (attach, attach with
+  history, resync) ends with the bytes `Screen::feed` holds back (an unfinished escape
+  sequence or UTF-8 character), so the snapshot and its `seq` describe the same bytes.
 - One daemon per home: an exclusive `flock` on `daemon.lock`, taken before
-  recovery; the holder of the lock writes its pid into the file. A reader must first fail
+  recovery (retried for up to 3 s, every 50 ms, because a stopping daemon releases it a
+  moment after its socket is gone; only then `AlreadyRunning`); the holder of the lock writes its pid into the file. A reader must first fail
   `flock(LOCK_EX|LOCK_NB)` on the file before it trusts that pid: after a crash the
   file keeps the old number. The daemon binds
   its socket first (under `umask 077`, so it is never connectable by others, not

@@ -174,3 +174,14 @@ fn history_with_a_wide_character_in_the_last_columns() {
     let first = [SCROLLED, "01234567\u{4e2d}".as_bytes()].concat();
     history_between_chunks_matches_control(&[&first, b"XY"]);
 }
+
+#[test]
+fn a_snapshot_ends_with_the_bytes_the_screen_still_holds() {
+    let mut screen = Screen::new(5, 20);
+    screen.feed(b"abc\x1b[3");
+    assert!(screen.snapshot().ends_with(b"\x1b[3"));
+    // The rest of the sequence arrives: nothing is held, nothing is repeated.
+    screen.feed(b"1mred");
+    assert!(!screen.snapshot().ends_with(b"\x1b[31m"));
+    assert!(String::from_utf8_lossy(&screen.snapshot()).contains("red"));
+}

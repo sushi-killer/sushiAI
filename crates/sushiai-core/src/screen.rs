@@ -73,9 +73,13 @@ impl Screen {
         self.parser.screen().size()
     }
 
-    /// Escape sequences that redraw the current screen from a blank terminal.
+    /// Escape sequences that redraw the current screen from a blank terminal, followed by the
+    /// bytes `feed` still holds back: a client that continues from the stream offset of this
+    /// snapshot then sees the rest of that unfinished sequence complete it.
     pub fn snapshot(&self) -> Vec<u8> {
-        self.parser.screen().contents_formatted()
+        let mut out = self.parser.screen().contents_formatted();
+        out.extend_from_slice(&self.held);
+        out
     }
 
     /// Visible text without formatting.

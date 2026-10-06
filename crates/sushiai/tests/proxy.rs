@@ -413,6 +413,11 @@ fn two_proxies_on_an_empty_home_start_exactly_one_daemon() {
     let mut b = sandbox.proxy();
     assert_eq!(a.hello()["protocol"], 1);
     assert_eq!(b.hello()["protocol"], 1);
+    // The loser waits for the home lock for a few seconds before it gives up.
+    wait_until("the second daemon to give up", 10, || {
+        sandbox.daemon_pids().len() == 1
+    });
+    sleep(Duration::from_millis(500));
     assert_eq!(sandbox.daemon_pids().len(), 1);
 }
 

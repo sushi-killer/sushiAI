@@ -23,8 +23,6 @@ pub enum LaunchError {
     SettingsHooks,
     #[error("claudeSettings key {0:?} is not allowed")]
     SettingsKey(String),
-    #[error("claudeSettings env must be an object of strings without SUSHIAI_ names")]
-    SettingsEnv,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,12 +162,14 @@ pub fn claude_settings(hook_bin: &str, permission_wait_secs: u64) -> Result<Valu
     Ok(json!({ "hooks": Value::Object(hooks) }))
 }
 
-/// Top-level `--settings` keys a caller may set. `apiKeyHelper` is a command the account
-/// owner chooses, like `env`; hooks, `disableAllHooks`, `statusLine` and the rest stay out.
-pub const ALLOWED_SETTINGS: &[&str] = &["apiKeyHelper", "env", "model"];
+/// Top-level `--settings` keys a caller may set. They go into argv, which other users of the
+/// machine can read, so they carry no secrets: `apiKeyHelper` is a command that should read
+/// the key from an environment variable, and variables belong in the session environment.
+/// Hooks, `disableAllHooks`, `statusLine`, the variables key and the rest stay out.
+pub const ALLOWED_SETTINGS: &[&str] = &["apiKeyHelper", "model"];
 
 /// The caller's keys with our `hooks` on top. Only `ALLOWED_SETTINGS` pass; a `hooks` key is
-/// its own error; `env` must hold strings and no `SUSHIAI_` name (those carry the session).
+/// its own error.
 pub fn merge_claude_settings(
     ours: Value,
     caller: &Map<String, Value>,
@@ -180,15 +180,6 @@ pub fn merge_claude_settings(
         }
         if !ALLOWED_SETTINGS.contains(&key.as_str()) {
             return Err(LaunchError::SettingsKey(key.clone()));
-        }
-    }
-    if let Some(vars) = caller.get("env") {
-        let ok = vars.as_object().is_some_and(|m| {
-            m.iter()
-                .all(|(k, v)| v.is_string() && !k.to_ascii_uppercase().starts_with("SUSHIAI_"))
-        });
-        if !ok {
-            return Err(LaunchError::SettingsEnv);
         }
     }
     let mut merged = caller.clone();

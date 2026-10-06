@@ -1,3 +1,4 @@
+const fs = require("node:fs");
 const { execFile } = require("node:child_process");
 const os = require("node:os");
 const path = require("node:path");
@@ -7,6 +8,7 @@ const {
   installPinnedHerdr,
   installRemoteHerdr,
 } = require("./herdr-install.cjs");
+const { installSushiai } = require("./host-install.cjs");
 const { errorDetails } = require("./herdr.cjs");
 const { syncBuiltinSkillsOnHost } = require("./extensions/builtin-skills.cjs");
 
@@ -45,6 +47,18 @@ else
 fi
 `;
 
+/** `{ manifest, binDir }` from the manifest file `npm run build:host` writes
+ * into dist/host, or null when it is not there. The caller passes the result
+ * as the `sushiai` option of setupHost. */
+function loadHostManifest(file) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+    return { manifest, binDir: path.dirname(file) };
+  } catch {
+    return null;
+  }
+}
+
 /** `{ herdr: "installed", claude: "present", ... }` from the script's output. */
 function parseSetup(output) {
   const states = {};
@@ -68,6 +82,7 @@ function setupSummary(states) {
   return [
     ...done,
     ...failed,
+    ...(states.sushiaiError ? [states.sushiaiError] : []),
     ...(states.herdrError ? [states.herdrError.message] : []),
     ...(states.compatibility && !states.compatibility.compatible
       ? states.compatibility.issues
@@ -170,6 +185,8 @@ async function runSetup(
     checkCompatibility = checkHerdrCompatibility,
     runLocalScript = localScript,
     installSkill = syncBuiltinSkillsOnHost,
+    sushiai = null,
+    installSushiaiBinary = installSushiai,
   } = {},
 ) {
   const timeout = 10 * 60 * 1000;
@@ -180,6 +197,22 @@ async function runSetup(
       ? connections.exec(endpoint, "sh -s", { input: script, timeout })
       : runLocalScript(script, timeout);
   const states = parseSetup(await runScript(SETUP_SCRIPT));
+  // `sushiai` is `{ manifest, binDir }` (loadHostManifest). Remote hosts only:
+  // the local machine runs the bundled daemon itself.
+  if (remote && sushiai) {
+    try {
+      const result = await installSushiaiBinary({
+        exec: (command, o) => connections.exec(endpoint, command, o),
+        manifest: sushiai.manifest,
+        binDir: sushiai.binDir,
+      });
+      states.sushiai = result.status;
+      states.sushiaiVersion = result.version;
+    } catch (error) {
+      states.sushiai = "failed";
+      states.sushiaiError = error.message;
+    }
+  }
   const probe = () =>
     checkCompatibility({
       endpoint,
@@ -243,4 +276,5 @@ module.exports = {
   setupSummary,
   setupHost,
   cleanEnvironment,
+  loadHostManifest,
 };

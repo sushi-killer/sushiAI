@@ -7,6 +7,13 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { createHash } = require("node:crypto");
+const {
+  parseProbe,
+  posixCommand,
+  REMOTE_PATH,
+  REMOTE_BIN,
+  UPLOAD_TIMEOUT_MS,
+} = require("./host-install.cjs");
 
 const RUSTUP_COMMAND =
   "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y";
@@ -15,12 +22,7 @@ const RUSTUP_COMMAND =
 const RUSTUP_ARGS = "-y --profile minimal --no-modify-path";
 const RUSTUP_TIMEOUT_MS = 10 * 60 * 1000;
 const REMOTE_DATA = "$HOME/.sushiai/orchestrator";
-const REMOTE_BIN = "$HOME/.sushiai/bin";
-// A non-interactive ssh shell often lacks the user's tool directories.
-const REMOTE_PATH =
-  'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"';
 const BUILD_TIMEOUT_MS = 20 * 60 * 1000;
-const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 const RETRY_AFTER_MS = 30 * 1000;
 // How long a planned install waits for the old daemon to exit.
 const STOP_WAIT_SECONDS = 10;
@@ -46,16 +48,6 @@ function rustFailedMessage(name, reason) {
 
 function stillRunningMessage(name, seconds) {
   return `The old orchestrator on ${name} did not stop within ${seconds} s, so the update was not installed. Check ~/.sushiai/orchestrator/orchd.log on the host, then connect again.`;
-}
-
-/** One `key=value` per line, as the probe scripts below print them. */
-function parseProbe(output) {
-  const values = {};
-  for (const line of String(output).split("\n")) {
-    const match = /^([a-z_]+)=(.*)$/.exec(line.trim());
-    if (match) values[match[1]] = match[2];
-  }
-  return values;
 }
 
 const INFO_SCRIPT = `${REMOTE_PATH}
@@ -329,6 +321,11 @@ class RemoteOrchd {
     this.failure = null;
   }
 
+  // Every script runs under POSIX sh, whatever the host's login shell is.
+  #exec(script, options) {
+    return this.connections.exec(this.endpoint, posixCommand(script), options);
+  }
+
   #set(state, detail = "") {
     this.state = state;
     this.detail = detail;
@@ -381,9 +378,7 @@ class RemoteOrchd {
 
   async #provision() {
     this.#set("connecting");
-    const info = parseProbe(
-      await this.connections.exec(this.endpoint, INFO_SCRIPT),
-    );
+    const info = parseProbe(await this.#exec(INFO_SCRIPT));
     if (!info.home || !info.home.startsWith("/"))
       throw new Error("Could not read the home directory on the host.");
     this.platform = info.platform || "";
@@ -404,7 +399,7 @@ class RemoteOrchd {
       await this.#install(plan, info, want);
     }
     this.#set("starting");
-    await this.connections.exec(this.endpoint, startScript());
+    await this.#exec(startScript());
     const conn = await this.#connect(info.home);
     this.conn = conn;
     return conn;
@@ -434,11 +429,9 @@ class RemoteOrchd {
 
   async #waitStopped() {
     const out = parseProbe(
-      await this.connections.exec(
-        this.endpoint,
-        waitStoppedScript(this.stopWaitSeconds),
-        { timeout: (this.stopWaitSeconds + 30) * 1000 },
-      ),
+      await this.#exec(waitStoppedScript(this.stopWaitSeconds), {
+        timeout: (this.stopWaitSeconds + 30) * 1000,
+      }),
     );
     if (out.stopped !== "1")
       throw new Error(stillRunningMessage(this.name, this.stopWaitSeconds));
@@ -448,7 +441,7 @@ class RemoteOrchd {
     const name = this.name;
     if (plan === "upload") {
       this.#set("installing", `Uploading orchd to ${name}`);
-      await this.connections.exec(this.endpoint, uploadScript(want.hash), {
+      await this.#exec(uploadScript(want.hash), {
         input: await this.artifacts.readBinary(),
         timeout: UPLOAD_TIMEOUT_MS,
       });
@@ -461,7 +454,7 @@ class RemoteOrchd {
         throw new Error(needsRustMessage(name, info.platform));
       this.#set("building", `Installing Rust on ${name}`);
       try {
-        await this.connections.exec(this.endpoint, RUSTUP_SCRIPT, {
+        await this.#exec(RUSTUP_SCRIPT, {
           timeout: RUSTUP_TIMEOUT_MS,
         });
       } catch (error) {
@@ -469,7 +462,7 @@ class RemoteOrchd {
       }
     }
     this.#set("building", `Building orchd on ${name} (a few minutes)`);
-    await this.connections.exec(this.endpoint, buildScript(want.hash), {
+    await this.#exec(buildScript(want.hash), {
       input: await this.artifacts.archive(),
       timeout: BUILD_TIMEOUT_MS,
     });
@@ -501,11 +494,9 @@ class RemoteOrchd {
       for (let attempt = 0; attempt < attempts && !exited; attempt++) {
         try {
           token ??= (
-            await this.connections.exec(
-              this.endpoint,
-              `cat "${dataDir}/control.token"`,
-              { timeout: 8000 },
-            )
+            await this.#exec(`cat "${dataDir}/control.token"`, {
+              timeout: 8000,
+            })
           ).trim();
           if (!token) throw new Error("no token yet");
           await this.request(socketPath, "ping", {}, token, 2000);
@@ -528,7 +519,7 @@ class RemoteOrchd {
 
   async refreshPreflight() {
     this.preflight = parsePreflight(
-      await this.connections.exec(this.endpoint, PREFLIGHT_SCRIPT, {
+      await this.#exec(PREFLIGHT_SCRIPT, {
         timeout: 40000,
       }),
     );

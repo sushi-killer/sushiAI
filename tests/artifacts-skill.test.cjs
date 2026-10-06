@@ -326,3 +326,13 @@ test("the skill goes into the shared agents folder and custom config folders", (
   assert.match(script, /CODEX_HOME:-\$HOME\/\.codex/);
   assert.match(script, /\$HOME\/\.agents/);
 });
+
+test("the skill teaches sushiai open with an absolute path and no Herdr command", () => {
+  const text = fs.readFileSync(
+    path.join(__dirname, "..", "electron", "extensions", "artifacts-skill.md"),
+    "utf8",
+  );
+  assert.match(text, /sushiai open artifacts\/preview "\$\(pwd\)\/artifacts\//);
+  assert.match(text, /SUSHIAI_SESSION_ID/);
+  assert.doesNotMatch(text, /herdr/i);
+});

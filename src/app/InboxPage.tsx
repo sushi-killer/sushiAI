@@ -15,6 +15,14 @@ import type { ExtensionRegistry } from "../extensions/registry.ts";
 import type { InboxGroup, InboxRow } from "./attention.ts";
 import { LOCAL_GROUP, groupKey, groupLabel } from "./workspaceMerge.ts";
 import {
+  askDecision,
+  asksOf,
+  summarizeAskInput,
+  type OpenAsk,
+} from "./daemonAsks.ts";
+import { useDaemonAsks } from "./useDaemonAsks.ts";
+import { daemonHost } from "../daemonSessions.ts";
+import {
   KINDS,
   ageLabel,
   agentName,
@@ -107,11 +115,21 @@ type DiffStat = { files: number; added: number; removed: number };
 const diffOf = (task: Task): DiffStat | undefined =>
   (task as Task & { diffStat?: DiffStat }).diffStat;
 
+/** A session whose screen has not been read yet: free text only. */
+const NO_PROMPT: SessionPrompt = {
+  question: "",
+  detail: [],
+  options: [],
+  multi: false,
+  advance: [],
+  typeSteps: [],
+};
+
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 
-/** A Herdr pane the Inbox can read and type into. */
-const answerable = (row: InboxRow) =>
-  !!row.panel.herdrId && !!row.workspace.connection && !row.panel.ended;
+/** A daemon session the Inbox can read and type into. */
+const answerable = (row: InboxRow) => !!row.panel.sessionId && !row.panel.ended;
+const hostOfRow = (row: InboxRow) => daemonHost(row.workspace.connection);
 
 /** Whether a global key belongs to something else: an open dialog, a text
  * field, or - for anything but J/K - a focused button or link, where Enter is
@@ -131,17 +149,11 @@ function usePaneScreens(rows: InboxRow[]) {
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
   const read = useCallback(async (row: InboxRow) => {
-    const result = await window.bridge?.herdr(
-      row.workspace.connection!,
-      "pane.read",
-      {
-        pane_id: row.panel.herdrId,
-        source: "visible",
-        format: "text",
-        strip_ansi: true,
-      },
+    const result = await window.bridge?.sessionRead(
+      hostOfRow(row),
+      row.panel.sessionId!,
     );
-    const text: unknown = result?.read?.text;
+    const text: unknown = result?.text;
     if (typeof text !== "string") return;
     setScreens((old) =>
       old[row.panel.id] === text ? old : { ...old, [row.panel.id]: text },
@@ -210,9 +222,33 @@ export function InboxPage({
   const inFlight = useRef(false);
   const orchestrator = useOrchestratorEnabled();
 
+  const sessionRows = useMemo(
+    () =>
+      groups
+        .filter((group) => group.key !== "shells")
+        .flatMap((group) => group.rows)
+        .filter(answerable),
+    [groups],
+  );
+  const asks = useDaemonAsks(sessionRows.map(hostOfRow));
+  const asksByPanel = useMemo(() => {
+    const out: Record<string, OpenAsk[]> = {};
+    for (const row of sessionRows) {
+      const open = asksOf(asks, hostOfRow(row), row.panel.sessionId!);
+      if (open.length) out[row.panel.id] = open;
+    }
+    return out;
+  }, [sessionRows, asks]);
   const items = useMemo(
-    () => inboxItems(ownerTasks, allTasks, groups, orchestrator),
-    [ownerTasks, allTasks, groups, orchestrator],
+    () =>
+      inboxItems(
+        ownerTasks,
+        allTasks,
+        groups,
+        orchestrator,
+        new Set(Object.keys(asksByPanel)),
+      ),
+    [ownerTasks, allTasks, groups, orchestrator, asksByPanel],
   );
   const blockedRows = useMemo(
     () =>
@@ -385,13 +421,10 @@ export function InboxPage({
       const { row } = item;
       for (const [index, raw] of steps.entries()) {
         if (index > 0) await sleep(150);
-        await window.bridge!.herdr(
-          row.workspace.connection!,
-          "pane.send_input",
-          {
-            pane_id: row.panel.herdrId,
-            raw,
-          },
+        await window.bridge!.sessionInput(
+          hostOfRow(row),
+          row.panel.sessionId!,
+          raw,
         );
       }
       if (clearNote) setNote(item, "");
@@ -403,6 +436,11 @@ export function InboxPage({
     const steps = prompt && replySteps(prompt, noteOf(item));
     if (steps) send(item, steps, true);
   };
+  const decide = (ask: OpenAsk, decision: "allow" | "deny") =>
+    void act(() => {
+      const [host, response] = askDecision(ask, decision);
+      return window.bridge!.askRespond(host, response);
+    });
   const runAgain = (task: Task) =>
     void act(() => clientOf(task).taskStart(task.id));
   const archive = (task: Task) =>
@@ -563,18 +601,52 @@ export function InboxPage({
     ));
   }
 
+  /** What a permission ask is about: the tool and a short summary of its input. */
+  const askLine = (ask: OpenAsk) =>
+    [ask.tool || "Tool", summarizeAskInput(ask.input)]
+      .filter(Boolean)
+      .join(" · ");
+
+  function askButtons(ask: OpenAsk) {
+    return (
+      <>
+        <button
+          className="ui-button primary"
+          disabled={busy}
+          onClick={() => decide(ask, "allow")}
+        >
+          Allow
+        </button>
+        <button
+          className="ui-button secondary"
+          disabled={busy}
+          onClick={() => decide(ask, "deny")}
+        >
+          Deny
+        </button>
+      </>
+    );
+  }
+
   function sessionView(item: SessionItem) {
     const { row } = item;
     const prompt = prompts[row.panel.id];
+    const open = asksByPanel[row.panel.id] ?? [];
     const meta = `${item.project} · ${hostName(item)} · ${sessionKind(row)}`;
     const context =
-      item.kind === "answer"
-        ? prompt?.question ||
-          `Waiting for your input in the ${row.panel.kind === "terminal" ? "terminal" : "panel"}`
-        : `Finished “${row.panel.title}”`;
+      item.kind === "answer" && open.length
+        ? `${askLine(open[0])}${open.length > 1 ? ` · +${open.length - 1} more` : ""}`
+        : item.kind === "answer"
+          ? prompt?.question ||
+            `Waiting for your input in the ${row.panel.kind === "terminal" ? "terminal" : "panel"}`
+          : `Finished “${row.panel.title}”`;
     const actions = (
       <>
-        {item.kind === "answer" && prompt && optionChips(item, prompt)}
+        {open.length > 0 && askButtons(open[0])}
+        {open.length === 0 &&
+          item.kind === "answer" &&
+          prompt &&
+          optionChips(item, prompt)}
         <button className="ui-button secondary" onClick={() => jump(row)}>
           <ArrowUpRight size={14} />{" "}
           {item.kind === "answer" ? "Jump to panel" : "Open panel"}
@@ -782,6 +854,53 @@ export function InboxPage({
           </p>
         </>
       );
+    const open = asksByPanel[row.panel.id] ?? [];
+    if (open.length > 0) {
+      const screen = (screens[row.panel.id] ?? "")
+        .split("\n")
+        .filter((line) => line.trim())
+        .slice(-12)
+        .join("\n");
+      const note = noteOf(item);
+      const reply = replySteps(prompt ?? NO_PROMPT, note);
+      return (
+        <>
+          {head}
+          <p className="inbox-session-line">
+            {`${agentName(row)} · ${row.panel.title} · ${row.workspace.name}`}
+          </p>
+          {open.map((ask) => (
+            <div key={ask.askId} className="inbox-ask">
+              <p className="inbox-prompt-question">{askLine(ask)}</p>
+              <div className="inbox-prompt-options">{askButtons(ask)}</div>
+            </div>
+          ))}
+          {screen && <pre className="inbox-prompt-detail">{screen}</pre>}
+          <div className="inbox-preview-spacer" />
+          <form
+            className="inbox-reply"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (reply) send(item, reply, true);
+            }}
+          >
+            <input
+              aria-label="Reply to the session"
+              placeholder="Reply in the session…"
+              value={note}
+              onChange={(event) => setNote(item, event.target.value)}
+            />
+            <button
+              type="submit"
+              className="ui-button primary"
+              disabled={busy || !reply}
+            >
+              Send
+            </button>
+          </form>
+        </>
+      );
+    }
     if (!answerable(row) || !prompt)
       return (
         <>

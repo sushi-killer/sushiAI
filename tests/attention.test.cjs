@@ -390,7 +390,7 @@ test("fitNotice cuts a title and body to the caps the main process enforces", as
 test("a shell is never filed under a status bucket, whatever status it carries", async () => {
   const { createAttentionState, observe, inboxGroups, waitingCount } =
     await library;
-  // Herdr reports "unknown" for a plain shell, but a stale or surprising value
+  // A plain shell has no status, but a stale or surprising value
   // must not put a pane nobody observes into Needs input.
   const ws = [
     workspace("w1", [
@@ -409,10 +409,9 @@ test("a shell is never filed under a status bucket, whatever status it carries",
   assert.equal(waitingCount(ws, state, []), 1, "only the agent is waiting");
 });
 
-test("the statuses Herdr really emits carry through to the Inbox groups", async () => {
+test("the panel statuses the daemon mapping emits carry through to the Inbox groups", async () => {
   const { createAttentionState, observe, inboxGroups } = await library;
-  // Values taken from a live `herdr api snapshot`: done, idle, working, and
-  // unknown for a pane with no agent.
+  // done, idle, working, and unknown for a pane with no agent.
   const ws = [
     workspace("w1", [
       panel("finished", "agent", { agent: "claude", status: "done" }),
@@ -466,4 +465,59 @@ test("waitingCount ignores orchd tasks while the orchestrator is off", async () 
   const state = createAttentionState();
   assert.equal(waitingCount([], state, [], tasks), 1);
   assert.equal(waitingCount([], state, [], tasks, false), 0);
+});
+
+test("daemon agentStatus drives attention: blocked needs you, working then idle is done", async () => {
+  const { createAttentionState, observe, inboxGroups, waitingCount } =
+    await library;
+  const { reconcileSessions } = await import("../src/daemonSessions.ts");
+  const bound = {
+    id: "p1",
+    kind: "agent",
+    title: "Claude",
+    agent: "claude",
+    sessionId: "s1",
+  };
+  const ws = [workspace("w1", [bound])];
+  const hosts = (agentStatus) => ({
+    local: {
+      ready: true,
+      listed: true,
+      sessions: {
+        s1: { id: "s1", status: "running", cmd: [], cwd: "/w", agentStatus },
+      },
+    },
+  });
+  const step = (state, list, agentStatus, now) => {
+    const next = reconcileSessions(list, hosts(agentStatus));
+    return { next, ...observe(state, next, now) };
+  };
+  let list = ws;
+  let { state } = observe(createAttentionState(), ws, 0);
+  let result = step(state, list, "working", 1000);
+  ({ state, next: list } = result);
+  assert.deepEqual(result.events, []);
+  assert.equal(list[0].panels[0].status, "working");
+
+  result = step(state, list, "blocked", 2000);
+  ({ state, next: list } = result);
+  assert.deepEqual(
+    result.events.map((e) => e.kind),
+    ["blocked"],
+  );
+  assert.equal(waitingCount(list, state, []), 1);
+
+  result = step(state, list, "working", 3000);
+  ({ state, next: list } = result);
+  assert.deepEqual(result.events, []);
+
+  result = step(state, list, "idle", 4000);
+  ({ state, next: list } = result);
+  assert.deepEqual(
+    result.events.map((e) => e.kind),
+    ["done"],
+  );
+  assert.equal(list[0].panels[0].status, "done");
+  const groupOf = inboxGroups(list, state, []).find((g) => g.rows.length);
+  assert.equal(groupOf.key, "done");
 });

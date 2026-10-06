@@ -23,10 +23,10 @@ export type CoreViewProps = {
   /** The agent pane's own live folder, which can differ from `cwd`. */
   paneCwd?: string;
   connection?: string;
-  /** The Herdr pane id of the agent pane this view is the companion of. */
-  agentHerdrPaneId?: string;
-  /** The Herdr endpoint (local socket or "ssh:<id>") that pane lives on. */
-  herdrEndpoint?: string;
+  /** The daemon session of the agent pane this view is the companion of. */
+  agentSessionId?: string;
+  /** The daemon host ("local" or a connection id) that session runs on. */
+  agentHost?: string;
   /** The title of that agent pane, for "Send to <agent>". */
   agentLabel?: string;
   /** The live sessions the app runs in worktrees. */

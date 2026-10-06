@@ -295,7 +295,7 @@ export function resolvePaneOpen(
 /** A project is identified by where it lives, not just by its path: the same
  * path on a remote host is a different project.
  *
- * Only a remote endpoint changes the answer. A local Herdr socket is still
+ * Only a remote endpoint changes the answer. A local daemon is still
  * this machine, so folding it in would split a project from itself and break
  * again the moment the socket path moved. */
 export function projectScope(cwd: string, connection?: string): string {

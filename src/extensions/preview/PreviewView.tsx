@@ -210,19 +210,20 @@ export function PreviewView(props: CoreViewProps) {
   // Enter that submits it is a second, separate input. A closed agent pane
   // means nothing is sent.
   const sendToAgent = async (message: string) => {
-    if (!window.bridge || !props.agentHerdrPaneId || !props.herdrEndpoint)
+    if (!window.bridge || !props.agentSessionId || !props.agentHost)
       return false;
-    const target = { pane_id: props.agentHerdrPaneId };
-    await window.bridge.herdr(props.herdrEndpoint, "pane.send_input", {
-      ...target,
-      raw: pasteOf(message),
-    });
+    await window.bridge.sessionInput(
+      props.agentHost,
+      props.agentSessionId,
+      pasteOf(message),
+    );
     // The agent TUI needs a moment to take the paste before Enter.
     await new Promise((resolve) => window.setTimeout(resolve, 150));
-    await window.bridge.herdr(props.herdrEndpoint, "pane.send_input", {
-      ...target,
-      raw: "\r",
-    });
+    await window.bridge.sessionInput(
+      props.agentHost,
+      props.agentSessionId,
+      "\r",
+    );
     return true;
   };
   const send = async (items: Comment[]) => {
@@ -371,7 +372,7 @@ export function PreviewView(props: CoreViewProps) {
   // Nothing started yet: the tag row offers Start task; otherwise it shows the run.
   const idle = !starting && !record && !failed;
   const agentLabel = props.agentLabel || "agent";
-  const noAgent = props.agentHerdrPaneId
+  const noAgent = props.agentSessionId
     ? ""
     : "The agent pane is closed; there is nowhere to send this.";
   const title = parsed.meta.title || "";

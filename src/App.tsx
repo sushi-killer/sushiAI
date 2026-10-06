@@ -242,7 +242,7 @@ export function App() {
     notify,
   );
 
-  useOpenSignals(workspaces, extensionRegistry, ws, notify);
+  useOpenSignals(workspaces, extensionRegistry, ws);
   function addExtensionPanel(
     extensionId: string,
     contributionId: string,

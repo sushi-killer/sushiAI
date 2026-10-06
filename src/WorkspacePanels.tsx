@@ -115,7 +115,6 @@ export const PanelHost = memo(function PanelHost({
                   panel={panel}
                   registry={extensionRegistry}
                   cwd={cwd}
-                  socket={socket}
                   endpoint={endpoint}
                   onLaunchAgent={onLaunchAgent}
                   worktrees={worktrees}

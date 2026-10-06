@@ -77,7 +77,17 @@ pub(super) fn settle_unfinished_cost(task: &mut Task, idx: usize, run_dir: &Path
             task.cost_usd += cost;
         }
     }
-    // An attempt reviews once, and its review_cost_usd is saved right after.
+    settle_interrupted_review(task, idx, run_dir, prices);
+}
+
+/// An attempt reviews once, and its review_cost_usd is saved right after: when the daemon
+/// died during the review, its spend is replayed from `runs/<n>/review`.
+pub(super) fn settle_interrupted_review(
+    task: &mut Task,
+    idx: usize,
+    run_dir: &Path,
+    prices: &Prices,
+) {
     let attempt = &task.attempts[idx];
     if attempt.stage == Stage::Implement && attempt.review_cost_usd.is_none() {
         if let Some(o) = replay_run_cost(&run_dir.join("review").join("events.jsonl"), prices) {

@@ -496,6 +496,13 @@ pub(super) async fn run_task_loop(
                     strength: None,
                 });
             let run_dir = app.store.run_dir(&task_id, a.n);
+            // The earlier daemon may have counted this run's spend before it
+            // died (during review); the outcome below counts it again.
+            if let Some(counted) = task.attempts[idx].cost_usd.take() {
+                task.cost_usd -= counted;
+            }
+            // A review it died under is paid for too; the review runs again.
+            settle_interrupted_review(&mut task, idx, &run_dir, &settings.prices);
             task.status = TaskStatus::Running;
             task.updated_at = now_ms();
             let _ = app.store.save_task(&task);

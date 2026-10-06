@@ -259,14 +259,17 @@ pub(super) async fn follow_run(
         codex_version,
         harness::prompt_hash(&argv, None),
     ));
-    record_run(
-        app,
-        &task.id,
-        n,
-        &CostTag::task("implement", &attempt.route_id),
-        (attempt.harness, model.as_deref(), false),
-        &outcome,
-        attempt.started_at,
-    );
+    // A run the earlier daemon already settled (it died during review) has its record.
+    if attempt.fingerprint.is_none() {
+        record_run(
+            app,
+            &task.id,
+            n,
+            &CostTag::task("implement", &attempt.route_id),
+            (attempt.harness, model.as_deref(), false),
+            &outcome,
+            attempt.started_at,
+        );
+    }
     Ok(outcome)
 }

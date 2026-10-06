@@ -9,12 +9,23 @@ use sushiai_agents::codex_hooks::{self, FileOutcome};
 use sushiai_agents::codex_trust::{self, TrustOutcome};
 use sushiai_daemon::{ensure_bin_link, Link, ASK_WAIT_SECS};
 
-/// `$CODEX_HOME`, else `~/.codex`. Not canonicalized: Codex keys its trust by this path.
-fn codex_home(home: &Path) -> PathBuf {
-    match std::env::var_os("CODEX_HOME") {
-        Some(dir) if !dir.is_empty() => dir.into(),
-        _ => home.join(".codex"),
+/// `$CODEX_HOME` resolved (Codex canonicalizes it and keys hook trust by the result), else
+/// `~/.codex` as is (Codex does not resolve its default home). `create` makes the directory.
+fn codex_home(home: &Path, create: bool) -> Result<PathBuf> {
+    let Some(dir) = std::env::var_os("CODEX_HOME").filter(|d| !d.is_empty()) else {
+        let dir = home.join(".codex");
+        if create {
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("cannot create {}", dir.display()))?;
+        }
+        return Ok(dir);
+    };
+    let dir = PathBuf::from(dir);
+    if create {
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("cannot create {}", dir.display()))?;
     }
+    Ok(dir.canonicalize().unwrap_or(dir))
 }
 
 fn hooks_line(verb: &str, file: &Path, outcome: &FileOutcome) -> String {
@@ -35,7 +46,7 @@ fn trust_line(verb: &str, file: &Path, outcome: &TrustOutcome) -> String {
 
 pub fn run(action: Option<&str>) -> Result<()> {
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
-    let codex = codex_home(&home);
+    let codex = codex_home(&home, action == Some("install"))?;
     let hooks = codex.join("hooks.json");
     let config = codex.join("config.toml");
     let ts = SystemTime::now()
@@ -54,8 +65,6 @@ pub fn run(action: Option<&str>) -> Result<()> {
             let bin = base.join("bin/sushiai");
             let bin = bin.to_str().context("HOME is not valid UTF-8")?;
             println!("bin link: {link:?} {bin}");
-            std::fs::create_dir_all(&codex)
-                .with_context(|| format!("cannot create {}", codex.display()))?;
             let installed = codex_hooks::install(&hooks, bin, ASK_WAIT_SECS, ts)?;
             println!(
                 "hooks.json: {}",

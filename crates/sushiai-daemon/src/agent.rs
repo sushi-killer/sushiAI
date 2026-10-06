@@ -231,6 +231,8 @@ pub fn ensure_codex_home(p: &SessionCreate, home_dir: &std::path::Path) -> Resul
     let bin = home_dir.join("bin/sushiai");
     let bin = bin.to_string_lossy();
     std::fs::create_dir_all(dir).map_err(|e| fail("directory", &e))?;
+    // Codex resolves `$CODEX_HOME` and keys hook trust by the resolved path.
+    let dir = dir.canonicalize().map_err(|e| fail("directory", &e))?;
     let (hooks, config) = (dir.join("hooks.json"), dir.join("config.toml"));
     let ts = now_ms() / 1000;
     sushiai_agents::codex_hooks::install(&hooks, &bin, ASK_WAIT_SECS, ts)

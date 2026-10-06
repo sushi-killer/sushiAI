@@ -241,6 +241,35 @@ fn an_account_codex_home_gets_our_hooks_and_trust_once() {
     assert!(!fakes.path(".codex").exists());
 }
 
+/// Codex resolves `$CODEX_HOME` (symlinks included) and keys its hook trust by the resolved
+/// path, so trust written under the unresolved path is never found and Codex asks again.
+#[test]
+fn an_account_codex_home_behind_a_symlink_is_trusted_by_its_resolved_path() {
+    let fakes = Fakes::new();
+    fakes.add("codex", "sleep 60");
+    let real = fakes.path("real-home");
+    fs::create_dir(&real).expect("mkdir");
+    let link = fakes.path("linked-home");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+    let mut sandbox = fakes.sandbox();
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let mut p = agent_params("codex");
+    p["env"] = json!({"CODEX_HOME": link.display().to_string()});
+    client.call("session.create", p);
+    let (_, config) = codex_files(&real);
+    let resolved = fs::canonicalize(&real).expect("canonicalize");
+    let key = format!(
+        "{}:session_start:0:0",
+        resolved.join("hooks.json").display()
+    );
+    assert!(config.contains(&key), "config.toml: {config}");
+    assert!(
+        !config.contains(&link.display().to_string()),
+        "config.toml: {config}"
+    );
+}
+
 const HISTORY: &str =
     "i=1; while [ $i -le 100 ]; do echo histline-$i; i=$((i+1)); done; echo history-done; sleep 60";
 

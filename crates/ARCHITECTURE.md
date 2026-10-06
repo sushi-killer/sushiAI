@@ -14,7 +14,9 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
 
 - `sushiai-protocol`: wire types and the frame codec. No IO, no tokio.
 - `sushiai-core`: pure session logic. Screen model over `vt100`, session
-  transitions, state file model. No IO, no tokio.
+  transitions, state file model. No IO, no tokio. `Screen::resize` moves the rows a
+  shorter screen would drop (above the cursor) into scrollback, as a terminal does; vt100
+  alone drops the bottom rows, the newest output.
 - `sushiai-agents`: pure agent logic: hook payload parsing, the status state
   machine, launch specs, Codex `hooks.json` merging, screen heuristics. No
   tokio; the only IO is `codex_hooks::install`/`uninstall`.
@@ -54,6 +56,15 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
   owner (daemon ask timeout 600 s, `SUSHIAI_ASK_TIMEOUT_MS` overrides it in
   tests) and prints the answer; no answer prints nothing, so the agent asks in
   its terminal.
+- `SUSHIAI_HOOK_LOG=<file>` (opt-in, for debugging) makes `sushiai hook` append one line per
+  run: event, `--agent`, which `SUSHIAI_*` variables are set (names only), the step it
+  reached, the connect result and the daemon reply code. No value or payload is logged.
+- Codex starts with `--no-daemon`. Codex 0.160 otherwise runs interactive turns in a shared
+  background app server per `CODEX_HOME`, and hooks inherit that server's environment, not
+  the session child's: they miss the session variables (or carry those of the session that
+  started the server). In-process Codex runs its hooks with our variables. Codex fires its
+  first hook (`SessionStart`) only with the first prompt, so a fresh Codex session stays
+  `starting` until then; the desktop draws `starting` as neutral, not working.
 - The token is random per session. The daemon keeps only its SHA-256, also in
   `state.json`, so it verifies the unchanged token of a surviving agent after a
   restart. A client never sees the hash.
@@ -90,7 +101,8 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
   replaced, a regular file is never overwritten. `hooks install` then writes
   `hooks.json` and Codex hook trust in `config.toml` (`codex_trust::trust`);
   `uninstall` removes trust first, then the hooks. `$CODEX_HOME` overrides
-  `~/.codex`.
+  `~/.codex`. Codex resolves `$CODEX_HOME` (symlinks too) and keys trust by the resolved
+  path, so we resolve it the same way; the default `~/.codex` is used as is.
 - Trust boundary: any process of the same user that can reach `daemon.sock` (for
   example an agent child that inherits `SUSHIAI_SOCKET`) can call `ask.respond`
   and the other client methods. The socket is mode 0600 and the token only

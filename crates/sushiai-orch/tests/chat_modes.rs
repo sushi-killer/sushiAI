@@ -260,7 +260,7 @@ fn a_prompts_yaml_in_the_data_dir_overrides_a_mode_prompt_on_the_next_turn() {
     assert!(flag_value(&env.argv(), "--append-system-prompt").contains("plan mode"));
 
     std::fs::write(
-        env.daemon.data_dir.path().join("prompts.yaml"),
+        env.daemon.data_dir().join("prompts.yaml"),
         "# owner override\nplan: |\n  You plan like a pirate.\n",
     )
     .unwrap();

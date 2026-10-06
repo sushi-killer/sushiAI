@@ -7,13 +7,14 @@ use common::*;
 use std::time::{Duration, Instant};
 
 #[test]
-fn a_daemon_restart_mid_attempt_keeps_the_interrupted_attempt_s_estimated_cost() {
+fn a_daemon_restart_mid_attempt_keeps_the_surviving_run_s_estimated_cost() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let marker = scripts_dir.path().join("first-run");
     // The first run streams one message (twice, as Claude does per content
-    // block) and a second one, then hangs with no `result`; the daemon is
-    // killed under it. Any later run finishes the task, reporting $0.20 as
-    // the session total so far, as the CLI does.
+    // block) and a second one, then goes on for a few seconds and ends with no
+    // `result`; the daemon is killed under it. The run survives, and the next
+    // daemon follows it: with no reported total, its cost is estimated from the
+    // streamed messages.
     let msg = |id: &str, input: u32, write: u32, read: u32, output: u32| {
         format!(
             r#"{{"type":"assistant","message":{{"model":"claude-opus-5-5","id":"{id}","type":"message","role":"assistant","content":[],"usage":{{"input_tokens":{input},"cache_creation_input_tokens":{write},"cache_read_input_tokens":{read},"output_tokens":{output}}}}},"parent_tool_use_id":null,"session_id":"sess-fake"}}"#
@@ -28,24 +29,19 @@ fn a_daemon_restart_mid_attempt_keeps_the_interrupted_attempt_s_estimated_cost()
     .map(|l| format!("echo '{l}'\n"))
     .concat();
     let body = format!(
-        "#!/bin/sh\ncat > /dev/null\nif [ ! -f {m} ]; then touch {m}\n{first_run}sleep 30; fi\necho changed > CHANGED_MARKER.txt\necho '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}}'\necho '{{\"type\":\"result\",\"total_cost_usd\":0.2,\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}},\"result\":\"done\"}}'\n",
+        "#!/bin/sh\ncat > /dev/null\nif [ ! -f {m} ]; then touch {m}\n{first_run}sleep 3\necho changed > CHANGED_MARKER.txt\nexit 0; fi\necho changed > CHANGED_MARKER.txt\n",
         m = marker.display()
     );
     let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", &body);
     let fake_bins = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
     let data_holder = tempfile::tempdir().unwrap();
-    let data = data_holder.path().to_path_buf();
+    let home = data_holder.path().to_path_buf();
+    let data = home.join("orchestrator");
 
-    let socket1 = data.join("orchd1.sock");
-    let mut first = spawn_orchd_raw(&data, &socket1, &fake_bins);
+    let socket1 = socket_of(&home);
+    let mut first = spawn_daemon(&home, &fake_bins);
     wait_for_socket(&socket1);
-    let token = read_control_token(&data);
-    let mut settings = request_on(
-        &socket1,
-        "settings.get",
-        serde_json::json!({}),
-        Some(&token),
-    );
+    let mut settings = request_on(&socket1, "settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     fit_sandbox(&mut settings);
     settings["briefCheckRoute"] = serde_json::json!("");
@@ -54,7 +50,6 @@ fn a_daemon_restart_mid_attempt_keeps_the_interrupted_attempt_s_estimated_cost()
         &socket1,
         "settings.set",
         serde_json::json!({"settings": settings}),
-        Some(&token),
     );
     let repo = init_git_repo();
     let task = request_on(
@@ -62,7 +57,6 @@ fn a_daemon_restart_mid_attempt_keeps_the_interrupted_attempt_s_estimated_cost()
         "task.create",
         serde_json::json!({"repo": repo.path().to_str().unwrap(),
         "title": "Keeps its spend", "goal": "g", "criteria": [], "verify": ["true"]}),
-        Some(&token),
     );
     let id = task["id"].as_str().unwrap().to_string();
     // Killed only once the daemon has written the last message to disk.
@@ -78,11 +72,10 @@ fn a_daemon_restart_mid_attempt_keeps_the_interrupted_attempt_s_estimated_cost()
     first.kill().unwrap();
     let _ = first.wait();
 
-    let socket2 = data.join("orchd2.sock");
-    let second = spawn_orchd_raw(&data, &socket2, &fake_bins);
+    let socket2 = socket_of(&home);
+    let second = spawn_daemon(&home, &fake_bins);
     wait_for_socket(&socket2);
-    let token = read_control_token(&data);
-    let call = |m: &str, p: serde_json::Value| request_on(&socket2, m, p, Some(&token));
+    let call = |m: &str, p: serde_json::Value| request_on(&socket2, m, p);
     let start = Instant::now();
     let settled = loop {
         let t = call("task.get", serde_json::json!({"id": id}));
@@ -99,20 +92,20 @@ fn a_daemon_restart_mid_attempt_keeps_the_interrupted_attempt_s_estimated_cost()
     // output; msg_1 counted once.
     let estimated = (10.0 * 4.0 + 20_000.0 * 5.0 + 100.0 * 20.0) / 1e6
         + (5.0 * 4.0 + 1_000.0 * 5.0 + 20_000.0 * 0.20 + 2_000.0 * 20.0) / 1e6;
-    let interrupted = &settled["attempts"][0];
-    assert_eq!(interrupted["status"], "interrupted", "{settled}");
-    assert_eq!(interrupted["costEstimated"], true, "{settled}");
-    let cost = interrupted["costUsd"].as_f64().unwrap();
+    assert_eq!(
+        settled["attempts"].as_array().unwrap().len(),
+        1,
+        "{settled}"
+    );
+    let kept = &settled["attempts"][0];
+    assert_eq!(kept["status"], "passed", "{settled}");
+    assert_eq!(kept["costEstimated"], true, "{settled}");
+    let cost = kept["costUsd"].as_f64().unwrap();
     assert!((cost - estimated).abs() < 1e-9, "{cost} vs {estimated}");
-    assert_eq!(interrupted["usage"]["output"], 2_100, "{settled}");
-    // The retry is a fresh session: its own $0.20 is added to the interrupted
-    // run's estimate.
-    let retried = &settled["attempts"][1];
-    assert!(retried.get("costEstimated").is_none());
-    assert_eq!(retried["costUsd"], 0.2, "{settled}");
+    assert_eq!(kept["usage"]["output"], 2_100, "{settled}");
     let total = settled["costUsd"].as_f64().unwrap();
-    assert!((total - (0.2 + estimated)).abs() < 1e-9, "{total}");
-    let _ = call("shutdown", serde_json::json!({}));
+    assert!((total - estimated).abs() < 1e-9, "{total}");
+    stop_daemon(&socket2);
     let _ = wait_for_exit(second, Duration::from_secs(5));
     let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
 }
@@ -180,13 +173,13 @@ fn kill_during_side_run_and_restart(
         ("HANG_ON", hang_on),
     ];
     let data_holder = tempfile::tempdir().unwrap();
-    let data = data_holder.path().to_path_buf();
+    let home = data_holder.path().to_path_buf();
+    let data = home.join("orchestrator");
 
-    let socket1 = data.join("orchd1.sock");
-    let mut first = spawn_orchd_raw(&data, &socket1, &env);
+    let socket1 = socket_of(&home);
+    let mut first = spawn_daemon(&home, &env);
     wait_for_socket(&socket1);
-    let token = read_control_token(&data);
-    let call1 = |m: &str, p: serde_json::Value| request_on(&socket1, m, p, Some(&token));
+    let call1 = |m: &str, p: serde_json::Value| request_on(&socket1, m, p);
     let mut settings = call1("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!(review);
     fit_sandbox(&mut settings);
@@ -212,11 +205,10 @@ fn kill_during_side_run_and_restart(
     first.kill().unwrap();
     let _ = first.wait();
 
-    let socket2 = data.join("orchd2.sock");
-    let second = spawn_orchd_raw(&data, &socket2, &env);
+    let socket2 = socket_of(&home);
+    let second = spawn_daemon(&home, &env);
     wait_for_socket(&socket2);
-    let token = read_control_token(&data);
-    let call = |m: &str, p: serde_json::Value| request_on(&socket2, m, p, Some(&token));
+    let call = |m: &str, p: serde_json::Value| request_on(&socket2, m, p);
     let start = Instant::now();
     let settled = loop {
         let t = call("task.get", serde_json::json!({"id": id}));
@@ -234,7 +226,7 @@ fn kill_during_side_run_and_restart(
         .lines()
         .map(str::to_string)
         .collect();
-    let _ = call("shutdown", serde_json::json!({}));
+    stop_daemon(&socket2);
     let _ = wait_for_exit(second, Duration::from_secs(5));
     let _ = std::fs::remove_dir_all(created["worktree"].as_str().unwrap());
     (settled, runs)
@@ -248,16 +240,19 @@ fn a_daemon_restart_mid_review_keeps_the_review_s_estimated_cost() {
         serde_json::json!({"title": "Reviewed", "goal": "g", "verify": ["true"]}),
         "1/review/events.jsonl",
     );
-    let interrupted = &settled["attempts"][0];
-    assert_eq!(interrupted["status"], "interrupted", "{settled}");
-    let review = interrupted["reviewCostUsd"].as_f64().unwrap();
-    assert!((review - PRICED_MESSAGE_COST).abs() < 1e-9, "{settled}");
-    assert_eq!(interrupted["costUsd"], 0.01, "{settled}");
-    // The retry is a fresh session with its own $0.01, and its own review
-    // adds $0.05.
-    assert_eq!(runs, ["implement", "implement", "review"], "{settled}");
+    // The implement run was over: the next daemon resumes the same attempt and
+    // only the review runs again; the one it died under is paid for too.
+    let kept = &settled["attempts"][0];
+    assert_eq!(
+        settled["attempts"].as_array().unwrap().len(),
+        1,
+        "{settled}"
+    );
+    assert_eq!(kept["status"], "passed", "{settled}");
+    assert_eq!(kept["costUsd"], 0.01, "{settled}");
+    assert_eq!(runs, ["implement", "review"], "{settled}");
     let total = settled["costUsd"].as_f64().unwrap();
-    let expected = 0.01 + PRICED_MESSAGE_COST + 0.01 + 0.05;
+    let expected = 0.01 + PRICED_MESSAGE_COST + 0.05;
     assert!((total - expected).abs() < 1e-9, "{total} vs {expected}");
 }
 

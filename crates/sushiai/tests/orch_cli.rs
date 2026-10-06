@@ -1,8 +1,8 @@
 //! `sushiai mcp`, `sushiai orch hook` and `sushiai orch register` in the real binary.
 //!
-//! The real-daemon tests run against the stub orchestration module (it answers `orch.echo`
-//! only). Where a test needs `orch.task.list` or `orch.hook.stop` answered, a fake daemon in
-//! the test plays the socket: the real `sushiai proxy` and `sushiai mcp` processes talk to it.
+//! The mcp tests run against a real daemon with the orchestration module enabled. The hook
+//! test needs `orch.hook.stop` answered with a chosen reply, so a fake daemon in the test
+//! plays the socket there.
 
 mod common;
 
@@ -145,20 +145,59 @@ impl Drop for Mcp {
     }
 }
 
+/// A one-commit git repo with synthetic content, for `orch.task.create`.
+fn repo(dir: &std::path::Path) -> String {
+    let path = dir.join("repo");
+    std::fs::create_dir_all(&path).expect("repo dir");
+    std::fs::write(path.join("a.txt"), "one\n").expect("file");
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    ] {
+        let status = Command::new("git")
+            .args(&args)
+            .current_dir(&path)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    }
+    path.to_string_lossy().into_owned()
+}
+
 #[test]
-fn mcp_against_the_real_daemon_lists_the_tools_and_reaches_the_module() {
+fn mcp_against_the_real_daemon_lists_the_tools_and_returns_the_modules_tasks() {
     let mut sandbox = Sandbox::new();
+    let modules = sandbox.home().join("modules");
+    std::fs::create_dir_all(&modules).expect("modules dir");
+    std::fs::write(modules.join("orch.enabled"), b"").expect("flag");
     sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let task = client.call(
+        "orch.task.create",
+        json!({"repo": repo(sandbox.home()), "title": "Add a line", "goal": "Add a line",
+               "criteria": ["a.txt has two lines"], "verify": ["true"]}),
+    );
+    let id = task["id"].as_str().expect("task id").to_string();
+
     let mut full = Mcp::start(&sandbox, &[]);
     let init = full.request("initialize", json!({"protocolVersion": "2025-06-18"}));
     assert_eq!(init["result"]["serverInfo"]["name"], "sushiai-orchestrator");
     assert_eq!(full.tool_names().len(), 23);
-    // The stub module has no `task.list`: the error proves the call went through the daemon
-    // to the `orch` module and came back as a tool error, not a protocol error.
     let out = full.request("tools/call", json!({"name": "task_list", "arguments": {}}));
-    assert_eq!(out["result"]["isError"], true, "{out}");
+    assert!(out["result"].get("isError").is_none(), "{out}");
     let text = out["result"]["content"][0]["text"].as_str().expect("text");
-    assert!(text.contains("orch.task.list"), "{text}");
+    let tasks: Value = serde_json::from_str(text).expect("tasks");
+    assert_eq!(tasks[0]["id"], id.as_str(), "{tasks}");
 
     let mut task = Mcp::start(&sandbox, &["--task", "t1"]);
     assert_eq!(
@@ -170,25 +209,14 @@ fn mcp_against_the_real_daemon_lists_the_tools_and_reaches_the_module() {
 }
 
 #[test]
-fn mcp_task_list_call_returns_what_the_module_answers() {
-    let sandbox = Sandbox::new();
-    let fake = FakeDaemon::start(
-        &sandbox,
-        vec![("orch.task.list", json!([{"id": "t-1", "title": "demo"}]))],
-    );
+fn mcp_against_a_daemon_without_the_module_returns_a_tool_error() {
+    let mut sandbox = Sandbox::new();
+    sandbox.start_daemon();
     let mut mcp = Mcp::start(&sandbox, &[]);
-    let out = mcp.request(
-        "tools/call",
-        json!({"name": "task_list", "arguments": {"archived": false}}),
-    );
-    assert!(out["result"].get("isError").is_none(), "{out}");
+    let out = mcp.request("tools/call", json!({"name": "task_list", "arguments": {}}));
+    assert_eq!(out["result"]["isError"], true, "{out}");
     let text = out["result"]["content"][0]["text"].as_str().expect("text");
-    let tasks: Value = serde_json::from_str(text).expect("tasks");
-    assert_eq!(tasks[0]["id"], "t-1");
-    assert_eq!(
-        fake.requests("orch.task.list"),
-        [json!({"archived": false})]
-    );
+    assert!(text.contains("orch.task.list"), "{text}");
 }
 
 #[test]

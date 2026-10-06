@@ -180,7 +180,7 @@ impl Env {
             .as_str()
             .unwrap();
         command
-            .split("--token '")
+            .split("SUSHIAI_ORCH_TOKEN='")
             .nth(1)
             .and_then(|rest| rest.split('\'').next())
             .unwrap()

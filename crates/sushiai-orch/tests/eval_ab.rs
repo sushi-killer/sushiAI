@@ -1,4 +1,4 @@
-//! Black-box integration tests (eval ab): spawn the real `orchd` binary and drive
+//! Black-box integration tests (eval ab): spawn the real `sushiai daemon` and drive
 //! it over its NDJSON unix socket.
 
 mod common;
@@ -21,7 +21,6 @@ fn task_create_rejects_an_unknown_variant_flag() {
             "goal": "g",
             "variant": {"retrymode": "fresh"},
         }),
-        Some(&daemon.token),
     );
     assert!(
         result
@@ -54,7 +53,6 @@ fn task_create_rejects_a_retired_variant_flag_with_a_clear_message() {
                 "goal": "g",
                 "variant": {flag: true},
             }),
-            Some(&daemon.token),
         );
         assert!(
             result
@@ -114,18 +112,16 @@ fn the_planner_s_tier_routes_the_task() {
     let _ = std::fs::remove_dir_all(worktree);
 }
 
-/// Runs `orchd eval run` against `daemon` from `repo`; `(exit ok, stdout, stderr)`.
+/// Runs `sushiai orch eval run` against `daemon` from `repo`; `(exit ok, stdout, stderr)`.
 fn eval_run(daemon: &Daemon, repo: &Path, extra: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_orchd"))
-        .args(["eval", "run", "--data"])
-        .arg(daemon.data_dir())
-        .arg("--socket")
-        .arg(&daemon.socket)
+    let out = Command::new(sushiai_bin())
+        .args(["orch", "eval", "run"])
+        .env("SUSHIAI_HOME", daemon.home.path())
         .arg("--repo")
         .arg(repo)
         .args(extra)
         .output()
-        .expect("run orchd eval");
+        .expect("run sushiai orch eval");
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).to_string(),
@@ -373,7 +369,6 @@ fn task_create_rejects_a_route_override_naming_an_unknown_route_and_creates_noth
                 "goal": "g",
                 "variant": variant,
             }),
-            Some(&daemon.token),
         );
         assert_eq!(result["error"]["message"], expected, "{result}");
     }
@@ -447,9 +442,9 @@ fn a_done_eval_task_counts_as_a_success_only_when_its_check_passes() {
         assert!(!leftover, "a done task's worktree is removed");
     }
 
-    // The daemon's data dir feeds the report exactly as `orchd ab` reads it.
-    let out = Command::new(env!("CARGO_BIN_EXE_orchd"))
-        .args(["ab", "--eval", "set-x", "--data"])
+    // The daemon's data dir feeds the report exactly as `sushiai orch ab` reads it.
+    let out = Command::new(sushiai_bin())
+        .args(["orch", "ab", "--eval", "set-x", "--data"])
         .arg(daemon.data_dir())
         .output()
         .unwrap();

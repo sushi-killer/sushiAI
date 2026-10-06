@@ -263,16 +263,7 @@ fn a_backlog_task_is_never_started_by_the_graph_or_recovery() {
     assert!(!started(gates.path(), "w"));
 
     // Restart onto the same data dir.
-    let _ = daemon.request("shutdown", json!({}));
-    let begin = Instant::now();
-    while !matches!(daemon.child.try_wait(), Ok(Some(_))) {
-        assert!(begin.elapsed() < Duration::from_secs(10), "no exit");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    daemon.socket = daemon.data_dir().join("orchd2.sock");
-    daemon.child = spawn_orchd_logged(daemon.data_dir(), &daemon.socket, &refs);
-    wait_for_socket(&daemon.socket);
-    daemon.token = read_control_token(daemon.data_dir());
+    daemon.restart(&refs);
     std::thread::sleep(Duration::from_millis(1500));
     let w = get(&daemon, &wid);
     assert_eq!(w["status"], "queued", "{w}");

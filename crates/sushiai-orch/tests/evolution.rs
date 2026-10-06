@@ -465,12 +465,7 @@ fn evolution_approve_creates_a_task_and_adopts_it_once_done() {
     assert_eq!(settled["status"], "done", "{settled}");
 
     // Approving twice is refused.
-    let again = raw_request_with_params(
-        &daemon.socket,
-        "evolution.approve",
-        json!({"id": id}),
-        Some(&daemon.token),
-    );
+    let again = raw_request_with_params(&daemon.socket, "evolution.approve", json!({"id": id}));
     assert!(again["error"].is_object(), "{again}");
 
     // The next run sees the finished task and adopts the proposal.
@@ -508,17 +503,12 @@ fn evolution_harness_proposal_has_an_eval_command_and_cannot_be_approved() {
     let id = p["id"].as_str().unwrap().to_string();
     assert_eq!(p["status"], "proposed", "{p}");
     let cmd = p["evalCommand"].as_str().unwrap();
-    assert!(cmd.starts_with("orchd eval run"), "{cmd}");
+    assert!(cmd.contains(" orch eval run "), "{cmd}");
     assert!(cmd.contains("--arms"), "{cmd}");
     assert!(cmd.contains("readOnce"), "{cmd}");
-    assert!(cmd.contains("--socket"), "{cmd}");
+    assert!(cmd.contains("SUSHIAI_HOME="), "{cmd}");
 
-    let refused = raw_request_with_params(
-        &daemon.socket,
-        "evolution.approve",
-        json!({"id": id}),
-        Some(&daemon.token),
-    );
+    let refused = raw_request_with_params(&daemon.socket, "evolution.approve", json!({"id": id}));
     assert!(refused["error"].is_object(), "{refused}");
 
     let adopted = daemon.request("evolution.adopt", json!({"id": id}));
@@ -565,13 +555,16 @@ fn evolution_cli_runs_and_adopts_over_the_default_socket() {
         &["a", "b"],
         1,
     );
-    let bin = env!("CARGO_BIN_EXE_orchd");
-    let data = daemon.data_dir().to_str().unwrap();
+    let evolve = |args: &[&str]| {
+        Command::new(sushiai_bin())
+            .args(["orch", "evolve"])
+            .args(args)
+            .env("SUSHIAI_HOME", daemon.home.path())
+            .output()
+            .unwrap()
+    };
 
-    let out = Command::new(bin)
-        .args(["evolve", "--data", data])
-        .output()
-        .unwrap();
+    let out = evolve(&[]);
     assert!(
         out.status.success(),
         "{}",
@@ -582,10 +575,7 @@ fn evolution_cli_runs_and_adopts_over_the_default_socket() {
 
     let list = wait_for_proposals(&daemon, 1);
     let id = list[0]["id"].as_str().unwrap();
-    let out = Command::new(bin)
-        .args(["evolve", "--data", data, "--adopt", id])
-        .output()
-        .unwrap();
+    let out = evolve(&["--adopt", id]);
     assert!(
         out.status.success(),
         "{}",
@@ -598,12 +588,9 @@ fn evolution_cli_runs_and_adopts_over_the_default_socket() {
         "adopted"
     );
 
-    let bad = Command::new(bin).args(["evolve"]).output().unwrap();
+    let bad = evolve(&["--bogus"]);
     assert_eq!(bad.status.code(), Some(2));
-    let missing = Command::new(bin)
-        .args(["evolve", "--data", data, "--adopt", "nope"])
-        .output()
-        .unwrap();
+    let missing = evolve(&["--adopt", "nope"]);
     assert_eq!(missing.status.code(), Some(1));
     daemon.shutdown_and_wait();
 }

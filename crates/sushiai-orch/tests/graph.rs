@@ -472,7 +472,7 @@ fn task_create_rejects_a_dependency_cycle_and_an_unknown_id_and_creates_nothing(
             .as_object_mut()
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
-        raw_request_with_params(&daemon.socket, "task.create", params, Some(&daemon.token))
+        raw_request_with_params(&daemon.socket, "task.create", params)
     };
     let parent = create(serde_json::json!({}))["result"].clone();
     let parent_id = parent["id"].as_str().unwrap().to_string();
@@ -769,19 +769,13 @@ fn a_task_queued_for_a_slot_cannot_become_a_parent_and_implements_alone() {
         ("PARTS_LOG", log.path().to_str().unwrap()),
     ];
     let data_holder = tempfile::tempdir().unwrap();
-    let data = data_holder.path().to_path_buf();
+    let home = data_holder.path().to_path_buf();
     // `parallel` is read at startup: save it with a first daemon, then
     // restart onto the saved settings in the same data dir.
-    let socket1 = data.join("orchd1.sock");
-    let first = spawn_orchd_raw(&data, &socket1, &fake_bins);
+    let socket1 = socket_of(&home);
+    let first = spawn_daemon(&home, &fake_bins);
     wait_for_socket(&socket1);
-    let token1 = read_control_token(&data);
-    let mut settings = request_on(
-        &socket1,
-        "settings.get",
-        serde_json::json!({}),
-        Some(&token1),
-    );
+    let mut settings = request_on(&socket1, "settings.get", serde_json::json!({}));
     settings["parallel"] = serde_json::json!(1);
     settings["briefCheckRoute"] = serde_json::json!("");
     settings["review"] = serde_json::json!("");
@@ -791,16 +785,14 @@ fn a_task_queued_for_a_slot_cannot_become_a_parent_and_implements_alone() {
         &socket1,
         "settings.set",
         serde_json::json!({"settings": settings}),
-        Some(&token1),
     );
-    let _ = request_on(&socket1, "shutdown", serde_json::json!({}), Some(&token1));
+    stop_daemon(&socket1);
     let _ = wait_for_exit(first, Duration::from_secs(5));
 
-    let socket = data.join("orchd2.sock");
-    let child = spawn_orchd_raw(&data, &socket, &fake_bins);
+    let socket = socket_of(&home);
+    let child = spawn_daemon(&home, &fake_bins);
     wait_for_socket(&socket);
-    let token = read_control_token(&data);
-    let call = |m: &str, p: serde_json::Value| request_on(&socket, m, p, Some(&token));
+    let call = |m: &str, p: serde_json::Value| request_on(&socket, m, p);
     let repo = init_git_repo();
     let repo_path = repo.path().to_str().unwrap();
 
@@ -826,7 +818,6 @@ fn a_task_queued_for_a_slot_cannot_become_a_parent_and_implements_alone() {
         "task.create",
         serde_json::json!({"repo": repo_path, "title": "Late child", "goal": "g",
         "parent": parent_id}),
-        Some(&token),
     );
     let message = rejected["error"]["message"].as_str().unwrap_or_default();
     assert!(message.contains("already running"), "{rejected}");
@@ -849,7 +840,7 @@ fn a_task_queued_for_a_slot_cannot_become_a_parent_and_implements_alone() {
     };
     assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
 
-    let _ = call("shutdown", serde_json::json!({}));
+    stop_daemon(&socket);
     let _ = wait_for_exit(child, Duration::from_secs(5));
     for t in [&blocker, &parent] {
         let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
@@ -1396,16 +1387,7 @@ fn answering_stop_after_a_daemon_restart_stops_the_parent_and_its_subtasks() {
         .collect();
 
     // Restart onto the same data dir: no live loop holds the question now.
-    let _ = daemon.request("shutdown", serde_json::json!({}));
-    let start = Instant::now();
-    while !matches!(daemon.child.try_wait(), Ok(Some(_))) {
-        assert!(start.elapsed() < Duration::from_secs(10), "no exit");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    daemon.socket = daemon.data_dir().join("orchd2.sock");
-    daemon.child = spawn_orchd_logged(daemon.data_dir(), &daemon.socket, &env);
-    wait_for_socket(&daemon.socket);
-    daemon.token = read_control_token(daemon.data_dir());
+    daemon.restart(&env);
 
     daemon.request(
         "task.answer",

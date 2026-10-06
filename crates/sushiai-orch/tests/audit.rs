@@ -136,7 +136,6 @@ fn repo_audit_refuses_a_directory_that_is_not_a_git_repository() {
         &daemon.socket,
         "repo.audit",
         serde_json::json!({"repo": plain.path().to_str().unwrap()}),
-        Some(&daemon.token),
     );
     assert_eq!(
         result["error"]["message"], "repo is not a git repository",

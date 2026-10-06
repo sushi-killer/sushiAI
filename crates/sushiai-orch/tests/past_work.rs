@@ -412,10 +412,9 @@ fn no_notes_and_no_matches_means_no_section() {
 #[test]
 fn repo_notes_round_trip_through_a_subdirectory_and_a_restart() {
     let data = tempfile::tempdir().unwrap();
-    let socket = data.path().join("orchd1.sock");
-    let child = spawn_orchd_raw(data.path(), &socket, &[]);
+    let socket = socket_of(data.path());
+    let child = spawn_daemon(data.path(), &[]);
     wait_for_socket(&socket);
-    let token = read_control_token(data.path());
     let repo = init_git_repo();
     std::fs::create_dir_all(repo.path().join("sub")).unwrap();
     let repo_str = repo.path().to_str().unwrap();
@@ -424,7 +423,6 @@ fn repo_notes_round_trip_through_a_subdirectory_and_a_restart() {
         &socket,
         "repo.notes.add",
         json!({"repo": repo_str, "text": " Keep it small "}),
-        Some(&token),
     );
     assert_eq!(note["text"], "Keep it small");
     assert_eq!(note["source"], "owner");
@@ -437,7 +435,6 @@ fn repo_notes_round_trip_through_a_subdirectory_and_a_restart() {
         &socket,
         "repo.notes.list",
         json!({"repo": sub.to_str().unwrap()}),
-        Some(&token),
     );
     assert_eq!(listed["notes"], json!([note]));
 
@@ -445,50 +442,37 @@ fn repo_notes_round_trip_through_a_subdirectory_and_a_restart() {
         &socket,
         "repo.notes.add",
         json!({"repo": repo_str, "text": "  "}),
-        Some(&token),
     );
     assert!(empty["error"].is_object(), "{empty}");
     let unknown = raw_request_with_params(
         &socket,
         "repo.notes.remove",
         json!({"repo": repo_str, "id": "nope"}),
-        Some(&token),
     );
     assert!(unknown["error"].is_object(), "{unknown}");
 
     // Its own file, not settings.json.
-    assert!(data.path().join("repo-notes.json").exists());
-    let settings = std::fs::read_to_string(data.path().join("settings.json")).unwrap_or_default();
+    assert!(data.path().join("orchestrator/repo-notes.json").exists());
+    let settings =
+        std::fs::read_to_string(data.path().join("orchestrator/settings.json")).unwrap_or_default();
     assert!(!settings.contains("Keep it small"));
 
-    let _ = request_on(&socket, "shutdown", json!({}), Some(&token));
+    stop_daemon(&socket);
     let _ = wait_for_exit(child, Duration::from_secs(15));
-    let socket2 = data.path().join("orchd2.sock");
-    let second = spawn_orchd_raw(data.path(), &socket2, &[]);
+    let socket2 = socket_of(data.path());
+    let second = spawn_daemon(data.path(), &[]);
     wait_for_socket(&socket2);
-    let token2 = read_control_token(data.path());
-    let after = request_on(
-        &socket2,
-        "repo.notes.list",
-        json!({"repo": repo_str}),
-        Some(&token2),
-    );
+    let after = request_on(&socket2, "repo.notes.list", json!({"repo": repo_str}));
     assert_eq!(after["notes"][0]["id"], id.as_str(), "{after}");
 
     request_on(
         &socket2,
         "repo.notes.remove",
         json!({"repo": repo_str, "id": id}),
-        Some(&token2),
     );
-    let gone = request_on(
-        &socket2,
-        "repo.notes.list",
-        json!({"repo": repo_str}),
-        Some(&token2),
-    );
+    let gone = request_on(&socket2, "repo.notes.list", json!({"repo": repo_str}));
     assert_eq!(gone["notes"], json!([]));
-    let _ = request_on(&socket2, "shutdown", json!({}), Some(&token2));
+    stop_daemon(&socket2);
     let _ = wait_for_exit(second, Duration::from_secs(15));
 }
 

@@ -9,15 +9,11 @@ use std::time::{Duration, Instant};
 const PASS_SCRIPT: &str = "#!/bin/sh\ninput=\"$(cat)\"\ncase \"$input\" in *SLOW*) sleep 30 ;; esac\necho changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n";
 
 /// A first daemon with review off, on a data dir the test keeps.
-fn first_daemon(
-    data: &std::path::Path,
-    env: &[(&str, &str)],
-) -> (OrchdChild, std::path::PathBuf, String) {
-    let socket = data.join("orchd1.sock");
-    let child = spawn_orchd_raw(data, &socket, env);
+fn first_daemon(home: &std::path::Path, env: &[(&str, &str)]) -> (DaemonChild, std::path::PathBuf) {
+    let socket = socket_of(home);
+    let child = spawn_daemon(home, env);
     wait_for_socket(&socket);
-    let token = read_control_token(data);
-    let mut settings = request_on(&socket, "settings.get", serde_json::json!({}), Some(&token));
+    let mut settings = request_on(&socket, "settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     settings["briefCheckRoute"] = serde_json::json!("");
     settings["answerPolicy"] = serde_json::json!(false);
@@ -26,26 +22,14 @@ fn first_daemon(
         &socket,
         "settings.set",
         serde_json::json!({"settings": settings}),
-        Some(&token),
     );
-    (child, socket, token)
+    (child, socket)
 }
 
-fn wait_status(
-    socket: &std::path::Path,
-    token: &str,
-    id: &str,
-    want: &str,
-    secs: u64,
-) -> serde_json::Value {
+fn wait_status(socket: &std::path::Path, id: &str, want: &str, secs: u64) -> serde_json::Value {
     let start = Instant::now();
     loop {
-        let t = request_on(
-            socket,
-            "task.get",
-            serde_json::json!({"id": id}),
-            Some(token),
-        );
+        let t = request_on(socket, "task.get", serde_json::json!({"id": id}));
         if t["status"] == want {
             return t;
         }
@@ -68,8 +52,9 @@ fn a_final_check_killed_by_a_shutdown_is_rerun_not_failed() {
     );
     let env = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
     let data_holder = tempfile::tempdir().unwrap();
-    let data = data_holder.path().to_path_buf();
-    let (first, socket1, token1) = first_daemon(&data, &env);
+    let home = data_holder.path().to_path_buf();
+    let data = home.join("orchestrator");
+    let (first, socket1) = first_daemon(&home, &env);
     let repo = init_git_repo();
     let task = request_on(
         &socket1,
@@ -82,7 +67,6 @@ fn a_final_check_killed_by_a_shutdown_is_rerun_not_failed() {
             "finalVerify": [final_check],
             "start": true,
         }),
-        Some(&token1),
     );
     let id = task["id"].as_str().unwrap().to_string();
     let start = Instant::now();
@@ -93,7 +77,7 @@ fn a_final_check_killed_by_a_shutdown_is_rerun_not_failed() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = request_on(&socket1, "shutdown", serde_json::json!({}), Some(&token1));
+    stop_daemon(&socket1);
     let _ = wait_for_exit(first, Duration::from_secs(15));
 
     let stopped: serde_json::Value = serde_json::from_str(
@@ -102,18 +86,22 @@ fn a_final_check_killed_by_a_shutdown_is_rerun_not_failed() {
     .unwrap();
     for a in stopped["attempts"].as_array().unwrap() {
         assert!(a.get("failure").is_none_or(|f| f.is_null()), "{stopped}");
-        assert_eq!(a["status"], "interrupted", "{stopped}");
+        // A run still going at the shutdown stays `running` for the next daemon to follow;
+        // one past its run is interrupted by the cancelled final check.
+        assert!(
+            matches!(a["status"].as_str(), Some("running" | "interrupted")),
+            "{stopped}"
+        );
     }
 
-    let socket2 = data.join("orchd2.sock");
-    let second = spawn_orchd_raw(&data, &socket2, &env);
+    let socket2 = socket_of(&home);
+    let second = spawn_daemon(&home, &env);
     wait_for_socket(&socket2);
-    let token2 = read_control_token(&data);
-    let done = wait_status(&socket2, &token2, &id, "done", 30);
+    let done = wait_status(&socket2, &id, "done", 30);
     for a in done["attempts"].as_array().unwrap() {
         assert!(a.get("failure").is_none_or(|f| f.is_null()), "{done}");
     }
-    let _ = request_on(&socket2, "shutdown", serde_json::json!({}), Some(&token2));
+    stop_daemon(&socket2);
     let _ = wait_for_exit(second, Duration::from_secs(15));
     let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
 }
@@ -124,10 +112,11 @@ fn a_dependency_question_that_became_moot_while_down_clears_on_start() {
     let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", PASS_SCRIPT);
     let env = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
     let data_holder = tempfile::tempdir().unwrap();
-    let data = data_holder.path().to_path_buf();
-    let (first, socket1, token1) = first_daemon(&data, &env);
+    let home = data_holder.path().to_path_buf();
+    let data = home.join("orchestrator");
+    let (first, socket1) = first_daemon(&home, &env);
     let repo = init_git_repo();
-    let call1 = |m: &str, p: serde_json::Value| request_on(&socket1, m, p, Some(&token1));
+    let call1 = |m: &str, p: serde_json::Value| request_on(&socket1, m, p);
     let dep = call1(
         "task.create",
         serde_json::json!({"repo": repo.path().to_str().unwrap(), "title": "Slow dependency",
@@ -140,14 +129,14 @@ fn a_dependency_question_that_became_moot_while_down_clears_on_start() {
         "goal": "g", "verify": ["true"], "dependsOn": [dep_id]}),
     );
     let dependent_id = dependent["id"].as_str().unwrap().to_string();
-    wait_status(&socket1, &token1, &dep_id, "running", 10);
+    wait_status(&socket1, &dep_id, "running", 10);
     call1("task.stop", serde_json::json!({"id": dep_id}));
-    let asked = wait_status(&socket1, &token1, &dependent_id, "waiting", 15);
+    let asked = wait_status(&socket1, &dependent_id, "waiting", 15);
     assert!(asked["question"]["text"]
         .as_str()
         .unwrap()
         .contains("stopped"));
-    let _ = call1("shutdown", serde_json::json!({}));
+    stop_daemon(&socket1);
     let _ = wait_for_exit(first, Duration::from_secs(15));
 
     // While the daemon is down the dependency ends up done.
@@ -157,13 +146,12 @@ fn a_dependency_question_that_became_moot_while_down_clears_on_start() {
     t["status"] = serde_json::json!("done");
     std::fs::write(&path, t.to_string()).unwrap();
 
-    let socket2 = data.join("orchd2.sock");
-    let second = spawn_orchd_raw(&data, &socket2, &env);
+    let socket2 = socket_of(&home);
+    let second = spawn_daemon(&home, &env);
     wait_for_socket(&socket2);
-    let token2 = read_control_token(&data);
-    let done = wait_status(&socket2, &token2, &dependent_id, "done", 30);
+    let done = wait_status(&socket2, &dependent_id, "done", 30);
     assert!(done.get("question").is_none_or(|q| q.is_null()), "{done}");
-    let _ = request_on(&socket2, "shutdown", serde_json::json!({}), Some(&token2));
+    stop_daemon(&socket2);
     let _ = wait_for_exit(second, Duration::from_secs(15));
     for w in [&dep, &dependent] {
         let _ = std::fs::remove_dir_all(w["worktree"].as_str().unwrap());
@@ -216,21 +204,15 @@ fn an_accept_answer_after_a_restart_commits_the_last_attempt() {
         ("ACCEPT_REPLY", "false"),
     ];
     let data_holder = tempfile::tempdir().unwrap();
-    let data = data_holder.path().to_path_buf();
-    let (first, socket1, token1) = first_daemon(&data, &env);
-    let mut settings = request_on(
-        &socket1,
-        "settings.get",
-        serde_json::json!({}),
-        Some(&token1),
-    );
+    let home = data_holder.path().to_path_buf();
+    let (first, socket1) = first_daemon(&home, &env);
+    let mut settings = request_on(&socket1, "settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("claude-opus");
     settings["maxAttempts"] = serde_json::json!(1);
     request_on(
         &socket1,
         "settings.set",
         serde_json::json!({"settings": settings}),
-        Some(&token1),
     );
     let repo = init_git_repo();
     let task = request_on(
@@ -243,29 +225,26 @@ fn an_accept_answer_after_a_restart_commits_the_last_attempt() {
             "verify": ["true"],
             "start": true,
         }),
-        Some(&token1),
     );
     let id = task["id"].as_str().unwrap().to_string();
-    let waiting = wait_status(&socket1, &token1, &id, "waiting", 20);
+    let waiting = wait_status(&socket1, &id, "waiting", 20);
     assert!(waiting["question"]["options"]
         .to_string()
         .contains("accept the last attempt as done"));
-    let _ = request_on(&socket1, "shutdown", serde_json::json!({}), Some(&token1));
+    stop_daemon(&socket1);
     let _ = wait_for_exit(first, Duration::from_secs(15));
 
-    let socket2 = data.join("orchd2.sock");
-    let second = spawn_orchd_raw(&data, &socket2, &env);
+    let socket2 = socket_of(&home);
+    let second = spawn_daemon(&home, &env);
     wait_for_socket(&socket2);
-    let token2 = read_control_token(&data);
-    let still = wait_status(&socket2, &token2, &id, "waiting", 15);
+    let still = wait_status(&socket2, &id, "waiting", 15);
     assert!(still["question"].is_object(), "{still}");
     request_on(
         &socket2,
         "task.answer",
         serde_json::json!({"id": id, "answer": "Accept the last attempt as done"}),
-        Some(&token2),
     );
-    let done = wait_status(&socket2, &token2, &id, "done", 30);
+    let done = wait_status(&socket2, &id, "done", 30);
     let implement = done["attempts"]
         .as_array()
         .unwrap()
@@ -284,7 +263,7 @@ fn an_accept_answer_after_a_restart_commits_the_last_attempt() {
             .contains("Owner: accepted attempt 1 as done; review skipped"),
         "{done}"
     );
-    let _ = request_on(&socket2, "shutdown", serde_json::json!({}), Some(&token2));
+    stop_daemon(&socket2);
     let _ = wait_for_exit(second, Duration::from_secs(15));
     let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
 }

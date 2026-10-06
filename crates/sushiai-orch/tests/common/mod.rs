@@ -1,11 +1,11 @@
 //! Shared helpers for the black-box integration tests: spawning and
-//! guarding `orchd serve` daemons, fake harness scripts, and request/poll
-//! helpers. Each test file compiles this as its own module, so any one
+//! guarding real `sushiai daemon` processes with the orchestrator module enabled, fake
+//! harness scripts, and request/poll helpers. Each test file compiles this as its own module, so any one
 //! file uses only a subset.
 
 #![allow(dead_code)]
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -13,80 +13,115 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 pub struct Daemon {
-    pub child: OrchdChild,
+    pub child: DaemonChild,
     pub socket: PathBuf,
-    pub data_dir: tempfile::TempDir,
-    pub token: String,
+    /// The sushiAI home the daemon runs in; the orchestrator lives in `<home>/orchestrator`.
+    pub home: tempfile::TempDir,
+    data: PathBuf,
 }
 
-/// Reads `<data>/control.token` (spec item A), trimmed -- the same file the
-/// real Electron client reads before it can call anything but `ping`.
-pub fn read_control_token(data_dir: &Path) -> String {
-    let start = Instant::now();
-    let path = data_dir.join("control.token");
-    loop {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            let trimmed = text.trim().to_string();
-            if !trimmed.is_empty() {
-                return trimmed;
-            }
-        }
-        if start.elapsed() > Duration::from_secs(10) {
-            panic!("orchd did not write control.token in time");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
+/// A `sushiai daemon` child that dies with its owner. Every daemon a test spawns -- through
+/// `Daemon` or `spawn_daemon` -- is held in one, so a test that panics, or simply forgets to
+/// shut its daemon down, cannot leave an orphan behind. Dropping reaps the process.
+pub struct DaemonChild(Child);
 
-/// An `orchd serve` child that dies with its owner. Every daemon a test
-/// spawns -- through `Daemon` or `spawn_orchd_raw` -- is held in one, so a
-/// test that panics, or simply forgets to shut its daemon down, cannot leave
-/// an orphan behind (they used to pile up across runs, each with a temp
-/// `--data` dir). Dropping reaps the process and asserts it is really gone.
-pub struct OrchdChild(Child);
-
-impl std::ops::Deref for OrchdChild {
+impl std::ops::Deref for DaemonChild {
     type Target = Child;
     fn deref(&self) -> &Child {
         &self.0
     }
 }
 
-impl std::ops::DerefMut for OrchdChild {
+impl std::ops::DerefMut for DaemonChild {
     fn deref_mut(&mut self) -> &mut Child {
         &mut self.0
     }
 }
 
-impl Drop for OrchdChild {
+impl Drop for DaemonChild {
     fn drop(&mut self) {
         if let Ok(None) = self.0.try_wait() {
             let _ = self.0.kill();
             let _ = self.0.wait();
         }
-        if !std::thread::panicking() {
-            assert!(
-                matches!(self.0.try_wait(), Ok(Some(_))),
-                "orchd serve (pid {}) survived its guard",
-                self.0.id()
-            );
-        }
     }
+}
+
+/// The `sushiai` binary the daemon runs as: `SUSHIAI_BIN`, else the workspace's own build,
+/// brought up to date once per test process.
+pub fn sushiai_bin() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        if let Some(bin) = std::env::var_os("SUSHIAI_BIN") {
+            return PathBuf::from(bin);
+        }
+        let exe = std::env::current_exe().expect("test executable");
+        let profile_dir = exe
+            .parent()
+            .and_then(Path::parent)
+            .expect("target profile dir")
+            .to_path_buf();
+        let mut build = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+        build
+            .args(["build", "--quiet", "-p", "sushiai"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"));
+        if profile_dir.file_name().is_some_and(|n| n == "release") {
+            build.arg("--release");
+        }
+        assert!(
+            build.status().is_ok_and(|s| s.success()),
+            "cargo build -p sushiai failed"
+        );
+        profile_dir.join("sushiai")
+    })
+}
+
+/// The daemon socket of a home.
+pub fn socket_of(home: &Path) -> PathBuf {
+    home.join("daemon.sock")
+}
+
+/// Starts `sushiai daemon` in `home` with the orchestrator module enabled, like the desktop
+/// does. Its output goes to `<home>/daemon-test.log`.
+pub fn spawn_daemon(home: &Path, extra_env: &[(&str, &str)]) -> DaemonChild {
+    let user = home.join("user");
+    std::fs::create_dir_all(user.join(".codex")).unwrap();
+    std::fs::write(
+        user.join(".gitconfig"),
+        "[user]\n\tname = orch test\n\temail = orch-test@example.invalid\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(home.join("modules")).unwrap();
+    std::fs::write(home.join("modules/orch.enabled"), b"").unwrap();
+    let log = std::fs::File::options()
+        .create(true)
+        .append(true)
+        .open(home.join(DAEMON_LOG))
+        .unwrap();
+    let mut cmd = Command::new(sushiai_bin());
+    cmd.arg("daemon")
+        .env("SUSHIAI_HOME", home)
+        .env("HOME", &user)
+        .env("CODEX_HOME", user.join(".codex"))
+        .stdout(log.try_clone().unwrap())
+        .stderr(log);
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    DaemonChild(cmd.spawn().expect("failed to spawn sushiai daemon"))
 }
 
 impl Daemon {
     pub fn spawn(extra_env: &[(&str, &str)]) -> Daemon {
-        let data_dir = tempfile::tempdir().unwrap();
-        let socket = data_dir.path().join("orchd.sock");
-        let child = spawn_orchd_logged(data_dir.path(), &socket, extra_env);
+        let home = tempfile::tempdir().unwrap();
+        let socket = socket_of(home.path());
+        let child = spawn_daemon(home.path(), extra_env);
         wait_for_socket(&socket);
-        let token = read_control_token(data_dir.path());
         // The brief check is one more harness run: off, so tests that count
         // runs, cost or argv see only the runs they set up. Its own tests
         // turn it back on.
         {
-            let mut settings =
-                request_on(&socket, "settings.get", serde_json::json!({}), Some(&token));
+            let mut settings = request_on(&socket, "settings.get", serde_json::json!({}));
             settings["briefCheckRoute"] = serde_json::json!("");
             // The answer policy answers routine questions itself; the other
             // tests wait for them. Its own tests turn it back on.
@@ -98,40 +133,53 @@ impl Daemon {
                 &socket,
                 "settings.set",
                 serde_json::json!({"settings": settings}),
-                Some(&token),
             );
         }
+        let data = home.path().join("orchestrator");
         Daemon {
             child,
             socket,
-            data_dir,
-            token,
+            home,
+            data,
         }
     }
 
+    /// The orchestrator's own folder.
     pub fn data_dir(&self) -> &Path {
-        self.data_dir.path()
+        &self.data
     }
 
     pub fn request(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
-        request_on(&self.socket, method, params, Some(&self.token))
+        request_on(&self.socket, method, params)
     }
 
     /// The `error` text of a request that is expected to fail.
     pub fn request_error(&self, method: &str, params: serde_json::Value) -> String {
-        let v = raw_request_with_params(&self.socket, method, params, Some(&self.token));
+        let v = raw_request_with_params(&self.socket, method, params);
         v["error"].to_string()
+    }
+
+    /// Stops the daemon and waits for it to exit, then starts a new one in the same home.
+    pub fn restart(&mut self, extra_env: &[(&str, &str)]) {
+        stop_daemon(&self.socket);
+        let begin = Instant::now();
+        while !matches!(self.child.try_wait(), Ok(Some(_))) {
+            assert!(begin.elapsed() < Duration::from_secs(15), "no exit");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.child = spawn_daemon(self.home.path(), extra_env);
+        wait_for_socket(&self.socket);
     }
 
     pub fn shutdown_and_wait(mut self) {
         // Drop still runs afterwards and finds the child already reaped.
-        let _ = self.request("shutdown", serde_json::json!({}));
+        stop_daemon(&self.socket);
         let start = Instant::now();
         loop {
             if let Ok(Some(_)) = self.child.try_wait() {
                 return;
             }
-            if start.elapsed() > Duration::from_secs(5) {
+            if start.elapsed() > Duration::from_secs(15) {
                 let _ = self.child.kill();
                 let _ = self.child.wait();
                 return;
@@ -143,8 +191,8 @@ impl Daemon {
 
 /// Whether this process cannot apply a `sandbox-exec` profile. macOS refuses
 /// to nest one inside another (`sandbox_apply: Operation not permitted`),
-/// which is exactly where this suite runs when orchd's own Native-sandboxed
-/// verify runs `npm run test:orchd`: every daemon here would then fail each
+/// which is exactly where this suite runs when the orchestrator's own Native-sandboxed
+/// verify runs `cargo test`: every daemon here would then fail each
 /// verify command it wraps in `sandbox-exec`, so no task could ever pass.
 pub fn native_sandbox_unavailable() -> bool {
     static UNAVAILABLE: OnceLock<bool> = OnceLock::new();
@@ -168,51 +216,9 @@ pub fn fit_sandbox(settings: &mut serde_json::Value) {
     }
 }
 
-pub fn spawn_orchd_raw(data_dir: &Path, socket: &Path, extra_env: &[(&str, &str)]) -> OrchdChild {
-    let bin = env!("CARGO_BIN_EXE_orchd");
-    let mut cmd = Command::new(bin);
-    cmd.args([
-        "serve",
-        "--data",
-        data_dir.to_str().unwrap(),
-        "--socket",
-        socket.to_str().unwrap(),
-    ])
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
-    for (k, v) in extra_env {
-        cmd.env(k, v);
-    }
-    OrchdChild(cmd.spawn().expect("failed to spawn orchd"))
-}
-
-/// The file a `Daemon`'s orchd writes its stdout and stderr to: next to its
-/// socket, so a request that gets no answer can say what the daemon printed.
-const DAEMON_LOG: &str = "orchd-test.log";
-
-/// Like `spawn_orchd_raw`, but output goes to `DAEMON_LOG` instead of a pipe
-/// nobody reads, which would block orchd once it fills.
-pub fn spawn_orchd_logged(
-    data_dir: &Path,
-    socket: &Path,
-    extra_env: &[(&str, &str)],
-) -> OrchdChild {
-    let log = std::fs::File::create(socket.with_file_name(DAEMON_LOG)).unwrap();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_orchd"));
-    cmd.args([
-        "serve",
-        "--data",
-        data_dir.to_str().unwrap(),
-        "--socket",
-        socket.to_str().unwrap(),
-    ])
-    .stdout(log.try_clone().unwrap())
-    .stderr(log);
-    for (k, v) in extra_env {
-        cmd.env(k, v);
-    }
-    OrchdChild(cmd.spawn().expect("failed to spawn orchd"))
-}
+/// The file a daemon's output goes to, inside its home, so a request that gets no answer can
+/// say what the daemon printed.
+const DAEMON_LOG: &str = "daemon-test.log";
 
 /// Why a request got no answer: the tail of the daemon's log, when there is one.
 fn no_answer(socket: &Path, method: &str) -> String {
@@ -220,26 +226,26 @@ fn no_answer(socket: &Path, method: &str) -> String {
     let tail: Vec<&str> = log.lines().rev().take(40).collect();
     let tail: Vec<&str> = tail.into_iter().rev().collect();
     format!(
-        "orchd closed the connection without answering {method}; daemon log tail:\n{}",
+        "the daemon closed the connection without answering {method}; log tail:\n{}",
         tail.join("\n")
     )
 }
 
 pub fn wait_for_socket(socket: &Path) {
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(10) {
+    while start.elapsed() < Duration::from_secs(15) {
         if socket.exists() && UnixStream::connect(socket).is_ok() {
             return;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("orchd did not open its socket in time");
+    panic!("the daemon did not open its socket in time");
 }
 
 /// Wait for a raw (non-`Daemon`) child to exit, returning its status and
 /// everything it wrote to stderr. Used for the singleton/bind-failure tests
 /// where the process under test is expected to exit quickly on its own.
-pub fn wait_for_exit(mut child: OrchdChild, timeout: Duration) -> (ExitStatus, String) {
+pub fn wait_for_exit(mut child: DaemonChild, timeout: Duration) -> (ExitStatus, String) {
     let start = Instant::now();
     loop {
         if let Ok(Some(status)) = child.try_wait() {
@@ -252,43 +258,74 @@ pub fn wait_for_exit(mut child: OrchdChild, timeout: Duration) -> (ExitStatus, S
         if start.elapsed() > timeout {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("orchd did not exit within {timeout:?}");
+            panic!("the daemon did not exit within {timeout:?}");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
 }
 
-pub fn request_on(
-    socket: &Path,
-    method: &str,
-    params: serde_json::Value,
-    auth: Option<&str>,
-) -> serde_json::Value {
-    let mut stream = UnixStream::connect(socket).expect("connect to orchd socket");
-    let id = "1";
-    let mut req = serde_json::json!({"id": id, "method": method, "params": params});
-    if let Some(token) = auth {
-        req["auth"] = serde_json::json!(token);
-    }
-    let mut line = req.to_string();
-    line.push('\n');
-    stream.write_all(line.as_bytes()).unwrap();
-    stream.flush().unwrap();
+/// One JSON frame: a 4-byte big-endian length (kind byte included), the kind `J`, the text.
+fn frame(text: &str) -> Vec<u8> {
+    let mut out = ((text.len() + 1) as u32).to_be_bytes().to_vec();
+    out.push(b'J');
+    out.extend_from_slice(text.as_bytes());
+    out
+}
 
-    let mut reader = BufReader::new(stream);
-    let mut response_line = String::new();
-    reader
-        .read_line(&mut response_line)
-        .expect("read response line from orchd");
-    if response_line.trim().is_empty() {
-        // `shutdown` may exit before its reply is written: that is the answer.
-        if method == "shutdown" {
-            return serde_json::Value::Null;
+/// Opens a connection, says `hello`, sends `orch.<method>` and returns the response envelope
+/// (`result` or `error`). `None` when the daemon closed the connection first.
+fn exchange(socket: &Path, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
+    let mut stream = UnixStream::connect(socket).expect("connect to the daemon socket");
+    let hello = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "hello",
+        "params": {"protocol": 1, "client": "orch-test"}});
+    let call = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": format!("orch.{method}"),
+        "params": params});
+    stream.write_all(&frame(&hello.to_string())).unwrap();
+    stream.write_all(&frame(&call.to_string())).unwrap();
+    stream.flush().unwrap();
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        while pending.len() >= 4 {
+            let len = u32::from_be_bytes(pending[..4].try_into().unwrap()) as usize;
+            if pending.len() < 4 + len {
+                break;
+            }
+            let body: Vec<u8> = pending.drain(..4 + len).skip(5).collect();
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
+                if v["id"] == 2 {
+                    return Some(v);
+                }
+            }
         }
-        panic!("{}", no_answer(socket, method));
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => pending.extend_from_slice(&buf[..n]),
+        }
     }
-    let v: serde_json::Value =
-        serde_json::from_str(response_line.trim()).expect("valid JSON response");
+}
+
+/// Asks the daemon to stop. It may exit before it answers.
+pub fn stop_daemon(socket: &Path) {
+    let Ok(mut stream) = UnixStream::connect(socket) else {
+        return;
+    };
+    let hello = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "hello",
+        "params": {"protocol": 1, "client": "orch-test"}});
+    let stop = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "daemon.shutdown",
+        "params": {}});
+    let _ = stream.write_all(&frame(&hello.to_string()));
+    let _ = stream.write_all(&frame(&stop.to_string()));
+    let _ = stream.flush();
+    let mut sink = [0u8; 4096];
+    while matches!(stream.read(&mut sink), Ok(n) if n > 0) {}
+}
+
+/// The `result` of `orch.<method>`; panics on an error answer.
+pub fn request_on(socket: &Path, method: &str, params: serde_json::Value) -> serde_json::Value {
+    let Some(v) = exchange(socket, method, params) else {
+        panic!("{}", no_answer(socket, method));
+    };
     if let Some(err) = v.get("error") {
         panic!("{method} failed: {err}");
     }
@@ -308,42 +345,24 @@ pub fn init_git_repo() -> tempfile::TempDir {
         assert!(status.success(), "git {args:?} failed");
     };
     run(&["init", "-q"]);
-    run(&["config", "user.email", "orchd-test@example.com"]);
-    run(&["config", "user.name", "orchd test"]);
+    run(&["config", "user.email", "orch-test@example.invalid"]);
+    run(&["config", "user.name", "orch test"]);
     std::fs::write(dir.path().join("README.md"), "hello\n").unwrap();
     run(&["add", "."]);
     run(&["commit", "-q", "-m", "init"]);
     dir
 }
 
+/// The whole response envelope of `orch.<method>`, error or not.
 pub fn raw_request_with_params(
     socket: &Path,
     method: &str,
     params: serde_json::Value,
-    auth: Option<&str>,
 ) -> serde_json::Value {
-    let mut stream = UnixStream::connect(socket).unwrap();
-    let mut req = serde_json::json!({"id": "1", "method": method, "params": params});
-    if let Some(token) = auth {
-        req["auth"] = serde_json::json!(token);
-    }
-    stream.write_all(format!("{req}\n").as_bytes()).unwrap();
-    stream.flush().unwrap();
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    if line.trim().is_empty() {
-        if method == "shutdown" {
-            return serde_json::Value::Null;
-        }
-        panic!("{}", no_answer(socket, method));
-    }
-    serde_json::from_str(line.trim()).unwrap()
+    exchange(socket, method, params).unwrap_or_else(|| panic!("{}", no_answer(socket, method)))
 }
 
-/// `kill(pid, 0)`: true iff a process with this pid exists and is
-/// signalable by us -- the standard liveness probe, same one
-/// `main.rs::acquire_singleton` uses for the daemon's own pidfile.
+/// `kill(pid, 0)`: true iff a process with this pid exists and is signalable by us.
 pub fn is_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
@@ -375,8 +394,8 @@ pub fn poll_task_status(daemon: &Daemon, task_id: &str, timeout: Duration) -> se
 }
 
 /// A fake Claude harness that exercises the *real* Stop hook path: it reads
-/// the `--settings` file it was given, extracts the hook command orchd
-/// wired up, and actually runs `orchd hook stop` against the live daemon
+/// the `--settings` file it was given, extracts the hook command the orchestrator
+/// wired up, and actually runs `sushiai orch hook stop` against the live daemon
 /// with a synthetic payload on stdin -- the same way the real Claude CLI
 /// would, just without a real model in the loop.
 pub const FAKE_CLAUDE_HOOK_SCRIPT: &str = r#"#!/usr/bin/env node

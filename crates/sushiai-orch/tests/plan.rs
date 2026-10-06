@@ -203,19 +203,13 @@ fn a_task_waiting_on_its_plan_question_does_not_hold_a_parallel_slot() {
         ("PLAN_ASK_QUESTION", "1"),
     ];
     let data_holder = tempfile::tempdir().unwrap();
-    let data = data_holder.path().to_path_buf();
+    let home = data_holder.path().to_path_buf();
     // `parallel` is read at startup: save it with a first daemon, then
     // restart onto the saved settings in the same data dir.
-    let socket1 = data.join("orchd1.sock");
-    let first = spawn_orchd_raw(&data, &socket1, &fake_bins);
+    let socket1 = socket_of(&home);
+    let first = spawn_daemon(&home, &fake_bins);
     wait_for_socket(&socket1);
-    let token1 = read_control_token(&data);
-    let mut settings = request_on(
-        &socket1,
-        "settings.get",
-        serde_json::json!({}),
-        Some(&token1),
-    );
+    let mut settings = request_on(&socket1, "settings.get", serde_json::json!({}));
     settings["parallel"] = serde_json::json!(1);
     settings["briefCheckRoute"] = serde_json::json!("");
     settings["review"] = serde_json::json!("");
@@ -225,16 +219,14 @@ fn a_task_waiting_on_its_plan_question_does_not_hold_a_parallel_slot() {
         &socket1,
         "settings.set",
         serde_json::json!({"settings": settings}),
-        Some(&token1),
     );
-    let _ = request_on(&socket1, "shutdown", serde_json::json!({}), Some(&token1));
+    stop_daemon(&socket1);
     let _ = wait_for_exit(first, Duration::from_secs(5));
 
-    let socket = data.join("orchd2.sock");
-    let child = spawn_orchd_raw(&data, &socket, &fake_bins);
+    let socket = socket_of(&home);
+    let child = spawn_daemon(&home, &fake_bins);
     wait_for_socket(&socket);
-    let token = read_control_token(&data);
-    let call = |m: &str, p: serde_json::Value| request_on(&socket, m, p, Some(&token));
+    let call = |m: &str, p: serde_json::Value| request_on(&socket, m, p);
 
     let repo = init_git_repo();
     let drafting = call(
@@ -250,7 +242,6 @@ fn a_task_waiting_on_its_plan_question_does_not_hold_a_parallel_slot() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(call("ping", serde_json::json!({}))["running"], 0);
 
     let passing = call(
         "task.create",
@@ -270,7 +261,7 @@ fn a_task_waiting_on_its_plan_question_does_not_hold_a_parallel_slot() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    let _ = call("shutdown", serde_json::json!({}));
+    stop_daemon(&socket);
     let _ = wait_for_exit(child, Duration::from_secs(5));
     for t in [&drafting, &passing] {
         let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());

@@ -213,7 +213,6 @@ fn gc_removes_done_and_archived_worktrees_but_never_running_or_unknown_ones() {
             .unwrap();
         assert!(out.status.success(), "git {args:?}");
     };
-    let socket = daemon.socket.to_str().unwrap().to_string();
 
     // A done task whose worktree is back, as an older orchd left it.
     let done = create(&daemon, repo.path(), "Done", true);
@@ -287,9 +286,9 @@ fn gc_removes_done_and_archived_worktrees_but_never_running_or_unknown_ones() {
     assert!(Path::new(&stopped_wt).exists(), "dry run changes nothing");
 
     // The CLI reaches the same RPC.
-    let cli = Command::new(env!("CARGO_BIN_EXE_orchd"))
-        .args(["gc", "--dry-run", "--socket", &socket, "--data"])
-        .arg(daemon.data_dir())
+    let cli = Command::new(sushiai_bin())
+        .args(["orch", "gc", "--dry-run"])
+        .env("SUSHIAI_HOME", daemon.home.path())
         .output()
         .unwrap();
     assert!(cli.status.success(), "{cli:?}");
@@ -298,9 +297,9 @@ fn gc_removes_done_and_archived_worktrees_but_never_running_or_unknown_ones() {
     assert_eq!(printed["dryRun"], true);
     assert!(Path::new(&stopped_wt).exists());
 
-    let real = Command::new(env!("CARGO_BIN_EXE_orchd"))
-        .args(["gc", "--socket", &socket, "--data"])
-        .arg(daemon.data_dir())
+    let real = Command::new(sushiai_bin())
+        .args(["orch", "gc"])
+        .env("SUSHIAI_HOME", daemon.home.path())
         .output()
         .unwrap();
     assert!(real.status.success(), "{real:?}");

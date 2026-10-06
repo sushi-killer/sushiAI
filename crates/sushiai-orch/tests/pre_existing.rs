@@ -271,25 +271,19 @@ fn a_drop_answered_after_a_restart_sticks_for_a_single_task() {
     let script = fake_harness_script(scripts.path(), "fake.sh", FAKE);
     let env = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
     let data_holder = tempfile::tempdir().unwrap();
-    let data = data_holder.path().to_path_buf();
+    let home = data_holder.path().to_path_buf();
     let log = scripts.path().join("ran.log");
     let check = format!("echo ran >> {}; false", log.display());
 
-    let socket1 = data.join("orchd1.sock");
-    let first = spawn_orchd_raw(&data, &socket1, &env);
+    let socket1 = socket_of(&home);
+    let first = spawn_daemon(&home, &env);
     wait_for_socket(&socket1);
-    let token1 = read_control_token(&data);
-    let mut settings = request_on(&socket1, "settings.get", json!({}), Some(&token1));
+    let mut settings = request_on(&socket1, "settings.get", json!({}));
     settings["review"] = json!("claude-opus");
     settings["briefCheckRoute"] = json!("");
     settings["answerPolicy"] = json!(false);
     fit_sandbox(&mut settings);
-    request_on(
-        &socket1,
-        "settings.set",
-        json!({"settings": settings}),
-        Some(&token1),
-    );
+    request_on(&socket1, "settings.set", json!({"settings": settings}));
     let repo = init_git_repo();
     let task = request_on(
         &socket1,
@@ -302,13 +296,12 @@ fn a_drop_answered_after_a_restart_sticks_for_a_single_task() {
             "finalVerify": [check],
             "start": true,
         }),
-        Some(&token1),
     );
     let id = task["id"].as_str().unwrap().to_string();
-    let wait_waiting = |socket: &Path, token: &str| {
+    let wait_waiting = |socket: &Path| {
         let start = std::time::Instant::now();
         loop {
-            let t = request_on(socket, "task.get", json!({"id": id}), Some(token));
+            let t = request_on(socket, "task.get", json!({"id": id}));
             if t["status"] == "waiting" {
                 return t;
             }
@@ -316,30 +309,28 @@ fn a_drop_answered_after_a_restart_sticks_for_a_single_task() {
             std::thread::sleep(Duration::from_millis(100));
         }
     };
-    let waiting = wait_waiting(&socket1, &token1);
+    let waiting = wait_waiting(&socket1);
     assert_eq!(
         waiting["question"]["kind"], "preexisting_failure",
         "{waiting}"
     );
     let base_sha = waiting["baseSha"].as_str().unwrap().to_string();
-    let _ = request_on(&socket1, "shutdown", json!({}), Some(&token1));
+    stop_daemon(&socket1);
     let _ = wait_for_exit(first, Duration::from_secs(15));
 
-    let socket2 = data.join("orchd2.sock");
-    let second = spawn_orchd_raw(&data, &socket2, &env);
+    let socket2 = socket_of(&home);
+    let second = spawn_daemon(&home, &env);
     wait_for_socket(&socket2);
-    let token2 = read_control_token(&data);
-    let still = wait_waiting(&socket2, &token2);
+    let still = wait_waiting(&socket2);
     assert_eq!(still["question"]["kind"], "preexisting_failure", "{still}");
     request_on(
         &socket2,
         "task.answer",
         json!({"id": id, "answer": "drop this check"}),
-        Some(&token2),
     );
     let start = std::time::Instant::now();
     let done = loop {
-        let t = request_on(&socket2, "task.get", json!({"id": id}), Some(&token2));
+        let t = request_on(&socket2, "task.get", json!({"id": id}));
         if matches!(t["status"].as_str(), Some("done" | "failed")) {
             break t;
         }
@@ -376,7 +367,7 @@ fn a_drop_answered_after_a_restart_sticks_for_a_single_task() {
         .count();
     assert_eq!(drops, 1, "{decisions:?}");
 
-    let _ = request_on(&socket2, "shutdown", json!({}), Some(&token2));
+    stop_daemon(&socket2);
     let _ = wait_for_exit(second, Duration::from_secs(15));
     let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
 }

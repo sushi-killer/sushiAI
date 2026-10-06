@@ -238,7 +238,7 @@ fn hook_token(daemon: &Daemon, task_id: &str) -> String {
         "Edit|Write|MultiEdit|NotebookEdit|mcp__.*|WebFetch|WebSearch"
     );
     command
-        .split("--token '")
+        .split("SUSHIAI_ORCH_TOKEN='")
         .nth(1)
         .and_then(|rest| rest.split('\'').next())
         .unwrap()

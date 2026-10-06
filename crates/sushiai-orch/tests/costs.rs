@@ -103,8 +103,8 @@ fn a_full_task_leaves_one_cost_record_per_run_and_summaries_add_up() {
     assert_eq!(by_stage.len(), 4, "{detail}");
 
     // The CLI prints the same rows.
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_orchd"))
-        .args(["costs", "--json", "--by", "stage", "--data"])
+    let out = std::process::Command::new(sushiai_bin())
+        .args(["orch", "costs", "--json", "--by", "stage", "--data"])
         .arg(daemon.data_dir())
         .output()
         .unwrap();

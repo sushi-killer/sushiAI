@@ -88,7 +88,7 @@ fn project_secrets_reach_the_agent_but_not_settings_logs_or_task_mcp() {
         std::fs::read_to_string(marker).unwrap(),
         "invented-project-secret-42|unset"
     );
-    let task_dir = daemon.data_dir.path().join("tasks").join(task_id);
+    let task_dir = daemon.data_dir().join("tasks").join(task_id);
     let task_mcp = std::fs::read_to_string(task_dir.join("mcp.json")).unwrap();
     assert!(task_mcp.contains("${PROJECT_TOKEN}"));
     assert!(!task_mcp.contains("invented-project-secret-42"));
@@ -158,19 +158,13 @@ fn a_task_waiting_for_its_owner_does_not_hold_a_parallel_slot() {
     );
     let fake_bins = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
     let data_holder = tempfile::tempdir().unwrap();
-    let data = data_holder.path().to_path_buf();
+    let home = data_holder.path().to_path_buf();
     // `parallel` is read at startup: save it with a first daemon, then
     // restart onto the saved settings in the same data dir.
-    let socket1 = data.join("orchd1.sock");
-    let first = spawn_orchd_raw(&data, &socket1, &fake_bins);
+    let socket1 = socket_of(&home);
+    let first = spawn_daemon(&home, &fake_bins);
     wait_for_socket(&socket1);
-    let token1 = read_control_token(&data);
-    let mut settings = request_on(
-        &socket1,
-        "settings.get",
-        serde_json::json!({}),
-        Some(&token1),
-    );
+    let mut settings = request_on(&socket1, "settings.get", serde_json::json!({}));
     settings["maxAttempts"] = serde_json::json!(1);
     settings["parallel"] = serde_json::json!(1);
     settings["review"] = serde_json::json!("");
@@ -181,16 +175,14 @@ fn a_task_waiting_for_its_owner_does_not_hold_a_parallel_slot() {
         &socket1,
         "settings.set",
         serde_json::json!({"settings": settings}),
-        Some(&token1),
     );
-    let _ = request_on(&socket1, "shutdown", serde_json::json!({}), Some(&token1));
+    stop_daemon(&socket1);
     let _ = wait_for_exit(first, Duration::from_secs(5));
 
-    let socket = data.join("orchd2.sock");
-    let child = spawn_orchd_raw(&data, &socket, &fake_bins);
+    let socket = socket_of(&home);
+    let child = spawn_daemon(&home, &fake_bins);
     wait_for_socket(&socket);
-    let token = read_control_token(&data);
-    let call = |m: &str, p: serde_json::Value| request_on(&socket, m, p, Some(&token));
+    let call = |m: &str, p: serde_json::Value| request_on(&socket, m, p);
 
     let repo = init_git_repo();
     let waiting = call(
@@ -207,7 +199,6 @@ fn a_task_waiting_for_its_owner_does_not_hold_a_parallel_slot() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(call("ping", serde_json::json!({}))["running"], 0);
 
     let passing = call(
         "task.create",
@@ -227,7 +218,7 @@ fn a_task_waiting_for_its_owner_does_not_hold_a_parallel_slot() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    let _ = call("shutdown", serde_json::json!({}));
+    stop_daemon(&socket);
     let _ = wait_for_exit(child, Duration::from_secs(5));
     for t in [&waiting, &passing] {
         let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
@@ -358,30 +349,24 @@ fn a_task_is_carried_onto_its_base_when_the_base_moves_mid_attempt() {
 }
 
 #[test]
-fn a_task_interrupted_by_a_daemon_crash_resumes_on_restart() {
+fn a_task_whose_daemon_crashed_resumes_its_surviving_run_on_restart() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let marker = scripts_dir.path().join("first-run");
-    // The first run hangs (the daemon is killed under it); any later run
-    // finishes the task.
+    // The first run is slow and outlives the daemon killed under it; the next daemon
+    // follows that same run and finishes the task without a second attempt.
     let body = format!(
-        "#!/bin/sh\ncat > /dev/null\nif [ ! -f {m} ]; then touch {m}; sleep 30; fi\necho changed > CHANGED_MARKER.txt\necho '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}}'\necho '{{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}},\"result\":\"done\"}}'\n",
+        "#!/bin/sh\ncat > /dev/null\nif [ ! -f {m} ]; then touch {m}; sleep 4; fi\necho changed > CHANGED_MARKER.txt\necho '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}}'\necho '{{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}},\"result\":\"done\"}}'\n",
         m = marker.display()
     );
     let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", &body);
     let fake_bins = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
     let data_holder = tempfile::tempdir().unwrap();
-    let data = data_holder.path().to_path_buf();
+    let home = data_holder.path().to_path_buf();
 
-    let socket1 = data.join("orchd1.sock");
-    let mut first = spawn_orchd_raw(&data, &socket1, &fake_bins);
+    let socket1 = socket_of(&home);
+    let mut first = spawn_daemon(&home, &fake_bins);
     wait_for_socket(&socket1);
-    let token = read_control_token(&data);
-    let mut settings = request_on(
-        &socket1,
-        "settings.get",
-        serde_json::json!({}),
-        Some(&token),
-    );
+    let mut settings = request_on(&socket1, "settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     fit_sandbox(&mut settings);
     settings["briefCheckRoute"] = serde_json::json!("");
@@ -390,7 +375,6 @@ fn a_task_interrupted_by_a_daemon_crash_resumes_on_restart() {
         &socket1,
         "settings.set",
         serde_json::json!({"settings": settings}),
-        Some(&token),
     );
     let repo = init_git_repo();
     let task = request_on(
@@ -398,7 +382,6 @@ fn a_task_interrupted_by_a_daemon_crash_resumes_on_restart() {
         "task.create",
         serde_json::json!({"repo": repo.path().to_str().unwrap(),
         "title": "Survives a crash", "goal": "g", "criteria": [], "verify": ["true"], "start": true}),
-        Some(&token),
     );
     let id = task["id"].as_str().unwrap().to_string();
     let start = Instant::now();
@@ -412,11 +395,10 @@ fn a_task_interrupted_by_a_daemon_crash_resumes_on_restart() {
     first.kill().unwrap();
     let _ = first.wait();
 
-    let socket2 = data.join("orchd2.sock");
-    let second = spawn_orchd_raw(&data, &socket2, &fake_bins);
+    let socket2 = socket_of(&home);
+    let second = spawn_daemon(&home, &fake_bins);
     wait_for_socket(&socket2);
-    let token = read_control_token(&data);
-    let call = |m: &str, p: serde_json::Value| request_on(&socket2, m, p, Some(&token));
+    let call = |m: &str, p: serde_json::Value| request_on(&socket2, m, p);
     let start = Instant::now();
     let settled = loop {
         let t = call("task.get", serde_json::json!({"id": id}));
@@ -429,8 +411,13 @@ fn a_task_interrupted_by_a_daemon_crash_resumes_on_restart() {
         );
         std::thread::sleep(Duration::from_millis(100));
     };
-    assert_eq!(settled["attempts"][0]["status"], "interrupted");
-    let _ = call("shutdown", serde_json::json!({}));
+    assert_eq!(
+        settled["attempts"].as_array().unwrap().len(),
+        1,
+        "{settled}"
+    );
+    assert_eq!(settled["attempts"][0]["status"], "passed", "{settled}");
+    stop_daemon(&socket2);
     let _ = wait_for_exit(second, Duration::from_secs(5));
     let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
 }
@@ -443,24 +430,18 @@ fn hang_shutdown_and_restart(stop_first: bool) -> serde_json::Value {
     let scripts_dir = tempfile::tempdir().unwrap();
     let marker = scripts_dir.path().join("first-run");
     let body = format!(
-        "#!/bin/sh\ncat > /dev/null\nif [ ! -f {m} ]; then touch {m}; sleep 30; fi\necho changed > CHANGED_MARKER.txt\necho '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}}'\necho '{{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}},\"result\":\"done\"}}'\n",
+        "#!/bin/sh\ncat > /dev/null\nif [ ! -f {m} ]; then touch {m}; sleep 4; fi\necho changed > CHANGED_MARKER.txt\necho '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}}'\necho '{{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}},\"result\":\"done\"}}'\n",
         m = marker.display()
     );
     let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", &body);
     let fake_bins = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
     let data_holder = tempfile::tempdir().unwrap();
-    let data = data_holder.path().to_path_buf();
+    let home = data_holder.path().to_path_buf();
 
-    let socket1 = data.join("orchd1.sock");
-    let first = spawn_orchd_raw(&data, &socket1, &fake_bins);
+    let socket1 = socket_of(&home);
+    let first = spawn_daemon(&home, &fake_bins);
     wait_for_socket(&socket1);
-    let token = read_control_token(&data);
-    let mut settings = request_on(
-        &socket1,
-        "settings.get",
-        serde_json::json!({}),
-        Some(&token),
-    );
+    let mut settings = request_on(&socket1, "settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     fit_sandbox(&mut settings);
     settings["briefCheckRoute"] = serde_json::json!("");
@@ -469,7 +450,6 @@ fn hang_shutdown_and_restart(stop_first: bool) -> serde_json::Value {
         &socket1,
         "settings.set",
         serde_json::json!({"settings": settings}),
-        Some(&token),
     );
     let repo = init_git_repo();
     let task = request_on(
@@ -477,7 +457,6 @@ fn hang_shutdown_and_restart(stop_first: bool) -> serde_json::Value {
         "task.create",
         serde_json::json!({"repo": repo.path().to_str().unwrap(),
         "title": "Survives a shutdown", "goal": "g", "criteria": [], "verify": ["true"], "start": true}),
-        Some(&token),
     );
     let id = task["id"].as_str().unwrap().to_string();
     let start = Instant::now();
@@ -489,20 +468,10 @@ fn hang_shutdown_and_restart(stop_first: bool) -> serde_json::Value {
         std::thread::sleep(Duration::from_millis(50));
     }
     if stop_first {
-        request_on(
-            &socket1,
-            "task.stop",
-            serde_json::json!({"id": id}),
-            Some(&token),
-        );
+        request_on(&socket1, "task.stop", serde_json::json!({"id": id}));
         let start = Instant::now();
         loop {
-            let t = request_on(
-                &socket1,
-                "task.get",
-                serde_json::json!({"id": id}),
-                Some(&token),
-            );
+            let t = request_on(&socket1, "task.get", serde_json::json!({"id": id}));
             if t["status"] == "stopped" {
                 break;
             }
@@ -513,14 +482,13 @@ fn hang_shutdown_and_restart(stop_first: bool) -> serde_json::Value {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
-    request_on(&socket1, "shutdown", serde_json::json!({}), Some(&token));
+    stop_daemon(&socket1);
     let _ = wait_for_exit(first, Duration::from_secs(10));
 
-    let socket2 = data.join("orchd2.sock");
-    let second = spawn_orchd_raw(&data, &socket2, &fake_bins);
+    let socket2 = socket_of(&home);
+    let second = spawn_daemon(&home, &fake_bins);
     wait_for_socket(&socket2);
-    let token = read_control_token(&data);
-    let call = |m: &str, p: serde_json::Value| request_on(&socket2, m, p, Some(&token));
+    let call = |m: &str, p: serde_json::Value| request_on(&socket2, m, p);
     let start = Instant::now();
     let settled = loop {
         let t = call("task.get", serde_json::json!({"id": id}));
@@ -534,17 +502,23 @@ fn hang_shutdown_and_restart(stop_first: bool) -> serde_json::Value {
         );
         std::thread::sleep(Duration::from_millis(100));
     };
-    let _ = call("shutdown", serde_json::json!({}));
+    stop_daemon(&socket2);
     let _ = wait_for_exit(second, Duration::from_secs(5));
     let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
     settled
 }
 
 #[test]
-fn a_shutdown_leaves_a_running_task_resumable_and_the_next_daemon_finishes_it() {
+fn a_shutdown_leaves_the_run_going_and_the_next_daemon_finishes_the_task() {
     let settled = hang_shutdown_and_restart(false);
     assert_eq!(settled["status"], "done", "{settled}");
-    assert_eq!(settled["attempts"][0]["status"], "interrupted");
+    // The run was left going by the shutdown and followed by the next daemon.
+    assert_eq!(
+        settled["attempts"].as_array().unwrap().len(),
+        1,
+        "{settled}"
+    );
+    assert_eq!(settled["attempts"][0]["status"], "passed", "{settled}");
 }
 
 #[test]

@@ -1,5 +1,5 @@
-//! Black-box integration tests (daemon basics): spawn the real `orchd` binary and drive
-//! it over its NDJSON unix socket.
+//! Black-box integration tests (daemon basics): spawn the real `sushiai daemon` with the
+//! orchestrator module enabled and drive it over its socket.
 
 mod common;
 
@@ -7,43 +7,9 @@ use common::*;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// Sends a raw request without going through `request_on` (which panics on
-/// an error response) so the "unauthorized" error itself can be asserted on.
-fn raw_request(socket: &Path, method: &str, auth: Option<&str>) -> serde_json::Value {
-    raw_request_with_params(socket, method, serde_json::json!({}), auth)
-}
-
 #[test]
-fn requests_without_the_control_token_are_rejected() {
+fn settings_task_create_and_list_round_trip() {
     let daemon = Daemon::spawn(&[]);
-
-    // ping needs no token.
-    let ping = request_on(&daemon.socket, "ping", serde_json::json!({}), None);
-    assert!(ping["pid"].as_u64().unwrap() > 0);
-
-    // Everything else does: no auth field at all, or the wrong token, both
-    // rejected before the method ever runs.
-    let no_auth = raw_request(&daemon.socket, "settings.get", None);
-    assert_eq!(no_auth["error"]["message"], "unauthorized");
-    let wrong_auth = raw_request(&daemon.socket, "settings.get", Some("not-the-real-token"));
-    assert_eq!(wrong_auth["error"]["message"], "unauthorized");
-
-    // The real token works.
-    let settings = daemon.request("settings.get", serde_json::json!({}));
-    assert_eq!(settings["maxAttempts"], 4);
-
-    daemon.shutdown_and_wait();
-}
-
-#[test]
-fn ping_settings_task_create_and_list_round_trip() {
-    let daemon = Daemon::spawn(&[]);
-
-    let ping = daemon.request("ping", serde_json::json!({}));
-    assert!(ping["pid"].as_u64().unwrap() > 0);
-    assert!(!ping["dataDir"].as_str().unwrap().is_empty());
-    assert!(ping["binaryMtimeMs"].as_u64().unwrap() > 0);
-    assert_eq!(ping["running"], 0);
 
     let settings = daemon.request("settings.get", serde_json::json!({}));
     assert_eq!(settings["maxAttempts"], 4);
@@ -157,58 +123,6 @@ fn shutdown_kills_a_live_orchestrator_chat_turn_s_child() {
 }
 
 #[test]
-fn second_daemon_with_same_data_dir_but_different_socket_refuses_to_start() {
-    // Electron can legitimately pick a different `--socket` across launches
-    // for the same `--data` dir (it falls back to a `$TMPDIR` path when the
-    // natural one is too long), so the singleton lock must not depend on
-    // both invocations agreeing on the socket path.
-    let data_dir = tempfile::tempdir().unwrap();
-    let socket1 = data_dir.path().join("first.sock");
-    let first = spawn_orchd_raw(data_dir.path(), &socket1, &[]);
-    wait_for_socket(&socket1);
-
-    let socket2 = data_dir.path().join("second.sock");
-    let second = spawn_orchd_raw(data_dir.path(), &socket2, &[]);
-    let (status, stderr) = wait_for_exit(second, Duration::from_secs(5));
-    assert!(!status.success(), "second daemon should refuse to start");
-    assert!(
-        stderr.contains("already running"),
-        "stderr should explain why: {stderr}"
-    );
-    assert!(
-        !socket2.exists(),
-        "the second daemon must not have bound a socket of its own"
-    );
-
-    // The first daemon must be completely unaffected.
-    let ping = request_on(&socket1, "ping", serde_json::json!({}), None);
-    assert!(ping["pid"].as_u64().unwrap() > 0);
-    let token = read_control_token(data_dir.path());
-    let _ = request_on(&socket1, "shutdown", serde_json::json!({}), Some(&token));
-    let _ = wait_for_exit(first, Duration::from_secs(5));
-}
-
-#[test]
-fn daemon_exits_nonzero_when_the_socket_path_is_too_long() {
-    let data_dir = tempfile::tempdir().unwrap();
-    // Unix socket paths are capped well under 200 bytes on every platform
-    // orchd targets; this is comfortably past that so `UnixListener::bind`
-    // fails with ENAMETOOLONG.
-    let long_name = "x".repeat(200);
-    let socket = data_dir.path().join(format!("{long_name}.sock"));
-    let child = spawn_orchd_raw(data_dir.path(), &socket, &[]);
-    let (status, stderr) = wait_for_exit(child, Duration::from_secs(5));
-    assert!(
-        !status.success(),
-        "daemon should exit non-zero when it can't bind its socket"
-    );
-    assert!(
-        !stderr.trim().is_empty(),
-        "daemon should print a clear message when bind fails"
-    );
-}
-
-#[test]
 fn task_create_rejects_request_form_when_the_planner_is_disabled() {
     let daemon = Daemon::spawn(&[]);
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
@@ -220,7 +134,6 @@ fn task_create_rejects_request_form_when_the_planner_is_disabled() {
         &daemon.socket,
         "task.create",
         serde_json::json!({"repo": repo.path().to_str().unwrap(), "request": "add a widget"}),
-        Some(&daemon.token),
     );
     assert!(
         result["error"]["message"]
@@ -241,7 +154,6 @@ fn task_create_rejects_neither_request_nor_title_and_goal() {
         &daemon.socket,
         "task.create",
         serde_json::json!({"repo": repo.path().to_str().unwrap()}),
-        Some(&daemon.token),
     );
     assert!(result.get("error").is_some(), "{result}");
 
@@ -249,40 +161,22 @@ fn task_create_rejects_neither_request_nor_title_and_goal() {
 }
 
 #[test]
-fn daemon_exits_when_its_data_dir_is_deleted() {
-    let data_dir = tempfile::tempdir().unwrap();
-    let root = data_dir.path().join("orchestrator");
-    std::fs::create_dir_all(&root).unwrap();
-    let socket = root.join("orchd.sock");
-    let child = spawn_orchd_raw(&root, &socket, &[]);
-    wait_for_socket(&socket);
-
-    // An intact data dir keeps serving past several poll intervals.
-    std::thread::sleep(Duration::from_millis(2500));
-    let ping = request_on(&socket, "ping", serde_json::json!({}), None);
-    assert!(ping["pid"].as_u64().unwrap() > 0);
-
-    std::fs::remove_dir_all(&root).unwrap();
-    let (status, stderr) = wait_for_exit(child, Duration::from_secs(10));
-    assert!(status.success(), "daemon should exit 0: {stderr}");
-}
-
-#[test]
 fn an_old_settings_json_with_a_classifier_still_loads() {
-    let data_dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let data_dir = home.path().join("orchestrator");
+    std::fs::create_dir_all(&data_dir).unwrap();
     let old = serde_json::json!({
         "routes": [], "tiers": {}, "review": "",
         "classifier": {"backend": "openrouter", "model": "old-model", "providerId": ""},
         "sandbox": "host", "allowedDomains": [], "protectedPaths": [],
         "maxAttempts": 4, "parallel": 2,
     });
-    std::fs::write(data_dir.path().join("settings.json"), old.to_string()).unwrap();
-    let socket = data_dir.path().join("orchd.sock");
-    let child = spawn_orchd_raw(data_dir.path(), &socket, &[]);
+    std::fs::write(data_dir.join("settings.json"), old.to_string()).unwrap();
+    let socket = socket_of(home.path());
+    let child = spawn_daemon(home.path(), &[]);
     wait_for_socket(&socket);
-    let token = read_control_token(data_dir.path());
 
-    let settings = request_on(&socket, "settings.get", serde_json::json!({}), Some(&token));
+    let settings = request_on(&socket, "settings.get", serde_json::json!({}));
     assert_eq!(settings["maxAttempts"], 4, "{settings}");
     assert!(settings.get("classifier").is_none(), "{settings}");
 
@@ -290,9 +184,8 @@ fn an_old_settings_json_with_a_classifier_still_loads() {
         &socket,
         "secrets.set",
         serde_json::json!({"classifier": {"key": "k", "baseUrl": "http://x"}, "profiles": {}}),
-        Some(&token),
     );
 
-    let _ = request_on(&socket, "shutdown", serde_json::json!({}), Some(&token));
+    stop_daemon(&socket);
     let _ = wait_for_exit(child, Duration::from_secs(5));
 }

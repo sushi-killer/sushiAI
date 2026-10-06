@@ -96,7 +96,6 @@ fn task_timeline_orders_plan_implement_review_and_the_owner_wait_with_costs() {
         &daemon.socket,
         "task.timeline",
         json!({"id": "22222222-2222-4222-8222-222222222222"}),
-        Some(&daemon.token),
     );
     assert!(missing.to_string().contains("not found"), "{missing}");
     daemon.shutdown_and_wait();

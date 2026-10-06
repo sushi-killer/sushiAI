@@ -296,22 +296,16 @@ fn a_budget_question_before_an_implement_run_is_asked_by_implement_and_answered_
         ("COST", "0.5"),
     ];
     let data_holder = tempfile::tempdir().unwrap();
-    let data = data_holder.path().to_path_buf();
-    let socket1 = data.join("orchd1.sock");
-    let first = spawn_orchd_raw(&data, &socket1, &env);
+    let home = data_holder.path().to_path_buf();
+    let socket1 = socket_of(&home);
+    let first = spawn_daemon(&home, &env);
     wait_for_socket(&socket1);
-    let token1 = read_control_token(&data);
-    let mut settings = request_on(&socket1, "settings.get", json!({}), Some(&token1));
+    let mut settings = request_on(&socket1, "settings.get", json!({}));
     settings["review"] = json!("");
     settings["briefCheckRoute"] = json!("");
     settings["answerPolicy"] = json!(false);
     fit_sandbox(&mut settings);
-    request_on(
-        &socket1,
-        "settings.set",
-        json!({"settings": settings}),
-        Some(&token1),
-    );
+    request_on(&socket1, "settings.set", json!({"settings": settings}));
     let repo = init_git_repo();
     let task = request_on(
         &socket1,
@@ -325,12 +319,11 @@ fn a_budget_question_before_an_implement_run_is_asked_by_implement_and_answered_
             "variant": {"maxCostUsd": 0.1},
             "start": true,
         }),
-        Some(&token1),
     );
     let id = task["id"].as_str().unwrap().to_string();
     let start = std::time::Instant::now();
     let waiting = loop {
-        let t = request_on(&socket1, "task.get", json!({"id": id}), Some(&token1));
+        let t = request_on(&socket1, "task.get", json!({"id": id}));
         if t["status"] == "waiting" {
             break t;
         }
@@ -340,18 +333,16 @@ fn a_budget_question_before_an_implement_run_is_asked_by_implement_and_answered_
     assert_eq!(waiting["question"]["kind"], "budget", "{waiting}");
     assert_eq!(waiting["question"]["askedBy"], "implement", "{waiting}");
     assert!(waiting["question"]["askedAt"].is_i64(), "{waiting}");
-    let _ = request_on(&socket1, "shutdown", json!({}), Some(&token1));
+    stop_daemon(&socket1);
     let _ = wait_for_exit(first, Duration::from_secs(15));
 
-    let socket2 = data.join("orchd2.sock");
-    let second = spawn_orchd_raw(&data, &socket2, &env);
+    let socket2 = socket_of(&home);
+    let second = spawn_daemon(&home, &env);
     wait_for_socket(&socket2);
-    let token2 = read_control_token(&data);
     let answered = request_on(
         &socket2,
         "task.answer",
         json!({"id": id, "answer": "raise"}),
-        Some(&token2),
     );
     let h = history(&answered);
     assert_eq!(h.len(), 1, "{answered}");
@@ -363,7 +354,7 @@ fn a_budget_question_before_an_implement_run_is_asked_by_implement_and_answered_
     assert_eq!(h[0]["answer"], "raise");
     assert!(h[0]["answeredAt"].is_i64(), "{answered}");
     assert_eq!(h[0]["answeredBy"], "owner");
-    let _ = request_on(&socket2, "shutdown", json!({}), Some(&token2));
+    stop_daemon(&socket2);
     let _ = wait_for_exit(second, Duration::from_secs(15));
     let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
 }

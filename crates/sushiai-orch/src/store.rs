@@ -123,26 +123,23 @@ impl Store {
     }
 
     /// [`Self::recover_interrupted`], asking `fate` first about each attempt
-    /// left `running`. A file-backed run can outlive the daemon: `Alive`
-    /// leaves the attempt and its task alone (the caller re-adopts the run),
-    /// `Finished` means `fate` already settled the attempt from the files
-    /// the run left (the task is `stopped`, not requeued: the work is done
-    /// and nothing needs redoing). Only `Interrupted` kills the group.
+    /// left `running`. A file-backed run can outlive the daemon: `Resume`
+    /// leaves the attempt and its task alone (the task's loop follows the
+    /// run). Only `Interrupted` kills the group.
     pub fn recover_interrupted_with(
         &self,
-        mut fate: impl FnMut(&mut Task, usize) -> RunFate,
+        mut fate: impl FnMut(&Task, usize) -> RunFate,
         mut settle: impl FnMut(&mut Task, usize),
     ) -> io::Result<Vec<Task>> {
         let mut recovered = Vec::new();
         for mut task in self.list_tasks()? {
-            let (mut interrupted, mut finished) = (false, false);
+            let mut interrupted = false;
             for idx in 0..task.attempts.len() {
                 if task.attempts[idx].status != AttemptStatus::Running {
                     continue;
                 }
-                match fate(&mut task, idx) {
-                    RunFate::Alive => {}
-                    RunFate::Finished => finished = true,
+                match fate(&task, idx) {
+                    RunFate::Resume => {}
                     RunFate::Interrupted => {
                         let attempt = &mut task.attempts[idx];
                         if let Some(pgid) = attempt.pgid {
@@ -161,12 +158,8 @@ impl Store {
             // owner's stop marks its attempt interrupted right away), so the
             // task is queued again and resumes, rather than waiting for the
             // owner to notice and press Start.
-            if interrupted || finished {
-                task.status = if interrupted {
-                    TaskStatus::Queued
-                } else {
-                    TaskStatus::Stopped
-                };
+            if interrupted {
+                task.status = TaskStatus::Queued;
                 task.updated_at = crate::model::now_ms();
                 self.save_task(&task)?;
                 recovered.push(task);
@@ -318,20 +311,19 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option<T
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-/// Best-effort: SIGTERM then (briefly later) SIGKILL a process group left
-/// over from an unclean daemon shutdown, if it's still alive. Never panics
-/// or blocks the caller for long -- this runs once at startup, before the
-/// tokio runtime is doing anything else that matters.
-/// What became of a run that was `running` when the daemon stopped.
+/// What becomes of a run that was `running` when the daemon stopped.
 pub enum RunFate {
-    /// Its process group still runs; the caller takes it over.
-    Alive,
-    /// It ended while the daemon was down and the attempt is settled.
-    Finished,
+    /// It ended or still runs: the attempt stays `running` and the task's
+    /// loop follows the run (review and verify come after it as usual).
+    Resume,
     /// Its result is lost: the attempt is interrupted.
     Interrupted,
 }
 
+/// Best-effort: SIGTERM then (briefly later) SIGKILL a process group left
+/// over from an unclean daemon shutdown, if it's still alive. Never panics
+/// or blocks the caller for long -- this runs once at startup, before the
+/// tokio runtime is doing anything else that matters.
 #[cfg(unix)]
 fn kill_stale_process_group(pgid: i32) {
     unsafe {

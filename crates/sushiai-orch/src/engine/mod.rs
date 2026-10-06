@@ -558,6 +558,15 @@ impl App {
         }
     }
 
+    /// The hook token registered for attempt `n` of a task, if its run has one.
+    pub(super) fn hook_token_of(&self, task_id: &str, n: u32) -> Option<String> {
+        let tokens = self.hook_tokens.read().unwrap();
+        tokens
+            .iter()
+            .find(|(_, ctx)| ctx.task_id == task_id && ctx.attempt_n == n)
+            .map(|(token, _)| token.clone())
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.events_tx.subscribe()
     }

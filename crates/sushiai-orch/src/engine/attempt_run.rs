@@ -206,7 +206,11 @@ pub(super) async fn run_harness(
         // Lets a repo's own hooks tell an orchd-run agent from a person's
         // session (sushiAI's lesson reminder stays quiet for it).
         .env("ORCHD_TASK", task_id)
+        .env("SUSHIAI_HOME", &app.home)
         .envs(&project_env);
+    if let Some(token) = app.hook_token_of(task_id, attempt_n) {
+        cmd.env("SUSHIAI_ORCH_TOKEN", token);
+    }
     if track_attempt {
         let open = |p: &Path| std::fs::File::create(p).map(std::process::Stdio::from);
         match (
@@ -285,6 +289,11 @@ pub(super) async fn run_harness(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
+                if track_attempt && app.shutting_down.load(Ordering::SeqCst) {
+                    // A daemon shutdown leaves the run going: the next daemon
+                    // finds it by its process group and files.
+                    return Err(RunError::Cancelled);
+                }
                 kill_group(pgid, &mut child).await;
                 // A stopped run still ran: keep what it reported so far.
                 let fp = fingerprint_of(&outcome, req, &run_argv, codex_version.clone());

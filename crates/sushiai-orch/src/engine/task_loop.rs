@@ -1,3 +1,4 @@
+use super::recovery::{follow_run, resumable_attempt};
 use super::*;
 
 /// The per-task attempt loop (spec "Engine", steps 1-10). Runs as its own
@@ -461,338 +462,402 @@ pub(super) async fn run_task_loop(
             }
         }
 
-        let resume_status = task.status;
-        if !wait_for_harness(
-            &app,
-            &task_id,
-            &mut task,
-            resume_status,
-            &pending_answer,
-            &cancel,
-            &mut permit,
-        )
-        .await
-        {
-            drop(permit);
-            app.finish_task_loop(&task_id);
-            return;
-        }
-        let settings = app.settings.read().unwrap().clone();
-        let attempt_n = implement_attempt_count(&task) + 1;
-        // A landing that conflicted only needs its markers resolved: that
-        // runs on the cheap route, not as a full re-implementation.
-        let conflict_only = last_failure_is_conflict(&task);
-        let (route_id, overridden) = task.variant().implement_route_id(
-            &settings,
-            if conflict_only {
-                Tier::Mechanical
-            } else {
-                task.tier
-            },
-        );
-        if conflict_only {
-            task.decisions.push(format!(
-                "Orchestrator: the landing conflicted -> conflict-only attempt on the cheap route {route_id}"
-            ));
-        } else if overridden {
-            let line = variant_route_line(&format!("tier {}", task.tier.as_str()), &route_id);
-            if !task.decisions.contains(&line) {
-                task.decisions.push(line);
-            }
-        }
-        if planner_tier_used {
-            task.decisions.push(format!(
-                "Planner: tier {} -> route {route_id}",
-                task.tier.as_str()
-            ));
-        }
-        if no_planner_tier {
-            task.decisions.push(no_planner_tier_line(&route_id));
-        }
-        let route = settings
-            .routes
-            .iter()
-            .find(|r| r.id == route_id)
-            .cloned()
-            .unwrap_or(Route {
-                id: "codex".to_string(),
-                label: "Codex".to_string(),
-                harness: Harness::Codex,
-                model: None,
-                effort: None,
-                profile_id: None,
-                account_id: None,
-                strength: None,
-            });
-        let Some((route, swap)) = app.usable_route(&settings, route) else {
-            // No route runs on an installed harness: ask again.
-            continue 'attempts;
-        };
-        if let Some(line) = swap {
-            if !task.decisions.contains(&line) {
-                task.decisions.push(line);
-            }
-        }
-
-        let worktree = PathBuf::from(&task.worktree);
-        let base_sha = task.base_sha.clone();
-        let wt2 = worktree.clone();
-        let base2 = base_sha.clone();
-        let (status_short, diff_stat) = tokio::task::spawn_blocking(move || {
+        // A run that outlived the daemon is followed, not started again: its
+        // outcome goes through review and verify like any other pass.
+        let resumed = resumable_attempt(&app, &task);
+        let (
+            settings,
+            attempt_n,
+            idx,
+            route,
+            worktree,
+            base_sha,
+            run_dir,
+            key_path,
+            mut registered,
+            run_result,
+            best_of,
+        ) = if let Some(idx) = resumed {
+            let settings = app.settings.read().unwrap().clone();
+            let a = task.attempts[idx].clone();
+            let route = settings
+                .routes
+                .iter()
+                .find(|r| r.id == a.route_id)
+                .cloned()
+                .unwrap_or_else(|| Route {
+                    id: a.route_id.clone(),
+                    label: a.route_id.clone(),
+                    harness: a.harness,
+                    model: (!a.model.is_empty()).then(|| a.model.clone()),
+                    effort: None,
+                    profile_id: None,
+                    account_id: None,
+                    strength: None,
+                });
+            let run_dir = app.store.run_dir(&task_id, a.n);
+            task.status = TaskStatus::Running;
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
+            let result = follow_run(&app, &task, idx, &cancel).await;
             (
-                git::status_short(&wt2).unwrap_or_default(),
-                git::diff_stat(&wt2, &base2).unwrap_or_default(),
+                settings,
+                a.n,
+                idx,
+                route,
+                PathBuf::from(&task.worktree),
+                task.base_sha.clone(),
+                run_dir.clone(),
+                run_dir.join("key"),
+                None,
+                result,
+                BestOfExtra::default(),
             )
-        })
-        .await
-        .unwrap_or_default();
-
-        // A finding the reviewer says came back gets the advisor whether or
-        // not the variant asks for it.
-        let repeated_finding = last_review_repeated(&task);
-        if task.variant().advisor || repeated_finding {
-            if let Some(cost) = run_advisor_before_retry(
+        } else {
+            let resume_status = task.status;
+            if !wait_for_harness(
                 &app,
+                &task_id,
                 &mut task,
-                &settings,
-                &route,
-                &worktree,
-                &base_sha,
-                repeated_finding,
+                resume_status,
+                &pending_answer,
                 &cancel,
+                &mut permit,
             )
             .await
             {
-                task.cost_usd += cost;
-                task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
-                app.broadcast_task(&task);
-                // The advisor's spend can be what reaches the budget.
-                let status = task.status;
-                if !wait_while_over_budget(
+                drop(permit);
+                app.finish_task_loop(&task_id);
+                return;
+            }
+            let settings = app.settings.read().unwrap().clone();
+            let attempt_n = implement_attempt_count(&task) + 1;
+            // A landing that conflicted only needs its markers resolved: that
+            // runs on the cheap route, not as a full re-implementation.
+            let conflict_only = last_failure_is_conflict(&task);
+            let (route_id, overridden) = task.variant().implement_route_id(
+                &settings,
+                if conflict_only {
+                    Tier::Mechanical
+                } else {
+                    task.tier
+                },
+            );
+            if conflict_only {
+                task.decisions.push(format!(
+                "Orchestrator: the landing conflicted -> conflict-only attempt on the cheap route {route_id}"
+            ));
+            } else if overridden {
+                let line = variant_route_line(&format!("tier {}", task.tier.as_str()), &route_id);
+                if !task.decisions.contains(&line) {
+                    task.decisions.push(line);
+                }
+            }
+            if planner_tier_used {
+                task.decisions.push(format!(
+                    "Planner: tier {} -> route {route_id}",
+                    task.tier.as_str()
+                ));
+            }
+            if no_planner_tier {
+                task.decisions.push(no_planner_tier_line(&route_id));
+            }
+            let route = settings
+                .routes
+                .iter()
+                .find(|r| r.id == route_id)
+                .cloned()
+                .unwrap_or(Route {
+                    id: "codex".to_string(),
+                    label: "Codex".to_string(),
+                    harness: Harness::Codex,
+                    model: None,
+                    effort: None,
+                    profile_id: None,
+                    account_id: None,
+                    strength: None,
+                });
+            let Some((route, swap)) = app.usable_route(&settings, route) else {
+                // No route runs on an installed harness: ask again.
+                continue 'attempts;
+            };
+            if let Some(line) = swap {
+                if !task.decisions.contains(&line) {
+                    task.decisions.push(line);
+                }
+            }
+
+            let worktree = PathBuf::from(&task.worktree);
+            let base_sha = task.base_sha.clone();
+            let wt2 = worktree.clone();
+            let base2 = base_sha.clone();
+            let (status_short, diff_stat) = tokio::task::spawn_blocking(move || {
+                (
+                    git::status_short(&wt2).unwrap_or_default(),
+                    git::diff_stat(&wt2, &base2).unwrap_or_default(),
+                )
+            })
+            .await
+            .unwrap_or_default();
+
+            // A finding the reviewer says came back gets the advisor whether or
+            // not the variant asks for it.
+            let repeated_finding = last_review_repeated(&task);
+            if task.variant().advisor || repeated_finding {
+                if let Some(cost) = run_advisor_before_retry(
                     &app,
-                    &task_id,
                     &mut task,
-                    "implement",
-                    status,
-                    &pending_answer,
+                    &settings,
+                    &route,
+                    &worktree,
+                    &base_sha,
+                    repeated_finding,
                     &cancel,
-                    &mut permit,
                 )
                 .await
                 {
-                    drop(permit);
-                    app.finish_task_loop(&task_id);
-                    return;
+                    task.cost_usd += cost;
+                    task.updated_at = now_ms();
+                    let _ = app.store.save_task(&task);
+                    app.broadcast_task(&task);
+                    // The advisor's spend can be what reaches the budget.
+                    let status = task.status;
+                    if !wait_while_over_budget(
+                        &app,
+                        &task_id,
+                        &mut task,
+                        "implement",
+                        status,
+                        &pending_answer,
+                        &cancel,
+                        &mut permit,
+                    )
+                    .await
+                    {
+                        drop(permit);
+                        app.finish_task_loop(&task_id);
+                        return;
+                    }
                 }
             }
-        }
 
-        // An owner or policy answer that contradicts a criterion amends it
-        // before the attempt is briefed.
-        if heal_answers(&app, &mut task, attempt_n, &cancel)
-            .await
-            .is_err()
-        {
-            drop(permit);
-            mark_stopped_if_not_already(&app, &task_id).await;
-            app.finish_task_loop(&task_id);
-            return;
-        }
-        let brief_text = brief::build_brief(&task, &status_short, &diff_stat);
-        let brief_text = if conflict_only {
-            brief::with_block_before_report(&brief_text, &brief::conflict_only_block())
-        } else {
-            brief_text
-        };
-        let brief_text = match &task.brief_check.conflict {
-            Some(conflict) if implement_attempt_count(&task) == 0 => {
+            // An owner or policy answer that contradicts a criterion amends it
+            // before the attempt is briefed.
+            if heal_answers(&app, &mut task, attempt_n, &cancel)
+                .await
+                .is_err()
+            {
+                drop(permit);
+                mark_stopped_if_not_already(&app, &task_id).await;
+                app.finish_task_loop(&task_id);
+                return;
+            }
+            let brief_text = brief::build_brief(&task, &status_short, &diff_stat);
+            let brief_text = if conflict_only {
+                brief::with_block_before_report(&brief_text, &brief::conflict_only_block())
+            } else {
+                brief_text
+            };
+            let brief_text = match &task.brief_check.conflict {
+                Some(conflict) if implement_attempt_count(&task) == 0 => {
+                    brief::with_block_before_report(
+                        &brief_text,
+                        &brief::conflict_block(conflict, task.variant().grounded_checks),
+                    )
+                }
+                _ => brief_text,
+            };
+            let brief_text = brief::with_block_before_report(
+                &brief_text,
+                &brief::landed_dependencies_block(&task, &app.repo_tasks(&task.repo), None),
+            );
+            let brief_text = if implement_attempt_count(&task) == 0 {
                 brief::with_block_before_report(
                     &brief_text,
-                    &brief::conflict_block(conflict, task.variant().grounded_checks),
+                    &brief::relay_block(&task, &app.repo_tasks(&task.repo)),
                 )
-            }
-            _ => brief_text,
-        };
-        let brief_text = brief::with_block_before_report(
-            &brief_text,
-            &brief::landed_dependencies_block(&task, &app.repo_tasks(&task.repo), None),
-        );
-        let brief_text = if implement_attempt_count(&task) == 0 {
-            brief::with_block_before_report(
+            } else {
+                brief_text
+            };
+            // A parent's first attempt gets what failed when it tried to finish.
+            let brief_text = match &parent_failure {
+                Some(failure) if implement_attempt_count(&task) == 0 => {
+                    brief::with_block_before_report(
+                        &brief_text,
+                        &brief::parent_failure_block(failure),
+                    )
+                }
+                _ => brief_text,
+            };
+            // The messages sent to this task since its last attempt are
+            // delivered here, with the attempt about to start.
+            let brief_text = brief::with_block_before_report(
                 &brief_text,
-                &brief::relay_block(&task, &app.repo_tasks(&task.repo)),
+                &messages::brief_block_for_task(&app, &task_id),
+            );
+            let advice = task
+                .attempts
+                .iter()
+                .rev()
+                .find(|a| a.stage == Stage::Implement)
+                .and_then(|a| a.advice.clone());
+            let brief_text = match advice.as_deref() {
+                Some(advice) => {
+                    brief::with_block_before_report(&brief_text, &brief::advisor_block(advice))
+                }
+                _ => brief_text,
+            };
+
+            let tools = permissions::task_tools(&app, &settings, &task, &worktree);
+            let brief_text = brief::with_block_before_report(
+                &brief_text,
+                &permissions::tools_block(&tools, false),
+            );
+
+            let reason = if conflict_only {
+                format!("conflict only -> route {}", route.id)
+            } else {
+                format!("tier {} -> route {}", task.tier.as_str(), route.id)
+            };
+            let attempt = Attempt {
+                n: attempt_n,
+                stage: Stage::Implement,
+                route_id: route.id.clone(),
+                harness: route.harness,
+                model: route.model.clone().unwrap_or_default(),
+                reason,
+                session_id: None,
+                pgid: None,
+                started_at: now_ms(),
+                ended_at: None,
+                status: AttemptStatus::Running,
+                summary: None,
+                handoff: None,
+                disputes: vec![],
+                changed_files: vec![],
+                verify: vec![],
+                gate_blocks: 0,
+                prefix_tokens: None,
+                review: None,
+                failure: None,
+                usage: None,
+                cost_usd: None,
+                cost_estimated: false,
+                review_cost_usd: None,
+                evidence: vec![],
+                evidence_tree: None,
+                evidence_base: None,
+                evidence_from: None,
+                advice: None,
+                advisor_cost_usd: None,
+                fingerprint: None,
+                review_fingerprint: None,
+                advisor_fingerprint: None,
+                candidates: vec![],
+                criteria_results: vec![],
+                diff_stat: None,
+            };
+            task.attempts.push(attempt);
+            let idx = task.attempts.len() - 1;
+            refresh_criteria_results(&mut task, idx);
+            task.status = TaskStatus::Running;
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
+
+            let run_dir = app.store.run_dir(&task_id, attempt_n);
+            let _ = std::fs::create_dir_all(&run_dir);
+            let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
+            let PreparedRun {
+                mcp_path,
+                settings_path,
+                key_path,
+                messages_server,
+                registered,
+            } = prepare_run(
+                &app, &task, &task_id, &route, &settings, &worktree, &base_sha, attempt_n,
+                &run_dir, &deny_read, &tools,
+            );
+
+            let network_allowed = settings.codex_network;
+            let codex_mcp = tools.codex_servers(&messages_server);
+            let req = harness::RunRequest {
+                harness: route.harness,
+                worktree: &worktree,
+                model: route.model.as_deref(),
+                effort: route.effort.as_deref(),
+                max_budget_usd: (task.variant().max_attempt_cost_usd > 0.0)
+                    .then(|| task.variant().max_attempt_cost_usd),
+                review: false,
+                mcp_config: Some(&mcp_path),
+                settings_path: Some(&settings_path),
+                network_allowed,
+                codex_mcp: &codex_mcp,
+                images: &[],
+                repo_settings: true,
+            };
+
+            let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
+            let events_path = run_dir.join("events.jsonl");
+            let a_run = run_harness(
+                &app,
+                &task_id,
+                attempt_n,
+                true,
+                &worktree,
+                &req,
+                CostTag::task("implement", &route.id),
+                &brief_text,
+                &events_path,
+                &cancel,
+                (task.variant().stall_timeout_secs > 0).then(|| Stall {
+                    limit: Duration::from_secs(task.variant().stall_timeout_secs),
+                    paused: registered
+                        .as_ref()
+                        .map(|(_, ctx)| ctx.hook_running.clone())
+                        .unwrap_or_default(),
+                }),
+                task.variant().loop_detect.then(LoopDetector::new),
+            );
+            // Recorded after the reload below, which would drop a line pushed now.
+            let mut no_second = BestOfExtra::default();
+            let second = match second_route(&task, &settings, &route, attempt_n) {
+                Ok(second) => second,
+                Err(line) => {
+                    no_second.decisions.push(line);
+                    None
+                }
+            };
+            let (run_result, best_of) = match second {
+                Some(b_route) => {
+                    run_best_of(
+                        &app,
+                        &task,
+                        &task_id,
+                        attempt_n,
+                        a_run,
+                        &route,
+                        &b_route,
+                        &settings,
+                        &worktree,
+                        &base_sha,
+                        &run_dir,
+                        &brief_text,
+                        &deny_read,
+                        &cancel,
+                    )
+                    .await
+                }
+                None => (a_run.await, no_second),
+            };
+            (
+                settings, attempt_n, idx, route, worktree, base_sha, run_dir, key_path, registered,
+                run_result, best_of,
             )
-        } else {
-            brief_text
-        };
-        // A parent's first attempt gets what failed when it tried to finish.
-        let brief_text = match &parent_failure {
-            Some(failure) if implement_attempt_count(&task) == 0 => {
-                brief::with_block_before_report(&brief_text, &brief::parent_failure_block(failure))
-            }
-            _ => brief_text,
-        };
-        // The messages sent to this task since its last attempt are
-        // delivered here, with the attempt about to start.
-        let brief_text = brief::with_block_before_report(
-            &brief_text,
-            &messages::brief_block_for_task(&app, &task_id),
-        );
-        let advice = task
-            .attempts
-            .iter()
-            .rev()
-            .find(|a| a.stage == Stage::Implement)
-            .and_then(|a| a.advice.clone());
-        let brief_text = match advice.as_deref() {
-            Some(advice) => {
-                brief::with_block_before_report(&brief_text, &brief::advisor_block(advice))
-            }
-            _ => brief_text,
         };
 
-        let tools = permissions::task_tools(&app, &settings, &task, &worktree);
-        let brief_text =
-            brief::with_block_before_report(&brief_text, &permissions::tools_block(&tools, false));
-
-        let reason = if conflict_only {
-            format!("conflict only -> route {}", route.id)
-        } else {
-            format!("tier {} -> route {}", task.tier.as_str(), route.id)
-        };
-        let attempt = Attempt {
-            n: attempt_n,
-            stage: Stage::Implement,
-            route_id: route.id.clone(),
-            harness: route.harness,
-            model: route.model.clone().unwrap_or_default(),
-            reason,
-            session_id: None,
-            pgid: None,
-            started_at: now_ms(),
-            ended_at: None,
-            status: AttemptStatus::Running,
-            summary: None,
-            handoff: None,
-            disputes: vec![],
-            changed_files: vec![],
-            verify: vec![],
-            gate_blocks: 0,
-            prefix_tokens: None,
-            review: None,
-            failure: None,
-            usage: None,
-            cost_usd: None,
-            cost_estimated: false,
-            review_cost_usd: None,
-            evidence: vec![],
-            evidence_tree: None,
-            evidence_base: None,
-            evidence_from: None,
-            advice: None,
-            advisor_cost_usd: None,
-            fingerprint: None,
-            review_fingerprint: None,
-            advisor_fingerprint: None,
-            candidates: vec![],
-            criteria_results: vec![],
-            diff_stat: None,
-        };
-        task.attempts.push(attempt);
-        let idx = task.attempts.len() - 1;
-        refresh_criteria_results(&mut task, idx);
-        task.status = TaskStatus::Running;
-        task.updated_at = now_ms();
-        let _ = app.store.save_task(&task);
-        app.broadcast_task(&task);
-
-        let run_dir = app.store.run_dir(&task_id, attempt_n);
-        let _ = std::fs::create_dir_all(&run_dir);
         let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
-        let PreparedRun {
-            mcp_path,
-            settings_path,
-            key_path,
-            messages_server,
-            mut registered,
-        } = prepare_run(
-            &app, &task, &task_id, &route, &settings, &worktree, &base_sha, attempt_n, &run_dir,
-            &deny_read, &tools,
-        );
-
-        let network_allowed = settings.codex_network;
-        let codex_mcp = tools.codex_servers(&messages_server);
-        let req = harness::RunRequest {
-            harness: route.harness,
-            worktree: &worktree,
-            model: route.model.as_deref(),
-            effort: route.effort.as_deref(),
-            max_budget_usd: (task.variant().max_attempt_cost_usd > 0.0)
-                .then(|| task.variant().max_attempt_cost_usd),
-            review: false,
-            mcp_config: Some(&mcp_path),
-            settings_path: Some(&settings_path),
-            network_allowed,
-            codex_mcp: &codex_mcp,
-            images: &[],
-            repo_settings: true,
-        };
-
-        let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
-        let events_path = run_dir.join("events.jsonl");
-        let a_run = run_harness(
-            &app,
-            &task_id,
-            attempt_n,
-            true,
-            &worktree,
-            &req,
-            CostTag::task("implement", &route.id),
-            &brief_text,
-            &events_path,
-            &cancel,
-            (task.variant().stall_timeout_secs > 0).then(|| Stall {
-                limit: Duration::from_secs(task.variant().stall_timeout_secs),
-                paused: registered
-                    .as_ref()
-                    .map(|(_, ctx)| ctx.hook_running.clone())
-                    .unwrap_or_default(),
-            }),
-            task.variant().loop_detect.then(LoopDetector::new),
-        );
-        // Recorded after the reload below, which would drop a line pushed now.
-        let mut no_second = BestOfExtra::default();
-        let second = match second_route(&task, &settings, &route, attempt_n) {
-            Ok(second) => second,
-            Err(line) => {
-                no_second.decisions.push(line);
-                None
-            }
-        };
-        let (run_result, best_of) = match second {
-            Some(b_route) => {
-                run_best_of(
-                    &app,
-                    &task,
-                    &task_id,
-                    attempt_n,
-                    a_run,
-                    &route,
-                    &b_route,
-                    &settings,
-                    &worktree,
-                    &base_sha,
-                    &run_dir,
-                    &brief_text,
-                    &deny_read,
-                    &cancel,
-                )
-                .await
-            }
-            None => (a_run.await, no_second),
-        };
-
         let (gate_blocks, handled, staged_lines) = if let Some((tok, ctx)) = registered.take() {
             app.hook_tokens.write().unwrap().remove(&tok);
             ctx.cancel.cancel();
@@ -840,6 +905,15 @@ pub(super) async fn run_task_loop(
         let outcome = match run_result {
             Ok(o) => o,
             Err(RunError::Cancelled) => {
+                if app.shutting_down.load(Ordering::SeqCst)
+                    && resumable_attempt(&app, &task) == Some(idx)
+                {
+                    // The run outlives this daemon and stays `running`; the
+                    // next daemon's loop follows it.
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
                 task.attempts[idx].status = AttemptStatus::Interrupted;
                 task.attempts[idx].ended_at = Some(now_ms());
                 settle_unfinished_cost(&mut task, idx, &run_dir, &settings.prices);

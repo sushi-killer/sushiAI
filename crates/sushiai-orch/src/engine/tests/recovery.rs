@@ -30,7 +30,7 @@ fn running_implement_task(app: &App, dir: &Path) -> (Task, PathBuf) {
 }
 
 #[tokio::test]
-async fn a_run_that_ended_while_the_daemon_was_down_settles_from_its_files() {
+async fn a_run_that_ended_while_the_daemon_was_down_is_resumed_from_its_files() {
     let (app, dir) = test_app();
     let (task, run_dir) = running_implement_task(&app, dir.path());
     std::fs::write(
@@ -41,19 +41,28 @@ async fn a_run_that_ended_while_the_daemon_was_down_settles_from_its_files() {
     std::fs::write(run_dir.join("events.exit"), "1\n").unwrap();
     std::fs::write(run_dir.join("events.stderr.log"), "boom\n").unwrap();
 
-    app.recover_on_start().unwrap();
-
+    let recovered = app
+        .store
+        .recover_interrupted_with(
+            |task, idx| app.run_fate(task, idx),
+            |_, _| panic!("a run with its files is not interrupted"),
+        )
+        .unwrap();
+    assert!(recovered.is_empty());
     let task = app.store.load_task(&task.id).unwrap().unwrap();
-    assert_eq!(task.status, TaskStatus::Stopped);
-    let attempt = &task.attempts[0];
-    assert_eq!(attempt.status, AttemptStatus::Failed);
-    assert_eq!(attempt.failure.as_ref().unwrap().detail, "boom");
-    assert_eq!(attempt.session_id.as_deref(), Some("s1"));
-    assert_eq!(attempt.cost_usd, Some(0.5));
-    assert_eq!(task.cost_usd, 0.5);
+    assert_eq!(task.attempts[0].status, AttemptStatus::Running);
+    assert_eq!(recovery::resumable_attempt(&app, &task), Some(0));
+
+    // The loop follows it and gets the outcome run_harness would have given.
+    let outcome = recovery::follow_run(&app.arc(), &task, 0, &CancelToken::new())
+        .await
+        .ok()
+        .expect("outcome");
+    assert_eq!(outcome.error.as_deref(), Some("boom"));
+    assert_eq!(outcome.session_id.as_deref(), Some("s1"));
+    assert_eq!(outcome.cost_usd, Some(0.5));
     let log = std::fs::read_to_string(run_dir.join("events.jsonl")).unwrap();
     assert!(log.contains("total_cost_usd"), "{log}");
-    assert!(!app.controls.lock().unwrap().contains_key(&task.id));
 }
 
 #[tokio::test]
@@ -69,7 +78,7 @@ async fn a_dead_run_without_an_exit_file_is_interrupted_and_its_spend_kept() {
     let recovered = app
         .store
         .recover_interrupted_with(
-            |task, idx| app.run_fate(task, idx, &mut Vec::new()),
+            |task, idx| app.run_fate(task, idx),
             |task, idx| {
                 let run_dir = app.store.run_dir(&task.id, task.attempts[idx].n);
                 settle_unfinished_cost(task, idx, &run_dir, &Default::default());

@@ -845,14 +845,14 @@ export function isPackagedInstall(message: string): boolean {
   return message.includes("is missing from this installation");
 }
 
-/** Whether an RPC error means the daemon itself is gone (not built, failed
- * to start, the socket refused or dropped the call), as opposed to the
- * daemon refusing one request. */
+/** Whether an RPC error means the host's daemon itself is unusable (not
+ * running, not ready, without the orchestrator module, or the connection
+ * dropped), as opposed to the daemon refusing one request. */
 export function daemonDown(
   message: string,
 ): "not-built" | "unavailable" | null {
   if (isDaemonMissing(message)) return "not-built";
-  return /failed to start|did not respond|disconnected before responding|ECONNREFUSED|ENOENT|ECONNRESET|EPIPE/.test(
+  return /sushiai daemon is not running|not ready|Update sushiai on|did not become ready|did not respond|daemon connection closed|ECONNREFUSED|ENOENT|ECONNRESET|EPIPE/.test(
     message,
   )
     ? "unavailable"

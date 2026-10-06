@@ -67,7 +67,7 @@ export function RemoteSetup({
   seen,
   address,
   onRetry,
-  onInstallRust,
+  onInstallSushiai,
   onCancel,
 }: {
   host: OrchestratorHost;
@@ -76,7 +76,7 @@ export function RemoteSetup({
   address?: string;
   onRetry(): void;
   /** The one button: install or update sushiai on the host. */
-  onInstallRust(): void;
+  onInstallSushiai(): void;
   onCancel(): void;
 }) {
   const failed = host.state === "error";
@@ -110,7 +110,7 @@ export function RemoteSetup({
                   <button
                     type="button"
                     className="ui-button primary"
-                    onClick={onInstallRust}
+                    onClick={onInstallSushiai}
                   >
                     {step.action.label}
                   </button>

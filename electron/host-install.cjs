@@ -1,5 +1,5 @@
 // Installs the `sushiai` binary on a host over an injected exec, and holds the
-// probe/upload helpers shared with electron/orchestrator-remote.cjs.
+// probe/upload helpers host-setup.cjs shares.
 //
 // API (called by host-setup.cjs):
 //   installSushiai({ exec, manifest, binDir, upload? }) -> Promise<{

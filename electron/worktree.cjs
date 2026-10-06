@@ -134,7 +134,7 @@ async function createWorktree(
 const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 
 // A non-interactive ssh shell often lacks the user's tool directories (as in
-// orchestrator-remote.cjs).
+// host-install.cjs).
 const PATH_SH =
   'export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"';
 

@@ -3213,42 +3213,6 @@ iframe {
 .providers-settings > .muted:first-child {
   margin-top: 18px;
 }
-/* The socket row keeps the status beside its label and the Reconnect button on
-   the input's line instead of on a row of its own. */
-.modal .socket-form {
-  gap: 8px;
-  margin-top: 16px;
-}
-.socket-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-}
-.socket-head label {
-  font-size: 12px;
-  color: #aaa;
-  flex-shrink: 0;
-}
-.socket-head .connection-detail {
-  justify-content: flex-end;
-  text-align: right;
-}
-.socket-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.socket-controls input {
-  flex: 1;
-  min-width: 0;
-}
-.socket-controls .primary {
-  height: 38px;
-  flex-shrink: 0;
-  padding: 0 13px;
-}
 .connection-card {
   border: 1px solid #333;
   border-radius: 8px;

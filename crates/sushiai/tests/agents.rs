@@ -318,7 +318,7 @@ fn codex_env(home: &Path) -> Vec<(String, String)> {
 
 fn sushiai_hooks(home: &Path, action: &str) -> String {
     let mut command = Command::new(BIN);
-    command.args(["hooks", action]);
+    command.args(["hooks", action]).env_remove("SUSHIAI_HOME");
     for (k, v) in codex_env(home) {
         command.env(k, v);
     }
@@ -858,4 +858,133 @@ fn a_session_that_lost_its_holder_across_a_restart_drops_its_token() {
         let text = fs::read_to_string(&path).unwrap_or_default();
         text.contains("exited") && !text.contains("deadbeef")
     });
+}
+
+#[test]
+fn hooks_install_puts_the_link_under_sushiai_home_and_needs_codex_home_for_a_custom_home() {
+    let home = tempfile::Builder::new()
+        .prefix("hm")
+        .tempdir_in("/tmp")
+        .expect("tempdir");
+    let custom = home.path().join("other");
+    let run = |codex: Option<&Path>| {
+        let mut command = Command::new(BIN);
+        command
+            .args(["hooks", "install"])
+            .env("HOME", home.path())
+            .env("SUSHIAI_HOME", &custom)
+            .env_remove("CODEX_HOME");
+        if let Some(codex) = codex {
+            command.env("CODEX_HOME", codex);
+        }
+        command.output().expect("run")
+    };
+    // Without CODEX_HOME the default ~/.codex would change: refused, nothing written.
+    let refused = run(None);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("CODEX_HOME"));
+    assert!(!home.path().join(".codex").exists());
+    assert!(!custom.join("bin/sushiai").exists());
+
+    // With an explicit CODEX_HOME the link lives under SUSHIAI_HOME, not ~/.sushiai.
+    let codex = home.path().join("codex-test");
+    let ok = run(Some(&codex));
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert_eq!(
+        fs::read_link(custom.join("bin/sushiai")).expect("link"),
+        Path::new(BIN)
+    );
+    assert!(!home.path().join(".sushiai").exists());
+    assert!(!home.path().join(".codex").exists());
+    assert!(codex.join("hooks.json").exists());
+}
+
+/// Creates a plain-command session labelled as `agent` (gemini and cursor-agent have no hooks).
+fn create_screen_agent(client: &mut Client, agent: &str, script: &str) -> String {
+    let created = client.call(
+        "session.create",
+        json!({"agent": agent, "cmd": ["sh", "-c", script], "cwd": "/tmp", "cols": 80, "rows": 24}),
+    );
+    created["id"].as_str().expect("id").to_string()
+}
+
+fn agent_status(client: &mut Client, id: &str) -> (String, String) {
+    let entry = list_entry(client, id);
+    (
+        entry["agentStatus"].as_str().unwrap_or_default().into(),
+        entry["statusSource"].as_str().unwrap_or_default().into(),
+    )
+}
+
+#[test]
+fn gemini_and_cursor_status_is_read_from_the_screen() {
+    let mut sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    // Gemini asks for confirmation, then (a second screen later) shows nothing it knows.
+    let gemini = create_screen_agent(
+        &mut client,
+        "gemini",
+        "printf 'Waiting for user confirmation\\n'; sleep 1; printf '\\033[2J\\033[Hready\\n'; sleep 60",
+    );
+    wait_status(&mut client, &gemini, 1, "blocked");
+    assert_eq!(
+        agent_status(&mut client, &gemini),
+        ("blocked".into(), "heuristic".into())
+    );
+    wait_status(&mut client, &gemini, 2, "idle");
+
+    // Cursor shows its working marker.
+    let cursor = create_screen_agent(
+        &mut client,
+        "cursor-agent",
+        "printf 'thinking...\\nctrl+c to stop\\n'; sleep 60",
+    );
+    wait_status(&mut client, &cursor, 1, "working");
+    assert_eq!(
+        agent_status(&mut client, &cursor),
+        ("working".into(), "heuristic".into())
+    );
+}
+
+#[test]
+fn a_codex_dialog_no_hook_reports_blocks_the_session_until_hooks_take_over() {
+    let flow = r#"
+process.stdout.write('Do you trust the contents of this directory?\n');
+say('dialog');
+setTimeout(() => {
+  run('SessionStart', 'SessionStart-startup.json');
+  say('hooked');
+  process.stdout.write('Allow command?\n');
+  say('done');
+}, 1500);
+stay();
+"#;
+    let fake = Fake::new("codex", flow);
+    let home = tempfile::Builder::new()
+        .prefix("hm")
+        .tempdir_in("/tmp")
+        .expect("tempdir");
+    sushiai_hooks(home.path(), "install");
+    let mut sandbox = fake.sandbox();
+    sandbox.env.extend(codex_env(home.path()));
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let id = create_agent(&mut client, "codex");
+    // Before any hook the trust dialog on the screen is all there is to go by.
+    wait_status(&mut client, &id, 1, "blocked");
+    assert_eq!(
+        agent_status(&mut client, &id),
+        ("blocked".into(), "heuristic".into())
+    );
+    // Once the hooks speak, they win: the later "Allow command?" text changes nothing.
+    wait_file(&fake.out("done"), "x");
+    std::thread::sleep(Duration::from_millis(1200));
+    let (status, source) = agent_status(&mut client, &id);
+    assert_eq!(source, "hook", "hooks took over");
+    assert_eq!(status, "idle", "the screen text did not override the hook");
 }

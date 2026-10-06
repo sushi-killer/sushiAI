@@ -262,6 +262,9 @@ impl SessionStatus {
                 }
             }
         }
+        let heuristic_dialog = self.source == StatusSource::Heuristic
+            && self.status == Status::Blocked
+            && self.blocked_kind == Some(BlockedKind::Input);
         self.source = StatusSource::Hook;
         self.ending = false;
         match p.event {
@@ -272,7 +275,9 @@ impl SessionStatus {
                 if p.common.transcript_path.is_some() {
                     self.transcript_path = p.common.transcript_path;
                 }
-                if self.status == Status::Starting {
+                // A dialog read from the screen before any hook (Codex asking to trust the
+                // folder) is over once the session starts.
+                if self.status == Status::Starting || heuristic_dialog {
                     self.set(Status::Idle, None, now);
                 }
             }

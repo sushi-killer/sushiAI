@@ -167,7 +167,6 @@ export function Sidebar({
   selected,
   connected,
   connection,
-  localSocket,
   connectionProfiles,
   worktreeTasks,
   statusByEndpoint,
@@ -206,9 +205,6 @@ export function Sidebar({
   selected: string;
   connected: boolean;
   connection: string;
-  /** This Mac's own endpoint, so the "Local" group can look up its daemon
-   * status the same way an SSH group looks up its own. */
-  localSocket: string;
   connectionProfiles: ConnectionProfile[];
   /** orchd tasks, so a task's worktree is named by the task's title. */
   worktreeTasks: WorktreeTask[];
@@ -339,8 +335,7 @@ export function Sidebar({
     const anchor =
       group.members.find((m) => m.hostKey === LOCAL_GROUP) || group.members[0];
     const statusKey = mergedRowStatusKey(group, active.id);
-    const live =
-      groupStatus(statusKey, localSocket, statusByEndpoint) === "connected";
+    const live = groupStatus(statusKey, statusByEndpoint) === "connected";
     const collapse = shouldCollapseHostMarkers(
       group,
       connectionProfiles,
@@ -351,7 +346,6 @@ export function Sidebar({
     const markerName = mergedMarkerAccessibleName(
       group,
       connectionProfiles,
-      localSocket,
       statusByEndpoint,
       worktreeTasks,
     );
@@ -441,8 +435,7 @@ export function Sidebar({
                 worktreeTasks,
               );
               const offline =
-                groupStatus(m.hostKey, localSocket, statusByEndpoint) ===
-                "offline";
+                groupStatus(m.hostKey, statusByEndpoint) === "offline";
               const HostIcon = m.hostKey === LOCAL_GROUP ? Server : Globe;
               return codePanels(m.workspace).map((p) => (
                 <button
@@ -606,8 +599,7 @@ export function Sidebar({
                     }
                     const key = groupKey(w.connection);
                     const live =
-                      groupStatus(key, localSocket, statusByEndpoint) ===
-                      "connected";
+                      groupStatus(key, statusByEndpoint) === "connected";
                     const tag =
                       key !== LOCAL_GROUP
                         ? groupLabel(key, connectionProfiles)
@@ -662,11 +654,7 @@ export function Sidebar({
                 return keys.map((key) => {
                   const members = groups.get(key)!;
                   const label = groupLabel(key, connectionProfiles);
-                  const status = groupStatus(
-                    key,
-                    localSocket,
-                    statusByEndpoint,
-                  );
+                  const status = groupStatus(key, statusByEndpoint);
                   const live = status === "connected";
                   const collapsed = collapsedGroups.has(key);
                   const consumed = new Set<string>();

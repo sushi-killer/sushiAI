@@ -250,6 +250,9 @@ try {
       ...process.env,
       SUSHIAI_TEST_WINDOW: windowMode,
       BRIDGE_DATA_DIR: profile,
+      // Never the owner's ~/.codex or ~/.sushiai/bin link.
+      HOME: profile,
+      CODEX_HOME: `${profile}/codex`,
       SUSHIAI_HOME: `${profile}/sushiai`,
       BRIDGE_DEV_URL: "",
       SUSHIAI_TEST_MASCOT: "1",
@@ -723,7 +726,13 @@ try {
 } finally {
   if (app) await app.close().catch(() => {});
   stopDaemon(`${profile}/sushiai`);
-  await fs.rm(profile, { recursive: true, force: true });
+  // A shell that exits late may still write its history into HOME.
+  await fs.rm(profile, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 200,
+  });
   await fs
     .writeFile(
       `${root}/artifacts/mascot-report.json`,

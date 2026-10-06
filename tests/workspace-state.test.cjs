@@ -393,3 +393,73 @@ test("a restored agent that ran without a session comes back ended and keeps its
   assert.equal(ran.agent, "codex");
   assert.equal(idle.ended, undefined);
 });
+
+test("an old snapshot that named This Mac by its socket path or by nothing is remapped to local", async () => {
+  const { restore } = await library;
+  const old = {
+    workspaces: [
+      {
+        id: "by-path",
+        name: "By path",
+        cwd: "/a",
+        connection: "/Users/me/.sushiai/daemon.sock",
+        panels: [panel("one", "terminal", { sessionId: "s-one" })],
+        layout: { type: "leaf", id: "one" },
+      },
+      {
+        id: "empty",
+        name: "Empty string",
+        cwd: "/b",
+        connection: "",
+        panels: [panel("two")],
+        layout: { type: "leaf", id: "two" },
+      },
+      {
+        id: "ssh",
+        name: "Remote",
+        cwd: "/c",
+        connection: "ssh:lab",
+        panels: [panel("three", "terminal", { sessionId: "s-three" })],
+        layout: { type: "leaf", id: "three" },
+      },
+    ],
+    socket: "/Users/me/.sushiai/daemon.sock",
+    closedProjects: [
+      {
+        id: "closed:/Users/me/.sushiai/daemon.sock:/old",
+        name: "old",
+        cwd: "/old",
+        endpoint: "/Users/me/.sushiai/daemon.sock",
+        backed: true,
+        closedAt: 1,
+        git: {},
+      },
+      {
+        id: "closed:ssh:lab:/lab",
+        name: "lab",
+        cwd: "/lab",
+        endpoint: "ssh:lab",
+        backed: true,
+        closedAt: 2,
+        git: {},
+      },
+    ],
+  };
+  const saved = restore({ read: () => JSON.stringify(old) });
+  assert.deepEqual(
+    saved.workspaces.map((w) => w.connection),
+    ["local", "local", "ssh:lab"],
+  );
+  assert.deepEqual(
+    saved.closedProjects.map((p) => [p.id, p.endpoint]),
+    [
+      ["closed:local:/old", "local"],
+      ["closed:ssh:lab:/lab", "ssh:lab"],
+    ],
+  );
+  assert.equal("socket" in saved, false);
+  // What the next save writes restores to the same thing: the remap is stable.
+  const again = restore({ read: () => JSON.stringify(saved) });
+  assert.deepEqual(again.workspaces, saved.workspaces);
+  assert.deepEqual(again.closedProjects, saved.closedProjects);
+});

@@ -227,7 +227,14 @@ test("no launch error carries a secret", async (t) => {
 
 // Remote hosts ---------------------------------------------------------------
 
-function remoteSetup({ missing = [], project = null, hasShell = true } = {}) {
+function remoteSetup({
+  missing = [],
+  project = null,
+  hasShell = true,
+  inspect = async () => {
+    throw new Error("unexpected inspect");
+  },
+} = {}) {
   const requests = [];
   const commands = [];
   const exec = async (endpoint, command, options) => {
@@ -257,6 +264,7 @@ function remoteSetup({ missing = [], project = null, hasShell = true } = {}) {
       },
     },
     exec,
+    inspect,
     environment: (input) =>
       sessionLaunchEnv(
         {
@@ -313,21 +321,52 @@ test("a remote folder that is missing is refused before the daemon is asked", as
   assert.equal(requests.length, 0);
 });
 
-test("a remote worktree is used when it exists and refused clearly otherwise", async () => {
-  const worktree = { branch: "feat/x" };
-  const have = remoteSetup();
-  const out = await have.launcher.launch(remoteBase({ worktree }));
+test("a remote worktree is created on the host once per launch key", async () => {
+  const calls = [];
+  const setup = remoteSetup({
+    inspect: async (endpoint, options) => {
+      calls.push({ endpoint, options });
+      return { path: "/srv/app-feat-x", root: "/srv/app" };
+    },
+  });
+  const worktree = { branch: "feat/x", base: "refs/heads/dev" };
+  const out = await setup.launcher.launch(remoteBase({ worktree }));
   assert.equal(out.cwd, "/srv/app-feat-x");
-  assert.equal(have.requests[0].params.cwd, "/srv/app-feat-x");
-  const none = remoteSetup({ missing: ["/srv/app-feat-x"] });
-  await assert.rejects(
-    none.launcher.launch(remoteBase({ worktree })),
-    (error) =>
-      error.code === "REMOTE_WORKTREE_MISSING" &&
-      /not supported yet/.test(error.message) &&
-      error.message.includes("/srv/app-feat-x"),
+  assert.equal(setup.requests[0].params.cwd, "/srv/app-feat-x");
+  assert.deepEqual(calls, [
+    {
+      endpoint: "ssh:host-1",
+      options: {
+        operation: "worktree_create",
+        root: "/srv/app",
+        branch: "feat/x",
+        base: "refs/heads/dev",
+      },
+    },
+  ]);
+  // A retry with the same key reuses the worktree: the host would refuse a second one.
+  await setup.launcher.launch(remoteBase({ worktree }));
+  assert.equal(calls.length, 1);
+  assert.equal(setup.requests[1].params.cwd, "/srv/app-feat-x");
+  // Another key is another launch; no base lets the host pick its default.
+  await setup.launcher.launch(
+    remoteBase({ worktree: { branch: "feat/y" }, idempotencyKey: "k2" }),
   );
-  assert.equal(none.requests.length, 0);
+  assert.equal(calls.length, 2);
+  assert.equal("base" in calls[1].options, false);
+});
+
+test("a remote worktree the host refuses fails the launch before the daemon is asked", async () => {
+  const setup = remoteSetup({
+    inspect: async () => {
+      throw new Error("A worktree already exists at that path.");
+    },
+  });
+  await assert.rejects(
+    setup.launcher.launch(remoteBase({ worktree: { branch: "feat/x" } })),
+    /already exists/,
+  );
+  assert.equal(setup.requests.length, 0);
 });
 
 const chatgpt = (refresh) =>
@@ -457,6 +496,8 @@ test("the IPC handler dispatches a validated launch to the launcher", async () =
   const seen = [];
   registerDaemonIpc({
     handle: (channel, fn) => handlers.set(channel, fn),
+    send: () => {},
+    getManager: () => null,
     launch: async (request) => {
       seen.push(request);
       return { host: "local", sessionId: "s9" };

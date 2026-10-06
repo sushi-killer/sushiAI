@@ -68,7 +68,9 @@ const navLabel = (id) => contributed("navigation", id).label;
 const ledger = surfaceOf("probe.ledger");
 const itemLabel = ledger.view.document.itemLabel;
 const profile = await fs.mkdtemp("/tmp/sushiai-smoke-");
-await fs.writeFile(path.join(profile, ".zshrc"), "");
+// A profile of its own (HOME is the temp profile): no end-of-line mark, which
+// a screen replayed at another width would show as a stray "%" row.
+await fs.writeFile(path.join(profile, ".zshrc"), "unsetopt PROMPT_SP\n");
 // The strict daemon: the app under test starts its own `sushiai` daemon in a
 // home of its own and never touches the owner's ~/.sushiai.
 const daemonHome = path.join(profile, "sushiai");
@@ -121,6 +123,9 @@ const launchApp = () =>
     env: {
       ...process.env,
       BRIDGE_DATA_DIR: profile,
+      // Never the owner's ~/.codex or ~/.sushiai/bin link.
+      HOME: profile,
+      CODEX_HOME: path.join(profile, "codex"),
       ZDOTDIR: profile,
       SUSHIAI_HOME: daemonHome,
       SUSHIAI_DAEMON_BIN: process.env.SUSHIAI_DAEMON_BIN || daemonBinary(root),
@@ -869,6 +874,9 @@ try {
   await page
     .getByRole("button", { name: "Close session", exact: true })
     .click();
+  // The panel must be gone first: a snapshot written before the routine panel
+  // existed would satisfy the check below without the close ever happening.
+  await routinePanel.waitFor({ state: "detached" });
   // The reload must find the close already persisted, not race its write.
   await until(async () => {
     const saved = JSON.parse(readSnapshot(profile) ?? "null");
@@ -942,7 +950,13 @@ try {
   await desktop.close();
   const orchdGone = !orchdBuilt || (await pollOrchd(false, 3000));
   stopDaemon(daemonHome);
-  await fs.rm(profile, { recursive: true, force: true });
+  // A shell that exits late may still write its history into HOME.
+  await fs.rm(profile, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 200,
+  });
   assert.ok(!orchdBuilt || orchdRan, "orchd never started for this data dir");
   assert.ok(orchdGone, "orchd for this data dir outlived the app");
 }

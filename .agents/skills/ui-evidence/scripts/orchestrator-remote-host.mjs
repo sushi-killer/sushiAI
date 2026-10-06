@@ -108,6 +108,9 @@ try {
       SUSHIAI_TEST_SSH: ssh,
       FAKE_SSH_CONFIG: `${profile}/ssh.json`,
       BRIDGE_DATA_DIR: profile,
+      // Never the owner's ~/.codex or ~/.sushiai/bin link.
+      HOME: profile,
+      CODEX_HOME: `${profile}/codex`,
       SUSHIAI_HOME: `${profile}/sushiai`,
       BRIDGE_DEV_URL: "",
     },

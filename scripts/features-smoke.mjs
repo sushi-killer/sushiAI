@@ -66,6 +66,9 @@ print(r)`)
       ...process.env,
       SUSHIAI_TEST_WINDOW: "hidden",
       BRIDGE_DATA_DIR: profile,
+      // Never the owner's ~/.codex or ~/.sushiai/bin link.
+      HOME: profile,
+      CODEX_HOME: `${profile}/codex`,
     },
   });
   page = await desktop.firstWindow();
@@ -225,5 +228,11 @@ print(r)`)
   if (root?.startsWith("/tmp/sushiai-ui-fixture-"))
     await remote("import shutil;shutil.rmtree(" + JSON.stringify(root) + ")");
   await connections.close();
-  await fs.rm(profile, { recursive: true, force: true });
+  // A shell that exits late may still write its history into HOME.
+  await fs.rm(profile, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 200,
+  });
 }

@@ -25,8 +25,10 @@ variants are archived there.
   added: adding the host is the consent, so there is no consent screen and no per-host approval.
   The one control is "Don't send secrets to this host" (Project settings → Hosts, off by default,
   `hosts[host].withheld`); with it on the host gets no value of that project and its daemon drops
-  what it holds. Values travel only in orchd memory, on the prepare script's stdin or in a
-  one-shot 0600 file deleted right after it is sourced, and never in a session's command line.
+  what it holds. Values travel only in orchd memory, on the prepare script's stdin, or in the
+  `session.create` `env` over the daemon protocol (through the ssh proxy for a remote host). There they
+  live in the holder's environment and in the daemon's memory, and never in a command line, in
+  `argv`, or in `state.json`.
 - **D2 · Core changes: approved.** The owner started this feature knowing every lane touches
   `src/app/*`, `electron/*` or orchd.
 - D3 · Project description in the app only (proposed) vs also a committable
@@ -43,8 +45,9 @@ variants are archived there.
 - A Claude subscription token is passed through `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` (checked
   in CLI 2.1.285), never through env. If fd passing fails in a session, the fallback is env plus
   redaction. That is decided in S7 with a test.
-- Remote values travel only over channels that leave nothing on the host: orchd in memory, or a
-  one-shot 0600 file sent over ssh stdin and deleted after it is sourced.
+- Remote values travel only over channels that leave nothing on the host: orchd in memory, or
+  `session.create` `env` over the daemon protocol (the ssh proxy). They stay in the holder's
+  environment and the daemon's memory; they are never in `argv` or in `state.json`.
 
 ## Out of scope
 
@@ -148,8 +151,9 @@ network{allowedDomains}, sessions{claudeAccount, backend}, targets[]`) in `src/t
 ### S9 · Remote delivery (depends on S5, S8)
 
 - Remote orchd gets `secrets.set` for every host except those switched off for the project (drop
-  the "never leave this machine" branch). SSH terminals get a one-shot 0600 env file over stdin (and the fd
-  for a subscription token), deleted after sourcing. Project MCP reaches remote tasks.
+  the "never leave this machine" branch). SSH sessions get the values in `session.create` `env` over the daemon
+  protocol (ssh proxy), held in the holder's environment and the daemon's memory, never in `argv` or
+  `state.json`. Project MCP reaches remote tasks.
 - **Accept:** live run on a remote SSH host: the agent sees the env, the host has no file left behind, a
   host switched off gets nothing; `docs/architecture.md` arrow updated.
 

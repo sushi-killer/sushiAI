@@ -9,7 +9,7 @@ const { createHash } = require("node:crypto");
 const { execFileSync } = require("node:child_process");
 const { createDaemonManager } = require("../electron/daemon/manager.cjs");
 const { remoteConnectors } = require("../electron/daemon/connectors.cjs");
-const { createHostInstaller } = require("../electron/daemon/install.cjs");
+const { createHostInstaller } = require("../electron/host-setup.cjs");
 const { setupHost } = require("../electron/host-setup.cjs");
 const { makeHost } = require("./helpers/fake-host.cjs");
 

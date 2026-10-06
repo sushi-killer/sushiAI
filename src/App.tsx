@@ -31,6 +31,7 @@ import { TitleBar } from "./app/TitleBar";
 import { useExtensions } from "./app/useExtensions";
 import { useConnectionProfiles } from "./app/useConnectionProfiles";
 import { useDaemon } from "./app/useDaemon";
+import { LOCAL_ENDPOINT } from "./daemonSessions.ts";
 import { useHostContext, useProjectGit } from "./app/useProjectGit";
 import { useMergedCanvas } from "./workspace/mergedLayouts";
 import { useProjectView } from "./workspace/projectView";
@@ -90,14 +91,11 @@ export function App() {
   });
   const { connectionProfiles, refreshConnectionProfiles } =
     useConnectionProfiles();
-  const { system, socket, setSocket, connection, statusByEndpoint } = useDaemon(
-    {
-      savedSocket: saved?.socket || "",
-      notify,
-      setWorkspaces,
-      connectionProfiles,
-    },
-  );
+  const { system, connection, statusByEndpoint, sessions } = useDaemon({
+    notify,
+    setWorkspaces,
+    connectionProfiles,
+  });
   const skills = useSkills(sectionName, notify);
   const [sidebar, setSidebar] = useState(
     saved?.sidebar ?? window.innerWidth >= 760,
@@ -116,8 +114,6 @@ export function App() {
     workspaces,
     setWorkspaces,
     saved,
-    socket,
-    useEndpoint: setSocket,
     notify,
     showWorkspace,
     confirmClose: ({ workspace, panel }) =>
@@ -172,7 +168,7 @@ export function App() {
   // Held here, not in SettingsDialog: the blocker runs whenever the app is open.
   const [keepAwake, setKeepAwake] = useKeepAwake();
   const connected = connection === "connected";
-  const activeEndpoint = active.connection || socket;
+  const activeEndpoint = active.connection || LOCAL_ENDPOINT;
   const { projectGit, readyWorkspaceIds, hydratedHostKeys } = useProjectGit(
     workspaces,
     active.id,
@@ -216,7 +212,6 @@ export function App() {
     {
       workspaces,
       activeId: active.id,
-      socket,
       routines,
       fontScale,
       mode,
@@ -400,7 +395,6 @@ export function App() {
             selected={selected}
             connected={connected}
             connection={connection}
-            localSocket={system?.socketPath || ""}
             connectionProfiles={connectionProfiles}
             statusByEndpoint={statusByEndpoint}
             projectGit={projectGit}
@@ -446,7 +440,7 @@ export function App() {
               ws={ws}
               projectGit={projectGit}
               connectionProfiles={connectionProfiles}
-              attention={attention}
+              attention={{ ...attention, daemonSessions: sessions }}
             />
           ) : mode === "Agent" ? (
             <AgentsView slot={slot} session={session} />
@@ -541,8 +535,7 @@ export function App() {
               workspaces={workspaces}
               settingsTab={settingsTab}
               setSettingsTab={setSettingsTab}
-              socket={socket}
-              setSocket={setSocket}
+              endpoint={activeEndpoint}
               fontScale={fontScale}
               setFontScale={setFontScale}
               keepAwake={keepAwake}
@@ -557,7 +550,6 @@ export function App() {
             <WorkspaceDialog
               defaultCwd={active.cwd}
               activeEndpoint={active.connection}
-              localSocket={system?.socketPath || ""}
               connectionProfiles={connectionProfiles}
               statusByEndpoint={statusByEndpoint}
               onCreate={(...args) => ws.createWorkspace(...args)}

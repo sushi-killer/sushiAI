@@ -17,7 +17,8 @@ pub mod method {
     pub const SESSION_EXITED: &str = "session.exited";
     /// Notification sent to a subscriber that fell behind: a fresh snapshot replaces the lost bytes.
     pub const SESSION_SNAPSHOT: &str = "session.snapshot";
-    /// Notification sent to a client that missed events: the full session list.
+    /// Notification sent to a client that missed events. It has no payload: the client lists the
+    /// sessions again.
     pub const SESSION_RESYNC: &str = "session.resync";
     /// Request from an agent's hook process (token required).
     pub const HOOK_EVENT: &str = "hook.event";
@@ -119,6 +120,10 @@ pub struct HelloResult {
     /// The host name this daemon is the replica of (see `projects.sync`).
     #[serde(default)]
     pub host: String,
+    /// sha256 (hex) of the daemon's own binary, measured at startup. Additive: an older daemon
+    /// does not send it. The desktop compares it with the bundled manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,11 +347,6 @@ pub struct SessionSnapshot {
     pub id: String,
     #[serde(flatten)]
     pub attach: AttachResult,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionsResync {
-    pub sessions: Vec<SessionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

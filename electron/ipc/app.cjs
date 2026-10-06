@@ -1,7 +1,6 @@
 const os = require("node:os");
 const path = require("node:path");
 const { powerSaveBlocker } = require("electron");
-const { resolveHome } = require("../daemon/local.cjs");
 
 function registerAppIpc({
   handle,
@@ -65,8 +64,6 @@ function registerAppIpc({
     home: os.homedir(),
     cwd: app.isPackaged ? os.homedir() : process.cwd(),
     platform: process.platform,
-    // The local daemon's socket names this Mac as an endpoint.
-    socketPath: path.join(resolveHome(), "daemon.sock"),
     agents: ["claude", "codex", "gemini", "cursor-agent"].map((name) => ({
       name,
       path: executable(name),

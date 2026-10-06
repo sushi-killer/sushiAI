@@ -93,8 +93,7 @@ const DEFAULT_APP_PREFERENCES: AppPreferences = {
 export function SettingsDialog({
   settingsTab,
   setSettingsTab,
-  socket,
-  setSocket,
+  endpoint,
   fontScale,
   setFontScale,
   keepAwake,
@@ -111,8 +110,8 @@ export function SettingsDialog({
 }: {
   settingsTab: SettingsTab;
   setSettingsTab(tab: SettingsTab): void;
-  socket: string;
-  setSocket(value: string): void;
+  /** The host of the active workspace; This Mac's card is "Active" otherwise. */
+  endpoint: string;
   fontScale: number;
   setFontScale(value: number): void;
   keepAwake: boolean;
@@ -207,9 +206,7 @@ export function SettingsDialog({
           <RenderProfiler id="settings">
             {tab === "connections" ? (
               <ConnectionsSettings
-                endpoint={socket}
-                localSocket={system?.socketPath || ""}
-                onSelect={(value) => setSocket(value)}
+                endpoint={endpoint}
                 profiles={connectionProfiles}
                 onRefresh={refreshConnectionProfiles}
                 notify={notify}

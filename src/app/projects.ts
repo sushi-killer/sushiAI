@@ -8,7 +8,7 @@ import { computeMergeGroups, isHidden, memberLabel } from "./workspaceMerge.ts";
  * that decides whether reopening it would just recreate an already-open
  * workspace. Used both as the remembered entry's `id` and as the pseudo
  * workspace id merging keys off (`closed:<endpoint>:<cwd>`), so the two never
- * drift apart. A concrete local socket identifies its own session server. */
+ * drift apart. This Mac is the endpoint "local". */
 export function closedProjectId(
   endpoint: string | undefined,
   cwd: string,

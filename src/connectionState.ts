@@ -1,6 +1,6 @@
 import type { Connector, DaemonState } from "./types";
 
-export type HostAction = "retry" | "install" | "update";
+export type HostAction = "retry" | "install" | "update" | "restart";
 export type HostView = {
   tone: "ok" | "info" | "warning" | "danger" | "neutral";
   label: string;
@@ -19,9 +19,15 @@ export function describeHost(state: DaemonState | undefined): HostView {
   switch (state.state) {
     case "ready":
       return {
-        tone: "ok",
+        tone: state.update ? "info" : "ok",
         label: "Connected",
         detail: state.version ? `sushiai ${state.version}` : undefined,
+        ...(state.update
+          ? {
+              hint: "This app ships a different sushiai than the one running on this host.",
+              action: "update" as const,
+            }
+          : {}),
       };
     case "connecting":
       return { tone: "info", label: "Connecting" };
@@ -55,6 +61,14 @@ export function describeHost(state: DaemonState | undefined): HostView {
           detail: state.message,
           action: "install",
         };
+      if (state.reason === "incompatible" && state.host === "local")
+        return {
+          tone: "warning",
+          label: "Another sushiAI build owns the daemon",
+          detail: state.message,
+          hint: "Restart the daemon to use this app's build. Running sessions keep going.",
+          action: "restart",
+        };
       if (state.reason === "incompatible")
         return {
           tone: "warning",
@@ -77,7 +91,9 @@ export function actionLabel(action: HostAction): string {
     ? "Install sushiai"
     : action === "update"
       ? "Update sushiai"
-      : "Retry";
+      : action === "restart"
+        ? "Restart daemon"
+        : "Retry";
 }
 
 /** Splits one line into argv on spaces; quotes group words, backslash escapes. */

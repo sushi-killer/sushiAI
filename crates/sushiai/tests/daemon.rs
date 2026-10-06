@@ -442,3 +442,17 @@ fn a_killed_holder_ends_its_session_and_removes_its_socket() {
         "exited"
     );
 }
+
+#[test]
+fn hello_reports_the_sha256_of_the_daemon_binary_as_build() {
+    use sha2::{Digest, Sha256};
+    let mut sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let hello = client.call("hello", json!({"protocol": 1, "client": "test"}));
+    let expected: String = Sha256::digest(std::fs::read(common::BIN).expect("binary"))
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(hello["build"], expected.as_str());
+}

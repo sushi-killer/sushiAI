@@ -13,7 +13,6 @@ const {
   resolveBinary,
   ensureHome,
   HOOKS_STAMP,
-  BINARY_STAMP,
 } = require("../electron/daemon/local.cjs");
 
 const cleanups = [];
@@ -41,7 +40,7 @@ const until = async (check, ms = 3000, what = "condition") => {
 // the socket like the real daemon does.
 async function fakeDaemon(
   socketPath,
-  { version = "1.0.0", host = "devbox" } = {},
+  { version = "1.0.0", host = "devbox", build } = {},
 ) {
   const conns = [];
   const log = [];
@@ -66,6 +65,7 @@ async function fakeDaemon(
             capabilities: ["sessions", "attach"],
             daemon: version,
             host,
+            ...(build ? { build } : {}),
           });
         else if (message.method === "session.list") reply(message.id, []);
         else if (message.method === "session.attach")
@@ -164,6 +164,24 @@ test("hello and session.list make the host ready with version, capabilities and 
     manager.request("other", "session.list"),
     /unknown host/,
   );
+});
+
+test("setUpdate flags a ready host with update and a new connection clears it", async () => {
+  const socketPath = path.join(tmp(), "d.sock");
+  await fakeDaemon(socketPath, { build: "a".repeat(64) });
+  const manager = startManager(stubConnector({ socketPath }));
+  manager.start();
+  await until(() => stateOf(manager).state === "ready", 3000, "ready");
+  assert.equal(manager.hello("local").build, "a".repeat(64));
+  assert.equal(stateOf(manager).update, undefined);
+  const seen = [];
+  manager.on("state", (state) => seen.push(state.update));
+  manager.setUpdate("local", true);
+  manager.setUpdate("local", true);
+  assert.deepEqual(seen, [true]);
+  assert.equal(stateOf(manager).update, true);
+  await manager.retry("local");
+  assert.equal(stateOf(manager).update, undefined);
 });
 
 test("notifications are forwarded as events with the generation", async () => {
@@ -347,13 +365,6 @@ const sha256 = (file) =>
     .createHash("sha256")
     .update(fs.readFileSync(file))
     .digest("hex");
-// Marks the daemon already running as started from the fixture's binary.
-const stampCurrent = (f, pid = null) =>
-  fs.writeFileSync(
-    path.join(f.home, BINARY_STAMP),
-    JSON.stringify({ sha256: sha256(f.binary), pid }),
-  );
-
 function localFixture({ bundled = "1.0.0", appVersion = "app-1" } = {}) {
   const dir = tmp();
   const home = path.join(dir, "home");
@@ -373,19 +384,19 @@ function localFixture({ bundled = "1.0.0", appVersion = "app-1" } = {}) {
     pollMs: 10,
     ...extra,
   });
-  return { dir, home, binary, socketPath, spawned, env, options };
+  // A daemon of the fixture's binary: same version, same build.
+  const current = { version: bundled, build: sha256(binary) };
+  return { dir, home, binary, socketPath, spawned, env, options, current };
 }
 
-test("local connector creates the home 0700, stamps the binary and starts a missing daemon detached", async () => {
+test("local connector creates the home 0700 and starts a missing daemon detached", async () => {
   const f = localFixture();
   let daemon;
   const connector = createLocalConnector(
     f.options({
       spawn: (bin, args, opts) => {
         f.spawned.push({ bin, args, opts });
-        fakeDaemon(f.socketPath, { version: "1.0.0" }).then(
-          (d) => (daemon = d),
-        );
+        fakeDaemon(f.socketPath, f.current).then((d) => (daemon = d));
         return Object.assign(new EventEmitter(), { unref() {} });
       },
     }),
@@ -402,10 +413,7 @@ test("local connector creates the home 0700, stamps the binary and starts a miss
   assert.equal(f.spawned[0].opts.env.SECRET_APP_VAR, undefined);
   assert.equal(fs.existsSync(path.join(f.home, "daemon.log")), true);
   assert.equal(fs.existsSync(path.join(f.home, "bin")), false);
-  assert.equal(
-    JSON.parse(fs.readFileSync(path.join(f.home, BINARY_STAMP), "utf8")).sha256,
-    sha256(f.binary),
-  );
+  assert.equal(fs.existsSync(path.join(f.home, "daemon-binary")), false);
   assert.ok(daemon);
   // A daemon that is already up and current is reused, not spawned again.
   const again = await connector.connect();
@@ -424,9 +432,7 @@ test("a daemon of another version is shut down and the bundled one started", asy
         f.spawned.push(args);
         // The old socket is gone by now: the new daemon binds the same path.
         assert.equal(fs.existsSync(f.socketPath), false);
-        fakeDaemon(f.socketPath, { version: "2.0.0" }).then((d) =>
-          fresh.push(d),
-        );
+        fakeDaemon(f.socketPath, f.current).then((d) => fresh.push(d));
         return Object.assign(new EventEmitter(), { unref() {} });
       },
     }),
@@ -459,8 +465,7 @@ test("a binary that stays on the wrong version is reported incompatible", async 
 test("hooks install runs once per app version", async () => {
   const f = localFixture({ appVersion: "app-1" });
   fs.mkdirSync(f.home, { mode: 0o700 });
-  stampCurrent(f);
-  await fakeDaemon(f.socketPath);
+  await fakeDaemon(f.socketPath, f.current);
   const hooksLog = () => {
     try {
       return fs
@@ -487,7 +492,46 @@ test("hooks install runs once per app version", async () => {
   assert.equal(hooksLog().length, 2);
 });
 
-test("a daemon without this binary's stamp is replaced once per app run, then reported incompatible", async () => {
+test("a daemon of another build is replaced once per app run, then reported incompatible", async () => {
+  const f = localFixture();
+  fs.mkdirSync(f.home, { mode: 0o700 });
+  // Same version, another binary: only hello.build tells them apart.
+  const old = await fakeDaemon(f.socketPath, {
+    version: "1.0.0",
+    build: "0".repeat(64),
+  });
+  let started = 0;
+  const connector = createLocalConnector(
+    f.options({
+      spawn: () => {
+        started++;
+        fakeDaemon(f.socketPath, f.current);
+        return Object.assign(new EventEmitter(), { unref() {} });
+      },
+    }),
+  );
+  const client = await connector.connect();
+  assert.equal(started, 1);
+  assert.ok(old.log.some((m) => m.method === "daemon.shutdown"));
+  client.close();
+  // Another app replaced the daemon with its own binary: no second shutdown.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const other = await fakeDaemon(f.socketPath, { build: "1".repeat(64) });
+  await assert.rejects(
+    connector.connect(),
+    (error) =>
+      error.reason === "incompatible" &&
+      error.retry === false &&
+      /Another sushiAI build owns the daemon/.test(error.message),
+  );
+  assert.equal(started, 1);
+  assert.equal(
+    other.log.some((m) => m.method === "daemon.shutdown"),
+    false,
+  );
+});
+
+test("a daemon that reports no build (an older daemon) is not current", async () => {
   const f = localFixture();
   fs.mkdirSync(f.home, { mode: 0o700 });
   const old = await fakeDaemon(f.socketPath, { version: "1.0.0" });
@@ -496,98 +540,95 @@ test("a daemon without this binary's stamp is replaced once per app run, then re
     f.options({
       spawn: () => {
         started++;
-        fakeDaemon(f.socketPath, { version: "1.0.0" });
-        return Object.assign(new EventEmitter(), {
-          unref() {},
-          pid: process.pid,
-        });
-      },
-    }),
-  );
-  const client = await connector.connect();
-  assert.equal(started, 1);
-  assert.ok(old.log.some((m) => m.method === "daemon.shutdown"));
-  assert.equal(
-    JSON.parse(fs.readFileSync(path.join(f.home, BINARY_STAMP), "utf8")).pid,
-    process.pid,
-  );
-  client.close();
-  // Another app replaced the daemon with its own binary: no second shutdown.
-  fs.writeFileSync(
-    path.join(f.home, BINARY_STAMP),
-    JSON.stringify({ sha256: "0".repeat(64), pid: process.pid }),
-  );
-  const other = await fakeDaemon(path.join(f.home, "x.sock"));
-  void other;
-  await assert.rejects(
-    connector.connect(),
-    (error) => error.reason === "incompatible" && error.retry === false,
-  );
-  assert.equal(started, 1);
-});
-
-test("the stamp takes its pid from the daemon lock, and a daemon another app started first is not stamped", async () => {
-  const f = localFixture();
-  fs.mkdirSync(f.home, { mode: 0o700 });
-  const connector = createLocalConnector(
-    f.options({
-      spawn: () => {
-        fs.writeFileSync(path.join(f.home, "daemon.lock"), String(process.pid));
-        fakeDaemon(f.socketPath);
-        return Object.assign(new EventEmitter(), { unref() {}, pid: 999999 });
-      },
-    }),
-  );
-  // The lock names another process than the one we spawned: not ours, so no
-  // stamp, and with nothing running before it is reported incompatible.
-  await assert.rejects(
-    connector.connect(),
-    (error) => error.reason === "incompatible" && error.retry === false,
-  );
-  assert.equal(fs.existsSync(path.join(f.home, BINARY_STAMP)), false);
-
-  const g = localFixture();
-  fs.mkdirSync(g.home, { mode: 0o700 });
-  const ours = createLocalConnector(
-    g.options({
-      spawn: () => {
-        fs.writeFileSync(path.join(g.home, "daemon.lock"), String(process.pid));
-        fakeDaemon(g.socketPath);
-        return Object.assign(new EventEmitter(), {
-          unref() {},
-          pid: process.pid,
-        });
-      },
-    }),
-  );
-  (await ours.connect()).close();
-  assert.equal(
-    JSON.parse(fs.readFileSync(path.join(g.home, BINARY_STAMP), "utf8")).pid,
-    process.pid,
-  );
-});
-
-test("a daemon stamped with a dead pid is not current", async () => {
-  const f = localFixture();
-  fs.mkdirSync(f.home, { mode: 0o700 });
-  stampCurrent(f, 2 ** 22 + 12345);
-  const old = await fakeDaemon(f.socketPath);
-  let started = 0;
-  const connector = createLocalConnector(
-    f.options({
-      spawn: () => {
-        started++;
-        fakeDaemon(f.socketPath);
-        return Object.assign(new EventEmitter(), {
-          unref() {},
-          pid: process.pid,
-        });
+        fakeDaemon(f.socketPath, f.current);
+        return Object.assign(new EventEmitter(), { unref() {} });
       },
     }),
   );
   (await connector.connect()).close();
   assert.equal(started, 1);
   assert.ok(old.log.some((m) => m.method === "daemon.shutdown"));
+});
+
+test("a daemon started by this call that is not the bundled build is incompatible, not replaced", async () => {
+  const f = localFixture();
+  fs.mkdirSync(f.home, { mode: 0o700 });
+  // Another app won the race for the socket with its own binary.
+  const connector = createLocalConnector(
+    f.options({
+      spawn: () => {
+        fakeDaemon(f.socketPath, { build: "2".repeat(64) });
+        return Object.assign(new EventEmitter(), { unref() {} });
+      },
+    }),
+  );
+  await assert.rejects(
+    connector.connect(),
+    (error) => error.reason === "incompatible" && error.retry === false,
+  );
+});
+
+test("restart stops the daemon of another build so the next connect starts this app's", async () => {
+  const f = localFixture();
+  fs.mkdirSync(f.home, { mode: 0o700 });
+  const first = await fakeDaemon(f.socketPath, { build: "3".repeat(64) });
+  let started = 0;
+  const connector = createLocalConnector(
+    f.options({
+      spawn: () => {
+        started++;
+        fakeDaemon(f.socketPath, f.current);
+        return Object.assign(new EventEmitter(), { unref() {} });
+      },
+    }),
+  );
+  // The one allowed replacement is used up; the next mismatch is incompatible.
+  (await connector.connect()).close();
+  assert.ok(first.log.some((m) => m.method === "daemon.shutdown"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const other = await fakeDaemon(f.socketPath, { build: "4".repeat(64) });
+  await assert.rejects(
+    connector.connect(),
+    (error) => error.reason === "incompatible",
+  );
+  await connector.restart();
+  assert.ok(other.log.some((m) => m.method === "daemon.shutdown"));
+  const client = await connector.connect();
+  cleanups.push(() => client.close());
+  assert.equal(client.hello.build, f.current.build);
+  assert.equal(started, 2);
+});
+
+test("a test run never runs hooks install", async () => {
+  const f = localFixture();
+  fs.mkdirSync(f.home, { mode: 0o700 });
+  await fakeDaemon(f.socketPath, f.current);
+  const vars = { ...f.env, SUSHIAI_TEST_WINDOW: "hidden" };
+  (await createLocalConnector(f.options({ env: vars })).connect()).close();
+  assert.equal(fs.existsSync(path.join(f.dir, "hooks.log")), false);
+  assert.equal(fs.existsSync(path.join(f.home, HOOKS_STAMP)), false);
+});
+
+test("a packaged app without its bundled daemon fails with a clear error", () => {
+  assert.throws(
+    () =>
+      resolveBinary({
+        env: {},
+        isPackaged: true,
+        resourcesPath: "/r/Resources",
+        exists: () => false,
+      }),
+    /missing its bundled daemon.*\/r\/Resources\/sushiai/,
+  );
+  assert.equal(
+    resolveBinary({
+      env: {},
+      isPackaged: true,
+      resourcesPath: "/r/Resources",
+      exists: () => true,
+    }),
+    "/r/Resources/sushiai",
+  );
 });
 
 test("the daemon environment keeps LC_CTYPE and defaults the locale to UTF-8", async () => {
@@ -606,7 +647,7 @@ test("the daemon environment keeps LC_CTYPE and defaults the locale to UTF-8", a
         env: { ...f.env, ...env },
         spawn: (bin, args, opts) => {
           spawned.push(opts.env);
-          fakeDaemon(f.socketPath);
+          fakeDaemon(f.socketPath, f.current);
           return Object.assign(new EventEmitter(), { unref() {} });
         },
       }),

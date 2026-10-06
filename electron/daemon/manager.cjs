@@ -28,9 +28,12 @@
 //                                    connector is unchanged but stopped without
 //                                    a retry (need_auth, ...) is retried
 //   retry(host): Promise<ConnectorState>  reconnect now (one attempt)
-//   states(): ConnectorState[]       {host, state, generation, reason?, message?, version?, capabilities?}
-//   hello(host): {host, version, capabilities} | null   `host` is the daemon's own
-//                                    host name (projects.sync must use it)
+//   states(): ConnectorState[]       {host, state, generation, reason?, message?, version?, capabilities?, update?}
+//   hello(host): {host, version, capabilities, build?} | null   `host` is the daemon's own
+//                                    host name (projects.sync must use it);
+//                                    `build` is the sha256 of its binary
+//   setUpdate(host, bool)            flags a ready host whose binary differs
+//                                    from the bundled one (`update: true`)
 //   request(host, method, params)    rejects with RpcError, or Error when not ready
 //   attach(host, id, {scrollback}, onBytes)
 //        -> Promise<{cols, rows, seq, detach()}>
@@ -113,6 +116,7 @@ function createDaemonManager({
     if (entry.state === "ready" && entry.hello) {
       out.version = entry.hello.daemon;
       out.capabilities = entry.hello.capabilities;
+      if (entry.update) out.update = true;
     }
     return out;
   }
@@ -326,7 +330,9 @@ function createDaemonManager({
       host: client.hello.host || entry.host,
       daemon: client.hello.daemon,
       capabilities: client.hello.capabilities || [],
+      build: client.hello.build,
     };
+    entry.update = false;
     entry.generation += 1;
     const generation = entry.generation;
     client.on("notification", (method, params) => {
@@ -446,8 +452,17 @@ function createDaemonManager({
             host: entry.hello.host,
             version: entry.hello.daemon,
             capabilities: entry.hello.capabilities,
+            ...(entry.hello.build ? { build: entry.hello.build } : {}),
           }
         : null;
+    },
+    // The bundled sushiai differs from the daemon's build: the row offers an
+    // update. Cleared by the next connection.
+    setUpdate(host, update) {
+      const entry = hosts.get(host);
+      if (!entry || entry.state !== "ready" || entry.update === update) return;
+      entry.update = update;
+      emit("state", publicState(entry));
     },
     async request(host, method, params = {}) {
       return readyClient(host).client.request(method, params);

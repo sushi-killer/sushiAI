@@ -313,7 +313,7 @@ test("throwing consumers do not tear down the connection", async () => {
     conn.bytes("s1", 0, "one");
     conn.json({ method: "session.exited", params: { id: "s1", code: 0 } });
     conn.bytes("s1", 3, "two");
-    conn.json({ method: "session.resync", params: { sessions: [] } });
+    conn.json({ method: "session.resync", params: {} });
   });
   const client = await connectTracked({
     socketPath: daemon.socketPath,

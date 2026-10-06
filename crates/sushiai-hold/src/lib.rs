@@ -31,6 +31,8 @@ use sushiai_protocol::{
 const RING_BYTES: usize = 2 * 1024 * 1024;
 const REPLAY_CHUNK: usize = 64 * 1024;
 const EXIT_WAIT: Duration = Duration::from_secs(60);
+/// How often a holder checks that its socket (in the sessions directory) still exists.
+const GONE_CHECK: Duration = Duration::from_secs(60);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Bytes of PTY input that may wait for a child that is not reading.
 const INPUT_LIMIT: usize = 256 * 1024;
@@ -224,14 +226,21 @@ pub fn detach_stderr() {
 }
 
 impl Running {
-    /// Runs until the child has exited and the exit was delivered (or 60 s passed).
+    /// Runs until the child has exited and the exit was delivered (or 60 s passed), or the
+    /// session directory is gone: nobody can reach the holder then, so it ends too.
     pub fn serve(self) -> Result<(), Error> {
+        self.serve_checking(GONE_CHECK)
+    }
+
+    /// `serve` that looks for the vanished session directory every `check`.
+    pub fn serve_checking(self, check: Duration) -> Result<(), Error> {
         let Running {
             holder,
             listener,
             sock_path,
         } = self;
         let mut next_conn = 0u64;
+        let mut checked = Instant::now();
         let result = loop {
             match listener.accept() {
                 Ok((stream, _)) => {
@@ -250,6 +259,12 @@ impl Running {
                 .is_some_and(|e| e.at.elapsed() > EXIT_WAIT);
             if holder.exit_delivered.load(Ordering::SeqCst) || timed_out {
                 break Ok(());
+            }
+            if checked.elapsed() >= check {
+                checked = Instant::now();
+                if !sock_path.exists() {
+                    break Ok(());
+                }
             }
         };
         let _ = fs::remove_file(&sock_path);

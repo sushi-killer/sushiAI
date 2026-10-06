@@ -9,15 +9,15 @@ import {
 } from "lucide-react";
 import { Character } from "./Character";
 import { isTyping, mascotMood, type Typing } from "./mood";
-import type { MascotNotice, TaskMascotNotice } from "./types";
-import { doneMeta, noticeHeader } from "../orchestrator/notices";
+import type { MascotAction, MascotNotice } from "./types";
 import {
-  clickAnswer,
-  enterAnswer,
+  ageLabel,
+  clickReply,
+  enterReply,
   shownPick,
   togglePick,
-  type AnswerChoice,
-} from "../orchestrator/ownerAttention";
+  type ReplyChoice,
+} from "./reply";
 
 const FADE_MS = 700;
 
@@ -70,14 +70,27 @@ function Head({
   );
 }
 
-const TONES: Record<string, string> = {
+const TONES: Record<MascotNotice["kind"], string> = {
   input: "warn",
   done: "ok",
-  landing: "info",
   failed: "bad",
-  stopped: "bad",
-  "core-update": "info",
+  info: "info",
 };
+
+const TAGS: Record<MascotNotice["kind"], string> = {
+  input: "Needs you",
+  done: "Done",
+  failed: "Failed",
+  info: "Notice",
+};
+
+const ICONS = { check: Check, refresh: RefreshCw };
+
+/** The header's source text: where it comes from and how long ago. */
+const sourceText = (notice: MascotNotice, now: number) =>
+  [notice.header, notice.at ? ageLabel(notice.at, now) : ""]
+    .filter(Boolean)
+    .join(" \u00b7 ");
 
 function Bubble({
   notice,
@@ -101,7 +114,8 @@ function Bubble({
     return () => clearInterval(timer);
   }, []);
   const bridge = window.mascot;
-  const options = notice.kind === "input" ? (notice.options ?? []) : [];
+  const options = notice.choices ?? [];
+  const confirmed = notice.confirmed !== undefined;
 
   useEffect(() => {
     onTyping({ id: notice.id, on: focused || text.length > 0 });
@@ -121,33 +135,32 @@ function Bubble({
     return () => clearTimeout(timer);
   }, [notice.id, notice.expiresAt]);
 
-  const answer = async (taskId: string, value: string) => {
+  const reply = async (value: string) => {
     setError("");
     try {
-      await bridge?.answer(taskId, value);
+      await bridge?.act(notice.id, "reply", value);
       setText("");
     } catch (failure) {
       setError(cleanError(failure));
     }
   };
-  const choice: AnswerChoice = {
+  const choice: ReplyChoice = {
     pick,
     preselected: options[0] ?? "",
     note: text,
   };
-  const value = clickAnswer(choice);
-  const send = (answerText: string) => {
-    if (notice.kind === "input" && answerText)
-      void answer(notice.taskId, answerText);
+  const value = clickReply(choice);
+  const send = (replyText: string) => {
+    if (notice.reply && replyText) void reply(replyText);
   };
-  const sendByKey = () => send(enterAnswer(choice, shownAt, Date.now()));
+  const sendByKey = () => send(enterReply(choice, shownAt, Date.now()));
   const keys = useRef({ sendByKey, options });
   keys.current = { sendByKey, options };
 
   // 1-N picks an option and Enter sends what was picked or typed, unless the
   // reply field has focus (digits are text there, and its form sends on
   // Enter itself).
-  const open = notice.kind === "input" && !notice.answered;
+  const open = Boolean(notice.reply) && !confirmed;
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
@@ -168,76 +181,46 @@ function Bubble({
   }, [open, options.length]);
 
   const dismiss = () => void bridge?.dismiss(notice.id);
+  const run = (action: MascotAction) =>
+    void bridge
+      ?.act(notice.id, action.id)
+      .catch((failure) => setError(cleanError(failure)));
 
-  if (notice.kind === "core-update")
+  if (confirmed) {
+    // "Label \u2014 detail": the label is the tag, the whole message the text.
+    const message = notice.confirmed ?? "";
     return (
-      <div
-        className={`bubble core-update ${fading ? "leaving" : ""}`}
-        role="status"
-      >
-        <Head
-          label="Update"
-          source=""
-          tone={TONES["core-update"]}
-          onDismiss={dismiss}
-        />
-        <strong title={notice.title}>{notice.title}</strong>
-        <span className="bubble-body clamped" title={notice.body}>
-          {notice.body}
-        </span>
-        <div className="bubble-actions">
-          <button
-            className="bubble-primary"
-            onClick={() => void bridge?.restart()}
-          >
-            Restart
-          </button>
-        </div>
-      </div>
-    );
-  if (notice.answered)
-    return (
-      <div className="bubble answered" role="status">
+      <div className="bubble confirmed" role="status">
         <div className="bubble-head">
           <span className="tag ok">
             <i />
-            Answered
+            {message.split(" \u2014 ")[0]}
           </span>
-          <span className="bubble-source">
-            {noticeHeader(notice, now).source}
-          </span>
+          <span className="bubble-source">{sourceText(notice, now)}</span>
         </div>
         <div className="bubble-msg">
           <Check size={14} />
-          <span>Answered — the task carries on.</span>
+          <span>{message}</span>
         </div>
       </div>
     );
+  }
 
-  const header = noticeHeader(notice, now);
-  const openTask = () => void bridge?.open(notice.taskId, notice.focus);
-  const meta = notice.kind === "done" ? doneMeta(notice) : null;
-  const land = () =>
-    void bridge
-      ?.land(notice.taskId)
-      .catch((failure) => setError(cleanError(failure)));
-  const rerun = () =>
-    void bridge
-      ?.rerun(notice.taskId)
-      .catch((failure) => setError(cleanError(failure)));
+  const actions = notice.actions ?? [];
+  const second = notice.meta?.length ? notice.meta.join(" \u00b7 ") : null;
   return (
     <div
       className={`bubble ${notice.kind} ${fading ? "leaving" : ""}`}
       role="status"
     >
       <Head
-        label={header.label}
-        source={header.source}
-        tone={TONES[notice.kind] ?? "info"}
+        label={notice.label ?? TAGS[notice.kind]}
+        source={sourceText(notice, now)}
+        tone={TONES[notice.kind]}
         onDismiss={dismiss}
       />
       {notice.kind === "input" ? (
-        <QuestionLines notice={notice} />
+        <QuestionLines notice={notice} second={second} />
       ) : (
         <strong title={notice.title}>{notice.title}</strong>
       )}
@@ -267,39 +250,41 @@ function Bubble({
           )}
         </div>
       ) : (
-        <span className="bubble-body clamped" title={meta ?? notice.body}>
-          {meta ?? notice.body}
+        <span className="bubble-body clamped" title={second ?? notice.body}>
+          {second ?? notice.body}
         </span>
       )}
-      {notice.kind === "input" && (
+      {notice.kind === "input" ? (
         <>
-          <form
-            className="bubble-answer"
-            onSubmit={(event) => {
-              // Enter in the field: only typed text or an explicit pick.
-              event.preventDefault();
-              sendByKey();
-            }}
-          >
-            <input
-              value={text}
-              maxLength={2000}
-              placeholder="Type an answer..."
-              aria-label="Answer"
-              onChange={(event) => setText(event.target.value)}
-              onFocus={() => setFocused(true)}
-              onBlur={() => setFocused(false)}
-            />
-            <button
-              type="button"
-              className="kbd-button"
-              aria-label="Send answer"
-              disabled={!value}
-              onClick={() => send(value)}
+          {notice.reply && (
+            <form
+              className="bubble-answer"
+              onSubmit={(event) => {
+                // Enter in the field: only typed text or an explicit pick.
+                event.preventDefault();
+                sendByKey();
+              }}
             >
-              <Kbd>⏎</Kbd>
-            </button>
-          </form>
+              <input
+                value={text}
+                maxLength={2000}
+                placeholder="Type an answer..."
+                aria-label="Answer"
+                onChange={(event) => setText(event.target.value)}
+                onFocus={() => setFocused(true)}
+                onBlur={() => setFocused(false)}
+              />
+              <button
+                type="button"
+                className="kbd-button"
+                aria-label="Send answer"
+                disabled={!value}
+                onClick={() => send(value)}
+              >
+                <Kbd>⏎</Kbd>
+              </button>
+            </form>
+          )}
           <div className="bubble-hint">
             {!!options.length && (
               <>
@@ -307,43 +292,44 @@ function Bubble({
                 <span>pick</span>
               </>
             )}
-            <Kbd>⏎</Kbd>
-            <span>send</span>
-            <button className="bubble-link" onClick={openTask}>
-              Open task
-            </button>
+            {notice.reply && (
+              <>
+                <Kbd>⏎</Kbd>
+                <span>send</span>
+              </>
+            )}
+            {actions.map((action) => (
+              <button
+                key={action.id}
+                className="bubble-link"
+                onClick={() => run(action)}
+              >
+                {action.label}
+              </button>
+            ))}
           </div>
           {error && <span className="bubble-error">{error}</span>}
         </>
-      )}
-      {notice.kind === "done" && (
-        <div className="bubble-actions">
-          {notice.canLand && (
-            <button className="bubble-primary" onClick={land}>
-              <Check size={14} />
-              Land
-            </button>
-          )}
-          <button className="bubble-ghost" onClick={openTask}>
-            View diff
-          </button>
-        </div>
-      )}
-      {(notice.kind === "failed" || notice.kind === "stopped") && (
-        <div className="bubble-actions">
-          <button onClick={rerun}>
-            <RefreshCw size={14} />
-            Run again
-          </button>
-          <button className="bubble-ghost" onClick={openTask}>
-            Open
-          </button>
-        </div>
-      )}
-      {notice.kind === "landing" && (
-        <div className="bubble-actions">
-          <button onClick={openTask}>Open</button>
-        </div>
+      ) : (
+        !!actions.length && (
+          <div className="bubble-actions">
+            {actions.map((action) => {
+              const Icon = action.icon ? ICONS[action.icon] : null;
+              return (
+                <button
+                  key={action.id}
+                  className={
+                    action.emphasis ? `bubble-${action.emphasis}` : undefined
+                  }
+                  onClick={() => run(action)}
+                >
+                  {Icon && <Icon size={14} />}
+                  {action.label}
+                </button>
+              );
+            })}
+          </div>
+        )
       )}
       {notice.kind !== "input" && error && (
         <span className="bubble-error">{error}</span>
@@ -352,23 +338,28 @@ function Bubble({
   );
 }
 
-/** A question bubble's head: the question itself in bold, then the task and
- * who asked it (Figma "Needs you"). */
-function QuestionLines({ notice }: { notice: TaskMascotNotice }) {
+/** A question bubble's head: the question itself in bold, then its source
+ * line (Figma "Needs you"). */
+function QuestionLines({
+  notice,
+  second,
+}: {
+  notice: MascotNotice;
+  second: string | null;
+}) {
   const { lead } = splitQuestion(notice.body);
-  const by = notice.askedBy;
   return (
     <>
       <strong title={notice.body}>{lead}</strong>
       <span className="bubble-sub" title={notice.title}>
-        {by ? `${notice.title} · asked by ${by}` : notice.title}
+        {second ?? notice.title}
       </span>
     </>
   );
 }
 
-/** The desktop mascot: the sushi with a speech bubble for the newest queued
- * orchd notice, a pager ("2 of 4") for the rest, and a pill it collapses to. */
+/** The desktop mascot: the sushi with a speech bubble for the newest
+ * queued notice, a pager ("2 of 4") for the rest, and a pill it collapses to. */
 export function Mascot() {
   const [notices, setNotices] = useState<MascotNotice[]>([]);
   const [index, setIndex] = useState(0);
@@ -539,7 +530,7 @@ export function Mascot() {
           </div>
         )}
         <Bubble
-          key={`${shown.id}:${shown.kind !== "core-update" && shown.answered}`}
+          key={`${shown.id}:${shown.confirmed !== undefined}`}
           notice={shown}
           onTyping={setTyping}
         />

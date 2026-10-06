@@ -2,12 +2,9 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const {
   registerMascot,
-  rerunNotice,
   presentingFrom,
   watchPresenting,
 } = require("../electron/mascot.cjs");
-
-const TASK = "0f8fad5b-d9cb-469f-a165-70867728950e";
 
 class FakeWindow {
   constructor() {
@@ -54,6 +51,7 @@ class FakeWindow {
 function setup(policy = "visible") {
   const handlers = new Map();
   const calls = [];
+  const outcome = {};
   const windows = [];
   const mascot = registerMascot({
     ipcMain: {
@@ -72,15 +70,13 @@ function setup(policy = "visible") {
     },
     root: "/app",
     policy,
-    getService: () => ({
-      call: async (method, params, host) => {
-        calls.push(host ? [method, params, host] : [method, params]);
-        return {};
-      },
-    }),
+    act: async (source, key, actionId, text) => {
+      calls.push(["act", source, key, actionId, text]);
+      if (outcome.fail) throw new Error("source refused");
+      return outcome.message;
+    },
     showMainWindow: () => calls.push(["show"]),
     send: (channel, value) => calls.push(["send", channel, value]),
-    restart: () => {},
   });
   const win = () => windows[0];
   const invoke = (channel, ...args) => {
@@ -91,59 +87,104 @@ function setup(policy = "visible") {
     return handlers.get(channel)(event, ...args);
   };
   const add = (notice) => {
-    mascot.add({ repo: "/repo", title: "t", body: "b", ...notice });
+    mascot.add({ source: "src", title: "t", body: "b", ...notice });
     win()?.finishLoad();
   };
-  return { mascot, handlers, calls, win, invoke, add };
+  return { mascot, handlers, calls, outcome, win, invoke, add };
 }
 
-test("Run again starts a queued failed or stopped task and drops its notice", async () => {
-  for (const kind of ["failed", "stopped"]) {
-    const { mascot, calls, invoke, add } = setup();
-    add({ kind, taskId: TASK, focus: "summary" });
-    assert.equal(await invoke("mascot-rerun", TASK), "Running");
-    assert.deepEqual(calls, [["task.start", { id: TASK }]]);
-    assert.equal(mascot.snapshot().length, 0);
-    mascot.destroy();
-  }
-});
+const OPEN = [{ id: "open", label: "Open" }];
 
-test("Run again starts a remote task on the host it runs on", async () => {
+test("an action reaches its source with the notice's source and key", async () => {
   const { mascot, calls, invoke, add } = setup();
-  add({ kind: "failed", taskId: TASK, focus: "summary", host: "ssh:box" });
-  assert.equal(await invoke("mascot-rerun", TASK), "Running");
-  assert.deepEqual(calls, [["task.start", { id: TASK }, "ssh:box"]]);
+  add({ kind: "failed", key: "k1", actions: OPEN });
+  await invoke("mascot-act", "src:k1", "open");
+  assert.deepEqual(calls, [["act", "src", "k1", "open", undefined]]);
   mascot.destroy();
 });
 
-test("Run again refuses anything but a queued failed/stopped task id", async () => {
+test("an action with no message dismisses the notice, one with a message confirms it", async () => {
+  const quiet = setup();
+  quiet.add({ kind: "done", key: "k1", actions: OPEN });
+  assert.equal(await quiet.invoke("mascot-act", "src:k1", "open"), undefined);
+  assert.equal(quiet.mascot.snapshot().length, 0);
+  quiet.mascot.destroy();
+
+  const said = setup();
+  said.outcome.message = "Sent";
+  said.add({ kind: "input", key: "k2", reply: true });
+  assert.equal(
+    await said.invoke("mascot-act", "src:k2", "reply", " hi "),
+    "Sent",
+  );
+  assert.deepEqual(said.calls, [["act", "src", "k2", "reply", "hi"]]);
+  const [entry] = said.mascot.snapshot();
+  assert.equal(entry.confirmed, "Sent");
+  assert.ok(entry.expiresAt > Date.now());
+  said.mascot.destroy();
+});
+
+test("an action on an input notice that returns nothing keeps it queued", async () => {
+  const { mascot, invoke, add } = setup();
+  add({ kind: "input", key: "k1", reply: true, actions: OPEN });
+  await invoke("mascot-act", "src:k1", "open");
+  assert.equal(mascot.snapshot().length, 1);
+  mascot.destroy();
+});
+
+test("a source error reaches the page and leaves the notice queued", async () => {
+  const { mascot, outcome, invoke, add } = setup();
+  outcome.fail = true;
+  add({ kind: "done", key: "k1", actions: OPEN });
+  await assert.rejects(
+    invoke("mascot-act", "src:k1", "open"),
+    /source refused/,
+  );
+  assert.equal(mascot.snapshot().length, 1);
+  mascot.destroy();
+});
+
+test("an action is refused unless the notice is queued and offers it", async () => {
   const { mascot, calls, invoke, add } = setup();
-  add({ kind: "done", taskId: TASK, focus: "summary" });
-  for (const bad of [
-    TASK, // only a done notice is queued for it
-    "../../etc/passwd",
-    "a",
-    `${TASK} `,
-    42,
-    { id: TASK },
-    undefined,
+  add({ kind: "done", key: "k1", actions: OPEN });
+  for (const [id, action, text] of [
+    ["src:missing", "open"],
+    ["src:k1", "nope"],
+    ["src:k1", "reply", "text"],
+    ["../../etc/passwd", "open"],
+    [42, "open"],
+    [{ id: "src:k1" }, "open"],
+    [undefined, "open"],
+    ["src:k1", "open", { text: 1 }],
   ])
-    await assert.rejects(invoke("mascot-rerun", bad), /That notice is gone/);
+    await assert.rejects(invoke("mascot-act", id, action, text));
   assert.deepEqual(calls, []);
   mascot.destroy();
 });
 
-test("rerunNotice checks the id shape before the queue", () => {
-  const queue = [{ id: "x", kind: "failed", taskId: "not-a-uuid" }];
-  assert.equal(rerunNotice("not-a-uuid", queue), null);
-  const ok = [{ id: "y", kind: "stopped", taskId: TASK }];
-  assert.equal(rerunNotice(TASK, ok), ok[0]);
-  assert.equal(rerunNotice(TASK.toUpperCase(), ok), null);
+test("retract and clear remove a source's notices from the page", () => {
+  const { mascot, add } = setup();
+  add({ kind: "done", key: "k1" });
+  add({ kind: "done", key: "k2" });
+  add({ kind: "done", key: "k3", source: "other" });
+  mascot.retract("src", "k1");
+  assert.deepEqual(
+    mascot.snapshot().map((item) => item.id),
+    ["other:k3", "src:k2"],
+  );
+  mascot.clear("src");
+  assert.deepEqual(
+    mascot.snapshot().map((item) => item.id),
+    ["other:k3"],
+  );
+  mascot.clear();
+  assert.equal(mascot.snapshot().length, 0);
+  mascot.destroy();
 });
 
 test("Answer all in Inbox shows the main window and asks it for the Inbox", async () => {
   const { mascot, calls, invoke, add } = setup();
-  add({ kind: "input", taskId: TASK, focus: "question" });
+  add({ kind: "input", key: "k1" });
   await invoke("mascot-inbox", "ignored", { extra: true });
   assert.deepEqual(calls, [["show"], ["send", "open-inbox", undefined]]);
   mascot.destroy();
@@ -151,11 +192,11 @@ test("Answer all in Inbox shows the main window and asks it for the Inbox", asyn
 
 test("mascot IPC rejects a sender that is not the mascot page", async () => {
   const { mascot, handlers, calls, add } = setup();
-  add({ kind: "failed", taskId: TASK, focus: "summary" });
+  add({ kind: "failed", key: "k1", actions: OPEN });
   const stranger = { sender: {}, senderFrame: {} };
-  for (const channel of ["mascot-rerun", "mascot-inbox", "mascot-focus"])
+  for (const channel of ["mascot-act", "mascot-inbox", "mascot-focus"])
     await assert.rejects(
-      handlers.get(channel)(stranger, TASK),
+      handlers.get(channel)(stranger, "src:k1", "open"),
       /Untrusted IPC sender/,
     );
   assert.deepEqual(calls, []);
@@ -165,7 +206,7 @@ test("mascot IPC rejects a sender that is not the mascot page", async () => {
 test("toggle and presenting reach the page; focus only for a visible mascot", async () => {
   const { mascot, win, invoke, add } = setup();
   mascot.toggle();
-  add({ kind: "input", taskId: TASK, focus: "question" });
+  add({ kind: "input", key: "k1" });
   mascot.toggle();
   mascot.setPresenting(true);
   const channels = win().sent.map(([channel, value]) =>
@@ -178,7 +219,7 @@ test("toggle and presenting reach the page; focus only for a visible mascot", as
   mascot.destroy();
 
   const hidden = setup("hidden");
-  hidden.add({ kind: "input", taskId: TASK, focus: "question" });
+  hidden.add({ kind: "input", key: "k1" });
   await hidden.invoke("mascot-focus");
   assert.equal(hidden.win().focused, 0);
   hidden.mascot.destroy();

@@ -10,6 +10,7 @@ const {
   safeStorage,
   powerMonitor,
   globalShortcut,
+  Notification,
 } = require("electron");
 const path = require("node:path");
 const os = require("node:os");
@@ -60,6 +61,8 @@ const {
 } = require("./window-state.cjs");
 const { registerMascot, watchPresenting } = require("./mascot.cjs");
 const { createMascotShortcut } = require("./mascot-shortcut.cjs");
+const { createNotices } = require("./extensions/notices.cjs");
+const { createOrchestratorNotices } = require("./orchestrator-notices.cjs");
 const { DEV_RESTART_EXIT_CODE, watchCore } = require("./dev-restart.cjs");
 const { testWindow } = require("./test-window.cjs");
 
@@ -321,20 +324,21 @@ const mascot = registerMascot({
   root,
   policy: testMode.mascot,
   devURL: process.env.BRIDGE_DEV_URL,
-  getService: () => orchestrator,
+  act: (source, key, actionId, text) =>
+    notices.act(source, key, actionId, text),
   showMainWindow: () => attention.showWindow(),
   send,
-  restart: () => {
-    devRestart = true;
-    app.quit();
-  },
 });
 function coreUpdated(file) {
   console.log(`[dev] electron/${file} changed - restart from the mascot`);
-  mascot.add({
-    kind: "core-update",
+  notices.publish("app", {
+    key: "core-update",
+    kind: "info",
+    label: "Update",
     title: "sushiAI core",
     body: "Core updated - restart?",
+    sticky: true,
+    actions: [{ id: "restart", label: "Restart", emphasis: "primary" }],
   });
 }
 if (process.env.BRIDGE_DEV_URL)
@@ -358,12 +362,30 @@ const attention = registerAttentionIpc({
     if (!testMode.test) mascotShortcut.sync(preferences.mascotShortcut);
   },
 });
+const notices = createNotices({
+  preferences: () => attention.getPreferences(),
+  mascot,
+  showWindow: () => attention.showWindow(),
+  Notification,
+  icon: () => attention.mascotImage(),
+});
+notices.register("app", async (_key, actionId) => {
+  if (actionId !== "restart") return;
+  devRestart = true;
+  app.quit();
+});
+const orchestratorNotices = createOrchestratorNotices({
+  notices,
+  getService: () => orchestrator,
+  showWindow: () => attention.showWindow(),
+  send,
+});
 orchestrator = registerOrchestratorExtension({
   handle,
   extensions,
   send,
-  notify: (notice) => attention.notifyTask(notice),
-  onTask: (task) => mascot.onTask(task),
+  notify: (notice) => orchestratorNotices.publish(notice),
+  onTask: (task) => orchestratorNotices.onTask(task),
   dataDir: path.join(app.getPath("userData"), "orchestrator"),
   root,
   resourcesPath: process.resourcesPath,
@@ -376,9 +398,9 @@ orchestrator = registerOrchestratorExtension({
   userDataDir: app.getPath("userData"),
   hostsChanged: () => send("orchestrator-hosts-changed"),
 });
-// Turning the orchestrator off also drops the notices it already queued.
+// Turning an extension off also drops the notices it already queued.
 extensions.onChange((id, enabled) => {
-  if (id === ORCHESTRATOR_MANIFEST.id && !enabled) mascot.clear();
+  if (!enabled) notices.clear(id);
 });
 function validWebURL(value) {
   try {
@@ -520,7 +542,7 @@ app.whenReady().then(async () => {
   // Evidence seam: pushes a task through the real notice path (no daemon).
   if (process.env.SUSHIAI_TEST_MASCOT === "1")
     globalThis.__sushiaiMascot = {
-      notify: (task) => attention.notifyTask(orchestratorNotice(task)),
+      notify: (task) => orchestratorNotices.publish(orchestratorNotice(task)),
       coreUpdated: () => coreUpdated("<seam>"),
       queue: () => mascot.snapshot(),
       window: () => mascot.getWindow(),

@@ -12,7 +12,9 @@ use sushiai_core::catalog::project_for_cwd;
 use sushiai_core::catalog::{Catalog as Directory, CatalogError};
 use sushiai_core::StateFile;
 use sushiai_protocol::catalog::SyncResult;
-use sushiai_protocol::catalog::{GroupsSync, ProjectsSync, SessionBinding, SessionUpdate};
+use sushiai_protocol::catalog::{
+    CatalogSnapshot, GroupsSync, ProjectsSync, SessionBinding, SessionUpdate,
+};
 use sushiai_protocol::{method, Notification, SessionInfo, SessionRemoved, SessionStatus};
 use tokio::sync::{broadcast, Notify};
 
@@ -312,6 +314,26 @@ impl Registry {
             self.save_directory(&directory);
         }
         result
+    }
+
+    /// The live (not deleted) projects and groups, ordered by id.
+    pub fn catalog_snapshot(&self) -> CatalogSnapshot {
+        let directory = self.directory();
+        CatalogSnapshot {
+            host: self.host.clone(),
+            projects: directory
+                .projects
+                .values()
+                .filter(|p| !p.deleted)
+                .cloned()
+                .collect(),
+            groups: directory
+                .groups
+                .values()
+                .filter(|g| !g.deleted)
+                .cloned()
+                .collect(),
+        }
     }
 
     /// The binding a new session gets. The project and group are stored as given (opaque: the

@@ -3,7 +3,14 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const CAPABILITIES: &[&str] = &["sessions", "attach", "resync", "agents", "catalog"];
+pub const CAPABILITIES: &[&str] = &[
+    "sessions",
+    "attach",
+    "resync",
+    "agents",
+    "catalog",
+    "catalogRead",
+];
 
 pub mod method {
     pub const HELLO: &str = "hello";
@@ -49,6 +56,8 @@ pub mod method {
     pub const PROJECTS_SYNC: &str = "projects.sync";
     /// Request: replace or merge the groups.
     pub const GROUPS_SYNC: &str = "groups.sync";
+    /// Request: read the live projects and groups. Params: none. Result: `CatalogSnapshot`.
+    pub const CATALOG_GET: &str = "catalog.get";
     /// Request: change a session's project, group or title.
     pub const SESSION_UPDATE: &str = "session.update";
     /// Request: forget an exited session.

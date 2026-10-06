@@ -73,6 +73,15 @@ pub struct SyncResult {
     pub rev: u64,
 }
 
+/// Result of `catalog.get`: the live records as stored from the syncs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogSnapshot {
+    pub host: String,
+    pub projects: Vec<Project>,
+    pub groups: Vec<Group>,
+}
+
 /// Distinguishes a missing field (leave as is) from `null` (clear).
 fn double_option<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
 where

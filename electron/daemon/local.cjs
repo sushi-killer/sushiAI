@@ -15,6 +15,9 @@
 //           daemon itself.
 //   hooks   `sushiai hooks install` once per app version (stamp file in home);
 //           never in a test run (it would write the owner's ~/.codex)
+//   legacy  a standalone `orchd` from a previous build is stopped once per app
+//           run before the daemon starts (stopLegacyOrchd). Its data stays
+//           where it is: the orchestrator starts clean in the daemon home.
 
 const fs = require("node:fs");
 const os = require("node:os");
@@ -109,6 +112,76 @@ function sha256File(file) {
   });
 }
 
+function commOf(pid) {
+  try {
+    return childProcess
+      .execFileSync("ps", ["-p", String(pid), "-o", "comm="], {
+        encoding: "utf8",
+        timeout: 5000,
+      })
+      .trim();
+  } catch {
+    return "";
+  }
+}
+
+/** Stops a standalone `orchd` of a previous build: `orchd.pid` in its data dir
+ * names the process; it must still be an `orchd` (a reused pid is never
+ * signalled). SIGTERM first (it stops its agents), SIGKILL of its process group
+ * after `timeoutMs`; then the pid, socket and control token files go. Resolves
+ * "none" (no pid file), "stale" (no such process), "foreign" (another program
+ * holds the pid) or "stopped". The task data is left untouched. */
+async function stopLegacyOrchd(
+  dir,
+  {
+    timeoutMs = 10000,
+    pollMs = POLL_MS,
+    kill = process.kill.bind(process),
+    comm = commOf,
+  } = {},
+) {
+  const pidFile = path.join(dir, "orchd.pid");
+  let pid;
+  try {
+    pid = Number.parseInt(fs.readFileSync(pidFile, "utf8"), 10);
+  } catch {
+    return "none";
+  }
+  const isAlive = () => {
+    try {
+      kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error.code === "EPERM";
+    }
+  };
+  const clean = () => {
+    for (const name of ["orchd.pid", "orchd.sock", "control.token"])
+      fs.rmSync(path.join(dir, name), { force: true });
+  };
+  if (!Number.isInteger(pid) || pid <= 1 || !isAlive()) {
+    clean();
+    return "stale";
+  }
+  if (!comm(pid).includes("orchd")) {
+    clean();
+    return "foreign";
+  }
+  kill(pid, "SIGTERM");
+  const deadline = Date.now() + timeoutMs;
+  while (isAlive() && Date.now() < deadline) await sleep(pollMs);
+  if (isAlive()) {
+    try {
+      kill(-pid, "SIGKILL");
+    } catch {
+      kill(pid, "SIGKILL");
+    }
+    while (isAlive() && Date.now() < deadline + 2000) await sleep(pollMs);
+  }
+  clean();
+  return "stopped";
+}
+
 function daemonEnv(env, home) {
   const out = {};
   for (const key of DAEMON_ENV_KEYS) if (env[key]) out[key] = env[key];
@@ -130,6 +203,8 @@ function createLocalConnector({
   startTimeoutMs = START_TIMEOUT_MS,
   stopTimeoutMs = STOP_TIMEOUT_MS,
   pollMs = POLL_MS,
+  legacyOrchdDir = "",
+  stopLegacy = stopLegacyOrchd,
   log = () => {},
   testMode = Boolean(env.SUSHIAI_TEST_WINDOW),
 } = {}) {
@@ -140,6 +215,7 @@ function createLocalConnector({
   let binarySha = "";
   let shaOf = "";
   let replaced = false; // this app run replaced a daemon once already
+  let legacyDone = false;
 
   function run(args) {
     return new Promise((resolve, reject) => {
@@ -171,8 +247,22 @@ function createLocalConnector({
     return true;
   }
 
+  // Once per app run, before any daemon starts: an old standalone orchd keeps
+  // its own socket and would run tasks beside the daemon's orchestrator.
+  async function stopLegacyOnce() {
+    if (legacyDone || !legacyOrchdDir) return;
+    legacyDone = true;
+    try {
+      const result = await stopLegacy(legacyOrchdDir, { pollMs });
+      if (result === "stopped") log("stopped a legacy orchd");
+    } catch (error) {
+      log(`legacy orchd was not stopped: ${error.message}`);
+    }
+  }
+
   async function prepare() {
     ensureHome(home);
+    await stopLegacyOnce();
     binary = resolveBinary({ env, isPackaged, resourcesPath, repoRoot });
     if (!bundledVersion)
       bundledVersion = (await run(["--version"])).trim().split(/\s+/).pop();
@@ -305,5 +395,6 @@ module.exports = {
   resolveHome,
   ensureHome,
   resolveBinary,
+  stopLegacyOrchd,
   HOOKS_STAMP,
 };

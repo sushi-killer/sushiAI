@@ -3,7 +3,6 @@ import { setWorkspaceRepos } from "./workspaceRepos";
 import type { PanelKind, Workspace } from "../types";
 import { orchestratorTarget, type TaskTarget } from "./notices";
 import { publishReveal } from "./reveal";
-import { useWorktreeTasks } from "./useWorktreeTasks";
 
 type Shell = {
   workspaces: Workspace[];
@@ -24,12 +23,10 @@ type Shell = {
 
 /** The open path a desktop-mascot Open button and a native notification
  * click both go through: reveal the task, then bring its Orchestrator panel
- * (adding the panel or the workspace when missing) to the front. Also returns the
- * live task list the sidebar uses to title task worktrees. */
+ * (adding the panel or the workspace when missing) to the front. */
 export function useOrchestratorNotices(shell: Shell) {
   const [pending, setPending] = useState<TaskTarget | null>(null);
   const kicked = useRef("");
-  const worktreeTasks = useWorktreeTasks();
   useEffect(() => setWorkspaceRepos(shell.workspaces), [shell.workspaces]);
 
   const { showWorkspace } = shell;
@@ -84,5 +81,5 @@ export function useOrchestratorNotices(shell: Shell) {
     createWorkspace,
   ]);
 
-  return { openTask, worktreeTasks };
+  return { openTask };
 }

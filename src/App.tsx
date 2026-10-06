@@ -361,7 +361,6 @@ export function App() {
       <div className="app-body">
         {sidebar && (
           <Sidebar
-            worktreeTasks={orchestrator.worktreeTasks}
             registry={extensionRegistry}
             openExtensionTarget={openExtensionTarget}
             runExtensionCommand={runExtensionCommand}

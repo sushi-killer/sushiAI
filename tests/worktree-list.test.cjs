@@ -134,7 +134,7 @@ test("a missing folder or a folder outside git is an error, not an empty list", 
   }
 });
 
-test("rows join every host's worktrees with open sessions and orchd tasks", async () => {
+test("rows join every host's worktrees with open sessions and worktree claims", async () => {
   const { worktreeRows, removable, removalLoss } =
     await import("../src/projectWorktrees.ts");
   const wt = (path, extra = {}) => ({
@@ -175,11 +175,17 @@ test("rows join every host's worktrees with open sessions and orchd tasks", asyn
     { id: "2", cwd: "/w/app-opener", panels: [{}] },
     { id: "3", cwd: "/home/user/app-b", connection: "ssh:other", panels: [] },
   ];
-  const tasks = [
-    { title: "Retry", worktree: "/w/app-task", status: "running" },
+  const claims = [
+    {
+      host: "local",
+      repo: "/w/app",
+      path: "/w/app-task",
+      label: "Retry",
+      active: true,
+    },
   ];
   const profiles = [{ id: "devbox", name: "devbox", host: "user@devbox" }];
-  const rows = worktreeRows(lists, workspaces, tasks, profiles);
+  const rows = worktreeRows(lists, workspaces, claims, profiles);
   assert.deepEqual(
     rows.map((row) => `${row.hostLabel} ${row.worktree.path}`),
     [
@@ -190,7 +196,7 @@ test("rows join every host's worktrees with open sessions and orchd tasks", asyn
       "devbox /home/user/app-b",
     ],
   );
-  const [main, open, task, , remote] = rows;
+  const [main, open, claimed, , remote] = rows;
   assert.deepEqual(
     open.open.map((w) => w.id),
     ["1"],
@@ -198,9 +204,9 @@ test("rows join every host's worktrees with open sessions and orchd tasks", asyn
   assert.deepEqual(remote.open, []);
   assert.equal(remote.base, "main");
   assert.equal(removable(main), false);
-  assert.equal(removable(task), false);
+  assert.equal(removable(claimed), false);
   assert.equal(
-    removable({ ...task, task: { ...task.task, status: "done" } }),
+    removable({ ...claimed, claim: { ...claimed.claim, active: false } }),
     true,
   );
   assert.equal(
@@ -258,7 +264,7 @@ test("the base branch, a fresh worktree and a locked one are never merged or rem
   assert.equal(lists[0].root, repo);
 });
 
-test("an unfinished task wins over a finished one on the same worktree", async () => {
+test("an active claim wins over an inactive one on the same worktree", async () => {
   const { worktreeRows, removable } =
     await import("../src/projectWorktrees.ts");
   const worktree = {
@@ -287,23 +293,30 @@ test("an unfinished task wins over a finished one on the same worktree", async (
     [],
     [
       {
-        title: "old",
-        worktree: "/w/app-t/",
-        branch: "",
+        host: "local",
+        label: "old",
+        path: "/w/app-t/",
         repo: "/w/app",
-        status: "done",
+        active: false,
       },
       {
-        title: "retry",
-        worktree: "",
+        host: "local",
+        label: "retry",
         branch: "task/7",
         repo: "/w/app",
-        status: "running",
+        active: true,
+      },
+      {
+        host: "ssh:lab",
+        label: "elsewhere",
+        path: "/w/app-t",
+        repo: "/w/app",
+        active: true,
       },
     ],
     [],
   );
-  assert.equal(byPath.task.title, "retry");
+  assert.equal(byPath.claim.label, "retry");
   assert.equal(removable(byPath), false);
 });
 

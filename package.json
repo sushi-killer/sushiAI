@@ -14,13 +14,13 @@
     "test": "node --test tests/*.test.cjs",
     "test:desktop": "npm run build && node scripts/smoke.mjs",
     "test:terminal": "node scripts/terminal-rendering.mjs",
-    "package": "npm run build && npm run build:orchd && electron-builder --mac dir",
+    "package": "npm run build && npm run build:sushiai && electron-builder --mac dir",
     "postinstall": "electron-builder install-app-deps",
     "format": "prettier --write src electron scripts tests *.json *.ts *.html README.md",
     "icon": "node scripts/icon.mjs",
     "test:remote": "node scripts/features-smoke.mjs",
     "promo": "node scripts/promo.mjs",
-    "package:dmg": "npm run build && npm run build:orchd && electron-builder --mac dmg --arm64 --publish never",
+    "package:dmg": "npm run build && npm run build:sushiai && electron-builder --mac dmg --arm64 --publish never",
     "test:unicode": "node scripts/terminal-unicode.mjs",
     "perf": "node scripts/perf-benchmark.mjs",
     "check:conventions": "node scripts/check-conventions.mjs",
@@ -30,7 +30,7 @@
     "test:core": "node --test tests/layout.test.cjs tests/navigation.test.cjs tests/workspace-actions.test.cjs tests/chat-threads.test.cjs tests/dialog-state.test.cjs tests/app-boundary.test.cjs tests/workspace-state.test.cjs tests/inspection-worker.test.cjs tests/git-history.test.cjs",
     "ci": "npm run build && npm test && npm run test:daemon && npm run check:conventions && npm run lint && prettier --check src electron scripts tests *.json *.ts *.html README.md && git diff --check",
     "release:prepare": "node scripts/release.mjs",
-    "build:orchd": "cargo build --release -p sushiai-orch --bin orchd",
+    "build:sushiai": "cargo build --release -p sushiai",
     "test:daemon": "cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && node scripts/check-crate-deps.mjs"
   },
   "dependencies": {
@@ -82,10 +82,6 @@
     },
     "artifactName": "sushiAI-${version}-${arch}.${ext}",
     "extraResources": [
-      {
-        "from": "target/release/orchd",
-        "to": "orchd"
-      },
       {
         "from": "target/release/sushiai",
         "to": "sushiai"

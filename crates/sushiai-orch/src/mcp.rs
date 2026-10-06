@@ -1,21 +1,14 @@
-//! `orchd mcp --data <dir> [--socket <path>]`: a stdio MCP (Model Context
-//! Protocol) server, so any MCP-capable agent harness (Claude Code, Codex,
-//! ...) can attach orchd and act as the owner's task orchestrator. This is
-//! purely a bridge: it speaks newline-delimited JSON-RPC 2.0 on
-//! stdin/stdout and translates `tools/call` into a request against the same
-//! control-token-gated unix socket `protocol::serve` already listens on. It
-//! never touches engine/store internals directly -- the daemon started by
-//! `orchd serve` must already be running. Deliberately synchronous (plain
-//! `std::io` / `std::os::unix::net`, no tokio): one line in, one orchd
-//! round trip, one line out, nothing else runs concurrently in this
-//! process.
+//! The stdio MCP (Model Context Protocol) server behind `sushiai mcp`, so any MCP-capable
+//! agent harness (Claude Code, Codex, ...) can attach the orchestrator, or a task agent can
+//! message its peers. It speaks newline-delimited JSON-RPC 2.0 on stdin/stdout and translates
+//! `tools/call` into an `orch.*` call through the [`Caller`] its host supplies; it never
+//! touches engine or store internals. Deliberately synchronous: one line in, one round trip,
+//! one line out.
 
 use crate::model::ORCHESTRATOR;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, Write};
 
 /// Protocol version handed back when the client didn't ask for a specific
 /// one. When it did ask, we just echo it back rather than maintaining a
@@ -564,62 +557,6 @@ fn dispatch(bridge: &Bridge, method: &str, params: &Value) -> Result<Value, (i64
     }
 }
 
-/// Sends one request over `socket` with orchd's own `auth` field set (the
-/// control token), the same envelope shape as `electron/orchestrator.cjs`'s
-/// `orchdRequest` -- deliberately not `protocol::client_request`, which has
-/// no `auth` field at all (that module belongs to the daemon side, which
-/// never needs to authenticate itself).
-pub(crate) fn call_orchd(
-    socket: &Path,
-    token: &str,
-    method: &str,
-    params: Value,
-) -> Result<Value, String> {
-    let mut stream = UnixStream::connect(socket)
-        .map_err(|e| format!("cannot reach orchd at {}: {e}", socket.display()))?;
-    let id = uuid::Uuid::new_v4().to_string();
-    let req = json!({"id": id, "method": method, "params": params, "auth": token});
-    stream
-        .write_all(req.to_string().as_bytes())
-        .map_err(|e| e.to_string())?;
-    stream.write_all(b"\n").map_err(|e| e.to_string())?;
-    stream.flush().map_err(|e| e.to_string())?;
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    let n = reader.read_line(&mut line).map_err(|e| e.to_string())?;
-    if n == 0 {
-        return Err("orchd closed the connection before responding".to_string());
-    }
-    let v: Value = serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
-    if let Some(err) = v.get("error") {
-        let message = err
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("orchd error")
-            .to_string();
-        Err(message)
-    } else {
-        Ok(v.get("result").cloned().unwrap_or(Value::Null))
-    }
-}
-
-pub(crate) fn read_control_token(data_dir: &Path) -> Result<String, String> {
-    let path = data_dir.join("control.token");
-    let contents = std::fs::read_to_string(&path).map_err(|e| {
-        format!(
-            "cannot read {}: {e} (is `orchd serve --data {}` running?)",
-            path.display(),
-            data_dir.display()
-        )
-    })?;
-    let token = contents.trim().to_string();
-    if token.is_empty() {
-        return Err(format!("{} is empty", path.display()));
-    }
-    Ok(token)
-}
-
 /// One line in (a JSON-RPC request), at most one line out. A parse failure
 /// can't be tied to a request `id` (there wasn't a valid one to read), so it
 /// always answers with `id: null`, matching JSON-RPC's own parse-error
@@ -644,60 +581,6 @@ fn handle_line(bridge: &Bridge, line: &str) -> Option<Value> {
         }
     };
     Some(response)
-}
-
-pub fn run(args: &[String]) -> i32 {
-    let mut data_dir_arg: Option<String> = None;
-    let mut socket_arg: Option<String> = None;
-    let mut task: Option<String> = None;
-    let mut read_only = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--data" if i + 1 < args.len() => {
-                data_dir_arg = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--socket" if i + 1 < args.len() => {
-                socket_arg = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--task" if i + 1 < args.len() => {
-                task = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--read-only" => {
-                read_only = true;
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
-    let Some(data_dir_arg) = data_dir_arg else {
-        eprintln!("orchd mcp: --data <dir> is required");
-        return 2;
-    };
-    let data_dir = PathBuf::from(data_dir_arg);
-    crate::prompts::set_data_dir(&data_dir);
-    let socket = socket_arg
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data_dir.join("orchd.sock"));
-    let token = match read_control_token(&data_dir) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("orchd mcp: {e}");
-            return 1;
-        }
-    };
-    let call: Caller = Box::new(move |method, params| call_orchd(&socket, &token, method, params));
-    serve_stdio(
-        task,
-        read_only,
-        call,
-        std::io::stdin().lock(),
-        std::io::stdout(),
-    );
-    0
 }
 
 /// The stdio MCP server loop: one JSON-RPC line in, at most one line out, until `input` ends
@@ -734,7 +617,6 @@ mod tests {
     use super::*;
 
     use crate::engine::App;
-    use crate::protocol::Dispatcher;
     use std::sync::Arc;
 
     fn bridge(task: Option<&str>) -> Bridge {
@@ -960,12 +842,9 @@ mod tests {
     const TASK_B: &str = "22222222-2222-4222-8222-222222222222";
     const UNKNOWN: &str = "99999999-9999-4999-8999-999999999999";
 
-    /// A real daemon (`App` behind `protocol::serve`) on a temp socket with
-    /// two tasks in one repo; returns its socket and control token.
-    async fn live_daemon(dir: &Path) -> (PathBuf, String) {
-        let socket = dir.join("orchd.sock");
-        let orchd = "/x/orchd".to_string();
-        let app = App::new(dir.into(), socket.clone(), orchd).unwrap();
+    /// A real `App` with two tasks in one repo, in `dir`.
+    fn live_app(dir: &std::path::Path) -> Arc<App> {
+        let app = App::new(dir.into(), dir.into(), "/x/sushiai".to_string()).unwrap();
         for id in [TASK_A, TASK_B] {
             let task = serde_json::from_value(json!({
                 "id": id, "title": id, "goal": "g", "criteria": [], "verify": [],
@@ -976,18 +855,7 @@ mod tests {
             .unwrap();
             app.store.save_task(&task).unwrap();
         }
-        let dispatcher: Arc<dyn Dispatcher> = app;
-        let (shutdown, rx) = tokio::sync::broadcast::channel(1);
-        let path = socket.clone();
-        tokio::spawn(async move {
-            let _keep_serving = shutdown;
-            let _ = crate::protocol::serve(&path, dispatcher, rx).await;
-        });
-        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let token = read_control_token(dir).unwrap();
-        (socket, token)
+        app
     }
 
     /// One tool call from inside the runtime; the bridge itself blocks.
@@ -1004,11 +872,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_refused_message_is_a_tool_error_and_nothing_is_kept() {
         let dir = tempfile::tempdir().unwrap();
-        let (socket, token) = live_daemon(dir.path()).await;
+        let app = live_app(dir.path());
         let bridge = |task: Option<&str>| Bridge {
             call: {
-                let (socket, token) = (socket.clone(), token.clone());
-                Box::new(move |method, params| call_orchd(&socket, &token, method, params))
+                let app = app.clone();
+                Box::new(move |method, params| {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(app.dispatch(method, params))
+                    })
+                })
             },
             task: task.map(str::to_string),
             read_only: false,

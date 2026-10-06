@@ -1,23 +1,24 @@
-//! `orchd eval run`: creates the tasks of an eval set (or one ad-hoc A/B
-//! pair) through a running daemon's `task.create`, one per task and arm.
-//! It only creates tasks; the daemon runs them as usual and `orchd ab
+//! `sushiai orch eval run`: creates the tasks of an eval set (or one ad-hoc A/B
+//! pair) through the daemon's `task.create`, one per task and arm.
+//! It only creates tasks; the daemon runs them as usual and `sushiai orch ab
 //! --eval <set>` reports them.
 //!
 //! ```text
-//! orchd eval run --data <dir> --socket <sock> --set <file> \
+//! sushiai orch eval run --set <file> \
 //!     [--variant '<json>' | --arms '[<json>, ...]'] [--only a,b] [--repeat N] [--repo <path>]
-//! orchd eval run --data <dir> --socket <sock> --request '<text>' \
+//! sushiai orch eval run --request '<text>' \
 //!     --arms '[<json>, <json>]' [--base <ref>] [--repo <path>]
-//! orchd eval harvest --data <dir> --repo <path> --out <file>
+//! sushiai orch eval harvest --data <dir> --repo <path> --out <file>
 //! ```
 //!
 //! `harvest` writes candidate set entries from the repo's own finished tasks
 //! that are not eval tasks. It never edits a set: a person (or the lead)
 //! promotes a candidate into one, adding a `check` if it has a way to grade.
 
+use crate::git;
+use crate::mcp::Caller;
 use crate::model::{Task, TaskStatus};
 use crate::store::Store;
-use crate::{git, mcp};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -26,8 +27,6 @@ use std::path::PathBuf;
 type Job = (String, String, String, String, Option<String>);
 
 struct Options {
-    data: PathBuf,
-    socket: PathBuf,
     repo: PathBuf,
     set: Option<PathBuf>,
     request: Option<String>,
@@ -43,7 +42,6 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    let need = |name: &str| flag(args, name).ok_or_else(|| format!("{name} is required"));
     let repeat = match flag(args, "--repeat") {
         None => 1,
         Some(n) => n
@@ -57,8 +55,6 @@ fn parse(args: &[String]) -> Result<Options, String> {
         None => std::env::current_dir().map_err(|e| e.to_string())?,
     };
     let o = Options {
-        data: PathBuf::from(need("--data")?),
-        socket: PathBuf::from(need("--socket")?),
         repo,
         set: flag(args, "--set").map(PathBuf::from),
         request: flag(args, "--request"),
@@ -219,12 +215,11 @@ fn plan(o: &Options, adhoc_name: &str) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
-fn create_all(o: &Options, adhoc_name: &str) -> Result<Value, String> {
+fn create_all(o: &Options, adhoc_name: &str, call: &Caller) -> Result<Value, String> {
     let params = plan(o, adhoc_name)?;
-    let token = mcp::read_control_token(&o.data)?;
     let mut created = vec![];
     for p in params {
-        let task = mcp::call_orchd(&o.socket, &token, "task.create", p.clone())?;
+        let task = call("task.create", p.clone())?;
         created.push(json!({
             "id": task["id"],
             "evalSet": p["evalSet"],
@@ -328,7 +323,8 @@ fn harvest(args: &[String]) -> Result<usize, String> {
     Ok(added)
 }
 
-pub fn run(args: &[String]) -> i32 {
+/// `call` sends one `orch.*` request (method without the prefix) to the daemon.
+pub fn run(args: &[String], call: &Caller) -> i32 {
     if args.first().map(String::as_str) == Some("harvest") {
         return match harvest(&args[1..]) {
             Ok(n) => {
@@ -336,19 +332,19 @@ pub fn run(args: &[String]) -> i32 {
                 0
             }
             Err(e) => {
-                eprintln!("orchd eval harvest: {e}");
+                eprintln!("sushiai orch eval harvest: {e}");
                 1
             }
         };
     }
     if args.first().map(String::as_str) != Some("run") {
-        eprintln!("orchd eval: usage: orchd eval run --data <dir> --socket <sock> (--set <file> | --request <text> --arms <json>) ... | orchd eval harvest --data <dir> --repo <path> --out <file>");
+        eprintln!("usage: sushiai orch eval run (--set <file> | --request <text> --arms <json>) ... | sushiai orch eval harvest --data <dir> --repo <path> --out <file>");
         return 2;
     }
     let o = match parse(&args[1..]) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("orchd eval run: {e}");
+            eprintln!("sushiai orch eval run: {e}");
             return 2;
         }
     };
@@ -356,13 +352,13 @@ pub fn run(args: &[String]) -> i32 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    match create_all(&o, &format!("adhoc-{now}")) {
+    match create_all(&o, &format!("adhoc-{now}"), call) {
         Ok(v) => {
             println!("{v}");
             0
         }
         Err(e) => {
-            eprintln!("orchd eval run: {e}");
+            eprintln!("sushiai orch eval run: {e}");
             1
         }
     }

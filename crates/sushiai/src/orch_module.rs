@@ -36,7 +36,6 @@ pub fn enabled(home: &Path) -> bool {
 
 /// Turns hosting on or off for the next daemon start.
 /// Used by `sushiai orch register` and `unregister`.
-#[allow(dead_code)]
 pub fn set_enabled(home: &Path, on: bool) -> io::Result<()> {
     let path = flag(home);
     if on {

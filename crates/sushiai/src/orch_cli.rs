@@ -1,143 +1,19 @@
-//! `sushiai orch <hook|ab|eval|costs|failures|evolve|gc|register|unregister>`, plus the small
-//! daemon client the orchestration commands and `sushiai mcp` share.
+//! `sushiai orch <hook|ab|eval|costs|failures|evolve|gc|register|unregister>`.
 
-use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use sushiai_daemon::Home;
-use sushiai_protocol::{encode, Decoder, Frame, Message, Request, PROTOCOL_VERSION};
+
+use crate::daemon_client::{orch_caller, Conn};
 
 const SERVER: &str = "sushiai-orchestrator";
 
 /// Where the orchestration module keeps its files.
 pub fn data_dir(home: &Home) -> PathBuf {
     home.dir().join("orchestrator")
-}
-
-pub enum CallError {
-    /// The connection ended before an answer; a fresh one may work.
-    Closed(String),
-    /// The daemon answered with an error.
-    Rpc(String),
-}
-
-impl CallError {
-    pub fn message(self) -> String {
-        match self {
-            CallError::Closed(e) | CallError::Rpc(e) => e,
-        }
-    }
-}
-
-/// One blocking connection to the daemon, after `hello`.
-pub struct Conn {
-    reader: Box<dyn Read>,
-    writer: Box<dyn Write>,
-    decoder: Decoder,
-    next_id: u64,
-    child: Option<Child>,
-}
-
-impl Conn {
-    /// Through `sushiai proxy`, which starts the daemon when nobody answers.
-    pub fn via_proxy(client: &str) -> Result<Conn, String> {
-        let exe = std::env::current_exe().map_err(|e| format!("cannot find sushiai: {e}"))?;
-        let mut child = Command::new(exe)
-            .arg("proxy")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| format!("cannot start sushiai proxy: {e}"))?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            return Err("sushiai proxy has no pipes".into());
-        };
-        Conn::hello(Box::new(stdout), Box::new(stdin), Some(child), client)
-    }
-
-    /// Straight to the socket; never starts a daemon.
-    pub fn direct(socket: &Path, client: &str) -> Result<Conn, String> {
-        let stream = UnixStream::connect(socket).map_err(|e| e.to_string())?;
-        let reader = stream.try_clone().map_err(|e| e.to_string())?;
-        Conn::hello(Box::new(reader), Box::new(stream), None, client)
-    }
-
-    fn hello(
-        reader: Box<dyn Read>,
-        writer: Box<dyn Write>,
-        child: Option<Child>,
-        client: &str,
-    ) -> Result<Conn, String> {
-        let mut conn = Conn {
-            reader,
-            writer,
-            decoder: Decoder::new(),
-            next_id: 1,
-            child,
-        };
-        let params = json!({"protocol": PROTOCOL_VERSION, "client": client});
-        match conn.call("hello", params) {
-            Ok(_) => Ok(conn),
-            Err(CallError::Closed(e) | CallError::Rpc(e)) => Err(e),
-        }
-    }
-
-    pub fn call(&mut self, method: &str, params: Value) -> Result<Value, CallError> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let frame = Request::new(id, method, params).frame();
-        self.writer
-            .write_all(&encode(&frame))
-            .and_then(|()| self.writer.flush())
-            .map_err(|e| CallError::Closed(format!("daemon write failed: {e}")))?;
-        let mut buf = [0u8; 8192];
-        loop {
-            let n = match self.reader.read(&mut buf) {
-                Ok(0) => return Err(CallError::Closed("the daemon closed the connection".into())),
-                Ok(n) => n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(CallError::Closed(format!("daemon read failed: {e}"))),
-            };
-            let frames = self
-                .decoder
-                .push(&buf[..n])
-                .map_err(|e| CallError::Closed(format!("bad frame from the daemon: {e}")))?;
-            for frame in frames {
-                // Notifications and output frames are not answers.
-                let Frame::Json(text) = frame else { continue };
-                if let Ok(Message::Response(r)) = Message::parse(&text) {
-                    if r.id == json!(id) {
-                        return match r.error {
-                            Some(e) => Err(CallError::Rpc(e.message)),
-                            None => Ok(r.result.unwrap_or(Value::Null)),
-                        };
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl Drop for Conn {
-    fn drop(&mut self) {
-        // The proxy ends when its stdin does; do not leave it behind if it does not.
-        if let Some(mut child) = self.child.take() {
-            let _ = std::mem::replace(&mut self.writer, Box::new(std::io::sink()));
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while std::time::Instant::now() < deadline {
-                if matches!(child.try_wait(), Ok(Some(_))) {
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
 }
 
 pub fn run(mut args: impl Iterator<Item = String>) -> i32 {
@@ -151,14 +27,14 @@ pub fn run(mut args: impl Iterator<Item = String>) -> i32 {
         }
         Some("gc") => gc(&rest),
         Some("register") => report(register(&home)),
-        Some("unregister") => report(unregister()),
-        Some(name @ ("ab" | "eval" | "costs" | "failures" | "evolve")) => {
+        Some("unregister") => report(unregister(&home)),
+        Some("eval") => sushiai_orch::eval::run(&with_data(&home, rest), &orch_caller("orch-eval")),
+        Some("evolve") => sushiai_orch::evolve::run(&rest, &orch_caller("orch-evolve")),
+        Some(name @ ("ab" | "costs" | "failures")) => {
             let rest = with_data(&home, rest);
             match name {
                 "ab" => sushiai_orch::ab::run(&rest),
-                "eval" => sushiai_orch::eval::run(&rest),
                 "costs" => sushiai_orch::costs::run(&rest),
-                "evolve" => sushiai_orch::evolve::run(&rest),
                 _ => sushiai_orch::timeline::run(&rest),
             }
         }
@@ -183,11 +59,7 @@ fn with_data(home: &Home, mut args: Vec<String>) -> Vec<String> {
 /// `orch gc [--dry-run]`: asks the daemon to remove worktrees its tasks no longer need.
 fn gc(args: &[String]) -> i32 {
     let dry_run = args.iter().any(|a| a == "--dry-run");
-    let result = Conn::via_proxy("orch-gc").and_then(|mut conn| {
-        conn.call("orch.worktrees.gc", json!({"dryRun": dry_run}))
-            .map_err(CallError::message)
-    });
-    match result {
+    match orch_caller("orch-gc")("worktrees.gc", json!({"dryRun": dry_run})) {
         Ok(v) => {
             println!("{v}");
             0
@@ -367,7 +239,8 @@ fn verb(changed: bool, file: &Path, done: &str) -> String {
 }
 
 /// `orch register`: the `sushiai-orchestrator` MCP entry and skill, for each tool that is
-/// installed. Writes nothing else; every changed file is backed up first.
+/// installed, and the flag that makes the daemon host the module at its next start. Writes
+/// nothing else; every changed file is backed up first.
 fn register(home: &Home) -> anyhow::Result<Vec<String>> {
     use anyhow::{bail, Context};
     use sushiai_daemon::{ensure_bin_link, Link};
@@ -399,6 +272,8 @@ fn register(home: &Home) -> anyhow::Result<Vec<String>> {
             "registered",
         ));
     }
+    crate::orch_module::set_enabled(home.dir(), true)?;
+    lines.push(format!("orchestrator enabled in {}", home.dir().display()));
     let data = data_dir(home);
     for written in sushiai_orch::skill::install(&user, Path::new(bin), &data) {
         lines.push(format!("skill written to {}", written.display()));
@@ -406,10 +281,12 @@ fn register(home: &Home) -> anyhow::Result<Vec<String>> {
     Ok(lines)
 }
 
-/// `orch unregister`: removes what `register` wrote.
-fn unregister() -> anyhow::Result<Vec<String>> {
+/// `orch unregister`: removes what `register` wrote and stops hosting the module at the next
+/// daemon start.
+fn unregister(home: &Home) -> anyhow::Result<Vec<String>> {
     let user = user_home()?;
     let mut lines = Vec::new();
+    crate::orch_module::set_enabled(home.dir(), false)?;
     let claude = user.join(".claude.json");
     if claude.exists() {
         lines.push(verb(claude_entry(&claude, None)?, &claude, "removed"));

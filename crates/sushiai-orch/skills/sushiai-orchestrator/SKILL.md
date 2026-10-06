@@ -15,7 +15,7 @@ If the `sushiai-orchestrator` tools are missing in this session, the owner (or y
 OK) registers the server once for every project:
 
 ```
-claude mcp add --scope user sushiai-orchestrator -- "{{ORCHD}}" mcp
+claude mcp add --scope user sushiai-orchestrator -- "{{SUSHIAI}}" mcp
 ```
 
 For Codex, add the same command/args under `[mcp_servers.sushiai-orchestrator]` in

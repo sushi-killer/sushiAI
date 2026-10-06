@@ -158,10 +158,7 @@ try {
   // The remote daemon outlives the app by design; this run stops its own.
   try {
     const pid = Number(
-      await fs.readFile(
-        `${profile}/remote-home/.sushiai/orchestrator/orchd.pid`,
-        "utf8",
-      ),
+      await fs.readFile(`${profile}/remote-home/.sushiai/daemon.lock`, "utf8"),
     );
     process.kill(pid, "SIGTERM");
   } catch {

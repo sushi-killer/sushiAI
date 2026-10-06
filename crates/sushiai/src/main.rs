@@ -1,6 +1,7 @@
 use std::io::stderr;
 use std::path::PathBuf;
 
+mod daemon_client;
 mod hook;
 mod hooks_file;
 mod mcp;

@@ -97,6 +97,32 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
   separates sessions' hooks; this is not a security boundary on a single-user
   machine.
 
+## Launch and read additions
+
+- `session.create` also takes `claudeSettings` (Claude only) and `idempotencyKey`.
+  - `claudeSettings` is merged into the single `--settings`. Only these top-level keys
+    pass: `apiKeyHelper`, `env`, `model`. Our `hooks` always
+    win; `hooks`, `disableAllHooks` and every other key are `INVALID_PARAMS`, as is an
+    `env` name that starts with `SUSHIAI_`. The recorded `cmd` keeps our settings only, so
+    the caller's keys are never persisted or listed. They do reach the holder's argv, so
+    the same user can see them in `ps`.
+  - Request errors never echo what the caller sent.
+  - `idempotencyKey` (1 to 256 bytes) is key-only: a key that matches an existing session
+    record returns that session's id, whatever the other params. The key is kept in the
+    record and in `state.json`, never sent to clients, and looked up by scanning the
+    records. A key resolves while its record exists: exited sessions beyond the last 50
+    are forgotten (`MAX_EXITED`), and their keys with them. Launches under one key run
+    one at a time.
+- For `agent: "codex"` with `env.CODEX_HOME` (absolute, no `~`), hooks and trust are
+  ensured in that directory after the launch is prepared and before the holder starts.
+- `session.attach {id, scrollback?}` puts up to N formatted history lines before the
+  snapshot, at most about 4 MiB of them (the oldest go first). `session.read {id,
+  scrollback?}` returns `{text, rows, cols}` as plain text; wrapped rows are joined.
+- `sushiai open TARGET PATH` sends `hook.open {session, token, target, arg}` on a hook
+  connection (fails open, exit 0). `target` is `extension/surface` in lowercase, digits
+  and dashes; `arg` is an absolute path without control characters. The daemon broadcasts `session.open {id,
+  target, arg, nonce}` to normal clients.
+
 ## Invariants
 
 - A frame is `u32` BE length of (kind + payload), a kind byte (`J` JSON-RPC,

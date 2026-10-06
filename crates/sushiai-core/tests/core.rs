@@ -59,3 +59,102 @@ fn a_state_file_from_before_agents_loads_with_empty_agent_fields() {
     let state = StateFile::from_bytes(old).expect("old state loads");
     assert_eq!(state.sessions[0].agent, Default::default());
 }
+
+#[test]
+fn history_returns_the_newest_scrolled_off_lines_oldest_first() {
+    let mut screen = Screen::new(5, 20);
+    for i in 1..=30 {
+        screen.feed(format!("line-{i}\r\n").as_bytes());
+    }
+    let before = screen.snapshot();
+    // Rows 5 hold lines 27..30 and the cursor row; lines 1..=26 scrolled off.
+    let text = screen.history_text(12);
+    let expected: String = (15..=26).map(|i| format!("line-{i}\n")).collect();
+    assert_eq!(text, expected);
+    let formatted = screen.history_formatted(3);
+    assert_eq!(formatted.len(), 3);
+    assert!(String::from_utf8_lossy(&formatted[0]).contains("line-24"));
+    assert_eq!(screen.history_text(0), "");
+    assert_eq!(
+        screen.history_text(10_000).lines().count(),
+        26,
+        "clamped to what exists"
+    );
+    // The live view is untouched, cursor and attributes included.
+    assert_eq!(screen.snapshot(), before);
+    assert_eq!(screen.size(), (5, 20));
+    assert!(screen.text().contains("line-30"));
+}
+
+#[test]
+fn reading_history_keeps_a_pending_wrap_cursor_and_the_pen() {
+    // Both screens end a line exactly in the last column: the cursor waits to wrap.
+    let setup: &[u8] = b"a\r\nb\r\nc\r\nd\r\ne\r\nf\r\n\x1b[1;31m0123456789";
+    let (mut read, mut control) = (Screen::new(5, 10), Screen::new(5, 10));
+    read.feed(setup);
+    control.feed(setup);
+    assert!(!read.history_text(3).is_empty());
+    assert_eq!(read.snapshot(), control.snapshot());
+    // The next character wraps; the old last column must survive and the pen must too.
+    read.feed(b"XY");
+    control.feed(b"XY");
+    assert_eq!(read.text(), control.text());
+    assert!(read.text().contains("0123456789XY"));
+    assert_eq!(read.snapshot(), control.snapshot());
+}
+
+#[test]
+fn history_text_joins_wrapped_rows_like_text_does() {
+    let mut screen = Screen::new(3, 10);
+    screen.feed(b"abcdefghijklmnopqrstuvwxy\r\none\r\ntwo\r\nthree\r\nfour");
+    let all = screen.history_text(100) + &screen.text();
+    assert!(
+        all.starts_with("abcdefghijklmnopqrstuvwxy\none\n"),
+        "{all:?}"
+    );
+}
+
+/// Feeds `chunks` to a screen that reads history between the first chunk and the rest, and
+/// the same bytes in one piece to a control; both must end identical, and stay so after more
+/// output.
+fn history_between_chunks_matches_control(chunks: &[&[u8]]) {
+    let (mut read, mut control) = (Screen::new(5, 10), Screen::new(5, 10));
+    read.feed(chunks[0]);
+    assert!(!read.history_text(3).is_empty(), "the test needs history");
+    for chunk in &chunks[1..] {
+        read.feed(chunk);
+    }
+    control.feed(&chunks.concat());
+    assert_eq!(read.text(), control.text());
+    assert_eq!(read.snapshot(), control.snapshot());
+    read.feed(b"+tail");
+    control.feed(b"+tail");
+    assert_eq!(read.text(), control.text());
+    assert_eq!(read.snapshot(), control.snapshot());
+}
+
+const SCROLLED: &[u8] = b"a\r\nb\r\nc\r\nd\r\ne\r\nf\r\n";
+
+#[test]
+fn history_between_the_halves_of_an_escape_sequence() {
+    let first = [SCROLLED, b"0123456789\x1b[3"].concat();
+    history_between_chunks_matches_control(&[&first, b"1mXY"]);
+}
+
+#[test]
+fn history_between_the_halves_of_a_utf8_character() {
+    let first = [SCROLLED, b"0123456789\xc3"].concat();
+    history_between_chunks_matches_control(&[&first, b"\xa9Z"]);
+}
+
+#[test]
+fn history_with_the_cursor_waiting_to_wrap_in_origin_mode() {
+    let first = [SCROLLED, b"\x1b[2;4r\x1b[?6h\x1b[2;1H0123456789"].concat();
+    history_between_chunks_matches_control(&[&first, b"XY"]);
+}
+
+#[test]
+fn history_with_a_wide_character_in_the_last_columns() {
+    let first = [SCROLLED, "01234567\u{4e2d}".as_bytes()].concat();
+    history_between_chunks_matches_control(&[&first, b"XY"]);
+}

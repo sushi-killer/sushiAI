@@ -19,6 +19,12 @@ pub enum LaunchError {
     ForbiddenArg(String),
     #[error("invalid agent session id {0:?}")]
     BadSessionId(String),
+    #[error("claudeSettings must not contain a `hooks` key: the daemon owns the hooks")]
+    SettingsHooks,
+    #[error("claudeSettings key {0:?} is not allowed")]
+    SettingsKey(String),
+    #[error("claudeSettings env must be an object of strings without SUSHIAI_ names")]
+    SettingsEnv,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +50,8 @@ pub struct LaunchParams<'a> {
     pub prompt: Option<&'a str>,
     /// How long the approver may wait for the owner (spec default 600).
     pub permission_wait_secs: u64,
+    /// Extra top-level keys for Claude's `--settings` (may hold secrets). Our `hooks` win.
+    pub claude_settings: Option<&'a Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +164,40 @@ pub fn claude_settings(hook_bin: &str, permission_wait_secs: u64) -> Result<Valu
     Ok(json!({ "hooks": Value::Object(hooks) }))
 }
 
+/// Top-level `--settings` keys a caller may set. `apiKeyHelper` is a command the account
+/// owner chooses, like `env`; hooks, `disableAllHooks`, `statusLine` and the rest stay out.
+pub const ALLOWED_SETTINGS: &[&str] = &["apiKeyHelper", "env", "model"];
+
+/// The caller's keys with our `hooks` on top. Only `ALLOWED_SETTINGS` pass; a `hooks` key is
+/// its own error; `env` must hold strings and no `SUSHIAI_` name (those carry the session).
+pub fn merge_claude_settings(
+    ours: Value,
+    caller: &Map<String, Value>,
+) -> Result<Value, LaunchError> {
+    for key in caller.keys() {
+        if key == "hooks" {
+            return Err(LaunchError::SettingsHooks);
+        }
+        if !ALLOWED_SETTINGS.contains(&key.as_str()) {
+            return Err(LaunchError::SettingsKey(key.clone()));
+        }
+    }
+    if let Some(vars) = caller.get("env") {
+        let ok = vars.as_object().is_some_and(|m| {
+            m.iter()
+                .all(|(k, v)| v.is_string() && !k.to_ascii_uppercase().starts_with("SUSHIAI_"))
+        });
+        if !ok {
+            return Err(LaunchError::SettingsEnv);
+        }
+    }
+    let mut merged = caller.clone();
+    if let Value::Object(ours) = ours {
+        merged.extend(ours);
+    }
+    Ok(Value::Object(merged))
+}
+
 pub fn build(p: &LaunchParams) -> Result<LaunchSpec, LaunchError> {
     require_absolute(p.hook_bin)?;
     check_extra_args(p.extra_args)?;
@@ -174,7 +216,10 @@ pub fn build(p: &LaunchParams) -> Result<LaunchSpec, LaunchError> {
                 AgentSession::New(id) => argv.extend(["--session-id".into(), (*id).into()]),
                 AgentSession::Resume(id) => argv.extend(["--resume".into(), (*id).into()]),
             }
-            let settings = claude_settings(p.hook_bin, p.permission_wait_secs)?;
+            let mut settings = claude_settings(p.hook_bin, p.permission_wait_secs)?;
+            if let Some(caller) = p.claude_settings {
+                settings = merge_claude_settings(settings, caller)?;
+            }
             argv.extend(["--settings".into(), settings.to_string()]);
             argv.extend(p.extra_args.iter().cloned());
         }

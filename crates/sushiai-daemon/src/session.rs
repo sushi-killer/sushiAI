@@ -37,6 +37,8 @@ const HOOK_SILENCE: Duration = Duration::from_secs(15);
 const ENDING_GRACE: Duration = Duration::from_secs(3);
 /// Open permission asks per session; more are left to the agent's own terminal prompt.
 const MAX_ASKS: usize = 20;
+/// Formatted history bytes one attach may carry; the oldest lines go first.
+const HISTORY_BUDGET: usize = 4 * 1024 * 1024;
 
 /// A piece of output and its offset in the session's stream.
 pub struct Chunk {
@@ -52,6 +54,13 @@ pub struct Snap {
     pub rows: u16,
 }
 
+/// Plain screen text.
+pub struct Text {
+    pub text: String,
+    pub rows: u16,
+    pub cols: u16,
+}
+
 pub struct Attached {
     pub snap: Snap,
     /// Receives every chunk at or after `snap.seq`.
@@ -64,7 +73,8 @@ enum Cmd {
     Input(Vec<u8>, Reply),
     Resize(u16, u16, Reply),
     Close(bool, Reply),
-    Attach(oneshot::Sender<Attached>),
+    Attach(usize, oneshot::Sender<Attached>),
+    Read(usize, oneshot::Sender<Text>),
     Snapshot(oneshot::Sender<Snap>),
     Hook(Vec<u8>, oneshot::Sender<HookReply>),
     Respond(AskRespond, Reply),
@@ -129,9 +139,17 @@ impl Handle {
         self.ask(|r| Cmd::Respond(answer, r)).await
     }
 
-    pub async fn attach(&self) -> Option<Attached> {
+    /// Attaches with up to `scrollback` history lines before the screen snapshot.
+    pub async fn attach(&self, scrollback: usize) -> Option<Attached> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(Cmd::Attach(tx)).await.ok()?;
+        self.tx.send(Cmd::Attach(scrollback, tx)).await.ok()?;
+        rx.await.ok()
+    }
+
+    /// The screen as plain text, with up to `scrollback` history lines before it.
+    pub async fn read(&self, scrollback: usize) -> Option<Text> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(Cmd::Read(scrollback, tx)).await.ok()?;
         rx.await.ok()
     }
 
@@ -332,11 +350,16 @@ impl Actor {
                     self.kill_at = Some(Instant::now() + TERM_GRACE);
                 }
             }
-            Cmd::Attach(reply) => {
-                let _ = reply.send(Attached {
-                    output: self.output.subscribe(),
-                    snap: self.snap(),
-                });
+            Cmd::Attach(scrollback, reply) => {
+                let output = self.output.subscribe();
+                let mut snap = self.snap();
+                if scrollback > 0 {
+                    snap.snapshot = self.with_history(scrollback, snap.snapshot);
+                }
+                let _ = reply.send(Attached { output, snap });
+            }
+            Cmd::Read(scrollback, reply) => {
+                let _ = reply.send(self.text(scrollback));
             }
             Cmd::Snapshot(reply) => {
                 let _ = reply.send(self.snap());
@@ -547,6 +570,41 @@ impl Actor {
                 .events
                 .send(Notification::new(method::SESSION_META, params));
         }
+    }
+
+    /// History lines in front of `snapshot`. The snapshot clears the screen, so the lines are
+    /// scrolled up out of the way first: the cursor goes to the bottom row and one line break
+    /// per row pushes the last of them into the terminal's own scrollback.
+    fn with_history(&mut self, scrollback: usize, snapshot: Vec<u8>) -> Vec<u8> {
+        let mut lines = self.screen.history_formatted(scrollback);
+        // Each line also costs its reset and line break.
+        let mut size: usize = lines.iter().map(|l| l.len() + 5).sum();
+        let mut skip = 0;
+        while size > HISTORY_BUDGET && skip < lines.len() {
+            size -= lines[skip].len() + 5;
+            skip += 1;
+        }
+        lines.drain(..skip);
+        if lines.is_empty() {
+            return snapshot;
+        }
+        let (rows, _) = self.screen.size();
+        let mut out = format!("\x1b[m\x1b[{rows};1H").into_bytes();
+        for line in lines {
+            out.extend(line);
+            out.extend(b"\x1b[m\r\n");
+        }
+        out.extend(b"\r\n".repeat(usize::from(rows).saturating_sub(1)));
+        out.extend(snapshot);
+        out
+    }
+
+    fn text(&mut self, scrollback: usize) -> Text {
+        let (rows, cols) = self.screen.size();
+        let mut text = self.screen.history_text(scrollback);
+        text.push_str(&self.screen.text());
+        text.truncate(text.trim_end().len());
+        Text { text, rows, cols }
     }
 
     fn snap(&self) -> Snap {

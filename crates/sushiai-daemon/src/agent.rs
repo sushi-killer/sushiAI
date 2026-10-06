@@ -99,7 +99,10 @@ pub fn source_from_wire(s: StatusSource) -> AgentSource {
 
 /// What `session.create` runs and records.
 pub struct Prepared {
+    /// What the catalog records and clients see: never holds `claudeSettings`.
     pub cmd: Vec<String>,
+    /// What the holder runs. Differs from `cmd` only when `claudeSettings` is set.
+    pub run_cmd: Vec<String>,
     pub env: Vec<(String, String)>,
     pub agent: AgentInfo,
 }
@@ -119,8 +122,12 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
             name: p.agent.clone(),
             ..AgentInfo::default()
         };
+        if p.claude_settings.is_some() {
+            return Err(invalid("claudeSettings needs agent claude"));
+        }
         return Ok(Prepared {
             cmd: p.cmd.clone(),
+            run_cmd: p.cmd.clone(),
             env,
             agent,
         });
@@ -145,6 +152,9 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
         extra_args.extend(["--model".to_string(), model.clone()]);
     }
     extra_args.extend(p.extra_args.iter().cloned());
+    if agent != Agent::Claude && p.claude_settings.is_some() {
+        return Err(invalid("claudeSettings needs agent claude"));
+    }
     let spec = launch::build(&LaunchParams {
         agent,
         hook_bin: &hook_bin,
@@ -155,6 +165,7 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
         extra_args: &extra_args,
         prompt: p.prompt.as_deref(),
         permission_wait_secs: ASK_WAIT_SECS,
+        claude_settings: p.claude_settings.as_ref(),
     })
     .map_err(|e| invalid(&e.to_string()))?;
     env.extend(spec.vars);
@@ -167,11 +178,65 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
         token_hash: Some(hash_token(&token)),
         ..AgentInfo::default()
     };
+    let mut cmd = spec.argv.clone();
+    if p.claude_settings.is_some() {
+        // The recorded command keeps our own settings only; the caller's keys may be secrets.
+        let ours = launch::claude_settings(&hook_bin, ASK_WAIT_SECS)
+            .map_err(|e| invalid(&e.to_string()))?
+            .to_string();
+        if let Some(at) = cmd.iter().position(|a| a == "--settings") {
+            if let Some(value) = cmd.get_mut(at + 1) {
+                *value = ours;
+            }
+        }
+    }
     Ok(Prepared {
-        cmd: spec.argv,
+        cmd,
+        run_cmd: spec.argv,
         env,
         agent: agent_info,
     })
+}
+
+/// Only one launch at a time edits an account home: read, merge and rename must not overlap.
+static CODEX_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// An account `CODEX_HOME` given in `env` is not the one `sushiai hooks install` served:
+/// put our hooks and their trust there before Codex starts. Both steps are idempotent. The
+/// directory must be absolute and free of `~`; nothing is written otherwise.
+pub fn ensure_codex_home(p: &SessionCreate, home_dir: &std::path::Path) -> Result<(), Fail> {
+    if agent_of(p.agent.as_deref()) != Some(Agent::Codex) {
+        return Ok(());
+    }
+    let Some(dir) = p.env.get("CODEX_HOME").filter(|d| !d.is_empty()) else {
+        return Ok(());
+    };
+    if !dir.starts_with('/') || dir.contains('~') {
+        return Err((
+            code::INVALID_PARAMS,
+            "CODEX_HOME must be an absolute path without `~`".into(),
+        ));
+    }
+    let fail = |what: &str, e: &dyn std::fmt::Display| {
+        (
+            code::SPAWN_FAILED,
+            format!("cannot prepare CODEX_HOME: {what}: {e}"),
+        )
+    };
+    let dir = std::path::Path::new(dir);
+    let _one_at_a_time = CODEX_HOME_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::binlink::ensure_bin_link(home_dir).map_err(|e| fail("bin link", &e))?;
+    let bin = home_dir.join("bin/sushiai");
+    let bin = bin.to_string_lossy();
+    std::fs::create_dir_all(dir).map_err(|e| fail("directory", &e))?;
+    let (hooks, config) = (dir.join("hooks.json"), dir.join("config.toml"));
+    let ts = now_ms() / 1000;
+    sushiai_agents::codex_hooks::install(&hooks, &bin, ASK_WAIT_SECS, ts)
+        .map_err(|e| fail("hooks.json", &e))?;
+    sushiai_agents::codex_trust::trust(&config, &hooks, ts).map_err(|e| fail("config.toml", &e))?;
+    Ok(())
 }
 
 /// The largest ask `input` sent to clients, as JSON text.

@@ -31,6 +31,12 @@ pub mod method {
     pub const SESSION_ASK: &str = "session.ask";
     /// Notification: an ask is closed (answered, timed out, or its agent went away).
     pub const SESSION_ASK_CLOSED: &str = "session.askClosed";
+    /// Request: plain text of a session's screen, optionally with scrollback lines before it.
+    pub const SESSION_READ: &str = "session.read";
+    /// Request from an agent's `sushiai open` process (token required).
+    pub const HOOK_OPEN: &str = "hook.open";
+    /// Notification: an agent asked the desktop to open something.
+    pub const SESSION_OPEN: &str = "session.open";
     pub const HOLD_ATTACH: &str = "hold.attach";
     pub const HOLD_INPUT: &str = "hold.input";
     pub const HOLD_RESIZE: &str = "hold.resize";
@@ -113,6 +119,14 @@ pub struct SessionCreate {
     /// Extra variables for the child. Never logged or persisted.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+    /// Claude only: extra keys for the single `--settings` JSON (for example `apiKeyHelper`
+    /// and `env`). A `hooks` key is rejected; the daemon's hooks always win. May hold secrets:
+    /// never logged, never persisted, and not part of any record clients can read back.
+    #[serde(default)]
+    pub claude_settings: Option<serde_json::Map<String, serde_json::Value>>,
+    /// A key that matches an existing session record returns that session.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +194,9 @@ pub struct AgentInfo {
     /// SHA-256 (hex) of the session token. Only in the state file, never sent to clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_hash: Option<String>,
+    /// Launch idempotency key of the session. Kept in the state file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -219,6 +236,57 @@ pub struct SessionResize {
 pub struct SessionClose {
     pub id: String,
     pub graceful: bool,
+}
+
+/// Params of `session.attach`. `scrollback` (default 0) puts up to that many formatted history
+/// lines in front of the screen snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionAttach {
+    pub id: String,
+    #[serde(default)]
+    pub scrollback: Option<u32>,
+}
+
+/// Params of `session.read`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRead {
+    pub id: String,
+    #[serde(default)]
+    pub scrollback: Option<u32>,
+}
+
+/// Result of `session.read`: plain text, scrollback lines first.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadResult {
+    pub text: String,
+    pub rows: u16,
+    pub cols: u16,
+}
+
+/// Params of `hook.open`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookOpen {
+    pub session: String,
+    pub token: String,
+    /// What to open with, for example `preview/files`.
+    pub target: String,
+    /// Absolute path or other argument for the target.
+    pub arg: String,
+}
+
+/// Result of `hook.open`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookOpenResult {
+    pub nonce: String,
+}
+
+/// Params of the `session.open` notification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionOpen {
+    pub id: String,
+    pub target: String,
+    pub arg: String,
+    pub nonce: String,
 }
 
 /// Result of `session.attach`; also the params of a `session.snapshot` notification (with `id`).

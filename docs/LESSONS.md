@@ -29,6 +29,7 @@ Rule: land one working end-to-end path first, then generalize.
 
 ## Promoted
 
+- 2026-10-07 A test launcher with only `SUSHIAI_HOME` rewrote the owner's `~/.codex` and bin link → set `HOME` and `CODEX_HOME` too. `check-conventions.mjs`.
 - 2026-10-06 Agent-shell markers leaked into sessions → daemon strips them (lifecycle.rs test).
 - 2026-10-06 Codex TUI hooks ran in a shared server → `--no-daemon` (launch_spec).
 - 2026-10-02 Duplicate project rows survived three point fixes → data-model fix, not another patch.
@@ -38,7 +39,6 @@ Rule: land one working end-to-end path first, then generalize.
 - 2026-10-02 Fixtures invented `gh` output → copy real CLI shapes (`MERGED`). `worktree-session.test.cjs`.
 - 2026-10-02 Git identity loading split worktree rows → wait for first-host identities before drawing.
 - 2026-10-01 A temp `$HOME` did not isolate Herdr on macOS → never stop an unowned server; test on SSH.
-- 2026-10-01 Herdr 0.8.2 closed linked sessions with the primary's last pane → detach first. `herdr-pane-close.test.cjs`.
 - 2026-10-01 Prepare lost SSH recovery between callers → preserve structured failures; reuse recovery UI. `GitRecovery` and `project-git-ssh.test.cjs`.
 - 2026-10-01 contextBridge discards Error fields → transport tagged values; reconstruct before App restores state. `tests/bridge.test.cjs`.
 
@@ -58,4 +58,3 @@ Rule: land one working end-to-end path first, then generalize.
 - 2026-09-24 Real Claude/Codex output broke `orchd` while self-written fakes passed → parsers assert captured CLI lines. `parses_captured_real_cli_streams`.
 - 2026-09-14 A debug paste leaked a real IP/host → examples use 192.0.2.0/24. `check-conventions.mjs`.
 - 2026-09-29 orchd preflights checks on a fresh checkout → check commands build what they need. `package.json`.
-- 2026-09-18 A fixture invented a Herdr status (`running`) → check vocabularies against `herdr api snapshot`. `tests/herdr-snapshot.test.cjs`.

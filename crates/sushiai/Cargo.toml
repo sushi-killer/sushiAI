@@ -25,3 +25,4 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+sha2 = "0.10"

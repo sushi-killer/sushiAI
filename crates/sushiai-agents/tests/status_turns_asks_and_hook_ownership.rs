@@ -1,4 +1,5 @@
-//! Regression tests for the step 2a review (P1 first).
+//! Status turn scoping and ask matching, which hook entries are ours in a Codex hooks file, and
+//! the launch spec the daemon keeps for itself.
 
 use std::fs;
 

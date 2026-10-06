@@ -99,6 +99,9 @@ try {
       ...process.env,
       PATH: `${bin}:${process.env.PATH}`,
       BRIDGE_DATA_DIR: dataDir,
+      // Never the owner's ~/.codex or ~/.sushiai/bin link.
+      HOME: dataDir,
+      CODEX_HOME: path.join(dataDir, "codex"),
       BRIDGE_DEV_URL: "",
       SUSHIAI_HOME: path.join(dataDir, "sushiai"),
       SUSHIAI_TEST_WINDOW: "hidden",

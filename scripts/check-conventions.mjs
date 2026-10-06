@@ -89,24 +89,38 @@ async function* walkAll(dir, base) {
     const relative = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       if (entry.name !== "node_modules") yield* walkAll(relative, base);
-    } else if (/\.(png|jpe?g|gif|icns|woff2?|ttf|otf|node)$/i.test(entry.name))
+    } else if (
+      /\.(png|jpe?g|gif|icns|woff2?|ttf|otf|node|mp4|wav)$/i.test(entry.name)
+    )
       continue;
     else yield relative;
   }
 }
-for (const dir of ["src", "electron", "scripts", "tests", ".agents"])
-  for await (const file of walkAll(dir, retiredRoot)) {
-    const name = file.split(path.sep).join("/");
-    if (RETIRED_ALLOWED.has(name) && retiredRoot === root) continue;
-    const text = await readFile(path.join(retiredRoot, file), "utf8");
-    const line = text
-      .split("\n")
-      .findIndex((value) => RETIRED_NAME.test(value));
-    if (line >= 0)
-      problems.push(
-        `${name}:${line + 1} names the retired session backend; sessions run in the sushiai daemon`,
-      );
-  }
+const retiredScan = async function* () {
+  for (const dir of [
+    "src",
+    "electron",
+    "scripts",
+    "tests",
+    ".agents",
+    "promo",
+    "crates",
+  ])
+    yield* walkAll(dir, retiredRoot);
+  for (const file of ["README.md", "AGENTS.md"]) yield file;
+};
+for await (const file of retiredScan()) {
+  const name = file.split(path.sep).join("/");
+  if (RETIRED_ALLOWED.has(name) && retiredRoot === root) continue;
+  const text = await readFile(path.join(retiredRoot, file), "utf8").catch(
+    () => "",
+  );
+  const line = text.split("\n").findIndex((value) => RETIRED_NAME.test(value));
+  if (line >= 0)
+    problems.push(
+      `${name}:${line + 1} names the retired session backend; sessions run in the sushiai daemon`,
+    );
+}
 
 // App state lives in one place: `<userData>/sushiai.db`. A string literal that
 // names a `*.json` file in `electron/` - quoted, a template ending in `.json`,
@@ -438,6 +452,28 @@ for (const dir of ["scripts", ".agents", ".github"])
           `${file}: electron.launch without SUSHIAI_TEST_WINDOW; test launchers must run hidden`,
         );
     }
+  }
+// A script or test that gives a daemon its own SUSHIAI_HOME must give it a HOME
+// too: `sushiai hooks install` and Codex's files resolve from HOME, and the
+// owner's real ~/.codex and ~/.sushiai/bin link are never a test's to touch.
+const homeRoot = process.env.HOME_RULE_ROOT_OVERRIDE || root;
+for (const dir of ["scripts", "tests", ".agents"])
+  for await (const file of walkAll(dir, homeRoot)) {
+    const name = file.split(path.sep).join("/");
+    if (
+      !/\.(mjs|cjs|js)$/.test(name) ||
+      name === "scripts/check-conventions.mjs"
+    )
+      continue;
+    if (dir === ".agents" && !/\/scripts\//.test(name)) continue;
+    const text = await readFile(path.join(homeRoot, file), "utf8");
+    if (
+      /SUSHIAI_HOME["']?\s*[:=]/.test(text) &&
+      !/(?<![A-Z_])HOME["']?\s*[:=,]|["']HOME["']/.test(text)
+    )
+      problems.push(
+        `${name}: sets SUSHIAI_HOME without HOME; a test must never reach the owner's ~/.codex or ~/.sushiai/bin`,
+      );
   }
 for (const dir of [
   "src",

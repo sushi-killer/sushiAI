@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { errorText } from "./errors.ts";
 import {
-  daemonHost,
+  LOCAL_ENDPOINT,
   emptyFeed,
   emptyHost,
   failList,
@@ -34,26 +34,24 @@ const connectionOf = (state: DaemonState | undefined): DaemonConnection =>
  * No polling. The workspace list itself lives in App; this hook only
  * reconciles known panels into it. */
 export function useDaemon({
-  savedSocket,
   notify,
   setWorkspaces,
   connectionProfiles,
 }: {
-  savedSocket: string;
   notify: (text: string) => void;
   setWorkspaces: React.Dispatch<React.SetStateAction<Workspace[]>>;
   connectionProfiles: ConnectionProfile[];
 }) {
   const [system, setSystem] = useState<System | null>(null);
-  const [socket, setSocket] = useState(savedSocket);
   const [states, setStates] = useState<Record<string, DaemonState>>({});
   const hosts = useRef<SessionsByHost>({});
+  const [sessions, setSessions] = useState<SessionsByHost>({});
   const feeds = useRef<Record<string, HostFeed>>({});
 
-  const reconcile = useCallback(
-    () => setWorkspaces((items) => reconcileSessions(items, hosts.current)),
-    [setWorkspaces],
-  );
+  const reconcile = useCallback(() => {
+    setSessions({ ...hosts.current });
+    setWorkspaces((items) => reconcileSessions(items, hosts.current));
+  }, [setWorkspaces]);
 
   const list = useCallback(
     async (host: string) => {
@@ -91,7 +89,6 @@ export function useDaemon({
       .then((info) => {
         if (stopped) return;
         setSystem(info);
-        setSocket((current) => current || info.socketPath);
         setWorkspaces((items) =>
           items.map((w) => ({ ...w, cwd: w.cwd || info.cwd })),
         );
@@ -127,6 +124,7 @@ export function useDaemon({
       if (state.state !== "ready") {
         // Keep what was known: a host that is not ready never ends a panel.
         hosts.current[state.host] = { ...entry, ready: false, listed: false };
+        setSessions({ ...hosts.current });
         window.clearTimeout(retries.get(state.host));
         retries.delete(state.host);
         return;
@@ -167,25 +165,22 @@ export function useDaemon({
   }, [list, notify, reconcile, setWorkspaces]);
 
   const statusByEndpoint = useMemo(() => {
-    const status: Record<string, DaemonConnection> = {};
-    if (system?.socketPath)
-      status[system.socketPath] = connectionOf(states.local);
-    if (socket && !socket.startsWith("ssh:"))
-      status[socket] = connectionOf(states.local);
+    const status: Record<string, DaemonConnection> = {
+      [LOCAL_ENDPOINT]: connectionOf(states.local),
+    };
     for (const profile of connectionProfiles)
       status[`ssh:${profile.id}`] = connectionOf(states[profile.id]);
     return status;
-  }, [system, socket, states, connectionProfiles]);
+  }, [states, connectionProfiles]);
 
-  const socketHost = daemonHost(socket);
-  const state = states[socketHost];
   return {
     system,
-    socket,
-    setSocket,
-    connection: connectionOf(state),
+    /** This Mac's daemon. */
+    connection: connectionOf(states.local),
     statusByEndpoint,
     /** The connection state of each host the manager reports. */
     daemonStates: states,
+    /** The sessions each host runs, with their open asks (Inbox reads them). */
+    sessions,
   };
 }

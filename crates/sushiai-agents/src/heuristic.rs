@@ -5,8 +5,8 @@
 //! rules come before working rules. A screen that matches nothing returns
 //! `None` (the caller decides what a quiet screen means).
 //!
-//! The Gemini and Cursor phrases come from Herdr's published manifests (spec
-//! section 4). The Codex phrases come from the same source; none of them has
+//! The Gemini and Cursor phrases come from the published manifests of the session
+//! backend this daemon replaced (spec section 4). The Codex phrases come from the same source; none of them has
 //! been checked against a captured screen yet.
 
 use crate::status::{BlockedKind, Detected};

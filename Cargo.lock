@@ -479,6 +479,7 @@ dependencies = [
  "anyhow",
  "libc",
  "serde_json",
+ "sha2",
  "sushiai-agents",
  "sushiai-daemon",
  "sushiai-hold",

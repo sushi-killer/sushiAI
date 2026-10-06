@@ -7,6 +7,9 @@ fn hello_result_host_is_optional_for_old_daemons() {
         serde_json::from_value(json!({"protocol": 1, "capabilities": [], "daemon": "0.1.0"}))
             .unwrap();
     assert_eq!(old.host, "");
+    assert_eq!(old.build, None);
+    let value = serde_json::to_value(&old).unwrap();
+    assert!(value.get("build").is_none(), "an unset build is not sent");
 }
 
 #[test]

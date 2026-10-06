@@ -1,4 +1,10 @@
-import type { DaemonEvent, DaemonSession, Panel, Workspace } from "./types";
+import type {
+  DaemonAsk,
+  DaemonEvent,
+  DaemonSession,
+  Panel,
+  Workspace,
+} from "./types";
 
 /** What the desktop knows about one host's sessions. */
 export type HostSessions = {
@@ -23,16 +29,25 @@ type MetaParams = {
   transcriptPath?: string | null;
 };
 
+const withoutAsks = (session: DaemonSession): DaemonSession => {
+  const next = { ...session };
+  delete next.asks;
+  return next;
+};
+
 export const emptyHost = (): HostSessions => ({
   ready: false,
   listed: false,
   sessions: {},
 });
 
+/** The endpoint, and the daemon host, of This Mac. */
+export const LOCAL_ENDPOINT = "local";
+
 /** The daemon host of a workspace connection: "local" for this Mac (any
  * non-ssh endpoint), else the connection id. */
 export function daemonHost(connection: string | undefined): string {
-  return connection?.startsWith("ssh:") ? connection.slice(4) : "local";
+  return connection?.startsWith("ssh:") ? connection.slice(4) : LOCAL_ENDPOINT;
 }
 
 /** The stable panel id of a daemon session on an endpoint. */
@@ -54,7 +69,7 @@ export function applySessionList(
 }
 
 /** One notification applied to a host's sessions. Returns the same object when
- * the event changes nothing. `session.resync` and the ask/open events are the
+ * the event changes nothing. `session.resync` and `session.open` are the
  * caller's business, not session state. */
 export function applyDaemonEvent(
   host: HostSessions,
@@ -74,16 +89,43 @@ export function applyDaemonEvent(
       delete rest[id];
       return { ...host, sessions: rest };
     }
+    case "session.ask": {
+      // The session record carries its open asks, so Inbox reads them here.
+      const ask = event.params as DaemonAsk;
+      const known = ask?.askId ? sessions[ask.session] : undefined;
+      if (!known) return host;
+      const rest = (known.asks ?? []).filter((a) => a.askId !== ask.askId);
+      return {
+        ...host,
+        sessions: {
+          ...sessions,
+          [known.id]: { ...known, asks: [...rest, ask] },
+        },
+      };
+    }
+    case "session.askClosed": {
+      // Settled however: Allow or Deny here, an answer in the terminal, a timeout.
+      const { askId } = event.params as { askId: string };
+      const known = Object.values(sessions).find((s) =>
+        s.asks?.some((a) => a.askId === askId),
+      );
+      if (!known) return host;
+      const asks = known.asks!.filter((a) => a.askId !== askId);
+      const next = asks.length ? { ...known, asks } : withoutAsks(known);
+      return { ...host, sessions: { ...sessions, [known.id]: next } };
+    }
     case "session.exited": {
       const { id, code } = event.params as { id: string; code: number | null };
       const known = sessions[id];
       if (!known) return host;
+      // An exited session has no open asks.
+      const rest = withoutAsks(known);
       return {
         ...host,
         sessions: {
           ...sessions,
           [id]: {
-            ...known,
+            ...rest,
             status: "exited",
             agentStatus: known.agentStatus && "exited",
             ...(code === null ? {} : { exitCode: code }),
@@ -284,4 +326,63 @@ export function reconcileSessions(
     return { ...workspace, panels };
   });
   return changed ? next : workspaces;
+}
+
+/** A permission ask an agent is waiting on, with the host whose daemon owns it. */
+export type OpenAsk = DaemonAsk & { host: string };
+
+/** The open asks of one session, oldest first. */
+export function asksOf(
+  hosts: SessionsByHost,
+  host: string,
+  sessionId: string,
+): OpenAsk[] {
+  return (hosts[host]?.sessions[sessionId]?.asks ?? []).map((ask) => ({
+    ...ask,
+    host,
+  }));
+}
+
+const SUMMARY_KEYS = [
+  "command",
+  "file_path",
+  "path",
+  "url",
+  "pattern",
+  "query",
+  "description",
+];
+const SUMMARY_MAX = 140;
+
+const clip = (text: string) => {
+  const line = text.replace(/\s+/g, " ").trim();
+  return line.length <= SUMMARY_MAX
+    ? line
+    : `${line.slice(0, SUMMARY_MAX - 1)}…`;
+};
+
+/** A short, one-line description of what the tool will do, from its input. */
+export function summarizeAskInput(input: unknown): string {
+  if (typeof input === "string") return clip(input);
+  if (input && typeof input === "object") {
+    const fields = input as Record<string, unknown>;
+    for (const key of SUMMARY_KEYS)
+      if (typeof fields[key] === "string" && fields[key])
+        return clip(fields[key] as string);
+    try {
+      const text = JSON.stringify(input);
+      return text === "{}" ? "" : clip(text);
+    } catch {
+      return "";
+    }
+  }
+  return input == null ? "" : clip(String(input));
+}
+
+/** The request `askRespond` takes for one button press. */
+export function askDecision(
+  ask: OpenAsk,
+  decision: "allow" | "deny",
+): [string, { sessionId: string; askId: string; decision: "allow" | "deny" }] {
+  return [ask.host, { sessionId: ask.session, askId: ask.askId, decision }];
 }

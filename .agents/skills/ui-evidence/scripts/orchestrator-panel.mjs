@@ -183,6 +183,9 @@ if (!seedPath || !title) {
         ...process.env,
         SUSHIAI_TEST_WINDOW: "hidden",
         BRIDGE_DATA_DIR: profile,
+        // Never the owner's ~/.codex or ~/.sushiai/bin link.
+        HOME: profile,
+        CODEX_HOME: `${profile}/codex`,
         SUSHIAI_HOME: `${profile}/sushiai`,
         BRIDGE_DEV_URL: "",
       },
@@ -298,7 +301,13 @@ if (!seedPath || !title) {
   } finally {
     if (app) await app.close().catch(() => {});
     stopDaemon(`${profile}/sushiai`);
-    await fs.rm(profile, { recursive: true, force: true });
+    // A shell that exits late may still write its history into HOME.
+    await fs.rm(profile, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 200,
+    });
     console.log(JSON.stringify(report, null, 2));
     if (report.error || report.pageErrors.length > 0) process.exitCode = 1;
   }

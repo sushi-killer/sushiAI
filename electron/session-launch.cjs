@@ -10,11 +10,11 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { createWorktree, worktreeBranchError } = require("./worktree.cjs");
 const { sessionLaunchEnv } = require("./project-session.cjs");
+const { quote } = require("./connections.cjs");
 
 const SHELL_CMD = ["/bin/sh", "-lc", 'exec "${SHELL:-/bin/sh}" -l'];
 const NATIVE_AGENTS = ["claude", "codex"];
 const CMD_AGENTS = ["gemini", "cursor-agent"];
-const quote = (text) => `'${String(text).replaceAll("'", "'\\''")}'`;
 
 function launchError(code, message) {
   return Object.assign(new Error(message), { code });
@@ -67,6 +67,7 @@ function createSessionLauncher({
   environment,
   worktreeCreate = createWorktree,
   exec,
+  inspect,
   hasShell = () => true,
 }) {
   // A retry with the same key reuses its worktree instead of failing on it.
@@ -87,17 +88,17 @@ function createSessionLauncher({
     }
   }
 
-  // A remote folder is used as it is. A remote worktree is used when it exists
-  // (the sibling `<repo>-<branch>` a local launch would create); sushiAI does
-  // not create one on a host yet.
+  // A remote folder is used as it is. A remote worktree is created on the host
+  // (remote-files.py `worktree_create`: the sibling `<repo>-<branch>`), once per
+  // launch key like the local one.
   async function remoteCheckout(request) {
     // A command connector has no shell to probe with: the folder is taken as
-    // given, and a worktree cannot be looked up.
+    // given, and a worktree cannot be created.
     if (!hasShell(request.host)) {
       if (request.worktree)
         throw launchError(
           "REMOTE_WORKTREE_MISSING",
-          "This host connects through a command and has no shell, so a worktree cannot be used. Launch without a worktree.",
+          "This host connects through a command and has no shell, so a worktree cannot be created. Launch without a worktree.",
         );
       return request.cwd;
     }
@@ -108,18 +109,23 @@ function createSessionLauncher({
         "The folder is not present on the host, or the host cannot be reached.",
       );
     if (!request.worktree) return cwd;
-    const slug = request.worktree.branch.replace(/\//g, "-");
-    const target = path.posix.join(
-      path.posix.dirname(cwd),
-      `${path.posix.basename(cwd)}-${slug}`,
-    );
-    const existing = await remoteDirectory(request.host, target);
-    if (!existing)
-      throw launchError(
-        "REMOTE_WORKTREE_MISSING",
-        `Creating a worktree on a remote host is not supported yet. Create ${target} on the host first, or launch without a worktree.`,
-      );
-    return existing;
+    let made = worktrees.get(request.idempotencyKey);
+    if (!made) {
+      const { branch, base } = request.worktree;
+      made = await inspect(`ssh:${request.host}`, {
+        operation: "worktree_create",
+        root: cwd,
+        branch,
+        ...(base ? { base } : {}),
+      });
+      if (typeof made?.path !== "string" || !made.path)
+        throw launchError(
+          "PREPARATION_FAILED",
+          "The host did not report the new worktree.",
+        );
+      worktrees.set(request.idempotencyKey, made);
+    }
+    return made.path;
   }
 
   async function checkout(request) {
@@ -205,6 +211,7 @@ function createDaemonLaunch({
   return createSessionLauncher({
     manager,
     exec: (...args) => connections.exec(...args),
+    inspect: (...args) => connections.inspect(...args),
     hasShell: (host) => host === "local" || connections.hasShell(`ssh:${host}`),
     environment: (input) =>
       sessionLaunchEnv(

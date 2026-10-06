@@ -103,3 +103,33 @@ test("formatArgv round-trips and connectorFromLine picks the kind", async () => 
     argv: ["tsh", "ssh", "devbox"],
   });
 });
+
+test("a ready host whose binary differs from the bundled one offers Update sushiai", async () => {
+  const { describeHost, actionLabel } = await load();
+  const same = describeHost(st("ready", { version: "0.4.1" }), profile);
+  assert.equal(same.action, undefined);
+  const view = describeHost(
+    st("ready", { version: "0.4.1", update: true }),
+    profile,
+  );
+  assert.equal(view.label, "Connected");
+  assert.equal(view.action, "update");
+  assert.equal(actionLabel(view.action), "Update sushiai");
+});
+
+test("This Mac incompatible says another build owns the daemon and offers Restart daemon", async () => {
+  const { describeHost, actionLabel } = await load();
+  const view = describeHost(
+    st("failed", { host: "local", reason: "incompatible", message: "x" }),
+    profile,
+  );
+  assert.equal(view.action, "restart");
+  assert.match(view.label, /Another sushiAI build owns the daemon/);
+  assert.equal(actionLabel("restart"), "Restart daemon");
+  // A failed connect on This Mac is a plain Retry, as on any host.
+  const failed = describeHost(
+    st("failed", { host: "local", reason: "daemon_died" }),
+    profile,
+  );
+  assert.equal(failed.action, "retry");
+});

@@ -88,6 +88,13 @@ Modules attach at the composition bin (`crates/sushiai`); nothing else knows whi
   hook silence (15 s while `working`), session-end grace (3 s), ask expiry.
   A holder exit feeds `Exit`. The agent status is `agentStatus` in the record;
   the process status stays in `status`.
+- Screen-read status: `gemini` and `cursor-agent` send no hooks, and Codex shows
+  dialogs no hook reports. For those the actor reads the screen with
+  `sushiai_agents::heuristic::detect` on output, at most every 500 ms (one more
+  read when held-back output is due), and feeds `Screen`. The state machine
+  applies it only while no hook drives the status, so a hook status always wins
+  (`statusSource` says which); Codex dialogs only ever block, and a
+  `SessionStart` hook ends a dialog read before any hook.
 - Asks: a `PermissionRequest` opens an ask (`session.ask`, listed in
   `session.list` as `asks`). `ask.respond` answers it. Timeout or a vanished hook
   process hands it back to the terminal (`PermissionClosed {decided: false}`).
@@ -96,7 +103,7 @@ Modules attach at the composition bin (`crates/sushiai`); nothing else knows whi
   defaults, so an older file loads unchanged. A restored `blocked` status stays
   `blocked`: the agent may still show its dialog. The ask is gone, so the
   machine is told it went back to the terminal (`PermissionClosed {decided:
-  false}`); the next prompt or stop clears it.
+false}`); the next prompt or stop clears it.
 - `hook.event` carries the hook's `agent`. `sushiai hook` exits silently when
   `--agent` (default claude) differs from `SUSHIAI_AGENT`, and the daemon rejects
   a hook whose agent differs from the session's, so a nested agent that inherits
@@ -105,7 +112,7 @@ Modules attach at the composition bin (`crates/sushiai`); nothing else knows whi
 - Limits: a hook payload over 1 MiB is not forwarded; at most 20 open asks per
   session (more get no decision and no ask); an ask's `input` on the wire is cut
   to 64 KiB of JSON text (the tool name is kept). `session.askClosed {askId,
-  decided}` follows every ask that closes (answered, timed out, hook vanished,
+decided}` follows every ask that closes (answered, timed out, hook vanished,
   session exited).
 - An exited session's token hash is cleared: its hooks are refused at once.
   Token compare folds all bytes of the SHA-256 digests (constant time).
@@ -127,16 +134,17 @@ Modules attach at the composition bin (`crates/sushiai`); nothing else knows whi
 - **Replica rule.** The desktop is the master of projects and groups; a daemon
   holds only the projects that have a folder on its own host. The daemon's host
   name is `$SUSHIAI_HOST`, else the first line of `<home>/host`, else the machine
-  hostname; `hello` returns it as `host`, and `projects.sync {host}` for another
+  hostname; `hello` returns it as `host` (and, optionally, `build`: the sha256 of the
+  daemon's own binary, which the desktop compares with the bundled one), and `projects.sync {host}` for another
   host fails with `INVALID_PARAMS` "daemon is <host>". `projects.sync {host, projects,
-  full}` and `groups.sync {groups, full}` answer `{applied, ignored, rev}`. A partial
+full}` and `groups.sync {groups, full}` answer `{applied, ignored, rev}`. A partial
   sync merges by last writer (higher `rev`, then `updatedAt`). A `full` sync is
   authoritative: every record in the payload replaces the stored one whatever its
   `rev`, and live records absent from it become tombstones without a `rev` bump (so
   do the groups of a removed project). A project removed and added again is live
   with the next full projects sync, and its groups come back with the next full
-  groups sync. The groups replica is write-only until a catalog read exists: nothing
-  in the daemon reads it back. The replica is
+  groups sync. `catalog.get {}` (capability `catalogRead`) answers
+  `{host, projects, groups}` with the live records, tombstones left out. The replica is
   saved as `<home>/catalog.json` (mode 0600, own `catalogVersion` 1) by the same
   writer thread as `state.json`. A catalog file that cannot be read is renamed to
   `catalog.json.unreadable-<ts>` and the desktop syncs again. Bindings are opaque
@@ -173,7 +181,8 @@ Modules attach at the composition bin (`crates/sushiai`); nothing else knows whi
   (compare `daemon` and `capabilities`), `session.list`, and for each open
   terminal `session.attach`, whose result carries a snapshot and `seq`; output
   frames after it continue from `seq`. A `session.resync` or `session.snapshot`
-  notification means the client missed events and replaces its view.
+  notification means the client missed events and replaces its view; `session.resync`
+  has no payload, the client lists the sessions again.
 - **Log.** The binary logs at WARN by default; `SUSHIAI_LOG=info|debug|trace|off`
   changes it (`sushiai proxy` passes it on to an auto-started daemon).
 
@@ -198,11 +207,11 @@ Modules attach at the composition bin (`crates/sushiai`); nothing else knows whi
   ensured in that directory after the launch is prepared and before the holder starts.
 - `session.attach {id, scrollback?}` puts up to N formatted history lines before the
   snapshot, at most about 4 MiB of them (the oldest go first). `session.read {id,
-  scrollback?}` returns `{text, rows, cols}` as plain text; wrapped rows are joined.
+scrollback?}` returns `{text, rows, cols}` as plain text; wrapped rows are joined.
 - `sushiai open TARGET PATH` sends `hook.open {session, token, target, arg}` on a hook
   connection (fails open, exit 0). `target` is `extension/surface` in lowercase, digits
   and dashes; `arg` is an absolute path without control characters. The daemon broadcasts `session.open {id,
-  target, arg, nonce}` to normal clients.
+target, arg, nonce}` to normal clients.
 - These paths follow the lifecycle rules above: `session.read` and `hook.open` wait for
   a restored session's holder like any other request; a stopping daemon refuses a keyed
   `session.create` as well (`SHUTTING_DOWN`); the idempotent return of an existing
@@ -215,7 +224,8 @@ Modules attach at the composition bin (`crates/sushiai`); nothing else knows whi
 - `seq` is the byte offset of a chunk in the session's whole output stream.
   The holder ring and the daemon screen agree on it.
 - The holder is its own session (`setsid`). Killing the daemon, even with
-  SIGKILL, never kills a holder or its child.
+  SIGKILL, never kills a holder or its child. A holder checks once a minute
+  that its socket directory still exists and exits cleanly when it does not.
 - One client at a time on a holder. A new connection replaces the old one and
   replays the ring from the start.
 - A session actor owns its screen, its `seq` and its holder connection. Other

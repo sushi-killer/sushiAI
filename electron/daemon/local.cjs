@@ -7,12 +7,14 @@
 //   home    $SUSHIAI_HOME, else ~/.sushiai, created 0700
 //   binary  $SUSHIAI_DAEMON_BIN, else <resources>/sushiai when packaged,
 //           else the newer (mtime) of the repo's target/release and target/debug
-//   stamp   <home>/daemon-binary {sha256, pid}: the binary this app started. A
-//           running daemon whose stamp differs from the resolved binary is
-//           shut down and replaced, once per app run (two apps with different
-//           binaries must not fight); after that a mismatch is "incompatible"
-//           and not retried. <home>/bin/sushiai belongs to the daemon itself.
-//   hooks   `sushiai hooks install` once per app version (stamp file in home)
+//   build   `hello.build` is the sha256 of the running daemon's own binary. A
+//           daemon whose build differs from the resolved binary (or reports
+//           none) is shut down and replaced, once per app run (two apps with
+//           different binaries must not fight); after that a mismatch is
+//           "incompatible" and not retried. <home>/bin/sushiai belongs to the
+//           daemon itself.
+//   hooks   `sushiai hooks install` once per app version (stamp file in home);
+//           never in a test run (it would write the owner's ~/.codex)
 
 const fs = require("node:fs");
 const os = require("node:os");
@@ -25,7 +27,6 @@ const START_TIMEOUT_MS = 15000;
 const STOP_TIMEOUT_MS = 8000;
 const POLL_MS = 100;
 const HOOKS_STAMP = "hooks-installed";
-const BINARY_STAMP = "daemon-binary";
 // What a detached daemon (and every session it starts) may see of the app's
 // own environment: nothing of Electron, npm or the shell the app came from.
 const DAEMON_ENV_KEYS = [
@@ -77,7 +78,14 @@ function resolveBinary({
   mtimeOf = (file) => fs.statSync(file).mtimeMs,
 } = {}) {
   if (env.SUSHIAI_DAEMON_BIN) return env.SUSHIAI_DAEMON_BIN;
-  if (isPackaged && resourcesPath) return path.join(resourcesPath, "sushiai");
+  if (isPackaged && resourcesPath) {
+    const packaged = path.join(resourcesPath, "sushiai");
+    if (!exists(packaged))
+      throw new Error(
+        `This build of sushiAI is missing its bundled daemon (${packaged}). Reinstall the app, or rebuild the package with \`npm run build:daemon && npm run build:host\` first.`,
+      );
+    return packaged;
+  }
   let best = null;
   for (const profile of ["release", "debug"]) {
     const candidate = path.join(repoRoot, "target", profile, "sushiai");
@@ -101,15 +109,6 @@ function sha256File(file) {
   });
 }
 
-const alive = (pid) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-};
-
 function daemonEnv(env, home) {
   const out = {};
   for (const key of DAEMON_ENV_KEYS) if (env[key]) out[key] = env[key];
@@ -132,6 +131,7 @@ function createLocalConnector({
   stopTimeoutMs = STOP_TIMEOUT_MS,
   pollMs = POLL_MS,
   log = () => {},
+  testMode = Boolean(env.SUSHIAI_TEST_WINDOW),
 } = {}) {
   const home = resolveHome(env);
   const socketPath = path.join(home, "daemon.sock");
@@ -139,7 +139,7 @@ function createLocalConnector({
   let bundledVersion = "";
   let binarySha = "";
   let shaOf = "";
-  let restarts = 0; // replacements this app run made (at most one)
+  let replaced = false; // this app run replaced a daemon once already
 
   function run(args) {
     return new Promise((resolve, reject) => {
@@ -182,6 +182,8 @@ function createLocalConnector({
       binarySha = await sha256File(binary);
       shaOf = key;
     }
+    // A test run must never write the owner's Codex files or bin link.
+    if (testMode) return;
     try {
       await installHooksOnce();
     } catch (error) {
@@ -190,49 +192,15 @@ function createLocalConnector({
     }
   }
 
-  function readStamp() {
-    try {
-      return JSON.parse(fs.readFileSync(path.join(home, BINARY_STAMP), "utf8"));
-    } catch {
-      return null;
-    }
-  }
-
-  // The pid the running daemon wrote into its lock (the lock is held, so the
-  // file is its own); null when it is missing or not a number.
-  function readLockPid() {
-    try {
-      const pid = Number(
-        fs.readFileSync(path.join(home, "daemon.lock"), "utf8").trim(),
-      );
-      return Number.isInteger(pid) && pid > 1 ? pid : null;
-    } catch {
-      return null;
-    }
-  }
-
-  function writeStamp(pid) {
-    fs.writeFileSync(
-      path.join(home, BINARY_STAMP),
-      JSON.stringify({ sha256: binarySha, pid: pid ?? null }),
-      { mode: 0o600 },
-    );
-  }
-
-  // Does the running daemon come from the binary resolved now? A daemon with no
-  // stamp, a dead stamped pid or another sha is not the one this app starts.
-  function isCurrent(client) {
-    if (client.hello.daemon !== bundledVersion) return false;
-    const stamp = readStamp();
-    if (!stamp || stamp.sha256 !== binarySha) return false;
-    return typeof stamp.pid !== "number" || alive(stamp.pid);
-  }
+  // Does the running daemon come from the binary resolved now?
+  const isCurrent = (client) =>
+    client.hello.daemon === bundledVersion && client.hello.build === binarySha;
 
   function incompatible(client) {
     client.close();
     return Object.assign(
       new Error(
-        `The running sushiai daemon is not the one bundled with this app (${client.hello.daemon}, bundled ${bundledVersion}). Another sushiAI window may have started its own; quit it and restart.`,
+        `Another sushiAI build owns the daemon on this Mac (${client.hello.daemon}, bundled ${bundledVersion}). Restart the daemon to use this app's build.`,
       ),
       { reason: "incompatible", retry: false },
     );
@@ -297,17 +265,26 @@ function createLocalConnector({
     kind: "local",
     home,
     socketPath,
+    // The owner's "Restart daemon": stops whatever daemon answers (sessions
+    // survive in their holders) so the next connect starts this app's build.
+    async restart() {
+      const client = await tryConnect();
+      if (client) {
+        await client.request("daemon.shutdown", {}).catch(() => {});
+        await waitGone(client);
+      }
+      replaced = false;
+    },
     async connect() {
       await prepare();
       let client = await tryConnect();
       let fresh = false; // started by this call
-      let ours = false; // and it is the daemon of the binary we started
       for (;;) {
         if (client && isCurrent(client)) return client;
         if (client) {
-          // Another version, or no daemon of this binary is running.
-          if (restarts >= 1 || (fresh && ours)) throw incompatible(client);
-          restarts += 1;
+          // Another build, or no daemon of this binary is running.
+          if (replaced || fresh) throw incompatible(client);
+          replaced = true;
           log(
             `daemon ${client.hello.daemon} is not the bundled binary; replacing`,
           );
@@ -318,14 +295,6 @@ function createLocalConnector({
         const starting = startDaemon();
         client = await connectWithin(startTimeoutMs, starting);
         fresh = true;
-        // Another app may have started its own daemon first: the lock names
-        // the process that won. Only a daemon we started gets our stamp.
-        const lockPid = readLockPid();
-        ours =
-          typeof starting.pid !== "number" ||
-          lockPid === null ||
-          lockPid === starting.pid;
-        if (ours) writeStamp(lockPid ?? starting.pid ?? null);
       }
     },
   };
@@ -337,5 +306,4 @@ module.exports = {
   ensureHome,
   resolveBinary,
   HOOKS_STAMP,
-  BINARY_STAMP,
 };

@@ -5,6 +5,7 @@ use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+use sushiai_agents::heuristic::ScreenAgent;
 use sushiai_agents::launch::{self, AgentSession, LaunchParams};
 use sushiai_agents::status::{Status, StatusSource as AgentSource};
 use sushiai_agents::Agent;
@@ -59,6 +60,17 @@ pub fn agent_of(name: Option<&str>) -> Option<Agent> {
     match name {
         Some("claude") => Some(Agent::Claude),
         Some("codex") => Some(Agent::Codex),
+        _ => None,
+    }
+}
+
+/// The screen heuristic that reads an agent's status: `gemini` and `cursor-agent` send no
+/// hooks at all, and Codex shows some dialogs no hook reports.
+pub fn screen_agent_of(name: Option<&str>) -> Option<ScreenAgent> {
+    match name {
+        Some("gemini") => Some(ScreenAgent::Gemini),
+        Some("cursor-agent") => Some(ScreenAgent::Cursor),
+        Some("codex") => Some(ScreenAgent::Codex),
         _ => None,
     }
 }
@@ -118,8 +130,16 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
         if p.cmd.is_empty() {
             return Err(invalid("cmd, cols and rows are required"));
         }
+        // An agent without hooks starts with a screen-read status.
+        let screen_only = matches!(
+            screen_agent_of(p.agent.as_deref()),
+            Some(ScreenAgent::Gemini | ScreenAgent::Cursor)
+        );
         let agent = AgentInfo {
             name: p.agent.clone(),
+            agent_status: screen_only.then_some(AgentStatus::Starting),
+            status_source: screen_only.then_some(StatusSource::Heuristic),
+            status_since: screen_only.then(now_ms),
             ..AgentInfo::default()
         };
         if p.claude_settings.is_some() {

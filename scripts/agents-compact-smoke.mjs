@@ -9,6 +9,9 @@ const app = await electron.launch({
     ...process.env,
     SUSHIAI_TEST_WINDOW: "hidden",
     BRIDGE_DATA_DIR: profile,
+    // Never the owner's ~/.codex or ~/.sushiai/bin link.
+    HOME: profile,
+    CODEX_HOME: `${profile}/codex`,
   },
 });
 try {
@@ -577,5 +580,11 @@ try {
   );
 } finally {
   await app.close();
-  await fs.rm(profile, { recursive: true, force: true });
+  // A shell that exits late may still write its history into HOME.
+  await fs.rm(profile, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 200,
+  });
 }

@@ -19,8 +19,8 @@ import {
   asksOf,
   summarizeAskInput,
   type OpenAsk,
-} from "./daemonAsks.ts";
-import { useDaemonAsks } from "./useDaemonAsks.ts";
+  type SessionsByHost,
+} from "../daemonSessions.ts";
 import { daemonHost } from "../daemonSessions.ts";
 import {
   KINDS,
@@ -190,6 +190,7 @@ export function InboxPage({
   cwd,
   connection,
   workspaces,
+  daemonSessions,
 }: {
   groups: InboxGroup[];
   markSeen(panelId: string): void;
@@ -204,6 +205,8 @@ export function InboxPage({
   cwd: string;
   connection?: string;
   workspaces: Workspace[];
+  /** What each daemon host runs, open asks included (`useDaemon`). */
+  daemonSessions: SessionsByHost;
 }) {
   const [query, setQuery] = useState(""),
     [project, setProject] = useState(""),
@@ -230,15 +233,14 @@ export function InboxPage({
         .filter(answerable),
     [groups],
   );
-  const asks = useDaemonAsks(sessionRows.map(hostOfRow));
   const asksByPanel = useMemo(() => {
     const out: Record<string, OpenAsk[]> = {};
     for (const row of sessionRows) {
-      const open = asksOf(asks, hostOfRow(row), row.panel.sessionId!);
+      const open = asksOf(daemonSessions, hostOfRow(row), row.panel.sessionId!);
       if (open.length) out[row.panel.id] = open;
     }
     return out;
-  }, [sessionRows, asks]);
+  }, [sessionRows, daemonSessions]);
   const items = useMemo(
     () =>
       inboxItems(

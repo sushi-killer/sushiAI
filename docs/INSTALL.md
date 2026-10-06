@@ -49,6 +49,11 @@ On macOS, install **Node.js 22.18+**, npm, Git, and Xcode Command Line Tools.
 
 The `sushiai` daemon, which hosts the orchestrator module, is written in Rust. `npm run build:daemon`, CI and packaging need the Rust toolchain (`cargo`, from [rustup](https://rustup.rs)). The installed app does not: a packaged sushiAI ships the built daemon.
 
+The `sushiai` daemon (sessions, agents, the host proxy) is Rust too. `npm run dev` builds it with `cargo build -p sushiai` before it starts. Packaging needs two more steps, which `npm run package` and `npm run package:dmg` run for you:
+
+- `npm run build:daemon` builds the release `sushiai` for This Mac. The packaged app starts it from its resources and stops with an error that names the missing file when it is not there.
+- `npm run build:host` builds the `sushiai` binaries that **Install sushiai** uploads to remote hosts (Linux x86_64 and aarch64, macOS x86_64 and arm64) and writes `target/host/manifest.json`. The Linux targets need [zig](https://ziglang.org) and `cargo-zigbuild` (`brew install zig && cargo install cargo-zigbuild --locked`); the script names any missing tool and installs nothing.
+
 ```sh
 git clone https://github.com/sushi-killer/sushiAI.git
 cd sushiAI

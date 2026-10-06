@@ -81,7 +81,7 @@ and `npm run build` come first.
 
 To photograph the orchd notices on the desktop mascot (needs input, done,
 failed), the quick answer and what "Open" does, run
-`npm run build && npm run build:sushiai && node .agents/skills/ui-evidence/scripts/orchestrator-notices.mjs`
+`npm run build && npm run build:daemon && node .agents/skills/ui-evidence/scripts/orchestrator-notices.mjs`
 (no arguments). It seeds one landed done task with cost, one failed task whose
 last attempt failed with kind `verify`, and one waiting task with a question
 and the options Delete it / Keep behind a flag / Stop, opens a Local Evidence

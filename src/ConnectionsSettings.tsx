@@ -71,7 +71,7 @@ function CopyText({ text }: { text: string }) {
 
 type InstallState =
   | { phase: "running" }
-  | { phase: "done"; version: string }
+  | { phase: "done"; version: string; status: string }
   | { phase: "error"; message: string };
 
 function HostStatus({
@@ -94,9 +94,19 @@ function HostStatus({
       </div>
       {view.hint && <p className="muted">{view.hint}</p>}
       {view.command && <CopyText text={view.command} />}
-      {running && <p className="muted">Installing sushiai on the host…</p>}
+      {running && (
+        <p className="muted">
+          {state?.host === "local"
+            ? "Restarting the daemon…"
+            : "Installing sushiai on the host…"}
+        </p>
+      )}
       {install?.phase === "done" && (
-        <p className="muted">Installed sushiai {install.version}.</p>
+        <p className="muted">
+          {install.status === "restarted"
+            ? `Daemon restarted (sushiai ${install.version}).`
+            : `Installed sushiai ${install.version}.`}
+        </p>
       )}
       {install?.phase === "error" && (
         <p className="inline-error" role="alert">
@@ -119,15 +129,12 @@ function HostStatus({
 
 export function ConnectionsSettings({
   endpoint,
-  localSocket,
-  onSelect,
   profiles,
   onRefresh,
   notify,
 }: {
+  /** The active workspace's host: "local" or `ssh:<id>`. */
   endpoint: string;
-  localSocket: string;
-  onSelect(endpoint: string): void;
   /** Shared with the Sidebar, which labels workspace groups by the same profiles. */
   profiles: ConnectionProfile[];
   onRefresh(): Promise<void>;
@@ -135,15 +142,18 @@ export function ConnectionsSettings({
 }) {
   const states = useDaemonStates();
   const [installs, setInstalls] = useState<Record<string, InstallState>>({});
+  // On This Mac, "install" is Restart daemon (hostInstall("local")).
   async function install(id: string) {
     setInstalls((all) => ({ ...all, [id]: { phase: "running" } }));
     try {
       const result = await window.bridge!.hostInstall(id);
       setInstalls((all) => ({
         ...all,
-        [id]: { phase: "done", version: result.version },
+        [id]: { phase: "done", version: result.version, status: result.status },
       }));
-      await window.bridge!.connectionsConnect(`ssh:${id}`).catch(() => null);
+      await window
+        .bridge!.connectionsConnect(id === "local" ? id : `ssh:${id}`)
+        .catch(() => null);
     } catch (e) {
       setInstalls((all) => ({
         ...all,
@@ -159,13 +169,20 @@ export function ConnectionsSettings({
     ),
     [busy, setBusy] = useState(""),
     [error, setError] = useState("");
+  async function retryLocal() {
+    setError("");
+    try {
+      await window.bridge!.connectionsConnect("local");
+    } catch (e) {
+      setError(String(e));
+    }
+  }
   async function connect(value: string, label: string) {
     setBusy(value);
     setError("");
     try {
-      const { setup } = await window.bridge!.connectionsConnect(value);
-      onSelect(value);
-      notify(`Connecting to ${label}.` + (setup ? ` Set up: ${setup}.` : ""));
+      await window.bridge!.connectionsConnect(value);
+      notify(`Connecting to ${label}.`);
       await onRefresh();
     } catch (e) {
       setError(String(e));
@@ -180,15 +197,18 @@ export function ConnectionsSettings({
           className={`connection-card ${!endpoint.startsWith("ssh:") ? "selected" : ""}`}
         >
           <Server size={17} />
-          <button
-            className="connection-info"
-            onClick={() => onSelect(localSocket)}
-          >
+          <div className="connection-info">
             <strong>This Mac</strong>
             <small>Local sushiai daemon</small>
-          </button>
+          </div>
           {!endpoint.startsWith("ssh:") && <span>Active</span>}
-          <HostStatus state={states.get("local")} onAction={() => {}} />
+          <HostStatus
+            state={states.get("local")}
+            install={installs.local}
+            onAction={(action) =>
+              action === "restart" ? void install("local") : void retryLocal()
+            }
+          />
         </div>
         {profiles.map((p) => (
           <div
@@ -238,7 +258,6 @@ export function ConnectionsSettings({
               title={`Disconnect ${p.name}`}
               onClick={async () => {
                 await window.bridge!.connectionsDisconnect(`ssh:${p.id}`);
-                if (endpoint === `ssh:${p.id}`) onSelect(localSocket);
                 await onRefresh();
               }}
             >
@@ -248,7 +267,6 @@ export function ConnectionsSettings({
               title={`Remove connection ${p.name}`}
               onClick={async () => {
                 await window.bridge!.connectionsDelete(`ssh:${p.id}`);
-                if (endpoint === `ssh:${p.id}`) onSelect(localSocket);
                 await onRefresh();
               }}
             >

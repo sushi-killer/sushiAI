@@ -17,6 +17,8 @@ export type ConnectorState = {
   hint?: string;
   version?: string;
   capabilities?: string[];
+  /** The daemon's binary differs from the one bundled with this app. */
+  update?: boolean;
   /** Bumps on every reconnect; events of an older generation are stale. */
   generation: number;
 };
@@ -100,7 +102,7 @@ export type DaemonTerminalEvent = {
   exited?: boolean;
 };
 export type HostInstallResult = {
-  status: "installed" | "unchanged";
+  status: "installed" | "unchanged" | "restarted";
   version: string;
   path: string;
   platform: string;
@@ -409,7 +411,6 @@ export type ProjectHostReadiness = {
 export type System = {
   home: string;
   cwd: string;
-  socketPath: string;
   platform: string;
   agents: { name: string; path: string | null }[];
 };
@@ -622,7 +623,6 @@ export interface Bridge {
     request: DaemonLaunchRequest,
   ): Promise<{ host: string; sessionId: string; cwd: string }>;
   sessionClose(host: string, id: string, graceful: boolean): Promise<void>;
-  sessionRemove(host: string, id: string): Promise<void>;
   sessionUpdate(
     host: string,
     patch: { id: string; project?: string; group?: string; title?: string },
@@ -852,10 +852,7 @@ export interface Bridge {
     hidden: boolean,
   ): Promise<ConnectionProfile>;
   connectionsDelete(endpoint: string): Promise<void>;
-  /** `setup` says what a fresh host was given ("" when nothing ran). */
-  connectionsConnect(
-    endpoint: string,
-  ): Promise<{ connected: boolean; setup: string }>;
+  connectionsConnect(endpoint: string): Promise<{ connected: boolean }>;
   connectionsDisconnect(endpoint: string): Promise<void>;
   connectionsForward(endpoint: string, url: string): Promise<string>;
   projectsList(): Promise<Project[]>;

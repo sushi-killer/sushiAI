@@ -1,7 +1,8 @@
 "use strict";
 
-// IPC contract for the sushiai daemon. Handlers are stubs until lanes L1-L4b
-// fill them in; argument validation already runs here and stays.
+// IPC contract for the sushiai daemon. Lifecycle handlers dispatch to the
+// daemon manager; launch, terminal and host-install stay stubs until their
+// lanes fill them in. Argument validation runs here before any dispatch.
 
 const { validatePanelId } = require("./panel-id.cjs");
 
@@ -111,13 +112,59 @@ const CHANNELS = {
   "host-install": (h) => host(h),
 };
 
-function registerDaemonIpc({ handle }) {
+// Lifecycle channels -> [daemon method, params from the validated arguments].
+const LIFECYCLE = {
+  "daemon-sessions-list": () => ["session.list", {}],
+  "daemon-session-close": (_h, id, graceful) => [
+    "session.close",
+    { id, graceful },
+  ],
+  "daemon-session-remove": (_h, id) => ["session.remove", { id }],
+  "daemon-session-update": (_h, patch) => {
+    const { id, project, group, title } = patch;
+    return ["session.update", { id, project, group, title }];
+  },
+  "daemon-session-read": (_h, id, scrollback) => [
+    "session.read",
+    { id, scrollback },
+  ],
+  "daemon-session-input": (_h, id, data) => ["session.input", { id, data }],
+  "daemon-ask-respond": (_h, { askId, decision, message }) => [
+    "ask.respond",
+    { askId, decision, message },
+  ],
+};
+// Channels whose result the renderer reads; the others resolve to undefined.
+const RETURNS_RESULT = new Set(["daemon-sessions-list", "daemon-session-read"]);
+
+function registerDaemonIpc({ handle, getManager = () => null }) {
   for (const [channel, validate] of Object.entries(CHANNELS))
     handle(channel, async (...args) => {
       validate(...args);
-      if (channel === "daemon-states") return [];
-      throw new Error(NOT_IMPLEMENTED);
+      const manager = getManager();
+      if (channel === "daemon-states") return manager ? manager.states() : [];
+      const build = LIFECYCLE[channel];
+      if (!build) throw new Error(NOT_IMPLEMENTED);
+      if (!manager) throw new Error("daemon manager is not running");
+      const [method, params] = build(...args);
+      const result = await manager.request(args[0], method, params);
+      return RETURNS_RESULT.has(channel) ? result : undefined;
     });
+  return { getManager };
 }
 
-module.exports = { registerDaemonIpc, CHANNELS, NOT_IMPLEMENTED };
+/** Pushes manager state and events to every window; returns the unsubscribe. */
+function forwardDaemonEvents(manager, broadcast) {
+  const offs = [
+    manager.on("state", (state) => broadcast("daemon-state", state)),
+    manager.on("event", (event) => broadcast("daemon-event", event)),
+  ];
+  return () => offs.forEach((off) => off());
+}
+
+module.exports = {
+  registerDaemonIpc,
+  forwardDaemonEvents,
+  CHANNELS,
+  NOT_IMPLEMENTED,
+};

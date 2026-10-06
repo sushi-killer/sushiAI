@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Builds the `sushiai` host binary for every platform the SSH installer can meet and writes
-// dist/host/<target>/sushiai, dist/host/SHA256SUMS and dist/host/manifest.json.
+// target/host/<target>/sushiai, target/host/SHA256SUMS and target/host/manifest.json.
 //
-// Usage: node scripts/build-host-binaries.mjs [--targets a,b] [--out dist/host] [--docker-smoke]
+// Usage: node scripts/build-host-binaries.mjs [--targets a,b] [--out target/host] [--docker-smoke]
 //   Targets are keys of TARGETS below (default: all four; darwin targets are skipped on a
 //   non-darwin host). Output is built in a temp directory next to --out and renamed into
 //   place only when every target succeeded.
@@ -64,18 +64,18 @@ function run(command, args, options = {}) {
   return spawnSync(command, args, { cwd: ROOT, encoding: "utf8", ...options });
 }
 
-const HELP = `Usage: node scripts/build-host-binaries.mjs [--targets a,b] [--out dist/host] [--docker-smoke]
+const HELP = `Usage: node scripts/build-host-binaries.mjs [--targets a,b] [--out target/host] [--docker-smoke]
 
   --targets   comma-separated: ${Object.keys(TARGETS).join(", ")}
               (default: all; darwin targets are skipped on a non-darwin host)
-  --out       output directory (default dist/host), replaced only if every target built
+  --out       output directory (default target/host), replaced only if every target built
   --docker-smoke  also run the linux binaries in an alpine container (--rm)
   --help      this text`;
 
 function parseArgs(argv) {
   const options = {
     targets: Object.keys(TARGETS),
-    out: "dist/host",
+    out: "target/host",
     dockerSmoke: false,
   };
   for (let i = 0; i < argv.length; i++) {

@@ -46,7 +46,9 @@ const { ipcResult } = require("./ipc/errors.cjs");
 const { registerSessionLaunchIpc } = require("./session-launch.cjs");
 const { assertHerdrCompatibility } = require("./herdr-compatibility.cjs");
 const { registerExtensionIpc } = require("./ipc/extensions.cjs");
-const { registerDaemonIpc } = require("./ipc/daemon.cjs");
+const { registerDaemonIpc, forwardDaemonEvents } = require("./ipc/daemon.cjs");
+const { createDaemonManager } = require("./daemon/manager.cjs");
+const { createLocalConnector } = require("./daemon/local.cjs");
 const { registerAttentionIpc } = require("./attention.cjs");
 const {
   registerWorkspaceSnapshot,
@@ -205,7 +207,11 @@ registerProjectIpc({
   terminalPending,
   projects,
 });
-registerDaemonIpc({ handle });
+let daemonManager = null;
+registerDaemonIpc({
+  handle,
+  getManager: () => daemonManager,
+});
 registerExtensionIpc({
   handle,
   getExtensions: () => extensions,
@@ -423,6 +429,26 @@ app.whenReady().then(async () => {
         if (summary) console.log(`Environment: ${summary}`);
       })
       .catch((error) => console.error("Environment setup failed:", error));
+  // A test run starts a daemon only when it brings its own SUSHIAI_HOME.
+  if (!testMode.test || process.env.SUSHIAI_HOME) {
+    daemonManager = createDaemonManager({
+      connectors: {
+        local: createLocalConnector({
+          appVersion: app.getVersion(),
+          isPackaged: app.isPackaged,
+          resourcesPath: process.resourcesPath,
+          log: (message) => console.log(`daemon: ${message}`),
+        }),
+      },
+      powerMonitor,
+      log: (message) => console.log(`daemon: ${message}`),
+    });
+    forwardDaemonEvents(daemonManager, (channel, value) => {
+      for (const window of BrowserWindow.getAllWindows())
+        if (!window.isDestroyed()) window.webContents.send(channel, value);
+    });
+    daemonManager.start();
+  }
   await orchestrator.start();
   // Sleep/wake can drop every SSH tunnel at once - retry them all rather than
   // waiting for each one's own backoff timer to come back around.
@@ -642,6 +668,7 @@ app.on("before-quit", (event) => {
   preview?.close();
   terminalIpc.close();
   herdrExtension.close();
+  daemonManager?.close();
   for (const pending of terminalPending.values()) pending.cancelled = true;
   for (const terminal of terminals.values())
     if (!terminal.exited || terminal.source === "herdr") terminal.proc.kill();

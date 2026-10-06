@@ -26,6 +26,7 @@ import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { stopDaemon } from "../../../../scripts/lib/daemon-binary.mjs";
 
 // "hidden" keeps the run off the owner's screen; "visible" is the opt-out for
 // a run that must show the real mascot window (checks below adapt).
@@ -249,7 +250,7 @@ try {
       ...process.env,
       SUSHIAI_TEST_WINDOW: windowMode,
       BRIDGE_DATA_DIR: profile,
-      HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
+      SUSHIAI_HOME: `${profile}/sushiai`,
       BRIDGE_DEV_URL: "",
       SUSHIAI_TEST_MASCOT: "1",
       ORCHD_CLAUDE_BIN: "/usr/bin/false",
@@ -721,6 +722,7 @@ try {
     .catch(() => {});
 } finally {
   if (app) await app.close().catch(() => {});
+  stopDaemon(`${profile}/sushiai`);
   await fs.rm(profile, { recursive: true, force: true });
   await fs
     .writeFile(

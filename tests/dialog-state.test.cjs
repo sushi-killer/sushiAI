@@ -40,7 +40,7 @@ test("a dialog whose target disappeared resolves to null", async () => {
   assert.equal(
     resolveDialog({ kind: "workspace-actions", workspaceId: "gone" }, list),
     null,
-    "a workspace removed by a Herdr snapshot closes its dialog",
+    "a workspace removed by a session update closes its dialog",
   );
   assert.equal(
     resolveDialog(

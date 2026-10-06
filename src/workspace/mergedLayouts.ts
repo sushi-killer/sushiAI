@@ -31,7 +31,6 @@ export function useMergedCanvas(
   projectGit: Record<string, ProjectGit>,
   connectionProfiles: ConnectionProfile[],
   workspaceGrouping: "grouped" | "flat",
-  socket: string,
   { mergedLayouts: stored, setMergedLayouts: setStored }: SessionState,
 ): MergedCanvas {
   const setGroupLayout = useCallback(
@@ -60,7 +59,7 @@ export function useMergedCanvas(
     : undefined;
   return {
     group,
-    panes: group ? resolveGroupPanes(group, connectionProfiles, socket) : [],
+    panes: group ? resolveGroupPanes(group, connectionProfiles) : [],
     layout,
   };
 }

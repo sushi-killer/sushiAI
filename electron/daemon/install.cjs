@@ -6,7 +6,7 @@
 // report it ready.
 //
 //   1. setupHost with the host manifest (target/host in dev, <resources>/host
-//      when packaged) and no Herdr steps.
+//      when packaged).
 //   2. The old daemon stops: `daemon.shutdown` when one is connected (an old
 //      daemon answered through a new proxy drops its answers at EOF, so the
 //      next proxy has to start the new one; sessions live in their holders and

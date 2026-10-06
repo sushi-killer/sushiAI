@@ -1,15 +1,7 @@
 const fs = require("node:fs");
 const { execFile } = require("node:child_process");
-const os = require("node:os");
 const path = require("node:path");
-const { quote } = require("./connections.cjs");
-const { checkHerdrCompatibility } = require("./herdr-compatibility.cjs");
-const {
-  installPinnedHerdr,
-  installRemoteHerdr,
-} = require("./herdr-install.cjs");
 const { installSushiai } = require("./host-install.cjs");
-const { errorDetails } = require("./herdr.cjs");
 const { syncBuiltinSkillsOnHost } = require("./extensions/builtin-skills.cjs");
 
 const HOST_PATH = `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
@@ -83,7 +75,7 @@ function requireHostManifest(options = {}) {
   );
 }
 
-/** `{ herdr: "installed", claude: "present", ... }` from the script's output. */
+/** `{ claude: "present", codex: "installed", ... }` from the script's output. */
 function parseSetup(output) {
   const states = {};
   for (const [, tool, state] of String(output).matchAll(
@@ -93,30 +85,23 @@ function parseSetup(output) {
   return states;
 }
 
-/** One line for the owner: what was installed or started, and what failed. */
+/** One line for the owner: what was installed, and what failed. */
 function setupSummary(states) {
   const done = Object.entries(states)
-    .filter(([, state]) => ["installed", "started"].includes(state))
+    .filter(([, state]) => state === "installed")
     .map(([tool, state]) => `${tool} ${state}`);
   const failed = Object.entries(states)
-    .filter(([, state]) =>
-      ["failed", "missing", "incompatible"].includes(state),
-    )
+    .filter(([, state]) => ["failed", "missing"].includes(state))
     .map(([tool, state]) => `${tool} ${state}`);
   return [
     ...done,
     ...failed,
     ...(states.sushiaiError ? [states.sushiaiError] : []),
-    ...(states.herdrError ? [states.herdrError.message] : []),
-    ...(states.compatibility && !states.compatibility.compatible
-      ? states.compatibility.issues
-      : []),
   ].join(" · ");
 }
 
-/** What a Herdr server started here may see: it outlives the app and hands
- * its environment to every pane, so nothing of the app's own (Electron, npm,
- * a Claude Code session the app was started from) goes in. */
+/** What a setup script run here may see: nothing of the app's own (Electron,
+ * npm, a Claude Code session the app was started from) goes in. */
 function cleanEnvironment(env = process.env) {
   const keep = ["HOME", "PATH", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR"];
   return Object.fromEntries(
@@ -124,44 +109,17 @@ function cleanEnvironment(env = process.env) {
   );
 }
 
-/** Points Herdr at the socket selected by the connection. */
-function socketLine(socket) {
-  if (!socket) return "";
-  const where = socket.startsWith("~/")
-    ? `"$HOME"/${quote(socket.slice(2))}`
-    : quote(socket);
-  return `export HERDR_SOCKET_PATH=${where}\n`;
-}
-
-/** Setups under way, by endpoint and socket: a second connect waits for the first
+/** Setups under way, by endpoint: a second connect waits for the first
  * instead of running the installers twice. */
 const running = new Map();
 
-/** Runs the setup on an SSH host (over its connection, for its Herdr
- * `socket`) or on the local machine. */
-function setupHost(connections, endpoint, socket = "", options = {}) {
-  const remote = typeof endpoint === "string" && endpoint.startsWith("ssh:");
-  const selected = remote
-    ? socket || connections.get(endpoint).socket
-    : socket ||
-      (typeof endpoint === "string" && path.isAbsolute(endpoint)
-        ? endpoint
-        : process.env.HERDR_SOCKET_PATH ||
-          path.join(os.homedir(), ".config/herdr/herdr.sock"));
-  if (remote && selected !== connections.get(endpoint).socket)
-    return Promise.reject(
-      new Error("Setup socket must match the SSH connection's socket."),
-    );
-  if (!remote && !path.isAbsolute(selected))
-    return Promise.reject(
-      new Error("Choose an absolute local Herdr socket path."),
-    );
-  const key = JSON.stringify([remote ? endpoint : "local", selected]);
+/** Runs the setup on an SSH host (over its connection) or on the local
+ * machine. */
+function setupHost(connections, endpoint, options = {}) {
+  const key = typeof endpoint === "string" ? endpoint : "local";
   if (!running.has(key)) {
     const run = Promise.resolve()
-      .then(() =>
-        runSetup(connections, remote ? endpoint : selected, selected, options),
-      )
+      .then(() => runSetup(connections, endpoint, options))
       .finally(() => running.delete(key));
     running.set(key, run);
   }
@@ -180,42 +138,18 @@ function localScript(script, timeout) {
   });
 }
 
-function startServerScript(binary, socket) {
-  const command = quote(binary);
-  return `${HOST_PATH}${socketLine(socket)}
-say() { printf 'SUSHIAI_SETUP server %s\\n' "$1"; }
-if ${command} status server 2>/dev/null | grep -q '^status: running'; then say running
-elif [ -S "\${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}" ]; then say failed
-else
-  nohup ${command} server >/dev/null 2>&1 </dev/null &
-  for i in 1 2 3 4 5 6 7 8 9 10; do
-    ${command} status server 2>/dev/null | grep -q '^status: running' && break
-    sleep 1
-  done
-  if ${command} status server 2>/dev/null | grep -q '^status: running'; then say started
-  else say failed; fi
-fi
-`;
-}
-
 async function runSetup(
   connections,
   endpoint,
-  socket,
   {
-    binary,
-    installLocal = installPinnedHerdr,
-    installRemote = installRemoteHerdr,
-    checkCompatibility = checkHerdrCompatibility,
     runLocalScript = localScript,
     installSkill = syncBuiltinSkillsOnHost,
     sushiai,
-    herdr = true,
     installSushiaiBinary = installSushiai,
   } = {},
 ) {
   const timeout = 10 * 60 * 1000;
-  const remote = endpoint.startsWith("ssh:");
+  const remote = typeof endpoint === "string" && endpoint.startsWith("ssh:");
   if (remote && connections.hasShell && !connections.hasShell(endpoint))
     return {
       note: "This host connects through a command and has no shell: set up sushiai, Claude Code and Codex on it yourself.",
@@ -243,62 +177,6 @@ async function runSetup(
       states.sushiaiError = error.message;
     }
   }
-  // A daemon host needs none of the Herdr steps below.
-  if (herdr === false) return states;
-  const probe = () =>
-    checkCompatibility({
-      endpoint,
-      connections,
-      binary,
-      preferManaged: false,
-    });
-  if (!binary)
-    binary = (await runScript(`${HOST_PATH}command -v herdr || true\n`)).trim();
-  states.herdrInstallation = binary ? "user" : "managed";
-  if (!binary) {
-    try {
-      const installed = remote
-        ? await installRemote(endpoint, connections)
-        : await installLocal(connections.herdrInstallDirectory);
-      binary = installed.binary;
-      states.herdr = installed.installed ? "installed" : "present";
-    } catch (error) {
-      states.herdr = "failed";
-      states.herdrError = errorDetails(error);
-      states.compatibility = await probe();
-      states.server = states.compatibility.daemon.available
-        ? states.compatibility.daemon.compatible
-          ? "running"
-          : "incompatible"
-        : "failed";
-      return states;
-    }
-  } else states.herdr = "present";
-  let status = await probe();
-  // The daemon may still run a release whose CLI is another one on disk;
-  // sessions attach through it (see checkHerdrCompatibility), so setup does too.
-  if (!status.compatible && status.daemon.compatible) {
-    const other = await checkCompatibility({ endpoint, connections, binary });
-    if (other.compatible) status = other;
-  }
-  if (!status.cli.compatible) {
-    states.herdr = "incompatible";
-    states.server = status.daemon.available
-      ? status.daemon.compatible
-        ? "running"
-        : "incompatible"
-      : "failed";
-  } else if (status.daemon.available) {
-    states.server = status.daemon.compatible ? "running" : "incompatible";
-  } else {
-    states.server = parseSetup(
-      await runScript(startServerScript(binary, socket)),
-    ).server;
-    status = await probe();
-    if (!status.daemon.compatible)
-      states.server = status.daemon.available ? "incompatible" : "failed";
-  }
-  states.compatibility = status;
   return states;
 }
 

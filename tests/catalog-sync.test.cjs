@@ -49,7 +49,7 @@ const fixtureProjects = () => ({
       id: "p1",
       name: "Alpha",
       folders: [
-        { endpoint: "herdr:sock", cwd: "/work/alpha" },
+        { endpoint: "/tmp/local.sock", cwd: "/work/alpha" },
         { endpoint: "ssh:box", cwd: "/srv/alpha" },
       ],
     },
@@ -115,7 +115,7 @@ test("groups.sync sends a host only the groups that belong to it", async () => {
     workspaces: async () => [
       { id: "w1", name: "Local", projectId: "" },
       { id: "w2", name: "Remote", projectId: "", connection: "ssh:box" },
-      { id: "w3", name: "Local herdr", connection: "herdr:sock" },
+      { id: "w3", name: "Local socket", connection: "/tmp/local.sock" },
       { id: "w4", name: "By project", projectId: "p2", connection: "ssh:gone" },
     ],
     store: memoryStore(),
@@ -239,6 +239,7 @@ test(
     });
     const exited = new Promise((resolve) => daemon.once("exit", resolve));
     let client;
+    let created;
     try {
       const socketPath = path.join(home, "daemon.sock");
       client = await until(async () => {
@@ -276,7 +277,7 @@ test(
           fs.readFileSync(catalog, "utf8").includes("Alpha"),
         "catalog.json",
       );
-      const created = await client.request("session.create", {
+      created = await client.request("session.create", {
         cmd: ["/bin/sh"],
         cwd: fs.realpathSync(folder),
         cols: 80,
@@ -288,6 +289,26 @@ test(
       assert.equal(info.project, "p1");
       sync.stop();
     } finally {
+      // The session lives in its own holder process, which outlives the
+      // daemon: end it before the daemon goes.
+      if (created) {
+        await client
+          ?.request("session.close", { id: created.id, graceful: false })
+          .catch(() => {});
+        // The holder exits once the daemon has taken its exit and the session
+        // is removed.
+        for (let tries = 0; tries < 30; tries++) {
+          const listed = await client
+            ?.request("session.list", {})
+            .catch(() => []);
+          if (listed.find((s) => s.id === created.id)?.status === "exited")
+            break;
+          await wait(100);
+        }
+        await client
+          ?.request("session.remove", { id: created.id })
+          .catch(() => {});
+      }
       client?.close?.();
       daemon.kill("SIGTERM");
       await Promise.race([exited, wait(3000)]);

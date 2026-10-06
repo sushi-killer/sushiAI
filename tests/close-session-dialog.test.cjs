@@ -52,7 +52,7 @@ function render({ cwd = "/tmp/project", git } = {}) {
     id: "workspace",
     name: "Project",
     cwd,
-    panels: [{ id: "pane", herdrId: "session" }],
+    panels: [{ id: "pane", sessionId: "session" }],
   };
   const panel = workspace.panels[0];
   return renderToStaticMarkup(

@@ -206,8 +206,8 @@ export function Sidebar({
   selected: string;
   connected: boolean;
   connection: string;
-  /** This Mac's own Herdr socket, so the "Local" group can look up its
-   * real poll status the same way an SSH group looks up its own. */
+  /** This Mac's own endpoint, so the "Local" group can look up its daemon
+   * status the same way an SSH group looks up its own. */
   localSocket: string;
   connectionProfiles: ConnectionProfile[];
   /** orchd tasks, so a task's worktree is named by the task's title. */

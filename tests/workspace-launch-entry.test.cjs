@@ -5,7 +5,6 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { createRequire } = require("node:module");
 const ts = require("typescript");
-const { herdrWorkspaceKey } = require("../src/herdrIdentity.ts");
 const { sessionPanelId } = require("../src/daemonSessions.ts");
 const {
   launchTarget,
@@ -62,8 +61,6 @@ function controller(
   );
   let workspaces = initial;
   const errors = [],
-    invalidations = [],
-    snapshots = [],
     confirmations = [];
   const ws = exports.useWorkspaces({
     workspaces,
@@ -72,12 +69,6 @@ function controller(
     },
     saved: null,
     socket: "/tmp/entry.sock",
-    refreshHerdr: async (endpoint) => {
-      snapshots.push(endpoint);
-    },
-    invalidateHerdr: (endpoint) => {
-      invalidations.push(endpoint);
-    },
     useEndpoint: () => {},
     notify: (message) => errors.push(message),
     showWorkspace: () => {},
@@ -87,8 +78,6 @@ function controller(
     ws,
     current: () => workspaces,
     errors,
-    invalidations,
-    snapshots,
     confirmations,
     states,
     currentClosedProjects: () => states[5],
@@ -113,7 +102,6 @@ function daemon({ fail } = {}) {
           : request.cwd,
       };
     },
-    terminalClose: async () => {},
   };
   return { bridge, requests, sessions };
 }
@@ -178,7 +166,6 @@ test("20 concurrent new-project launches each get their own session and workspac
   const hosted = app.current().filter((workspace) => workspace.connection);
   assert.equal(hosted.length, 20);
   assert.ok(hosted.every((workspace) => workspace.panels.length === 1));
-  assert.equal(app.snapshots.length, 20);
   assert.equal(server.requests[0].host, "local");
 });
 
@@ -351,7 +338,7 @@ test("add forwards the selected worktree base into a workspace of its own", asyn
   assert.equal(made.panels[0].sessionId.startsWith("s"), true);
 });
 
-test("closing the last Herdr session keeps the project with no open panes", async () => {
+test("closing the last session keeps the project with no open panes", async () => {
   for (const chats of [false, true]) {
     const panel = {
       id: "live-pane",
@@ -360,7 +347,7 @@ test("closing the last Herdr session keeps the project with no open panes", asyn
       title: "Shell",
     };
     const workspace = {
-      id: herdrWorkspaceKey("/tmp/entry.sock", "w1"),
+      id: "workspace-w1",
       connection: "/tmp/entry.sock",
       name: "Checkout",
       cwd: "/tmp/checkout",
@@ -374,7 +361,6 @@ test("closing the last Herdr session keeps the project with no open panes", asyn
     const app = controller(
       {
         sessionClose: async (...args) => calls.push(args),
-        terminalClose: async () => {},
       },
       [workspace],
     );
@@ -401,26 +387,26 @@ test("closing the last Herdr session keeps the project with no open panes", asyn
   }
   const pending = {
     ...initial()[0],
-    id: herdrWorkspaceKey("/tmp/entry.sock", "pending-git"),
+    id: "workspace-pending-git",
     connection: "/tmp/entry.sock",
     panels: [
       { id: "pending-pane", sessionId: "pending-pane", kind: "terminal" },
     ],
     layout: { type: "leaf", id: "pending-pane" },
   };
-  const pendingApp = controller({ herdr: async () => {} }, [pending]);
+  const pendingApp = controller({}, [pending]);
   pendingApp.ws.closePanel("pending-pane");
   assert.equal(pendingApp.confirmations.length, 1);
   assert.equal(pendingApp.confirmations[0].workspace.id, pending.id);
 
   const linked = {
     ...initial()[0],
-    id: herdrWorkspaceKey("/tmp/entry.sock", "linked"),
+    id: "workspace-linked",
     connection: "/tmp/entry.sock",
     panels: [{ id: "linked-pane", sessionId: "linked-pane", kind: "terminal" }],
     layout: { type: "leaf", id: "linked-pane" },
   };
-  const linkedApp = controller({ herdr: async () => {} }, [linked]);
+  const linkedApp = controller({}, [linked]);
   linkedApp.ws.setProjectGit({
     [linked.id]: { linkedWorktree: true },
   });
@@ -434,13 +420,9 @@ test("closing the last Herdr session keeps the project with no open panes", asyn
     panels: [{ id: "local-shell", kind: "terminal", title: "Shell" }],
     layout: { type: "leaf", id: "local-shell" },
   };
-  const closed = [];
-  const app = controller({ terminalClose: async (id) => closed.push(id) }, [
-    local,
-  ]);
+  const app = controller({}, [local]);
   app.ws.closePanel("local-shell");
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(closed, []);
   assert.equal(app.confirmations.length, 1);
   assert.equal(app.confirmations[0].workspace.id, local.id);
   assert.equal(app.confirmations[0].panel.id, "local-shell");
@@ -458,7 +440,6 @@ test("closed pane keeps a worktree workspace when checkout removal fails", async
   };
   const app = controller(
     {
-      terminalClose: async () => {},
       worktreeRemove: async () => {
         throw new Error("worktree is dirty");
       },
@@ -485,7 +466,7 @@ test("closing a local worktree session without deleting its checkout keeps the p
     panels: [panel],
     layout: { type: "leaf", id: panel.id },
   };
-  const app = controller({ terminalClose: async () => {} }, [workspace]);
+  const app = controller({}, [workspace]);
   await app.ws.endSessions([{ workspace, panel }]);
   assert.equal(app.current().length, 1);
   assert.equal(app.current()[0].id, workspace.id);
@@ -506,7 +487,6 @@ test("successful worktree cleanup leaves the project until Close Project", async
   const removals = [];
   const app = controller(
     {
-      terminalClose: async () => {},
       worktreeRemove: async (...args) => removals.push(args),
     },
     [workspace],
@@ -523,10 +503,10 @@ test("successful worktree cleanup leaves the project until Close Project", async
   assert.deepEqual(app.current()[0].panels, []);
 });
 
-test("renaming an empty retained Herdr project does not call its vanished host workspace", async () => {
+test("renaming an empty retained project does not call its vanished host workspace", async () => {
   const workspace = {
     ...initial()[0],
-    id: herdrWorkspaceKey("/tmp/entry.sock", "old-workspace"),
+    id: "workspace-old-workspace",
     connection: "/tmp/entry.sock",
     panels: [],
     layout: null,
@@ -534,7 +514,7 @@ test("renaming an empty retained Herdr project does not call its vanished host w
   const calls = [];
   const app = controller(
     {
-      herdr: async (...args) => calls.push(args),
+      sessionUpdate: async (...args) => calls.push(args),
     },
     [workspace],
   );
@@ -543,10 +523,10 @@ test("renaming an empty retained Herdr project does not call its vanished host w
   assert.equal(calls.length, 0);
 });
 
-test("Close Project removes an empty retained Herdr project", async () => {
+test("Close Project removes an empty retained project", async () => {
   const workspace = {
     ...initial()[0],
-    id: herdrWorkspaceKey("/tmp/entry.sock", "old-workspace"),
+    id: "workspace-old-workspace",
     connection: "/tmp/entry.sock",
     panels: [],
     layout: null,
@@ -566,7 +546,7 @@ test("Close Project removes an empty retained Herdr project", async () => {
   assert.equal(app.currentClosedProjects()[0].cwd, workspace.cwd);
 });
 
-test("closing a sole ended Herdr pane keeps the project empty", () => {
+test("closing a sole ended pane keeps the project empty", () => {
   const panel = {
     id: "ended-pane",
     sessionId: "ended-pane",
@@ -576,7 +556,7 @@ test("closing a sole ended Herdr pane keeps the project empty", () => {
   };
   const workspace = {
     ...initial()[0],
-    id: herdrWorkspaceKey("/tmp/entry.sock", "w1"),
+    id: "workspace-w1",
     connection: "/tmp/entry.sock",
     panels: [panel],
     layout: { type: "leaf", id: panel.id },
@@ -594,7 +574,7 @@ test("adding a session to an empty retained project reuses its record", async ()
   const server = daemon();
   const workspace = {
     ...initial()[0],
-    id: herdrWorkspaceKey(entry, "old-workspace"),
+    id: "workspace-old-workspace",
     connection: entry,
     panels: [],
     layout: null,
@@ -628,7 +608,6 @@ test("actual workspace close shares concurrent intent and allows retry after fai
         await gate;
         if (fail) throw new Error("Close failed");
       },
-      terminalClose: async () => {},
       projectIdentify: async () => ({ projectId: "", remote: "" }),
     },
     [workspace],
@@ -794,7 +773,6 @@ test("Reopen of an ended agent panel launches with resume and the workspace as g
         requests.push(input);
         return { host: "local", sessionId: "s-new", cwd: "/tmp/checkout" };
       },
-      terminalClose: async () => {},
     },
     [workspace],
   );
@@ -902,13 +880,6 @@ test("reopenProject launches a shell on the remembered endpoint and forgets the 
   assert.equal(app.current().at(-1).cwd, "/tmp/old");
 });
 
-test("an agent panel keeps its agent when a terminal event names none", () => {
-  const { retitleTerminal } = require("../src/workspace/workspace-actions.ts");
-  const panel = { id: "p", kind: "agent", agent: "codex", title: "Codex" };
-  assert.equal(retitleTerminal(panel, undefined).agent, "codex");
-  assert.equal(retitleTerminal(panel, null).agent, "codex");
-});
-
 test("closing any live daemon session asks first, an ended one closes without asking", () => {
   for (const [kind, agent] of [
     ["terminal", undefined],
@@ -918,7 +889,7 @@ test("closing any live daemon session asks first, an ended one closes without as
     ["agent", "cursor-agent"],
   ]) {
     const live = { id: "live", sessionId: "s1", kind, agent, title: "x" };
-    const app = controller({ terminalClose: async () => {} }, [
+    const app = controller({}, [
       { ...initial()[0], panels: [live], layout: { type: "leaf", id: "live" } },
     ]);
     app.ws.closePanel("live");
@@ -932,21 +903,9 @@ test("closing any live daemon session asks first, an ended one closes without as
     title: "x",
     ended: true,
   };
-  const app = controller({ terminalClose: async () => {} }, [
+  const app = controller({}, [
     { ...initial()[0], panels: [ended], layout: { type: "leaf", id: "e" } },
   ]);
   app.ws.closePanel("e");
   assert.equal(app.confirmations.length, 0);
-});
-
-test("a terminal event never changes the agent of a daemon session panel", () => {
-  const { retitleTerminal } = require("../src/workspace/workspace-actions.ts");
-  const panel = {
-    id: "p",
-    kind: "agent",
-    agent: "codex",
-    sessionId: "s1",
-    title: "Codex",
-  };
-  assert.equal(retitleTerminal(panel, "claude"), panel);
 });

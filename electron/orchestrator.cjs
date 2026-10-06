@@ -170,9 +170,8 @@ function socketPathFor(dataDir, tmpDir = os.tmpdir()) {
   return path.join(tmpDir, `sushi-orchd-${hash}.sock`);
 }
 
-// A small NDJSON-RPC client dedicated to orchd's own control-auth envelope
-// (`herdr.cjs`'s `request()` has no `auth` field and Herdr's own protocol
-// must not gain one just for this). Every request but `ping` carries the
+// A small NDJSON-RPC client dedicated to orchd's own control-auth envelope.
+// Every request but `ping` carries the
 // current control token alongside id/method/params.
 function orchdRequest(socketPath, method, params, token, timeout = 5000) {
   return new Promise((resolve, reject) => {

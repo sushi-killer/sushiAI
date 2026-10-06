@@ -37,7 +37,7 @@ export const DIALOG_META: Record<
 };
 
 /** Dialogs remember their target by id and read the live object, so a rename or
- * a Herdr snapshot that arrives while the dialog is open is reflected instead of
+ * a session update that arrives while the dialog is open is reflected instead of
  * showing a stale copy. `null` means the target is gone and the dialog should
  * close. */
 export function resolveDialog(

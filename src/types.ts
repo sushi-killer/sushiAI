@@ -111,8 +111,6 @@ export type ConnectionProfile = {
   name: string;
   host: string;
   port?: number;
-  /** Only orchd and Herdr read it (until step 6); daemon hosts ignore it. */
-  socket?: string;
   /** How the desktop reaches the sushiai daemon on this host; ssh when unset. */
   connector?: Connector;
   connected?: boolean;
@@ -157,12 +155,9 @@ export type Companion = {
 };
 type PanelState = {
   id: string;
-  launchOperationId?: string;
-  launchError?: string;
   title: string;
   agent?: string;
   started?: boolean;
-  herdrId?: string;
   /** The pane's own working folder as the host last reported it. */
   paneCwd?: string;
   companion?: Companion;
@@ -185,7 +180,7 @@ type PanelState = {
   orchestratorHost?: string;
   orchestratorRepo?: string;
   filesView?: FilesView;
-  /** A Herdr pane that is gone from its host: the slot stays in the layout
+  /** A session that is gone from its host: the slot stays in the layout
    * with a Reopen button until the user reopens or closes it. */
   ended?: boolean;
   /** The daemon session this panel is bound to. */
@@ -279,51 +274,6 @@ export type SessionLaunchRequest = {
   /** The agent CLI session to resume (Reopen). */
   resume?: string;
 };
-export type SessionLaunchValue = {
-  operationId: string;
-  workspaceId: string;
-  paneId: string;
-  cwd: string;
-  createdWorkspace: boolean;
-};
-export type SessionLaunchResult =
-  | { ok: true; value: SessionLaunchValue }
-  | {
-      ok: false;
-      error: {
-        code: string;
-        message: string;
-        retryable: boolean;
-        stage: string;
-        created?: SessionLaunchValue;
-      };
-    };
-export type HerdrCompatibility = {
-  endpoint: string;
-  compatible: boolean;
-  expected: { version: string; protocol: number };
-  daemon: {
-    available: boolean;
-    compatible: boolean;
-    version?: string;
-    protocol?: number;
-  };
-  cli: {
-    available: boolean;
-    compatible: boolean;
-    version?: string;
-    protocol?: number;
-    stream: boolean;
-  };
-  issues: string[];
-};
-export type HerdrEvent = {
-  endpoint: string;
-  generation: number;
-  type: "connected" | "disconnected" | "changed";
-  event?: string;
-  error?: { code: string; message: string };
-};
 export type Layout =
   | { type: "leaf"; id: string }
   | {
@@ -338,13 +288,10 @@ export type Workspace = {
   id: string;
   name: string;
   cwd: string;
-  herdrId?: string;
   localWorktree?: boolean;
   /** The branch of the new worktree this workspace was launched into. */
   worktreeBranch?: string;
   connection?: string;
-  /** Metadata tokens the host reported for this workspace; never saved. */
-  herdrTokens?: Record<string, string>;
   panels: Panel[];
   layout: Layout | null;
 };
@@ -370,7 +317,6 @@ export type Project = {
   sessions: {
     claudeAccount?: string;
     codexAccount?: string;
-    backend?: "herdr" | "local";
   };
   targets: string[];
   hosts?: Record<
@@ -459,24 +405,6 @@ export type ProjectHostReadiness = {
   secrets: { ok: boolean; count: number };
   /** The owner switched sending this project's values to the host off. */
   withheld: boolean;
-};
-export type Snapshot = {
-  version: string;
-  workspaces: {
-    workspace_id: string;
-    label: string;
-    worktree?: { checkout_path: string };
-    tokens?: Record<string, string>;
-  }[];
-  panes: {
-    pane_id: string;
-    workspace_id: string;
-    cwd?: string;
-    label?: string;
-    agent?: string;
-    agent_status: string;
-    terminal_title_stripped?: string;
-  }[];
 };
 export type System = {
   home: string;
@@ -686,47 +614,6 @@ export interface Bridge {
   chooseDirectory(): Promise<string | null>;
   chooseAttachments(): Promise<string[]>;
   pathForFile(file: File): string;
-  /** What to type into a Herdr pane so the project's values reach its shell. */
-  projectSessionEnv(options: {
-    endpoint: string;
-    cwd: string;
-    agent?: string;
-    claudeAccountId?: string;
-    codexAccountId?: string;
-    modelProfileId?: string;
-  }): Promise<{ prefix: string; settings: string; launch: string }>;
-  terminalOpen(options: {
-    panelId: string;
-    cwd: string;
-    command?: string;
-    cols?: number;
-    rows?: number;
-    endpoint?: string;
-    herdrId?: string;
-    modelProfileId?: string;
-    claudeAccountId?: string;
-    codexAccountId?: string;
-    streamId?: string;
-  }): Promise<{ history: string; exited?: boolean; streamId?: string }>;
-  terminalAck(
-    panelId: string,
-    streamId: string,
-    sequence: number,
-  ): Promise<void>;
-  terminalWrite(panelId: string, data: string): Promise<void>;
-  terminalAttach(input: {
-    panelId: string;
-    name: string;
-    data: string;
-  }): Promise<string>;
-  terminalResize(panelId: string, cols: number, rows: number): Promise<void>;
-  terminalClose(panelId: string): Promise<void>;
-  terminalScroll(
-    panelId: string,
-    direction: string,
-    lines: number,
-    position?: { column: number; row: number; fast?: boolean },
-  ): Promise<void>;
   daemonStates(): Promise<DaemonState[]>;
   onDaemonState(callback: (state: DaemonState) => void): () => void;
   sessionsList(host: string): Promise<DaemonSession[]>;
@@ -780,20 +667,6 @@ export interface Bridge {
   ): Promise<void>;
   onDaemonTerminal(callback: (event: DaemonTerminalEvent) => void): () => void;
   hostInstall(host: string): Promise<HostInstallResult>;
-  herdr(
-    socket: string,
-    method: string,
-    params?: Record<string, unknown>,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic RPC passthrough, callers narrow the result themselves
-  ): Promise<any>;
-  herdrCompatibility(endpoint: string): Promise<HerdrCompatibility>;
-  herdrInstall(endpoint: string): Promise<{ binary: string }>;
-  herdrSubscribe(
-    endpoint: string,
-    subscriptionId: string,
-  ): Promise<{ generation: number }>;
-  herdrUnsubscribe(endpoint: string, subscriptionId: string): Promise<void>;
-  onHerdr(callback: (event: HerdrEvent) => void): () => void;
   /** Raw NDJSON-RPC passthrough to the orchestrator daemon; the renderer's
    * typed wrapper is `src/orchestrator/client.ts`. */
   orchestrator(
@@ -842,18 +715,6 @@ export interface Bridge {
   }): Promise<unknown>;
   cancelChat(panelId: string): Promise<void>;
   chatModels(): Promise<ChatModels>;
-  onTerminal(
-    callback: (event: {
-      panelId: string;
-      data: string;
-      exitCode?: number;
-      agent?: string | null;
-      streamId?: string;
-      sequence?: number;
-      reset?: boolean;
-      error?: string;
-    }) => void,
-  ): () => void;
   onChat(callback: (event: ChatEvent) => void): () => void;
   catalog(
     kind: string,
@@ -931,7 +792,6 @@ export interface Bridge {
     contextWindow?: number;
   }): Promise<ModelProfile>;
   modelProfilesDelete(id: string): Promise<void>;
-  modelLaunch(modelProfileId: string): Promise<string>;
   claudeAccountsList(): Promise<ClaudeAccount[]>;
   claudeAccountsUpsert(input: {
     id?: string;

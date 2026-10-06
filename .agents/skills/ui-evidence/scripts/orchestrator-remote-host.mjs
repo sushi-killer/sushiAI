@@ -14,6 +14,7 @@ import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { stopDaemon } from "../../../../scripts/lib/daemon-binary.mjs";
 
 const root = process.cwd();
 const shot = (name) => `${root}/artifacts/${name}.png`;
@@ -90,7 +91,6 @@ try {
         id: profileId,
         name: "Build box",
         host: "build-box",
-        socket: "~/.herdr.sock",
       },
     ]),
   );
@@ -108,7 +108,7 @@ try {
       SUSHIAI_TEST_SSH: ssh,
       FAKE_SSH_CONFIG: `${profile}/ssh.json`,
       BRIDGE_DATA_DIR: profile,
-      HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
+      SUSHIAI_HOME: `${profile}/sushiai`,
       BRIDGE_DEV_URL: "",
     },
   });

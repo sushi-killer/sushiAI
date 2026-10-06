@@ -23,7 +23,7 @@ export type WorktreeRow = {
 
 const FINISHED = new Set(["done", "stopped", "failed"]);
 
-/** "local" for this Mac (a Herdr socket included), else the ssh endpoint -
+/** "local" for this Mac (any non-ssh endpoint), else the ssh endpoint -
  * the host keys the worktree IPC uses. */
 export function hostOf(connection: string | undefined): string {
   return connection?.startsWith("ssh:") ? connection : "local";

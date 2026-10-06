@@ -281,36 +281,6 @@ test("fixSelection follows panels that disappeared", async () => {
   });
 });
 
-test("retitleTerminal follows the agent but never overwrites a typed name", async () => {
-  const { retitleTerminal } = await library;
-  const fresh = panel("t", "terminal");
-  fresh.title = "zsh";
-  assert.equal(retitleTerminal(fresh, "claude").title, "Claude Code");
-  assert.equal(retitleTerminal(fresh, "claude").agent, "claude");
-
-  const running = { ...fresh, title: "Claude Code", agent: "claude" };
-  assert.equal(
-    retitleTerminal(running, null).title,
-    "zsh",
-    "the agent exiting restores the shell name",
-  );
-  assert.equal(retitleTerminal(running, null).agent, undefined);
-
-  const named = { ...fresh, title: "build server" };
-  assert.equal(
-    retitleTerminal(named, "codex").title,
-    "build server",
-    "a name the user typed survives",
-  );
-
-  const chat = { ...fresh, kind: "chat", title: "zsh" };
-  assert.equal(
-    retitleTerminal(chat, "claude").title,
-    "zsh",
-    "only terminals follow the agent",
-  );
-});
-
 const profile = (id, name) => ({
   id,
   name,
@@ -389,26 +359,16 @@ test("groupPanelIds drops a pane a member hid (still in panels, removed from tha
 test("resolveGroupPanes resolves each pane to its own owner's cwd, endpoint and host label", async () => {
   const { resolveGroupPanes } = await library;
   const { group } = await mergeGroupFixture();
-  const panes = resolveGroupPanes(
-    group,
-    [profile("lab", "Lab")],
-    "local-socket",
-  );
+  const panes = resolveGroupPanes(group, [profile("lab", "Lab")]);
   assert.deepEqual(
     panes.map((p) => p.panel.id),
     ["a", "b", "c"],
   );
   const [a, , c] = panes;
   assert.equal(a.cwd, "/Users/dev/app");
-  assert.equal(
-    a.socket,
-    "local-socket",
-    "the Local member falls back to the app socket",
-  );
   assert.equal(a.endpoint, undefined);
   assert.equal(a.hostLabel, "Local");
   assert.equal(c.cwd, "/home/dev/app");
-  assert.equal(c.socket, "ssh:lab", "the Lab member uses its own connection");
   assert.equal(c.endpoint, "ssh:lab");
   assert.equal(c.hostLabel, "Lab");
 });

@@ -230,3 +230,35 @@ test("template and concatenated .json names in electron/ are rejected, comments 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("the retired session backend's name fails the check in any shipped tree", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "retired-name-"));
+  try {
+    fs.mkdirSync(path.join(root, "electron"));
+    fs.mkdirSync(path.join(root, ".agents"));
+    // Built at runtime: this file is itself scanned.
+    const name = ["Her", "dr"].join("");
+    fs.writeFileSync(path.join(root, "electron", "clean.cjs"), "// fine\n");
+    assert.equal(
+      run({
+        HEAD_BRANCH: "chore/x",
+        PR_TITLE: "chore: x",
+        RETIRED_NAME_ROOT_OVERRIDE: root,
+      }).status,
+      0,
+    );
+    fs.writeFileSync(path.join(root, ".agents", "note.md"), `uses ${name}\n`);
+    const result = run({
+      HEAD_BRANCH: "chore/x",
+      PR_TITLE: "chore: x",
+      RETIRED_NAME_ROOT_OVERRIDE: root,
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /\.agents\/note\.md:1 names the retired/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

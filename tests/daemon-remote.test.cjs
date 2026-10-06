@@ -670,18 +670,48 @@ test("connection profiles keep the connector, need no socket, and tell listeners
 
 // Slice 2 review fixes -----------------------------------------------------
 
-test("a daemon that dies right after ready cannot spin: the retry budget refills only after a stable connection", async () => {
-  const proxy = fakeProxy({ dieAfterMs: 80, dieCode: 2 });
-  const { manager } = sshManager(proxy, {
+test("a daemon that dies right after ready cannot spin: the retry budget refills only after a stable connection", async (t) => {
+  // Virtual time: the schedule is the subject, not how fast a machine is.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { EventEmitter } = require("node:events");
+  let connects = 0;
+  const connector = {
+    kind: "stub",
+    connect: async () => {
+      connects += 1;
+      const client = new EventEmitter();
+      client.hello = { host: "devbox", daemon: "1.0.0", capabilities: [] };
+      client.close = () => {};
+      // Answers the readiness check, then the connection drops at once.
+      client.request = async () => {
+        setImmediate(() => client.emit("disconnect"));
+        return [];
+      };
+      return client;
+    },
+  };
+  const manager = createDaemonManager({
+    connectors: { [PROFILE.id]: connector },
     backoffMinMs: 300,
     backoffMaxMs: 300,
+    random: () => 1,
   });
+  cleanups.push(() => manager.close());
   manager.start();
-  await sleep(1500);
-  // Immediate once, then 300 ms backoffs. Resetting on every "ready" gave
-  // a new spawn every ~100 ms (about 15 here).
-  assert.ok(proxy.spawns() <= 5, `spawns ${proxy.spawns()}`);
-  assert.ok(proxy.spawns() >= 2);
+  const settle = async () => {
+    for (let i = 0; i < 6; i++)
+      await new Promise((resolve) => setImmediate(resolve));
+  };
+  await settle();
+  for (let elapsed = 0; elapsed < 1500; elapsed += 100) {
+    t.mock.timers.tick(100);
+    await settle();
+  }
+  // The first connection, one immediate retry, then one per 300 ms backoff
+  // (6 here). Refilling the budget on every "ready" gave a new connection at
+  // every 100 ms step (16 here).
+  assert.ok(connects <= 7, `connects ${connects}`);
+  assert.ok(connects >= 2, `connects ${connects}`);
 });
 
 test("a connection that stays up refills the budget", async () => {
@@ -887,7 +917,7 @@ time.sleep(30)`,
   await until(() => holder.signalCode === "SIGTERM", 3000, "holder stopped");
 });
 
-test("a port forward is its own process and never needs the Herdr tunnel", async () => {
+test("a port forward is its own process", async () => {
   const net = require("node:net");
   const { EventEmitter } = require("node:events");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fwd-"));
@@ -901,9 +931,6 @@ test("a port forward is its own process and never needs the Herdr tunnel", async
   await connections.init();
   const profile = await connections.save({ host: "user@devbox" });
   const endpoint = `ssh:${profile.id}`;
-  connections.socket = async () => {
-    throw new Error("the Herdr socket must not be needed");
-  };
   const specs = [];
   const killed = [];
   connections.forwardProcess = async (_profile, spec) => {

@@ -25,6 +25,21 @@ class SurfaceStateStore {
     this.queues = new Map();
   }
 
+  /** Drops the state of built-ins the app no longer ships (`keep` is the set
+   * of extension ids that exist now). */
+  async forgetRetired(keep) {
+    const all = readStore(this.userDataDir, "surface-state", { damaged: true });
+    if (Object.values(all).includes(DAMAGED)) return;
+    const next = Object.fromEntries(
+      Object.entries(all).filter(
+        ([id]) => !id.startsWith("builtin.") || keep.has(id),
+      ),
+    );
+    if (Object.keys(next).length === Object.keys(all).length) return;
+    const db = appDb(this.userDataDir);
+    transaction(db, () => putStore(db, "surface-state", next));
+  }
+
   /** The queue key of an extension's state. */
   file(extensionId) {
     if (typeof extensionId !== "string" || !ID.test(extensionId))

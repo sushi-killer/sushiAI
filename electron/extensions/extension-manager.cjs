@@ -200,6 +200,20 @@ class ExtensionManager {
           };
     }
     let lockChanged = false;
+    // A built-in the app no longer ships leaves its saved settings and lock
+    // entry behind: they are dropped, never shown and never an error.
+    const retired = (id) =>
+      id.startsWith("builtin.") && !this.manifests.has(id);
+    for (const id of Object.keys(this.state.extensions))
+      if (retired(id)) {
+        delete this.state.extensions[id];
+        stateChanged = true;
+      }
+    for (const id of Object.keys(this.lock.packages))
+      if (retired(id)) {
+        delete this.lock.packages[id];
+        lockChanged = true;
+      }
     for (const manifest of this.manifests.values()) {
       // A local folder has no package identity to pin: bumping the version in
       // your own manifest is the normal edit loop, not a supply-chain event.

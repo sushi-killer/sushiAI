@@ -478,7 +478,7 @@ test("a project is its path, unless it lives on another machine", async () => {
   const cwd = "/Users/me/app";
   assert.equal(projectScope(cwd), cwd);
   assert.equal(
-    projectScope(cwd, "/Users/me/.config/herdr/herdr.sock"),
+    projectScope(cwd, "/Users/me/.sushiai/daemon.sock"),
     cwd,
     "a local daemon socket is still this machine, not part of identity",
   );

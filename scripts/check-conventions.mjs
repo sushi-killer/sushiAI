@@ -68,6 +68,46 @@ for (const dir of ["src", "electron", "tests", "scripts"])
       );
   }
 
+// The retired session backend is gone: its name appears nowhere in shipped
+// code, scripts, tests or agent files (release notes under docs/ keep history).
+// Allowed: this file (it holds the pattern) and the one test that proves a
+// profile saved by an older release still loads (it needs the saved id).
+const RETIRED_NAME = /herdr/i;
+const RETIRED_ALLOWED = new Set([
+  "scripts/check-conventions.mjs",
+  "tests/retired-builtin-state.test.cjs",
+]);
+const retiredRoot = process.env.RETIRED_NAME_ROOT_OVERRIDE || root;
+async function* walkAll(dir, base) {
+  let entries;
+  try {
+    entries = await readdir(path.join(base, dir), { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const relative = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name !== "node_modules") yield* walkAll(relative, base);
+    } else if (/\.(png|jpe?g|gif|icns|woff2?|ttf|otf|node)$/i.test(entry.name))
+      continue;
+    else yield relative;
+  }
+}
+for (const dir of ["src", "electron", "scripts", "tests", ".agents"])
+  for await (const file of walkAll(dir, retiredRoot)) {
+    const name = file.split(path.sep).join("/");
+    if (RETIRED_ALLOWED.has(name) && retiredRoot === root) continue;
+    const text = await readFile(path.join(retiredRoot, file), "utf8");
+    const line = text
+      .split("\n")
+      .findIndex((value) => RETIRED_NAME.test(value));
+    if (line >= 0)
+      problems.push(
+        `${name}:${line + 1} names the retired session backend; sessions run in the sushiai daemon`,
+      );
+  }
+
 // App state lives in one place: `<userData>/sushiai.db`. A string literal that
 // names a `*.json` file in `electron/` - quoted, a template ending in `.json`,
 // or `+ ".json"` - is how a new userData JSON store sneaks back in, so every
@@ -80,7 +120,7 @@ const JSON_NAMES = [
 const JSON_ALLOWED = {
   "electron/app-db.cjs": [
     [
-      /^(agents\/)?(projects|workspace-state|herdr-launches|connections|orchestrator-hosts|providers|secrets|model-profiles|claude-accounts|codex-accounts|project-secrets|window-state|updates|app-preferences|hermes-scheduler|hermes-activity|extensions|extension-lock)\.json$/,
+      /^(agents\/)?(projects|workspace-state|connections|orchestrator-hosts|providers|secrets|model-profiles|claude-accounts|codex-accounts|project-secrets|window-state|updates|app-preferences|hermes-scheduler|hermes-activity|extensions|extension-lock)\.json$/,
       "legacy files taken in once, then renamed or deleted",
     ],
     [/^\.json$/, "legacy surface-state file suffix"],

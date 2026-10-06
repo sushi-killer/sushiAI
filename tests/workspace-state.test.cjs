@@ -73,8 +73,7 @@ test("restore keeps a workspace's connection and binds a legacy host workspace t
       id: "legacy",
       name: "Legacy",
       cwd: "/c",
-      herdrId: "old",
-      panels: [panel("three")],
+      panels: [panel("three", "terminal", { paneCwd: "/c" })],
       layout: { type: "leaf", id: "three" },
     },
     {
@@ -337,7 +336,7 @@ test("initialWorkspace and codePanels preserve layout and panel identity invaria
   assert.equal(codePanels(withoutCodeChat)[0], workspace.panels[0]);
 });
 
-test("restored Herdr panels stay in their workspace, ended, with Reopen", async () => {
+test("restored panels that ran without a session stay in their workspace, ended, with Reopen", async () => {
   const { restore } = await library;
   const saved = restore({
     read: () =>
@@ -347,8 +346,7 @@ test("restored Herdr panels stay in their workspace, ended, with Reopen", async 
             id: "kept",
             name: "Kept",
             cwd: "/kept",
-            herdrId: "w1",
-            panels: [panel("a", "agent", { herdrId: "p1", agent: "codex" })],
+            panels: [panel("a", "agent", { status: "idle", agent: "codex" })],
             layout: { type: "leaf", id: "a" },
           },
           {

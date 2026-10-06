@@ -5,7 +5,6 @@ const os = require("node:os");
 const path = require("node:path");
 
 const library = import("../src/workspaceState.ts");
-const { herdrWorkspaceKey } = require("../src/workspace/worktree.ts");
 const helper = require("../electron/workspace-snapshot.cjs");
 const { appDb, closeAppDb } = require("../electron/app-db.cjs");
 
@@ -37,7 +36,7 @@ function busySnapshot() {
   const panels = [
     { id: "local-term", kind: "terminal", title: "zsh", ...runtime },
     {
-      id: herdrWorkspaceKey("/tmp/herdr.sock", "pane-1"),
+      id: "session:pane-1",
       kind: "terminal",
       title: "zsh",
       sessionId: "pane-1",
@@ -53,7 +52,7 @@ function busySnapshot() {
       ...runtime,
     },
     {
-      id: herdrWorkspaceKey("/tmp/herdr.sock", "pane-2"),
+      id: "session:pane-2",
       kind: "agent",
       title: "Claude Code",
       agent: "claude",
@@ -111,7 +110,7 @@ function busySnapshot() {
       ...runtime,
     },
     {
-      id: herdrWorkspaceKey("/tmp/herdr.sock", "pane-9"),
+      id: "session:pane-9",
       kind: "terminal",
       title: "zsh",
       sessionId: "pane-9",
@@ -128,24 +127,12 @@ function busySnapshot() {
       "s2",
       "column",
       0.61,
-      split(
-        "s3",
-        "row",
-        0.29,
-        leaf(herdrWorkspaceKey("/tmp/herdr.sock", "pane-1")),
-        leaf("local-agent"),
-      ),
+      split("s3", "row", 0.29, leaf("session:pane-1"), leaf("local-agent")),
       split(
         "s4",
         "column",
         0.44,
-        split(
-          "s5",
-          "row",
-          0.71,
-          leaf(herdrWorkspaceKey("/tmp/herdr.sock", "pane-2")),
-          leaf("browser"),
-        ),
+        split("s5", "row", 0.71, leaf("session:pane-2"), leaf("browser")),
         split(
           "s6",
           "row",
@@ -156,13 +143,7 @@ function busySnapshot() {
             "column",
             0.82,
             leaf("orch"),
-            split(
-              "s8",
-              "row",
-              0.33,
-              leaf("ext"),
-              leaf(herdrWorkspaceKey("/tmp/herdr.sock", "pane-9")),
-            ),
+            split("s8", "row", 0.33, leaf("ext"), leaf("session:pane-9")),
           ),
         ),
       ),
@@ -174,15 +155,15 @@ function busySnapshot() {
         id: "w-local",
         name: "app",
         cwd: "/work/app",
-        connection: "/tmp/herdr.sock",
+        connection: "/tmp/local.sock",
         panels,
         layout,
       },
       {
-        id: herdrWorkspaceKey("/tmp/herdr.sock", "w1"),
+        id: "session:w1",
         name: "remote",
         cwd: "/work/remote",
-        connection: "/tmp/herdr.sock",
+        connection: "/tmp/local.sock",
         panels: [
           {
             id: "solo",
@@ -196,7 +177,7 @@ function busySnapshot() {
       },
     ],
     activeId: "w-local",
-    socket: "/tmp/herdr.sock",
+    socket: "/tmp/local.sock",
     routines: [{ id: "r1", name: "Test", command: "npm test" }],
     fontScale: 1.15,
     mode: "Agent",
@@ -221,7 +202,7 @@ function busySnapshot() {
         "column",
         0.4,
         leaf("local-term"),
-        leaf(herdrWorkspaceKey("/tmp/herdr.sock", "pane-1")),
+        leaf("session:pane-1"),
       ),
     },
     agentTabs: [
@@ -678,7 +659,7 @@ test("the electron helper serves read, write and flush and refuses other senders
 
 test("empty session workspaces survive restore while ended-only rows move to Recently closed", async () => {
   const { restore } = await library;
-  const host = (id, cwd, panels, connection = "/tmp/herdr.sock") => ({
+  const host = (id, cwd, panels, connection = "/tmp/local.sock") => ({
     id,
     name: cwd.split("/").pop(),
     cwd,
@@ -721,7 +702,7 @@ test("empty session workspaces survive restore while ended-only rows move to Rec
   );
   assert.deepEqual(
     restored.closedProjects.map((p) => [p.cwd, p.endpoint, p.backed]),
-    [["/repo/app-wt", "/tmp/herdr.sock", true]],
+    [["/repo/app-wt", "/tmp/local.sock", true]],
   );
   assert.deepEqual(
     JSON.parse(store.text).workspaces.map((w) => w.id),
@@ -738,20 +719,24 @@ test("empty session workspaces survive restore while ended-only rows move to Rec
   );
 });
 
-test("a panel that ran in Herdr restores ended and unbound; a session panel stays live", async () => {
+test("a panel that ran without a session restores ended and unbound; a session panel stays live", async () => {
   const { restore } = await library;
   const store = messageStore();
   store.text = JSON.stringify({
-    socket: "/tmp/herdr.sock",
+    socket: "/tmp/local.sock",
     workspaces: [
       {
         id: "w1",
         name: "app",
         cwd: "/repo/app",
-        herdrId: "old-workspace",
-        herdrTokens: { a: "b" },
         panels: [
-          { id: "legacy", kind: "agent", title: "Claude", herdrId: "pane-1" },
+          {
+            id: "legacy",
+            kind: "agent",
+            title: "Claude",
+            status: "idle",
+            paneCwd: "/repo/app",
+          },
           {
             id: "bound",
             kind: "terminal",
@@ -767,14 +752,11 @@ test("a panel that ran in Herdr restores ended and unbound; a session panel stay
   });
   const [workspace] = restore(store).workspaces;
   const [legacy, bound, chat] = workspace.panels;
-  assert.equal(legacy.ended, true, "no Herdr session is adopted");
-  assert.equal("herdrId" in legacy, false);
+  assert.equal(legacy.ended, true, "no session is adopted");
   assert.equal(legacy.sessionId, undefined);
   assert.equal(bound.ended, undefined, "reconcile decides, not restore");
   assert.equal(bound.sessionId, "s-1");
   assert.equal(bound.started, false);
   assert.equal(chat.ended, undefined);
-  assert.equal("herdrId" in workspace, false);
-  assert.equal("herdrTokens" in workspace, false);
-  assert.equal(workspace.connection, "/tmp/herdr.sock");
+  assert.equal(workspace.connection, "/tmp/local.sock");
 });

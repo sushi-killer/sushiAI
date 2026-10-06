@@ -15,7 +15,6 @@ const path = require("node:path");
 const os = require("node:os");
 const fs = require("node:fs/promises");
 const { existsSync } = require("node:fs");
-const pty = require("node-pty");
 const { Connections } = require("./connections.cjs");
 const { readStore, writeStore } = require("./app-db.cjs");
 const { PreviewServer } = require("./preview.cjs");
@@ -30,7 +29,6 @@ const { Projects } = require("./projects.cjs");
 const { AgentRegistry } = require("./agents/registry.cjs");
 const { HermesProvider } = require("./agents/hermes-provider.cjs");
 const { registerProjectIpc } = require("./ipc/projects.cjs");
-const { registerTerminalIpc } = require("./ipc/terminals.cjs");
 const {
   setupHost,
   setupSummary,
@@ -68,10 +66,6 @@ const { testWindow } = require("./test-window.cjs");
 const testMode = testWindow();
 const { SurfaceStateStore } = require("./extensions/surface-state.cjs");
 const { ExtensionManager } = require("./extensions/extension-manager.cjs");
-const {
-  HERDR_MANIFEST,
-  registerHerdrExtension,
-} = require("./extensions/builtin-herdr.cjs");
 const { ARTIFACTS_MANIFEST } = require("./extensions/builtin-artifacts.cjs");
 const { configureArtifactsSkill } = require("./artifacts-skill.cjs");
 const { syncLocalBuiltinSkills } = require("./extensions/builtin-skills.cjs");
@@ -90,16 +84,14 @@ const agents = new AgentRegistry();
 const claudeMcp = new ClaudeMcp({ home: os.homedir() });
 const claudePlugins = new ClaudePlugins({ home: os.homedir() });
 agents.on("event", (event) => send("agent-event", event));
-const terminals = new Map(),
-  terminalPending = new Map(),
-  chats = new Map();
+const chats = new Map();
 let mainWindow;
 const root = path.join(__dirname, "..");
 const dataDir = process.env.BRIDGE_DATA_DIR;
 if (dataDir) app.setPath("userData", path.resolve(dataDir));
 const extensions = new ExtensionManager({
   dataDir: app.getPath("userData"),
-  builtins: [HERDR_MANIFEST, ORCHESTRATOR_MANIFEST, ARTIFACTS_MANIFEST],
+  builtins: [ORCHESTRATOR_MANIFEST, ARTIFACTS_MANIFEST],
   // Folders dropped here are read as JSON manifests, never executed. The
   // override exists so the desktop smoke can point at its own fixtures.
   localDir: process.env.SUSHIAI_EXTENSIONS_DIR
@@ -124,6 +116,9 @@ extensions.ready.then(() =>
   ),
 );
 const surfaceState = new SurfaceStateStore(app.getPath("userData"));
+extensions.ready.then(() =>
+  surfaceState.forgetRetired(new Set(extensions.manifests.keys())),
+);
 agents.register(
   new HermesProvider({
     userDataDir: app.getPath("userData"),
@@ -174,16 +169,6 @@ function id(value) {
     throw new Error("Invalid panel ID.");
   return value;
 }
-/** Writes a `claude --settings` file for a model profile; the caller owns
- * where it's used (a local pty's argv, or typed into a herdr pane). */
-async function stageModelSettings(modelProfileId) {
-  id(modelProfileId);
-  return modelProviders.stageSettings(modelProfileId, os.tmpdir());
-}
-async function stageClaudeAccount(accountId) {
-  id(accountId);
-  return modelProviders.stageClaudeAccount(accountId, os.tmpdir());
-}
 function send(channel, value) {
   if (mainWindow && !mainWindow.isDestroyed())
     mainWindow.webContents.send(channel, value);
@@ -199,8 +184,7 @@ function handle(channel, callback) {
   });
 }
 // Connect / Retry / Disconnect on a host the daemon manager owns go to the
-// manager; the Herdr tunnel path only serves hosts the manager does not know.
-// Connecting a host that is ready or connecting does nothing.
+// manager. Connecting a host that is ready or connecting does nothing.
 const daemonHost = (endpoint) => {
   if (typeof endpoint !== "string" || !endpoint.startsWith("ssh:")) return null;
   const host = endpoint.slice(4);
@@ -208,33 +192,24 @@ const daemonHost = (endpoint) => {
     ? host
     : null;
 };
-const disconnectThroughDaemon =
-  (original) =>
-  async (endpoint, ...rest) => {
-    const host = daemonHost(endpoint);
-    // The manager closes the host's terminals when it reports "disconnected".
-    if (host) daemonManager.disconnect(host);
-    return original(endpoint, ...rest);
-  };
-const daemonWrappers = {
-  "connections-connect": connectThroughDaemon({
-    daemonHost,
-    getManager: () => daemonManager,
-    getConnections: () => connections,
-  }),
-  "connections-disconnect": disconnectThroughDaemon,
-};
+const connectHost = connectThroughDaemon({
+  daemonHost,
+  getManager: () => daemonManager,
+  getConnections: () => connections,
+})(() => {
+  throw new Error("The sushiai daemon is not running.");
+});
 registerProjectIpc({
-  handle: (channel, callback) =>
-    handle(
-      channel,
-      daemonWrappers[channel] ? daemonWrappers[channel](callback) : callback,
-    ),
+  handle,
+  connectHost,
+  // The manager closes the host's terminals when it reports "disconnected".
+  onDisconnect: (endpoint) => {
+    const host = daemonHost(endpoint);
+    if (host) daemonManager.disconnect(host);
+  },
   getConnections: () => connections,
   getPreview: () => preview,
   getClaudeMcp: () => claudeMcp,
-  terminals,
-  terminalPending,
   projects,
 });
 let daemonManager = null;
@@ -246,9 +221,9 @@ const hostManifest = () =>
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
   });
-// The one installer: tools, skills and sushiai, with no Herdr steps.
+// The one installer: tools, skills and sushiai.
 const setupDaemonHost = serializePerHost((endpoint, options) =>
-  setupHost(connections, endpoint, "", { ...options, herdr: false }),
+  setupHost(connections, endpoint, options),
 );
 // The manager is created in whenReady; subscribers registered before that
 // are served by one forwarding subscription made when it exists.
@@ -299,48 +274,12 @@ registerExtensionIpc({
   getSurfaceState: () => surfaceState,
   announce: (change) => send("extensions-state-changed", change),
 });
-const herdrExtension = registerHerdrExtension({
-  handle,
-  getConnections: () => connections,
-  id,
-  send,
-  executable,
-});
 registerWorkspaceSnapshot({
   ipcMain,
   handle,
   getMainWindow: () => mainWindow,
   userDataDir: () => app.getPath("userData"),
   onWrite: () => catalogSync?.notifyChanged(),
-});
-const terminalIpc = registerTerminalIpc({
-  handle,
-  send,
-  app,
-  pty,
-  getConnections: () => connections,
-  executable,
-  directory,
-  id,
-  terminals,
-  terminalPending,
-  stageModelSettings,
-  stageClaudeAccount,
-  resolveClaudeAccount: (accountId) => {
-    id(accountId);
-    return modelProviders.resolveClaudeAccount(accountId);
-  },
-  resolveCodexAccount: (accountId, endpoint) => {
-    id(accountId);
-    return codexAccounts.resolve(accountId, endpoint);
-  },
-  resolveModel: (profileId) => {
-    id(profileId);
-    return modelProviders.resolveEnv(profileId);
-  },
-  projects,
-  // The test harness runs a fake ssh (see SUSHIAI_TEST_SSH above).
-  sshBinary: (testMode.hidden && process.env.SUSHIAI_TEST_SSH) || undefined,
 });
 const chatIpc = registerChatIpc({
   handle,
@@ -454,8 +393,7 @@ app.whenReady().then(async () => {
     fakeSsh ? { ssh: fakeSsh } : undefined,
   );
   await connections.init();
-  // The local machine gets what sessions need (Herdr running, Claude Code, Codex) on
-  // its own; a test run never installs anything.
+  // The local machine gets what sessions need (Claude Code, Codex) on its own; a test run never installs anything.
   if (!testMode.test)
     void setupHost(connections, "local")
       .then((states) => {
@@ -521,9 +459,6 @@ app.whenReady().then(async () => {
     daemonManager.start();
   }
   await orchestrator.start();
-  // Sleep/wake can drop every SSH tunnel at once - retry them all rather than
-  // waiting for each one's own backoff timer to come back around.
-  powerMonitor.on("resume", () => connections.retryAutoConnect());
   updates = new Updates({
     directory: app.getPath("userData"),
     currentVersion: app.getVersion(),
@@ -743,13 +678,8 @@ app.on("before-quit", (event) => {
   for (const window of BrowserWindow.getAllWindows())
     if (!window.isDestroyed()) window.hide();
   preview?.close();
-  terminalIpc.close();
-  herdrExtension.close();
   catalogSync?.stop();
   daemonManager?.close();
-  for (const pending of terminalPending.values()) pending.cancelled = true;
-  for (const terminal of terminals.values())
-    if (!terminal.exited || terminal.source === "herdr") terminal.proc.kill();
   chatIpc.close();
   Promise.allSettled([
     Promise.resolve(connections?.close()),

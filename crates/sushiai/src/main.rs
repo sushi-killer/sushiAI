@@ -6,7 +6,9 @@ mod hooks_file;
 
 use anyhow::{bail, Context, Result};
 
-const USAGE: &str = "usage: sushiai daemon | status | hook EVENT | hooks install|uninstall | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
+mod proxy;
+
+const USAGE: &str = "usage: sushiai daemon | status | proxy | hook EVENT | hooks install|uninstall | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -24,6 +26,8 @@ fn main() -> Result<()> {
             "{}",
             sushiai_daemon::status_blocking(sushiai_daemon::Home::from_env())?
         ),
+        Some("proxy") => proxy::run(&sushiai_daemon::Home::from_env())?,
+        Some("--version") => println!("sushiai {}", env!("CARGO_PKG_VERSION")),
         Some("hold") => {
             // A startup failure goes to stderr, where the daemon reads it; once the holder
             // runs, stderr is closed, which tells the daemon all is well.

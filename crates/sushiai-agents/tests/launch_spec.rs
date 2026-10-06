@@ -148,6 +148,9 @@ fn settings_argument_survives_a_path_with_spaces_and_quotes() {
     assert!(cmd.starts_with("'/home/o'\\''brien/my dir/sushiai' hook stop"));
 }
 
+/// Codex 0.160 runs an interactive turn, and so its hooks, in a shared background app server
+/// that keeps the environment of whoever started it; our session variables reach the hooks only
+/// when Codex runs in-process (`--no-daemon`).
 #[test]
 fn codex_argv() {
     let spec = build(&params(
@@ -157,9 +160,9 @@ fn codex_argv() {
         &[],
     ))
     .unwrap();
-    assert_eq!(spec.argv, ["codex"]);
+    assert_eq!(spec.argv, ["codex", "--no-daemon"]);
     let spec = build(&params(Agent::Codex, AgentSession::Resume("abc"), BIN, &[])).unwrap();
-    assert_eq!(spec.argv, ["codex", "resume", "abc"]);
+    assert_eq!(spec.argv, ["codex", "resume", "abc", "--no-daemon"]);
 }
 
 #[test]
@@ -169,7 +172,14 @@ fn extra_args_then_prompt_and_dash_prompt_is_guarded() {
     p.prompt = Some("-rf is not a flag");
     assert_eq!(
         build(&p).unwrap().argv,
-        ["codex", "--model", "m", "--", "-rf is not a flag"]
+        [
+            "codex",
+            "--no-daemon",
+            "--model",
+            "m",
+            "--",
+            "-rf is not a flag"
+        ]
     );
     p.prompt = Some("fix it");
     assert_eq!(build(&p).unwrap().argv.last().unwrap(), "fix it");

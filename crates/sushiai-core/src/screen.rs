@@ -64,7 +64,24 @@ impl Screen {
         self.parser.process(&data);
     }
 
+    /// vt100 0.15 resizes only the live rows: a shorter screen drops its bottom rows, which
+    /// hold the newest output when the cursor is low. A terminal keeps the cursor's line
+    /// instead and moves the rows above it into scrollback. That is done here first: the rows
+    /// that would fall off are scrolled up into scrollback (SU) and the cursor follows its
+    /// line (CUU keeps its column). The alternate screen has no
+    /// scrollback and its program redraws after a resize, so it is left as it is. A program
+    /// that set a scroll region keeps vt100's behaviour.
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        let screen = self.parser.screen();
+        let (old_rows, _) = screen.size();
+        if rows > 0 && rows < old_rows && !screen.alternate_screen() {
+            let (cursor_row, _) = screen.cursor_position();
+            let lift = (cursor_row + 1).saturating_sub(rows);
+            if lift > 0 {
+                self.parser
+                    .process(format!("\x1b[{lift}S\x1b[{lift}A").as_bytes());
+            }
+        }
         self.parser.set_size(rows, cols);
     }
 

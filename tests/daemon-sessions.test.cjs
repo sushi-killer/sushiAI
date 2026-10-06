@@ -38,7 +38,7 @@ test("a known panel takes the session's status, title and folder", async () => {
   const { reconcileSessions } = await library;
   const before = [workspace([panel("p1", "s1", { title: "old" })])];
   for (const [agentStatus, status] of [
-    ["starting", "working"],
+    ["starting", "starting"],
     ["working", "working"],
     ["blocked", "blocked"],
     ["idle", "idle"],
@@ -67,6 +67,12 @@ test("an agent turn that finished reads done until it is seen", async () => {
   assert.equal(fromWorking[0].panels[0].status, "done");
   const fresh = reconcileSessions([workspace([panel("p1", "s1")])], idle);
   assert.equal(fresh[0].panels[0].status, "idle");
+  // A start that never ran a turn has nothing to report as done.
+  const fromStarting = reconcileSessions(
+    [workspace([panel("p1", "s1", { status: "starting" })])],
+    idle,
+  );
+  assert.equal(fromStarting[0].panels[0].status, "idle");
   const terminal = reconcileSessions(
     [workspace([panel("p1", "s1", { status: "working" })])],
     { local: ready([session("s1", { cmd: ["zsh"] })]) },

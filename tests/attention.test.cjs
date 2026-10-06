@@ -366,6 +366,20 @@ test("workingCount counts running sessions and skips hidden hosts", async () => 
   );
 });
 
+test("a starting agent is neutral: idle in the Inbox, not counted as working", async () => {
+  const { createAttentionState, observe, workingCount, inboxGroups } =
+    await library;
+  const ws = [workspace("w1", [panel("a", "agent", { status: "starting" })])];
+  const { state } = observe(createAttentionState(), ws, 0);
+  assert.equal(workingCount(ws, state, []), 0);
+  const groups = inboxGroups(ws, state, []);
+  const idle = groups.find((g) => g.key === "idle");
+  assert.deepEqual(
+    idle?.rows.map((r) => r.panel.id),
+    ["a"],
+  );
+});
+
 test("fitNotice cuts a title and body to the caps the main process enforces", async () => {
   const { fitNotice } = await library;
   const short = {

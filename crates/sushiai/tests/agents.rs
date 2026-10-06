@@ -482,6 +482,63 @@ fn run_hook(command: Command) -> (std::process::ExitStatus, String, Duration) {
 }
 
 #[test]
+fn the_hook_log_names_variables_and_outcomes_but_never_values() {
+    let dir = tempfile::Builder::new()
+        .prefix("hl")
+        .tempdir_in("/tmp")
+        .expect("tempdir");
+    let log = dir.path().join("hook.log");
+    let secret = "tok-secret-0123456789";
+    // No daemon at the socket: the trail records the failed connect.
+    let mut command = hook_command("stop");
+    command
+        .args(["--agent", "codex"])
+        .env("SUSHIAI_HOOK_LOG", &log)
+        .env("SUSHIAI_AGENT", "codex")
+        .env("SUSHIAI_SOCKET", dir.path().join("none.sock"))
+        .env("SUSHIAI_SESSION_ID", "sess-id-value")
+        .env("SUSHIAI_SESSION_TOKEN", secret)
+        .env_remove("SUSHIAI_HOME");
+    let (status, stdout, _) = run_hook_with(
+        command,
+        br#"{"hook_event_name":"Stop","x":"payload-value"}"#,
+    );
+    assert!(status.success());
+    assert_eq!(stdout, "");
+    // Without session variables the trail stops at the first step.
+    let mut command = hook_command("prompt");
+    command
+        .args(["--agent", "codex"])
+        .env("SUSHIAI_HOOK_LOG", &log);
+    for var in [
+        "SUSHIAI_SOCKET",
+        "SUSHIAI_SESSION_ID",
+        "SUSHIAI_SESSION_TOKEN",
+        "SUSHIAI_AGENT",
+    ] {
+        command.env_remove(var);
+    }
+    let (status, _, _) = run_hook(command);
+    assert!(status.success());
+
+    let text = fs::read_to_string(&log).expect("log");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[0].contains("event=stop agent=codex"), "{text}");
+    assert!(lines[0].contains("SUSHIAI_SESSION_TOKEN=set"), "{text}");
+    assert!(lines[0].contains("SUSHIAI_HOME=unset"), "{text}");
+    assert!(lines[0].contains("step=connect connect=NotFound"), "{text}");
+    assert!(lines[1].contains("event=prompt"), "{text}");
+    assert!(lines[1].contains("SUSHIAI_AGENT=unset"), "{text}");
+    assert!(lines[1].contains("step=env"), "{text}");
+    for value in [secret, "sess-id-value", "none.sock", "payload-value"] {
+        assert!(!text.contains(value), "{value} leaked: {text}");
+    }
+    let mode = fs::metadata(&log).expect("meta").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
 fn a_hook_without_session_variables_exits_zero_silently() {
     let mut command = hook_command("permission");
     for var in [

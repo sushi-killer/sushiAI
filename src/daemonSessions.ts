@@ -187,13 +187,17 @@ export function failList(feed: HostFeed, token: number): HostFeed {
 }
 
 /** The panel status the UI draws. A finished turn reads "done" until the
- * attention layer has seen it, then "idle". Terminals have no status. */
+ * attention layer has seen it, then "idle". "starting" is neutral (no green
+ * dot, not counted as working): an agent may wait at its prompt with no hook
+ * yet, and Codex fires its first hook only with the first prompt. Terminals
+ * have no status. */
 function panelStatus(
   session: DaemonSession,
   previous: string | undefined,
 ): string | undefined {
   switch (session.agentStatus) {
     case "starting":
+      return "starting";
     case "working":
       return "working";
     case "blocked":

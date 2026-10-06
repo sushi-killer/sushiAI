@@ -3,7 +3,8 @@
 //! Claude gets exactly one `--settings` JSON holding the status hooks and the
 //! permission approver (a second `--settings` flag is undocumented). Codex
 //! gets no per-launch hooks: its entries live in `~/.codex/hooks.json` (see
-//! `codex_hooks`) and stay inert without the session variables.
+//! `codex_hooks`) and stay inert without the session variables. Codex starts
+//! with `--no-daemon`, so its hooks run in the child that has those variables.
 
 use serde_json::{json, Map, Value};
 
@@ -94,6 +95,9 @@ fn valid_session_id(id: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
 }
+
+/// The Codex flag (0.160 and later) that keeps the session in the `codex` process itself.
+pub const CODEX_NO_DAEMON: &str = "--no-daemon";
 
 fn check_extra_args(args: &[String]) -> Result<(), LaunchError> {
     for a in args {
@@ -219,6 +223,11 @@ pub fn build(p: &LaunchParams) -> Result<LaunchSpec, LaunchError> {
             if let AgentSession::Resume(id) = &p.session {
                 argv.extend(["resume".into(), (*id).into()]);
             }
+            // Codex 0.160 runs interactive turns in a shared background app server per
+            // CODEX_HOME. Its hooks inherit that server's environment, not this child's, so
+            // they would miss our session variables (or carry another session's). In-process
+            // Codex runs the hooks with the variables below.
+            argv.push(CODEX_NO_DAEMON.into());
             argv.extend(p.extra_args.iter().cloned());
         }
     }

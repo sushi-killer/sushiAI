@@ -234,9 +234,10 @@ const moduleRoot = process.env.MODULE_ROOT_OVERRIDE || root;
 const COMPOSITION_ROOTS = [
   "src/extensions/coreViews.ts",
   "src/extensions/modules.ts",
+  "src/extensions/panelMigrations.ts",
 ];
 const CORE_FILES =
-  /^(src\/(app|mascot|workspace)\/.+\.(ts|tsx)|src\/(App|WorkspacePanels|Project[A-Za-z]*Tab)\.tsx|src\/project[A-Za-z]*\.ts|electron\/(attention|mascot[A-Za-z-]*)\.cjs)$/;
+  /^(src\/(app|mascot|workspace)\/.+\.(ts|tsx)|src\/(App|WorkspacePanels|Project[A-Za-z]*Tab)\.tsx|src\/workspaceState\.ts|src\/project[A-Za-z]*\.ts|electron\/(attention|mascot[A-Za-z-]*)\.cjs)$/;
 const resolvedDir = (file, source) =>
   path.posix.join(path.posix.dirname(file), source);
 const listFiles = async (dir) => {

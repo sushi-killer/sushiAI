@@ -5,6 +5,7 @@
 //   {dieAfterMs, dieCode}   serve, then exit (default code 2) after the delay
 //   {noPing}                serve, but never answer `$/ping`
 //   {protocol}              hello answers with this protocol number
+//   SIGUSR1                 exit now (dieCode, default 2): a test picks the moment
 //   {gPort}                 the port `ssh -G` reports (default 22)
 const fs = require("node:fs");
 const path = require("node:path");
@@ -24,7 +25,9 @@ fs.appendFileSync(
   path.join(dir, "spawns.log"),
   JSON.stringify(process.argv.slice(2)) + "\n",
 );
+fs.appendFileSync(path.join(dir, "pids.log"), `${process.pid}\n`);
 const mode = JSON.parse(fs.readFileSync(path.join(dir, "mode.json"), "utf8"));
+process.on("SIGUSR1", () => process.exit(mode.dieCode ?? 2));
 
 if (mode.exit !== undefined) {
   process.stderr.write(mode.stderr || "", () => process.exit(mode.exit));

@@ -225,7 +225,7 @@ function createCompanions({
         classify: (exit) => failure(describeExit(exit).message, { exit }),
       });
     } catch (error) {
-      exited(entry, run, error.exit || pipe.exit, error);
+      void exited(entry, run, error.exit || pipe.exit, error);
       return;
     }
     if (entry.run !== run) {
@@ -241,14 +241,21 @@ function createCompanions({
           surfaceId: params.surfaceId,
         });
     });
-    client.on("disconnect", () => exited(entry, run, pipe.exit, null));
+    client.on("disconnect", () => void exited(entry, run, pipe.exit, null));
     setState(entry, "running", "");
   }
 
-  function exited(entry, run, exit, error) {
+  async function exited(entry, run, exit, error) {
     if (entry.run !== run) return;
     entry.client = null;
+    // The process may outlive its pipe (a bad hello, a malformed frame). Keep
+    // the pipe on the entry until the process is gone, so halt() can still
+    // reach it and a retry never stacks a second process on a live one.
+    const { pipe } = entry;
+    await terminate(pipe);
+    if (entry.run !== run) return;
     entry.pipe = null;
+    exit = exit || pipe?.exit;
     const now = Date.now();
     entry.exits = entry.exits.filter((at) => now - at < windowMs);
     entry.exits.push(now);

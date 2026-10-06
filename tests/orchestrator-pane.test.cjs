@@ -126,18 +126,48 @@ test("a saved orchestrator panel loads as the extension pane with its state", as
 
 test("the pane's view args round-trip", async () => {
   // JSX is not loadable in node, so the pure helpers live in a .ts module.
-  const { parseView, patchArgs } =
-    await import("../src/orchestrator/paneArgs.ts");
+  const { parseView } = await import("../src/orchestrator/paneArgs.ts");
   assert.deepEqual(parseView('{"kind":"task","id":"t"}'), {
     kind: "task",
     id: "t",
   });
   assert.equal(parseView("not json"), undefined);
   assert.equal(parseView(undefined), undefined);
-  assert.deepEqual(patchArgs({ view: "x", host: "h" }, { view: undefined }), {
+});
+
+test("two args writes in one tick both land: the view reset and the new host", async () => {
+  const { extensionArgsUpdate, mergeArgs } =
+    await import("../src/extensions/args.ts");
+  const { patchPanel } = await import("../src/workspace/workspace-actions.ts");
+  assert.deepEqual(mergeArgs({ view: "x", host: "h" }, { view: undefined }), {
     host: "h",
   });
-  assert.deepEqual(patchArgs({}, { host: "ssh:lab", repo: "/r" }), {
+  assert.deepEqual(mergeArgs(undefined, { host: "ssh:lab" }), {
+    host: "ssh:lab",
+  });
+  const start = [
+    workspace("w1", "/repo", [
+      {
+        ...pane("p1"),
+        extension: {
+          ...pane("p1").extension,
+          args: { view: '{"kind":"task","id":"t"}', host: "old", repo: "/old" },
+        },
+      },
+    ]),
+  ];
+  // Both writes were built from the same stale args, as in one event handler.
+  const afterReset = patchPanel(
+    start,
+    "p1",
+    extensionArgsUpdate({ view: undefined }),
+  );
+  const afterHost = patchPanel(
+    afterReset,
+    "p1",
+    extensionArgsUpdate({ host: "ssh:lab", repo: "/r" }),
+  );
+  assert.deepEqual(afterHost[0].panels[0].extension.args, {
     host: "ssh:lab",
     repo: "/r",
   });

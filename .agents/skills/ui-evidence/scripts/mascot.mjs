@@ -70,6 +70,7 @@ try {
     env: {
       ...process.env,
       BRIDGE_DATA_DIR: profile,
+      HOME: profile,
       SUSHIAI_HOME: `${profile}/sushiai`,
       BRIDGE_DEV_URL: "",
       SUSHIAI_TEST_MASCOT: "1",

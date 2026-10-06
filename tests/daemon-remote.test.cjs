@@ -43,6 +43,14 @@ function fakeProxy(mode) {
     setMode(next) {
       fs.writeFileSync(path.join(dir, "mode.json"), JSON.stringify(next));
     },
+    /** Ends the newest proxy process now (it exits with code 2). */
+    killLatest() {
+      const pids = fs
+        .readFileSync(path.join(dir, "pids.log"), "utf8")
+        .trim()
+        .split("\n");
+      process.kill(Number(pids.at(-1)), "SIGUSR1");
+    },
     spawns() {
       try {
         return fs
@@ -799,10 +807,17 @@ test("a connection that stays up refills the budget", async () => {
   cleanups.push(() => manager.close());
   manager.start();
   await until(() => stateOf(manager).state === "ready");
-  await sleep(150); // stable now
-  proxy.setMode({ dieAfterMs: 60, dieCode: 2 });
+  await sleep(150); // stable now: its 50 ms timer is due before this sleep ends
   await manager.retry(PROFILE.id);
-  await until(() => proxy.spawns() >= 3, 2500, "immediate reconnect again");
+  await until(() => stateOf(manager).state === "ready");
+  assert.equal(proxy.spawns(), 2);
+  await sleep(150); // the second connection is stable too
+  proxy.killLatest();
+  await until(() => proxy.spawns() >= 3, 2500, "immediate reconnect");
+  await until(() => stateOf(manager).state === "ready");
+  await sleep(150); // stable again: the one immediate retry is back
+  proxy.killLatest();
+  await until(() => proxy.spawns() >= 4, 2500, "immediate reconnect again");
 });
 
 test("a daemon speaking another protocol is failed/incompatible and never retried", async () => {

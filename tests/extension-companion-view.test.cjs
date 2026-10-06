@@ -98,7 +98,7 @@ test("QR bytes are UTF-8 so a scanner reads back the original text", async () =>
 const view = {
   kind: "companion",
   fields: [
-    { id: "link", label: "Link", type: "status" },
+    { id: "service", label: "Service", type: "status" },
     { id: "code", label: "Pairing code", type: "qr" },
     { id: "note", label: "Note", type: "text" },
     { id: "gone", label: "Empty", type: "text" },
@@ -121,7 +121,7 @@ test("a companion panel draws status tone, a QR SVG, text and buttons", async ()
         ...INITIAL_COMPANION_STATE,
         loaded: true,
         values: {
-          link: { text: "Connected", tone: "ok" },
+          service: { text: "Connected", tone: "ok" },
           code: "pair:EXAMPLE-1",
           note: "Hello <b>there</b>",
           gone: null,

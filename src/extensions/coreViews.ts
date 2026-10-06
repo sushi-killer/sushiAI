@@ -1,4 +1,5 @@
 import type { ComponentType } from "react";
+import type { ArgsPatch } from "./args.ts";
 import { FileText, ListTodo, type LucideIcon } from "lucide-react";
 import { PreviewView } from "./preview/PreviewView.tsx";
 import { useChangedWhileHidden } from "./preview/useChangedWhileHidden.ts";
@@ -39,7 +40,8 @@ export type CoreViewProps = {
   launchAgent?(request: LaunchAgentRequest): Promise<boolean>;
   /** The companion's header row, where the view draws its own controls. */
   headerSlot?: HTMLElement | null;
-  onArgs(next: Record<string, string>): void;
+  /** Merges into the pane's args; an undefined value deletes the key. */
+  onArgs(patch: ArgsPatch): void;
 };
 
 /** One core view and what the companion's "show" button needs to draw it:

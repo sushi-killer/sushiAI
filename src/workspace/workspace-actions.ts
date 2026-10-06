@@ -12,6 +12,7 @@ import {
 import { memberLabel } from "../app/workspaceMerge.ts";
 import type { MergeGroup } from "../app/workspaceMerge.ts";
 import { codePanels } from "../workspaceState.ts";
+import { mergeArgs, type ArgsPatch } from "../extensions/args.ts";
 import { daemonHost } from "../daemonSessions.ts";
 import type {
   ConnectionProfile,
@@ -352,6 +353,25 @@ export function companionRatio(ratio: number | undefined): number {
     : COMPANION_RATIO.fallback;
 }
 
+/** A panel update, as a patch or as a function of the panel as it is now. */
+export type PanelUpdate = Partial<Panel> | ((panel: Panel) => Partial<Panel>);
+
+export function patchPanel(
+  workspaces: Workspace[],
+  panelId: string,
+  patch: PanelUpdate,
+): Workspace[] {
+  return mapPanel(
+    workspaces,
+    panelId,
+    (panel) =>
+      ({
+        ...panel,
+        ...(typeof patch === "function" ? patch(panel) : patch),
+      }) as Panel,
+  );
+}
+
 function mapPanel(
   workspaces: Workspace[],
   panelId: string,
@@ -398,7 +418,7 @@ export function openCompanion(
 export function patchCompanion(
   workspaces: Workspace[],
   panelId: string,
-  patch: { args?: Record<string, string>; open?: boolean; ratio?: number },
+  patch: { args?: ArgsPatch; open?: boolean; ratio?: number },
 ): Workspace[] {
   return mapPanel(workspaces, panelId, (panel) =>
     panel.companion
@@ -410,7 +430,7 @@ export function patchCompanion(
             ...(patch.ratio === undefined
               ? {}
               : { ratio: companionRatio(patch.ratio) }),
-            args: { ...panel.companion.args, ...patch.args },
+            args: mergeArgs(panel.companion.args, patch.args ?? {}),
           },
         }
       : panel,

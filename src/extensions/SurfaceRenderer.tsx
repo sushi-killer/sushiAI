@@ -20,6 +20,7 @@ import {
   type Item,
 } from "./records.ts";
 import { projectScope } from "./routes.ts";
+import { mergeArgs, type ArgsPatch } from "./args.ts";
 import { CompanionView } from "./CompanionView.tsx";
 import { coreViews } from "./coreViews.ts";
 import type { ExtensionPanel, Workspace } from "../types.ts";
@@ -49,7 +50,7 @@ export function ExtensionSurface({
   connection?: string;
   registry: ExtensionRegistry;
   /** Saves the pane's arguments on the panel. */
-  onArgs?(args: Record<string, string>): void;
+  onArgs?(patch: ArgsPatch): void;
 }) {
   const surface = registry.resolveSurface(panel);
   if (!surface || !registry.isExtensionActive(panel.extension.extensionId))
@@ -93,7 +94,7 @@ export function ExtensionSurfaceView({
   frame?: SurfaceFrame;
   /** What a core view reads; the pane keeps them on its panel. */
   args?: Record<string, string>;
-  onArgs?(args: Record<string, string>): void;
+  onArgs?(patch: ArgsPatch): void;
 }) {
   if (surface.view.kind === "companion")
     return (
@@ -165,7 +166,7 @@ function CoreSurface({
   cwd: string;
   connection?: string;
   args?: Record<string, string>;
-  onArgs?(args: Record<string, string>): void;
+  onArgs?(patch: ArgsPatch): void;
 }) {
   const [local, setLocal] = useState<Record<string, string>>({});
   const entry = coreViews[viewId];
@@ -175,7 +176,7 @@ function CoreSurface({
     <Suspense fallback={<div className="loading">Loading…</div>}>
       <View
         args={onArgs ? (args ?? {}) : local}
-        onArgs={onArgs ?? setLocal}
+        onArgs={onArgs ?? ((patch) => setLocal((cur) => mergeArgs(cur, patch)))}
         cwd={cwd}
         connection={connection}
       />

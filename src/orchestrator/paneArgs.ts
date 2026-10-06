@@ -12,16 +12,3 @@ export function parseView(
     return undefined;
   }
 }
-
-/** Returns `args` with `patch` applied; an undefined value removes the key. */
-export function patchArgs(
-  args: Record<string, string>,
-  patch: Record<string, string | undefined>,
-): Record<string, string> {
-  const next = { ...args };
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === undefined) delete next[key];
-    else next[key] = value;
-  }
-  return next;
-}

@@ -1,5 +1,6 @@
 import type { Layout, Panel, Workspace } from "./types";
 import { contains, isValidLayout, leaf, split, uid } from "./layout.ts";
+import { panelMigrations } from "./extensions/panelMigrations.ts";
 import { validRoute, type RouteRef } from "./extensions/routes.ts";
 import type { ProjectGit } from "./app/useProjectGit.ts";
 import { LOCAL_ENDPOINT } from "./daemonSessions.ts";
@@ -321,30 +322,17 @@ export function sweepLeftovers(saved: Saved): Saved {
   };
 }
 
-/** A panel saved before the orchestrator became a built-in extension pane:
- * `kind: "orchestrator"` with its view, host and repo on the panel. It loads
- * as the extension's pane with the same state as args. Data migration only;
- * the next save writes the new shape. */
-function convertLegacyPanel(panel: Panel): Panel {
-  const legacy = panel as unknown as Record<string, unknown>;
-  if (legacy.kind !== "orchestrator") return panel;
-  const { orchestratorView, orchestratorHost, orchestratorRepo, ...rest } =
-    legacy;
-  const args: Record<string, string> = {};
-  if (orchestratorView) args.view = JSON.stringify(orchestratorView);
-  if (typeof orchestratorHost === "string") args.host = orchestratorHost;
-  if (typeof orchestratorRepo === "string") args.repo = orchestratorRepo;
-  return {
-    ...rest,
-    kind: "extension",
-    extension: {
-      extensionId: "builtin.orchestrator",
-      contributionId: "orchestration",
-      instanceId: String(legacy.id),
-      stateVersion: 1,
-      ...(Object.keys(args).length ? { args } : {}),
-    },
-  } as Panel;
+const CORE_KINDS = new Set(["agent", "terminal", "browser", "chat", "files"]);
+
+/** A panel of a kind core does not know goes through the modules' migrations;
+ * the first one that claims it supplies the current shape. */
+function migratePanel(panel: Panel): Panel {
+  if (CORE_KINDS.has(panel.kind) || panel.kind === "extension") return panel;
+  for (const migrate of panelMigrations) {
+    const next = migrate(panel);
+    if (next) return next;
+  }
+  return panel;
 }
 
 /** A terminal or agent panel that ran without a daemon session (the host had
@@ -380,7 +368,7 @@ const restoreWorkspace =
       ...w,
       connection:
         localEndpoint(w.connection) ?? (backed ? fallback : undefined),
-      panels: w.panels.map((p) => restorePanel(convertLegacyPanel(p))),
+      panels: w.panels.map((p) => restorePanel(migratePanel(p))),
     };
   };
 

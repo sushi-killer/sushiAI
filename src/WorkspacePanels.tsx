@@ -9,6 +9,8 @@ import { RenderProfiler } from "./RenderProfiler";
 import { Icon } from "./PanelIcon";
 import type { ExtensionRegistry } from "./extensions/registry";
 import { ExtensionSurface } from "./extensions/SurfaceRenderer";
+import { extensionArgsUpdate } from "./extensions/args";
+import type { PanelUpdate } from "./workspace/workspace-actions";
 import type {
   CoreViewProps,
   LaunchAgentRequest,
@@ -41,7 +43,7 @@ type PanelHostProps = {
   onStart(panelId: string): void;
   onReopen(panelId: string): void;
   /** Saves per-pane state (Files folder) on the panel. */
-  onPatch(panelId: string, patch: Partial<Panel>): void;
+  onPatch(panelId: string, patch: PanelUpdate): void;
   onNavigate(panelId: string, url: string): void;
   onHTML(root: string, file: string, endpoint?: string): void;
   onSend(panel: Panel, text: string): void;
@@ -178,9 +180,7 @@ export const PanelHost = memo(function PanelHost({
             cwd={cwd}
             connection={endpoint}
             registry={extensionRegistry}
-            onArgs={(args) =>
-              onPatch(panel.id, { extension: { ...panel.extension, args } })
-            }
+            onArgs={(patch) => onPatch(panel.id, extensionArgsUpdate(patch))}
           />
         ) : (
           <ChatPanel

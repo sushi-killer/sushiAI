@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import type { CoreViewProps } from "../extensions/coreViews.ts";
 import { openSettings } from "../app/openSettings.ts";
 import { OrchestratorPanel } from "./OrchestratorPanel";
-import { parseView, patchArgs } from "./paneArgs.ts";
+import { parseView } from "./paneArgs.ts";
 
 /** The Orchestrator pane: maps the pane's args {view, host, repo} onto the
  * panel's own props and writes its changes back. */
@@ -20,11 +20,9 @@ export function OrchestrationView({
       view={view}
       host={args.host}
       repo={args.repo}
-      onViewChange={(next) =>
-        onArgs(patchArgs(args, { view: next && JSON.stringify(next) }))
-      }
+      onViewChange={(next) => onArgs({ view: next && JSON.stringify(next) })}
       onAddHost={() => openSettings("connections")}
-      onHostChange={({ host, repo }) => onArgs(patchArgs(args, { host, repo }))}
+      onHostChange={({ host, repo }) => onArgs({ host, repo })}
     />
   );
 }

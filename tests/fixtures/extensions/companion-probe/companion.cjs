@@ -3,6 +3,7 @@
 // $SUSHIAI_HOME/probe (the only environment a companion inherits):
 //   exit-now      write "boom" to stderr and exit 1 before answering hello
 //   ignore-term   ignore SIGTERM, so only SIGKILL ends it
+//   no-hello      never answer hello (the app gives up on it)
 // It records what it was started with and what it was asked.
 const fs = require("node:fs");
 const path = require("node:path");
@@ -37,13 +38,15 @@ const decoder = createDecoder();
 process.stdin.on("data", (chunk) => {
   for (const frame of decoder.push(chunk)) {
     const { id, method, params } = JSON.parse(frame.json);
-    if (method === "hello") send({ id, result: { protocol: 1 } });
-    else if (method === "view.read")
+    if (method === "hello") {
+      if (!fs.existsSync(path.join(dir, "no-hello")))
+        send({ id, result: { protocol: 1 } });
+    } else if (method === "view.read")
       send({
         id,
         result: {
           values: {
-            hub: { text: "Linked", tone: "ok" },
+            service: { text: "Connected", tone: "ok" },
             pairing: "probe-pairing-code",
             note: null,
           },

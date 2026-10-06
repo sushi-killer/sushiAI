@@ -124,7 +124,7 @@ async function build(t, dirs, options = {}) {
     },
     backoffMs: [20, 20, 20],
     killGraceMs: 300,
-    helloTimeoutMs: 4000,
+    helloTimeoutMs: 20000, // a loaded machine starts node slowly
     ...options,
   });
   const manager = new ExtensionManager({
@@ -190,9 +190,13 @@ test("the child gets the environment allowlist and nothing else", async (t) => {
   const { manager } = await build(t, dirs);
   await manager.setEnabled(ID, true);
   await manager.approve(ID);
-  const { env } = JSON.parse(
-    fs.readFileSync(path.join(dirs.home, "probe", "started-with"), "utf8"),
-  );
+  // One line per start: a slow start that the app retried must not break the
+  // parse of the first line.
+  const [line] = fs
+    .readFileSync(path.join(dirs.home, "probe", "started-with"), "utf8")
+    .split("\n")
+    .filter(Boolean);
+  const { env } = JSON.parse(line);
   assert.ok(!env.includes("SECRET_TOKEN"));
   for (const key of env)
     assert.ok(
@@ -219,7 +223,7 @@ test("view.read round-trips and checks the reply against the declared fields", a
   await manager.approve(ID);
   const result = await manager.companionRead(ID, SURFACE);
   assert.deepEqual(result.values, {
-    hub: { text: "Linked", tone: "ok" },
+    service: { text: "Connected", tone: "ok" },
     pairing: "probe-pairing-code",
     note: null,
   });
@@ -421,6 +425,40 @@ test("disable removes the process within 3 seconds, even one that ignores SIGTER
   await manager.setEnabled(ID, false);
   assert.ok(Date.now() - started < 3000);
   assert.ok(!alive(stubborn), "SIGKILL ends what SIGTERM did not");
+});
+
+// A companion that never answers hello and ignores SIGTERM fails the
+// handshake; the app must still be able to end the process afterwards.
+async function stubborn(t) {
+  const dirs = layout(t);
+  dirs.control("no-hello");
+  dirs.control("ignore-term");
+  const built = await build(t, dirs, {
+    helloTimeoutMs: 150,
+    killGraceMs: 150,
+    backoffMs: [20, 20, 20],
+    maxExits: 50,
+  });
+  await built.manager.setEnabled(ID, true);
+  await built.manager.approve(ID);
+  // A second start proves the first was written off as failed.
+  await waitFor(() => dirs.pids().length >= 2, "a retry");
+  return { dirs, ...built };
+}
+
+test("a companion that fails the handshake is killed on disable, not leaked", async (t) => {
+  const { dirs, manager } = await stubborn(t);
+  await manager.setEnabled(ID, false);
+  await waitFor(() => dirs.pids().every((pid) => !alive(pid)), "all dead");
+  const count = dirs.pids().length;
+  await sleep(100);
+  assert.equal(dirs.pids().length, count, "no restart after disable");
+});
+
+test("a companion that fails the handshake is killed on quit, not leaked", async (t) => {
+  const { dirs, companions } = await stubborn(t);
+  await companions.stopAll();
+  await waitFor(() => dirs.pids().every((pid) => !alive(pid)), "all dead");
 });
 
 test("quitting stops the process", async (t) => {

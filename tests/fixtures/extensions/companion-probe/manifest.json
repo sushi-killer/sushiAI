@@ -22,7 +22,7 @@
         "view": {
           "kind": "companion",
           "fields": [
-            { "id": "hub", "label": "Link", "type": "status" },
+            { "id": "service", "label": "Service", "type": "status" },
             { "id": "pairing", "label": "Pairing code", "type": "qr" },
             { "id": "note", "label": "Note", "type": "text" }
           ],

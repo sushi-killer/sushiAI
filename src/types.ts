@@ -1,11 +1,117 @@
 export type PanelKind =
   "agent" | "terminal" | "browser" | "chat" | "files" | "orchestrator";
+export type Connector = { kind: "ssh" } | { kind: "command"; argv: string[] };
+export type ConnectorState = {
+  /** "local" or a connection id. */
+  host: string;
+  state: "connecting" | "ready" | "need_auth" | "failed" | "offline";
+  reason?:
+    | "host_key_changed"
+    | "revoked"
+    | "incompatible"
+    | "not_installed"
+    | "daemon_died"
+    | (string & {});
+  message?: string;
+  version?: string;
+  capabilities?: string[];
+  /** Bumps on every reconnect; events of an older generation are stale. */
+  generation: number;
+};
+/** One entry of `daemonStates()` and the payload of `daemon-state`. */
+export type DaemonState = ConnectorState;
+export type DaemonAsk = {
+  askId: string;
+  session: string;
+  tool?: string | null;
+  input: unknown;
+};
+/** Mirrors the Rust `SessionInfo` (camelCase, agent fields flattened). */
+export type DaemonSession = {
+  id: string;
+  cmd: string[];
+  cwd: string;
+  title?: string | null;
+  /** Process status. */
+  status: "running" | "detached" | "exited";
+  exitCode?: number;
+  holderPid?: number;
+  cols: number;
+  rows: number;
+  agent?: string;
+  agentSession?: string;
+  transcriptPath?: string;
+  agentStatus?: "starting" | "working" | "blocked" | "idle" | "exited";
+  statusSource?: "hook" | "heuristic";
+  /** Unix milliseconds of the last agent status change. */
+  statusSince?: number;
+  asks?: DaemonAsk[];
+  /** Catalog binding (gap G11) and shell title (gap G13); not in Rust yet. */
+  project?: string;
+  group?: string;
+  terminalTitle?: string;
+};
+export type DaemonEventBody =
+  | { method: "session.created"; params: DaemonSession }
+  | { method: "session.updated"; params: DaemonSession }
+  | { method: "session.removed"; params: { id: string } }
+  | { method: "session.exited"; params: { id: string; code: number | null } }
+  | { method: "session.status"; params: unknown }
+  | { method: "session.meta"; params: unknown }
+  | { method: "session.ask"; params: DaemonAsk }
+  | { method: "session.askClosed"; params: { id?: string; askId: string } }
+  | {
+      method: "session.open";
+      params: { id: string; target: string; arg: string; nonce: string };
+    }
+  | { method: "session.resync"; params: { id?: string } };
+export type DaemonEvent = DaemonEventBody & {
+  host: string;
+  generation: number;
+};
+/** Launch through the daemon; process variables and claudeSettings are built in main. */
+export type DaemonLaunchRequest = {
+  host: string;
+  agent?: string;
+  cwd: string;
+  cols: number;
+  rows: number;
+  title?: string;
+  model?: string;
+  prompt?: string;
+  resume?: string;
+  extraArgs?: string[];
+  project?: string;
+  group?: string;
+  claudeAccountId?: string;
+  codexAccountId?: string;
+  modelProfileId?: string;
+  worktree?: { branch: string; base?: string };
+  idempotencyKey: string;
+};
+export type DaemonTerminalEvent = {
+  panelId: string;
+  data?: string;
+  snapshot?: string;
+  cols?: number;
+  rows?: number;
+  exited?: boolean;
+};
+export type HostInstallResult = {
+  status: "installed" | "unchanged";
+  version: string;
+  path: string;
+  platform: string;
+  sha256: string;
+};
 export type ConnectionProfile = {
   id: string;
   name: string;
   host: string;
   port?: number;
   socket: string;
+  /** How the desktop reaches the sushiai daemon on this host; ssh when unset. */
+  connector?: Connector;
   connected?: boolean;
   /** Hidden from the workspace sidebar - the tunnel itself is unaffected. */
   hidden?: boolean;
@@ -79,6 +185,8 @@ type PanelState = {
   /** A Herdr pane that is gone from its host: the slot stays in the layout
    * with a Reopen button until the user reopens or closes it. */
   ended?: boolean;
+  /** The daemon session this panel is bound to. */
+  sessionId?: string;
   pinned?: boolean;
   updatedAt?: number;
   note?: string;
@@ -612,6 +720,53 @@ export interface Bridge {
     lines: number,
     position?: { column: number; row: number; fast?: boolean },
   ): Promise<void>;
+  daemonStates(): Promise<DaemonState[]>;
+  onDaemonState(callback: (state: DaemonState) => void): () => void;
+  sessionsList(host: string): Promise<DaemonSession[]>;
+  onDaemonEvent(callback: (event: DaemonEvent) => void): () => void;
+  daemonSessionLaunch(
+    request: DaemonLaunchRequest,
+  ): Promise<{ host: string; sessionId: string }>;
+  sessionClose(host: string, id: string, graceful: boolean): Promise<void>;
+  sessionRemove(host: string, id: string): Promise<void>;
+  sessionUpdate(
+    host: string,
+    patch: { id: string; project?: string; group?: string; title?: string },
+  ): Promise<void>;
+  sessionRead(
+    host: string,
+    id: string,
+    scrollback?: number,
+  ): Promise<{ text: string; rows: number; cols: number }>;
+  sessionInput(host: string, id: string, data: string): Promise<void>;
+  askRespond(
+    host: string,
+    response: {
+      sessionId: string;
+      askId: string;
+      decision: "allow" | "deny";
+      message?: string;
+    },
+  ): Promise<void>;
+  daemonTerminalAttach(input: {
+    panelId: string;
+    host: string;
+    sessionId: string;
+    cols: number;
+    rows: number;
+    scrollback?: number;
+  }): Promise<void>;
+  daemonTerminalWrite(panelId: string, data: string): Promise<void>;
+  daemonTerminalResize(
+    panelId: string,
+    cols: number,
+    rows: number,
+  ): Promise<void>;
+  daemonTerminalDetach(panelId: string): Promise<void>;
+  daemonTerminalAck(panelId: string, bytes: number): Promise<void>;
+  daemonTerminalAttachFile(panelId: string, path: string): Promise<void>;
+  onDaemonTerminal(callback: (event: DaemonTerminalEvent) => void): () => void;
+  hostInstall(host: string): Promise<HostInstallResult>;
   herdr(
     socket: string,
     method: string,

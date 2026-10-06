@@ -46,6 +46,7 @@ const { ipcResult } = require("./ipc/errors.cjs");
 const { registerSessionLaunchIpc } = require("./session-launch.cjs");
 const { assertHerdrCompatibility } = require("./herdr-compatibility.cjs");
 const { registerExtensionIpc } = require("./ipc/extensions.cjs");
+const { registerDaemonIpc } = require("./ipc/daemon.cjs");
 const { registerAttentionIpc } = require("./attention.cjs");
 const {
   registerWorkspaceSnapshot,
@@ -204,6 +205,7 @@ registerProjectIpc({
   terminalPending,
   projects,
 });
+registerDaemonIpc({ handle });
 registerExtensionIpc({
   handle,
   getExtensions: () => extensions,

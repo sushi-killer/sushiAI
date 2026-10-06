@@ -76,6 +76,37 @@ contextBridge.exposeInMainWorld("nativeBridge", {
     ipcRenderer.on("herdr-event", listener);
     return () => ipcRenderer.removeListener("herdr-event", listener);
   },
+  daemonStates: invoke("daemon-states"),
+  onDaemonState: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on("daemon-state", listener);
+    return () => ipcRenderer.removeListener("daemon-state", listener);
+  },
+  sessionsList: invoke("daemon-sessions-list"),
+  onDaemonEvent: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on("daemon-event", listener);
+    return () => ipcRenderer.removeListener("daemon-event", listener);
+  },
+  daemonSessionLaunch: invoke("daemon-session-launch"),
+  sessionClose: invoke("daemon-session-close"),
+  sessionRemove: invoke("daemon-session-remove"),
+  sessionUpdate: invoke("daemon-session-update"),
+  sessionRead: invoke("daemon-session-read"),
+  sessionInput: invoke("daemon-session-input"),
+  askRespond: invoke("daemon-ask-respond"),
+  daemonTerminalAttach: invoke("daemon-terminal-attach"),
+  daemonTerminalWrite: invoke("daemon-terminal-write"),
+  daemonTerminalResize: invoke("daemon-terminal-resize"),
+  daemonTerminalDetach: invoke("daemon-terminal-detach"),
+  daemonTerminalAck: invoke("daemon-terminal-ack"),
+  daemonTerminalAttachFile: invoke("daemon-terminal-attach-file"),
+  onDaemonTerminal: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on("daemon-terminal-data", listener);
+    return () => ipcRenderer.removeListener("daemon-terminal-data", listener);
+  },
+  hostInstall: invoke("host-install"),
   orchestrator: invoke("orchestrator"),
   onOrchestrator: (callback) => {
     const listener = (_, data) => callback(data);

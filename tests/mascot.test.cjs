@@ -2,95 +2,86 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const {
   MASCOT_TIMED_MS,
-  MASCOT_ANSWERED_MS,
+  MASCOT_CONFIRMED_MS,
   MASCOT_MAX_NOTICES,
-  MAX_ANSWER_CHARS,
+  MAX_REPLY_CHARS,
   noticeLifetimeMs,
   queueReducer,
-  validateAnswer,
+  validateAction,
   mascotBounds,
   MAX_HEIGHT_RATIO,
 } = require("../electron/mascot.cjs");
 
-const notice = (kind, taskId, body = "b") => ({
-  taskId,
-  repo: "/repo",
+const notice = (kind, key, extra = {}) => ({
+  source: "src",
+  key,
   kind,
   title: "t",
-  body,
-  focus: kind === "input" ? "question" : "summary",
+  body: "b",
+  ...extra,
 });
 const add = (state, n, now = 1000) =>
   queueReducer(state, { type: "add", notice: n, now });
-const ids = (state) => state.map((item) => `${item.kind}:${item.taskId}`);
+const ids = (state) => state.map((item) => item.id);
 
 test("the queue puts the newest notice first and caps its length", () => {
   let state = [];
-  const tasks = ["a", "b", "c", "d", "e", "f", "g"];
-  for (const id of tasks) state = add(state, notice("done", id));
+  for (const key of ["a", "b", "c", "d", "e", "f", "g"])
+    state = add(state, notice("done", key));
   assert.equal(MASCOT_MAX_NOTICES, 5);
-  assert.deepEqual(ids(state), [
-    "done:g",
-    "done:f",
-    "done:e",
-    "done:d",
-    "done:c",
+  assert.deepEqual(ids(state), ["src:g", "src:f", "src:e", "src:d", "src:c"]);
+});
+
+test("a notice is one entry per source and key and moves to the front", () => {
+  let state = [];
+  for (const key of ["a", "b"]) state = add(state, notice("done", key));
+  state = add(state, notice("done", "a"), 2000);
+  assert.deepEqual(ids(state), ["src:a", "src:b"]);
+  assert.equal(state[0].expiresAt, 2000 + MASCOT_TIMED_MS);
+  state = add(state, notice("done", "a-other"));
+  assert.equal(state.length, 3);
+  // The same key from another source is another entry.
+  state = add(state, notice("done", "a", { source: "other" }));
+  assert.deepEqual(ids(state).slice(0, 2), ["other:a", "src:a-other"]);
+  assert.equal(state.length, 4);
+});
+
+test("replacing a notice drops its confirmed state", () => {
+  let state = add([], notice("input", "a", { body: "older" }), 1000);
+  state = add(state, notice("input", "b"), 1100);
+  state = queueReducer(state, {
+    type: "confirm",
+    id: "src:a",
+    message: "Sent",
+    now: 1400,
+  });
+  state = add(state, notice("input", "a", { body: "newer" }), 1500);
+  const a = state.filter((item) => item.key === "a");
+  assert.equal(a.length, 1);
+  assert.equal(a[0].body, "newer");
+  assert.equal(a[0].confirmed, undefined);
+  assert.equal(a[0].expiresAt, null);
+  assert.equal(state[0], a[0]);
+  assert.ok(state.some((item) => item.key === "b"));
+});
+
+test("dismiss removes one notice by id; clear removes a source or all non-sticky", () => {
+  let state = add(add([], notice("done", "a")), notice("failed", "b"));
+  state = queueReducer(state, { type: "dismiss", id: state[0].id });
+  assert.deepEqual(ids(state), ["src:a"]);
+  assert.deepEqual(queueReducer(state, { type: "clear" }), []);
+  const mixed = add(state, notice("info", "x", { source: "other" }));
+  assert.deepEqual(ids(queueReducer(mixed, { type: "clear", source: "src" })), [
+    "other:x",
   ]);
 });
 
-test("a repeated notice (same kind, task and body) moves to the front once", () => {
-  let state = [];
-  for (const id of ["a", "b"]) state = add(state, notice("done", id));
-  state = add(state, notice("done", "a"), 2000);
-  assert.deepEqual(ids(state), ["done:a", "done:b"]);
-  assert.equal(state[0].expiresAt, 2000 + MASCOT_TIMED_MS);
-  state = add(state, notice("done", "a", "other body"));
-  assert.equal(state.length, 3);
-});
-
-test("a new question from a task replaces that task's older input notice", () => {
-  let state = [];
-  state = add(state, notice("input", "a", "older question"), 1000);
-  state = add(state, notice("input", "b", "other task question"), 1100);
-  state = add(state, notice("done", "a", "finished"), 1200);
-  state = add(state, notice("failed", "a", "failed"), 1300);
-  state = queueReducer(state, { type: "answered", taskId: "a", now: 1400 });
-  state = add(state, notice("input", "a", "new question"), 1500);
-
-  const inputsForA = state.filter(
-    (item) => item.kind === "input" && item.taskId === "a",
-  );
-  assert.equal(inputsForA.length, 1);
-  assert.equal(inputsForA[0].body, "new question");
-  assert.equal(inputsForA[0].answered, undefined);
-  assert.equal(inputsForA[0].expiresAt, null);
-  assert.equal(state[0], inputsForA[0]);
-  assert.ok(
-    state.some(
-      (item) =>
-        item.kind === "input" &&
-        item.taskId === "b" &&
-        item.body === "other task question",
-    ),
-  );
-  assert.ok(state.some((item) => item.kind === "done" && item.taskId === "a"));
-  assert.ok(
-    state.some((item) => item.kind === "failed" && item.taskId === "a"),
-  );
-});
-
-test("dismiss removes one notice by id and clear removes all", () => {
-  let state = add(add([], notice("done", "a")), notice("failed", "b"));
-  state = queueReducer(state, { type: "dismiss", id: state[0].id });
-  assert.deepEqual(ids(state), ["done:a"]);
-  assert.deepEqual(queueReducer(state, { type: "clear" }), []);
-});
-
-test("lifetimes: input waits for the owner, done and failed last 10000 ms", () => {
+test("lifetimes: input and sticky wait, others last 10000 ms", () => {
   assert.equal(MASCOT_TIMED_MS, 10000);
   assert.equal(noticeLifetimeMs(notice("input", "a")), null);
-  assert.equal(noticeLifetimeMs(notice("done", "a")), 10000);
-  assert.equal(noticeLifetimeMs(notice("failed", "a")), 10000);
+  assert.equal(noticeLifetimeMs(notice("info", "a", { sticky: true })), null);
+  for (const kind of ["done", "failed", "info"])
+    assert.equal(noticeLifetimeMs(notice(kind, "a")), 10000);
   let state = add(
     add(add([], notice("input", "a")), notice("done", "b")),
     notice("failed", "c"),
@@ -99,76 +90,89 @@ test("lifetimes: input waits for the owner, done and failed last 10000 ms", () =
   state = queueReducer(state, { type: "expire", now: 1000 + 9999 });
   assert.equal(state.length, 3);
   state = queueReducer(state, { type: "expire", now: 1000 + 10000 });
-  assert.deepEqual(ids(state), ["input:a"]);
+  assert.deepEqual(ids(state), ["src:a"]);
   assert.equal(queueReducer(state, { type: "expire", now: 1e15 }).length, 1);
 });
 
-test("a needs-input notice is dropped once its task is no longer waiting", () => {
+test("retract removes a source's key but leaves a confirmed notice its short life", () => {
   let state = add(
     add(add([], notice("input", "a")), notice("input", "b")),
-    notice("done", "a"),
+    notice("done", "a2"),
   );
-  const same = queueReducer(state, {
-    type: "task",
-    taskId: "a",
-    status: "waiting",
+  state = queueReducer(state, { type: "retract", source: "src", key: "a" });
+  assert.deepEqual(ids(state), ["src:a2", "src:b"]);
+  state = queueReducer(state, { type: "retract", source: "other", key: "b" });
+  assert.equal(state.length, 2);
+  state = queueReducer(state, {
+    type: "confirm",
+    id: "src:b",
+    message: "Sent",
+    now: 5000,
   });
-  assert.equal(same, state);
-  state = queueReducer(state, { type: "task", taskId: "a", status: "running" });
-  assert.deepEqual(ids(state), ["done:a", "input:b"]);
-});
-
-test("an answered notice shows a short confirmation and survives the task leaving waiting", () => {
-  let state = add([], notice("input", "a"));
-  state = queueReducer(state, { type: "answered", taskId: "a", now: 5000 });
-  assert.equal(state[0].answered, true);
-  assert.equal(state[0].expiresAt, 5000 + MASCOT_ANSWERED_MS);
-  state = queueReducer(state, { type: "task", taskId: "a", status: "running" });
-  assert.equal(state.length, 1);
+  assert.equal(
+    state.find((i) => i.key === "b").expiresAt,
+    5000 + MASCOT_CONFIRMED_MS,
+  );
+  state = queueReducer(state, { type: "retract", source: "src", key: "b" });
+  assert.equal(state.length, 2);
   state = queueReducer(state, {
     type: "expire",
-    now: 5000 + MASCOT_ANSWERED_MS,
+    now: 5000 + MASCOT_CONFIRMED_MS,
   });
-  assert.deepEqual(state, []);
+  assert.deepEqual(ids(state), ["src:a2"]);
 });
 
-const waiting = {
-  id: "a",
-  status: "waiting",
-  question: { text: "q", options: [] },
-};
-const queue = add([], notice("input", "a"));
+const reply = notice("input", "a", {
+  reply: true,
+  actions: [{ id: "open", label: "Open" }],
+});
+const queue = add([], reply);
 
-test("validateAnswer accepts a queued waiting task and returns the trimmed text", () => {
-  assert.equal(validateAnswer("a", "  yes  ", waiting, queue), "yes");
+test("validateAction accepts a queued notice's action and a trimmed reply", () => {
+  assert.deepEqual(
+    validateAction("src:a", "open", undefined, queue).text,
+    undefined,
+  );
+  assert.equal(validateAction("src:a", "reply", "  yes  ", queue).text, "yes");
   assert.equal(
-    validateAnswer("a", "x".repeat(MAX_ANSWER_CHARS), waiting, queue).length,
-    MAX_ANSWER_CHARS,
+    validateAction("src:a", "reply", "x".repeat(MAX_REPLY_CHARS), queue).text
+      .length,
+    MAX_REPLY_CHARS,
+  );
+  assert.equal(
+    validateAction("src:a", "open", undefined, queue).entry.key,
+    "a",
   );
 });
 
-test("validateAnswer rejects every bad case", () => {
-  assert.equal(MAX_ANSWER_CHARS, 2000);
-  const bad = (...args) => assert.throws(() => validateAnswer(...args));
-  bad("a", "yes", { ...waiting, status: "running" }, queue);
-  bad("a", "yes", { id: "a", status: "waiting" }, queue);
-  bad("a", "yes", null, queue);
-  bad("a", "yes", { ...waiting, id: "other" }, queue);
-  bad("b", "yes", { ...waiting, id: "b" }, queue);
-  bad("a", "yes", waiting, add([], notice("done", "a")));
-  bad("a", "yes", waiting, []);
-  bad("a", "yes", waiting);
-  const answered = queueReducer(queue, {
-    type: "answered",
-    taskId: "a",
+test("validateAction rejects every bad case", () => {
+  assert.equal(MAX_REPLY_CHARS, 2000);
+  const bad = (re, ...args) => assert.throws(() => validateAction(...args), re);
+  bad(/Invalid notice/, 7, "open", undefined, queue);
+  bad(/Invalid notice/, "", "open", undefined, queue);
+  bad(/gone/, "src:zzz", "open", undefined, queue);
+  bad(/gone/, "src:a", "open", undefined, []);
+  bad(/gone/, "src:a", "open");
+  bad(/Invalid action/, "src:a", "Open", undefined, queue);
+  bad(/Invalid action/, "src:a", "../x", undefined, queue);
+  bad(/Invalid action/, "src:a", 5, undefined, queue);
+  bad(/Unknown action/, "src:a", "other", undefined, queue);
+  bad(/Invalid reply/, "src:a", "reply", 42, queue);
+  bad(/Invalid reply/, "src:a", "open", 42, queue);
+  bad(/Type a reply/, "src:a", "reply", "   \n ", queue);
+  bad(/too long/, "src:a", "reply", "x".repeat(MAX_REPLY_CHARS + 1), queue);
+  const plain = add(
+    [],
+    notice("done", "p", { actions: [{ id: "open", label: "Open" }] }),
+  );
+  bad(/takes no reply/, "src:p", "reply", "yes", plain);
+  const confirmed = queueReducer(queue, {
+    type: "confirm",
+    id: "src:a",
+    message: "Sent",
     now: 1,
   });
-  bad("a", "yes", waiting, answered);
-  bad("a", "", waiting, queue);
-  bad("a", "   \n ", waiting, queue);
-  bad("a", 42, waiting, queue);
-  bad("a", "x".repeat(MAX_ANSWER_CHARS + 1), waiting, queue);
-  bad(7, "yes", waiting, queue);
+  bad(/gone/, "src:a", "reply", "yes", confirmed);
 });
 
 test("mascotBounds hugs the bottom-right of the work area and grows for input", () => {
@@ -208,32 +212,32 @@ test("mascotBounds clamps a reported content height and stays bottom-right", () 
   assert.equal(mascotBounds(tiny, queue, 5000).height, min);
 });
 
-test("core-update is one permanent entry that only dismiss removes", () => {
-  const core = { kind: "core-update", title: "t", body: "b" };
-  assert.equal(noticeLifetimeMs(core), null);
+test("a sticky notice survives a global clear, expiry and a retract of other keys", () => {
+  const sticky = notice("info", "keep", { sticky: true });
   let state = add([], notice("done", "a"));
-  state = add(state, core);
-  state = add(state, { ...core, body: "again" });
-  assert.equal(state.filter((item) => item.kind === "core-update").length, 1);
-  assert.equal(state[0].kind, "core-update");
+  state = add(state, sticky);
+  state = add(state, { ...sticky, body: "again" });
+  assert.equal(state.filter((item) => item.sticky).length, 1);
   assert.equal(state[0].expiresAt, null);
-  state = add(state, notice("done", "b"));
-  state = add(state, core);
-  assert.equal(state[0].id, "core-update");
+  assert.equal(state[0].body, "again");
   for (const action of [
-    { type: "task", taskId: "a", status: "running" },
-    { type: "answered", taskId: "a", now: 1 },
+    { type: "retract", source: "src", key: "a" },
     { type: "expire", now: 1e15 },
     { type: "clear" },
   ])
     assert.ok(
-      queueReducer(state, action).some((item) => item.id === "core-update"),
+      queueReducer(state, action).some((item) => item.id === "src:keep"),
       action.type,
     );
   assert.deepEqual(queueReducer(state, { type: "clear" }).length, 1);
   assert.ok(
-    !queueReducer(state, { type: "dismiss", id: "core-update" }).some(
-      (item) => item.id === "core-update",
+    !queueReducer(state, { type: "dismiss", id: "src:keep" }).some(
+      (item) => item.id === "src:keep",
+    ),
+  );
+  assert.ok(
+    !queueReducer(state, { type: "clear", source: "src" }).some(
+      (item) => item.id === "src:keep",
     ),
   );
 });

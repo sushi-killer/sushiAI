@@ -56,13 +56,6 @@ function mascotIconPath(trayIconPath) {
   return path.join(path.dirname(trayIconPath), "sushi-dock.png");
 }
 
-/** Where an orchd task notice goes: nowhere when notifications are off, the
- * desktop mascot when it is on (focused window or not), else a native one. */
-function taskNoticeRoute({ enabled, mascot }) {
-  if (!enabled) return "none";
-  return mascot ? "mascot" : "native";
-}
-
 function boundedString(value, max) {
   return typeof value === "string" && value.length > 0 && value.length <= max;
 }
@@ -105,7 +98,6 @@ function registerAttentionIpc({
   const trayIcons = new Map();
   let quitting = false;
   const notifications = new Set();
-  const inputNotifications = new Map();
 
   function showWindow() {
     if (hidden) return;
@@ -240,42 +232,6 @@ function registerAttentionIpc({
     return mascot;
   }
 
-  /** An orchd task notice (needs input, done, failed). Clicking the native
-   * one shows the window and asks the renderer to open that exact task. */
-  function notifyTask(notice) {
-    const route = taskNoticeRoute({
-      enabled: preferences.notifications,
-      mascot: preferences.desktopMascot,
-    });
-    if (route === "none") return;
-    if (route === "mascot") return mascotWindow?.add(notice);
-    if (notice.kind === "input") inputNotifications.get(notice.taskId)?.close();
-    const options = { title: notice.title, body: notice.body };
-    const icon = mascotImage();
-    if (icon) options.icon = icon;
-    const notification = new Notification(options);
-    notifications.add(notification);
-    if (notice.kind === "input")
-      inputNotifications.set(notice.taskId, notification);
-    const cleanup = () => {
-      notifications.delete(notification);
-      if (inputNotifications.get(notice.taskId) === notification)
-        inputNotifications.delete(notice.taskId);
-    };
-    notification.on("click", () => {
-      cleanup();
-      showWindow();
-      send("orchestrator-open", {
-        taskId: notice.taskId,
-        repo: notice.repo,
-        focus: notice.focus,
-        ...(notice.host ? { host: notice.host } : {}),
-      });
-    });
-    notification.on("close", cleanup);
-    notification.show();
-  }
-
   handle("attention-notify", (notice) => notify(notice));
   handle("attention-badge", (count, working) => setBadge(count, working));
   handle("app-preferences", () => ({ ...preferences }));
@@ -284,7 +240,10 @@ function registerAttentionIpc({
   return {
     init,
     showWindow,
-    notifyTask,
+    /** The current preferences (a copy). */
+    getPreferences: () => ({ ...preferences }),
+    /** The mascot picture for native notifications, or null. */
+    mascotImage,
     /** Called from the window's `close` listener; returns true when the
      * event was intercepted (hidden) so main.cjs can `preventDefault()`. */
     handleWindowClose(win) {
@@ -324,6 +283,5 @@ module.exports = {
   trayIconFile,
   validateNotice,
   mascotIconPath,
-  taskNoticeRoute,
   registerAttentionIpc,
 };

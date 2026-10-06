@@ -9,7 +9,6 @@ const {
   trayIconFile,
   validateNotice,
   mascotIconPath,
-  taskNoticeRoute,
 } = require("../electron/attention.cjs");
 
 test("normalizePreferences keeps valid booleans and falls back to defaults otherwise", () => {
@@ -226,13 +225,6 @@ test("trayIconFile picks the state's mark and falls back to the plain one", () =
     trayIconFile(base, "attention", () => false),
     base,
   );
-});
-
-test("taskNoticeRoute is silent when off, the mascot when on, native when the mascot is off", () => {
-  for (const mascot of [true, false])
-    assert.equal(taskNoticeRoute({ enabled: false, mascot }), "none");
-  assert.equal(taskNoticeRoute({ enabled: true, mascot: true }), "mascot");
-  assert.equal(taskNoticeRoute({ enabled: true, mascot: false }), "native");
 });
 
 test("mascotIconPath sits beside the tray icon", () => {

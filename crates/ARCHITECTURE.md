@@ -123,8 +123,8 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
   `rev`, and live records absent from it become tombstones without a `rev` bump (so
   do the groups of a removed project). A project removed and added again is live
   with the next full projects sync, and its groups come back with the next full
-  groups sync. The groups replica is write-only until a catalog read exists: nothing
-  in the daemon reads it back. The replica is
+  groups sync. `catalog.get {}` (capability `catalogRead`) answers
+  `{host, projects, groups}` with the live records, tombstones left out. The replica is
   saved as `<home>/catalog.json` (mode 0600, own `catalogVersion` 1) by the same
   writer thread as `state.json`. A catalog file that cannot be read is renamed to
   `catalog.json.unreadable-<ts>` and the desktop syncs again. Bindings are opaque

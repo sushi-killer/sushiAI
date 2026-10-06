@@ -45,6 +45,14 @@ fn session_update_distinguishes_unset_from_clear() {
 }
 
 #[test]
+fn catalog_snapshot_vector() {
+    let snap: sushiai_protocol::catalog::CatalogSnapshot = golden("catalog-snapshot.json");
+    assert_eq!(snap.host, "devbox");
+    assert_eq!(snap.projects[0].id, "p1");
+    assert_eq!(snap.groups[0].project_id, "p1");
+}
+
+#[test]
 fn sync_result_shape() {
     let r = SyncResult {
         applied: 1,

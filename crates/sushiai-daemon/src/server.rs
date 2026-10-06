@@ -305,6 +305,7 @@ impl Conn {
                 }
                 Ok(json!(self.registry.sync_projects(&p)))
             }
+            method::CATALOG_GET => Ok(json!(self.registry.catalog_snapshot())),
             method::GROUPS_SYNC => Ok(json!(self.registry.sync_groups(&params(request)?))),
             method::SESSION_UPDATE => {
                 let p: SessionUpdate = params(request)?;

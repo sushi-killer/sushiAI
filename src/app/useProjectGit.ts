@@ -258,7 +258,7 @@ export function useHostContext(
       const started = await latest.current.createWorkspace(
         name,
         cwd,
-        "herdr",
+        "local",
         starter,
         endpoint,
       );

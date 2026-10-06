@@ -49,7 +49,18 @@ const CHANNELS = {
     text(r.cwd, "cwd");
     text(r.idempotencyKey, "idempotencyKey", { max: 256 });
     size(r.cols, r.rows);
-    for (const key of ["agent", "title", "model", "prompt", "resume"])
+    for (const key of [
+      "agent",
+      "title",
+      "model",
+      "prompt",
+      "resume",
+      "project",
+      "group",
+      "claudeAccountId",
+      "codexAccountId",
+      "modelProfileId",
+    ])
       if (r[key] !== undefined && typeof r[key] !== "string")
         throw new Error(`Invalid ${key}.`);
     strings(r.extraArgs, "extraArgs");
@@ -150,8 +161,11 @@ const TERMINAL_CHANNELS = {
     t.attachFile(panelId, path),
 };
 
+// `launch(request)` is the session launcher (electron/session-launch.cjs,
+// createDaemonLaunch(...).launch); main.cjs passes it in.
 function registerDaemonIpc({
   handle,
+  launch,
   send = () => {},
   getManager = () => null,
   onEvent,
@@ -162,6 +176,7 @@ function registerDaemonIpc({
       validate(...args);
       const manager = getManager();
       if (channel === "daemon-states") return manager ? manager.states() : [];
+      if (channel === "daemon-session-launch" && launch) return launch(args[0]);
       const build = LIFECYCLE[channel];
       const terminal = TERMINAL_CHANNELS[channel];
       if (!build && !terminal) throw new Error(NOT_IMPLEMENTED);

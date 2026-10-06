@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const {
   SessionLauncher,
   registerSessionLaunchIpc,
-} = require("../electron/session-launch.cjs");
+} = require("../electron/herdr-session-launch.cjs");
 const { appDb, closeAppDb } = require("../electron/app-db.cjs");
 const {
   savedWorkspaces,

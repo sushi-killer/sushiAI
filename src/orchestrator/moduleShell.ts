@@ -7,6 +7,7 @@ import {
   orchestratorTarget,
   type TaskTarget,
 } from "./notices.ts";
+import { setTaskOpener } from "./moduleAttention.ts";
 import { publishReveal } from "./reveal.ts";
 import { setWorkspaceRepos } from "./workspaceRepos.ts";
 
@@ -25,14 +26,6 @@ export function openStep(
   return place.kind === "create-workspace"
     ? { kind: "workspace", cwd: place.cwd, name: place.name }
     : { kind: "surface", workspaceId: place.workspaceId };
-}
-
-let opener: ((target: TaskTarget) => void) | null = null;
-
-/** Opens a task in its orchestrator pane; the Inbox calls this. A no-op while
- * the module is off. */
-export function openOrchestratorTask(target: TaskTarget): void {
-  opener?.(target);
 }
 
 /** The open path a desktop-mascot Open button, a native notification click and
@@ -55,10 +48,10 @@ export function useOrchestratorShell(
 
   useEffect(() => {
     if (!enabled) return;
-    opener = openTask;
+    setTaskOpener(openTask);
     const off = window.bridge?.onOrchestratorOpen(openTask);
     return () => {
-      if (opener === openTask) opener = null;
+      setTaskOpener(null);
       off?.();
     };
   }, [enabled, openTask]);

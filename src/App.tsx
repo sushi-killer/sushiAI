@@ -36,7 +36,6 @@ import { useMergedCanvas } from "./workspace/mergedLayouts";
 import { useProjectView } from "./workspace/projectView";
 import { useSkills } from "./app/useSkills";
 import { useToast } from "./app/useToast";
-import { openOrchestratorTask } from "./orchestrator/moduleShell";
 import { useModuleShell } from "./extensions/useModuleShell";
 import { useUpdates } from "./app/useUpdates";
 import {
@@ -432,7 +431,6 @@ export function App() {
               activeEndpoint={activeEndpoint}
               home={system?.home}
               switchWorkspace={switchWorkspace}
-              openOrchestratorTask={openOrchestratorTask}
               addExtensionPanel={addExtensionPanel}
               setExtensionEnabled={(extensionId, enabled) =>
                 void setExtensionEnabled(extensionId, enabled)

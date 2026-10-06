@@ -225,6 +225,16 @@ const hostManifest = () =>
 const setupDaemonHost = serializePerHost((endpoint, options) =>
   setupHost(connections, endpoint, options),
 );
+const installDaemonHost = (host) => {
+  if (!daemonManager) throw new Error("daemon manager is not running");
+  return createHostInstaller({
+    manager: daemonManager,
+    connections,
+    manifest: hostManifest,
+    setup: setupDaemonHost,
+    markSetup: (name) => hostTools?.mark(name),
+  }).install(host);
+};
 // The manager is created in whenReady; subscribers registered before that
 // are served by one forwarding subscription made when it exists.
 const daemonEventListeners = new Set();
@@ -240,16 +250,7 @@ daemonIpc = registerDaemonIpc({
   onEvent: onDaemonEvent,
   attachmentsDir: path.join(app.getPath("temp"), "sushiai-attachments"),
   exec: (...args) => connections.exec(...args),
-  installHost: (host) => {
-    if (!daemonManager) throw new Error("daemon manager is not running");
-    return createHostInstaller({
-      manager: daemonManager,
-      connections,
-      manifest: hostManifest,
-      setup: setupDaemonHost,
-      markSetup: (name) => hostTools?.mark(name),
-    }).install(host);
-  },
+  installHost: installDaemonHost,
   launch: createDaemonLaunch({
     manager: {
       request: (...args) => {
@@ -362,15 +363,12 @@ orchestrator = registerOrchestratorExtension({
   send,
   notify: (notice) => attention.notifyTask(notice),
   onTask: (task) => mascot.onTask(task),
-  dataDir: path.join(app.getPath("userData"), "orchestrator"),
-  root,
-  resourcesPath: process.resourcesPath,
-  packaged: app.isPackaged,
   getClaudeMcp: () => claudeMcp,
   getModelProviders: () => modelProviders,
   getProjects: () => projects,
-  stopDaemonOnQuit: testMode.test,
   getConnections: () => connections,
+  getManager: () => daemonManager,
+  installHost: installDaemonHost,
   userDataDir: app.getPath("userData"),
   hostsChanged: () => send("orchestrator-hosts-changed"),
 });
@@ -407,6 +405,8 @@ app.whenReady().then(async () => {
       appVersion: app.getVersion(),
       isPackaged: app.isPackaged,
       resourcesPath: process.resourcesPath,
+      // A standalone orchd of a previous build is stopped before the daemon starts.
+      legacyOrchdDir: path.join(app.getPath("userData"), "orchestrator"),
       log: (message) => console.log(`daemon: ${message}`),
     });
     // One daemon host per connection profile; saving or deleting a profile

@@ -1,14 +1,7 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  RUSTUP_COMMAND,
-  needsRustMessage,
-  noSourceMessage,
-} = require("../electron/orchestrator-remote.cjs");
-const {
   hostOf,
-  hostPlatform,
-  rustupCommand,
   routeProblem,
   unavailableRoutes,
   repoSuggestions,
@@ -162,8 +155,9 @@ test("a remote reveal is taken by any panel; a local one only by its repo's pane
   resetReveal();
 });
 
-const RUST_ERROR =
-  "Rust is not installed on devbox (Linux aarch64), and orchd has to be built there. Install it on the host with: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y - then connect again.";
+const UPDATE_ERROR = "Update sushiai on lab";
+const NOT_INSTALLED_ERROR =
+  "sushiai is not installed on this host. Install it first.";
 
 test("the host selector's second line and dot follow the host and its daemon", () => {
   const { hostStatus } = require("../src/orchestrator/hosts.ts");
@@ -181,17 +175,19 @@ test("the host selector's second line and dot follow the host and its daemon", (
   });
   assert.deepEqual(hostStatus(local, "unavailable"), {
     tone: "danger",
-    detail: "This Mac · orchd unreachable",
+    detail: "This Mac · sushiai unreachable",
   });
   assert.deepEqual(hostStatus(ssh("ready")), {
     tone: "ok",
-    detail: "SSH · orchd connected",
+    detail: "SSH · sushiai connected",
   });
-  for (const state of ["connecting", "installing", "building", "starting"])
-    assert.equal(hostStatus(ssh(state)).detail, "SSH · setting up orchd");
-  assert.deepEqual(hostStatus(ssh("error", RUST_ERROR)), {
+  assert.equal(
+    hostStatus(ssh("connecting")).detail,
+    "SSH · connecting to sushiai",
+  );
+  assert.deepEqual(hostStatus(ssh("error", UPDATE_ERROR)), {
     tone: "warning",
-    detail: "SSH · orchd needs Rust",
+    detail: "SSH · sushiai needs an update",
   });
   assert.equal(
     hostStatus(ssh("error", "The SSH connection dropped.")).tone,
@@ -200,7 +196,7 @@ test("the host selector's second line and dot follow the host and its daemon", (
   // A ready host whose daemon stopped answering the panel is unreachable.
   assert.equal(
     hostStatus(ssh("ready"), "unavailable").detail,
-    "SSH · orchd unreachable",
+    "SSH · sushiai unreachable",
   );
   assert.equal(
     hostStatus({ ...ssh("idle"), enabled: false }).detail,
@@ -212,83 +208,56 @@ test("a remote host shows the setup card until it answers once; then its tasks s
   const { needsSetup } = require("../src/orchestrator/hosts.ts");
   const host = (state) => ({ id: "ssh:a", state });
   assert.equal(needsSetup({ id: "local", state: "error" }, false), false);
-  assert.equal(needsSetup(host("building"), false), true);
+  assert.equal(needsSetup(host("connecting"), false), true);
   assert.equal(needsSetup(host("connecting"), true), false);
   assert.equal(needsSetup(host("error"), false), true);
   assert.equal(needsSetup(host("error"), true), false);
   assert.equal(needsSetup(host("ready"), false), false);
 });
 
-test("the setup steps follow the host's state, with the elapsed build time", () => {
+test("the setup steps follow the host's state and offer the install where it helps", () => {
   const { setupSteps } = require("../src/orchestrator/hosts.ts");
-  const seen = (states, elapsedMs = 80_000) => ({
-    states,
-    elapsedMs,
-    address: "user@devbox",
-  });
-  const building = setupSteps(
-    { state: "building", detail: "Building orchd on devbox (a few minutes)" },
-    seen(["connecting", "building"]),
-  );
-  assert.deepEqual(
-    building.map((step) => step.state),
-    ["done", "done", "active", "pending", "pending"],
-  );
-  assert.equal(building[0].title, "Connected over SSH");
-  assert.equal(building[0].detail, "user@devbox");
-  assert.equal(building[1].detail, "no current build at ~/.sushiai/bin/orchd");
-  assert.equal(building[2].title, "Building orchd from source");
-  assert.match(building[2].detail, /cargo build --release · 1m 20s$/);
+  const seen = (states) => ({ states, address: "user@devbox" });
+  const states = (steps) => steps.map((step) => step.state);
 
-  // The platform the SSH probe read, before any error names it.
-  const probed = setupSteps(
-    {
-      state: "building",
-      detail: "Building orchd on devbox (a few minutes)",
-      platform: "Linux x86_64",
-      orchdInstalled: false,
-    },
-    seen(["connecting", "building"]),
-  );
-  assert.equal(probed[0].detail, "Linux x86_64 · user@devbox");
-  assert.equal(probed[1].detail, "not installed at ~/.sushiai/bin/orchd");
-  assert.match(probed[2].detail, /^no matching build for Linux x86_64 · /);
+  const connecting = setupSteps({ state: "connecting" }, seen([]));
+  assert.deepEqual(states(connecting), ["active", "pending", "pending"]);
+  assert.equal(connecting[0].detail, "user@devbox");
 
-  const connecting = setupSteps({ state: "connecting" }, seen(["connecting"]));
-  assert.deepEqual(
-    connecting.map((step) => step.state),
-    ["active", "pending", "pending", "pending", "pending"],
-  );
+  const reaching = setupSteps({ state: "connecting" }, seen(["connecting"]));
+  assert.deepEqual(states(reaching), ["done", "active", "pending"]);
+  assert.equal(reaching[0].title, "Connected over SSH");
 
-  const rust = setupSteps(
-    { state: "error", detail: RUST_ERROR },
-    seen(["connecting", "error"]),
+  const dropped = setupSteps(
+    { state: "error", detail: "The SSH connection dropped." },
+    seen([]),
   );
-  assert.deepEqual(
-    rust.map((step) => step.state),
-    ["done", "done", "failed", "pending", "pending"],
-  );
-  assert.equal(rust[0].detail, "Linux aarch64 · user@devbox");
-  assert.equal(rust[2].title, "Can’t build orchd here");
+  assert.deepEqual(states(dropped), ["failed", "pending", "pending"]);
+  assert.equal(dropped[0].detail, "The SSH connection dropped.");
   assert.equal(
-    rust[2].detail,
-    "no matching build for Linux aarch64, and cargo isn’t installed",
-  );
-  assert.equal(
-    rust[2].command,
-    "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+    dropped.some((step) => step.action),
+    false,
   );
 
-  const silent = setupSteps(
-    {
-      state: "error",
-      detail: "The orchestrator on devbox did not answer. Check the log.",
-    },
-    seen(["connecting", "starting", "error"]),
+  const missing = setupSteps(
+    { state: "error", detail: NOT_INSTALLED_ERROR, name: "Devbox" },
+    seen(["connecting"]),
   );
-  assert.equal(silent[4].state, "failed");
-  assert.match(silent[4].detail, /did not answer/);
-  assert.equal(silent[2].detail, "already up to date");
+  assert.deepEqual(states(missing), ["done", "failed", "pending"]);
+  assert.equal(missing[1].action.label, "Install sushiai");
+  assert.match(missing[1].action.hint, /on Devbox \(no sudo\)/);
+
+  // The `orch` capability is what the last step checks.
+  const old = setupSteps(
+    { state: "error", detail: UPDATE_ERROR, name: "Devbox" },
+    seen(["connecting"]),
+  );
+  assert.deepEqual(states(old), ["done", "done", "failed"]);
+  assert.equal(old[2].detail, UPDATE_ERROR);
+  assert.equal(old[2].action.label, "Update sushiai");
+
+  const ready = setupSteps({ state: "ready" }, seen(["connecting"]));
+  assert.deepEqual(states(ready), ["done", "done", "done"]);
 });
 
 test("the preflight strip lists git and each CLI, and names the routes it turns off", () => {
@@ -353,81 +322,15 @@ test("a host's running count skips the drafts that wait on the Plan", () => {
 test("a host the main process retries after a failure keeps showing that failure", () => {
   const { shownHost } = require("../src/orchestrator/hosts.ts");
   const retrying = { id: "ssh:a", state: "connecting", detail: "" };
-  assert.deepEqual(shownHost(retrying, RUST_ERROR), {
+  assert.deepEqual(shownHost(retrying, UPDATE_ERROR), {
     ...retrying,
     state: "error",
-    detail: RUST_ERROR,
+    detail: UPDATE_ERROR,
   });
   assert.equal(shownHost(retrying, "").state, "connecting");
   // Past connecting, the retry is real progress: it shows.
   assert.equal(
-    shownHost({ ...retrying, state: "building" }, RUST_ERROR).state,
-    "building",
+    shownHost({ ...retrying, state: "ready" }, UPDATE_ERROR).state,
+    "ready",
   );
-});
-
-test("the setup errors main builds parse back into the platform and the rustup command", () => {
-  const rust = needsRustMessage("Box", "Linux aarch64");
-  assert.equal(hostPlatform(rust), "Linux aarch64");
-  assert.equal(rustupCommand(rust), RUSTUP_COMMAND);
-  const source = noSourceMessage("Box", "Linux x86_64", "Darwin arm64");
-  assert.equal(hostPlatform(source), "Linux x86_64");
-  assert.equal(rustupCommand(source), null);
-  // An unknown platform names none.
-  assert.equal(hostPlatform(needsRustMessage("Box", "")), null);
-  assert.equal(rustupCommand(needsRustMessage("Box", "")), RUSTUP_COMMAND);
-});
-
-test("a host that needs Rust gets one button, its progress, and a Retry after a failure", () => {
-  const {
-    setupSteps,
-    buildToolsHint,
-  } = require("../src/orchestrator/hosts.ts");
-  const { rustFailedMessage } = require("../electron/orchestrator-remote.cjs");
-  const seen = (states) => ({ states, elapsedMs: 5000 });
-
-  const needs = setupSteps(
-    { state: "error", detail: RUST_ERROR, name: "Devbox" },
-    seen(["connecting", "error"]),
-  );
-  assert.equal(needs[2].action.label, "Install Rust and set up");
-  assert.equal(
-    needs[2].action.hint,
-    "Installs a minimal Rust toolchain in ~/.cargo on Devbox (no sudo), then builds and starts the orchestrator.",
-  );
-  assert.equal(needs[2].command, RUSTUP_COMMAND);
-
-  const installing = setupSteps(
-    { state: "building", detail: "Installing Rust on Devbox" },
-    seen(["connecting", "error", "building"]),
-  );
-  assert.equal(installing[2].title, "Installing Rust…");
-  assert.equal(installing[2].state, "active");
-  assert.equal(installing[2].action, undefined);
-
-  const failed = setupSteps(
-    {
-      state: "error",
-      detail: rustFailedMessage("Devbox", "curl: (6) Could not resolve host"),
-      name: "Devbox",
-    },
-    seen(["connecting", "building", "error"]),
-  );
-  assert.equal(failed[2].state, "failed");
-  assert.equal(failed[2].title, "Couldn’t install Rust");
-  assert.equal(failed[2].detail, "curl: (6) Could not resolve host");
-  assert.equal(failed[2].action.label, "Retry");
-
-  // An upload host never sees it.
-  const upload = setupSteps(
-    { state: "installing", detail: "Uploading orchd to Devbox" },
-    seen(["connecting", "installing"]),
-  );
-  assert.equal(
-    upload.some((step) => step.action),
-    false,
-  );
-
-  assert.match(buildToolsHint("Darwin arm64"), /xcode-select --install/);
-  assert.match(buildToolsHint("Linux x86_64"), /build-essential/);
 });

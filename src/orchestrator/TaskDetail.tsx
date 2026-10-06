@@ -158,7 +158,7 @@ function AttemptRow({ attempt }: { attempt: Attempt }) {
 }
 
 /** The images the latest passing implement attempt saved, as thumbnails that
- * open full size. Orchd serves them as data URLs (the renderer cannot read
+ * open full size. The orchestrator serves them as data URLs (the renderer cannot read
  * its data directory). */
 function EvidenceGallery({ task }: { task: Task }) {
   const orchestratorClient = useOrchestratorClient();

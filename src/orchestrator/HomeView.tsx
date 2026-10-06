@@ -21,10 +21,11 @@ import {
   sameFailureNote,
   subLine,
 } from "./homeModel";
-import { elapsedLabel, ownerTasks, projectName } from "./ownerAttention";
+import { elapsedLabel } from "../lib/text";
+import { ownerTasks, projectName } from "./ownerAttention";
 import { weekSummary } from "./stats";
 import type { SpendSummary, Task } from "./types";
-import { AttentionItem, Chip, StageTrack } from "./ui";
+import { AttentionItem, Chip, StageTrack } from "../ui";
 import "./home.css";
 
 const TRY = [

@@ -11,13 +11,13 @@ import { Character } from "./Character";
 import { isTyping, mascotMood, type Typing } from "./mood";
 import type { MascotAction, MascotNotice } from "./types";
 import {
-  ageLabel,
   clickReply,
   enterReply,
   shownPick,
   togglePick,
   type ReplyChoice,
-} from "./reply";
+} from "../lib/reply";
+import { elapsedLabel } from "../lib/text";
 
 const FADE_MS = 700;
 
@@ -87,6 +87,9 @@ const TAGS: Record<MascotNotice["kind"], string> = {
 const ICONS = { check: Check, refresh: RefreshCw };
 
 /** The header's source text: where it comes from and how long ago. */
+const ageLabel = (at: number, now: number) =>
+  now - at < 60_000 ? "now" : elapsedLabel(now - at);
+
 const sourceText = (notice: MascotNotice, now: number) =>
   [notice.header, notice.at ? ageLabel(notice.at, now) : ""]
     .filter(Boolean)

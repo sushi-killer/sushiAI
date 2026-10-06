@@ -22,9 +22,9 @@ import {
   stageTrack,
   statusBadgeLabel,
   statusTone,
-  type Tone,
   variantLabel,
 } from "./helpers";
+import type { Tone } from "../ui/tone";
 import type { Attempt, Settings, Task } from "./types";
 import { RichText } from "../agents/AgentsView";
 import { TaskCostLine, TaskTimeline } from "./TaskInsights";
@@ -39,7 +39,7 @@ import {
   reportSummary,
   shortBranch,
 } from "./taskDetailModel";
-import { Chip, Criterion, StageTrack, Tag } from "./ui";
+import { Chip, Criterion, StageTrack, Tag } from "../ui";
 import "./task-detail.css";
 
 const DECISION_TAGS = ["Orchestrator"] as const;

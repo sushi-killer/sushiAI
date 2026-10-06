@@ -36,7 +36,7 @@ itself.
    line of CSS. Use its classes. If it lacks a variant, add a modifier class
    next to it. If a pattern scoped to one area (`pk-`, `np-`, `pd-`) is
    needed in a second area, promote it to a shared `ui-` primitive in
-   `src/orchestrator/ui/` in the same change and move the old callers - do
+   `src/ui/` in the same change and move the old callers - do
    not copy it under a new prefix.
 2. **Spend tokens.** Colours, radii, gaps and type come from
    `src/styles/tokens.css` (`references/tokens.md`). CI rejects a raw hex in
@@ -79,9 +79,9 @@ itself.
 | Choice list row           | `pk-row` + `pk-row-main` + `pk-text`  | `src/app/PanelPickerDialog.tsx`                               |
 | Dropdown / account menu   | `picker-account-menu` + `pk-menu-*`   | `src/app/PanelPickerDialog.tsx`                               |
 | Table of records          | `pd-table` + `pd-row` (+ `.head`)     | `src/ProjectEnvironmentTab.tsx`                               |
-| Buttons                   | `ui-button primary/secondary/ghost`   | `src/orchestrator/ui/ui.css`                                  |
-| Switch, tag, chip, banner | `Toggle`, `Tag`, `Chip`, `Banner`     | `src/orchestrator/ui/`                                        |
-| Status dot                | `ui-dot ui-tone-*`                    | `src/orchestrator/ui/ui.css`                                  |
+| Buttons                   | `ui-button primary/secondary/ghost`   | `src/ui/ui.css`                                               |
+| Switch, tag, chip, banner | `Toggle`, `Tag`, `Chip`, `Banner`     | `src/ui/`                                                     |
+| Status dot                | `ui-dot ui-tone-*`                    | `src/ui/ui.css`                                               |
 | Key hint                  | `kbd.pk-kbd`                          | `src/styles/components/picker.css`                            |
 | Error / empty             | `pd-alert`, `pd-empty`, `Empty`       | `src/styles/components/project.css`, `src/app/Empty.tsx`      |
 

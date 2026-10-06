@@ -57,7 +57,7 @@ const fixtureDirs = (
   .sort();
 assert.deepEqual(
   fixtureDirs,
-  ["probe"],
+  ["companion-probe", "probe"],
   "tests/fixtures/extensions holds an unexpected directory - delete a stale fixture or update this list",
 );
 

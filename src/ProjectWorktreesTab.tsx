@@ -6,7 +6,7 @@ import type {
   WorktreeList,
   Workspace,
 } from "./types";
-import { Tag, Toggle } from "./orchestrator/ui";
+import { Tag, Toggle } from "./ui";
 import { useWorktreeClaims } from "./app/useWorktreeClaims";
 import { relativeTime } from "./chat-threads";
 import { ProjectPage } from "./ProjectPage";

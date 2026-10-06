@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { Tone } from "../helpers";
+import type { Tone } from "./tone.ts";
 
 /** Attention/Item: one thing that needs the owner - a toned marker, the
  * title and its age, a context line, the actions and a muted meta line.

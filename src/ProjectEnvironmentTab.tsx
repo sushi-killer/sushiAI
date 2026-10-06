@@ -3,8 +3,8 @@ import { FolderImport } from "./FolderImport";
 import { useEffect, useRef, useState } from "react";
 import { Lock, Plus, X } from "lucide-react";
 import type { ConnectionProfile, Project } from "./types";
-import { Banner, Tag, Toggle } from "./orchestrator/ui";
-import type { Tone } from "./orchestrator/helpers";
+import { Banner, Tag, Toggle } from "./ui";
+import type { Tone } from "./ui/tone";
 import { ProjectPage } from "./ProjectPage";
 
 type Status = "new" | "exists" | "same" | "differs";

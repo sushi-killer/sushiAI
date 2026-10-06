@@ -2,7 +2,6 @@
 // ../orchestrator.cjs (step 6 owns that file) and is completed here; lane L6
 // flips the ownership so this file defines it and orchestrator.cjs imports it.
 const { ORCHESTRATOR_MANIFEST } = require("../orchestrator.cjs");
-const { CONTRACT } = require("./manifest.cjs");
 
 const pane = {
   id: "orchestration",
@@ -28,10 +27,7 @@ const settings = {
 };
 
 ORCHESTRATOR_MANIFEST.contributions = {
-  // TEMPORARY: the validator learns `settings.page` in lane L1. Until that is
-  // merged the surface is left out so the manifest still validates. Delete the
-  // condition after L1 lands.
-  surfaces: CONTRACT.HOSTS.has("settings.page") ? [pane, settings] : [pane],
+  surfaces: [pane, settings],
   navigation: [
     {
       id: "orchestration-picker",

@@ -178,9 +178,15 @@ test("waitingCount counts blocked and done-not-seen panels across every workspac
   assert.equal(waitingCount(ws, state, []), 1);
 });
 
-test("waitingCount adds the module items on top of the session count", async () => {
+test("waitingCount adds the module items that wait on the owner, not review rows", async () => {
   const { createAttentionState, waitingCount } = await library;
-  assert.equal(waitingCount([], createAttentionState(), [], 4), 4);
+  const items = [
+    { kind: "answer" },
+    { kind: "decide" },
+    { kind: "review" },
+    { kind: "review" },
+  ];
+  assert.equal(waitingCount([], createAttentionState(), [], items), 2);
   assert.equal(waitingCount([], createAttentionState(), []), 0);
 });
 

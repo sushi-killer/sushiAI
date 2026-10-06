@@ -47,7 +47,7 @@ import {
   PrepareProgress,
   PreparingHost,
   type PrepareFailure,
-} from "./PrepareViews";
+} from "../ui/PrepareViews";
 import { PreflightStrip, RemoteSetup, RepoPrompt } from "./RemoteHostViews";
 import { useOrchestratorHosts } from "./useHosts";
 import { useWorkspaceRepos } from "./workspaceRepos";
@@ -78,7 +78,7 @@ import type {
   Task,
 } from "./types";
 import type { Project, ProjectHostReadiness } from "../types";
-import { Banner, Tag } from "./ui";
+import { Banner, Tag } from "../ui";
 import { OrchRail } from "./OrchRail";
 import { Composer, OrchestratorRouteChip, TaskRouteLabel } from "./Composer";
 import { TaskDetail } from "./TaskDetail";

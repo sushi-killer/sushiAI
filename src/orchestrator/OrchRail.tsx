@@ -20,7 +20,7 @@ import {
 } from "./helpers";
 import { planOnly } from "./planModel";
 import type { Task } from "./types";
-import { GroupLabel, TaskRow } from "./ui";
+import { GroupLabel, TaskRow } from "../ui";
 
 function NavRow({
   icon,

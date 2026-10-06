@@ -533,7 +533,7 @@ try {
   await mascot.locator(".bubble.input").waitFor();
   await mascot.getByRole("button", { name: "Stop", exact: true }).click();
   await mascot.getByRole("button", { name: "Send answer" }).click();
-  await mascot.locator(".bubble.answered").waitFor({ timeout: 10000 });
+  await mascot.locator(".bubble.confirmed").waitFor({ timeout: 10000 });
   await shotMascot("mascot-answered");
   report.mascot.answered = await bubbleText();
   await mascot

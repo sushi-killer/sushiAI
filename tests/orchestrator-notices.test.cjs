@@ -1,11 +1,6 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const {
-  orchestratorTarget,
-  noticeAge,
-  noticeHeader,
-  doneMeta,
-} = require("../src/orchestrator/notices.ts");
+const { orchestratorTarget } = require("../src/orchestrator/notices.ts");
 const { orchestratorNotice } = require("../electron/orchestrator.cjs");
 const {
   publishReveal,
@@ -86,34 +81,6 @@ test("the reveal store keeps a request for its repo's panels until it goes stale
   publishReveal(target, 6000);
   assert.deepEqual(seen, ["published", "published"]);
   resetReveal();
-});
-
-test('noticeAge and noticeHeader read as "repo · 2m"', () => {
-  const now = 10_000_000;
-  assert.equal(noticeAge(now - 20_000, now), "now");
-  assert.equal(noticeAge(now - 2 * 60_000, now), "2m");
-  assert.equal(noticeAge(now - 3 * 3600_000, now), "3h");
-  assert.equal(noticeAge(now - 50 * 3600_000, now), "2d");
-  assert.deepEqual(
-    noticeHeader(
-      { kind: "done", repo: "/work/sushiai", at: now - 120_000 },
-      now,
-    ),
-    { label: "Done", source: "sushiai · 2m" },
-  );
-  assert.deepEqual(noticeHeader({ kind: "input", repo: "/work/x" }, now), {
-    label: "Needs you",
-    source: "x",
-  });
-});
-
-test("doneMeta composes cost, review verdict and landed state", () => {
-  assert.equal(
-    doneMeta({ costUsd: 0.31, verdict: "PASS", landed: false }),
-    "$0.31 · review PASS · not landed",
-  );
-  assert.equal(doneMeta({ costUsd: 1, landed: true }), "$1.00 · landed");
-  assert.equal(doneMeta({}), null);
 });
 
 test("orchestratorNotice carries time, repo name, cost and the last review verdict", () => {

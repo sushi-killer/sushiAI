@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { Tone } from "../helpers";
+import type { Tone } from "./tone.ts";
 
 /** Control/Tag: a small toned pill, with a leading dot unless `dot` is off
  * (a plain label). */

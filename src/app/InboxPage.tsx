@@ -1,10 +1,10 @@
 import {
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type ReactNode,
 } from "react";
 import { ArrowUpRight, ChevronDown, ChevronRight } from "lucide-react";
 import {
@@ -33,7 +33,6 @@ import {
   inboxItems,
   needsYou,
   ownsKey,
-  plural,
   reviewTargets,
   scopedHeadline,
   stepSelection,
@@ -43,6 +42,8 @@ import {
   type ModuleItem,
   type SessionItem,
 } from "./inboxModel.ts";
+import { plural } from "../lib/text.ts";
+import { AttentionItem, Chip, GroupLabel } from "../ui";
 import {
   parseSessionPrompt,
   replySteps,
@@ -77,88 +78,6 @@ const TONE = {
   review: "ok",
   panels: "info",
 } as const;
-
-/** One pickable option or filter (the shared `ui-chip` look). */
-function Chip({
-  selected = false,
-  disabled,
-  onClick,
-  children,
-}: {
-  selected?: boolean;
-  disabled?: boolean;
-  onClick?: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      className={`ui-chip${selected ? " selected" : ""}`}
-      aria-pressed={selected}
-      disabled={disabled}
-      onClick={onClick}
-    >
-      {children}
-    </button>
-  );
-}
-
-/** An uppercase group heading with a count badge. */
-function GroupLabel({ label, count }: { label: string; count: number }) {
-  return (
-    <div className="ui-group-label">
-      <span className="ui-group-label-text">{label}</span>
-      <span className="ui-count">{count}</span>
-    </div>
-  );
-}
-
-/** One queue row: a toned marker, the title and its age, a context line, the
- * actions and a muted meta line. */
-function QueueRow({
-  tone,
-  title,
-  time,
-  context,
-  question = false,
-  actions,
-  meta,
-  selected = false,
-  onOpen,
-}: {
-  tone: (typeof TONE)[keyof typeof TONE];
-  title: string;
-  time?: string;
-  context?: ReactNode;
-  question?: boolean;
-  actions?: ReactNode;
-  meta?: string;
-  selected?: boolean;
-  onOpen(): void;
-}) {
-  return (
-    <article className={`ui-attention${selected ? " selected" : ""}`}>
-      <span className="ui-attention-marker">
-        <span className={`ui-attention-dot ui-tone-${tone}`} />
-      </span>
-      <div className="ui-attention-body">
-        <div className="ui-attention-head">
-          <button type="button" className="ui-attention-title" onClick={onOpen}>
-            {title}
-          </button>
-          {time && <span className="ui-attention-time">{time}</span>}
-        </div>
-        {context && (
-          <div className={`ui-attention-context${question ? " question" : ""}`}>
-            {context}
-          </div>
-        )}
-        {actions && <div className="ui-attention-actions">{actions}</div>}
-        {meta && <span className="ui-attention-meta">{meta}</span>}
-      </div>
-    </article>
-  );
-}
 
 /** How often a blocked session's screen is re-read while it waits. */
 const SCREEN_REFRESH_MS = 2500;
@@ -545,7 +464,7 @@ export function InboxPage({
         title={item.title}
         onClick={() => setSelectedKey(item.key)}
       >
-        <QueueRow
+        <AttentionItem
           tone={TONE[item.kind]}
           title={item.title}
           time={item.at != null ? ageLabel(Date.now() - item.at) : undefined}
@@ -769,7 +688,11 @@ export function InboxPage({
     const ui = moduleUis.find((m) => m.extensionId === item.entry.extensionId);
     if (!ui) return null;
     const Detail = ui.AttentionDetail;
-    return <Detail item={item.entry.item} />;
+    return (
+      <Suspense fallback={null}>
+        <Detail item={item.entry.item} />
+      </Suspense>
+    );
   }
 
   const errorLine = error && (

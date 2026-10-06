@@ -1,5 +1,5 @@
-// Pure logic of the bubble's reply: a picked choice and typed text become one
-// reply. No React, no bridge.
+// Pure logic of a reply with options: a picked choice and typed text become
+// one reply. Shared by the mascot bubble and the Inbox. No React, no bridge.
 
 /** Typed text replaces the pick; a pick alone is sent as is. */
 export function composeReply(pick: string, note: string): string {
@@ -47,13 +47,4 @@ export function enterReply(
 ): string {
   if (now - shownAt < ENTER_ARM_MS) return "";
   return composeReply(choice.pick ?? "", choice.note);
-}
-
-/** "now", "5m", "3h", "2d": how long ago `at` was. */
-export function ageLabel(at: number, now: number): string {
-  const minutes = Math.floor(Math.max(0, now - at) / 60_000);
-  if (minutes < 1) return "now";
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
 }

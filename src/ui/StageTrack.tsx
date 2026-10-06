@@ -1,6 +1,11 @@
 import { Fragment } from "react";
 import { Check, X } from "lucide-react";
-import type { StageStep } from "../helpers";
+
+/** One step of the track; a module's own stage type fits it. */
+type StageStep = {
+  stage: string;
+  state: "done" | "active" | "blocked" | "failed" | "pending";
+};
 
 /** Orch/StageTrack: brief → implement → verify → review → land, each step a
  * marker and a label, joined by equal connectors that turn green after a

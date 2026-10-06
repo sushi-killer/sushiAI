@@ -262,3 +262,35 @@ test("the retired session backend's name fails the check in any shipped tree", (
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("core may not import a directory the composition root loads as a module", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "core-module-"));
+  const write = (file, text) => {
+    fs.mkdirSync(path.dirname(path.join(tree, file)), { recursive: true });
+    fs.writeFileSync(path.join(tree, file), text);
+  };
+  write(
+    "src/extensions/modules.ts",
+    'import { widget } from "../gadget/module.ts";\nexport const modules = [widget];\n',
+  );
+  write("src/extensions/coreViews.ts", "export const views = [];\n");
+  write("src/gadget/module.ts", "export const widget = {};\n");
+  write("src/gadget/Panel.tsx", "export const Panel = null;\n");
+  write("src/ui/Tag.tsx", "export const Tag = null;\n");
+  write("src/app/Fine.tsx", 'import { Tag } from "../ui/Tag.tsx";\n');
+  const clean = run({ MODULE_ROOT_OVERRIDE: tree });
+  assert.equal(clean.status, 0, clean.stderr);
+
+  write("src/app/Leak.tsx", 'import { Panel } from "../gadget/Panel.tsx";\n');
+  const failed = run({ MODULE_ROOT_OVERRIDE: tree });
+  assert.equal(failed.status, 1);
+  assert.match(
+    failed.stderr,
+    /src\/app\/Leak\.tsx imports \.\.\/gadget\/Panel\.tsx; core may not import src\/gadget/,
+  );
+
+  fs.rmSync(tree, { recursive: true, force: true });
+});

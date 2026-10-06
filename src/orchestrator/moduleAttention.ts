@@ -3,14 +3,13 @@ import type { AttentionItem } from "../extensions/modules.ts";
 import { groupKey } from "../app/workspaceMerge.ts";
 import { orchestratorClientFor } from "./client.ts";
 import { formatCost } from "./helpers.ts";
+import { enterReply, type ReplyChoice } from "../lib/reply.ts";
 import { hostOf } from "./hosts.ts";
 import {
-  enterAnswer,
   landTasks,
   ownerKind,
   ownerTasks,
   projectName,
-  type AnswerChoice,
 } from "./ownerAttention.ts";
 import type { TaskTarget } from "./notices.ts";
 import type { Task } from "./types.ts";
@@ -68,17 +67,17 @@ export const reviewAllTasks = {
 };
 
 /** What Enter sends in the Inbox. Enter stays unarmed for a moment after the
- * selection moves (see `enterAnswer`), except after a digit or click pick
+ * selection moves (see `enterReply`), except after a digit or click pick
  * made while this question was shown: that pick is as deliberate as a click
  * on Answer, so the Enter right after it sends it. */
 export function inboxEnterAnswer(
-  choice: AnswerChoice,
+  choice: ReplyChoice,
   selectedAt: number,
   pickedAt: number | undefined,
   now: number,
 ): string {
   const picked = pickedAt != null && pickedAt >= selectedAt;
-  return enterAnswer(choice, picked ? -Infinity : selectedAt, now);
+  return enterReply(choice, picked ? -Infinity : selectedAt, now);
 }
 
 /** The detail's branch box after the branch and +/−: "3 files · attempt 1/4

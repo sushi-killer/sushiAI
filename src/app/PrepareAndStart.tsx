@@ -1,8 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  PrepareProgress,
-  type PrepareFailure,
-} from "../orchestrator/PrepareViews";
+import { PrepareProgress, type PrepareFailure } from "../ui/PrepareViews";
 import { rememberPrepareTimes } from "../projectPrepare";
 import { prepareAndStart } from "../projectDeliver";
 import type { Project } from "../types";

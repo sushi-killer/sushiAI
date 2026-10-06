@@ -1,7 +1,7 @@
 import { Check, GitBranch, ListChecks, Monitor, Play, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Icon } from "../../PanelIcon.tsx";
-import { Tag } from "../../orchestrator/ui/index.ts";
+import { Tag } from "../../ui/index.ts";
 import { orchestratorClientFor } from "../../orchestrator/client.ts";
 import type { Task } from "../../orchestrator/types.ts";
 import { worktreeBranchError } from "../../workspace/worktree.ts";

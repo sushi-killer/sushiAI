@@ -178,6 +178,9 @@ export const PanelHost = memo(function PanelHost({
             cwd={cwd}
             connection={endpoint}
             registry={extensionRegistry}
+            onArgs={(args) =>
+              onPatch(panel.id, { extension: { ...panel.extension, args } })
+            }
           />
         ) : (
           <ChatPanel

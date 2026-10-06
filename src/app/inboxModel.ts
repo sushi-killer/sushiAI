@@ -1,6 +1,7 @@
 // The Inbox's items and filters, without React: module attention rows and
 // agent sessions in one queue, grouped by what the owner has to do with them.
 import type { InboxGroup, InboxRow } from "./attention.ts";
+import { elapsedLabel, plural } from "../lib/text.ts";
 import { groupKey } from "./workspaceMerge.ts";
 import type { AttentionItem } from "../extensions/modules.ts";
 
@@ -143,19 +144,9 @@ export function cleanupCandidates(
   return { agents: rows("idle"), shells: rows("shells") };
 }
 
-/** "1 idle session", "2 idle sessions": a count and its noun, whose last
- * word takes an "s" unless the count is one. */
-export function plural(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
-}
-
 /** "<1m" under a minute, else "2m", "1h", "3d". */
 export function ageLabel(ms: number): string {
-  const minutes = Math.max(0, Math.floor(ms / 60_000));
-  if (minutes < 1) return "<1m";
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+  return ms < 60_000 ? "<1m" : elapsedLabel(ms);
 }
 
 /** The subtitle for the items in view: "3 things need you across 1 project

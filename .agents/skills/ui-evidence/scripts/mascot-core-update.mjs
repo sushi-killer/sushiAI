@@ -44,7 +44,7 @@ try {
   if (!mascot) throw new Error("the mascot window never appeared");
   mascot.on("pageerror", (error) => report.pageErrors.push(error.message));
   await mascot
-    .locator(".bubble", { hasText: "Core updated - restart?" })
+    .locator(".bubble.info", { hasText: "Core updated - restart?" })
     .waitFor({ timeout: 10000 });
   await new Promise((resolve) => setTimeout(resolve, 700));
 

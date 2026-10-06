@@ -1,5 +1,6 @@
 // Pure helpers the renderer bends the protocol into a screen with - no
 // window.bridge access here, so they're cheap to unit test directly.
+import type { Tone } from "../ui/tone.ts";
 import { needsOwner, questionCount, questionsLabel } from "./ownerAttention.ts";
 import type {
   Attempt,
@@ -519,8 +520,6 @@ export function sortTasks(tasks: Task[]): Task[] {
 }
 
 /** The four words the design system colours by (`--tone-*`). */
-export type Tone = "ok" | "warning" | "danger" | "info" | "neutral";
-
 /** A rail row's dot and reason colour: needs you amber, went wrong red, in
  * flight blue, finished green. */
 export function taskTone(task: Task): Tone {

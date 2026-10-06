@@ -127,12 +127,15 @@ test("Clean up offers idle agents and shells apart, within the host filter", asy
   );
 });
 
-test("Inbox counts read singular for one and plural otherwise", async () => {
-  const { plural } = await load();
-  assert.equal(plural(1, "idle session"), "1 idle session");
-  assert.equal(plural(2, "idle session"), "2 idle sessions");
-  assert.equal(plural(1, "shell"), "1 shell");
-  assert.equal(plural(0, "file"), "0 files");
+test("stepSelection clamps and falls back to the first key", async () => {
+  const { stepSelection } = await load();
+  const keys = ["a", "b", "c"];
+  assert.equal(stepSelection(keys, "a", 1), "b");
+  assert.equal(stepSelection(keys, "c", 1), "c");
+  assert.equal(stepSelection(keys, "a", -1), "a");
+  assert.equal(stepSelection(keys, "gone", 1), "a");
+  assert.equal(stepSelection(keys, null, 1), "a");
+  assert.equal(stepSelection([], "a", 1), null);
 });
 
 test("a module item keeps the host it reports", async () => {

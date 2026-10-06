@@ -1,4 +1,4 @@
-import type { Tone } from "../helpers";
+import type { Tone } from "./tone.ts";
 
 /** Orch/TaskRow: dot, title, a toned reason and a muted meta line. */
 export function TaskRow({

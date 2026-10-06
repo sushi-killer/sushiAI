@@ -134,7 +134,7 @@ export function useAttention({
     workspaces,
     state,
     connectionProfiles,
-    moduleItems.length,
+    moduleItems.map((entry) => entry.item),
   );
   const working = workingCount(workspaces, state, connectionProfiles);
   const lastBadge = useRef("");

@@ -1,6 +1,6 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const load = () => import("../src/mascot/reply.ts");
+const load = () => import("../src/lib/reply.ts");
 
 test("typed text replaces a pick; a pick alone is sent as is", async () => {
   const {
@@ -22,14 +22,4 @@ test("typed text replaces a pick; a pick alone is sent as is", async () => {
   assert.equal(shownPick({ ...fresh, note: "x" }), "");
   assert.equal(togglePick(fresh, "first"), "");
   assert.equal(togglePick(fresh, "second"), "second");
-});
-
-test("ageLabel reads now, minutes, hours and days", async () => {
-  const { ageLabel } = await load();
-  const now = 10_000_000_000;
-  assert.equal(ageLabel(now - 20_000, now), "now");
-  assert.equal(ageLabel(now - 2 * 60_000, now), "2m");
-  assert.equal(ageLabel(now - 3 * 3600_000, now), "3h");
-  assert.equal(ageLabel(now - 50 * 3600_000, now), "2d");
-  assert.equal(ageLabel(now + 5000, now), "now");
 });

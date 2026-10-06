@@ -17,16 +17,16 @@ import {
 } from "./helpers.ts";
 import { diffFacts, inboxEnterAnswer, openTask } from "./moduleAttention.ts";
 import {
-  clickAnswer,
-  ownerTarget,
+  clickReply,
   shownPick,
   togglePick,
-  type AnswerChoice,
-} from "./ownerAttention.ts";
+  type ReplyChoice,
+} from "../lib/reply.ts";
+import { ownerTarget } from "./ownerAttention.ts";
 import { shortBranch } from "./taskDetailModel.ts";
 import type { Task } from "./types.ts";
 import { useTasks } from "./useTasks.ts";
-import { Chip, Criterion, StageTrack } from "./ui/index.ts";
+import { Chip, Criterion, StageTrack } from "../ui/index.ts";
 
 /** orchd's `diffStat`: the task's branch against its base, absent until
  * its first implement attempt. */
@@ -79,7 +79,7 @@ export function InboxTaskDetail({ item }: { item: AttentionItem }) {
   }, [item.host, host, maxAttempts, task]);
 
   const note = notes[item.key] ?? "";
-  const choice: AnswerChoice = {
+  const choice: ReplyChoice = {
     pick: picks[item.key],
     preselected: task?.question?.options[0] ?? "",
     note,
@@ -390,8 +390,8 @@ export function InboxTaskDetail({ item }: { item: AttentionItem }) {
           <button
             type="button"
             className="ui-button primary"
-            disabled={busy || !clickAnswer(choice)}
-            onClick={() => answer(clickAnswer(choice))}
+            disabled={busy || !clickReply(choice)}
+            onClick={() => answer(clickReply(choice))}
           >
             Answer
           </button>

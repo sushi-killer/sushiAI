@@ -7,7 +7,7 @@ import type {
   Project,
   SkillCatalogItem,
 } from "./types";
-import { Tag, Toggle } from "./orchestrator/ui";
+import { Tag, Toggle } from "./ui";
 import { ProjectPage } from "./ProjectPage";
 import { FolderImport, importSummary } from "./FolderImport";
 import {

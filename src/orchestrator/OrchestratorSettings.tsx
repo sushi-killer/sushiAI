@@ -16,7 +16,7 @@ import {
   settingValue,
   settingsDifferingFromDefaults,
 } from "./helpers";
-import { Stepper } from "./ui";
+import { Stepper } from "../ui";
 import { formatSettingsJson, parseSettingsJson } from "./settingsJson";
 import { ConnectedTools } from "./ConnectedTools";
 import {

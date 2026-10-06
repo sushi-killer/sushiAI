@@ -12,7 +12,7 @@ import {
 } from "./chatModel";
 import { errorText } from "./helpers";
 import type { ChatMessage, ChatProposal, Task } from "./types";
-import { Tag } from "./ui";
+import { Tag } from "../ui";
 
 /** Orch/ProposalCard: the tasks a Brainstorm or Plan reply proposed, one row
  * each. The owner ticks the rows to keep, then creates them now or parks

@@ -227,15 +227,15 @@ export function inboxGroups(
 /** What the Dock badge and the Inbox nav count show: needing input, plus
  * finished-and-unseen. Hidden hosts are skipped exactly as `inboxGroups`
  * skips them, so the count never promises a row the Inbox cannot show.
- * `moduleItems` is how many rows the modules put in the Inbox; they add
- * to it. */
+ * `moduleItems` are the rows the modules put in the Inbox; those that wait
+ * on the owner (answer, decide) add to it, a review row does not. */
 export function waitingCount(
   workspaces: Workspace[],
   state: AttentionState,
   profiles: ConnectionProfile[],
-  moduleItems = 0,
+  moduleItems: { kind: string }[] = [],
 ): number {
-  let count = moduleItems;
+  let count = moduleItems.filter((item) => item.kind !== "review").length;
   for (const workspace of workspaces) {
     if (isHidden(workspace.connection, profiles)) continue;
     for (const panel of workspace.panels) {

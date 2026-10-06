@@ -193,7 +193,7 @@ badge.
   add a fourth.
 - Checkbox: `label.pk-worktree` with a hidden input and a drawn 15px
   `.pk-box` (radius 4, accent fill when on, `Check size={11} strokeWidth={3}`).
-- Switch: `Toggle` (`src/orchestrator/ui/Toggle.tsx`) - a real checkbox drawn
+- Switch: `Toggle` (`src/ui/Toggle.tsx`) - a real checkbox drawn
   32x18; it needs a `label` prop for its accessible name.
 
 ## Popover menu
@@ -265,8 +265,8 @@ button appears on hover or focus-within (`.pd-row-remove`). Empty: a
 | `.danger` (legacy)    | red fill                                             | rare destructive confirm                     |
 | `.icon-button`        | 25px square, radius 5                                | icon-only actions; needs `aria-label`        |
 
-`ui-button` comes from `src/orchestrator/ui/ui.css`, which loads when a module
-imports from `src/orchestrator/ui` - import a primitive from there in the
+`ui-button` comes from `src/ui/ui.css`, which loads when a module
+imports from `src/ui` - import a primitive from there in the
 file that uses the classes. New screens use `ui-button`; inside an existing
 legacy screen (Settings, Providers) match the buttons already on it rather
 than mixing both families on one screen. Actions sit right-aligned, Cancel

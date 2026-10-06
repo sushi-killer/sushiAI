@@ -9,7 +9,7 @@ import {
   type WorktreeCleanupRequest,
 } from "../app/worktreeCleanup";
 import type { Panel, Workspace } from "../types";
-import { Tag, Toggle } from "../orchestrator/ui";
+import { Tag, Toggle } from "../ui";
 
 /** The pull request's state as a tag at the worktree's name. */
 function PrTag({ state }: { state: string }) {

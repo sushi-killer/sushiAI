@@ -36,8 +36,8 @@ import {
   taskReason,
   taskTone,
   upsertMessage,
-  type Tone,
 } from "./helpers";
+import type { Tone } from "../ui/tone";
 import type {
   ChatMessage,
   ChatMode,
@@ -52,7 +52,7 @@ import { RichText } from "../agents/AgentsView";
 import { Composer, OrchestratorRouteChip } from "./Composer";
 import { ProposalCard } from "./ProposalCard";
 import { ToolConfirm } from "./ToolConfirm";
-import { Chip, Tag } from "./ui";
+import { Chip, Tag } from "../ui";
 import "./chat.css";
 
 const STARTERS = [

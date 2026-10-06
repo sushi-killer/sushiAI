@@ -6,11 +6,12 @@ export const errorText = (error: unknown) =>
     "",
   );
 
-/** Herdr no longer has the pane or workspace the app still remembers. */
+/** The daemon no longer has, or no longer runs, the session the app still
+ * remembers (SESSION_NOT_FOUND 1003, SESSION_NOT_RUNNING 1005). */
 export const isGone = (error: unknown) =>
   typeof error === "object" &&
   error !== null &&
   "code" in error &&
-  ["pane_not_found", "workspace_not_found", "HERDR_GONE"].includes(
+  ["1003", "1005", "SESSION_NOT_FOUND", "SESSION_NOT_RUNNING"].includes(
     String(error.code),
   );

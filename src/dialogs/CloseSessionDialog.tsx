@@ -144,7 +144,7 @@ export function CloseSessionDialog({
       <div className="dialog-eyebrow">CLOSE SESSION</div>
       <h2 className="cs-title">{panel.title}</h2>
       <p className="cs-meta">
-        {workspace.name} · {branch || panel.herdrId || workspace.cwd}
+        {workspace.name} · {branch || panel.sessionId || workspace.cwd}
       </p>
       <p className="cs-body">
         Hide this panel to keep its process running, or end the session.

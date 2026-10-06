@@ -2,7 +2,6 @@ import type { Layout, Panel, Workspace } from "./types";
 import { contains, isValidLayout, leaf, split, uid } from "./layout.ts";
 import { validRoute, type RouteRef } from "./extensions/routes.ts";
 import type { ProjectGit } from "./app/useProjectGit.ts";
-import { closedProjectKey, migrateHerdrIdentities } from "./herdrIdentity.ts";
 
 /** Where the snapshot lives when there is no desktop bridge (dev:web). With
  * the bridge it is <userData>/sushiai.db, written by the main process. */
@@ -16,6 +15,14 @@ const LEGACY_AGENT_FOCUS = "sushiai.agent-focus.v1";
 const LEGACY_CHAT_FOCUS = "sushiai.chat-focus.v1";
 export const MAX_AGENT_TABS = 30;
 
+/** The id of a closed project: its host endpoint and folder. */
+export function closedProjectKey(
+  endpoint: string | undefined,
+  cwd: string,
+): string {
+  return `closed:${endpoint || "local"}:${cwd}`;
+}
+
 export type Routine = { id: string; name: string; command: string };
 
 /** A workspace the sidebar dropped ("Close workspace and sessions") but the
@@ -27,7 +34,8 @@ export type ClosedProject = {
   name: string;
   cwd: string;
   endpoint?: string;
-  herdr: boolean;
+  /** The workspace ran daemon sessions, so reopening starts one. */
+  backed: boolean;
   closedAt: number;
   git: ProjectGit;
 };
@@ -142,7 +150,7 @@ function normalizeClosedProjects(value: unknown): ClosedProject[] {
       name: typeof p.name === "string" ? p.name : "",
       cwd: p.cwd as string,
       endpoint: typeof p.endpoint === "string" ? p.endpoint : undefined,
-      herdr: p.herdr === true,
+      backed: p.backed === true,
       closedAt: typeof p.closedAt === "number" ? p.closedAt : 0,
       git: normalizeGit(p.git),
     }));
@@ -254,13 +262,11 @@ function importLegacy(store: SnapshotStore): string | null {
   return text;
 }
 
-/** A Herdr workspace with ended panes and nothing else open moves to Recently
- * closed on start. An intentionally empty project stays in the workspace list. */
+/** A workspace whose panels are all ended sessions moves to Recently closed on
+ * start. An intentionally empty project stays in the workspace list. */
 export function sweepLeftovers(saved: Saved): Saved {
   const leftover = (w: Workspace) =>
-    Boolean(w.herdrId) &&
-    w.panels.length > 0 &&
-    w.panels.every((p) => p.herdrId && p.ended);
+    w.panels.length > 0 && w.panels.every((p) => p.ended);
   const rest = saved.workspaces.filter((w) => !leftover(w));
   if (rest.length === saved.workspaces.length || !rest.length) return saved;
   const closedAt = Date.now();
@@ -272,7 +278,7 @@ export function sweepLeftovers(saved: Saved): Saved {
       name: w.name,
       cwd: w.cwd,
       endpoint: w.connection,
-      herdr: true,
+      backed: true,
       closedAt,
       git: {
         projectId: "",
@@ -305,6 +311,37 @@ export function sweepLeftovers(saved: Saved): Saved {
   };
 }
 
+/** A panel that ran in Herdr has no daemon session to bind to: it comes back
+ * ended, with Reopen. Herdr sessions are never adopted. */
+function restorePanel(panel: Panel): Panel {
+  const { herdrId, ...rest } = panel;
+  return {
+    ...rest,
+    busy: false,
+    started: false,
+    ...(herdrId && !panel.sessionId ? { ended: true } : {}),
+    // A reply that never arrived leaves an empty bubble; drop it.
+    ...(panel.messages && {
+      messages: panel.messages.filter((m) => m.role === "user" || m.text),
+    }),
+  } as Panel;
+}
+
+const restoreWorkspace =
+  (socket: string) =>
+  (w: Workspace): Workspace => {
+    const { herdrId, ...rest } = w;
+    delete rest.herdrTokens;
+    const backed = Boolean(
+      herdrId || w.panels.some((p) => p.herdrId || p.sessionId),
+    );
+    return {
+      ...rest,
+      connection: w.connection || (backed ? socket : undefined),
+      panels: w.panels.map(restorePanel),
+    };
+  };
+
 export function restore(store: SnapshotStore = snapshotStore()): Saved | null {
   try {
     const value = JSON.parse(store.read() ?? importLegacy(store) ?? "null");
@@ -329,23 +366,9 @@ export function restore(store: SnapshotStore = snapshotStore()): Saved | null {
       agentTabs: normalizeAgentTabs(value.agentTabs),
       agentFocus: normalizeAgentFocus(value.agentFocus),
       chatFocus: typeof value.chatFocus === "string" ? value.chatFocus : "",
-      workspaces: value.workspaces.map((w: Workspace) => ({
-        ...w,
-        // Tokens are live host state: the first snapshot after start sets them.
-        herdrTokens: undefined,
-        connection: w.herdrId ? w.connection || value.socket : undefined,
-        panels: w.panels.map((p) => ({
-          ...p,
-          busy: false,
-          started: false,
-          // A reply that never arrived leaves an empty bubble; drop it.
-          ...(p.messages && {
-            messages: p.messages.filter((m) => m.role === "user" || m.text),
-          }),
-        })),
-      })),
+      workspaces: value.workspaces.map(restoreWorkspace(value.socket)),
     };
-    const migrated = sweepLeftovers(migrateHerdrIdentities(normalized));
+    const migrated = sweepLeftovers(normalized);
     if (migrated !== normalized) {
       try {
         store.flush(JSON.stringify(migrated));

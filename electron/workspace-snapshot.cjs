@@ -48,12 +48,10 @@ function savedWorkspaces(dir) {
     .filter((workspace) => workspace !== undefined);
 }
 
-/** The workspaces to store. A repeated id keeps the first row. A later row
- * claiming a (connection, herdrId) an earlier one holds is kept but loses the
- * binding, so one Herdr workspace is never stored twice. */
+/** The workspaces to store, keyed by id. A repeated id keeps the first row;
+ * the endpoint is kept beside the data for lookups. */
 function uniqueWorkspaces(workspaces) {
   const ids = new Set();
-  const bindings = new Set();
   const kept = [];
   for (const workspace of workspaces) {
     if (!isObject(workspace) || workspace.id == null || workspace.id === "")
@@ -61,25 +59,11 @@ function uniqueWorkspaces(workspaces) {
     const id = String(workspace.id);
     if (ids.has(id)) continue;
     ids.add(id);
-    const endpoint =
-      typeof workspace.connection === "string" ? workspace.connection : "";
-    let herdrId =
-      typeof workspace.herdrId === "string" ? workspace.herdrId : "";
-    let stored = workspace;
-    if (herdrId) {
-      const binding = JSON.stringify([endpoint, herdrId]);
-      if (bindings.has(binding)) {
-        console.warn(`Workspace ${id} repeats a Herdr binding; unbinding it.`);
-        const { herdrId: _dropped, ...rest } = workspace;
-        stored = rest;
-        herdrId = "";
-      } else bindings.add(binding);
-    }
     kept.push({
       id,
-      endpoint,
-      herdrId: herdrId || null,
-      data: JSON.stringify(stored),
+      endpoint:
+        typeof workspace.connection === "string" ? workspace.connection : "",
+      data: JSON.stringify(workspace),
     });
   }
   return kept;
@@ -114,7 +98,7 @@ function applyDelta(db, snapshot) {
   const next = uniqueWorkspaces(workspaces ?? []);
   const stored = new Map(
     db
-      .prepare("SELECT id, position, endpoint, herdr_id, data FROM workspaces")
+      .prepare("SELECT id, position, endpoint, data FROM workspaces")
       .all()
       .map((row) => [row.id, row]),
   );
@@ -125,30 +109,16 @@ function applyDelta(db, snapshot) {
   next.forEach((row, position) => {
     const old = stored.get(row.id);
     if (!old || old.position !== position || old.data !== row.data)
-      changed.push({ ...row, position, existing: Boolean(old) });
+      changed.push({ ...row, position });
   });
-  // A binding moving between two rows of one write must not trip the unique
-  // index half way: release the changed rows' bindings first.
-  const rebound = (row) => {
-    const old = stored.get(row.id);
-    return (
-      old &&
-      old.herdr_id &&
-      (old.herdr_id !== row.herdrId || old.endpoint !== row.endpoint)
-    );
-  };
-  const release = db.prepare(
-    "UPDATE workspaces SET herdr_id = NULL WHERE id = ?",
-  );
-  for (const row of changed) if (rebound(row)) release.run(row.id);
   const upsert = db.prepare(
-    "INSERT INTO workspaces(id, position, endpoint, herdr_id, data) " +
-      "VALUES(?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET " +
+    "INSERT INTO workspaces(id, position, endpoint, data) " +
+      "VALUES(?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET " +
       "position = excluded.position, endpoint = excluded.endpoint, " +
-      "herdr_id = excluded.herdr_id, data = excluded.data",
+      "data = excluded.data",
   );
   for (const row of changed)
-    upsert.run(row.id, row.position, row.endpoint, row.herdrId, row.data);
+    upsert.run(row.id, row.position, row.endpoint, row.data);
 }
 
 /** Stores an already parsed snapshot object (used by the one-time import,

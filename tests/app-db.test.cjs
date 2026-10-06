@@ -100,7 +100,7 @@ test("a failed import rolls back, keeps the file, never blocks opening and retri
   t.after(() => closeAppDb(dir));
   assert.equal(db.prepare("SELECT count(*) AS n FROM projects").get().n, 1);
   assert.equal(await exists(`${file}.imported`), true);
-  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 3);
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 4);
   assert.equal(
     db.prepare("PRAGMA journal_mode").get().journal_mode.toLowerCase(),
     "wal",
@@ -413,7 +413,7 @@ test("workspace-state.json splits into workspace rows and app state, then is ren
     activeId: "a",
     views: { a: { zoom: 1 } },
     workspaces: [
-      { id: "a", connection: "ssh:devbox", herdrId: "w1", cwd: "/repo/app" },
+      { id: "a", connection: "ssh:devbox", cwd: "/repo/app" },
       { id: "b", cwd: "/repo/other" },
     ],
   };
@@ -428,6 +428,85 @@ test("workspace-state.json splits into workspace rows and app state, then is ren
   );
   assert.equal(await exists(file), false);
   assert.equal(await exists(`${file}.imported`), true);
+});
+
+test("v3 to v4 rebuilds workspaces without herdr_id and keeps rows, order and endpoint", async (t) => {
+  const dir = await tempDir(t);
+  const first = appDb(dir);
+  // Put the database back the way v3 left it.
+  first.exec(`
+    DROP TABLE workspaces;
+    CREATE TABLE workspaces(
+      id TEXT PRIMARY KEY,
+      position INTEGER NOT NULL,
+      endpoint TEXT NOT NULL DEFAULT '',
+      herdr_id TEXT,
+      data TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX workspaces_herdr ON workspaces(endpoint, herdr_id)
+      WHERE herdr_id IS NOT NULL AND herdr_id != '';
+    PRAGMA user_version = 3;
+  `);
+  const insert = first.prepare(
+    "INSERT INTO workspaces(id, position, endpoint, herdr_id, data) VALUES(?, ?, ?, ?, ?)",
+  );
+  insert.run("b", 1, "", null, JSON.stringify({ id: "b", cwd: "/repo/b" }));
+  insert.run(
+    "a",
+    0,
+    "ssh:devbox",
+    "w1",
+    JSON.stringify({ id: "a", herdrId: "w1", connection: "ssh:devbox" }),
+  );
+  closeAppDb(dir);
+  const db = appDb(dir);
+  t.after(() => closeAppDb(dir));
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 4);
+  assert.deepEqual(
+    db
+      .prepare("PRAGMA table_info(workspaces)")
+      .all()
+      .map((c) => c.name),
+    ["id", "position", "endpoint", "data"],
+  );
+  assert.equal(
+    db
+      .prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'workspaces_herdr'",
+      )
+      .get(),
+    undefined,
+  );
+  assert.deepEqual(
+    db
+      .prepare(
+        "SELECT id, position, endpoint FROM workspaces ORDER BY position",
+      )
+      .all()
+      .map((row) => ({ ...row })),
+    [
+      { id: "a", position: 0, endpoint: "ssh:devbox" },
+      { id: "b", position: 1, endpoint: "" },
+    ],
+  );
+  assert.deepEqual(
+    savedWorkspaces(dir).map((item) => item.id),
+    ["a", "b"],
+  );
+});
+
+test("a fresh database has no herdr_id column", async (t) => {
+  const dir = await tempDir(t);
+  const db = appDb(dir);
+  t.after(() => closeAppDb(dir));
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 4);
+  assert.equal(
+    db
+      .prepare("PRAGMA table_info(workspaces)")
+      .all()
+      .some((column) => column.name === "herdr_id"),
+    false,
+  );
 });
 
 test("herdr-launches.json, connections.json and orchestrator-hosts.json are imported once", async (t) => {

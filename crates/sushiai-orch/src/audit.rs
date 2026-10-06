@@ -286,7 +286,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let app = App::new(
             dir.path().join("data"),
-            dir.path().join("orchd.sock"),
+            dir.path().join("home"),
             "orchd".to_string(),
         )
         .unwrap();

@@ -1,16 +1,16 @@
 //! The attempt loop, gates, review, commit and failure rules (spec
-//! "Engine"), plus the `Dispatcher` implementation (`App`) that wires the
-//! protocol methods to the store, git, harness and agents. Pure
+//! "Engine"), plus `App`, which wires the `orch.*` methods to the store, git,
+//! harness and agents. Pure
 //! decision helpers live at the top with their own unit tests; `App` and
 //! the async run loop are below.
 
 use crate::brief;
+use crate::events::Event;
 use crate::git;
 use crate::harness;
 use crate::hook;
 use crate::loop_detect::LoopDetector;
 use crate::model::*;
-use crate::protocol::{CallFuture, Dispatcher, Event};
 use crate::store::{self, Store};
 use serde::Deserialize;
 use serde_json::json;
@@ -270,12 +270,14 @@ impl Drop for ClearOnDrop<'_> {
 pub struct App {
     pub store: Store,
     pub data_dir: PathBuf,
-    pub socket_path: PathBuf,
-    pub orchd_path: String,
+    /// The sushiAI home (`SUSHIAI_HOME`): where agents' `sushiai mcp` and
+    /// `sushiai orch hook` find the daemon.
+    pub home: PathBuf,
+    /// The `sushiai` executable that agents run as `mcp` and `orch hook`.
+    pub exe_path: String,
     settings: RwLock<Settings>,
     secrets: RwLock<Secrets>,
     events_tx: broadcast::Sender<Event>,
-    shutdown_tx: broadcast::Sender<()>,
     controls: std::sync::Mutex<HashMap<String, TaskControl>>,
     /// Keyed by repo: the orchestrator chat turn running for it, if any.
     chat_turns: std::sync::Mutex<HashMap<String, CancelToken>>,
@@ -303,13 +305,6 @@ pub struct App {
     base_runs: std::sync::Mutex<HashMap<(String, String), VerifyOutcome>>,
     /// Which harness CLIs the last probe found (`availability.rs`).
     harness_avail: StdMutex<HashMap<Harness, bool>>,
-    pid: u32,
-    /// The executable's mtime at startup, so the app can tell a rebuilt
-    /// binary from the one this daemon is running.
-    binary_mtime_ms: u64,
-    /// Random per-start control-channel secret (`<data>/control.token`,
-    /// mode 0600): every request but `ping`/`hook.stop` must carry it.
-    control_token: String,
     /// Concurrency limit (`settings.parallel` at startup -- a live
     /// `settings.set` change takes effect on the next restart, not
     /// immediately; resizing a `Semaphore` down isn't a thing tokio
@@ -335,30 +330,8 @@ pub struct App {
     self_ref: OnceLock<std::sync::Weak<App>>,
 }
 
-fn generate_control_token() -> String {
-    // 32 bytes of randomness as 64 hex chars, built from two v4 UUIDs
-    // rather than a `rand` dependency the crate list doesn't include --
-    // `uuid`'s v4 feature already pulls in a real CSPRNG (`getrandom`).
-    format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    )
-}
-
-impl Dispatcher for App {
-    fn call<'a>(&'a self, method: String, params: serde_json::Value) -> CallFuture<'a> {
-        Box::pin(async move { self.dispatch(&method, params).await })
-    }
-
-    fn subscribe(&self) -> broadcast::Receiver<Event> {
-        self.events_tx.subscribe()
-    }
-
-    fn check_auth(&self, method: &str, auth: Option<&str>) -> bool {
-        App::check_auth(self, method, auth)
-    }
-}
+/// The start of the error message for a method this engine does not have.
+pub const UNKNOWN_METHOD: &str = "unknown method: ";
 
 fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(8)]
@@ -483,30 +456,11 @@ async fn persist_attempt_field(
 }
 
 impl App {
-    pub fn new(
-        data_dir: PathBuf,
-        socket_path: PathBuf,
-        orchd_path: String,
-    ) -> std::io::Result<Arc<App>> {
+    pub fn new(data_dir: PathBuf, home: PathBuf, exe_path: String) -> std::io::Result<Arc<App>> {
         crate::prompts::set_data_dir(&data_dir);
         let store = Store::new(&data_dir)?;
         let settings = store.load_settings()?;
         let (events_tx, _) = broadcast::channel(1024);
-        let (shutdown_tx, _) = broadcast::channel(4);
-        let binary = PathBuf::from(&orchd_path);
-        let binary_mtime_ms = std::fs::metadata(&binary)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        let control_token = generate_control_token();
-        store::write_secret_file(
-            &data_dir.join("control.token"),
-            &format!("{control_token}\n"),
-        )?;
-
         let parallel_limit = settings.parallel.max(1);
         let slots = Arc::new(Semaphore::new(parallel_limit as usize));
 
@@ -514,12 +468,11 @@ impl App {
         let app = Arc::new(App {
             store,
             data_dir,
-            socket_path,
-            orchd_path,
+            home,
+            exe_path,
             settings: RwLock::new(settings),
             secrets: RwLock::new(Secrets::default()),
             events_tx,
-            shutdown_tx,
             controls: std::sync::Mutex::new(HashMap::new()),
             chat_turns: std::sync::Mutex::new(HashMap::new()),
             audits: std::sync::Mutex::new(HashMap::new()),
@@ -532,9 +485,6 @@ impl App {
             verify_cache: std::sync::Mutex::new(HashMap::new()),
             base_runs: std::sync::Mutex::new(HashMap::new()),
             harness_avail: StdMutex::new(HashMap::new()),
-            pid: std::process::id(),
-            binary_mtime_ms,
-            control_token,
             slots,
             parallel_limit,
             landing_locks: StdMutex::new(HashMap::new()),
@@ -575,8 +525,7 @@ impl App {
     /// Cancels every live task loop (each one's own `run_harness`/verify
     /// call kills its child's process group on seeing this), every live
     /// orchestrator chat turn (`chat::run` kills its child the same way on
-    /// seeing its own `CancelToken`), and stops the socket server. Called
-    /// for both the `shutdown` RPC and SIGTERM -- a chat turn's `setsid`'d
+    /// seeing its own `CancelToken`). Called when the daemon stops -- a chat turn's `setsid`'d
     /// child is just as capable of leaking past the daemon exiting as a task
     /// attempt's, so it needs the same cancel-on-shutdown treatment.
     pub fn shutdown(&self) {
@@ -593,7 +542,6 @@ impl App {
         for cancel in self.proposals.lock().unwrap().values() {
             cancel.cancel();
         }
-        let _ = self.shutdown_tx.send(());
     }
 
     /// The status a task takes when its loop is cancelled: `stopped` for an
@@ -610,8 +558,8 @@ impl App {
         }
     }
 
-    pub fn subscribe_shutdown(&self) -> broadcast::Receiver<()> {
-        self.shutdown_tx.subscribe()
+    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+        self.events_tx.subscribe()
     }
 
     /// Whether any task loop is still winding down after `shutdown()` --
@@ -636,18 +584,6 @@ impl App {
         !self.audits.lock().unwrap().is_empty() || !self.proposals.lock().unwrap().is_empty()
     }
 
-    /// `ping`/`hook.stop`/`hook.edit` are the only methods reachable without
-    /// the control token: `ping` so Electron can probe/tell daemons apart
-    /// before it has read the token file, the hooks because they are only
-    /// ever invoked by `orchd hook ...` over the same trusted local
-    /// machine, matched by their own per-run token instead.
-    fn check_auth(&self, method: &str, auth: Option<&str>) -> bool {
-        if matches!(method, "ping" | "hook.stop" | "hook.edit") {
-            return true;
-        }
-        auth.map(|a| a == self.control_token).unwrap_or(false)
-    }
-
     /// Appends a line to a task's `decisions` and persists it right away --
     /// for call sites that don't otherwise hold the task in memory. Call sites that
     /// already hold `&mut Task` push the line onto their own copy instead, so
@@ -661,15 +597,16 @@ impl App {
         }
     }
 
-    // -- protocol methods --------------------------------------------------
+    // -- orch.* methods ----------------------------------------------------
 
-    async fn dispatch(
+    /// Runs one `orch.<method>` call. An unknown method answers with
+    /// [`UNKNOWN_METHOD`] as the start of its message.
+    pub async fn dispatch(
         &self,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         match method {
-            "ping" => self.handle_ping().await,
             "settings.get" => self.handle_settings_get().await,
             "settings.set" => self.handle_settings_set(params).await,
             "settings.defaults" => self.handle_settings_defaults().await,
@@ -731,8 +668,7 @@ impl App {
             "repo.notes.remove" => self.handle_repo_notes_remove(params).await,
             "hook.stop" => self.handle_hook_stop(params).await,
             "hook.edit" => self.handle_hook_edit(params).await,
-            "shutdown" => self.handle_shutdown().await,
-            other => Err(format!("unknown method: {other}")),
+            other => Err(format!("{UNKNOWN_METHOD}{other}")),
         }
     }
 }

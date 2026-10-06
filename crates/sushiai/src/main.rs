@@ -37,10 +37,11 @@ fn main() -> Result<()> {
         .init();
     match command.as_deref() {
         Some("hooks") => hooks_file::run(args.next().as_deref())?,
-        Some("daemon") => sushiai_daemon::run_blocking(
-            sushiai_daemon::Home::from_env(),
-            vec![orch_module::slot()],
-        )?,
+        Some("daemon") => {
+            let home = sushiai_daemon::Home::from_env();
+            let modules = orch_module::slots(&home);
+            sushiai_daemon::run_blocking(home, modules)?;
+        }
         Some("status") => println!(
             "{}",
             sushiai_daemon::status_blocking(sushiai_daemon::Home::from_env())?

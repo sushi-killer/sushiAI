@@ -1,16 +1,16 @@
-//! `orchd serve --install-skill`: puts the `sushiai-orchestrator` skill into
+//! `sushiai orch register`: puts the `sushiai-orchestrator` skill into
 //! the owner's Claude Code and Codex skill folders, so an agent in any
-//! repository knows how to drive orchd. Written only when its content
-//! changed; a folder whose tool is not installed is left alone. Skipped for
-//! a test launch and for a binary under a cargo `target/` dir, so only the
-//! installed app's orchd writes it.
+//! repository knows how to drive the orchestrator. Written only when its
+//! content changed; a folder whose tool is not installed is left alone.
+//! Skipped for a test launch and for a binary under a cargo `target/` dir,
+//! so only the installed app's `sushiai` writes it.
 
 use std::path::Path;
 
 const SKILL: &str = include_str!("../skills/sushiai-orchestrator/SKILL.md");
 const NAME: &str = "sushiai-orchestrator";
 
-/// The skill with this install's orchd binary and data dir filled in.
+/// The skill with this install's `sushiai` binary and data dir filled in.
 fn render(orchd: &Path, data_dir: &Path) -> String {
     SKILL
         .replace("{{ORCHD}}", &orchd.to_string_lossy())
@@ -44,7 +44,7 @@ pub fn install(home: &Path, orchd: &Path, data_dir: &Path) -> Vec<std::path::Pat
             .and_then(|()| std::fs::write(&path, &text));
         match saved {
             Ok(()) => written.push(path),
-            Err(e) => eprintln!("orchd: could not install {}: {e}", path.display()),
+            Err(e) => eprintln!("sushiai orch: could not install {}: {e}", path.display()),
         }
     }
     written
@@ -68,7 +68,7 @@ mod tests {
         assert!(!home.path().join(".agents/skills").exists());
         let text = std::fs::read_to_string(&written[0]).unwrap();
         assert!(text.starts_with("---\nname: sushiai-orchestrator\n"));
-        assert!(text.contains("-- \"/opt/orchd\" mcp --data \"/d/orchestrator\""));
+        assert!(text.contains("-- \"/opt/orchd\" mcp\n"));
         assert!(!text.contains("{{"));
 
         assert!(install(home.path(), orchd, data).is_empty());

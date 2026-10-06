@@ -346,9 +346,8 @@ pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> io::Res
     Ok(())
 }
 
-/// Atomically write a secret-bearing file (the control token, a per-run API
-/// key) restricted to owner read/write (mode 0600): `control.token` is
-/// "rewritten each start", and per-run key files are deleted once their run
+/// Atomically write a secret-bearing file (a per-run API key) restricted to
+/// owner read/write (mode 0600): per-run key files are deleted once their run
 /// ends, so this is always a small, short-lived plain-text file, never JSON.
 pub fn write_secret_file(path: &Path, contents: &str) -> io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -662,7 +661,7 @@ mod tests {
     #[test]
     fn write_secret_file_is_mode_0600() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("control.token");
+        let path = dir.path().join("key");
         write_secret_file(&path, "abc123\n").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "abc123\n");
         #[cfg(unix)]

@@ -10,11 +10,6 @@ description = "sushiAI task orchestration pipeline"
 name = "sushiai_orch"
 path = "src/lib.rs"
 
-# Transitional: the standalone orchd CLI stays until L1/L3 move it into the `sushiai` bin.
-[[bin]]
-name = "orchd"
-path = "src/main.rs"
-
 [dependencies]
 tokio.workspace = true
 serde.workspace = true

@@ -1,23 +1,6 @@
 use super::*;
 
 impl App {
-    pub(super) async fn handle_ping(&self) -> Result<serde_json::Value, String> {
-        // Only slots actually held by a running attempt count -- a task
-        // still queued behind the concurrency limit is not "running".
-        // Orchestrator chat replies in progress are reported apart in
-        // `chatTurns`: a task resumes after a restart, a chat reply does not.
-        let running = self.parallel_limit as usize - self.slots.available_permits();
-        let chat_turns = self.chat_turns.lock().unwrap().len();
-        Ok(json!({
-            "version": env!("CARGO_PKG_VERSION"),
-            "pid": self.pid,
-            "dataDir": self.data_dir.to_string_lossy(),
-            "binaryMtimeMs": self.binary_mtime_ms,
-            "running": running,
-            "chatTurns": chat_turns,
-        }))
-    }
-
     /// `costs.summary {repo?, taskId?, sinceDays? | from? / to? (UTC YYYY-MM-DD, inclusive), groupBy: [stage|model|route|repo|task|day]}`
     /// -> `{rows: [{key, keys, costUsd, runs, tokens, cacheHitRate}], totals,
     /// leadTouch: {touched, marked, rate, byRepo, byWeek},
@@ -144,11 +127,6 @@ impl App {
             project_mcp: p.project_mcp,
             repo_projects: p.repo_projects,
         };
-        Ok(json!({}))
-    }
-
-    pub(super) async fn handle_shutdown(&self) -> Result<serde_json::Value, String> {
-        self.shutdown();
         Ok(json!({}))
     }
 }

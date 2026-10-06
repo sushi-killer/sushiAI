@@ -333,9 +333,9 @@ struct Origin {
 fn eval_command(app: &App, repo: &str, origin: &Origin, arm: Option<&serde_json::Value>) -> String {
     let arm = arm.cloned().unwrap_or_else(|| json!({"<flag>": true}));
     let mut cmd = format!(
-        "orchd eval run --data {} --socket {} --repo {} --request {}",
-        shell_quote(&app.data_dir.to_string_lossy()),
-        shell_quote(&app.socket_path.to_string_lossy()),
+        "SUSHIAI_HOME={} {} orch eval run --repo {} --request {}",
+        shell_quote(&app.home.to_string_lossy()),
+        shell_quote(&app.exe_path),
         shell_quote(repo),
         shell_quote(&origin.request),
     );

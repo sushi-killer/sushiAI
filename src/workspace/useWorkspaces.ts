@@ -35,10 +35,11 @@ import {
   tidyWorkspace,
 } from "./workspace-actions.ts";
 import type { GroupCanvasContext } from "./workspace-actions.ts";
-import { launchesInWorktree, worktreeBranchError } from "./worktree.ts";
+import { launchesInWorktree } from "./worktree.ts";
 import {
   launchDaemonSession,
   launchTarget,
+  newWorkspaceId,
   placeLaunchedPanel,
 } from "./session-launch.ts";
 import { hostOf } from "../projectWorktrees.ts";
@@ -176,10 +177,7 @@ export function useWorkspaces({
   const zoomPanel = useCallback((panelId: string) => {
     setZoomed((current) => (current === panelId ? null : panelId));
   }, []);
-  const startPanel = useCallback(
-    (panelId: string) => updatePanel(panelId, { started: true }),
-    [updatePanel],
-  );
+
   const navigatePanel = useCallback(
     (panelId: string, url: string) =>
       updatePanel(panelId, { url, previewFile: undefined }),
@@ -262,6 +260,7 @@ export function useWorkspaces({
     request: SessionLaunchRequest,
     template: Panel,
     restore?: { workspaceId: string; panelId: string },
+    afterLaunch?: (host: string, sessionId: string) => Promise<void>,
   ): Promise<boolean> {
     const operationKey = JSON.stringify([
       request.endpoint,
@@ -271,11 +270,12 @@ export function useWorkspaces({
     setAdding(true);
     try {
       if (!window.bridge) throw new Error("Open the desktop app first.");
-      const { cwd, panel: bound } = await launchDaemonSession(
-        window.bridge,
-        request,
-        template,
-      );
+      const {
+        host,
+        sessionId,
+        cwd,
+        panel: bound,
+      } = await launchDaemonSession(window.bridge, request, template);
       const panel: Panel = {
         ...bound,
         started: request.kind === "agent",
@@ -284,6 +284,7 @@ export function useWorkspaces({
       };
       const targetId =
         launchTarget(workspacesRef.current, request, panel.id, restore) ||
+        request.workspaceId ||
         uid();
       setWorkspaces((items) =>
         placeLaunchedPanel(items, { targetId, request, panel, cwd, restore }),
@@ -296,6 +297,7 @@ export function useWorkspaces({
         if (zoomedRef.current === restore.panelId) setZoomed(panel.id);
       }
       failedLaunches.current.delete(operationKey);
+      await afterLaunch?.(host, sessionId);
       await refreshHerdr(request.endpoint).catch((error) =>
         notify(errorText(error)),
       );
@@ -318,9 +320,11 @@ export function useWorkspaces({
     env?: Record<string, string>,
   ): Promise<boolean> {
     const kind = starter === "shell" ? "terminal" : "agent";
+    const operation = operationId || uid();
     return launchSession(
       {
-        operationId: operationId || uid(),
+        operationId: operation,
+        workspaceId: newWorkspaceId(operation),
         endpoint,
         cwd,
         label: name,
@@ -397,27 +401,31 @@ export function useWorkspaces({
         workspacesRef.current.find((w) => w.id === targetWorkspaceId)) ||
       activeRef.current;
     try {
-      // A host-backed workspace runs its sessions in the daemon. Nothing else
-      // can start a process.
-      const viaDaemon = !!current.connection;
-      if (prompt && !(viaDaemon && launchesInWorktree(kind)))
-        throw new Error("Starting with a prompt needs a host workspace.");
-      if (viaDaemon && launchesInWorktree(kind)) {
+      // Every agent and terminal panel runs in a daemon: the local one for a
+      // workspace without a connection, the host's own for an ssh one.
+      if (prompt && !launchesInWorktree(kind))
+        throw new Error("Starting with a prompt needs an agent or terminal.");
+      if (launchesInWorktree(kind)) {
         const endpoint = current.connection || socket;
+        const operation = operationId || uid();
         return await launchSession(
           {
-            operationId: operationId || uid(),
+            operationId: operation,
             endpoint,
             cwd: current.cwd,
+            // The session title: the panel's own, or the new worktree workspace's.
             label: worktree
               ? `${current.name} · ${worktree.branch}`
-              : current.name,
+              : kind === "agent"
+                ? modelProfile?.label || agentTitle(agent)
+                : "zsh",
             kind: kind === "agent" ? "agent" : "terminal",
             agent: kind === "agent" ? agent : undefined,
             modelProfileId,
             ...accounts,
             env,
-            workspaceId: current.id,
+            // A worktree launch is a workspace of its own: its id is the group.
+            workspaceId: worktree ? newWorkspaceId(operation) : current.id,
             worktree,
             ...(prompt ? { prompt } : {}),
           },
@@ -434,36 +442,6 @@ export function useWorkspaces({
           },
           undefined,
         );
-      } else if (worktree && launchesInWorktree(kind)) {
-        // The local counterpart of the branch above: no daemon involved, so
-        // the new checkout runs as a plain local process on this Mac.
-        if (!window.bridge) throw new Error("Open the desktop app first.");
-        const branchError = worktreeBranchError(worktree.branch);
-        if (branchError) throw new Error(branchError);
-        const { path } = await window.bridge.worktreeCreate(
-          current.cwd,
-          worktree.branch,
-          worktree.base,
-        );
-        const w = initialWorkspace(path);
-        w.localWorktree = true;
-        w.worktreeBranch = worktree.branch;
-        w.name = `${current.name} · ${worktree.branch}`;
-        const panel: Panel = {
-          id: uid(),
-          kind,
-          title:
-            kind === "agent" ? modelProfile?.label || agentTitle(agent) : "zsh",
-          agent: kind === "agent" ? agent : undefined,
-          started: kind === "agent",
-          modelProfileId: kind === "agent" ? modelProfileId : undefined,
-          ...accounts,
-        };
-        w.panels = [panel];
-        w.layout = leaf(panel.id);
-        setWorkspaces((items) => [...items, w]);
-        switchWorkspace(w.id);
-        return true;
       } else {
         const panel: Panel = {
           id: uid(),
@@ -512,7 +490,7 @@ export function useWorkspaces({
       !owner ||
       !ended ||
       (ended.kind !== "agent" && ended.kind !== "terminal") ||
-      (!ended.ended && !ended.launchError)
+      (!ended.ended && !ended.launchError && ended.sessionId)
     )
       return Promise.resolve();
     const endpoint = owner.connection || socket;
@@ -544,6 +522,8 @@ export function useWorkspaces({
     });
     return run;
   }
+  /** A panel that never ran starts like a Reopen: a new daemon session in its slot. */
+  const startPanel = (panelId: string) => void reopenPanel(panelId);
   const endSessions = useCallback(
     async (
       items: { workspace: Workspace; panel: Panel }[],
@@ -603,20 +583,8 @@ export function useWorkspaces({
         confirmClose({ workspace: owner, panel });
         return;
       }
+      // Closing a live session ends it, so the owner always confirms first.
       if (panel.sessionId && !panel.ended) {
-        if (
-          owner.panels.filter((item) => item.sessionId && !item.ended)
-            .length === 1
-        ) {
-          const git = projectGitRef.current[owner.id];
-          // No folder means no worktree to offer; an unread one may be.
-          if (owner.cwd && (!git || git.linkedWorktree)) {
-            confirmClose({ workspace: owner, panel });
-            return;
-          }
-          void endSessions([{ workspace: owner, panel }]);
-          return;
-        }
         confirmClose({ workspace: owner, panel });
         return;
       }
@@ -752,26 +720,23 @@ export function useWorkspaces({
   }
   async function runRoutine(routine: Routine) {
     if (!window.bridge) return notify("Run routines in the desktop app.");
-    const panel: Panel = { id: uid(), kind: "terminal", title: routine.name };
-    try {
-      await window.bridge.terminalOpen({
-        panelId: panel.id,
+    const bridge = window.bridge;
+    // The shell holds the typed command until the pane attaches.
+    await launchSession(
+      {
+        operationId: uid(),
+        endpoint: active.connection || socket,
         cwd: active.cwd,
-        endpoint: active.connection,
-      });
-      await window.bridge.terminalWrite(panel.id, routine.command + "\r");
-      updateWorkspace(active.id, (w) => ({
-        ...w,
-        panels: [...w.panels, panel],
-        layout: w.layout
-          ? split(w.layout, leaf(panel.id), "row")
-          : leaf(panel.id),
-      }));
-      showWorkspace();
-      setZoomed(panel.id);
-    } catch (error) {
-      notify(errorText(error));
-    }
+        label: routine.name,
+        kind: "terminal",
+        workspaceId: active.id,
+      },
+      { id: "", kind: "terminal", title: routine.name },
+      undefined,
+      (host, sessionId) =>
+        bridge.sessionInput(host, sessionId, routine.command + "\r"),
+    );
+    showWorkspace();
   }
 
   const closing = useRef(new Set<string>());
@@ -851,7 +816,6 @@ export function useWorkspaces({
     const ok = await createWorkspace(
       project.name,
       project.cwd,
-      project.backed ? "herdr" : "local",
       "shell",
       project.endpoint || socket,
     );

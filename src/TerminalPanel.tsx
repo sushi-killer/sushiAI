@@ -76,12 +76,26 @@ export function TerminalPanel({
   const [attempt, setAttempt] = useState(0);
   const [transfer, setTransfer] = useState("");
   const [disconnected, setDisconnected] = useState(false);
-  const active =
-    !panel.ended &&
-    (panel.kind === "terminal" ||
-      panel.started ||
-      !!panel.herdrId ||
-      !!panel.sessionId);
+  // A process only runs in a daemon session (or a restored Herdr pane); a panel
+  // with neither waits for Launch.
+  const active = !panel.ended && (!!panel.herdrId || !!panel.sessionId);
+  // An ended panel keeps no attach in main.
+  useEffect(() => {
+    if (panel.ended) disposeTerminal(panel.id);
+  }, [panel.ended, panel.id]);
+  // A host that comes (back) up after the first attach failed gets another try.
+  useEffect(() => {
+    if (!panel.sessionId || !window.bridge?.onDaemonState) return;
+    const hostId = daemonHost(endpoint);
+    return window.bridge.onDaemonState((state) => {
+      if (state.host !== hostId || state.state !== "ready") return;
+      const runtime = cache.get(panel.id);
+      if (runtime?.daemon && !runtime.ready && runtime.error) {
+        disposeTerminal(panel.id);
+        setAttempt((a) => a + 1);
+      }
+    });
+  }, [panel.id, panel.sessionId, endpoint]);
   useEffect(() => {
     if (!active || !host.current) return;
     if (!window.bridge) {
@@ -484,7 +498,8 @@ export function TerminalPanel({
     return (
       <div className="agent-intro">
         <div className="terminal-command">
-          <span>❯</span> {panel.agent || "claude"}
+          <span>❯</span>{" "}
+          {panel.kind === "terminal" ? "zsh" : panel.agent || "claude"}
           <span className="idle-label">ready to launch</span>
         </div>
         <div className="agent-welcome">

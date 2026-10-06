@@ -238,6 +238,8 @@ function livePanel(panel: Panel, session: DaemonSession): Panel {
   if (title && !panel.launchError) next.title = title;
   if (session.cwd) next.paneCwd = session.cwd;
   if (session.agentSession) next.agentSession = session.agentSession;
+  // The icon follows the agent the daemon runs in the session.
+  if (session.agent) next.agent = session.agent;
   const keys = new Set([...Object.keys(panel), ...Object.keys(next)]);
   for (const key of keys)
     if (

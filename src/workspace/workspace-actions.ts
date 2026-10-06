@@ -349,9 +349,13 @@ export function retitleTerminal(
   panel: Panel,
   agent: string | null | undefined,
 ): Panel {
+  // A daemon session's agent is the one it was launched with, never a guess
+  // from what the terminal prints.
+  if (panel.sessionId) return panel;
   return {
     ...panel,
-    agent: agent || undefined,
+    // An agent panel keeps the agent it was made for when none is detected.
+    agent: agent || (panel.kind === "agent" ? panel.agent : undefined),
     title:
       panel.kind === "terminal" && DEFAULT_TERMINAL_TITLES.has(panel.title)
         ? agent

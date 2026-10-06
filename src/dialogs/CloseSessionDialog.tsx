@@ -34,7 +34,6 @@ export function CloseSessionDialog({
   panel,
   workspaces,
   projectGit,
-  hidePanel,
   endSessions,
   onClose,
 }: {
@@ -42,7 +41,6 @@ export function CloseSessionDialog({
   panel: Panel;
   workspaces: Workspace[];
   projectGit: Record<string, ProjectGit>;
-  hidePanel(workspaceId: string, panelId: string): void;
   endSessions(
     items: { workspace: Workspace; panel: Panel }[],
     cleanup?: WorktreeCleanupRequest,
@@ -134,11 +132,6 @@ export function CloseSessionDialog({
     onClose();
   }
 
-  function hideSession() {
-    hidePanel(workspace.id, panel.id);
-    onClose();
-  }
-
   return (
     <>
       <div className="dialog-eyebrow">CLOSE SESSION</div>
@@ -147,7 +140,7 @@ export function CloseSessionDialog({
         {workspace.name} · {branch || panel.sessionId || workspace.cwd}
       </p>
       <p className="cs-body">
-        Hide this panel to keep its process running, or end the session.
+        Closing this panel ends its session and stops the process.
       </p>
       {checkingGit && <p className="cs-hint">Checking workspace Git status…</p>}
       {cleanupTarget && (
@@ -185,9 +178,9 @@ export function CloseSessionDialog({
         <button
           className="ui-button secondary"
           disabled={ending}
-          onClick={hideSession}
+          onClick={onClose}
         >
-          Hide only
+          Cancel
         </button>
         <button
           className="ui-button danger"
@@ -195,10 +188,10 @@ export function CloseSessionDialog({
           onClick={() => void endSession()}
         >
           {ending
-            ? "Ending…"
+            ? "Closing…"
             : deleteWorktree
-              ? "End session and delete worktree"
-              : "End session"}
+              ? "Close session and delete worktree"
+              : "Close session"}
         </button>
       </div>
     </>

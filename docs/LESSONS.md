@@ -29,6 +29,7 @@ Rule: land one working end-to-end path first, then generalize.
 
 ## Promoted
 
+- 2026-10-06 Agent-shell markers leaked into sessions → daemon strips them (lifecycle.rs test).
 - 2026-10-02 Duplicate project rows survived three point fixes → data-model fix, not another patch.
 - 2026-10-02 herdr cuts token values at 80 chars → path in `sushiai_open_arg`. `open-signal.test.cjs`.
 - 2026-10-02 herdr ignored a lower `--seq` and repeats → signals carry a nonce. `open-signal.test.cjs`.

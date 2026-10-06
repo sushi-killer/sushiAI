@@ -791,3 +791,29 @@ fn an_attach_snapshot_carries_the_bytes_the_daemon_still_holds() {
     assert!(wait(&mut client, 10).ends_with(b"\x1b[3"));
     client.call("session.close", json!({"id": id, "graceful": false}));
 }
+
+#[test]
+fn agent_session_markers_never_reach_a_session() {
+    let mut sandbox = Sandbox::new();
+    sandbox
+        .env
+        .push(("CLAUDE_CODE_CHILD_SESSION".into(), "1".into()));
+    sandbox.env.push(("CLAUDECODE".into(), "1".into()));
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let out = sandbox.home().join("child-vars");
+    let created = client.call(
+        "session.create",
+        json!({"cmd": ["/bin/sh", "-c", format!("env > {}", out.display())],
+               "cwd": "/tmp", "cols": 80, "rows": 24,
+               "env": {"CLAUDE_CODE_CHILD_SESSION": "1", "CODEX_COMPANION_X": "1", "KEEP_ME": "yes"}}),
+    );
+    assert!(created["id"].is_string(), "{created}");
+    wait_until("the child's variables", 10, || {
+        fs::read_to_string(&out).is_ok_and(|text| text.contains("KEEP_ME=yes"))
+    });
+    let text = fs::read_to_string(&out).expect("read");
+    for marker in ["CLAUDE_CODE_", "CLAUDECODE", "CODEX_COMPANION_"] {
+        assert!(!text.contains(marker), "{marker} leaked:\n{text}");
+    }
+}

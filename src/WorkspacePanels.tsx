@@ -363,7 +363,7 @@ function PanelFrame({
         onDoubleClick={onZoom}
       >
         <span
-          className={`status-dot ${panel.status === "working" || (panel.kind === "agent" && panel.started) ? "green" : panel.status === "blocked" ? "yellow" : ""}`}
+          className={`status-dot ${panel.status === "working" ? "green" : panel.status === "blocked" ? "yellow" : ""}`}
         />
         <Icon kind={panel.kind} agent={panel.agent} size={12} />
         {rename ? (

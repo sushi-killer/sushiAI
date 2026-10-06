@@ -512,7 +512,6 @@ export function App() {
               panel={target.panel}
               workspaces={workspaces}
               projectGit={projectGit}
-              hidePanel={ws.hidePanel}
               endSessions={endSessions}
               onClose={closeDialog}
             />

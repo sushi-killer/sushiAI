@@ -109,6 +109,24 @@ export function useDaemon({
       .catch((error) => {
         if (!stopped) notify(errorText(error));
       });
+    // A failed full list is tried again with a growing pause while the host
+    // stays ready; without it the panels of that host never reconcile.
+    const retries = new Map<string, number>();
+    const load = (host: string, pause = 1000) => {
+      window.clearTimeout(retries.get(host));
+      retries.delete(host);
+      list(host).catch(() => {
+        const entry = hosts.current[host];
+        if (stopped || !entry?.ready || entry.listed) return;
+        retries.set(
+          host,
+          window.setTimeout(
+            () => load(host, Math.min(pause * 2, 15000)),
+            pause,
+          ),
+        );
+      });
+    };
     const onState = (state: DaemonState) => {
       const feed = feeds.current[state.host] ?? emptyFeed();
       const known = feed.generation;
@@ -119,11 +137,13 @@ export function useDaemon({
       if (state.state !== "ready") {
         // Keep what was known: a host that is not ready never ends a panel.
         hosts.current[state.host] = { ...entry, ready: false, listed: false };
+        window.clearTimeout(retries.get(state.host));
+        retries.delete(state.host);
         return;
       }
       if (entry.ready && state.generation === known) return;
       hosts.current[state.host] = { ...entry, ready: true, listed: false };
-      void list(state.host).catch(() => {});
+      load(state.host);
     };
     const onEvent = (event: DaemonEvent) => {
       const entry = hosts.current[event.host] ?? emptyHost();
@@ -133,7 +153,7 @@ export function useDaemon({
         event,
       );
       feeds.current[event.host] = step.feed;
-      if (step.relist) void list(event.host).catch(() => {});
+      if (step.relist) load(event.host);
       if (step.host === entry) return;
       hosts.current[event.host] = step.host;
       reconcile();
@@ -150,6 +170,7 @@ export function useDaemon({
       });
     return () => {
       stopped = true;
+      retries.forEach((timer) => window.clearTimeout(timer));
       offState();
       offEvent();
     };

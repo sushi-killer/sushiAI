@@ -495,6 +495,53 @@ test("v3 to v4 rebuilds workspaces without herdr_id and keeps rows, order and en
   );
 });
 
+test("a v3 database is copied to sushiai.db.v3.bak once, before migration 4 runs", async (t) => {
+  const dir = await tempDir(t);
+  const first = appDb(dir);
+  first.exec(`
+    DROP TABLE workspaces;
+    CREATE TABLE workspaces(
+      id TEXT PRIMARY KEY,
+      position INTEGER NOT NULL,
+      endpoint TEXT NOT NULL DEFAULT '',
+      herdr_id TEXT,
+      data TEXT NOT NULL
+    );
+    PRAGMA user_version = 3;
+  `);
+  first
+    .prepare(
+      "INSERT INTO workspaces(id, position, endpoint, herdr_id, data) VALUES('a', 0, '', 'w1', '{}')",
+    )
+    .run();
+  closeAppDb(dir);
+  const backup = path.join(dir, "sushiai.db.v3.bak");
+  await assert.rejects(fs.stat(backup));
+  const db = appDb(dir);
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 4);
+  const { DatabaseSync } = require("node:sqlite");
+  const old = new DatabaseSync(backup);
+  assert.equal(old.prepare("PRAGMA user_version").get().user_version, 3);
+  assert.equal(
+    old.prepare("SELECT herdr_id FROM workspaces").get().herdr_id,
+    "w1",
+  );
+  old.close();
+  // A later open never replaces the copy.
+  closeAppDb(dir);
+  await fs.writeFile(backup, "kept");
+  appDb(dir);
+  t.after(() => closeAppDb(dir));
+  assert.equal(await fs.readFile(backup, "utf8"), "kept");
+});
+
+test("a fresh database makes no v3 backup", async (t) => {
+  const dir = await tempDir(t);
+  appDb(dir);
+  t.after(() => closeAppDb(dir));
+  await assert.rejects(fs.stat(path.join(dir, "sushiai.db.v3.bak")));
+});
+
 test("a fresh database has no herdr_id column", async (t) => {
   const dir = await tempDir(t);
   const db = appDb(dir);

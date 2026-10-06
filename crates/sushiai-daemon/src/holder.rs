@@ -147,6 +147,16 @@ pub struct Spawn<'a> {
     pub env: &'a [(String, String)],
 }
 
+/// Variables an agent sets to mark its own session; a child must not inherit them. The
+/// subscription token and the `CLAUDE_CODE_USE_*` provider switches are launch settings,
+/// not markers, and stay.
+fn is_agent_marker(key: &str) -> bool {
+    let claude = key.starts_with("CLAUDE_CODE_")
+        && key != "CLAUDE_CODE_OAUTH_TOKEN"
+        && !key.starts_with("CLAUDE_CODE_USE_");
+    key == "CLAUDECODE" || claude || key.starts_with("CODEX_COMPANION_")
+}
+
 /// Starts `sushiai hold` in its own session, so it survives this daemon, and returns its pid.
 /// The holder reports a startup failure on stderr and closes stderr once it runs, so the
 /// error text (bad command, bad cwd) reaches the caller.
@@ -163,10 +173,23 @@ pub async fn spawn(spec: &Spawn<'_>) -> Result<u32> {
         ])
         .args(["--cwd", spec.cwd, "--"])
         .args(spec.cmd)
-        .envs(spec.env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    // An agent session marker (the daemon may have been started inside an agent) changes how
+    // the agent behaves, e.g. turns transcripts off. Drop it from the inherited and the
+    // requested variables alike, then set the requested ones.
+    for (key, _) in std::env::vars_os() {
+        if key.to_str().is_some_and(is_agent_marker) {
+            command.env_remove(&key);
+        }
+    }
+    command.envs(
+        spec.env
+            .iter()
+            .filter(|(k, _)| !is_agent_marker(k))
+            .map(|(k, v)| (k, v)),
+    );
     // SAFETY: setsid(2) is async-signal-safe and touches no Rust state between fork and exec.
     unsafe {
         command.pre_exec(|| {

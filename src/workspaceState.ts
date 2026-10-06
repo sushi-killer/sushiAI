@@ -262,11 +262,13 @@ function importLegacy(store: SnapshotStore): string | null {
   return text;
 }
 
-/** A workspace whose panels are all ended sessions moves to Recently closed on
- * start. An intentionally empty project stays in the workspace list. */
+/** A workspace whose panels are all ended daemon sessions moves to Recently
+ * closed on start. Panels that come back ended without a session (restored
+ * Herdr panes) stay in place with Reopen, so they never count here. An
+ * intentionally empty project stays in the workspace list. */
 export function sweepLeftovers(saved: Saved): Saved {
   const leftover = (w: Workspace) =>
-    w.panels.length > 0 && w.panels.every((p) => p.ended);
+    w.panels.length > 0 && w.panels.every((p) => p.sessionId && p.ended);
   const rest = saved.workspaces.filter((w) => !leftover(w));
   if (rest.length === saved.workspaces.length || !rest.length) return saved;
   const closedAt = Date.now();
@@ -311,15 +313,19 @@ export function sweepLeftovers(saved: Saved): Saved {
   };
 }
 
-/** A panel that ran in Herdr has no daemon session to bind to: it comes back
- * ended, with Reopen. Herdr sessions are never adopted. */
+/** A panel that ran without a daemon session (a Herdr pane, or an agent the
+ * old local path started) has nothing to bind to: it comes back ended, with
+ * Reopen, and keeps its agent so Reopen starts the same one. */
 function restorePanel(panel: Panel): Panel {
   const { herdrId, ...rest } = panel;
+  const ran =
+    !panel.sessionId &&
+    (herdrId || (panel.kind === "agent" && panel.started === true));
   return {
     ...rest,
     busy: false,
     started: false,
-    ...(herdrId && !panel.sessionId ? { ended: true } : {}),
+    ...(ran ? { ended: true } : {}),
     // A reply that never arrived leaves an empty bubble; drop it.
     ...(panel.messages && {
       messages: panel.messages.filter((m) => m.role === "user" || m.text),

@@ -336,3 +336,62 @@ test("initialWorkspace and codePanels preserve layout and panel identity invaria
   assert.equal(codePanels(withoutCodeChat).length, 3);
   assert.equal(codePanels(withoutCodeChat)[0], workspace.panels[0]);
 });
+
+test("restored Herdr panels stay in their workspace, ended, with Reopen", async () => {
+  const { restore } = await library;
+  const saved = restore({
+    read: () =>
+      JSON.stringify({
+        workspaces: [
+          {
+            id: "kept",
+            name: "Kept",
+            cwd: "/kept",
+            herdrId: "w1",
+            panels: [panel("a", "agent", { herdrId: "p1", agent: "codex" })],
+            layout: { type: "leaf", id: "a" },
+          },
+          {
+            id: "other",
+            name: "Other",
+            cwd: "/other",
+            panels: [panel("b")],
+            layout: { type: "leaf", id: "b" },
+          },
+        ],
+        socket: "local",
+      }),
+  });
+  assert.deepEqual(
+    saved.workspaces.map((w) => w.id),
+    ["kept", "other"],
+  );
+  assert.equal(saved.workspaces[0].panels[0].ended, true);
+  assert.equal(saved.workspaces[0].panels[0].agent, "codex");
+  assert.equal(saved.closedProjects.length, 0);
+});
+
+test("a restored agent that ran without a session comes back ended and keeps its kind", async () => {
+  const { restore } = await library;
+  const saved = restore({
+    read: () =>
+      JSON.stringify({
+        workspaces: [
+          {
+            id: "w",
+            name: "W",
+            cwd: "/w",
+            panels: [
+              panel("ran", "agent", { agent: "codex", started: true }),
+              panel("idle", "agent", { agent: "claude" }),
+            ],
+            layout: { type: "leaf", id: "ran" },
+          },
+        ],
+      }),
+  });
+  const [ran, idle] = saved.workspaces[0].panels;
+  assert.equal(ran.ended, true);
+  assert.equal(ran.agent, "codex");
+  assert.equal(idle.ended, undefined);
+});

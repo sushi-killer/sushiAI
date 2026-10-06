@@ -63,6 +63,12 @@ export async function launchDaemonSession(
   return { host, sessionId, cwd: cwd || request.cwd, panel };
 }
 
+/** The id of the workspace a launch creates, fixed before the launch so the
+ * daemon group and the workspace share it. A retry of the launch reuses it. */
+export function newWorkspaceId(operationId: string): string {
+  return `ws-${operationId}`;
+}
+
 /** The existing workspace a launch lands in, or undefined when it needs a new
  * one: a Reopen goes back to its workspace, a worktree launch gets a workspace
  * of its own, a new panel joins the workspace that asked for it. */

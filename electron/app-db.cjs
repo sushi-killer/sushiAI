@@ -84,6 +84,17 @@ const MIGRATIONS = [
   ALTER TABLE workspaces_v4 RENAME TO workspaces;`,
 ];
 
+/** Migration 4 rewrites the workspaces table. A database that is about to run
+ * it is copied once to `sushiai.db.v3.bak`; an existing copy is never replaced. */
+function backupBeforeV4(db, file) {
+  const current = db.prepare("PRAGMA user_version").get().user_version;
+  const backup = `${file}.v3.bak`;
+  if (current < 1 || current >= 4 || fs.existsSync(backup)) return;
+  db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  fs.copyFileSync(file, backup, fs.constants.COPYFILE_EXCL);
+  fs.chmodSync(backup, 0o600);
+}
+
 function migrate(db) {
   transaction(db, () => {
     const current = db.prepare("PRAGMA user_version").get().user_version;
@@ -484,6 +495,7 @@ function appDb(userDataDir) {
     // shared-memory files the database file's mode.
     for (const suffix of ["", "-wal", "-shm"])
       if (fs.existsSync(file + suffix)) fs.chmodSync(file + suffix, 0o600);
+    backupBeforeV4(db, file);
     migrate(db);
     importAll(db, userDataDir);
   } catch (error) {

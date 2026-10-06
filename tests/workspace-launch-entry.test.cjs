@@ -330,16 +330,9 @@ test("add forwards the selected worktree base into a workspace of its own", asyn
   assert.equal(created.worktreeBranch, "probe");
   assert.equal(created.connection, entry);
   assert.equal(created.panels[0].sessionId, "s1");
-  let creation;
-  const local = controller(
-    {
-      worktreeCreate: async (...args) => {
-        creation = args;
-        return { path: "/tmp/checkout-probe" };
-      },
-    },
-    initial(),
-  );
+  assert.equal(created.id, server.requests[0].group);
+  // A workspace without a connection launches its worktree in the local daemon.
+  const local = controller(server.bridge, initial());
   await local.ws.addPanel(
     "terminal",
     "claude",
@@ -349,12 +342,13 @@ test("add forwards the selected worktree base into a workspace of its own", asyn
     "local",
     chosen,
   );
-  assert.deepEqual(Array.from(creation), [
-    "/tmp/checkout",
-    chosen.branch,
-    chosen.base,
-  ]);
-  assert.equal(local.current().at(-1).localWorktree, true);
+  const request = server.requests.at(-1);
+  assert.equal(request.host, "local");
+  assert.deepEqual(request.worktree, chosen);
+  const made = local.current().at(-1);
+  assert.equal(made.id, request.group);
+  assert.notEqual(made.id, "local");
+  assert.equal(made.panels[0].sessionId.startsWith("s"), true);
 });
 
 test("closing the last Herdr session keeps the project with no open panes", async () => {
@@ -386,8 +380,10 @@ test("closing the last Herdr session keeps the project with no open panes", asyn
     );
     app.ws.setProjectGit({ [workspace.id]: { linkedWorktree: false } });
     app.ws.closePanel(panel.id);
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(app.confirmations.length, 0);
+    // A live session is never ended without the dialog.
+    assert.equal(app.confirmations.length, 1);
+    assert.equal(calls.length, 0);
+    await app.ws.endSessions([{ workspace, panel }]);
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0], ["local", "live-pane", true]);
     const remaining = app.current().find((item) => item.id === workspace.id);
@@ -814,4 +810,143 @@ test("Reopen of an ended agent panel launches with resume and the workspace as g
   assert.equal(panel.ended, undefined);
   assert.equal(panel.id, sessionPanelId(entry, "s-new"));
   assert.deepEqual(leafIds(app.current()[0].layout), [panel.id]);
+});
+
+test("the default workspace launches every panel kind through the local daemon", async () => {
+  const server = daemon();
+  const app = controller(server.bridge, initial());
+  for (const [kind, agent] of [
+    ["terminal", "claude"],
+    ["agent", "claude"],
+    ["agent", "codex"],
+    ["agent", "gemini"],
+  ])
+    assert.equal(
+      await app.ws.addPanel(
+        kind,
+        agent,
+        undefined,
+        undefined,
+        undefined,
+        "local",
+      ),
+      true,
+    );
+  assert.equal(server.requests.length, 4);
+  assert.deepEqual(
+    server.requests.map((r) => [r.host, r.agent]),
+    [
+      ["local", undefined],
+      ["local", "claude"],
+      ["local", "codex"],
+      ["local", "gemini"],
+    ],
+  );
+  const panels = app.current()[0].panels;
+  assert.equal(panels.length, 4);
+  assert.ok(panels.every((p) => p.sessionId));
+  assert.deepEqual(
+    panels.map((p) => p.agent),
+    [undefined, "claude", "codex", "gemini"],
+  );
+});
+
+test("a panel that never ran starts through the daemon in its own slot", async () => {
+  const server = daemon();
+  const starter = {
+    id: "starter",
+    kind: "agent",
+    agent: "codex",
+    title: "Codex",
+  };
+  const app = controller(server.bridge, [
+    {
+      ...initial()[0],
+      panels: [starter],
+      layout: { type: "leaf", id: "starter" },
+    },
+  ]);
+  app.ws.startPanel("starter");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(server.requests.length, 1);
+  assert.equal(server.requests[0].agent, "codex");
+  const [panel] = app.current()[0].panels;
+  assert.equal(panel.agent, "codex");
+  assert.ok(panel.sessionId);
+});
+
+test("createWorkspace sends the new workspace id as the daemon group", async () => {
+  const server = daemon();
+  const app = controller(server.bridge, initial());
+  await app.ws.createWorkspace("Fresh", "/tmp/fresh", "codex", entry, "op-1");
+  assert.equal(server.requests[0].group, app.current()[1].id);
+  assert.equal(server.requests[0].agent, "codex");
+});
+
+test("reopenProject launches a shell on the remembered endpoint and forgets the project", async () => {
+  const server = daemon();
+  const app = controller(server.bridge, initial());
+  await app.ws.reopenProject({
+    id: "p",
+    name: "Old",
+    cwd: "/tmp/old",
+    endpoint: entry,
+    backed: true,
+    closedAt: 1,
+    git: {},
+  });
+  assert.deepEqual(app.errors, []);
+  assert.equal(server.requests.length, 1);
+  assert.equal(server.requests[0].cwd, "/tmp/old");
+  assert.equal(server.requests[0].agent, undefined);
+  assert.equal(app.current().at(-1).cwd, "/tmp/old");
+});
+
+test("an agent panel keeps its agent when a terminal event names none", () => {
+  const { retitleTerminal } = require("../src/workspace/workspace-actions.ts");
+  const panel = { id: "p", kind: "agent", agent: "codex", title: "Codex" };
+  assert.equal(retitleTerminal(panel, undefined).agent, "codex");
+  assert.equal(retitleTerminal(panel, null).agent, "codex");
+});
+
+test("closing any live daemon session asks first, an ended one closes without asking", () => {
+  for (const [kind, agent] of [
+    ["terminal", undefined],
+    ["agent", "claude"],
+    ["agent", "codex"],
+    ["agent", "gemini"],
+    ["agent", "cursor-agent"],
+  ]) {
+    const live = { id: "live", sessionId: "s1", kind, agent, title: "x" };
+    const app = controller({ terminalClose: async () => {} }, [
+      { ...initial()[0], panels: [live], layout: { type: "leaf", id: "live" } },
+    ]);
+    app.ws.closePanel("live");
+    assert.equal(app.confirmations.length, 1, `${kind} ${agent}`);
+    assert.equal(app.current()[0].panels.length, 1);
+  }
+  const ended = {
+    id: "e",
+    sessionId: "s2",
+    kind: "agent",
+    title: "x",
+    ended: true,
+  };
+  const app = controller({ terminalClose: async () => {} }, [
+    { ...initial()[0], panels: [ended], layout: { type: "leaf", id: "e" } },
+  ]);
+  app.ws.closePanel("e");
+  assert.equal(app.confirmations.length, 0);
+});
+
+test("a terminal event never changes the agent of a daemon session panel", () => {
+  const { retitleTerminal } = require("../src/workspace/workspace-actions.ts");
+  const panel = {
+    id: "p",
+    kind: "agent",
+    agent: "codex",
+    sessionId: "s1",
+    title: "Codex",
+  };
+  assert.equal(retitleTerminal(panel, "claude"), panel);
 });

@@ -309,3 +309,29 @@ test("a resync asks for a new list and a replaced list is dropped", async () => 
   assert.equal(lib.failList(second.feed, second.token).pending, null);
   assert.ok(lib.finishList(second.feed, second.token, host, []));
 });
+
+test("a workspace without a connection reconciles against the local host and the icon follows the session agent", async () => {
+  const { reconcileSessions } = await library;
+  const before = [
+    workspace(
+      [
+        panel("p1", "s1", { agent: "claude" }),
+        panel("p2", "s2", { agent: "claude" }),
+      ],
+      undefined,
+    ),
+  ];
+  const after = reconcileSessions(before, {
+    local: ready([
+      session("s1", { agent: "claude", agentStatus: "working" }),
+      session("s2", { agent: "codex", agentStatus: "idle" }),
+    ]),
+  });
+  assert.deepEqual(
+    after[0].panels.map((p) => [p.agent, p.status]),
+    [
+      ["claude", "working"],
+      ["codex", "idle"],
+    ],
+  );
+});

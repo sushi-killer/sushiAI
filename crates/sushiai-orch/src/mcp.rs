@@ -369,7 +369,7 @@ impl Bridge {
     }
 }
 
-fn orchd_method_for(bridge: &Bridge, tool_name: &str) -> Option<&'static str> {
+fn orch_method_for(bridge: &Bridge, tool_name: &str) -> Option<&'static str> {
     tool_specs()
         .into_iter()
         .find(|(name, ..)| *name == tool_name && bridge.offers(name))
@@ -480,7 +480,7 @@ fn handle_tools_call(bridge: &Bridge, params: &Value) -> Value {
         Ok(p) => p,
         Err(e) => return tool_error(format!("invalid tools/call params: {e}")),
     };
-    let Some(method) = orchd_method_for(bridge, &p.name) else {
+    let Some(method) = orch_method_for(bridge, &p.name) else {
         return tool_error(format!("unknown tool: {}", p.name));
     };
     let args = if p.arguments.is_null() {
@@ -807,14 +807,14 @@ mod tests {
     }
 
     #[test]
-    fn every_tool_name_maps_to_a_dotted_orchd_method() {
+    fn every_tool_name_maps_to_a_dotted_orch_method() {
         let b = orchestrator();
         for (name, method, ..) in tool_specs() {
-            assert_eq!(orchd_method_for(&b, name), Some(method));
+            assert_eq!(orch_method_for(&b, name), Some(method));
         }
-        assert_eq!(orchd_method_for(&b, "task_delete"), None);
-        assert_eq!(orchd_method_for(&b, "settings_set"), None);
-        assert_eq!(orchd_method_for(&b, "secrets_set"), None);
+        assert_eq!(orch_method_for(&b, "task_delete"), None);
+        assert_eq!(orch_method_for(&b, "settings_set"), None);
+        assert_eq!(orch_method_for(&b, "secrets_set"), None);
     }
 
     #[test]

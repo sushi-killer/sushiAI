@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { stopDaemon } from "../../../../scripts/lib/daemon-binary.mjs";
 
 const root = process.cwd();
 const temp = await fs.mkdtemp("/tmp/sushiai-worktree-evidence-");
@@ -10,7 +11,6 @@ const dataDir = path.join(temp, "profile");
 const repo = path.join(temp, "checkout");
 const worktree = path.join(temp, "feature-checkout");
 const bin = path.join(temp, "bin");
-const missingSocket = path.join(temp, "no-herdr.sock");
 const report = { pageErrors: [] };
 let app;
 
@@ -54,7 +54,7 @@ const featurePanel = {
   title: "Feature Agent",
   agent: "codex",
   started: false,
-  herdrId: "feature-session",
+  sessionId: "feature-session",
   ended: true,
 };
 const workspaces = [
@@ -100,7 +100,7 @@ try {
       PATH: `${bin}:${process.env.PATH}`,
       BRIDGE_DATA_DIR: dataDir,
       BRIDGE_DEV_URL: "",
-      HERDR_SOCKET_PATH: missingSocket,
+      SUSHIAI_HOME: path.join(dataDir, "sushiai"),
       SUSHIAI_TEST_WINDOW: "hidden",
     },
   });
@@ -219,6 +219,7 @@ try {
   report.error = String(error?.message ?? error);
 } finally {
   if (app) await app.close();
+  stopDaemon(path.join(dataDir, "sushiai"));
   await fs.rm(temp, { recursive: true, force: true });
   console.log(JSON.stringify(report, null, 2));
 }

@@ -100,7 +100,7 @@ test("a failed import rolls back, keeps the file, never blocks opening and retri
   t.after(() => closeAppDb(dir));
   assert.equal(db.prepare("SELECT count(*) AS n FROM projects").get().n, 1);
   assert.equal(await exists(`${file}.imported`), true);
-  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 4);
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 5);
   assert.equal(
     db.prepare("PRAGMA journal_mode").get().journal_mode.toLowerCase(),
     "wal",
@@ -430,7 +430,7 @@ test("workspace-state.json splits into workspace rows and app state, then is ren
   assert.equal(await exists(`${file}.imported`), true);
 });
 
-test("v3 to v4 rebuilds workspaces without herdr_id and keeps rows, order and endpoint", async (t) => {
+test("v3 to v4 drops the old external-id column and keeps rows, order and endpoint", async (t) => {
   const dir = await tempDir(t);
   const first = appDb(dir);
   // Put the database back the way v3 left it.
@@ -440,15 +440,15 @@ test("v3 to v4 rebuilds workspaces without herdr_id and keeps rows, order and en
       id TEXT PRIMARY KEY,
       position INTEGER NOT NULL,
       endpoint TEXT NOT NULL DEFAULT '',
-      herdr_id TEXT,
+      legacy_id TEXT,
       data TEXT NOT NULL
     );
-    CREATE UNIQUE INDEX workspaces_herdr ON workspaces(endpoint, herdr_id)
-      WHERE herdr_id IS NOT NULL AND herdr_id != '';
+    CREATE UNIQUE INDEX workspaces_legacy ON workspaces(endpoint, legacy_id)
+      WHERE legacy_id IS NOT NULL AND legacy_id != '';
     PRAGMA user_version = 3;
   `);
   const insert = first.prepare(
-    "INSERT INTO workspaces(id, position, endpoint, herdr_id, data) VALUES(?, ?, ?, ?, ?)",
+    "INSERT INTO workspaces(id, position, endpoint, legacy_id, data) VALUES(?, ?, ?, ?, ?)",
   );
   insert.run("b", 1, "", null, JSON.stringify({ id: "b", cwd: "/repo/b" }));
   insert.run(
@@ -456,12 +456,12 @@ test("v3 to v4 rebuilds workspaces without herdr_id and keeps rows, order and en
     0,
     "ssh:devbox",
     "w1",
-    JSON.stringify({ id: "a", herdrId: "w1", connection: "ssh:devbox" }),
+    JSON.stringify({ id: "a", connection: "ssh:devbox" }),
   );
   closeAppDb(dir);
   const db = appDb(dir);
   t.after(() => closeAppDb(dir));
-  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 4);
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 5);
   assert.deepEqual(
     db
       .prepare("PRAGMA table_info(workspaces)")
@@ -472,7 +472,7 @@ test("v3 to v4 rebuilds workspaces without herdr_id and keeps rows, order and en
   assert.equal(
     db
       .prepare(
-        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'workspaces_herdr'",
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'workspaces_legacy'",
       )
       .get(),
     undefined,
@@ -504,26 +504,26 @@ test("a v3 database is copied to sushiai.db.v3.bak once, before migration 4 runs
       id TEXT PRIMARY KEY,
       position INTEGER NOT NULL,
       endpoint TEXT NOT NULL DEFAULT '',
-      herdr_id TEXT,
+      legacy_id TEXT,
       data TEXT NOT NULL
     );
     PRAGMA user_version = 3;
   `);
   first
     .prepare(
-      "INSERT INTO workspaces(id, position, endpoint, herdr_id, data) VALUES('a', 0, '', 'w1', '{}')",
+      "INSERT INTO workspaces(id, position, endpoint, legacy_id, data) VALUES('a', 0, '', 'w1', '{}')",
     )
     .run();
   closeAppDb(dir);
   const backup = path.join(dir, "sushiai.db.v3.bak");
   await assert.rejects(fs.stat(backup));
   const db = appDb(dir);
-  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 4);
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 5);
   const { DatabaseSync } = require("node:sqlite");
   const old = new DatabaseSync(backup);
   assert.equal(old.prepare("PRAGMA user_version").get().user_version, 3);
   assert.equal(
-    old.prepare("SELECT herdr_id FROM workspaces").get().herdr_id,
+    old.prepare("SELECT legacy_id FROM workspaces").get().legacy_id,
     "w1",
   );
   old.close();
@@ -542,34 +542,47 @@ test("a fresh database makes no v3 backup", async (t) => {
   await assert.rejects(fs.stat(path.join(dir, "sushiai.db.v3.bak")));
 });
 
-test("a fresh database has no herdr_id column", async (t) => {
+test("a fresh database has the plain workspaces table and no launches table", async (t) => {
   const dir = await tempDir(t);
   const db = appDb(dir);
   t.after(() => closeAppDb(dir));
-  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 4);
-  assert.equal(
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 5);
+  assert.deepEqual(
     db
       .prepare("PRAGMA table_info(workspaces)")
       .all()
-      .some((column) => column.name === "herdr_id"),
-    false,
+      .map((column) => column.name),
+    ["id", "position", "endpoint", "data"],
+  );
+  assert.equal(
+    db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'launches'").get(),
+    undefined,
   );
 });
 
-test("herdr-launches.json, connections.json and orchestrator-hosts.json are imported once", async (t) => {
+test("v4 to v5 drops the launches table of the retired backend", async (t) => {
   const dir = await tempDir(t);
-  const record = {
-    endpoint: "ssh:devbox",
-    operationId: "op-1",
-    created: { workspaceId: "w1", paneId: "p1", cwd: "/repo/app" },
-    signatureHash: "s",
-    preparationHash: "p",
-  };
+  const first = appDb(dir);
+  first.exec(`
+    CREATE TABLE launches(endpoint TEXT, operation_id TEXT, data TEXT);
+    PRAGMA user_version = 4;
+  `);
+  closeAppDb(dir);
+  const db = appDb(dir);
+  t.after(() => closeAppDb(dir));
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 5);
+  assert.equal(
+    db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'launches'").get(),
+    undefined,
+  );
+});
+
+test("connections.json and orchestrator-hosts.json are imported once", async (t) => {
+  const dir = await tempDir(t);
   const profile = (id) => ({
     id,
     name: id,
     host: "devbox",
-    socket: "~/.sushiai/herdr.sock",
   });
   const one = "11111111-1111-1111-1111-111111111111";
   const two = "22222222-2222-2222-2222-222222222222";
@@ -579,10 +592,6 @@ test("herdr-launches.json, connections.json and orchestrator-hosts.json are impo
     console.warn = warn;
   });
   await fs.writeFile(
-    path.join(dir, "herdr-launches.json"),
-    JSON.stringify({ version: 1, operations: [record] }),
-  );
-  await fs.writeFile(
     path.join(dir, "connections.json"),
     JSON.stringify([profile(one), { name: "no host" }, profile(two)]),
   );
@@ -591,10 +600,6 @@ test("herdr-launches.json, connections.json and orchestrator-hosts.json are impo
     JSON.stringify(["ssh:devbox"]),
   );
   const db = appDb(dir);
-  assert.deepEqual(
-    JSON.parse(db.prepare("SELECT data FROM launches").get().data),
-    record,
-  );
   assert.deepEqual(
     db
       .prepare("SELECT id FROM connections ORDER BY position")
@@ -607,11 +612,7 @@ test("herdr-launches.json, connections.json and orchestrator-hosts.json are impo
   t.after(() => loaded.close());
   assert.equal(loaded.list().length, 2);
   assert.equal(count(db, "orchestrator_hosts"), 1);
-  for (const name of [
-    "herdr-launches.json",
-    "connections.json",
-    "orchestrator-hosts.json",
-  ]) {
+  for (const name of ["connections.json", "orchestrator-hosts.json"]) {
     assert.equal(await exists(path.join(dir, name)), false);
     assert.equal(await exists(path.join(dir, `${name}.imported`)), true);
   }
@@ -626,7 +627,6 @@ test("an invalid legacy file is left in place and never blocks opening", async (
   const dir = await tempDir(t);
   const names = [
     "workspace-state.json",
-    "herdr-launches.json",
     "connections.json",
     "orchestrator-hosts.json",
   ];
@@ -636,14 +636,12 @@ test("an invalid legacy file is left in place and never blocks opening", async (
     console.warn = warn;
   });
   await fs.writeFile(path.join(dir, names[0]), "{broken");
-  await fs.writeFile(path.join(dir, names[1]), "[1]");
-  await fs.writeFile(path.join(dir, names[2]), '{"not":"a list"}');
-  await fs.writeFile(path.join(dir, names[3]), "nope");
+  await fs.writeFile(path.join(dir, names[1]), '{"not":"a list"}');
+  await fs.writeFile(path.join(dir, names[2]), "nope");
   const db = appDb(dir);
   for (const table of [
     "workspaces",
     "app_state",
-    "launches",
     "connections",
     "orchestrator_hosts",
   ])
@@ -676,34 +674,6 @@ test("a broken projects.json does not stop the other imports", async (t) => {
   );
 });
 
-test("invalid launch rows are dropped on load, valid ones kept", async (t) => {
-  const dir = await tempDir(t);
-  const { SessionLauncher } = require("../electron/herdr-session-launch.cjs");
-  const warn = console.warn;
-  console.warn = () => {};
-  t.after(() => {
-    console.warn = warn;
-  });
-  const db = appDb(dir);
-  const good = {
-    endpoint: "local",
-    operationId: "ok",
-    created: { workspaceId: "w1", paneId: "p1", cwd: "/repo/app" },
-    signatureHash: "s",
-    preparationHash: "p",
-  };
-  const insert = db.prepare(
-    "INSERT INTO launches(endpoint, operation_id, data) VALUES(?, ?, ?)",
-  );
-  insert.run("local", "ok", JSON.stringify(good));
-  insert.run("local", "bad", JSON.stringify({ endpoint: "local" }));
-  insert.run("local", "junk", "{x");
-  const launcher = new SessionLauncher({ userDataDir: dir });
-  await launcher.loadJournal();
-  assert.equal(launcher.journal.size, 1);
-  assert.equal(count(db, "launches"), 1);
-});
-
 test("appDb returns one connection per directory", async (t) => {
   const dir = await tempDir(t);
   assert.equal(appDb(dir), appDb(dir));
@@ -714,17 +684,15 @@ test("appDb returns one connection per directory", async (t) => {
 
 test("connection profiles persist across a reopen", async (t) => {
   const dir = await tempDir(t);
-  const socket = "~/.sushiai/herdr.sock";
   const connections = new Connections(dir);
   await connections.init();
-  const dev = await connections.save({ name: "Dev", host: "devbox", socket });
-  const box = await connections.save({ name: "Box", host: "user@box", socket });
+  const dev = await connections.save({ name: "Dev", host: "devbox" });
+  const box = await connections.save({ name: "Box", host: "user@box" });
   await connections.setHidden(`ssh:${dev.id}`, true);
   await connections.delete(`ssh:${box.id}`);
   const again = await connections.save({
     name: "Box",
     host: "user@box2",
-    socket,
   });
   await connections.close();
   closeAppDb(dir);

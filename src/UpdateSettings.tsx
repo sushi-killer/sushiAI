@@ -156,8 +156,8 @@ export function UpdateSettings({ state }: { state: UpdateState | null }) {
         ))}
       </div>
       <p className="update-note">
-        Save your edits before installing. Installation restarts sushiAI and
-        stops local terminals; Herdr sessions keep running. The app verifies the
+        Save your edits before installing. Installation restarts sushiAI;
+        terminal sessions keep running and reattach. The app verifies the
         package and keeps a recovery copy until the new version opens.
       </p>
       {state.release?.notes && (

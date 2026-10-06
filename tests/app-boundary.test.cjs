@@ -19,10 +19,10 @@ test("App.tsx owns no domain implementation", () => {
   // domain leaked back into the shell.
   const forbidden = [
     ["localStorage", "persistence lives in workspaceState/useAppPersistence"],
-    ["window.bridge.herdr(", "Herdr calls live in useHerdr/useWorkspaces"],
-    ["reconcileHerdrWorkspaces", "snapshot reconciliation lives in useHerdr"],
+    ["sessionsList", "session listing lives in useDaemon"],
+    ["reconcileSessions", "session reconciliation lives in useDaemon"],
     ["disposeTerminal", "terminal teardown lives in useWorkspaces"],
-    ["terminalClose", "terminal teardown lives in useWorkspaces"],
+    ["daemonTerminalDetach", "terminal detach lives in TerminalPanel"],
     ["modelProfilesList", "model profiles belong to the panel picker"],
     ["claudePluginsToggle", "plugin toggles live in ClaudeMcpSettings"],
     ["checkout", "branch checkout is a main-process operation only"],
@@ -36,7 +36,7 @@ test("App.tsx owns no domain implementation", () => {
 });
 
 test("App.tsx stores the workspace list but never edits it", () => {
-  // The list lives here because useHerdr and useWorkspaces both write to it;
+  // The list lives here because useDaemon and useWorkspaces both write to it;
   // App hands the setter to those two and touches it nowhere else.
   const mentions = source.match(/setWorkspaces\b/g) || [];
   assert.equal(

@@ -24,7 +24,6 @@ import { OrchestratorPanel } from "./orchestrator/OrchestratorPanel";
 type PanelHostProps = {
   panel: Panel;
   cwd: string;
-  socket: string;
   endpoint?: string;
   /** Pane provenance (AC23): the workspace's host label, set only when it is
    * a member of a merged sidebar row. Only the terminal/agent pane draws it. */
@@ -64,7 +63,6 @@ type PanelHostProps = {
 export const PanelHost = memo(function PanelHost({
   panel,
   cwd,
-  socket,
   endpoint,
   hostLabel,
   selected,
@@ -144,8 +142,6 @@ export const PanelHost = memo(function PanelHost({
           cwd || !window.bridge ? (
             <TerminalPanel
               panel={panel}
-              cwd={cwd}
-              socket={socket}
               endpoint={endpoint}
               hostLabel={hostLabel}
               onStart={() => onStart(panel.id)}

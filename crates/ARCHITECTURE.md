@@ -1,7 +1,8 @@
 # Crates
 
-A Cargo workspace for the session daemon. It is not wired into the app yet. The
-desktop app still uses Herdr and orchd; see `docs/architecture.md`.
+A Cargo workspace for the session daemon. The desktop app runs every terminal
+and agent session in it and still uses orchd for tasks; see
+`docs/architecture.md`.
 
 ## Shape
 

@@ -57,24 +57,6 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   chooseDirectory: invoke("choose-directory"),
   chooseAttachments: invoke("choose-attachments"),
   pathForFile: (file) => webUtils.getPathForFile(file),
-  terminalOpen: invoke("terminal-open"),
-  projectSessionEnv: invoke("project-session-env"),
-  terminalWrite: invoke("terminal-write"),
-  terminalAttach: invoke("terminal-attach"),
-  terminalResize: invoke("terminal-resize"),
-  terminalClose: invoke("terminal-close"),
-  terminalScroll: invoke("terminal-scroll"),
-  terminalAck: invoke("terminal-ack"),
-  herdr: invoke("herdr"),
-  herdrCompatibility: invoke("herdr-compatibility"),
-  herdrInstall: invoke("herdr-install"),
-  herdrSubscribe: invoke("herdr-events-subscribe"),
-  herdrUnsubscribe: invoke("herdr-events-unsubscribe"),
-  onHerdr: (callback) => {
-    const listener = (_, data) => callback(data);
-    ipcRenderer.on("herdr-event", listener);
-    return () => ipcRenderer.removeListener("herdr-event", listener);
-  },
   daemonStates: invoke("daemon-states"),
   onDaemonState: (callback) => {
     const listener = (_, data) => callback(data);
@@ -161,7 +143,6 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   modelProfilesList: invoke("model-profiles-list"),
   modelProfilesUpsert: invoke("model-profiles-upsert"),
   modelProfilesDelete: invoke("model-profiles-delete"),
-  modelLaunch: invoke("model-launch"),
   extensionsList: invoke("extensions-list"),
   extensionsRefresh: invoke("extensions-refresh"),
   extensionsStateRead: invoke("extensions-state-read"),
@@ -223,11 +204,6 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   worktreeCreate: invoke("worktree-create"),
   worktreesList: invoke("worktrees:list"),
   worktreeRemove: invoke("worktrees:remove"),
-  onTerminal: (callback) => {
-    const listener = (_, data) => callback(data);
-    ipcRenderer.on("terminal-data", listener);
-    return () => ipcRenderer.removeListener("terminal-data", listener);
-  },
   onChat: (callback) => {
     const listener = (_, data) => callback(data);
     ipcRenderer.on("chat-data", listener);

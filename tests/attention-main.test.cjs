@@ -119,7 +119,7 @@ test("validateNotice accepts a well-formed notice and returns its fields", () =>
 
 test("notifications accept endpoint-scoped IDs and retain a finite bound", () => {
   const endpoint = `/tmp/${String.fromCodePoint(0x044f).repeat(30)}.sock`;
-  const prefix = `herdr:v2:${encodeURIComponent(endpoint)}:`;
+  const prefix = `session:${encodeURIComponent(endpoint)}:`;
   const notice = {
     workspaceId: `${prefix}w1`,
     panelId: `${prefix}w1%3Ap1`,

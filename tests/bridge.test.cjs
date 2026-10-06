@@ -5,7 +5,7 @@ const { wrapBridge } = require("../src/bridge.ts");
 test("renderer unwraps structured IPC after crossing contextBridge", async () => {
   const bridge = wrapBridge(
     Object.freeze({
-      herdr: async () => ({
+      session: async () => ({
         __sushiaiIpc: 1,
         error: {
           message: "Missing pane",
@@ -18,7 +18,7 @@ test("renderer unwraps structured IPC after crossing contextBridge", async () =>
       launch: async () => ({ __sushiaiIpc: 1, value: { paneId: "new" } }),
     }),
   );
-  await assert.rejects(bridge.herdr(), (error) => {
+  await assert.rejects(bridge.session(), (error) => {
     assert.ok(error instanceof Error);
     assert.equal(error.code, "pane_not_found");
     assert.equal(error.stage, "create");

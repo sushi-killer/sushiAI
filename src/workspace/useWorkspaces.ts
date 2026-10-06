@@ -30,7 +30,6 @@ import {
   removePanel,
   renameRequest,
   reopenRequest,
-  retitleTerminal,
   tidyGroupLayout,
   tidyWorkspace,
 } from "./workspace-actions.ts";
@@ -77,7 +76,6 @@ export function useWorkspaces({
   setWorkspaces,
   saved,
   socket,
-  refreshHerdr,
   useEndpoint,
   notify,
   showWorkspace,
@@ -87,7 +85,6 @@ export function useWorkspaces({
   setWorkspaces: React.Dispatch<React.SetStateAction<Workspace[]>>;
   saved: Saved | null;
   socket: string;
-  refreshHerdr(path: string): Promise<void>;
   useEndpoint(endpoint: string): void;
   notify(text: string): void;
   showWorkspace(): void;
@@ -99,7 +96,6 @@ export function useWorkspaces({
   const [dragId, setDragId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const launches = useRef(0);
-  const failedLaunches = useRef(new Map<string, SessionLaunchRequest>());
   const reopening = useRef(new Map<string, Promise<void>>());
   const [closedProjects, setClosedProjects] = useState<ClosedProject[]>(
     saved?.closedProjects || [],
@@ -207,21 +203,6 @@ export function useWorkspaces({
       ),
     );
   }, [notify]);
-  useEffect(
-    () =>
-      window.bridge?.onTerminal((event) => {
-        if (event.agent !== undefined)
-          setWorkspaces((items) =>
-            items.map((w) => ({
-              ...w,
-              panels: w.panels.map((p) =>
-                p.id === event.panelId ? retitleTerminal(p, event.agent) : p,
-              ),
-            })),
-          );
-      }),
-    [],
-  );
   const renamePanel = useCallback(
     (panelId: string, title: string) => {
       const owner = findPanelOwner(workspacesRef.current, panelId);
@@ -246,7 +227,6 @@ export function useWorkspaces({
       ...w,
       layout: remove(w.layout, panelId),
     }));
-    window.bridge?.terminalClose(panelId);
     disposeTerminal(panelId);
     setZoomed(null);
   }
@@ -262,10 +242,6 @@ export function useWorkspaces({
     restore?: { workspaceId: string; panelId: string },
     afterLaunch?: (host: string, sessionId: string) => Promise<void>,
   ): Promise<boolean> {
-    const operationKey = JSON.stringify([
-      request.endpoint,
-      request.operationId,
-    ]);
     launches.current += 1;
     setAdding(true);
     try {
@@ -276,12 +252,7 @@ export function useWorkspaces({
         cwd,
         panel: bound,
       } = await launchDaemonSession(window.bridge, request, template);
-      const panel: Panel = {
-        ...bound,
-        started: request.kind === "agent",
-        launchOperationId: undefined,
-        launchError: undefined,
-      };
+      const panel: Panel = { ...bound, started: request.kind === "agent" };
       const targetId =
         launchTarget(workspacesRef.current, request, panel.id, restore) ||
         request.workspaceId ||
@@ -293,17 +264,11 @@ export function useWorkspaces({
       setSelected(panel.id);
       if (restore) {
         disposeTerminal(restore.panelId);
-        window.bridge.terminalClose(restore.panelId).catch(() => {});
         if (zoomedRef.current === restore.panelId) setZoomed(panel.id);
       }
-      failedLaunches.current.delete(operationKey);
       await afterLaunch?.(host, sessionId);
-      await refreshHerdr(request.endpoint).catch((error) =>
-        notify(errorText(error)),
-      );
       return true;
     } catch (error) {
-      failedLaunches.current.set(operationKey, request);
       notify(errorText(error));
       return false;
     } finally {
@@ -490,26 +455,15 @@ export function useWorkspaces({
       !owner ||
       !ended ||
       (ended.kind !== "agent" && ended.kind !== "terminal") ||
-      (!ended.ended && !ended.launchError && ended.sessionId)
+      (!ended.ended && ended.sessionId)
     )
       return Promise.resolve();
-    const endpoint = owner.connection || socket;
-    const cached = ended.launchOperationId
-      ? failedLaunches.current.get(
-          JSON.stringify([endpoint, ended.launchOperationId]),
-        )
-      : undefined;
-    const request: SessionLaunchRequest =
-      cached &&
-      !ended.ended &&
-      (!operationId || cached.operationId === operationId)
-        ? cached
-        : reopenRequest(
-            owner,
-            ended,
-            operationId || (!ended.ended && ended.launchOperationId) || uid(),
-            socket,
-          );
+    const request: SessionLaunchRequest = reopenRequest(
+      owner,
+      ended,
+      operationId || uid(),
+      socket,
+    );
     const run = Promise.resolve()
       .then(() =>
         launchSession(request, ended, { workspaceId: owner.id, panelId }),
@@ -535,9 +489,7 @@ export function useWorkspaces({
         const outcome = await closeBeforeWorktreeRemoval(
           async () => {
             if (panel.sessionId) await closeSession(workspace, panel, socket);
-            else await window.bridge?.terminalClose(panel.id);
             if (panel.busy) await window.bridge?.cancelChat(panel.id);
-            await window.bridge?.terminalClose(panel.id);
             disposeTerminal(panel.id);
           },
           cleanup?.panel.id === panel.id
@@ -564,15 +516,9 @@ export function useWorkspaces({
         return remaining.length ? remaining : [initialWorkspace()];
       });
       if (zoomedRef.current && closed.has(zoomedRef.current)) setZoomed(null);
-      for (const endpoint of new Set(
-        items
-          .filter((i) => i.panel.sessionId)
-          .map((i) => i.workspace.connection || socket),
-      ))
-        await refreshHerdr(endpoint);
       if (errors.length) notify(errors.join("; "));
     },
-    [notify, refreshHerdr, setWorkspaces, socket],
+    [notify, setWorkspaces, socket],
   );
   const closePanel = useCallback(
     (panelId: string) => {
@@ -599,10 +545,6 @@ export function useWorkspaces({
         return;
       }
       // Closing a session panel hides it locally; it never kills the session.
-      if (!panel.sessionId)
-        window.bridge
-          ?.terminalClose(panel.id)
-          .catch((error) => notify(errorText(error)));
       if (panel.busy)
         window.bridge
           ?.cancelChat(panel.id)
@@ -748,7 +690,6 @@ export function useWorkspaces({
       for (const panel of workspace.panels)
         if (panel.sessionId) await closeSession(workspace, panel, socket);
       for (const panel of workspace.panels) {
-        await window.bridge?.terminalClose(panel.id);
         disposeTerminal(panel.id);
         if (panel.busy) await window.bridge?.cancelChat(panel.id);
       }

@@ -1,7 +1,6 @@
 // Creates a linked git worktree on a new branch, next to the repository that
 // holds a project's working directory. Used for the "New worktree" launch
-// choice on local (non-Herdr) sessions - the Herdr-backed equivalent goes
-// through the `worktree.create` socket RPC instead (builtin-herdr.cjs).
+// choice.
 const fs = require("node:fs");
 const path = require("node:path");
 const { execFile } = require("node:child_process");

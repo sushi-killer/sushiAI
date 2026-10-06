@@ -47,7 +47,6 @@ export function useDaemon({
   const [system, setSystem] = useState<System | null>(null);
   const [socket, setSocket] = useState(savedSocket);
   const [states, setStates] = useState<Record<string, DaemonState>>({});
-  const [errorByHost, setErrorByHost] = useState<Record<string, string>>({});
   const hosts = useRef<SessionsByHost>({});
   const feeds = useRef<Record<string, HostFeed>>({});
 
@@ -72,13 +71,11 @@ export function useDaemon({
         if (!done) return;
         feeds.current[host] = done.feed;
         hosts.current[host] = done.host;
-        setErrorByHost((e) => (e[host] ? { ...e, [host]: "" } : e));
         reconcile();
       } catch (error) {
         const feed = feeds.current[host];
         if (feed.token !== started.token) return;
         feeds.current[host] = failList(feed, started.token);
-        setErrorByHost((e) => ({ ...e, [host]: errorText(error) }));
         throw error;
       }
     },
@@ -86,14 +83,7 @@ export function useDaemon({
   );
 
   useEffect(() => {
-    if (!window.bridge) {
-      setErrorByHost((e) => ({
-        ...e,
-        local:
-          "Browser preview. Start the desktop app for terminal and daemon access.",
-      }));
-      return;
-    }
+    if (!window.bridge) return;
     const bridge = window.bridge;
     let stopped = false;
     bridge
@@ -176,14 +166,6 @@ export function useDaemon({
     };
   }, [list, notify, reconcile, setWorkspaces]);
 
-  const refreshHerdr = useCallback(
-    (endpoint: string) =>
-      window.bridge && endpoint
-        ? list(daemonHost(endpoint))
-        : Promise.resolve(),
-    [list],
-  );
-
   const statusByEndpoint = useMemo(() => {
     const status: Record<string, DaemonConnection> = {};
     if (system?.socketPath)
@@ -202,12 +184,6 @@ export function useDaemon({
     socket,
     setSocket,
     connection: connectionOf(state),
-    connectionError:
-      errorByHost[socketHost] ||
-      (state && state.state !== "ready" && state.state !== "connecting"
-        ? state.message || state.reason || state.state
-        : ""),
-    refreshHerdr,
     statusByEndpoint,
     /** The connection state of each host the manager reports. */
     daemonStates: states,

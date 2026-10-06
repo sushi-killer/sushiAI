@@ -20,6 +20,7 @@
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { stopDaemon } from "../../../../scripts/lib/daemon-binary.mjs";
 
 const root = process.cwd();
 const shot = (name) => `${root}/artifacts/${name}.png`;
@@ -182,7 +183,7 @@ if (!seedPath || !title) {
         ...process.env,
         SUSHIAI_TEST_WINDOW: "hidden",
         BRIDGE_DATA_DIR: profile,
-        HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
+        SUSHIAI_HOME: `${profile}/sushiai`,
         BRIDGE_DEV_URL: "",
       },
     });
@@ -296,6 +297,7 @@ if (!seedPath || !title) {
     report.error = String(error?.message ?? error);
   } finally {
     if (app) await app.close().catch(() => {});
+    stopDaemon(`${profile}/sushiai`);
     await fs.rm(profile, { recursive: true, force: true });
     console.log(JSON.stringify(report, null, 2));
     if (report.error || report.pageErrors.length > 0) process.exitCode = 1;

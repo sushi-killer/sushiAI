@@ -113,15 +113,12 @@ export function SettingsDialog({
   setSettingsTab(tab: SettingsTab): void;
   socket: string;
   setSocket(value: string): void;
-  connected: boolean;
-  refreshHerdr(path: string): Promise<void>;
   fontScale: number;
   setFontScale(value: number): void;
   keepAwake: boolean;
   setKeepAwake(on: boolean): void;
   updates: UpdateState | null;
   system: System | null;
-  connectionError: string;
   registry: ExtensionRegistry;
   cwd: string;
   connection?: string;

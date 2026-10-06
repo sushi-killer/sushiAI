@@ -40,20 +40,11 @@ const MIGRATIONS = [
     id TEXT PRIMARY KEY,
     position INTEGER NOT NULL,
     endpoint TEXT NOT NULL DEFAULT '',
-    herdr_id TEXT,
     data TEXT NOT NULL
   );
-  CREATE UNIQUE INDEX workspaces_herdr ON workspaces(endpoint, herdr_id)
-    WHERE herdr_id IS NOT NULL AND herdr_id != '';
   CREATE TABLE app_state(
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
-  );
-  CREATE TABLE launches(
-    endpoint TEXT NOT NULL,
-    operation_id TEXT NOT NULL,
-    data TEXT NOT NULL,
-    PRIMARY KEY(endpoint, operation_id)
   );
   CREATE TABLE connections(
     id TEXT PRIMARY KEY,
@@ -70,7 +61,7 @@ const MIGRATIONS = [
     PRIMARY KEY(name, key)
   );`,
   // v4: a workspace is bound to its daemon sessions through its panels and
-  // its id is the daemon group, so the Herdr binding column and its unique
+  // its id is the daemon group, so an older external-id column and its unique
   // index go. The rows keep their order and data.
   `CREATE TABLE workspaces_v4(
     id TEXT PRIMARY KEY,
@@ -82,6 +73,8 @@ const MIGRATIONS = [
     SELECT id, position, endpoint, data FROM workspaces;
   DROP TABLE workspaces;
   ALTER TABLE workspaces_v4 RENAME TO workspaces;`,
+  // v5: launch records of the retired session backend are not read any more.
+  `DROP TABLE IF EXISTS launches;`,
 ];
 
 /** Migration 4 rewrites the workspaces table. A database that is about to run
@@ -277,21 +270,6 @@ const writeStore = (userDataDir, name, object) => {
   transaction(db, () => putStore(db, name, object));
 };
 
-/** One launch record as the launcher stores it; false for anything else. */
-function validLaunchRecord(record) {
-  return (
-    isObject(record) &&
-    typeof record.endpoint === "string" &&
-    typeof record.operationId === "string" &&
-    isObject(record.created) &&
-    ["workspaceId", "paneId", "cwd"].every(
-      (field) => typeof record.created[field] === "string",
-    ) &&
-    typeof record.signatureHash === "string" &&
-    typeof record.preparationHash === "string"
-  );
-}
-
 function importAll(db, userDataDir) {
   importLegacy(db, userDataDir, "projects.json", ["projects"], (parsed) => {
     if (!isObject(parsed)) return false;
@@ -319,27 +297,6 @@ function importAll(db, userDataDir) {
       if (!isObject(parsed)) return false;
       applySnapshot(db, parsed);
       return true;
-    },
-  );
-  importLegacy(
-    db,
-    userDataDir,
-    "herdr-launches.json",
-    ["launches"],
-    (parsed) => {
-      if (!isObject(parsed) || !Array.isArray(parsed.operations)) return false;
-      const insert = db.prepare(
-        "INSERT OR REPLACE INTO launches(endpoint, operation_id, data) VALUES(?, ?, ?)",
-      );
-      for (const record of parsed.operations) {
-        if (validLaunchRecord(record))
-          insert.run(
-            record.endpoint,
-            record.operationId,
-            JSON.stringify(record),
-          );
-        else console.warn("Skipping an invalid launch record in the import");
-      }
     },
   );
   importLegacy(
@@ -521,6 +478,5 @@ module.exports = {
   putStore,
   readStore,
   transaction,
-  validLaunchRecord,
   writeStore,
 };

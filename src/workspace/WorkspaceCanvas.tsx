@@ -18,7 +18,6 @@ import type { MergedCanvas } from "./mergedLayouts.ts";
  * empty state. Tab history and the compact breakpoint are its own business. */
 export function WorkspaceCanvas({
   ws,
-  activeEndpoint,
   extensionRegistry,
   tabMode,
   compact,
@@ -27,7 +26,6 @@ export function WorkspaceCanvas({
   merged,
 }: {
   ws: WorkspaceController;
-  activeEndpoint: string;
   extensionRegistry: ExtensionRegistry;
   tabMode: boolean;
   compact: boolean;
@@ -117,7 +115,6 @@ export function WorkspaceCanvas({
         key={panel.id}
         panel={panel}
         cwd={own ? own.cwd : panel.filesTarget?.root || active.cwd}
-        socket={own ? own.socket : activeEndpoint}
         endpoint={own ? own.endpoint : active.connection}
         hostLabel={own?.hostLabel}
         selected={selected === id}

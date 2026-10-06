@@ -484,10 +484,6 @@ test("settings.set pushes a full-replace secrets.set: each route's resolved prof
         if (id !== "account-1") throw new Error("Claude account not found.");
         return { kind: "subscription", value: "account-token" };
       },
-      // The old apiKeyHelper staging path must not be touched anymore.
-      stageSettings: async () => {
-        throw new Error("stageSettings should not be called");
-      },
     }),
   });
   await service.call("settings.set", { settings });

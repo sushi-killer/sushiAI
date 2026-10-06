@@ -239,7 +239,7 @@ function livePanel(panel: Panel, session: DaemonSession): Panel {
   if (status === undefined) delete next.status;
   else next.status = status;
   const title = session.title?.trim();
-  if (title && !panel.launchError) next.title = title;
+  if (title) next.title = title;
   if (session.cwd) next.paneCwd = session.cwd;
   if (session.agentSession) next.agentSession = session.agentSession;
   // The icon follows the agent the daemon runs in the session.

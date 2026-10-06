@@ -263,8 +263,8 @@ function importLegacy(store: SnapshotStore): string | null {
 }
 
 /** A workspace whose panels are all ended daemon sessions moves to Recently
- * closed on start. Panels that come back ended without a session (restored
- * Herdr panes) stay in place with Reopen, so they never count here. An
+ * closed on start. Panels that come back ended without a session (saved by an
+ * older release) stay in place with Reopen, so they never count here. An
  * intentionally empty project stays in the workspace list. */
 export function sweepLeftovers(saved: Saved): Saved {
   const leftover = (w: Workspace) =>
@@ -313,16 +313,19 @@ export function sweepLeftovers(saved: Saved): Saved {
   };
 }
 
-/** A panel that ran without a daemon session (a Herdr pane, or an agent the
- * old local path started) has nothing to bind to: it comes back ended, with
- * Reopen, and keeps its agent so Reopen starts the same one. */
+/** A terminal or agent panel that ran without a daemon session (the host had
+ * reported its state, or the agent was started) has nothing to bind to: it
+ * comes back ended, with Reopen, and keeps its agent so Reopen starts the same
+ * one. A panel that never ran keeps its Launch button. */
 function restorePanel(panel: Panel): Panel {
-  const { herdrId, ...rest } = panel;
   const ran =
     !panel.sessionId &&
-    (herdrId || (panel.kind === "agent" && panel.started === true));
+    (panel.kind === "terminal" || panel.kind === "agent") &&
+    (panel.started === true ||
+      panel.status !== undefined ||
+      panel.paneCwd !== undefined);
   return {
-    ...rest,
+    ...panel,
     busy: false,
     started: false,
     ...(ran ? { ended: true } : {}),
@@ -336,13 +339,9 @@ function restorePanel(panel: Panel): Panel {
 const restoreWorkspace =
   (socket: string) =>
   (w: Workspace): Workspace => {
-    const { herdrId, ...rest } = w;
-    delete rest.herdrTokens;
-    const backed = Boolean(
-      herdrId || w.panels.some((p) => p.herdrId || p.sessionId),
-    );
+    const backed = w.panels.some((p) => p.sessionId || p.paneCwd);
     return {
-      ...rest,
+      ...w,
       connection: w.connection || (backed ? socket : undefined),
       panels: w.panels.map(restorePanel),
     };

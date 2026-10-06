@@ -685,7 +685,7 @@ export function ClaudeMcpSettings({
               The workspace disappears from the sidebar and its {sessionCount}{" "}
               {sessionCount === 1 ? "session" : "sessions"} stop.
               {remote
-                ? " Herdr sessions on the host are closed."
+                ? " Sessions on the host are closed."
                 : " Local terminals stop and unsaved file edits are lost."}
             </p>
             <div className="workspace-confirm-actions">

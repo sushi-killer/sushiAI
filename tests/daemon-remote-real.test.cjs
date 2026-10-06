@@ -102,7 +102,7 @@ test(
       connections: host.connections,
       manifest: () => ({ manifest, binDir: dist }),
       setup: (endpoint, options) =>
-        setupHost(host.connections, endpoint, "", { ...options, herdr: false }),
+        setupHost(host.connections, endpoint, options),
     });
     const result = await installer.install(hostName);
     assert.equal(result.status, "installed");

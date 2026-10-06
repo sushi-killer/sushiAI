@@ -7,7 +7,7 @@ await fs.writeFile(
   `${profile}/workspace-state.json`,
   JSON.stringify({
     activeId: "test",
-    socket: "/tmp/absent-herdr-test.sock",
+    socket: "/tmp/absent-local-test.sock",
     routines: [],
     fontScale: 1,
     workspaces: [

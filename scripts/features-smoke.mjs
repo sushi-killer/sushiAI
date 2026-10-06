@@ -4,21 +4,17 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const { Connections, run, quote } = require("../electron/connections.cjs");
-const { request } = require("../electron/herdr.cjs");
 const host = process.env.SUSHIAI_SSH_HOST;
-if (!host) throw new Error("Set SUSHIAI_SSH_HOST to your SSH test host.");
+if (!host)
+  throw new Error(
+    "Set SUSHIAI_SSH_HOST to an SSH test host that has sushiai installed (Connections, Install).",
+  );
 const profile = await fs.mkdtemp("/tmp/sushiai-features-");
 const connections = new Connections(profile);
 await connections.init();
-const p = await connections.save({
-  name: "Remote test",
-  host,
-  socket:
-    process.env.SUSHIAI_SSH_SOCKET ||
-    "~/.config/herdr/sessions/sushiai/herdr.sock",
-});
+const p = await connections.save({ name: "Remote test", host });
 const endpoint = "ssh:" + p.id;
-let root, socket, workspace, desktop, page;
+let root, desktop, page;
 const remote = (code) =>
   run("/usr/bin/ssh", [
     ...connections.args(p),
@@ -39,17 +35,9 @@ subprocess.run(['git','-C',str(r),'-c','user.name=Demo','-c','user.email=demo@ex
 (r/'hello.txt').write_text('Updated remote text\\n')
 print(r)`)
   ).trim();
-  socket = await connections.socket(endpoint);
-  const created = await request(socket, "workspace.create", {
-    label: "sushiAI feature test",
-    cwd: root,
-    focus: false,
-  });
-  workspace = created.workspace.workspace_id;
-  const pane = created.root_pane.pane_id;
-  // The app imports this file into its database on first start.
-  const workspaceId = "herdr:" + endpoint + ":" + workspace,
-    panelId = "herdr:" + endpoint + ":" + pane;
+  // The app imports this file into its database on first start. The panel has
+  // no session yet: Launch starts one on the host.
+  const workspaceId = "feature-test";
   await fs.writeFile(
     `${profile}/workspace-state.json`,
     JSON.stringify({
@@ -61,13 +49,10 @@ print(r)`)
         {
           id: workspaceId,
           name: "sushiAI feature test",
-          herdrId: workspace,
           connection: endpoint,
           cwd: root,
-          panels: [
-            { id: panelId, herdrId: pane, kind: "terminal", title: "zsh" },
-          ],
-          layout: { type: "leaf", id: panelId },
+          panels: [{ id: "shell", kind: "terminal", title: "zsh" }],
+          layout: { type: "leaf", id: "shell" },
         },
       ],
     }),
@@ -87,7 +72,16 @@ print(r)`)
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.waitForSelector(".panel");
-  await page.waitForSelector(".herdr-terminal-note");
+  await page.waitForFunction(
+    async (id) =>
+      (await window.bridge.daemonStates()).some(
+        (state) => state.host === id && state.state === "ready",
+      ),
+    p.id,
+    { timeout: 60000 },
+  );
+  await page.getByRole("button", { name: /^Launch zsh/ }).click();
+  await page.waitForSelector(".panel-terminal .xterm");
   await page.waitForTimeout(1200);
   assert.equal(await page.locator(".panel-error").count(), 0);
   await page.getByTitle("Files and Git", { exact: true }).click();
@@ -182,22 +176,18 @@ print(r)`)
   await desktop.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0].setBounds({ width: 1380, height: 900 }),
   );
-  await page.getByRole("button", { name: "Sessions", exact: true }).click();
+  // Closing the live session through its confirmation ends it on the host.
+  await page.getByRole("button", { name: "Close zsh", exact: true }).click();
   await page
-    .getByLabel("Session status", { exact: true })
-    .selectOption("shells");
-  await page.getByLabel("Select visible (1)", { exact: false }).check();
-  await page
-    .getByRole("button", { name: "End selected sessions", exact: true })
+    .getByRole("button", { name: "Close session", exact: true })
     .click();
-  await page
-    .getByRole("button", { name: "End 1 sessions", exact: true })
-    .click();
-  await page.waitForTimeout(800);
-  const snapshot = (await request(socket, "session.snapshot")).snapshot;
-  assert.ok(
-    !snapshot.panes.some((x) => x.pane_id === pane),
-    "Session manager really closes backend pane",
+  await page.waitForFunction(
+    async (id) =>
+      (await window.bridge.sessionsList(id)).every(
+        (session) => session.status === "exited",
+      ),
+    p.id,
+    { timeout: 20000 },
   );
   assert.deepEqual(errors, []);
   console.log(
@@ -205,14 +195,14 @@ print(r)`)
       {
         passed: true,
         checks: [
-          "remote terminal stream",
+          "remote terminal session",
           "remote text/image",
           "text editor save over SSH",
           "Git diff",
           "HTML with relative CSS and isolated browser",
           "tabs keyboard navigation",
           "1440/1024/768/600 responsive layouts",
-          "real remote session deletion",
+          "closing a live remote session ends it",
         ],
       },
       null,
@@ -232,10 +222,6 @@ print(r)`)
   throw e;
 } finally {
   await desktop?.close();
-  if (workspace)
-    await request(socket, "workspace.close", { workspace_id: workspace }).catch(
-      () => {},
-    );
   if (root?.startsWith("/tmp/sushiai-ui-fixture-"))
     await remote("import shutil;shutil.rmtree(" + JSON.stringify(root) + ")");
   await connections.close();

@@ -186,11 +186,7 @@ async function fixture(
     await connections.init();
     const profile =
       connections.profiles[0] ??
-      (await connections.save({
-        host: "box",
-        name: "Box",
-        socket: "~/.herdr.sock",
-      }));
+      (await connections.save({ host: "box", name: "Box" }));
     const events = [];
     const notices = [];
     const changes = [];

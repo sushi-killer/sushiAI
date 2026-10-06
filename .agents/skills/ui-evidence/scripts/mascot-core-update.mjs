@@ -7,6 +7,7 @@
 // queueLength is 1, expiresAt is null and exitCode is 75.
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
+import { stopDaemon } from "../../../../scripts/lib/daemon-binary.mjs";
 
 const root = process.cwd();
 const report = { pageErrors: [] };
@@ -21,7 +22,7 @@ try {
     env: {
       ...process.env,
       BRIDGE_DATA_DIR: profile,
-      HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
+      SUSHIAI_HOME: `${profile}/sushiai`,
       BRIDGE_DEV_URL: "",
       SUSHIAI_TEST_MASCOT: "1",
       SUSHIAI_TEST_WINDOW: "hidden",
@@ -77,6 +78,7 @@ try {
   report.error = String(error?.message ?? error);
 } finally {
   if (app) await app.close().catch(() => {});
+  stopDaemon(`${profile}/sushiai`);
   await fs.rm(profile, { recursive: true, force: true });
   await fs
     .writeFile(

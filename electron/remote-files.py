@@ -685,7 +685,7 @@ def inspect(data):
             raise
         return {"path": filename, "size": len(content)}
     if operation == "home":
-        return {"home": str(Path.home()), "socket": str(Path(data.get("socket", "~/.config/herdr/herdr.sock")).expanduser())}
+        return {"home": str(Path.home())}
     if operation == "claude_mcp":
         return claude_mcp(data)
     if operation == "claude_plugins":

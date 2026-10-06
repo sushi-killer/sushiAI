@@ -8,7 +8,7 @@ import type { Panel } from "./types";
 import { fitTerminal, queueTerminalFit } from "./terminal-sizing";
 import { installTerminalInteractions } from "./terminal-interactions";
 import { createTerminalLinkProvider, openTerminalLink } from "./terminal-links";
-import { createTerminalOutput, createTerminalInput } from "./terminal-output";
+import { createTerminalInput } from "./terminal-output";
 import "@xterm/xterm/css/xterm.css";
 
 type CachedTerminal = {
@@ -21,27 +21,17 @@ type CachedTerminal = {
   unsubscribe: () => void;
   notify?: () => void;
   requestFit?: () => void;
-  selectionPaused?: boolean;
   transfer?: string;
   disposeInteractions?: () => void;
   cols: number;
   rows: number;
-  daemon?: boolean;
 };
 const cache = new Map<string, CachedTerminal>();
-const base64 = (bytes: Uint8Array) => {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 0x8000)
-    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(binary);
-};
-// A shell reads the path as one word however the file was named.
-const shellPath = (value: string) => `'${value.replace(/'/g, "'\\''")}' `;
 export function disposeTerminal(id: string) {
   const runtime = cache.get(id);
   if (runtime) {
     runtime.unsubscribe();
-    if (runtime.daemon) void window.bridge?.daemonTerminalDetach(id);
+    void window.bridge?.daemonTerminalDetach(id);
     runtime.disposeInteractions?.();
     runtime.terminal.dispose();
     cache.delete(id);
@@ -49,24 +39,18 @@ export function disposeTerminal(id: string) {
 }
 export function TerminalPanel({
   panel,
-  cwd,
-  socket,
   endpoint,
   hostLabel,
   onStart,
   onReopen,
 }: {
   panel: Panel;
-  cwd: string;
-  socket: string;
   endpoint?: string;
-  /** Pane provenance (AC23-AC24): set only when this pane's workspace is a
-   * member of a merged sidebar row (flat mode). Renders in the same corner
-   * cluster as the Herdr note, ahead of it (AC24), and independently of it -
-   * a merged workspace's local (non-Herdr) pane still gets the label alone. */
+  /** Pane provenance: set only when this pane's workspace is a member of a
+   * merged sidebar row (flat mode). */
   hostLabel?: string;
   onStart(): void;
-  /** Reopens an ended pane or retries preparation of its existing session. */
+  /** Reopens an ended pane. */
   onReopen(): void;
 }) {
   const host = useRef<HTMLDivElement>(null);
@@ -76,9 +60,9 @@ export function TerminalPanel({
   const [attempt, setAttempt] = useState(0);
   const [transfer, setTransfer] = useState("");
   const [disconnected, setDisconnected] = useState(false);
-  // A process only runs in a daemon session (or a restored Herdr pane); a panel
-  // with neither waits for Launch.
-  const active = !panel.ended && (!!panel.herdrId || !!panel.sessionId);
+  // A process only runs in a daemon session; a panel without one waits for
+  // Launch.
+  const active = !panel.ended && !!panel.sessionId;
   // An ended panel keeps no attach in main.
   useEffect(() => {
     if (panel.ended) disposeTerminal(panel.id);
@@ -90,7 +74,7 @@ export function TerminalPanel({
     return window.bridge.onDaemonState((state) => {
       if (state.host !== hostId || state.state !== "ready") return;
       const runtime = cache.get(panel.id);
-      if (runtime?.daemon && !runtime.ready && runtime.error) {
+      if (runtime && !runtime.ready && runtime.error) {
         disposeTerminal(panel.id);
         setAttempt((a) => a + 1);
       }
@@ -114,7 +98,7 @@ export function TerminalPanel({
         cursorBlink: true,
         linkHandler: { activate: openTerminalLink },
         cursorStyle: "bar",
-        scrollback: panel.herdrId && !panel.sessionId ? 0 : 10000,
+        scrollback: 10000,
         scrollSensitivity: 1.3,
         fastScrollSensitivity: 5,
         theme: {
@@ -134,9 +118,7 @@ export function TerminalPanel({
       const fit = new FitAddon();
       terminal.loadAddon(fit);
       const element = document.createElement("div");
-      element.className = panel.herdrId
-        ? "terminal-surface terminal-herdr"
-        : "terminal-surface";
+      element.className = "terminal-surface";
       host.current.appendChild(element);
       terminal.open(element);
       const links = terminal.registerLinkProvider(
@@ -156,33 +138,7 @@ export function TerminalPanel({
       };
       cache.set(panel.id, runtime);
       const entry = runtime;
-      const sessionId = panel.sessionId;
-      entry.daemon = !!sessionId;
-      const herdr = !!panel.herdrId && !sessionId;
-      const streamId = herdr ? crypto.randomUUID() : undefined;
-      let selecting = false;
-      const delivery = createTerminalOutput({
-        streamId,
-        write: (data, done) => terminal.write(data, done),
-        reset: () => terminal.reset(),
-        ack: (token, sequence) => {
-          window
-            .bridge!.terminalAck(panel.id, token, sequence)
-            .catch((error) => {
-              entry.exited = true;
-              entry.error = error.message;
-              delivery.close();
-              entry.notify?.();
-              void window.bridge!.terminalClose(panel.id);
-            });
-        },
-        fail: (message) => {
-          entry.exited = true;
-          entry.error = message;
-          entry.notify?.();
-          void window.bridge!.terminalClose(panel.id);
-        },
-      });
+      const sessionId = panel.sessionId!;
       const exitedMessage = "Session ended. Reconnect to continue.";
       const bytesOf = (text: string) => new TextEncoder().encode(text).length;
       const acked = (text: string) => () => {
@@ -190,42 +146,21 @@ export function TerminalPanel({
           .bridge!.daemonTerminalAck(panel.id, bytesOf(text))
           .catch(() => {});
       };
-      if (sessionId)
-        entry.unsubscribe = window.bridge.onDaemonTerminal((event) => {
-          if (event.panelId !== panel.id) return;
-          if (event.snapshot !== undefined) {
-            terminal.reset();
-            terminal.write(event.snapshot, acked(event.snapshot));
-          }
-          if (event.data) terminal.write(event.data, acked(event.data));
-          if (event.exited) {
-            entry.exited = true;
-            entry.error = exitedMessage;
-            entry.notify?.();
-          }
-        });
-      else
-        entry.unsubscribe = window.bridge.onTerminal((event) => {
-          if (event.panelId !== panel.id || !delivery.accepts(event.streamId))
-            return;
-          if (event.agent !== undefined)
-            attachmentsAllowed.current = !!event.agent;
-          if (event.data || event.sequence) delivery.push(event);
-          if (event.exitCode !== undefined) {
-            entry.exited = true;
-            entry.error =
-              event.error ||
-              (panel.herdrId
-                ? "Stream disconnected. Reconnect to resume. If another app owns this terminal, detach it first."
-                : "Process exited. Reconnect to start a new shell.");
-            entry.notify?.();
-          }
-        });
+      entry.unsubscribe = window.bridge.onDaemonTerminal((event) => {
+        if (event.panelId !== panel.id) return;
+        if (event.snapshot !== undefined) {
+          terminal.reset();
+          terminal.write(event.snapshot, acked(event.snapshot));
+        }
+        if (event.data) terminal.write(event.data, acked(event.data));
+        if (event.exited) {
+          entry.exited = true;
+          entry.error = exitedMessage;
+          entry.notify?.();
+        }
+      });
       const input = createTerminalInput(
-        (data) =>
-          sessionId
-            ? window.bridge!.daemonTerminalWrite(panel.id, data)
-            : window.bridge!.terminalWrite(panel.id, data),
+        (data) => window.bridge!.daemonTerminalWrite(panel.id, data),
         (message) => {
           entry.error = message;
           entry.notify?.();
@@ -239,27 +174,8 @@ export function TerminalPanel({
         terminal,
         element,
         sendInput,
-        herdr
-          ? (direction, lines, position) => {
-              window
-                .bridge!.terminalScroll(panel.id, direction, lines, position)
-                .catch((e) => {
-                  entry.error = e.message;
-                  entry.notify?.();
-                });
-            }
-          : undefined,
-        (active) => {
-          if (selecting === active) return;
-          selecting = active;
-          entry.selectionPaused = herdr && active;
-          entry.notify?.();
-          if (!active) entry.requestFit?.();
-          if (herdr) delivery.pause(active);
-        },
       );
       entry.disposeInteractions = () => {
-        delivery.close();
         input.close();
         links.dispose();
         interactions();
@@ -285,27 +201,17 @@ export function TerminalPanel({
             for (const file of files) {
               entry.transfer = `Attaching ${file.name || "image"}…`;
               entry.notify?.();
-              if (sessionId) {
-                // The daemon writes the path on its host. A file with a path
-                // on disk is handed over by path; pasted data goes to main.
-                const path = window.bridge!.pathForFile(file);
-                if (path)
-                  await window.bridge!.daemonTerminalAttachFile(panel.id, path);
-                else
-                  await window.bridge!.daemonTerminalAttachData(
-                    panel.id,
-                    file.name || "pasted.png",
-                    new Uint8Array(await file.arrayBuffer()),
-                  );
-                continue;
-              }
-              const stored = await window.bridge!.terminalAttach({
-                panelId: panel.id,
-                name: file.name || "pasted.png",
-                data: base64(new Uint8Array(await file.arrayBuffer())),
-              });
-              if (cache.get(panel.id) !== entry || entry.exited) return;
-              terminal.paste(shellPath(stored));
+              // The daemon writes the path on its host. A file with a path
+              // on disk is handed over by path; pasted data goes to main.
+              const path = window.bridge!.pathForFile(file);
+              if (path)
+                await window.bridge!.daemonTerminalAttachFile(panel.id, path);
+              else
+                await window.bridge!.daemonTerminalAttachData(
+                  panel.id,
+                  file.name || "pasted.png",
+                  new Uint8Array(await file.arrayBuffer()),
+                );
             }
             if (element.isConnected) terminal.focus();
           } catch (e) {
@@ -350,59 +256,24 @@ export function TerminalPanel({
         },
         true,
       );
-      if (sessionId)
-        window.bridge
-          .daemonTerminalAttach({
-            panelId: panel.id,
-            host: daemonHost(endpoint),
-            sessionId,
-            cols: terminal.cols,
-            rows: terminal.rows,
-          })
-          .then(() => {
-            if (cache.get(panel.id) !== entry) return;
-            entry.ready = true;
-            entry.requestFit?.();
-            entry.notify?.();
-          })
-          .catch((e) => {
-            entry.error = e.message;
-            entry.notify?.();
-          });
-      else
-        window.bridge
-          .terminalOpen({
-            panelId: panel.id,
-            cwd,
-            endpoint: panel.herdrId ? socket : endpoint,
-            herdrId: panel.herdrId,
-            streamId,
-            command:
-              panel.kind === "agent" ? panel.agent || "claude" : undefined,
-            modelProfileId:
-              panel.kind === "agent" ? panel.modelProfileId : undefined,
-            claudeAccountId:
-              panel.kind === "agent" ? panel.claudeAccountId : undefined,
-            codexAccountId:
-              panel.kind === "agent" ? panel.codexAccountId : undefined,
-            cols: terminal.cols,
-            rows: terminal.rows,
-          })
-          .then((result) => {
-            if (cache.get(panel.id) !== entry) return;
-            if (result.history) delivery.push({ data: result.history });
-            entry.ready = true;
-            entry.exited = entry.exited || !!result.exited;
-            if (entry.exited)
-              entry.error = "Session ended. Reconnect to continue.";
-            delivery.start();
-            entry.requestFit?.();
-            entry.notify?.();
-          })
-          .catch((e) => {
-            entry.error = e.message;
-            entry.notify?.();
-          });
+      window.bridge
+        .daemonTerminalAttach({
+          panelId: panel.id,
+          host: daemonHost(endpoint),
+          sessionId,
+          cols: terminal.cols,
+          rows: terminal.rows,
+        })
+        .then(() => {
+          if (cache.get(panel.id) !== entry) return;
+          entry.ready = true;
+          entry.requestFit?.();
+          entry.notify?.();
+        })
+        .catch((e) => {
+          entry.error = e.message;
+          entry.notify?.();
+        });
     } else host.current.appendChild(runtime.element);
     const current = runtime;
     current.notify = () => {
@@ -419,11 +290,11 @@ export function TerminalPanel({
       !!host.current?.clientWidth &&
       !!host.current.clientHeight;
     const fit = () => {
-      if (!visible() || !current.ready || current.selectionPaused) return;
+      if (!visible() || !current.ready) return;
       queueTerminalFit(
         current.terminal,
         current.fit,
-        () => visible() && !current.selectionPaused,
+        () => visible(),
         () => {
           if (
             current.ready &&
@@ -434,13 +305,12 @@ export function TerminalPanel({
             const { cols, rows } = current.terminal;
             current.cols = cols;
             current.rows = rows;
-            (current.daemon
-              ? window.bridge!.daemonTerminalResize(panel.id, cols, rows)
-              : window.bridge!.terminalResize(panel.id, cols, rows)
-            ).catch((e) => {
-              current.error = e.message;
-              current.notify?.();
-            });
+            window
+              .bridge!.daemonTerminalResize(panel.id, cols, rows)
+              .catch((e) => {
+                current.error = e.message;
+                current.notify?.();
+              });
           }
         },
       );
@@ -475,7 +345,7 @@ export function TerminalPanel({
       current.requestFit = undefined;
       current.element.remove();
     };
-  }, [panel.id, active, cwd, socket, endpoint, attempt]);
+  }, [panel.id, active, endpoint, attempt]);
   const currentErrorDismiss = () => {
     const runtime = cache.get(panel.id);
     if (runtime) runtime.error = "";
@@ -542,59 +412,33 @@ export function TerminalPanel({
           {transfer}
         </div>
       )}
-      {(error || panel.launchError) && (
+      {error && (
         <div className="panel-error" role="alert">
-          {panel.launchError && (
-            <div>
-              {panel.launchError}
-              <button className="terminal-reconnect" onClick={onReopen}>
-                Retry preparation
-              </button>
-            </div>
-          )}
-          {error && <div>{error}</div>}
-          {error && (
-            <button
-              className="terminal-reconnect"
-              onClick={async () => {
-                if (!disconnected) {
-                  currentErrorDismiss();
-                  return;
-                }
-                try {
-                  if (!cache.get(panel.id)?.daemon)
-                    await window.bridge?.terminalClose(panel.id);
-                  disposeTerminal(panel.id);
-                  setError("");
-                  setAttempt((a) => a + 1);
-                } catch (e) {
-                  setError(e instanceof Error ? e.message : String(e));
-                }
-              }}
-            >
-              {disconnected ? "Reconnect" : "Dismiss"}
-            </button>
-          )}
+          <div>{error}</div>
+          <button
+            className="terminal-reconnect"
+            onClick={() => {
+              if (!disconnected) {
+                currentErrorDismiss();
+                return;
+              }
+              disposeTerminal(panel.id);
+              setError("");
+              setAttempt((a) => a + 1);
+            }}
+          >
+            {disconnected ? "Reconnect" : "Dismiss"}
+          </button>
         </div>
       )}
-      {(hostLabel || panel.herdrId) && (
+      {hostLabel && (
         <div className="pane-host-cluster">
-          {panel.herdrId && (
-            <span
-              className="herdr-terminal-note"
-              title="Direct Herdr stream: raw input, incremental frames and native terminal resizing."
-            >
-              Herdr · live stream
-            </span>
-          )}
-          {hostLabel && (
-            <span
-              className="herdr-terminal-note"
-              title={`This pane belongs to ${hostLabel}.`}
-            >
-              {hostLabel}
-            </span>
-          )}
+          <span
+            className="terminal-host-note"
+            title={`This pane belongs to ${hostLabel}.`}
+          >
+            {hostLabel}
+          </span>
         </div>
       )}
     </div>

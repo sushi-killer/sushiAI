@@ -90,20 +90,14 @@ export function App() {
   });
   const { connectionProfiles, refreshConnectionProfiles } =
     useConnectionProfiles();
-  const {
-    system,
-    socket,
-    setSocket,
-    connection,
-    connectionError,
-    refreshHerdr,
-    statusByEndpoint,
-  } = useDaemon({
-    savedSocket: saved?.socket || "",
-    notify,
-    setWorkspaces,
-    connectionProfiles,
-  });
+  const { system, socket, setSocket, connection, statusByEndpoint } = useDaemon(
+    {
+      savedSocket: saved?.socket || "",
+      notify,
+      setWorkspaces,
+      connectionProfiles,
+    },
+  );
   const skills = useSkills(sectionName, notify);
   const [sidebar, setSidebar] = useState(
     saved?.sidebar ?? window.innerWidth >= 760,
@@ -123,7 +117,6 @@ export function App() {
     setWorkspaces,
     saved,
     socket,
-    refreshHerdr,
     useEndpoint: setSocket,
     notify,
     showWorkspace,
@@ -191,7 +184,6 @@ export function App() {
     projectGit,
     connectionProfiles,
     workspaceGrouping,
-    socket,
     session,
   );
   const { tabMode, setTabMode, views } = useProjectView(
@@ -479,7 +471,6 @@ export function App() {
           ) : (
             <WorkspaceCanvas
               ws={ws}
-              activeEndpoint={activeEndpoint}
               extensionRegistry={extensionRegistry}
               tabMode={tabMode}
               compact={compact}
@@ -552,9 +543,6 @@ export function App() {
               setSettingsTab={setSettingsTab}
               socket={socket}
               setSocket={setSocket}
-              connected={connected}
-              connectionError={connectionError}
-              refreshHerdr={refreshHerdr}
               fontScale={fontScale}
               setFontScale={setFontScale}
               keepAwake={keepAwake}

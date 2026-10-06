@@ -1,7 +1,7 @@
 import type { ConnectionProfile, Workspace } from "../types";
 import type { ProjectGit } from "./useProjectGit";
 
-/** Groups the flat workspace list by which Herdr this Mac or an SSH host owns
+/** Groups the flat workspace list by which host (this Mac or an SSH host) owns
  * it. Shared by Sidebar (which draws the grouping) and App (which needs to
  * know a pane's own host without drawing anything). */
 export const LOCAL_GROUP = "local";
@@ -15,9 +15,9 @@ export function groupLabel(key: string, profiles: ConnectionProfile[]) {
     key.replace(/^ssh:/, "")
   );
 }
-/** Every connected host is polled independently (see `useHerdr`), so a
- * group's status is always its own endpoint's real, current poll result -
- * never borrowed from whichever connection happens to be the default one. */
+/** Every host has its own daemon (see `useDaemon`), so a group's status is
+ * always its own endpoint's real, current state - never borrowed from
+ * whichever connection happens to be the default one. */
 export function groupStatus(
   key: string,
   localSocket: string,

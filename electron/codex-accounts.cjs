@@ -17,7 +17,7 @@ const { CODEX_COLLECT } = require("./project-session.cjs");
 
 const LOGIN_TIMEOUT = 10 * 60 * 1000;
 // How long a session not seen live is still asked for its login; the host
-// keeps it as long (CODEX_SESSION).
+// keeps it as long (CODEX_COLLECT).
 const RETURN_DAYS = 7 * 24 * 60 * 60 * 1000;
 
 /** True when `text` is a later login of the same ChatGPT account. */

@@ -834,7 +834,7 @@ textarea::placeholder {
   gap: var(--gap-xs);
   pointer-events: none;
 }
-.herdr-terminal-note {
+.terminal-host-note {
   font-size: 9px;
   background: #151515dd;
   color: #727d76;
@@ -4813,7 +4813,7 @@ iframe {
     color 0.15s ease;
 }
 
-/* Herdr owns scrollback; a local xterm thumb only moves stale rendered frames. */
+/* The wheel scrolls the terminal's own history; its thumb stays hidden. */
 .terminal-surface .xterm-scrollable-element > .scrollbar {
   display: none;
 }

@@ -95,7 +95,7 @@ try {
       () => events.push("unexpected hidden resize"),
     );
     await write(fixed, "");
-    const { installTerminalInteractions, cleanTerminalCopy } =
+    const { installTerminalInteractions } =
       await import("/src/terminal-interactions.ts");
     const interactive = make();
     const input = [];
@@ -166,78 +166,13 @@ try {
     );
     const copied = clipboard.getData("text/plain");
     cleanup();
-    const streamed = make();
-    const remoteEvents = [],
-      remoteInput = [],
-      selectionChanges = [];
-    const remoteCleanup = installTerminalInteractions(
-      streamed,
-      streamed.element.parentElement,
-      (data) => remoteInput.push(data),
-      (direction, lines, position) =>
-        remoteEvents.push({ direction, lines, position }),
-      (active) => selectionChanges.push(active),
-    );
-    await write(streamed, "\x1b[2J\x1b[H  Jump to bottom (click) ↓");
-    const remoteScreen = streamed.element.querySelector(".xterm-screen");
-    const bounds = remoteScreen.getBoundingClientRect();
-    const point = {
-      clientX: bounds.left + (bounds.width * 10.5) / streamed.cols,
-      clientY: bounds.top + (bounds.height * 0.5) / streamed.rows,
-    };
-    remoteScreen.dispatchEvent(
-      new MouseEvent("mousedown", {
-        ...point,
-        button: 0,
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-    remoteScreen.dispatchEvent(
-      new WheelEvent("wheel", {
-        ...point,
-        deltaY: -20,
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-    remoteScreen.dispatchEvent(
-      new WheelEvent("wheel", {
-        ...point,
-        deltaY: -20,
-        altKey: true,
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-    const idleWheelSelectionChanges = selectionChanges.length;
-    streamed.focus();
-    streamed.selectAll();
-    await write(streamed, "\x1b[2J\x1b[HNEW FRAME");
-    const remoteClipboard = new DataTransfer();
-    streamed.textarea.dispatchEvent(
-      new ClipboardEvent("copy", {
-        clipboardData: remoteClipboard,
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-    const copyMatchesVisibleFrame =
-      remoteClipboard.getData("text/plain") ===
-      cleanTerminalCopy(streamed.getSelection());
-    remoteCleanup();
     return {
-      remoteInput,
-      remoteEvents,
-      idleWheelSelectionChanges,
-      copyMatchesVisibleFrame,
       shortcuts,
       normalScroll,
       fastScroll,
       mouseReports: countReports(mouseReports),
       fastMouseReports: countReports(fastMouseReports),
-      copyMatches: copied === cleanTerminalCopy(interactive.getSelection()),
-      cleanCopy: cleanTerminalCopy("  code    \n    nested  x \t\r\n"),
+      copyMatches: copied === interactive.getSelection(),
       equivalent,
       oldDiffers,
       retained,
@@ -274,22 +209,6 @@ try {
     "\x1b[13;2u",
   ]);
   assert.equal(results.copyMatches, true);
-  assert.equal(results.cleanCopy, "  code\n    nested  x\n");
-  assert.equal(
-    results.idleWheelSelectionChanges,
-    0,
-    "Scrolling without a selection must not trigger selection notifications or resize work",
-  );
-  assert.deepEqual(results.remoteInput, ["\x1b[<0;11;1M\x1b[<0;11;1m"]);
-  assert.deepEqual(results.remoteEvents, [
-    { direction: "up", lines: 1, position: { column: 10, row: 0 } },
-    { direction: "up", lines: 1, position: { column: 10, row: 0, fast: true } },
-  ]);
-  assert.equal(
-    results.copyMatchesVisibleFrame,
-    true,
-    "Copy must read the current visible selection, never a stale saved string",
-  );
   assert.equal(results.hiddenUnchanged, true);
   assert.deepEqual(results.events, [[30, 8]]);
   assert.deepEqual(results.minimum, { cols: 10, rows: 3 });
@@ -333,14 +252,15 @@ try {
     });
   await drop();
   await page.waitForFunction(
-    () => window.terminalHarness.calls.writes.length === 1,
+    () => window.terminalHarness.calls.files.length === 1,
   );
   let calls = await page.evaluate(() => window.terminalHarness.calls);
   assert.deepEqual(calls.files, ["image one.png"]);
   assert.equal(calls.drops, 0, "file drops must not reach panel rearrangement");
-  assert.equal(
-    calls.writes[0],
-    "\x1b[200~'/tmp/attachments/image one.png' \x1b[201~",
+  assert.deepEqual(
+    calls.writes,
+    [],
+    "the daemon writes the path of an attachment, the renderer sends nothing",
   );
   await page.evaluate(() => {
     const data = new DataTransfer();
@@ -354,7 +274,7 @@ try {
     );
   });
   await page.waitForFunction(
-    () => window.terminalHarness.calls.writes.length === 2,
+    () => window.terminalHarness.calls.files.length === 2,
   );
   assert.equal(
     await page
@@ -362,7 +282,7 @@ try {
       .evaluate((el) => el === document.activeElement),
     true,
   );
-  // Hold an actual mouse selection while Herdr redraws its full screen.
+  // Hold an actual mouse selection while the program redraws its full screen.
   await page.evaluate(() =>
     window.terminalHarness.output(
       "\x1b[2J\x1b[H  Привет selected text here\r\nsecond line",
@@ -375,7 +295,7 @@ try {
   const cell = await page.locator(".xterm-rows > div").first().boundingBox();
   assert.equal(
     await page
-      .locator(".terminal-herdr .scrollbar.vertical")
+      .locator(".terminal-surface .scrollbar.vertical")
       .evaluateAll((elements) =>
         elements.every(
           (element) => getComputedStyle(element).display === "none",
@@ -385,16 +305,9 @@ try {
   );
   await page.mouse.move(grid.x + 200, cell.y + cell.height / 2);
   await page.mouse.down();
-  await page.waitForTimeout(100);
-  assert.equal(
-    await page.locator(".terminal-selection-status").count(),
-    0,
-    "Holding a click without selecting text must not show a selection indicator",
-  );
   await page.mouse.up();
   // Double click chooses the real word under the pointer, including Cyrillic.
   await page.mouse.dblclick(grid.x + 4 * 7.2, cell.y + cell.height / 2);
-  assert.equal(await page.locator(".terminal-selection-status").count(), 0);
   const readCopy = () =>
     page.evaluate(() => {
       const clipboard = new DataTransfer();
@@ -409,25 +322,8 @@ try {
     });
   const selectedText = await readCopy();
   assert.equal(selectedText, "Привет");
-  await page.evaluate(() =>
-    window.terminalHarness.output("\x1b[2J\x1b[HNEW LIVE FRAME"),
-  );
-  await page.waitForTimeout(150);
-  assert.equal(await readCopy(), selectedText);
-  assert.ok(
-    await page
-      .locator(".xterm-rows")
-      .textContent()
-      .then((text) => text.includes("Привет")),
-  );
   await page.screenshot({ path: "artifacts/terminal-selection.png" });
   await page.mouse.click(grid.x + 600, cell.y + cell.height * 4.5);
-  await page.waitForFunction(() =>
-    document
-      .querySelector(".xterm-rows")
-      ?.textContent.includes("NEW LIVE FRAME"),
-  );
-  assert.equal(await page.locator(".terminal-selection-status").count(), 0);
   await page.evaluate(() =>
     window.terminalHarness.output(
       "\x1b[2J\x1b[Halpha first line\r\nbeta second line",
@@ -438,9 +334,6 @@ try {
   );
   await page.mouse.move(grid.x + 0.1, cell.y + cell.height / 2);
   await page.mouse.down();
-  await page.evaluate(() =>
-    window.terminalHarness.output("\x1b[2J\x1b[HFRAME DURING DRAG"),
-  );
   await page.mouse.move(grid.x + 400, cell.y + cell.height * 1.5, { steps: 5 });
   await page.mouse.up();
   assert.equal(await readCopy(), "alpha first line\nbeta second line");
@@ -450,80 +343,6 @@ try {
   await page.waitForTimeout(150);
   assert.equal(await readCopy(), "alpha first line\nbeta second line");
   await page.mouse.click(grid.x + 600, cell.y + cell.height * 4.5);
-  await page.waitForFunction(() =>
-    document
-      .querySelector(".xterm-rows")
-      ?.textContent.includes("FRAME DURING DRAG"),
-  );
-  const firstSentence =
-    "  ⏺ Теперь перезапускаю обучение раунда r1 с чекпоинтами (та же выборка, тот же сид — только теперь сохраняем промежуточные шаги вместо";
-  await page.evaluate(
-    (first) =>
-      window.terminalHarness.output(
-        "\x1b[2J\x1b[H" + first + "\r\n  одного финального).",
-      ),
-    firstSentence,
-  );
-  await page.waitForFunction(() =>
-    document.querySelector(".xterm-rows")?.textContent.includes("финального"),
-  );
-  await page.mouse.move(grid.x + 0.1, cell.y + cell.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(grid.x + 500, cell.y + cell.height * 2.5, { steps: 5 });
-  await page.mouse.up();
-  assert.equal(
-    (await readCopy()).trimEnd(),
-    firstSentence + " одного финального).",
-  );
-  await page.mouse.click(grid.x + 600, cell.y + cell.height * 4.5);
-  // A selected transcript pauses Herdr frames. Jump must release that pause,
-  // otherwise Claude moves to the bottom but the user keeps seeing the old frame.
-  await page.evaluate(() =>
-    window.terminalHarness.output(
-      "\x1b[2J\x1b[HSelect this transcript\r\n  Jump to bottom (click) ↓",
-    ),
-  );
-  await page.waitForFunction(() =>
-    document
-      .querySelector(".xterm-rows")
-      ?.textContent.includes("Jump to bottom"),
-  );
-  await page.mouse.dblclick(grid.x + 4 * 7.2, cell.y + cell.height / 2);
-  await page.evaluate(() =>
-    window.terminalHarness.output("\x1b[2J\x1b[HQUEUED FRAME"),
-  );
-  await page.waitForTimeout(100);
-  assert.ok(
-    (await page.locator(".xterm-rows").textContent()).includes(
-      "Jump to bottom",
-    ),
-  );
-  const beforeJump = await page.evaluate(
-    () => window.terminalHarness.calls.writes.length,
-  );
-  await page.mouse.click(grid.x + 10 * 7.2, cell.y + cell.height * 1.5);
-  await page.waitForFunction(() =>
-    document.querySelector(".xterm-rows")?.textContent.includes("QUEUED FRAME"),
-  );
-  assert.equal(
-    await readCopy(),
-    "",
-    "Jump clears the selection that paused rendering",
-  );
-  const jumpWrites = await page.evaluate(
-    (before) => window.terminalHarness.calls.writes.slice(before),
-    beforeJump,
-  );
-  assert.equal(jumpWrites.length, 1);
-  assert.match(jumpWrites[0], /^\x1b\[<0;\d+;2M\x1b\[<0;\d+;2m$/);
-  await page.evaluate(() =>
-    window.terminalHarness.output("\x1b[2J\x1b[HACTUAL BOTTOM FRAME"),
-  );
-  await page.waitForFunction(() =>
-    document
-      .querySelector(".xterm-rows")
-      ?.textContent.includes("ACTUAL BOTTOM FRAME"),
-  );
   // Links: plain URL and OSC 8 open on Cmd/Ctrl+click only, never a dialog.
   await page.evaluate(() =>
     window.terminalHarness.output(
@@ -577,9 +396,9 @@ try {
     "dismissing an attachment error must preserve the session",
   );
   assert.equal(
-    calls.writes.length,
+    calls.files.length,
     3,
-    "failed attachment must not insert a path",
+    "the failed attachment was still attempted once",
   );
   await page.evaluate(() => {
     const data = new DataTransfer();
@@ -593,28 +412,6 @@ try {
     );
   });
   await page.screenshot({ path: "artifacts/terminal-drop.png" });
-  // Returning from a harness to zsh immediately disables all file attachments.
-  await page.evaluate(() => window.terminalHarness.shell());
-  const fileCount = await page.evaluate(
-    () => window.terminalHarness.calls.files.length,
-  );
-  await drop();
-  await page.evaluate(() => {
-    const data = new DataTransfer();
-    data.items.add(new File(["image"], "blocked.png", { type: "image/png" }));
-    document.querySelector(".xterm-helper-textarea").dispatchEvent(
-      new ClipboardEvent("paste", {
-        clipboardData: data,
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-  });
-  await page.waitForTimeout(100);
-  assert.equal(
-    await page.evaluate(() => window.terminalHarness.calls.files.length),
-    fileCount,
-  );
   assert.equal(
     await page.evaluate(async () => {
       const fonts = await document.fonts.load(

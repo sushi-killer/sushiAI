@@ -278,10 +278,6 @@ export function ConnectionsSettings({
                   name: String(form.get("name")),
                   host: String(form.get("host")),
                   port: Number(form.get("port")) || undefined,
-                  // The daemon connector has no socket; an existing profile
-                  // keeps the one orchd may still read.
-                  socket:
-                    typeof editing === "object" ? editing.socket : undefined,
                   connector: connectorFromLine(String(form.get("command"))),
                 });
                 setEditing(null);

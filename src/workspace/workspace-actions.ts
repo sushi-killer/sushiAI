@@ -9,7 +9,6 @@ import {
   swap,
   tidy,
 } from "../layout.ts";
-import { agentTitle } from "../app/agent-title.ts";
 import { memberLabel } from "../app/workspaceMerge.ts";
 import type { MergeGroup } from "../app/workspaceMerge.ts";
 import { codePanels } from "../workspaceState.ts";
@@ -56,14 +55,12 @@ export function reopenInSlot(
   workspace: Workspace,
   endedId: string,
   next: Panel,
-  herdrId?: string,
 ): Workspace {
   const listed = next.id !== endedId && contains(workspace.layout, next.id);
   const layout = listed ? remove(workspace.layout, next.id) : workspace.layout;
   const inSlot = contains(layout, endedId);
   return {
     ...workspace,
-    ...(herdrId ? { herdrId } : {}),
     panels: workspace.panels
       .filter((panel) => panel.id !== next.id || panel.id === endedId)
       .map((panel) =>
@@ -148,9 +145,6 @@ export function reopenRequest(
     codexAccountId: ended.codexAccountId,
     workspaceId: owner.id,
     ...(agent && ended.agentSession ? { resume: ended.agentSession } : {}),
-    ...(ended.launchError && !ended.ended && ended.sessionId
-      ? { paneId: ended.sessionId }
-      : {}),
     restore: true,
   };
 }
@@ -286,7 +280,6 @@ export function tidyGroupLayout(group: MergeGroup): Layout | null {
 export type MergedPane = {
   panel: Panel;
   cwd: string;
-  socket: string;
   endpoint?: string;
   hostLabel: string;
 };
@@ -294,18 +287,15 @@ export type MergedPane = {
 /** Every code panel across a merge group's members, each resolved to its own
  * owner's cwd, endpoint/connection and member label (C1) - the same
  * fields `PanelHost` computes inline for the single active workspace today,
- * generalized to each member. `appSocket` is the app's default connection,
- * the fallback `activeEndpoint` uses for the active workspace. */
+ * generalized to each member. */
 export function resolveGroupPanes(
   group: MergeGroup,
   profiles: ConnectionProfile[],
-  appSocket: string,
 ): MergedPane[] {
   return group.members.flatMap((member) =>
     codePanels(member.workspace).map((panel) => ({
       panel,
       cwd: panel.filesTarget?.root || member.workspace.cwd,
-      socket: member.workspace.connection || appSocket,
       endpoint: member.workspace.connection,
       hostLabel: memberLabel(group, member, profiles),
     })),
@@ -333,36 +323,6 @@ export function reconcileGroupLayout(
     (tree, id) => split(tree, leaf(id), "column", 0.7),
     layout,
   );
-}
-
-const DEFAULT_TERMINAL_TITLES = new Set([
-  "zsh",
-  "Claude Code",
-  "Codex",
-  "Gemini CLI",
-  "Cursor Agent",
-]);
-
-/** Follows the agent a terminal is running, but only while the panel still
- * carries a default title - a name the user typed is never overwritten. */
-export function retitleTerminal(
-  panel: Panel,
-  agent: string | null | undefined,
-): Panel {
-  // A daemon session's agent is the one it was launched with, never a guess
-  // from what the terminal prints.
-  if (panel.sessionId) return panel;
-  return {
-    ...panel,
-    // An agent panel keeps the agent it was made for when none is detected.
-    agent: agent || (panel.kind === "agent" ? panel.agent : undefined),
-    title:
-      panel.kind === "terminal" && DEFAULT_TERMINAL_TITLES.has(panel.title)
-        ? agent
-          ? agentTitle(agent)
-          : "zsh"
-        : panel.title,
-  };
 }
 
 /** The workspace a project already has on a host: the one at its path,

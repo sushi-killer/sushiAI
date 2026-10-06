@@ -5,6 +5,7 @@
 // lanes fill them in. Argument validation runs here before any dispatch.
 
 const { validatePanelId } = require("./panel-id.cjs");
+const { createTerminalHandlers } = require("../daemon/terminals.cjs");
 
 const NOT_IMPLEMENTED = "daemon IPC not implemented yet";
 const MAX_TEXT = 4096;
@@ -137,20 +138,40 @@ const LIFECYCLE = {
 // Channels whose result the renderer reads; the others resolve to undefined.
 const RETURNS_RESULT = new Set(["daemon-sessions-list", "daemon-session-read"]);
 
-function registerDaemonIpc({ handle, getManager = () => null }) {
+// daemon-terminal-* channel -> method of the terminal handlers.
+const TERMINAL_CHANNELS = {
+  "daemon-terminal-attach": (t, input) => t.attach(input),
+  "daemon-terminal-write": (t, panelId, data) => t.write(panelId, data),
+  "daemon-terminal-resize": (t, panelId, cols, rows) =>
+    t.resize(panelId, cols, rows),
+  "daemon-terminal-detach": (t, panelId) => t.detach(panelId),
+  "daemon-terminal-ack": (t, panelId, bytes) => t.ack(panelId, bytes),
+  "daemon-terminal-attach-file": (t, panelId, path) =>
+    t.attachFile(panelId, path),
+};
+
+function registerDaemonIpc({
+  handle,
+  send = () => {},
+  getManager = () => null,
+  onEvent,
+}) {
+  const terminals = createTerminalHandlers({ getManager, send, onEvent });
   for (const [channel, validate] of Object.entries(CHANNELS))
     handle(channel, async (...args) => {
       validate(...args);
       const manager = getManager();
       if (channel === "daemon-states") return manager ? manager.states() : [];
       const build = LIFECYCLE[channel];
-      if (!build) throw new Error(NOT_IMPLEMENTED);
+      const terminal = TERMINAL_CHANNELS[channel];
+      if (!build && !terminal) throw new Error(NOT_IMPLEMENTED);
       if (!manager) throw new Error("daemon manager is not running");
+      if (terminal) return terminal(terminals, ...args);
       const [method, params] = build(...args);
       const result = await manager.request(args[0], method, params);
       return RETURNS_RESULT.has(channel) ? result : undefined;
     });
-  return { getManager };
+  return { getManager, terminals };
 }
 
 /** Pushes manager state and events to every window; returns the unsubscribe. */

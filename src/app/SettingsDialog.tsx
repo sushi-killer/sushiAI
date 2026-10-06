@@ -56,7 +56,7 @@ const SETTINGS_NAV: {
     key: "connections",
     label: "Connections",
     icon: Globe,
-    description: "The Herdr socket and the machines sushiAI can reach.",
+    description: "The machines sushiAI can reach.",
   },
   {
     key: "providers",
@@ -95,15 +95,12 @@ export function SettingsDialog({
   setSettingsTab,
   socket,
   setSocket,
-  connected,
-  refreshHerdr,
   fontScale,
   setFontScale,
   keepAwake,
   setKeepAwake,
   updates,
   system,
-  connectionError,
   registry,
   cwd,
   connection,
@@ -219,48 +216,6 @@ export function SettingsDialog({
                 profiles={connectionProfiles}
                 onRefresh={refreshConnectionProfiles}
                 notify={notify}
-                socketForm={
-                  <form
-                    className="socket-form"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      const value = String(
-                        new FormData(event.currentTarget).get("socket"),
-                      );
-                      setSocket(value);
-                      refreshHerdr(value);
-                    }}
-                  >
-                    <div className="socket-head">
-                      <label htmlFor="settings-socket">Herdr socket</label>
-                      <div className="connection-detail">
-                        <i
-                          className={`status-dot ${connected ? "green" : ""}`}
-                        />
-                        {connected
-                          ? "Connected · workspaces sync automatically"
-                          : connectionError || "Connecting…"}
-                      </div>
-                    </div>
-                    <div className="socket-controls">
-                      <input
-                        id="settings-socket"
-                        name="socket"
-                        key={socket}
-                        defaultValue={
-                          socket.startsWith("ssh:")
-                            ? system?.socketPath
-                            : socket
-                        }
-                        placeholder="/Users/you/.config/herdr/herdr.sock"
-                        required
-                      />
-                      <button className="primary" type="submit">
-                        <RefreshCw size={14} /> Reconnect
-                      </button>
-                    </div>
-                  </form>
-                }
               />
             ) : tab === "providers" ? (
               <ProvidersSettings />
@@ -398,8 +353,8 @@ export function SettingsDialog({
                 <div className="settings-note">
                   <TerminalSquare size={16} />
                   <p>
-                    Herdr sessions keep running when you close sushiAI. Local
-                    terminals live for as long as the app does.
+                    Sessions keep running in the sushiai daemon when you close
+                    sushiAI.
                   </p>
                 </div>
                 <div className="cli-status">

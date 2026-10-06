@@ -1,11 +1,11 @@
 ---
 name: sushiai-orchestrator
-description: Drive the sushiAI orchestrator (orchd) from any agent session in any repository - create, plan, route, watch and answer tasks that run in isolated worktrees, group them into one feature branch, park them in the backlog. Use when the owner asks to "make it a task", "queue it", "run this on codex/claude", "put it in the backlog", "what are my tasks", or to hand work to orchd instead of editing files yourself.
+description: Drive the sushiAI orchestrator from any agent session in any repository - create, plan, route, watch and answer tasks that run in isolated worktrees, group them into one feature branch, park them in the backlog. Use when the owner asks to "make it a task", "queue it", "run this on codex/claude", "put it in the backlog", "what are my tasks", or to hand work to the orchestrator instead of editing files yourself.
 ---
 
-# sushiAI orchestrator (orchd)
+# sushiAI orchestrator
 
-orchd runs each task in its own git worktree with a coding agent (Claude or Codex), checks it
+The orchestrator runs each task in its own git worktree with a coding agent (Claude or Codex), checks it
 against its criteria, reviews it and lands it on a branch. You drive it through the
 `sushiai-orchestrator` MCP server; its tool descriptions carry the details, this is the map.
 
@@ -19,7 +19,7 @@ claude mcp add --scope user sushiai-orchestrator -- "{{ORCHD}}" mcp --data "{{DA
 ```
 
 For Codex, add the same command/args under `[mcp_servers.sushiai-orchestrator]` in
-`~/.codex/config.toml`. The orchd daemon must be running; the sushiAI app starts it.
+`~/.codex/config.toml`. The sushiai daemon must be running with the Orchestrator module on; the sushiAI app starts it.
 
 ## Make work
 
@@ -78,6 +78,6 @@ settings are the owner's. Never put secrets in a goal, a criterion or a message.
 ## Prompts
 
 The orchestrator's own prompts (chat, brainstorm, plan, these MCP instructions) are defaults in
-orchd; `{{DATA}}/prompts.yaml` overrides any of them by key (`chat`, `brainstorm`, `plan`,
+the orchestrator; `{{DATA}}/prompts.yaml` overrides any of them by key (`chat`, `brainstorm`, `plan`,
 `mcp_instructions`, `mcp_task_instructions`), each a `key: |` block indented by two spaces,
 applied on the next turn.

@@ -97,7 +97,7 @@ retro (`artifacts/RETRO-project-environments.md`).
 - **Fixed fidelity tolerances**, set by the lead before the run (text width 3%,
   shifts 2 px, no data-list excuses for layout). The critic, not a diff tool the
   implementer wrote, decides.
-- **Parallel lanes** for independent surfaces (electron/orchd, renderer, docs and
+- **Parallel lanes** for independent surfaces (electron/orchestrator module, renderer, docs and
   Figma), each in its own worktree.
 - **Preflight (two minutes):** Figma bridge connected, ssh alias answers, the
   build runs, the ports you need are free. Fix this before briefing a lane.

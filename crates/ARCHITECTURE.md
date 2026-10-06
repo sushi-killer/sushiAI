@@ -1,7 +1,7 @@
 # Crates
 
 A Cargo workspace for the session daemon. The desktop app runs every terminal
-and agent session in it and still uses orchd for tasks; see
+and agent session in it. The daemon also hosts modules, such as the orchestrator; see
 `docs/architecture.md`.
 
 ## Shape
@@ -30,6 +30,18 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
   `hold` (internal, started by the daemon).
 
 `scripts/check-crate-deps.mjs` enforces the arrows above in CI.
+
+## Coupling rule: core never names a module
+
+Modules attach at the composition bin (`crates/sushiai`); nothing else knows which modules exist.
+
+1. Core crates (protocol, core, hold, agents, daemon) have no module concepts. Without a module the daemon behaves as it does with none loaded.
+2. The daemon knows one trait (namespace, capability, call, shutdown) plus a notification sender. It routes `<namespace>.*` requests to the module that owns the namespace.
+3. A module crate depends on no `sushiai-*` core crate. The glue between the trait and the module lives in the composition bin.
+4. A module's child processes belong to the module: never holders, never listed by `session.list`.
+5. The desktop reaches a module only through the daemon connection: `<namespace>.*` requests and `<namespace>.event` notifications.
+6. Take over uses the public session API; a module is not involved.
+7. `scripts/check-crate-deps.mjs` stays generic: it names no module, and the rules are derived from the core list and the composition bin.
 
 ## Where things are
 

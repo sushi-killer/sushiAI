@@ -6,20 +6,14 @@ const { exitAction } = createRequire(import.meta.url)(
   "../electron/dev-restart.cjs",
 );
 
-// The orchestrator daemon is a Rust binary the app spawns; build it first so
-// the panel talks to current code. A machine without cargo still gets a dev
-// window, with the panel showing its "not built" state.
-const cargo = spawnSync(
-  "cargo",
-  ["build", "--release", "-p", "sushiai-orch", "--bin", "orchd"],
-  {
-    stdio: "inherit",
-  },
-);
+// The daemon (which hosts the orchestrator module) is a Rust binary the app
+// spawns; build it first so the app talks to current code. A machine without
+// cargo still gets a dev window.
+const cargo = spawnSync("cargo", ["build", "--release", "-p", "sushiai"], {
+  stdio: "inherit",
+});
 if (cargo.error || cargo.status !== 0)
-  console.warn(
-    "[dev] orchd build skipped or failed; the Orchestrator panel will say so.",
-  );
+  console.warn("[dev] sushiai daemon build skipped or failed.");
 
 // Renderer (src/**) hot-reloads through Vite HMR.
 // Main/preload (electron/**) can't hot-swap inside a running Electron: main

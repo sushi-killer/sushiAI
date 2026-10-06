@@ -268,6 +268,16 @@ test("the bin link is replaced atomically and no temp link is left", async (t) =
   assert.ok(f.commands.some((c) => /mv -f/.test(c) && !/ln -sfn/.test(c)));
 });
 
+test("an install removes the legacy orchd binary", async (t) => {
+  const f = fixture("Linux x86_64");
+  t.after(f.cleanup);
+  const bin = path.join(f.home, ".sushiai", "bin");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, "orchd"), "legacy");
+  await installSushiai(f);
+  assert.deepEqual(fs.readdirSync(bin), ["sushiai"]);
+});
+
 test("a regular file at the link path is never overwritten", async (t) => {
   const f = fixture("Linux x86_64");
   t.after(f.cleanup);

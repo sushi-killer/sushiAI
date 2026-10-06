@@ -4,7 +4,7 @@ Every orchestrator setting lives in one settings object, read and written as a
 whole (`settings.get` / `settings.set`). Change it in **Settings →
 Orchestration**. A key with no control there is edited under **Advanced — all
 settings as JSON**, the same object saved through the same call. The source of
-truth is the `Settings` struct in `orchd/src/model.rs`; the defaults below are
+truth is the `Settings` struct in `crates/sushiai-orch/src/model.rs`; the defaults below are
 the ones a fresh install gets.
 
 Settings hold no secrets. Model-provider keys stay in **Settings → Models**.
@@ -57,9 +57,9 @@ Settings hold no secrets. Model-provider keys stay in **Settings → Models**.
 | `loopDetect`                                                                              | `true`  | Stop an attempt that repeats itself.                                                                 |
 | `land`                                                                                    | `true`  | A passed task lands on its base branch by itself (never on the default branch unless allowed above). |
 | `maxCostUsd`, `maxAttemptCostUsd`                                                         | `0`     | Dollar caps per task and per attempt; 0 is none.                                                     |
-| `plannerRoute`, `tierRoutes`, `batchQuestions`, `groundedChecks`, `bestOf`, `bestOfRoute` | off     | Experiment arms; see `Variant` in `orchd/src/model.rs` for each.                                     |
+| `plannerRoute`, `tierRoutes`, `batchQuestions`, `groundedChecks`, `bestOf`, `bestOfRoute` | off     | Experiment arms; see `Variant` in `crates/sushiai-orch/src/model.rs` for each.                                     |
 
 Only settings reachable through the app are listed with a control. A key
-missing from the list above but present in `orchd/src/model.rs` is still
+missing from the list above but present in `crates/sushiai-orch/src/model.rs` is still
 editable in the Advanced JSON, which shows the whole object as the daemon
 returned it.

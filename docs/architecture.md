@@ -81,9 +81,9 @@ flowchart TB
   attention --> macos
   wsSnap & winState --> profile
 
-  subgraph orchd["orchd daemon - Rust, started on first use (or at launch when tasks are still pending on disk; attached if already running), stopped on quit only when this app spawned it (an attached one keeps running), and it exits when its data dir is deleted"]
+  subgraph orchd["orchestrator module (crates/sushiai-orch) - hosted by the sushiai daemon, loaded only when the Orchestrator extension is on; desktop calls orch.* over the daemon connection and receives orch.event; file-backed runs are re-adopted by process group after a daemon restart"]
     direction LR
-    proto["protocol.rs<br/>NDJSON socket + token"]
+    proto["protocol.rs<br/>orch.* request and result types"]
     engine["engine/<br/>task loop, gates, routing"]
     chat["chat.rs<br/>orchestrator chat"]
     audit["audit.rs<br/>repo.audit, read-only"]
@@ -333,7 +333,7 @@ flowchart LR
   orch -->|task_create / task_answer via MCP| planner
 ```
 
-Task agents run with `sandbox: native` by default (`orchd/src/model.rs`): the
+Task agents run with `sandbox: native` by default (`crates/sushiai-orch/src/model.rs`): the
 sandbox keeps writes inside the task's worktree and the network is open
 (`allowedDomains: ["*"]`). `sandbox: host` turns it off.
 
@@ -349,7 +349,7 @@ flowchart LR
   end
   subgraph ours["sushiAI"]
     modes["Shell modes Agent / Code / Chat"]
-    orchdN["orchd: task store + socket API,<br/>orchestrator agent over MCP"]
+    orchdN["orchestrator module in the sushiai daemon:<br/>task store, orch.* API,<br/>orchestrator agent over MCP"]
     skills[".agents/skills + role agents<br/>implementer, reviewer, qa, design-critic"]
     sessions["Terminal panels over the sushiai daemon"]
   end

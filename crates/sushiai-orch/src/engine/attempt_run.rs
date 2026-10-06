@@ -27,6 +27,76 @@ impl CostTag {
     }
 }
 
+/// The files a file-backed run (an implement or plan attempt) leaves next to
+/// its `events.jsonl`: the child's stdin, its raw stdout and stderr, the exit
+/// code its wrapper writes last, and the argv it was started with. They let
+/// a restarted daemon find the run again and finish it (see `recovery.rs`).
+pub(super) struct RunFiles {
+    pub stdin: PathBuf,
+    pub raw: PathBuf,
+    pub stderr: PathBuf,
+    pub exit: PathBuf,
+    pub meta: PathBuf,
+}
+
+impl RunFiles {
+    pub fn of(events_path: &Path) -> Self {
+        let at = |ext: &str| events_path.with_extension(ext);
+        RunFiles {
+            stdin: at("stdin"),
+            raw: at("raw"),
+            stderr: at("stderr.log"),
+            exit: at("exit"),
+            meta: at("run.json"),
+        }
+    }
+}
+
+/// `true` while some process of group `pgid` is alive.
+pub(super) fn group_alive(pgid: i32) -> bool {
+    pgid > 0 && unsafe { libc::kill(pgid, 0) == 0 }
+}
+
+/// Reads the lines `file` gains, as they arrive, until the run is over: its
+/// exit file exists or its process group is gone. What was written before
+/// that moment is still delivered.
+fn tail_file(
+    file: PathBuf,
+    exit: PathBuf,
+    pgid: i32,
+) -> Box<dyn tokio::io::AsyncRead + Unpin + Send> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut tx, rx) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        let mut offset = 0u64;
+        loop {
+            let over = exit.exists() || !group_alive(pgid);
+            if let Ok(mut f) = tokio::fs::File::open(&file).await {
+                let _ =
+                    tokio::io::AsyncSeekExt::seek(&mut f, std::io::SeekFrom::Start(offset)).await;
+                let mut buf = vec![0u8; 16 * 1024];
+                loop {
+                    match f.read(&mut buf).await {
+                        Ok(n) if n > 0 => {
+                            offset += n as u64;
+                            if tx.write_all(&buf[..n]).await.is_err() {
+                                return; // the reader gave up (cancelled run)
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            }
+            if over {
+                let _ = tx.shutdown().await;
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    });
+    Box::new(rx)
+}
+
 pub(super) enum RunError {
     Cancelled,
     Io(String),
@@ -94,47 +164,64 @@ pub(super) async fn run_harness(
         Harness::Codex => codex_version(&bin).await,
         Harness::Claude => None,
     };
-    let mut cmd = tokio::process::Command::new(&bin);
-    let (project_env, redaction_env) = app
-        .store
-        .load_task(task_id)
-        .ok()
-        .flatten()
-        .and_then(|task| {
-            task.project_id.or_else(|| {
-                app.secrets
-                    .read()
-                    .unwrap()
-                    .repo_projects
-                    .get(&task.repo)
-                    .cloned()
-            })
-        })
-        .map_or_else(
-            || {
-                (
-                    std::collections::HashMap::new(),
-                    std::collections::HashMap::new(),
-                )
-            },
-            |id| {
-                let secrets = app.secrets.read().unwrap();
-                let agent = secrets.projects.get(&id).cloned().unwrap_or_default();
-                let mut known = agent.clone();
-                known.extend(secrets.project_mcp.get(&id).cloned().unwrap_or_default());
-                (agent, known)
-            },
+    let mut cmd;
+    let (project_env, redaction_env) = run_secrets(app, task_id);
+    let files = RunFiles::of(events_path);
+    // What the fingerprint hashes: the harness's own argv, not the wrapper's.
+    let run_argv = argv.clone();
+    if track_attempt {
+        // stdin, stdout and stderr are files and a wrapper writes the exit
+        // code last, so the run does not depend on this process staying
+        // alive (a restarted daemon re-adopts it by pgid).
+        let wrapped = std::mem::take(&mut argv);
+        argv = vec![
+            "-c".into(),
+            "\"$@\"; c=$?; echo $c > \"$0.tmp\" && mv \"$0.tmp\" \"$0\"; exit $c".into(),
+            files.exit.to_string_lossy().into_owned(),
+            bin,
+        ];
+        argv.extend(wrapped);
+        bin = "/bin/sh".to_string();
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&files.stdin)
+                .and_then(|mut f| f.write_all(brief_text.as_bytes()));
+        }
+        let _ = std::fs::remove_file(&files.exit);
+        let _ = std::fs::write(
+            &files.meta,
+            json!({"argv": &run_argv, "codexVersion": codex_version}).to_string(),
         );
+    }
+    cmd = tokio::process::Command::new(&bin);
     cmd.args(&argv)
         .current_dir(worktree)
         .env("PATH", augmented_path())
         // Lets a repo's own hooks tell an orchd-run agent from a person's
         // session (sushiAI's lesson reminder stays quiet for it).
         .env("ORCHD_TASK", task_id)
-        .envs(&project_env)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .envs(&project_env);
+    if track_attempt {
+        let open = |p: &Path| std::fs::File::create(p).map(std::process::Stdio::from);
+        match (
+            std::fs::File::open(&files.stdin).map(std::process::Stdio::from),
+            open(&files.raw),
+            open(&files.stderr),
+        ) {
+            (Ok(i), Ok(o), Ok(e)) => cmd.stdin(i).stdout(o).stderr(e),
+            _ => return Err(RunError::Io("could not open the run files".into())),
+        };
+    } else {
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+    }
     #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| {
@@ -158,14 +245,24 @@ pub(super) async fn run_harness(
         }
     }
 
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let _ = stdin.write_all(brief_text.as_bytes()).await;
-        drop(stdin);
-    }
-
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
+    type Source = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+    let (stdout, stderr): (Source, Source) = if track_attempt {
+        let pgid = pgid.unwrap_or(0);
+        (
+            tail_file(files.raw.clone(), files.exit.clone(), pgid),
+            tail_file(files.stderr.clone(), files.exit.clone(), pgid),
+        )
+    } else {
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(brief_text.as_bytes()).await;
+            drop(stdin);
+        }
+        (
+            Box::new(child.stdout.take().expect("piped stdout")),
+            Box::new(child.stderr.take().expect("piped stderr")),
+        )
+    };
     let mut out_lines = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(stdout));
     let mut err_lines = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(stderr));
 
@@ -190,7 +287,7 @@ pub(super) async fn run_harness(
             _ = cancel.cancelled() => {
                 kill_group(pgid, &mut child).await;
                 // A stopped run still ran: keep what it reported so far.
-                let fp = fingerprint_of(&outcome, req, &argv, codex_version.clone());
+                let fp = fingerprint_of(&outcome, req, &run_argv, codex_version.clone());
                 let mut partial = outcome.clone();
                 finalize_cost(app, req.harness, req.model, &mut partial);
                 partial.fingerprint = Some(fp.clone());
@@ -284,6 +381,16 @@ pub(super) async fn run_harness(
             }
             status = child.wait(), if stdout_done && stderr_done => {
                 if let Ok(status) = status {
+                    // The wrapper shell reports a harness it could not start
+                    // (missing binary or interpreter) as 126 or 127: nothing ran.
+                    if track_attempt && matches!(status.code(), Some(126 | 127)) {
+                        let tail = stderr_tail.trim();
+                        return Err(RunError::NotFound(if tail.is_empty() {
+                            format!("{:?}: command not found", req.harness)
+                        } else {
+                            tail.to_string()
+                        }));
+                    }
                     if !status.success() && outcome.error.is_none() {
                         let tail = stderr_tail.trim();
                         outcome.error = Some(if tail.is_empty() {
@@ -298,7 +405,7 @@ pub(super) async fn run_harness(
         }
     }
     finalize_cost(app, req.harness, req.model, &mut outcome);
-    outcome.fingerprint = Some(fingerprint_of(&outcome, req, &argv, codex_version));
+    outcome.fingerprint = Some(fingerprint_of(&outcome, req, &run_argv, codex_version));
     record_run(
         app,
         task_id,
@@ -311,7 +418,36 @@ pub(super) async fn run_harness(
     Ok(outcome)
 }
 
-fn redact(line: &str, env: &std::collections::HashMap<String, String>) -> String {
+/// The project's agent variables, and every value known for the project
+/// (agent and MCP variables) that a run's output must not keep.
+pub(super) fn run_secrets(
+    app: &App,
+    task_id: &str,
+) -> (HashMap<String, String>, HashMap<String, String>) {
+    app.store
+        .load_task(task_id)
+        .ok()
+        .flatten()
+        .and_then(|task| {
+            task.project_id.or_else(|| {
+                app.secrets
+                    .read()
+                    .unwrap()
+                    .repo_projects
+                    .get(&task.repo)
+                    .cloned()
+            })
+        })
+        .map_or_else(Default::default, |id| {
+            let secrets = app.secrets.read().unwrap();
+            let agent = secrets.projects.get(&id).cloned().unwrap_or_default();
+            let mut known = agent.clone();
+            known.extend(secrets.project_mcp.get(&id).cloned().unwrap_or_default());
+            (agent, known)
+        })
+}
+
+pub(super) fn redact(line: &str, env: &std::collections::HashMap<String, String>) -> String {
     let mut values: Vec<_> = env.values().filter(|value| !value.is_empty()).collect();
     values.sort_by_key(|value| std::cmp::Reverse(value.len()));
     values.into_iter().fold(line.to_string(), |text, value| {

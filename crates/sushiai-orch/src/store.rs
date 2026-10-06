@@ -117,31 +117,56 @@ impl Store {
     /// Returns the tasks that were mutated.
     pub fn recover_interrupted(
         &self,
+        settle: impl FnMut(&mut Task, usize),
+    ) -> io::Result<Vec<Task>> {
+        self.recover_interrupted_with(|_, _| RunFate::Interrupted, settle)
+    }
+
+    /// [`Self::recover_interrupted`], asking `fate` first about each attempt
+    /// left `running`. A file-backed run can outlive the daemon: `Alive`
+    /// leaves the attempt and its task alone (the caller re-adopts the run),
+    /// `Finished` means `fate` already settled the attempt from the files
+    /// the run left (the task is `stopped`, not requeued: the work is done
+    /// and nothing needs redoing). Only `Interrupted` kills the group.
+    pub fn recover_interrupted_with(
+        &self,
+        mut fate: impl FnMut(&mut Task, usize) -> RunFate,
         mut settle: impl FnMut(&mut Task, usize),
     ) -> io::Result<Vec<Task>> {
         let mut recovered = Vec::new();
         for mut task in self.list_tasks()? {
-            let mut changed = false;
+            let (mut interrupted, mut finished) = (false, false);
             for idx in 0..task.attempts.len() {
-                let attempt = &mut task.attempts[idx];
-                if attempt.status == AttemptStatus::Running {
-                    if let Some(pgid) = attempt.pgid {
-                        kill_stale_process_group(pgid);
+                if task.attempts[idx].status != AttemptStatus::Running {
+                    continue;
+                }
+                match fate(&mut task, idx) {
+                    RunFate::Alive => {}
+                    RunFate::Finished => finished = true,
+                    RunFate::Interrupted => {
+                        let attempt = &mut task.attempts[idx];
+                        if let Some(pgid) = attempt.pgid {
+                            kill_stale_process_group(pgid);
+                        }
+                        let key_file = self.run_dir(&task.id, attempt.n).join("key");
+                        let _ = fs::remove_file(key_file);
+                        attempt.status = AttemptStatus::Interrupted;
+                        attempt.ended_at = Some(crate::model::now_ms());
+                        settle(&mut task, idx);
+                        interrupted = true;
                     }
-                    let key_file = self.run_dir(&task.id, attempt.n).join("key");
-                    let _ = fs::remove_file(key_file);
-                    attempt.status = AttemptStatus::Interrupted;
-                    attempt.ended_at = Some(crate::model::now_ms());
-                    settle(&mut task, idx);
-                    changed = true;
                 }
             }
             // A running attempt at startup means the daemon died under it (an
             // owner's stop marks its attempt interrupted right away), so the
             // task is queued again and resumes, rather than waiting for the
             // owner to notice and press Start.
-            if changed {
-                task.status = TaskStatus::Queued;
+            if interrupted || finished {
+                task.status = if interrupted {
+                    TaskStatus::Queued
+                } else {
+                    TaskStatus::Stopped
+                };
                 task.updated_at = crate::model::now_ms();
                 self.save_task(&task)?;
                 recovered.push(task);
@@ -297,6 +322,16 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option<T
 /// over from an unclean daemon shutdown, if it's still alive. Never panics
 /// or blocks the caller for long -- this runs once at startup, before the
 /// tokio runtime is doing anything else that matters.
+/// What became of a run that was `running` when the daemon stopped.
+pub enum RunFate {
+    /// Its process group still runs; the caller takes it over.
+    Alive,
+    /// It ended while the daemon was down and the attempt is settled.
+    Finished,
+    /// Its result is lost: the attempt is interrupted.
+    Interrupted,
+}
+
 #[cfg(unix)]
 fn kill_stale_process_group(pgid: i32) {
     unsafe {

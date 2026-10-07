@@ -69,6 +69,7 @@ const { testWindow } = require("./test-window.cjs");
 const testMode = testWindow();
 const { SurfaceStateStore } = require("./extensions/surface-state.cjs");
 const { ExtensionManager } = require("./extensions/extension-manager.cjs");
+const { createCompanions } = require("./extensions/companion-process.cjs");
 const { ARTIFACTS_MANIFEST } = require("./extensions/builtin-artifacts.cjs");
 const { configureArtifactsSkill } = require("./artifacts-skill.cjs");
 const { syncLocalBuiltinSkills } = require("./extensions/builtin-skills.cjs");
@@ -95,11 +96,20 @@ let mainWindow;
 const root = path.join(__dirname, "..");
 const dataDir = process.env.BRIDGE_DATA_DIR;
 if (dataDir) app.setPath("userData", path.resolve(dataDir));
+// The PATH extended below is on process.env before any companion starts; the
+// supervisor passes the child only an allowlist of it.
+const companions = createCompanions({
+  getHosts: () => connections?.profiles ?? [],
+  env: process.env,
+});
 const extensions = new ExtensionManager({
   dataDir: app.getPath("userData"),
+  companions,
   builtins: [ORCHESTRATOR_MANIFEST, ARTIFACTS_MANIFEST],
-  // Folders dropped here are read as JSON manifests, never executed. The
-  // override exists so the desktop smoke can point at its own fixtures.
+  // Folders dropped here are read as JSON manifests and carry no code; the
+  // extension folder is never executed. A manifest may name a companion
+  // program installed elsewhere, which runs only after the owner approves it.
+  // The override exists so the desktop smoke can point at its own fixtures.
   localDir: process.env.SUSHIAI_EXTENSIONS_DIR
     ? path.resolve(root, process.env.SUSHIAI_EXTENSIONS_DIR)
     : // A sibling of the settings folder, not inside it: this one is meant to
@@ -289,6 +299,7 @@ registerExtensionIpc({
   getExtensions: () => extensions,
   getSurfaceState: () => surfaceState,
   announce: (change) => send("extensions-state-changed", change),
+  announceCompanion: (change) => send("extensions-companion-changed", change),
 });
 registerWorkspaceSnapshot({
   ipcMain,
@@ -512,6 +523,10 @@ app.whenReady().then(async () => {
     daemonManager.start();
   }
   await orchestrator.start();
+  // After the saved on/off state and approvals are loaded and the host list
+  // is known: wanted companion processes start now.
+  await extensions.ready;
+  await companions.start();
   updates = new Updates({
     directory: app.getPath("userData"),
     currentVersion: app.getVersion(),
@@ -738,6 +753,7 @@ app.on("before-quit", (event) => {
     Promise.resolve(connections?.close()),
     agents.close(),
     orchestrator.quit(),
+    companions.stopAll(),
   ]).finally(() => {
     quitReady = true;
     app.quit();

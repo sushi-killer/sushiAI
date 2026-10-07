@@ -57,7 +57,6 @@ import {
   daemonDown,
   errorText,
   formatDuration,
-  isPackagedInstall,
   planDrafts,
   sortTasks,
   taskCreateParams,
@@ -324,7 +323,7 @@ function OrchestratorBody({
     let pid: number | null = null;
     let cancelled = false;
     const check = () => {
-      if (inFlight || daemonRef.current === "not-built") return;
+      if (inFlight) return;
       inFlight = true;
       let timer = 0;
       const timeout = new Promise<never>((_, reject) => {
@@ -750,43 +749,6 @@ function OrchestratorBody({
           : "task";
 
   function offlineBody() {
-    if (daemonState === "not-built" && isPackagedInstall(error))
-      return (
-        <div data-orchestrator-not-built>
-          <Banner
-            tone="warning"
-            title="The orchestrator is missing from this installation."
-            body="Reinstall sushiAI, then Retry."
-            action={{ label: "Retry", onClick: retry }}
-          />
-        </div>
-      );
-    if (daemonState === "not-built")
-      return (
-        <>
-          <div data-orchestrator-not-built>
-            <Banner
-              tone="warning"
-              title="The orchestrator isn't built yet."
-              body="Build it once from the repository root, then Retry."
-              action={{ label: "Retry", onClick: retry }}
-            />
-          </div>
-          <div className="orch-command">
-            <span className="orch-command-prompt">$</span>
-            <code>npm run build:orchd</code>
-            <button
-              type="button"
-              className="ui-button ghost"
-              onClick={() =>
-                void navigator.clipboard?.writeText("npm run build:orchd")
-              }
-            >
-              Copy
-            </button>
-          </div>
-        </>
-      );
     const seen =
       lastSeenAt === null
         ? ""
@@ -1034,9 +996,7 @@ function OrchestratorBody({
               }
               placeholder={
                 offline
-                  ? daemonState === "not-built"
-                    ? "Build the orchestrator to send tasks"
-                    : "Reconnect to send tasks"
+                  ? "Reconnect to send tasks"
                   : composerMode === "ask"
                     ? "Ask the orchestrator to start, check or answer a task…"
                     : composerMode === "plan"

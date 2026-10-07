@@ -35,17 +35,17 @@ const clock = (seconds: number) =>
 function StepList({ rows }: { rows: Row[] }) {
   const [open, setOpen] = useState<string | null>(null);
   return (
-    <div className="orch-prep-steps">
+    <div className="host-prep-steps">
       {rows.map((row) => (
-        <div className={`orch-prep-step ${row.mark}`} key={row.title}>
-          <span className="orch-prep-mark" aria-hidden />
-          <span className="orch-prep-text">
-            <span className="orch-prep-title">{row.title}</span>
-            <span className="orch-prep-sub">
+        <div className={`host-prep-step ${row.mark}`} key={row.title}>
+          <span className="host-prep-mark" aria-hidden />
+          <span className="host-prep-text">
+            <span className="host-prep-title">{row.title}</span>
+            <span className="host-prep-sub">
               {open === row.title && row.more ? row.more : row.sub}
             </span>
           </span>
-          {row.right && <span className="orch-prep-right">{row.right}</span>}
+          {row.right && <span className="host-prep-right">{row.right}</span>}
           {row.more && (
             <button
               type="button"
@@ -326,8 +326,8 @@ export function PrepareProgress({
   let extra: ReactNode = null;
   if (failure) {
     extra = (
-      <div className="orch-prep-help">
-        <div className="orch-prep-caption">What you can do</div>
+      <div className="host-prep-help">
+        <div className="host-prep-caption">What you can do</div>
         <p>
           {advice({
             hostName,
@@ -345,7 +345,7 @@ export function PrepareProgress({
         </p>
         {editToken && (
           <input
-            className="orch-prep-token"
+            className="host-prep-token"
             type="password"
             autoComplete="new-password"
             aria-label="Git token"
@@ -354,7 +354,7 @@ export function PrepareProgress({
             onChange={(event) => onTokenDraft(event.target.value)}
           />
         )}
-        <div className="orch-prep-actions">
+        <div className="host-prep-actions">
           <button
             type="button"
             className="ui-button ghost"
@@ -403,8 +403,8 @@ export function PrepareProgress({
     );
   }
   return (
-    <div className="orch-prep" role={failure ? "alert" : "status"}>
-      {eyebrow && <div className="orch-prep-eyebrow">{eyebrow}</div>}
+    <div className="host-prep" role={failure ? "alert" : "status"}>
+      {eyebrow && <div className="host-prep-eyebrow">{eyebrow}</div>}
       <h2>{`Prepare ${hostName} for ${project.name}`}</h2>
       <p>
         {`Clone, install and connect this project on ${hostName}. The daemon gets secrets only after every step passes.`}

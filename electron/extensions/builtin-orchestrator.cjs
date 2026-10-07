@@ -1,8 +1,4 @@
-// The built-in orchestrator's manifest. The object itself still lives in
-// ../orchestrator.cjs (step 6 owns that file) and is completed here; lane L6
-// flips the ownership so this file defines it and orchestrator.cjs imports it.
-const { ORCHESTRATOR_MANIFEST } = require("../orchestrator.cjs");
-
+// The built-in orchestrator's manifest: the one owner of this object.
 const pane = {
   id: "orchestration",
   title: "Orchestrator",
@@ -18,7 +14,7 @@ const settings = {
   id: "settings",
   title: "Orchestration",
   description:
-    "How tasks are planned, run, checked and landed. Saved to orchd for every project on this Mac.",
+    "How tasks are planned, run, checked and landed. Saved for every project on this Mac.",
   allowedHosts: ["settings.page"],
   defaultHost: "settings.page",
   instancePolicy: "singleton",
@@ -26,20 +22,29 @@ const settings = {
   view: { kind: "core", viewId: "orchestrator.settings" },
 };
 
-ORCHESTRATOR_MANIFEST.contributions = {
-  surfaces: [pane, settings],
-  navigation: [
-    {
-      id: "orchestration-picker",
-      targetSurfaceId: "orchestration",
-      allowedPlacements: ["panel.picker"],
-      defaultPlacement: "panel.picker",
-      label: "Orchestrator",
-      icon: "list-todo",
-    },
-  ],
-  actions: [],
-  commands: [],
+const ORCHESTRATOR_MANIFEST = {
+  id: "builtin.orchestrator",
+  name: "Orchestrator",
+  version: "1.0.0",
+  apiVersion: 1,
+  source: { kind: "builtin" },
+  scope: "app",
+  description: "Carries tasks to a verified, committed done.",
+  contributions: {
+    surfaces: [pane, settings],
+    navigation: [
+      {
+        id: "orchestration-picker",
+        targetSurfaceId: "orchestration",
+        allowedPlacements: ["panel.picker"],
+        defaultPlacement: "panel.picker",
+        label: "Orchestrator",
+        icon: "list-todo",
+      },
+    ],
+    actions: [],
+    commands: [],
+  },
 };
 
 module.exports = { ORCHESTRATOR_MANIFEST };

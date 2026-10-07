@@ -102,18 +102,18 @@ export function PrepareAndStart({
   return (
     <div className="pk-prepare">
       {phase === "checking" ? (
-        <div className="orch-prep" role="status">
-          <div className="orch-prep-eyebrow">{eyebrow}</div>
+        <div className="host-prep" role="status">
+          <div className="host-prep-eyebrow">{eyebrow}</div>
           <h2>{`Starting on ${hostName}`}</h2>
         </div>
       ) : phase === "unstarted" ? (
-        <div className="orch-prep" role="alert">
-          <div className="orch-prep-eyebrow">{eyebrow}</div>
+        <div className="host-prep" role="alert">
+          <div className="host-prep-eyebrow">{eyebrow}</div>
           <h2>{`Prepared ${hostName}, but the session could not start`}</h2>
           <p>
             {`${project.name} is ready on ${hostName}. Opening the session there failed; nothing else was changed.`}
           </p>
-          <div className="orch-prep-actions">
+          <div className="host-prep-actions">
             <button
               type="button"
               className="ui-button secondary"

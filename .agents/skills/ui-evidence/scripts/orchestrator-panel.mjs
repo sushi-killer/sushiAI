@@ -218,17 +218,13 @@ if (!seedPath || !title) {
     await page.getByRole("button", { name: "Maximize Orchestrator" }).click();
 
     await page
-      .locator(
-        ".orch-rail, [data-orchestrator-not-built], .orch-view-scroll.offline",
-      )
+      .locator(".orch-rail, .orch-view-scroll.offline")
       .first()
       .waitFor({ timeout: 15000 });
-    const notBuilt = page.locator(
-      "[data-orchestrator-not-built], .orch-view-scroll.offline",
-    );
-    if (await notBuilt.count()) {
+    const offlinePanel = page.locator(".orch-view-scroll.offline");
+    if (await offlinePanel.count()) {
       throw new Error(
-        `the orchestrator panel could not open: ${(await notBuilt.first().innerText()).trim()}`,
+        `the orchestrator panel could not open: ${(await offlinePanel.first().innerText()).trim()}`,
       );
     }
 

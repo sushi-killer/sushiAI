@@ -603,17 +603,22 @@ fn holder_signal(pid: u32, signal: &str) {
     kill(pid, signal);
 }
 
-/// Kills the daemon, freezes the session's holder so its reattach hangs, starts a new daemon,
-/// and thaws the holder after `thaw`. The new daemon's socket is answering meanwhile.
-fn restart_with_a_slow_holder(sandbox: &mut Sandbox, daemon: u32, holder: u32, thaw: Duration) {
+/// Kills the daemon, freezes the session's holder so its reattach hangs, and starts a new
+/// daemon whose socket answers meanwhile. The caller thaws the holder with [`thaw`].
+fn restart_with_a_frozen_holder(sandbox: &mut Sandbox, daemon: u32, holder: u32) {
     kill(daemon, "-KILL");
     wait_until("daemon to die", 5, || !alive(daemon));
     holder_signal(holder, "-STOP");
     sandbox.start_daemon();
-    std::thread::spawn(move || {
-        sleep(thaw);
-        holder_signal(holder, "-CONT");
-    });
+}
+
+/// Lets the frozen holder answer. Nothing here depends on how long a request waited: the
+/// holder stays frozen until the test has sent its requests and seen the daemon still
+/// answering with the session detached.
+fn thaw(sandbox: &Sandbox, id: &str, holder: u32) {
+    let mut other = sandbox.client();
+    assert_eq!(info_of(&mut other, id)["status"], "detached");
+    holder_signal(holder, "-CONT");
 }
 
 #[test]
@@ -627,30 +632,36 @@ fn requests_for_a_restored_session_wait_for_its_holder() {
     let holder = sandbox.holder_pid(&id);
 
     // attach, sent while the holder is frozen: it succeeds once the holder answers.
-    restart_with_a_slow_holder(&mut sandbox, first, holder, Duration::from_millis(1500));
+    restart_with_a_frozen_holder(&mut sandbox, first, holder);
     let mut client = sandbox.client();
-    assert_eq!(info_of(&mut client, &id)["status"], "detached");
-    let started = Instant::now();
-    assert!(client.attach(&id).contains("marker-5"));
-    assert!(
-        started.elapsed() >= Duration::from_millis(500),
-        "attach did not wait"
-    );
+    let attach = client.send("session.attach", json!({"id": id}));
+    thaw(&sandbox, &id, holder);
+    let result = client.response("session.attach", attach).expect("attach");
+    let snapshot = base64_decode(result["snapshot"].as_str().expect("snapshot"));
+    assert!(String::from_utf8_lossy(&snapshot).contains("marker-5"));
     assert_eq!(info_of(&mut client, &id)["status"], "running");
 
     // input and resize wait too.
     let second = sandbox.lock_pid().expect("pid");
-    restart_with_a_slow_holder(&mut sandbox, second, holder, Duration::from_millis(1500));
+    restart_with_a_frozen_holder(&mut sandbox, second, holder);
     let mut client = sandbox.client();
-    print_marker(&mut client, &id, 6);
-    client.call("session.resize", json!({"id": id, "cols": 100, "rows": 30}));
+    let input = client.send(
+        "session.input",
+        json!({"id": id, "data": "printf 'mark%s\\n' er-6\n"}),
+    );
+    let resize = client.send("session.resize", json!({"id": id, "cols": 100, "rows": 30}));
+    thaw(&sandbox, &id, holder);
+    client.response("session.input", input).expect("input");
+    client.response("session.resize", resize).expect("resize");
     wait_snapshot_contains(&mut client, &id, "marker-6");
 
     // A close sent during recovery is not lost: the session ends.
     let third = sandbox.lock_pid().expect("pid");
-    restart_with_a_slow_holder(&mut sandbox, third, holder, Duration::from_millis(1500));
+    restart_with_a_frozen_holder(&mut sandbox, third, holder);
     let mut client = sandbox.client();
-    client.call("session.close", json!({"id": id, "graceful": false}));
+    let close = client.send("session.close", json!({"id": id, "graceful": false}));
+    thaw(&sandbox, &id, holder);
+    client.response("session.close", close).expect("close");
     wait_until("the session to end", 10, || {
         info_of(&mut client, &id)["status"] == "exited"
     });
@@ -716,9 +727,11 @@ fn session_read_waits_for_a_restored_session() {
     print_marker(&mut client, &id, 9);
     wait_snapshot_contains(&mut client, &id, "marker-9");
     let holder = sandbox.holder_pid(&id);
-    restart_with_a_slow_holder(&mut sandbox, first, holder, Duration::from_millis(1500));
+    restart_with_a_frozen_holder(&mut sandbox, first, holder);
     let mut client = sandbox.client();
-    let read = client.call("session.read", json!({"id": id}));
+    let request = client.send("session.read", json!({"id": id}));
+    thaw(&sandbox, &id, holder);
+    let read = client.response("session.read", request).expect("read");
     assert!(read["text"].as_str().expect("text").contains("marker-9"));
 }
 
@@ -736,11 +749,6 @@ fn a_daemon_started_while_the_lock_is_still_held_waits_for_it() {
         .expect("lock file");
     // SAFETY: flock(2) on a descriptor this test owns.
     assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
-    let releaser = std::thread::spawn(move || {
-        sleep(Duration::from_millis(800));
-        drop(lock);
-    });
-    let started = Instant::now();
     let mut proxy = Command::new(BIN)
         .arg("proxy")
         .env("SUSHIAI_HOME", sandbox.home())
@@ -760,18 +768,19 @@ fn a_daemon_started_while_the_lock_is_still_held_waits_for_it() {
             let _ = tx.send(buf[..n].to_vec());
         }
     });
-    let answered = rx.recv_timeout(Duration::from_secs(2));
-    let waited = started.elapsed();
+    // While the lock is held nothing may answer: the hello waits for the lock, never fails.
+    assert!(
+        rx.recv_timeout(Duration::from_millis(300)).is_err(),
+        "the hello was answered while the old daemon still held the lock"
+    );
+    drop(lock);
+    // Once the lock is free the daemon starts and answers; only a bound for a hung test.
+    let answered = rx.recv_timeout(Duration::from_secs(60));
     drop(stdin);
     let _ = proxy.kill();
     let _ = proxy.wait();
-    releaser.join().expect("releaser");
-    let bytes = answered.expect("no hello answer within 2 s of starting the proxy");
+    let bytes = answered.expect("no hello answer after the lock was released");
     assert!(!bytes.is_empty());
-    assert!(
-        waited >= Duration::from_millis(700),
-        "the lock was not waited for"
-    );
 }
 
 #[test]

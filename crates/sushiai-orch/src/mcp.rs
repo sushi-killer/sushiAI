@@ -1,0 +1,942 @@
+//! The stdio MCP (Model Context Protocol) server behind `sushiai mcp`, so any MCP-capable
+//! agent harness (Claude Code, Codex, ...) can attach the orchestrator, or a task agent can
+//! message its peers. It speaks newline-delimited JSON-RPC 2.0 on stdin/stdout and translates
+//! `tools/call` into an `orch.*` call through the [`Caller`] its host supplies; it never
+//! touches engine or store internals. Deliberately synchronous: one line in, one round trip,
+//! one line out.
+
+use crate::model::ORCHESTRATOR;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::io::{BufRead, Write};
+
+/// Protocol version handed back when the client didn't ask for a specific
+/// one. When it did ask, we just echo it back rather than maintaining a
+/// compatibility matrix here -- this bridge has no version-specific
+/// behavior of its own to gate on.
+const PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// What a task agent gets (`--task`): only messaging, always as itself.
+pub const TASK_TOOLS: [&str; 4] = [
+    // In `tool_specs` order, so a task's tools/list reads the same way.
+    "peer_list",
+    "peer_send",
+    "inbox_read",
+    "ask_orchestrator",
+];
+
+/// What a Brainstorm or Plan turn gets (`--read-only`): looking, never changing.
+pub const READ_ONLY_TOOLS: [&str; 4] = ["task_list", "task_get", "settings_get", "repo_notes_list"];
+
+/// What the orchestrator agent gets: every tool below.
+pub const ORCHESTRATOR_TOOLS: [&str; 23] = [
+    "task_list",
+    "task_get",
+    "task_create",
+    "task_backlog",
+    "task_start",
+    "task_report",
+    "task_lead_touch",
+    "task_stop",
+    "task_answer",
+    "task_amend",
+    "settings_get",
+    "task_archive",
+    "task_unarchive",
+    "peer_list",
+    "peer_send",
+    "inbox_read",
+    "ask_orchestrator",
+    "orchestrator_reply",
+    "repo_audit",
+    "evolution_run",
+    "repo_notes_list",
+    "repo_notes_add",
+    "repo_notes_remove",
+];
+
+fn from_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "Sender: a task id, or \"orchestrator\" (the default).",
+    })
+}
+
+/// name, orchd method, description, JSON Schema for `inputSchema`. No
+/// `task_delete` (destructive, and never the agent's call), no
+/// `settings_set` (would let an agent silently change parallelism/planner
+/// config the owner didn't ask to change), no `secrets_*` (an agent has no
+/// business reading or writing API keys) -- all three are deliberately left
+/// off this surface, not just forgotten.
+fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
+    vec![
+        (
+            "task_list",
+            "task.list",
+            "List orchd tasks, optionally filtered by repo.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Absolute path; only list tasks for this repo."},
+                    "includeArchived": {"type": "boolean", "description": "Include archived tasks; omitted or false hides them."},
+                },
+            }),
+        ),
+        (
+            "task_get",
+            "task.get",
+            "Get one task by id.",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            }),
+        ),
+        (
+            "task_create",
+            "task.create",
+            "Create a task. Prefer {repo, request, start: true} and let the planner draft title/goal/criteria/verify; use the full {repo, title, goal, criteria, verify} form only when the owner already specified it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string"},
+                    "request": {"type": "string", "description": "One-sentence ask; drafted by the planner."},
+                    "title": {"type": "string"},
+                    "goal": {"type": "string"},
+                    "criteria": {"type": "array", "items": {"type": "string"}},
+                    "verify": {"type": "array", "items": {"type": "string"}},
+                    "finalVerify": {"type": "array", "items": {"type": "string"}, "description": "Slow checks (full CI, desktop smoke) run once, after review passes."},
+                    "screenshot": {"type": "string", "description": "Repo command that captures the screenshot evidence for a UI task; orchd runs it after verify passes and saves the images. The attempt still fails its evidence gate when the images the visual criteria name are missing after it ran. Leave out when the repo has no such command."},
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "Repo-relative files or directories the task edits; it waits while another live task on the same base holds any of them."},
+                    "branch": {"type": "string"},
+                    "base": {"type": "string", "description": "Branch or commit to start from; defaults to the repo's current HEAD."},
+                    "variant": {"type": "object", "description": "Experiment flags for this task only, over the settings defaults: stallTimeoutSecs (0 = off), reviewEvidence, advisor (bool), loopDetect (bool; on by default: stops an attempt that repeats itself), groundedChecks (bool; the planner writes an executable check per criterion, the ones that fail on the base gate every attempt, and one hidden held-out check is run after verify); bestOf (2 = on: on the hard tier the first implement attempt runs twice at once in two worktrees, on the tier route and on bestOfRoute, default the first route of the other harness; verify and the checks pick, the other-family reviewer picks when both pass, the loser is removed and both costs count; 0/1 = off); bestOfRoute (route id of the second candidate); plannerRoute (route id the plan stage runs on instead of the settings' planner) and tierRoutes (object tier -> route id, e.g. {\"hard\": \"claude-sonnet\"}, replacing the settings' tier route for implementing; must name configured routes); maxCostUsd (dollar budget; the task waits for the owner before its next run once spent, 0 = none); maxAttemptCostUsd (dollar cap on one implement attempt, stopped mid-run once its streamed usage passes it and retried, 0 = none). Create the same task twice with different variants to A/B them."},
+                    "land": {"type": "boolean", "description": "Land the finished top-level task on its base branch by itself (same as variant.land, default true for a top-level task): a per-(repo, branch) queue carries its work onto the branch head, squashes it to one commit, runs verify and finalVerify on that tree, and moves the branch (git merge --ff-only in its clean checkout, else update-ref). Conflicts or failing checks come back as an ordinary failed attempt; a dirty checkout makes the task wait `landing`, retried every 2 minutes and on task.start. Never pushes, and lands on the default branch only when the repo is allowed (settings.landOnDefaultRepos, or settings.landOnDefault for every repo). settings.afterLand [{repo, run}] runs commands in the checkout after a landing."},
+                    "checks": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "integer", "description": "0-based index into criteria."}, "run": {"type": "string", "description": "Shell command run from the repo root; must fail before the work and pass after it."}}, "required": ["criterion", "run"]}, "description": "With variant.groundedChecks: executable checks per criterion. Entries with an out-of-range criterion or an empty run are dropped."},
+                    "heldOut": {"type": "object", "properties": {"criterion": {"type": "integer"}, "run": {"type": "string"}}, "required": ["criterion", "run"], "description": "With variant.groundedChecks: one extra check the implementer never sees."},
+                    "dependsOn": {"type": "array", "items": {"type": "string"}, "description": "Ids of tasks in this repo that must be done before this one starts; it starts on its own once they are. A cycle is rejected."},
+                    "parent": {"type": "string", "description": "Id of the task this one is a part of: it branches from the parent's branch and lands there when done. The parent runs no implement attempt of its own; a task that already has a running loop is rejected as a parent."},
+                    "start": {"type": "boolean", "description": "Start right away (default true); false leaves the task stopped for review."},
+                    "mcp": {"type": "object", "properties": {"mcpServers": {"type": "object"}}, "description": "MCP servers for this task's runs, {\"mcpServers\": {name: {command, args, env} | {url}}}. Claude runs get them with every write asking the owner. A Codex run gets only a server marked \"codex\": true, and nothing gates its writes, so mark only a server the task may use freely and say in the goal what it must not change."},
+                    "backlog": {"type": "object", "properties": {"bucket": {"type": "string", "enum": ["next", "later"]}, "order": {"type": "integer"}}, "required": ["bucket"], "description": "Park the task in the plan backlog instead of starting it. Not for a subtask: its parent's place decides."},
+                },
+                "required": ["repo"],
+            }),
+        ),
+        (
+            "task_backlog",
+            "task.backlog",
+            "Move an unstarted top-level task into the plan backlog's next or later bucket, or out of the backlog with bucket null. order places it within the bucket (ascending); omitted, it goes last.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "bucket": {"type": ["string", "null"], "enum": ["next", "later", null]},
+                    "order": {"type": "integer"},
+                },
+                "required": ["id", "bucket"],
+            }),
+        ),
+        (
+            "task_start",
+            "task.start",
+            "Start (or resume) a queued, stopped, failed or drafting task.",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            }),
+        ),
+        (
+            "task_report",
+            "task.report",
+            "The report of a finished top-level task or graph, as markdown: outcome, what changed, each criterion's status, assumptions and automatic answers, cost by stage and model, attempts, follow-ups and its lead-touch mark. Returns {id, report}; errors while the task is not done.",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            }),
+        ),
+        (
+            "task_lead_touch",
+            "task.leadTouch",
+            "Mark whether a done task's work needed a fix from a person or the lead session after orchd said done (touched true) or was clean (touched false); omit touched to clear the mark. An owner's touched mark with a non-empty note also creates one follow-up task from that note (the same note never creates a second one). The autonomy metric behind costs.summary's leadTouch rate.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "touched": {"type": "boolean"},
+                    "note": {"type": "string", "description": "What had to be fixed."},
+                },
+                "required": ["id"],
+            }),
+        ),
+        (
+            "task_stop",
+            "task.stop",
+            "Stop a running or waiting task.",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            }),
+        ),
+        (
+            "task_answer",
+            "task.answer",
+            "Answer a task's pending question (send \"stop\" as the answer to cancel it instead).",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "answer": {"type": "string"}},
+                "required": ["id", "answer"],
+            }),
+        ),
+        (
+            "task_amend",
+            "task.amend",
+            "Replace a running, waiting, queued or stopped task's criteria, verify, finalVerify, screenshot, checks or heldOut (each field you pass replaces the task's; at least one is required). A live loop applies it at its next attempt boundary, never mid-run. The task gains an `Amended: <field names>` decision line. With variant.groundedChecks, amended checks and heldOut are re-run on the base commit and only those failing there gate.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "criteria": {"type": "array", "items": {"oneOf": [{"type": "string"}, {"type": "object", "properties": {"text": {"type": "string"}, "visual": {"type": "boolean", "description": "True only when the criterion is proven by looking at a saved image; never for a criterion checked by a command."}}, "required": ["text"]}]}},
+                    "verify": {"type": "array", "items": {"type": "string"}},
+                    "finalVerify": {"type": "array", "items": {"type": "string"}, "description": "Slow checks run once, after review passes."},
+                    "screenshot": {"type": "string", "description": "Replaces the repo command that captures the screenshot evidence; an empty string removes it."},
+                    "checks": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "integer", "description": "0-based index into criteria."}, "run": {"type": "string"}}, "required": ["criterion", "run"]}, "description": "Replaces the task's checks; a criterion index out of range is rejected."},
+                    "heldOut": {"type": ["object", "null"], "properties": {"criterion": {"type": "integer"}, "run": {"type": "string"}}, "required": ["criterion", "run"], "description": "Replaces the held-out check; null removes it."},
+                },
+                "required": ["id"],
+            }),
+        ),
+        (
+            "settings_get",
+            "settings.get",
+            "Read the orchd settings (parallelism, planner, profiles).",
+            json!({"type": "object", "properties": {}}),
+        ),
+        (
+            "task_archive",
+            "task.archive",
+            "Archive a task, hiding it from the default task_list without deleting it. Refused for a running, drafting, or waiting task.",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            }),
+        ),
+        (
+            "task_unarchive",
+            "task.unarchive",
+            "Restore an archived task so it appears in the default task_list again.",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            }),
+        ),
+        (
+            "peer_list",
+            "peer.list",
+            "List the other tasks in a repository (id, title, status) you can message.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "from": from_schema(),
+                    "repo": {"type": "string", "description": "Absolute path; needed only when sending as the orchestrator."},
+                },
+            }),
+        ),
+        (
+            "peer_send",
+            "message.send",
+            "Message another task by id. It reads the message on its next attempt; the attempt it is running is not interrupted.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "from": from_schema(),
+                    "to": {"type": "string", "description": "The recipient task's id."},
+                    "text": {"type": "string"},
+                    "replyTo": {"type": "string", "description": "Id of a message sent to you that this answers."},
+                },
+                "required": ["to", "text"],
+            }),
+        ),
+        (
+            "inbox_read",
+            "message.inbox",
+            "Read every message sent to you, delivered or still waiting for your next turn.",
+            json!({"type": "object", "properties": {"from": from_schema()}}),
+        ),
+        (
+            "ask_orchestrator",
+            "message.send",
+            "Ask the orchestrator a question without stopping your work. Its reply arrives with your next attempt.",
+            json!({
+                "type": "object",
+                "properties": {"from": from_schema(), "text": {"type": "string"}},
+                "required": ["text"],
+            }),
+        ),
+        (
+            "orchestrator_reply",
+            "message.send",
+            "Answer a question a task asked you; the task reads it on its next attempt.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "The question's message id."},
+                    "text": {"type": "string"},
+                },
+                "required": ["question", "text"],
+            }),
+        ),
+        (
+            "repo_audit",
+            "repo.audit",
+            "Start a read-only audit of a repository against a fixed agent-readiness rubric (instructions, build/test commands, test health, legibility, context hygiene, safety, verification surfaces). Returns the audit record with its id at once; the run continues in the background and stores a graded report with file-referenced recommendations.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Absolute path of the repository to audit."},
+                    "route": {"type": "string", "description": "Route id to run it on; defaults to the planner's route."},
+                },
+                "required": ["repo"],
+            }),
+        ),
+        (
+            "evolution_run",
+            "evolution.run",
+            "Cluster the recorded task signals (repeated waste: loops, throwaway scripts, repeated owner questions, ...) and start a read-only proposer run for each cluster that meets the evidence thresholds and has no proposal yet, at most the configured maximum. Returns the started clusters at once; each proposal is stored when its run ends. Also updates the measurement of adopted proposals.",
+            json!({"type": "object", "properties": {}}),
+        ),
+        (
+            "repo_notes_list",
+            "repo.notes.list",
+            "List the owner's standing notes for a repository (id, text, source, createdAt). They are shown to the planner in every plan brief.",
+            json!({
+                "type": "object",
+                "properties": {"repo": {"type": "string", "description": "Absolute path of the repository, or any directory in it."}},
+                "required": ["repo"],
+            }),
+        ),
+        (
+            "repo_notes_add",
+            "repo.notes.add",
+            "Add a standing note for a repository. Only when the owner asks for it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Absolute path of the repository, or any directory in it."},
+                    "text": {"type": "string"},
+                },
+                "required": ["repo", "text"],
+            }),
+        ),
+        (
+            "repo_notes_remove",
+            "repo.notes.remove",
+            "Remove a repository note by id. Only when the owner asks for it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Absolute path of the repository, or any directory in it."},
+                    "id": {"type": "string"},
+                },
+                "required": ["repo", "id"],
+            }),
+        ),
+    ]
+}
+
+/// The bridge's scope: the whole orchestrator surface, one task's messaging
+/// only (`--task <id>`), where every message is sent as that task, or the
+/// read-only tools of a Brainstorm or Plan turn (`--read-only`).
+struct Bridge {
+    /// One request to the orchestration backend: `(method, params)` to its result or message.
+    call: Caller,
+    task: Option<String>,
+    read_only: bool,
+}
+
+/// How the bridge reaches the backend; the transport is the caller's choice.
+pub type Caller = Box<dyn Fn(&str, Value) -> Result<Value, String>>;
+
+impl Bridge {
+    fn offers(&self, tool_name: &str) -> bool {
+        (self.task.is_none() || TASK_TOOLS.contains(&tool_name))
+            && (!self.read_only || READ_ONLY_TOOLS.contains(&tool_name))
+    }
+}
+
+fn orch_method_for(bridge: &Bridge, tool_name: &str) -> Option<&'static str> {
+    tool_specs()
+        .into_iter()
+        .find(|(name, ..)| *name == tool_name && bridge.offers(name))
+        .map(|(_, method, ..)| method)
+}
+
+fn tools_list_result(bridge: &Bridge) -> Value {
+    let tools: Vec<Value> = tool_specs()
+        .into_iter()
+        .filter(|(name, ..)| bridge.offers(name))
+        .map(|(name, _, description, mut input_schema)| {
+            if bridge.task.is_some() {
+                if let Some(props) = input_schema["properties"].as_object_mut() {
+                    props.remove("from");
+                }
+            }
+            json!({"name": name, "description": description, "inputSchema": input_schema})
+        })
+        .collect();
+    json!({"tools": tools})
+}
+
+/// Turns a messaging tool's arguments into its orchd params: the sender is
+/// the bridge's task when it has one (an agent can't speak as another), else
+/// `from`, else the orchestrator.
+fn message_params(tool: &str, mut args: Value, task: Option<&str>) -> Value {
+    let Some(obj) = args.as_object_mut() else {
+        return args;
+    };
+    let sender = task
+        .or_else(|| obj.get("from").and_then(|v| v.as_str()))
+        .unwrap_or(ORCHESTRATOR)
+        .to_string();
+    match tool {
+        "peer_list" | "peer_send" => {
+            obj.insert("from".to_string(), json!(sender));
+        }
+        "ask_orchestrator" => {
+            obj.insert("from".to_string(), json!(sender));
+            obj.insert("to".to_string(), json!(ORCHESTRATOR));
+        }
+        "inbox_read" => return json!({"id": sender}),
+        "orchestrator_reply" => {
+            return json!({
+                "from": ORCHESTRATOR,
+                "replyTo": obj.get("question").cloned().unwrap_or(Value::Null),
+                "text": obj.get("text").cloned().unwrap_or(Value::Null),
+            })
+        }
+        _ => {}
+    }
+    args
+}
+
+/// A parsed incoming JSON-RPC line. `id` stays a `Value` (JSON-RPC allows a
+/// string, number, or null) so it can be echoed back verbatim; its absence
+/// is what marks a notification.
+#[derive(Debug, Deserialize)]
+struct RpcRequest {
+    #[serde(default)]
+    id: Option<Value>,
+    method: String,
+    #[serde(default)]
+    params: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolCallParams {
+    name: String,
+    #[serde(default)]
+    arguments: Value,
+}
+
+fn handle_initialize(bridge: &Bridge, params: &Value) -> Value {
+    let protocol_version = params
+        .get("protocolVersion")
+        .and_then(|v| v.as_str())
+        .unwrap_or(PROTOCOL_VERSION);
+    let (name, instructions) = match bridge.task {
+        Some(_) => (
+            "sushiai-messages",
+            crate::prompts::get("mcp_task_instructions"),
+        ),
+        None => (
+            "sushiai-orchestrator",
+            crate::prompts::get("mcp_instructions"),
+        ),
+    };
+    json!({
+        "protocolVersion": protocol_version,
+        "capabilities": {"tools": {}},
+        "serverInfo": {"name": name, "version": env!("CARGO_PKG_VERSION")},
+        "instructions": instructions,
+    })
+}
+
+fn tool_ok(result: Value) -> Value {
+    let text = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
+    json!({"content": [{"type": "text", "text": text}]})
+}
+
+fn tool_error(message: String) -> Value {
+    json!({"content": [{"type": "text", "text": message}], "isError": true})
+}
+
+fn handle_tools_call(bridge: &Bridge, params: &Value) -> Value {
+    let p: ToolCallParams = match serde_json::from_value(params.clone()) {
+        Ok(p) => p,
+        Err(e) => return tool_error(format!("invalid tools/call params: {e}")),
+    };
+    let Some(method) = orch_method_for(bridge, &p.name) else {
+        return tool_error(format!("unknown tool: {}", p.name));
+    };
+    let args = if p.arguments.is_null() {
+        json!({})
+    } else {
+        p.arguments
+    };
+    let task_mcp = std::env::var("ORCHD_TASK_MCP")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str(&text).ok());
+    let args = with_task_mcp(method, args, task_mcp);
+    let args = with_source(method, args, bridge.task.is_some());
+    let args = message_params(&p.name, args, bridge.task.as_deref());
+    match (bridge.call)(method, args) {
+        Ok(result) => tool_ok(result),
+        Err(message) => tool_error(message),
+    }
+}
+
+/// A task the agent creates gets the MCP servers the app resolved for its
+/// project (`ORCHD_TASK_MCP` names a `{repo, mcp}` file the app writes), the
+/// same thing the app adds when the owner creates a task directly. Only for
+/// that repo, and never over an `mcp` the caller set itself.
+fn with_task_mcp(method: &str, mut args: Value, task_mcp: Option<Value>) -> Value {
+    let Some(task_mcp) = task_mcp else {
+        return args;
+    };
+    if method == "task.create"
+        && args.get("mcp").is_none()
+        && args.get("repo").is_some()
+        && args.get("repo") == task_mcp.get("repo")
+    {
+        if let (Some(obj), Some(mcp)) = (args.as_object_mut(), task_mcp.get("mcp")) {
+            obj.insert("mcp".to_string(), mcp.clone());
+        }
+    }
+    args
+}
+
+/// Records where a task created through this bridge started: the
+/// orchestrator chat agent (no task id) is `chat`, a task's own agent is
+/// `handoff`. A source the caller set itself is kept.
+fn with_source(method: &str, mut args: Value, from_task: bool) -> Value {
+    if method == "task.answer" {
+        // Never trusted from the caller: it marks the answer as not the
+        // owner's, so orchd refuses an allow on an owner-only question.
+        if let Some(obj) = args.as_object_mut() {
+            let source = if from_task { "mcp" } else { "chat" };
+            obj.insert("source".to_string(), json!(source));
+        }
+    }
+    if method == "task.create" && args.get("source").is_none() {
+        if let Some(obj) = args.as_object_mut() {
+            let source = if from_task { "handoff" } else { "chat" };
+            obj.insert("source".to_string(), json!(source));
+        }
+    }
+    args
+}
+
+/// Routes one already-parsed method/params pair to its result, or a
+/// JSON-RPC-level `(code, message)` error for anything this bridge doesn't
+/// know at all -- a bad tool name or a failed orchd call is *not* one of
+/// these, both come back as a normal (non-error) tool result with
+/// `isError: true`, same as the MCP spec wants.
+fn dispatch(bridge: &Bridge, method: &str, params: &Value) -> Result<Value, (i64, String)> {
+    match method {
+        "initialize" => Ok(handle_initialize(bridge, params)),
+        "ping" => Ok(json!({})),
+        "tools/list" => Ok(tools_list_result(bridge)),
+        "tools/call" => Ok(handle_tools_call(bridge, params)),
+        other => Err((-32601, format!("method not found: {other}"))),
+    }
+}
+
+/// One line in (a JSON-RPC request), at most one line out. A parse failure
+/// can't be tied to a request `id` (there wasn't a valid one to read), so it
+/// always answers with `id: null`, matching JSON-RPC's own parse-error
+/// convention. Notifications (no `id` field, parsed or not) get no
+/// response at all.
+fn handle_line(bridge: &Bridge, line: &str) -> Option<Value> {
+    let req: RpcRequest = match serde_json::from_str(line) {
+        Ok(r) => r,
+        Err(e) => {
+            return Some(json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": {"code": -32700, "message": format!("parse error: {e}")},
+            }))
+        }
+    };
+    let id = req.id?;
+    let response = match dispatch(bridge, &req.method, &req.params) {
+        Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+        Err((code, message)) => {
+            json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+        }
+    };
+    Some(response)
+}
+
+/// The stdio MCP server loop: one JSON-RPC line in, at most one line out, until `input` ends
+/// or `output` closes. `task` / `read_only` pick the tool scope; `call` is the transport.
+pub fn serve_stdio(
+    task: Option<String>,
+    read_only: bool,
+    call: Caller,
+    input: impl BufRead,
+    mut output: impl Write,
+) {
+    let bridge = Bridge {
+        call,
+        task,
+        read_only,
+    };
+    for line in input.lines() {
+        let Ok(line) = line else { break };
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(response) = handle_line(&bridge, &line) {
+            let mut out = response.to_string();
+            out.push('\n');
+            if output.write_all(out.as_bytes()).is_err() || output.flush().is_err() {
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::engine::App;
+    use std::sync::Arc;
+
+    fn bridge(task: Option<&str>) -> Bridge {
+        Bridge {
+            // Never dialed by the branches under test here (`initialize`,
+            // `ping`, `tools/list`, and the invalid-params/unknown-tool
+            // exits out of `tools/call`); a bogus path just documents that.
+            call: Box::new(|_, _| Err("no backend".to_string())),
+            task: task.map(str::to_string),
+            read_only: false,
+        }
+    }
+
+    fn orchestrator() -> Bridge {
+        bridge(None)
+    }
+
+    #[test]
+    fn initialize_echoes_a_requested_protocol_version_and_carries_the_role() {
+        let params = json!({"protocolVersion": "2024-11-05"});
+        let result = dispatch(&orchestrator(), "initialize", &params).unwrap();
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["serverInfo"]["name"], "sushiai-orchestrator");
+        assert!(!result["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("task_preflight"));
+    }
+
+    #[test]
+    fn initialize_defaults_the_protocol_version_when_absent() {
+        let result = dispatch(&orchestrator(), "initialize", &json!({})).unwrap();
+        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn ping_returns_an_empty_object() {
+        let result = dispatch(&orchestrator(), "ping", &json!({})).unwrap();
+        assert_eq!(result, json!({}));
+    }
+
+    #[test]
+    fn no_tool_maps_to_task_pr() {
+        assert!(tool_specs()
+            .iter()
+            .all(|(_, method, ..)| *method != "task.pr"));
+    }
+
+    #[test]
+    fn tools_list_has_exactly_the_orchestrator_tools_and_no_delete_or_settings_set() {
+        let result = dispatch(&orchestrator(), "tools/list", &json!({})).unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "task_list",
+                "task_get",
+                "task_create",
+                "task_backlog",
+                "task_start",
+                "task_report",
+                "task_lead_touch",
+                "task_stop",
+                "task_answer",
+                "task_amend",
+                "settings_get",
+                "task_archive",
+                "task_unarchive",
+                "peer_list",
+                "peer_send",
+                "inbox_read",
+                "ask_orchestrator",
+                "orchestrator_reply",
+                "repo_audit",
+                "evolution_run",
+                "repo_notes_list",
+                "repo_notes_add",
+                "repo_notes_remove",
+            ]
+        );
+        assert_eq!(names, ORCHESTRATOR_TOOLS);
+        for t in tools {
+            assert!(t["inputSchema"]["type"] == "object");
+            assert!(!t["inputSchema"]["properties"].is_null());
+        }
+        for name in TASK_TOOLS {
+            let tool = tools.iter().find(|t| t["name"] == name).unwrap();
+            let props = tool["inputSchema"]["properties"].as_object().unwrap();
+            assert!(!props.is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_task_bridge_offers_only_messaging_and_never_a_sender_choice() {
+        let task = bridge(Some("t1"));
+        let result = dispatch(&task, "tools/list", &json!({})).unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, TASK_TOOLS);
+        for t in tools {
+            assert!(t["inputSchema"]["properties"].get("from").is_none());
+        }
+        let init = dispatch(&task, "initialize", &json!({})).unwrap();
+        assert_eq!(init["serverInfo"]["name"], "sushiai-messages");
+        for name in ["task_create", "task_stop", "orchestrator_reply"] {
+            let call = json!({"name": name, "arguments": {}});
+            let out = dispatch(&task, "tools/call", &call).unwrap();
+            assert_eq!(out["isError"], true, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_read_only_bridge_offers_only_the_looking_tools_and_refuses_the_rest() {
+        let read_only = Bridge {
+            read_only: true,
+            ..bridge(None)
+        };
+        let result = dispatch(&read_only, "tools/list", &json!({})).unwrap();
+        let names: Vec<&str> = result["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, READ_ONLY_TOOLS);
+        for name in [
+            "task_create",
+            "task_start",
+            "task_amend",
+            "peer_send",
+            "repo_notes_add",
+        ] {
+            let call = json!({"name": name, "arguments": {}});
+            let out = dispatch(&read_only, "tools/call", &call).unwrap();
+            assert_eq!(out["isError"], true, "{name}");
+        }
+    }
+
+    #[test]
+    fn message_params_send_as_the_bridge_task_whatever_the_agent_claims() {
+        let sent = message_params(
+            "peer_send",
+            json!({"from": "someone-else", "to": "t2", "text": "hi"}),
+            Some("t1"),
+        );
+        assert_eq!(sent["from"], "t1");
+        let asked = message_params("ask_orchestrator", json!({"text": "?"}), Some("t1"));
+        assert_eq!(asked["from"], "t1");
+        assert_eq!(asked["to"], ORCHESTRATOR);
+        let inbox = message_params("inbox_read", json!({}), Some("t1"));
+        assert_eq!(inbox, json!({"id": "t1"}));
+        // Without a task the sender defaults to the orchestrator.
+        let inbox = message_params("inbox_read", json!({}), None);
+        assert_eq!(inbox["id"], ORCHESTRATOR);
+        let answer = json!({"question": "m1", "text": "yes"});
+        let reply = message_params("orchestrator_reply", answer, None);
+        assert_eq!(reply["from"], ORCHESTRATOR);
+        assert_eq!(reply["replyTo"], "m1");
+        assert_eq!(reply["text"], "yes");
+    }
+
+    #[test]
+    fn unknown_method_is_a_json_rpc_method_not_found_error() {
+        let err = dispatch(&orchestrator(), "not/a/method", &json!({})).unwrap_err();
+        assert_eq!(err.0, -32601);
+    }
+
+    #[test]
+    fn tools_call_with_an_unknown_tool_name_is_a_tool_error_not_a_protocol_error() {
+        let result = dispatch(
+            &orchestrator(),
+            "tools/call",
+            &json!({"name": "task_delete", "arguments": {}}),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unknown tool"));
+    }
+
+    #[test]
+    fn tools_call_with_malformed_params_is_a_tool_error_not_a_protocol_error() {
+        let result = dispatch(&orchestrator(), "tools/call", &json!({"arguments": {}})).unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn every_tool_name_maps_to_a_dotted_orch_method() {
+        let b = orchestrator();
+        for (name, method, ..) in tool_specs() {
+            assert_eq!(orch_method_for(&b, name), Some(method));
+        }
+        assert_eq!(orch_method_for(&b, "task_delete"), None);
+        assert_eq!(orch_method_for(&b, "settings_set"), None);
+        assert_eq!(orch_method_for(&b, "secrets_set"), None);
+    }
+
+    #[test]
+    fn a_notification_without_an_id_gets_no_response() {
+        let out = handle_line(&orchestrator(), r#"{"method":"ping","params":{}}"#);
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn a_request_with_an_id_gets_a_jsonrpc_shaped_response() {
+        let out = handle_line(&orchestrator(), r#"{"id":1,"method":"ping","params":{}}"#).unwrap();
+        assert_eq!(out["jsonrpc"], "2.0");
+        assert_eq!(out["id"], 1);
+        assert_eq!(out["result"], json!({}));
+    }
+
+    #[test]
+    fn unparseable_json_answers_with_a_null_id_parse_error() {
+        let out = handle_line(&orchestrator(), "not json").unwrap();
+        assert_eq!(out["id"], Value::Null);
+        assert_eq!(out["error"]["code"], -32700);
+    }
+
+    const TASK_A: &str = "11111111-1111-4111-8111-111111111111";
+    const TASK_B: &str = "22222222-2222-4222-8222-222222222222";
+    const UNKNOWN: &str = "99999999-9999-4999-8999-999999999999";
+
+    /// A real `App` with two tasks in one repo, in `dir`.
+    fn live_app(dir: &std::path::Path) -> Arc<App> {
+        let app = App::new(dir.into(), dir.into(), "/x/sushiai".to_string()).unwrap();
+        for id in [TASK_A, TASK_B] {
+            let task = serde_json::from_value(json!({
+                "id": id, "title": id, "goal": "g", "criteria": [], "verify": [],
+                "repo": "/r", "worktree": "/w", "branch": "b", "baseSha": "s",
+                "status": "running", "tier": "standard", "decisions": [],
+                "attempts": [], "costUsd": 0.0, "createdAt": 1, "updatedAt": 1,
+            }))
+            .unwrap();
+            app.store.save_task(&task).unwrap();
+        }
+        app
+    }
+
+    /// One tool call from inside the runtime; the bridge itself blocks.
+    fn call(bridge: &Bridge, name: &str, arguments: Value) -> Value {
+        let params = json!({"name": name, "arguments": arguments});
+        tokio::task::block_in_place(|| handle_tools_call(bridge, &params))
+    }
+
+    fn refused(bridge: &Bridge, name: &str, arguments: Value) {
+        let out = call(bridge, name, arguments.clone());
+        assert_eq!(out["isError"], true, "{name} {arguments} -> {out}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_message_is_a_tool_error_and_nothing_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = live_app(dir.path());
+        let bridge = |task: Option<&str>| Bridge {
+            call: {
+                let app = app.clone();
+                Box::new(move |method, params| {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(app.dispatch(method, params))
+                    })
+                })
+            },
+            task: task.map(str::to_string),
+            read_only: false,
+        };
+        let orch = bridge(None);
+        let a = bridge(Some(TASK_A));
+        let stranger = bridge(Some(UNKNOWN));
+        let a_to_a = json!({"from": TASK_A, "to": TASK_A, "text": "hi"});
+        refused(&orch, "peer_send", a_to_a);
+        refused(&a, "peer_send", json!({"to": TASK_A, "text": "hi"}));
+        refused(&a, "peer_send", json!({"to": UNKNOWN, "text": "hi"}));
+        let from_unknown = json!({"from": UNKNOWN, "to": TASK_A, "text": "hi"});
+        refused(&orch, "peer_send", from_unknown);
+        refused(&orch, "ask_orchestrator", json!({"text": "?"}));
+        refused(&stranger, "ask_orchestrator", json!({"text": "?"}));
+        assert!(!dir.path().join("messages.json").exists());
+
+        // The same bridge sends a valid one, still waiting for its reader.
+        let out = call(&a, "peer_send", json!({"to": TASK_B, "text": "hi"}));
+        assert!(out.get("isError").is_none(), "{out}");
+        let inbox = call(&bridge(Some(TASK_B)), "inbox_read", json!({}));
+        let text = inbox["content"][0]["text"].as_str().unwrap();
+        let inbox: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(inbox[0]["from"], TASK_A);
+        assert_eq!(inbox[0]["delivered"], false);
+    }
+
+    #[test]
+    fn task_create_gets_the_project_mcp_only_for_its_own_repo() {
+        let file = json!({"repo": "/r", "mcp": {"mcpServers": {"a": {}}}});
+        let got = with_task_mcp("task.create", json!({"repo": "/r"}), Some(file.clone()));
+        assert_eq!(got["mcp"]["mcpServers"]["a"], json!({}));
+        let other = with_task_mcp("task.create", json!({"repo": "/x"}), Some(file.clone()));
+        assert!(other.get("mcp").is_none());
+        let own = with_task_mcp(
+            "task.create",
+            json!({"repo": "/r", "mcp": {"mcpServers": {}}}),
+            Some(file.clone()),
+        );
+        assert_eq!(own["mcp"], json!({"mcpServers": {}}));
+        let start = with_task_mcp("task.start", json!({"repo": "/r"}), Some(file));
+        assert!(start.get("mcp").is_none());
+    }
+}
+
+#[cfg(test)]
+mod answer_source_tests {
+    use super::*;
+
+    #[test]
+    fn a_task_answer_always_carries_the_bridges_source_whatever_the_caller_sent() {
+        let chat = with_source("task.answer", json!({"id": "t", "source": ""}), false);
+        assert_eq!(chat["source"], "chat");
+        let task = with_source("task.answer", json!({"id": "t"}), true);
+        assert_eq!(task["source"], "mcp");
+        let other = with_source("task.start", json!({"id": "t"}), true);
+        assert!(other.get("source").is_none());
+    }
+}

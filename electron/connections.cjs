@@ -293,15 +293,9 @@ class Connections {
       timeout,
     );
   }
-  /** Forwards a local unix socket to a socket on the host; the returned
-   * handle emits `exit` when the tunnel drops and `kill()` closes it. The
-   * caller waits for `localSocket` to appear. */
-  forwardSocket(endpoint, localSocket, remoteSocket) {
-    return this.forwardProcess(
-      this.get(endpoint),
-      `${localSocket}:${remoteSocket}`,
-    );
-  }
+  /** Starts `ssh -L specification` (through the shared master when it has
+   * no competing forward); the returned handle emits `exit` when the tunnel
+   * drops and `kill()` closes it. */
   async forwardProcess(profile, specification) {
     // A LocalForward/RemoteForward the user's own ssh_config declares for this
     // Host rides along on every ssh we spawn, and ssh cannot keep our -L while

@@ -1,5 +1,5 @@
 // Installs the `sushiai` binary on a host over an injected exec, and holds the
-// probe/upload helpers shared with electron/orchestrator-remote.cjs.
+// probe/upload helpers host-setup.cjs shares.
 //
 // API (called by host-setup.cjs):
 //   installSushiai({ exec, manifest, binDir, upload? }) -> Promise<{
@@ -120,6 +120,9 @@ trap 'rm -f "$tmp"' EXIT HUP INT TERM PIPE
 rm -f "$tmp"
 ln -s "${REMOTE_VERSIONS}/${sha256}/sushiai" "$tmp"
 mv -f "$tmp" "$link"
+# The legacy orchd binary is replaced by the daemon module; the daemon stops a
+# still-running legacy process on its next start.
+rm -f "$b/orchd"
 echo "linked=1"`;
 }
 

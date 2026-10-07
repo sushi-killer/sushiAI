@@ -1,21 +1,21 @@
 // One-command screenshot recipe for the Orchestrator panel's task detail
-// view. Builds nothing itself: `npm run build` and `cargo build --release
-// --manifest-path orchd/Cargo.toml` must already be done. Usage:
+// view. Builds nothing itself: `npm run build` and `cargo build -p sushiai`
+// must already be done. Usage:
 //
 //   node .agents/skills/ui-evidence/scripts/orchestrator-panel.mjs <seed.json> <task title>
 //
 // <seed.json> is a JSON array of task objects, or {tasks, proposals, notes} (see
 // SKILL.md for the shape); only `title` is required on a task, everything
 // else defaults. The tasks are written as task.json files into the throwaway
-// profile's orchd data dir before the app starts; the app then spawns orchd
-// on that profile as usual, which loads them. Each proposal is completed
+// daemon home's orchestrator dir, with the module's enabled flag, before the
+// app starts; the app's sushiai daemon then loads them. Each proposal is completed
 // (id, repo, createdAt) and written to <dataDir>/evolution/proposals/<id>.json,
-// the path orchd's store reads; when any were seeded the run also opens Improvements from the rail and saves
+// the path the orchestrator's store reads; when any were seeded the run also opens Improvements from the rail and saves
 // artifacts/orchestrator-improvements.png plus artifacts/orchestrator-proposals.png, a crop of the first proposal card. Each note is completed (id, source
 // "owner", createdAt) and written under this repo's root in
-// <dataDir>/repo-notes.json ({repo: [note]}, what orchd's store reads); when
+// <dataDir>/repo-notes.json ({repo: [note]}, what the store reads); when
 // any were seeded the run also saves artifacts/orchestrator-repo-notes.png,
-// a crop of the REPO NOTES list. Only finished/waiting statuses are accepted, because orchd resumes
+// a crop of the REPO NOTES list. Only finished/waiting statuses are accepted, because the orchestrator resumes
 // queued/running/drafting tasks on start - a fixture must never run a harness.
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
@@ -31,7 +31,7 @@ function escapeRegExp(text) {
 
 const FIXTURE_STATUSES = new Set(["done", "failed", "stopped", "waiting"]);
 
-/** A seed object completed to the task.json shape orchd's store loads.
+/** A seed object completed to the task.json shape the orchestrator's store loads.
  * `ids` maps each seed's `key` to its generated id, so `parent`,
  * `dependsOn`, `followUps` and `followUpOf` can name other seeds by key. */
 function taskJson(seed, repo, now, id, ids) {
@@ -116,7 +116,8 @@ if (!seedPath || !title) {
   process.exitCode = 1;
 } else {
   const profile = await fs.mkdtemp("/tmp/sushiai-evidence-");
-  const dataDir = `${profile}/orchestrator`;
+  const daemonHome = `${profile}/sushiai`;
+  const dataDir = `${daemonHome}/orchestrator`;
   let app = null;
 
   try {
@@ -132,8 +133,8 @@ if (!seedPath || !title) {
       const dir = `${dataDir}/tasks/${task.id}`;
       await fs.mkdir(dir, { recursive: true });
       // `evidence: {"<attempt n>": ["<image path>", ...]}` copies images into
-      // runs/<n>/evidence/, where orchd keeps an attempt's screenshots, and
-      // lists them on that attempt the way orchd records them.
+      // runs/<n>/evidence/, where the orchestrator keeps an attempt's screenshots, and
+      // lists them on that attempt the way it records them.
       for (const [n, files] of Object.entries(seed.evidence ?? {})) {
         const to = `${dir}/runs/${n}/evidence`;
         await fs.mkdir(to, { recursive: true });
@@ -176,6 +177,10 @@ if (!seedPath || !title) {
     }
     report.seededTitles = tasks.map((t) => t.title);
 
+    // The daemon hosts the orchestrator module only when it is enabled.
+    await fs.mkdir(`${daemonHome}/modules`, { recursive: true, mode: 0o700 });
+    await fs.writeFile(`${daemonHome}/modules/orch.enabled`, "");
+
     app = await electron.launch({
       args: ["."],
       cwd: root,
@@ -186,7 +191,7 @@ if (!seedPath || !title) {
         // Never the owner's ~/.codex or ~/.sushiai/bin link.
         HOME: profile,
         CODEX_HOME: `${profile}/codex`,
-        SUSHIAI_HOME: `${profile}/sushiai`,
+        SUSHIAI_HOME: daemonHome,
         BRIDGE_DEV_URL: "",
       },
     });
@@ -300,7 +305,7 @@ if (!seedPath || !title) {
     report.error = String(error?.message ?? error);
   } finally {
     if (app) await app.close().catch(() => {});
-    stopDaemon(`${profile}/sushiai`);
+    stopDaemon(daemonHome);
     // A shell that exits late may still write its history into HOME.
     await fs.rm(profile, {
       recursive: true,

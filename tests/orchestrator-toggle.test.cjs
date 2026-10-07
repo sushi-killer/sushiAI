@@ -3,51 +3,21 @@ const assert = require("node:assert/strict");
 const os = require("node:os");
 const path = require("node:path");
 const fs = require("node:fs/promises");
-const { spawn } = require("node:child_process");
 const {
   OFF_MESSAGE,
   OrchestratorHosts,
   registerOrchestratorExtension,
 } = require("../electron/orchestrator.cjs");
+const { fakeDaemonManager } = require("./helpers/fake-daemon-manager.cjs");
 
 const { appDb, closeAppDb } = require("../electron/app-db.cjs");
 
-const FAKE = path.join(__dirname, "fixtures", "fake-orchd.cjs");
-
-async function waitUntil(check, { timeout = 3000, interval = 10 } = {}) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, interval));
-  }
-  throw new Error("waitUntil: condition never became true");
-}
-
-const alive = (pid) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-/** A data dir and a repo root whose `orchd` binary is the fake daemon, plus
- * the wiring `registerOrchestratorExtension` needs. */
+/** The wiring `registerOrchestratorExtension` needs, over a fake manager. */
 async function setup(t, { on }) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "orch-toggle-"));
-  const root = path.join(dir, "root");
-  const binary = path.join(root, "orchd", "target", "release", "orchd");
-  await fs.mkdir(path.dirname(binary), { recursive: true });
-  await fs.writeFile(
-    binary,
-    `#!/bin/sh\nexec "${process.execPath}" "${FAKE}" "$@"\n`,
-    { mode: 0o755 },
-  );
-  const data = path.join(dir, "data");
-  const pidFile = path.join(data, "orchd.pid");
-  const readPid = async () =>
-    Number(await fs.readFile(pidFile, "utf8").catch(() => 0));
+  const manager = fakeDaemonManager({
+    handlers: { "orch.task.list": () => [{ id: "t1", title: "Remote job" }] },
+  });
   const listeners = [];
   const extensions = {
     ready: Promise.resolve(),
@@ -67,53 +37,39 @@ async function setup(t, { on }) {
     handle: (channel, fn) => (handlers[channel] = fn),
     extensions,
     send: (channel, message) => events.push([channel, message]),
-    dataDir: data,
-    root,
-    resourcesPath: root,
-    packaged: false,
     getConnections: () => ({ get: () => ({}), list: () => [] }),
+    getManager: () => manager,
     userDataDir: dir,
     hostsChanged: () => {},
   });
   t.after(async () => {
     await hosts.quit();
-    const pid = await readPid();
-    if (pid && alive(pid)) process.kill(pid, "SIGKILL");
+    closeAppDb(dir);
     await fs.rm(dir, { recursive: true, force: true });
   });
-  return { dir, data, root, binary, hosts, handlers, events, toggle, readPid };
+  return { dir, manager, hosts, handlers, events, toggle };
 }
 
-test("nothing starts at launch or on enable; the first request spawns orchd, turning it off stops it", async (t) => {
+test("enabling only listens: nothing is requested until the first call, and turning it off leaves the daemon running", async (t) => {
   const s = await setup(t, { on: true });
   await s.hosts.start();
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  // Enabled, but no daemon was spawned and a probe never spawns one.
-  assert.equal(await s.readPid(), 0);
-  await assert.rejects(async () => s.handlers["orchestrator-probe"]("local"));
-  assert.equal(await s.readPid(), 0);
-  assert.equal(s.events.length, 0);
+  assert.equal(s.manager.listeners("event"), 1);
+  assert.equal(s.manager.calls.length, 0);
+  assert.deepEqual(await s.handlers["orchestrator-probe"]("local"), { pid: 0 });
+  assert.equal(s.manager.calls.length, 0);
 
-  // The first real request starts the daemon and the event relay.
   const tasks = await s.handlers.orchestrator("task.list", {});
   assert.equal(tasks[0].title, "Remote job");
-  const pid = await s.readPid();
-  assert.equal(alive(pid), true);
-  await waitUntil(() =>
-    s.events.some(([channel]) => channel === "orchestrator-event"),
+  assert.deepEqual(
+    s.manager.calls.map((call) => [call.host, call.method]),
+    [["local", "orch.task.list"]],
   );
-  assert.deepEqual(await s.handlers["orchestrator-probe"]("local"), {
-    version: "fake",
-    pid,
-    dataDir: s.data,
-  });
+  s.manager.notify("local", "orch.event", { event: "task", task: { id: "t" } });
+  assert.equal(s.events.length, 1);
 
-  // Off: the daemon this app spawned stops, the relay closes, no timer is
-  // left, and every entry point rejects without touching the socket.
+  // Off: listening stops and every entry point rejects without a request.
   await s.toggle(false);
-  await waitUntil(() => !alive(pid));
-  assert.equal(s.hosts.local.closed, true);
-  assert.equal(s.hosts.local.retryTimer, null);
+  assert.equal(s.manager.listeners("event"), 0);
   for (const call of [
     () => s.handlers.orchestrator("task.list", {}),
     () => s.handlers["orchestrator-hosts"](),
@@ -122,103 +78,70 @@ test("nothing starts at launch or on enable; the first request spawns orchd, tur
     () => s.handlers["orchestrator-probe"]("local"),
   ])
     await assert.rejects(async () => call(), { message: OFF_MESSAGE });
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.equal(alive(pid), false);
+  assert.equal(s.manager.calls.length, 1);
+  s.manager.notify("local", "orch.event", { event: "task", task: { id: "t" } });
+  assert.equal(s.events.length, 1);
 
-  // On again, still lazy: a new request spawns a fresh daemon.
+  // On again: listening resumes.
   await s.toggle(true);
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.equal(alive(pid), false);
-  await s.handlers.orchestrator("task.list", {});
-  assert.notEqual(await s.readPid(), pid);
+  assert.equal(s.manager.listeners("event"), 1);
+  s.manager.notify("local", "orch.event", { event: "task", task: { id: "u" } });
+  assert.equal(s.events.length, 2);
 });
 
-test("a disabled orchestrator never starts, whatever is asked", async (t) => {
+test("a disabled orchestrator never listens or requests, whatever is asked", async (t) => {
   const s = await setup(t, { on: false });
   await s.hosts.start();
   await assert.rejects(async () => s.handlers.orchestrator("task.list", {}), {
     message: OFF_MESSAGE,
   });
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.equal(await s.readPid(), 0);
+  assert.equal(s.manager.listeners("event"), 0);
+  assert.equal(s.manager.calls.length, 0);
   assert.equal(s.events.length, 0);
 });
 
-test("a daemon that is already running is attached without spawning, and quitting leaves it alone", async (t) => {
-  const s = await setup(t, { on: true });
-  await fs.mkdir(s.data, { recursive: true });
-  const child = spawn(
-    process.execPath,
-    [
-      FAKE,
-      "serve",
-      "--data",
-      s.data,
-      "--socket",
-      path.join(s.data, "orchd.sock"),
-    ],
-    { stdio: "ignore" },
-  );
-  t.after(() => child.kill("SIGKILL"));
-  await waitUntil(async () => (await s.readPid()) === child.pid);
-  await waitUntil(() =>
-    fs.access(path.join(s.data, "orchd.sock")).then(
-      () => true,
-      () => false,
-    ),
-  );
-
-  await s.hosts.start();
-  // Attached: its task event reaches the renderer, and nothing was spawned.
-  await waitUntil(() =>
-    s.events.some(([channel]) => channel === "orchestrator-event"),
-  );
-  assert.equal(await s.readPid(), child.pid);
-
-  // This app did not start it, so quitting the app does not stop it.
-  await s.hosts.quit();
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.equal(alive(child.pid), true);
-});
-
-test("quitting stops the local daemon this app spawned", async (t) => {
+test("quitting the app leaves every daemon alone and only stops listening", async (t) => {
   const s = await setup(t, { on: true });
   await s.hosts.start();
   await s.handlers.orchestrator("task.list", {});
-  const pid = await s.readPid();
-  assert.equal(alive(pid), true);
   await s.hosts.quit();
-  await waitUntil(() => !alive(pid));
+  assert.equal(s.manager.listeners("event"), 0);
+  assert.equal(
+    s.manager.calls.some((call) => !call.method.startsWith("orch.task")),
+    false,
+  );
 });
 
-test("turning it off stops the local daemon and quits every remote host; turning it on lists the saved ones without connecting", async (t) => {
+test("turning it off forgets the remote services; turning it on lists the saved ones without connecting", async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "orch-toggle-"));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  t.after(async () => {
+    closeAppDb(dir);
+    await fs.rm(dir, { recursive: true, force: true });
+  });
   appDb(dir)
     .prepare("INSERT INTO orchestrator_hosts(host) VALUES(?)")
     .run("ssh:box");
   const events = [];
+  const manager = fakeDaemonManager({ hosts: { local: {} } });
   const hosts = new OrchestratorHosts({
-    local: {
-      attach: async () => events.push("local.attach"),
-      close: () => events.push("local.close"),
-      quit: async () => events.push("local.quit"),
-    },
+    local: { refreshSecrets: async () => events.push("local.secrets") },
     connections: () => ({ get: () => ({}), list: () => [] }),
+    getManager: () => manager,
     userDataDir: dir,
     onChange: () => {},
     createService: (host) => {
       events.push(`${host}.create`);
-      return {
-        connect: () => events.push(`${host}.connect`),
-        quit: async () => events.push(`${host}.quit`),
-      };
+      return { refreshSecrets: async () => events.push(`${host}.secrets`) };
     },
   });
   await hosts.setEnabled(true);
-  assert.deepEqual(events, ["local.attach", "ssh:box.create"]);
+  assert.deepEqual(events, [
+    "ssh:box.create",
+    "local.secrets",
+    "ssh:box.secrets",
+  ]);
+  assert.equal(manager.calls.length, 0);
   await hosts.setEnabled(false);
-  assert.deepEqual(events.slice(2), ["ssh:box.quit", "local.quit"]);
   assert.equal(hosts.services.size, 0);
   await assert.rejects(hosts.call("task.list", {}, "ssh:box"), {
     message: OFF_MESSAGE,
@@ -232,7 +155,7 @@ test("turning it off stops the local daemon and quits every remote host; turning
     ["ssh:box"],
   );
   await hosts.setEnabled(true);
-  assert.deepEqual(events.slice(4), ["local.attach", "ssh:box.create"]);
+  assert.equal(events.filter((event) => event === "ssh:box.create").length, 2);
 });
 
 test("a host list that failed to load is not erased by a later save", async (t) => {
@@ -251,7 +174,8 @@ test("a host list that failed to load is not erased by a later save", async (t) 
     .run("ssh:old");
   let known = false;
   const hosts = new OrchestratorHosts({
-    local: { attach: async () => {} },
+    local: {},
+    getManager: () => null,
     connections: () => ({
       get: (host) => {
         if (!known && host === "ssh:old") throw new Error("not loaded yet");
@@ -266,64 +190,4 @@ test("a host list that failed to load is not erased by a later save", async (t) 
   await hosts.init();
   await hosts.call("task.list", {}, "ssh:new");
   assert.deepEqual(stored(), ["ssh:new", "ssh:old"]);
-});
-
-async function writeTask(data, id, task) {
-  const dir = path.join(data, "tasks", id);
-  await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(path.join(dir, "task.json"), JSON.stringify(task));
-}
-
-test("launch spawns orchd when a task on disk is still pending", async (t) => {
-  const s = await setup(t, { on: true });
-  await writeTask(s.data, "t1", { id: "t1", status: "done" });
-  await writeTask(s.data, "t2", { id: "t2", status: "landing" });
-  await s.hosts.start();
-  const pid = await s.readPid();
-  assert.ok(pid);
-  assert.equal(alive(pid), true);
-  await waitUntil(() =>
-    s.events.some(([channel]) => channel === "orchestrator-event"),
-  );
-});
-
-test("launch spawns nothing when every task on disk is finished or archived", async (t) => {
-  const s = await setup(t, { on: true });
-  await writeTask(s.data, "t1", { id: "t1", status: "done" });
-  await writeTask(s.data, "t2", { id: "t2", status: "failed" });
-  await writeTask(s.data, "t3", { id: "t3", status: "stopped" });
-  await writeTask(s.data, "t4", { id: "t4", status: "queued", archived: true });
-  await fs.mkdir(path.join(s.data, "tasks", "broken"), { recursive: true });
-  await s.hosts.start();
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.equal(await s.readPid(), 0);
-});
-
-test("launch spawns nothing for pending tasks while the orchestrator is off", async (t) => {
-  const s = await setup(t, { on: false });
-  await writeTask(s.data, "t1", { id: "t1", status: "running" });
-  await s.hosts.start();
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.equal(await s.readPid(), 0);
-});
-
-test("quit waits for a daemon that needs seconds to stop, without SIGKILL", async (t) => {
-  const s = await setup(t, { on: true });
-  await fs.mkdir(s.data, { recursive: true });
-  await fs.writeFile(path.join(s.data, "exit-delay"), "3000");
-  await s.hosts.start();
-  await s.handlers.orchestrator("task.list", {});
-  const pid = await s.readPid();
-  assert.equal(alive(pid), true);
-  const kill = process.kill;
-  const signals = [];
-  process.kill = (target, signal) => {
-    if (signal === "SIGKILL") signals.push(target);
-    return kill(target, signal);
-  };
-  t.after(() => (process.kill = kill));
-  await s.hosts.quit();
-  process.kill = kill;
-  assert.equal(alive(pid), false);
-  assert.deepEqual(signals, []);
 });

@@ -47,7 +47,7 @@ See [sessions and remote hosts](../README.md#sessions-and-remote-hosts) for deta
 
 On macOS, install **Node.js 22.18+**, npm, Git, and Xcode Command Line Tools.
 
-The orchestrator daemon (`orchd`) is written in Rust. `npm run build:orchd`, CI and packaging need the Rust toolchain (`cargo`, from [rustup](https://rustup.rs)). The installed app does not: a packaged sushiAI ships the built daemon.
+The `sushiai` daemon, which hosts the orchestrator module, is written in Rust. `npm run build:daemon`, CI and packaging need the Rust toolchain (`cargo`, from [rustup](https://rustup.rs)). The installed app does not: a packaged sushiAI ships the built daemon.
 
 The `sushiai` daemon (sessions, agents, the host proxy) is Rust too. `npm run dev` builds it with `cargo build -p sushiai` before it starts. Packaging needs two more steps, which `npm run package` and `npm run package:dmg` run for you:
 

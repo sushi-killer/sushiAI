@@ -1,8 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Check, RefreshCw, X } from "lucide-react";
 import {
-  buildToolsHint,
-  hostPlatform,
   preflightItems,
   routesFallbackNote,
   setupSteps,
@@ -62,47 +60,14 @@ function StepMark({ state }: { state: SetupStep["state"] }) {
   );
 }
 
-function CopyCommand({ command }: { command: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <div className="orch-setup-command">
-      <code>{command}</code>
-      <button
-        type="button"
-        className="orch-setup-copy"
-        onClick={() => {
-          void navigator.clipboard?.writeText(command).then(() => {
-            setCopied(true);
-            window.setTimeout(() => setCopied(false), 1500);
-          });
-        }}
-      >
-        {copied ? "Copied" : "Copy"}
-      </button>
-    </div>
-  );
-}
-
-/** The time since the host entered its current state, ticking each second
- * while it is being set up. */
-function useElapsed(since: number, ticking: boolean): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!ticking) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [ticking]);
-  return Math.max(0, now - since);
-}
-
-/** Figma "Home · remote setup": the five steps that bring orchd up on an
+/** Figma "Home · remote setup": the steps that reach the orchestrator on an
  * SSH host, what the host offers, and Try again / Cancel. */
 export function RemoteSetup({
   host,
   seen,
   address,
   onRetry,
-  onInstallRust,
+  onInstallSushiai,
   onCancel,
 }: {
   host: OrchestratorHost;
@@ -110,27 +75,23 @@ export function RemoteSetup({
   seen: { states: OrchestratorHost["state"][]; since: number };
   address?: string;
   onRetry(): void;
-  /** The one button: install Rust on the host, build and start orchd. */
-  onInstallRust(): void;
+  /** The one button: install or update sushiai on the host. */
+  onInstallSushiai(): void;
   onCancel(): void;
 }) {
   const failed = host.state === "error";
-  const elapsedMs = useElapsed(seen.since, !failed);
-  const setup: SetupSeen = { states: seen.states, elapsedMs, address };
+  const setup: SetupSeen = { states: seen.states, address };
   const steps = setupSteps(host, setup);
   const preflight = host.preflight;
   const off = preflight ? routesFallbackNote(preflight, host.name) : "";
-  const needsRust = steps.some(
-    (step) => step.action || step.title === "Installing Rust…",
-  );
   return (
     <div className="orch-view-scroll orch-setup">
       <div className="orch-setup-head">
         <h2>Set up the orchestrator on {host.name}</h2>
         <p>
-          orchd runs on the host where the repo lives, so tasks keep going when
-          you quit sushiAI or your Mac sleeps. Nothing new is opened: it talks
-          over your SSH connection.
+          The orchestrator runs inside the sushiai daemon on the host where the
+          repo lives, so tasks keep going when you quit sushiAI or your Mac
+          sleeps. Nothing new is opened: it talks over your SSH connection.
         </p>
       </div>
       <ol className="orch-setup-steps" aria-label="Setup steps">
@@ -149,22 +110,12 @@ export function RemoteSetup({
                   <button
                     type="button"
                     className="ui-button primary"
-                    onClick={onInstallRust}
+                    onClick={onInstallSushiai}
                   >
                     {step.action.label}
                   </button>
                   <span className="orch-setup-detail">{step.action.hint}</span>
                 </div>
-              )}
-              {step.command && (
-                <>
-                  {step.action && (
-                    <span className="orch-setup-detail">
-                      Or run this on the host yourself:
-                    </span>
-                  )}
-                  <CopyCommand command={step.command} />
-                </>
               )}
             </div>
           </li>
@@ -176,11 +127,6 @@ export function RemoteSetup({
           <div className="orch-setup-preflight-row">
             <PreflightRow preflight={preflight} />
           </div>
-          {preflight.cc === false && needsRust && (
-            <p className="orch-setup-preflight-note">
-              {buildToolsHint(host.platform || hostPlatform(host.detail))}
-            </p>
-          )}
           {off && <p className="orch-setup-preflight-note">{off}</p>}
         </div>
       )}

@@ -23,7 +23,7 @@ export function useWorktreeTasks(): WorktreeTask[] {
     // The daemon may still be starting when the app mounts, so retry a few
     // times with a growing delay before settling on branch labels.
     const load = (attempt: number) => {
-      // A ping first: it never starts a daemon, so this is not a first use.
+      // A liveness check first: it never starts a daemon, so this is not a first use.
       orchestratorClient
         .probe()
         .then(() => orchestratorClient.taskList(undefined, true))

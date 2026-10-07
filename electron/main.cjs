@@ -72,6 +72,7 @@ const { syncLocalBuiltinSkills } = require("./extensions/builtin-skills.cjs");
 const {
   ORCHESTRATOR_MANIFEST,
   registerOrchestratorExtension,
+  createModuleSwitch,
   orchestratorNotice,
 } = require("./orchestrator.cjs");
 const {
@@ -233,6 +234,17 @@ const hostManifest = () =>
 const setupDaemonHost = serializePerHost((endpoint, options) =>
   setupHost(connections, endpoint, options),
 );
+const installDaemonHost = (host) => {
+  if (!daemonManager) throw new Error("daemon manager is not running");
+  return createHostInstaller({
+    manager: daemonManager,
+    connections,
+    manifest: hostManifest,
+    setup: setupDaemonHost,
+    restartLocal: () => localConnector.restart(),
+    markSetup: (name) => hostTools?.mark(name),
+  }).install(host);
+};
 // The manager is created in whenReady; subscribers registered before that
 // are served by one forwarding subscription made when it exists.
 const daemonEventListeners = new Set();
@@ -248,17 +260,7 @@ daemonIpc = registerDaemonIpc({
   onEvent: onDaemonEvent,
   attachmentsDir: path.join(app.getPath("temp"), "sushiai-attachments"),
   exec: (...args) => connections.exec(...args),
-  installHost: (host) => {
-    if (!daemonManager) throw new Error("daemon manager is not running");
-    return createHostInstaller({
-      manager: daemonManager,
-      connections,
-      manifest: hostManifest,
-      setup: setupDaemonHost,
-      restartLocal: () => localConnector.restart(),
-      markSetup: (name) => hostTools?.mark(name),
-    }).install(host);
-  },
+  installHost: installDaemonHost,
   launch: createDaemonLaunch({
     manager: {
       request: (...args) => {
@@ -371,16 +373,28 @@ orchestrator = registerOrchestratorExtension({
   send,
   notify: (notice) => attention.notifyTask(notice),
   onTask: (task) => mascot.onTask(task),
-  dataDir: path.join(app.getPath("userData"), "orchestrator"),
-  root,
-  resourcesPath: process.resourcesPath,
-  packaged: app.isPackaged,
   getClaudeMcp: () => claudeMcp,
   getModelProviders: () => modelProviders,
   getProjects: () => projects,
-  stopDaemonOnQuit: testMode.test,
   getConnections: () => connections,
+  getManager: () => daemonManager,
+  installHost: installDaemonHost,
+  // Enabling the Orchestrator registers its module on each host. A test run
+  // must never write the owner's Claude or Codex files.
+  moduleSwitch: testMode.test
+    ? null
+    : createModuleSwitch({
+        getManager: () => daemonManager,
+        runLocal: (args) => localConnector.runCli(args),
+        restartLocal: () => localConnector.restart(),
+        exec: (...args) => connections.exec(...args),
+      }),
+  log: (message) => console.log(message),
   userDataDir: app.getPath("userData"),
+  // A test run never reads the owner's Claude or Codex files.
+  legacy: testMode.test
+    ? undefined
+    : { homeDir: app.getPath("home"), codexHome: process.env.CODEX_HOME },
   hostsChanged: () => send("orchestrator-hosts-changed"),
 });
 // Turning the orchestrator off also drops the notices it already queued.

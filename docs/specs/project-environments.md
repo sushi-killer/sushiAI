@@ -142,7 +142,7 @@ network{allowedDomains}, sessions{claudeAccount, backend}, targets[]`) in `src/t
 ### S8 · Hosts (depends on S1) — M2
 
 - Hosts tab: readiness matrix (checkout, setup, CLIs, MCP, secrets) from the existing preflight
-  (`electron/orchestrator-remote.cjs:87`) plus a checkout check against the project remote;
+  (`PREFLIGHT_SCRIPT` in `electron/host-setup.cjs`) plus a checkout check against the project remote;
   gets secrets / no secrets; per-host overrides; the "Don't send secrets to this host" switch.
 - `~/sushiai` is created on first connect; a non-standard checkout is detected and flagged.
 - **Accept:** matrix states covered by tests with a fake ssh; the switch stops the next run from

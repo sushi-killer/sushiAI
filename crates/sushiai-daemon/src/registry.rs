@@ -19,6 +19,7 @@ use sushiai_protocol::{method, Notification, SessionInfo, SessionRemoved, Sessio
 use tokio::sync::{broadcast, Notify};
 
 use crate::home::Home;
+use crate::module::Module;
 use crate::session::Handle;
 
 pub fn hash_token(token: &str) -> String {
@@ -215,6 +216,8 @@ pub struct Registry {
     settled: Notify,
     /// Serializes launches that carry an idempotency key (check, create).
     pub keyed_create: tokio::sync::Mutex<()>,
+    /// Hosted modules, set once at startup (none in a bare daemon).
+    modules: std::sync::OnceLock<Vec<Arc<dyn Module>>>,
 }
 
 impl Registry {
@@ -238,7 +241,25 @@ impl Registry {
             stopping: AtomicBool::new(false),
             settled: Notify::new(),
             keyed_create: tokio::sync::Mutex::new(()),
+            modules: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Hosts `modules` (once; a second call is ignored).
+    pub fn set_modules(&self, modules: Vec<Arc<dyn Module>>) {
+        let _ = self.modules.set(modules);
+    }
+
+    pub fn modules(&self) -> &[Arc<dyn Module>] {
+        self.modules.get().map_or(&[], Vec::as_slice)
+    }
+
+    /// The module that owns `namespace`.
+    pub fn module(&self, namespace: &str) -> Option<Arc<dyn Module>> {
+        self.modules()
+            .iter()
+            .find(|m| m.namespace() == namespace)
+            .cloned()
     }
 
     /// Asks the daemon to stop. Holders and sessions keep running.

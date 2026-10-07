@@ -1,28 +1,34 @@
-// The orchestrator daemon (`orchd/`, Rust): this module finds/spawns it,
-// speaks its NDJSON protocol, and relays its `subscribe` stream to the
-// renderer. Nothing starts at launch: a daemon that is already running is
-// attached to (never spawned), and the first real request spawns one. Closing
-// the window leaves it running; quitting the app shuts down the local daemon
-// this app spawned (a test launch, `stopDaemonOnQuit`, also stops one it
-// merely found). A remote host's daemon is only disconnected, never stopped.
-// orchd also exits on its own when its data dir is deleted.
-const net = require("node:net");
+// The Orchestrator's desktop side. The orchestration pipeline lives in the
+// sushiai daemon as the `orch` module: every request here is `orch.<method>`
+// on the daemon manager's connection to a host (the local daemon, or a remote
+// one over `ssh host sushiai proxy`), and the module's `orch.event`
+// notifications arrive per host through the same connection. This file owns
+// the renderer allowlist, per-host event tagging and notices, the secrets the
+// desktop pushes whenever a host becomes ready, and the host list. It starts,
+// stops and installs nothing itself: the daemon manager connects hosts and the
+// host installer provisions them.
+const fs = require("node:fs");
 const path = require("node:path");
-const os = require("node:os");
-const fs = require("node:fs/promises");
-const { existsSync } = require("node:fs");
-const { spawn } = require("node:child_process");
-const TEST_MCP_HOME = require("node:path").join(
-  __dirname,
-  "test-fixtures",
-  "mcp-home",
-);
-const { createHash, randomUUID } = require("node:crypto");
-const { appDb, transaction } = require("./app-db.cjs");
-const { RemoteOrchd, localArtifacts } = require("./orchestrator-remote.cjs");
+const childProcess = require("node:child_process");
+const { ClaudeMcp } = require("./claude-mcp.cjs");
+const { appDb, readStore, transaction, writeStore } = require("./app-db.cjs");
+const { posixCommand, REMOTE_PATH, REMOTE_BIN } = require("./host-install.cjs");
+const {
+  PREFLIGHT_SCRIPT,
+  parsePreflight,
+  reconnectUntilReady,
+} = require("./host-setup.cjs");
 
 const LOCAL_HOST = "local";
 const OFF_MESSAGE = "The orchestrator is off.";
+const ORCH_CAPABILITY = "orch";
+const ORCH_PREFIX = "orch.";
+// The daemon answers `orch.*` with this code while the module starts.
+const MODULE_STARTING = 1100;
+// A host that is connecting gets this long to become ready.
+const READY_TIMEOUT_MS = 30000;
+// A host that is down is not reconnected on every request.
+const RETRY_AFTER_MS = 30000;
 
 /** What every orchestrator request rejects with while the extension is off,
  * so nothing spawns, connects or provisions a host. */
@@ -46,7 +52,6 @@ const ORCHESTRATOR_MANIFEST = {
 // The renderer only ever reaches these; `hook.stop` (the Claude Stop hook)
 // and `shutdown` are daemon-internal / CLI-only, never IPC-reachable.
 const ALLOWED_METHODS = new Set([
-  "ping",
   "settings.get",
   "settings.set",
   "settings.defaults",
@@ -141,135 +146,6 @@ const ASKED_BY = new Set([
   "advisor",
   "land",
 ]);
-
-const NOT_BUILT =
-  "The orchestrator daemon is not built. Run npm run build:orchd.";
-const NOT_INSTALLED =
-  "The orchestrator is missing from this installation — reinstall sushiAI.";
-
-/** A packaged app has no toolchain to build with, so a missing daemon means a
- * broken install; only a source checkout is told to build it. */
-function notBuiltMessage(packaged) {
-  return packaged ? NOT_INSTALLED : NOT_BUILT;
-}
-const FAILED_TO_START = "The orchestrator daemon failed to start.";
-
-function orchdBinaryPath({ root, resourcesPath, packaged }) {
-  return packaged
-    ? path.join(resourcesPath, "orchd")
-    : path.join(root, "orchd", "target", "release", "orchd");
-}
-
-// A unix socket path is capped around 100 bytes on macOS; userData can nest
-// deep enough (a long account name, iCloud Drive, ...) to blow past that, so
-// a too-long path falls back to a short, stable name under $TMPDIR instead.
-function socketPathFor(dataDir, tmpDir = os.tmpdir()) {
-  const candidate = path.join(dataDir, "orchd.sock");
-  if (Buffer.byteLength(candidate, "utf8") <= 100) return candidate;
-  const hash = createHash("sha256").update(dataDir).digest("hex").slice(0, 8);
-  return path.join(tmpDir, `sushi-orchd-${hash}.sock`);
-}
-
-// A small NDJSON-RPC client dedicated to orchd's own control-auth envelope.
-// Every request but `ping` carries the
-// current control token alongside id/method/params.
-function orchdRequest(socketPath, method, params, token, timeout = 5000) {
-  return new Promise((resolve, reject) => {
-    const id = randomUUID();
-    const socket = net.createConnection(socketPath);
-    let buffer = "",
-      settled = false;
-    const finish = (error, value) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      error ? reject(error) : resolve(value);
-    };
-    socket.setEncoding("utf8");
-    socket.setTimeout(timeout, () =>
-      finish(new Error("The orchestrator daemon did not respond.")),
-    );
-    socket.on("error", (error) => finish(error));
-    socket.on("close", () => {
-      if (!settled)
-        finish(
-          new Error("The orchestrator daemon disconnected before responding."),
-        );
-    });
-    socket.on("connect", () => {
-      const envelope = { id, method, params };
-      if (method !== "ping" && token) envelope.auth = token;
-      socket.write(JSON.stringify(envelope) + "\n");
-    });
-    socket.on("data", (chunk) => {
-      buffer += chunk;
-      if (buffer.length > 16 * 1024 * 1024)
-        return finish(new Error("Orchestrator response exceeds 16 MB."));
-      let boundary;
-      while ((boundary = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 1);
-        if (!line.trim()) continue;
-        let message;
-        try {
-          message = JSON.parse(line);
-        } catch {
-          return finish(
-            new Error("Invalid JSON from the orchestrator daemon."),
-          );
-        }
-        if (message.id !== id) continue;
-        if (message.error) return finish(new Error(message.error.message));
-        finish(null, message.result);
-      }
-    });
-  });
-}
-
-/** How long a rebuilt binary waits for running attempts to finish before
- * it replaces the daemon anyway. */
-const STALE_DEFER_MS = 30 * 60 * 1000;
-
-/** Whether a running daemon's own binary has since been rebuilt: the binary
- * on disk is more than a second newer than the one it loaded. Running
- * attempts defer the replacement for up to `STALE_DEFER_MS` (`staleForMs` =
- * how long the rebuild has been seen): a replacement interrupts them and the
- * next daemon restarts each as a new attempt, so every landing's `afterLand`
- * rebuild would otherwise cut every live task short. An in-flight chat reply
- * (`chatTurns`) always blocks: chat has no resume path. */
-function isStalePing(ping, actualBinaryMtimeMs, staleForMs = 0) {
-  if (!ping?.binaryMtimeMs || ping.chatTurns > 0) return false;
-  if (actualBinaryMtimeMs <= ping.binaryMtimeMs + 1000) return false;
-  return !(ping.running > 0) || staleForMs >= STALE_DEFER_MS;
-}
-
-// Task statuses (orchd/src/model.rs TaskStatus) that need no daemon; every
-// other one (drafting, queued, running, waiting, landing) does. An archived
-// task never needs one.
-const FINISHED_STATUSES = new Set(["done", "failed", "stopped"]);
-
-/** Polls `killFn` (default: a zero-signal `kill`, which throws once the pid
- * is gone) until the process exits or `timeoutMs` passes. Best-effort: never
- * rejects, since a stuck old process just means the next call retries. */
-async function waitForExit(
-  pid,
-  {
-    killFn = (p) => process.kill(p, 0),
-    timeoutMs = 5000,
-    intervalMs = 100,
-  } = {},
-) {
-  if (!pid) return;
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      killFn(pid);
-    } catch {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-}
 
 const FAILURE_LABELS = {
   no_deliverable: "no deliverable",
@@ -394,37 +270,151 @@ function orchestratorNotice(task) {
   return notice;
 }
 
+/** The daemon manager's host name for an orchestrator host id. */
+function managerHostOf(host) {
+  return host === LOCAL_HOST ? LOCAL_HOST : host.replace(/^ssh:/, "");
+}
+
+function notReady(state, name) {
+  const error = new Error(
+    state?.message || `The sushiai daemon on ${name} is not ready.`,
+  );
+  error.code = "ORCH_HOST_NOT_READY";
+  return error;
+}
+
+/** The error for a daemon that answers without the `orch` capability: it is
+ * older than this app, or its Orchestrator module is not enabled. */
+function missingCapability(name) {
+  const error = new Error(`Update sushiai on ${name}`);
+  error.code = "ORCH_MISSING";
+  return error;
+}
+
+const hasOrch = (state) => !!state?.capabilities?.includes(ORCH_CAPABILITY);
+
+/** The manager's state of `host` once it is not "connecting" (immediately when
+ * it already is not). Resolves undefined for a host the manager does not know. */
+function settledState(manager, host, timeoutMs, timeoutMessage) {
+  const current = () => manager.states().find((state) => state.host === host);
+  return new Promise((resolve, reject) => {
+    let off = () => {};
+    const done = (state) => {
+      clearTimeout(timer);
+      off();
+      resolve(state);
+    };
+    const timer = setTimeout(() => {
+      off();
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+    timer.unref?.();
+    off = manager.on("state", (state) => {
+      if (state.host === host && state.state !== "connecting") done(state);
+    });
+    // The state may have settled between the check and the subscription.
+    const now = current();
+    if (!now || now.state !== "connecting") done(now);
+  });
+}
+
+/** The opt-in of the `orch` module on a host (owner O1). Enabling runs
+ * `sushiai orch register` there (local: the bundled binary; remote: over the
+ * existing ssh exec path), disabling runs `sushiai orch unregister`; then the
+ * host's daemon restarts (`daemon.shutdown`, then reconnect) when it does not
+ * serve the module yet or still does. Sessions survive: they live in their
+ * holders. `host` is "local" or "ssh:<profile id>". */
+function createModuleSwitch({
+  getManager,
+  runLocal,
+  restartLocal,
+  exec,
+  readyTimeoutMs = READY_TIMEOUT_MS,
+  settleMs,
+  attempts,
+}) {
+  const enabling = new Map();
+
+  async function apply(host, on) {
+    const manager = getManager?.();
+    if (!manager) throw new Error("The sushiai daemon is not running.");
+    const name = managerHostOf(host);
+    const verb = on ? "register" : "unregister";
+    if (host === LOCAL_HOST) await runLocal(["orch", verb]);
+    else
+      await exec(
+        host,
+        posixCommand(`${REMOTE_PATH}\n"${REMOTE_BIN}/sushiai" orch ${verb}`),
+        { timeout: 60000 },
+      );
+    const state = await settledState(
+      manager,
+      name,
+      readyTimeoutMs,
+      `The sushiai daemon on ${name} did not become ready.`,
+    );
+    if (state?.state !== "ready" || hasOrch(state) === on) return;
+    if (host === LOCAL_HOST) await restartLocal();
+    else await manager.request(name, "daemon.shutdown", {}).catch(() => {});
+    // The daemon takes a moment to go; a retry that meets it still answers.
+    await new Promise((resolve) => setTimeout(resolve, settleMs ?? 400));
+    const after = await reconnectUntilReady(manager, name, {
+      attempts,
+      settleMs,
+    });
+    if (after?.state !== "ready" || hasOrch(after) !== on)
+      throw new Error(
+        `The sushiai daemon on ${name} did not restart ${on ? "with" : "without"} the orchestrator.`,
+      );
+  }
+
+  return {
+    /** Once per host until it is disabled; concurrent callers share the run. */
+    enable(host) {
+      let run = enabling.get(host);
+      if (!run) {
+        run = apply(host, true);
+        enabling.set(host, run);
+        run.catch(() => {
+          if (enabling.get(host) === run) enabling.delete(host);
+        });
+      }
+      return run;
+    },
+    async disable(host) {
+      await enabling.get(host)?.catch(() => {});
+      enabling.delete(host);
+      await apply(host, false);
+    },
+  };
+}
+
+/** One host's orchestrator: requests as `orch.*` through the daemon manager,
+ * the events of that host, its notices and its secrets. `host` is "local" or
+ * "ssh:<profile id>"; the manager knows the host by `managerHostOf(host)`. */
 class OrchestratorService {
   constructor({
-    dataDir,
-    root,
-    resourcesPath,
-    packaged,
+    host = LOCAL_HOST,
+    getManager,
+    getConnections,
     send,
     notify,
     onTask,
     getClaudeMcp,
     getModelProviders,
     getProjects,
-    spawnRetries = 50,
-    spawnIntervalMs = 100,
-    stopDaemonOnQuit = false,
-    // orchd stops its agents on SIGTERM (5 s escalation) before it exits.
-    quitTimeoutMs = 7000,
-    host = LOCAL_HOST,
-    remote = null,
+    moduleSwitch,
+    readyTimeoutMs = READY_TIMEOUT_MS,
   }) {
     this.host = host;
-    // A remote service reaches its daemon through `remote` (the ssh
-    // forward and token); it never spawns, restarts or stops one itself.
-    this.remote = remote;
-    this.dataDir = dataDir;
-    this.socketPath = dataDir ? socketPathFor(dataDir) : null;
-    this.packaged = Boolean(packaged);
-    this.binary = remote
-      ? null
-      : orchdBinaryPath({ root, resourcesPath, packaged });
-    this.send = remote
+    this.moduleSwitch = moduleSwitch;
+    this.remote = host !== LOCAL_HOST;
+    this.managerHost = managerHostOf(host);
+    this.getManager = getManager;
+    this.getConnections = getConnections;
+    // A remote host's events carry the host so the renderer knows where a
+    // task lives.
+    this.send = this.remote
       ? (channel, message) => send(channel, tagEvent(message, host))
       : send;
     this.notify = notify;
@@ -432,27 +422,9 @@ class OrchestratorService {
     this.getClaudeMcp = getClaudeMcp;
     this.getModelProviders = getModelProviders;
     this.getProjects = getProjects;
-    this.spawnRetries = spawnRetries;
-    this.spawnIntervalMs = spawnIntervalMs;
-    this.stopDaemonOnQuit = stopDaemonOnQuit;
-    this.quitTimeoutMs = quitTimeoutMs;
-    this.token = null;
-    this.subscribeSocket = null;
-    this.backoff = 500;
-    this.closed = false;
-    // Bumped by every connect() and close(), so a subscribe loop that was
-    // mid-await when the service was closed and reopened cannot keep running
-    // beside the new one.
-    this.epoch = 0;
-    this.retryTimer = null;
-    // Whether a subscribe loop is running, whether a real request has been
-    // made (until then the loop only attaches, it never spawns), and whether
-    // this app spawned the daemon it talks to (so quit() may stop it).
-    this.looping = false;
-    this.used = false;
-    this.spawned = false;
-    this.starting = null;
-    this.running = null;
+    this.readyTimeoutMs = readyTimeoutMs;
+    this.preflight = null;
+    this.lastRetryAt = 0;
     // Keys of notices already raised (see #notifyTransition): a task
     // re-entering a state with the same question never re-notifies.
     this.notified = new Set();
@@ -461,139 +433,97 @@ class OrchestratorService {
     this.lastStatus = new Map();
   }
 
-  async #refreshToken() {
-    if (this.remote) return;
+  get name() {
+    if (!this.remote) return "this Mac";
     try {
-      this.token = (
-        await fs.readFile(path.join(this.dataDir, "control.token"), "utf8")
-      ).trim();
+      return this.getConnections().get(this.host).name;
     } catch {
-      this.token = null;
+      return this.managerHost;
     }
   }
 
-  async #isStale(ping) {
-    if (!ping?.binaryMtimeMs || ping.chatTurns > 0) return false;
-    try {
-      const { mtimeMs } = await fs.stat(this.binary);
-      if (mtimeMs <= ping.binaryMtimeMs + 1000) {
-        this.staleSeenAt = null;
-        return false;
-      }
-      this.staleSeenAt ??= Date.now();
-      return isStalePing(ping, mtimeMs, Date.now() - this.staleSeenAt);
-    } catch {
-      return false;
-    }
+  #manager() {
+    const manager = this.getManager?.();
+    if (!manager) throw new Error("The sushiai daemon is not running.");
+    return manager;
   }
 
-  // Tracks the whole in-flight call so quit() can wait for it, not only for
-  // the spawn at its end.
-  async #ensureRunning() {
-    const run = this.#ensureRunningInner();
-    this.running = run;
-    try {
-      return await run;
-    } finally {
-      if (this.running === run) this.running = null;
-    }
+  #state() {
+    return this.#manager()
+      .states()
+      .find((state) => state.host === this.managerHost);
   }
 
-  async #ensureRunningInner() {
-    if (this.closed) throw new Error("orchestrator closed");
-    if (this.remote) {
-      const conn = await this.remote.ensure();
-      this.socketPath = conn.socketPath;
-      this.token = conn.token;
-      return { remote: true };
-    }
-    if (!existsSync(this.binary))
-      throw new Error(notBuiltMessage(this.packaged));
-    await this.#refreshToken();
-    try {
-      const ping = await orchdRequest(
-        this.socketPath,
-        "ping",
-        {},
-        this.token,
-        2000,
-      );
-      if (!(await this.#isStale(ping))) return ping;
-      // A rebuilt binary replaces the daemon once no attempt runs (or the
-      // deferral ran out); wait for the old process to actually exit before
-      // spawning the new one on the same socket path.
-      this.staleSeenAt = null;
-      await orchdRequest(
-        this.socketPath,
-        "shutdown",
-        {},
-        this.token,
-        5000,
-      ).catch(() => {});
-      await waitForExit(ping.pid);
-    } catch {
-      // Fall through to spawn: one in-flight spawn per service, so a burst of
-      // calls before the daemon is up doesn't race several children.
-    }
-    if (this.closed) throw new Error("orchestrator closed");
-    if (!this.starting) this.starting = this.#spawnAndWait();
-    try {
-      return await this.starting;
-    } finally {
-      this.starting = null;
-    }
+  /** The host's daemon state when it is ready and has the `orch` capability;
+   * throws the reason it is not. Never connects anything. */
+  #usable() {
+    const state = this.#state();
+    if (!state) throw new Error("The orchestrator host is not connected.");
+    if (state.state !== "ready") throw notReady(state, this.name);
+    if (!state.capabilities?.includes(ORCH_CAPABILITY))
+      throw missingCapability(this.name);
+    return state;
   }
 
-  async #spawnAndWait() {
-    if (this.closed) throw new Error("orchestrator closed");
-    await fs.mkdir(this.dataDir, { recursive: true });
-    if (this.closed) throw new Error("orchestrator closed");
-    const child = spawn(
-      this.binary,
-      // The owner's own daemon installs the sushiai-orchestrator skill; a
-      // test launch never writes into the owner's home.
-      [
-        "--data",
-        this.dataDir,
-        "--socket",
-        this.socketPath,
-        ...(this.stopDaemonOnQuit ? [] : ["--install-skill"]),
-      ],
-      {
-        detached: true,
-        stdio: "ignore",
-        // A test launch reads MCP servers from a fixture, never the owner's
-        // own ~/.claude.json, so screenshots show no real server names.
-        env: this.stopDaemonOnQuit
-          ? { ...process.env, SUSHIAI_MCP_HOME: TEST_MCP_HOME }
-          : process.env,
-      },
-    );
-    // A binary that vanished (a removed install or data dir) is reported by
-    // the ping loop below as a failed start, never as an uncaught error that
-    // would take down the main process.
-    child.once("error", () => {});
-    // Detached and unref'd on purpose: this process must outlive the app.
-    child.unref();
-    this.spawned = true;
-    for (let attempt = 0; attempt < this.spawnRetries; attempt++) {
-      if (this.closed) throw new Error("orchestrator closed");
-      await this.#refreshToken();
+  /** Waits for a connecting host to be ready. A remote host that is down is
+   * reconnected (at most every RETRY_AFTER_MS): the first request on a saved
+   * host is what connects it. Then checks the `orch` capability. */
+  async ready() {
+    const manager = this.#manager();
+    let state = this.#state();
+    if (!state) throw new Error("The orchestrator host is not connected.");
+    if (
+      this.remote &&
+      state.state !== "ready" &&
+      state.state !== "connecting" &&
+      Date.now() - this.lastRetryAt >= RETRY_AFTER_MS
+    ) {
+      this.lastRetryAt = Date.now();
+      state = await manager.retry(this.managerHost);
+    }
+    if (state.state === "connecting") state = await this.#whenSettled(manager);
+    if (state?.state !== "ready") throw notReady(state, this.name);
+    // A ready daemon without the module: the owner turned the Orchestrator on
+    // after this host's daemon started, so the host is enabled now.
+    if (!hasOrch(state) && this.moduleSwitch) {
       try {
-        return await orchdRequest(
-          this.socketPath,
-          "ping",
-          {},
-          this.token,
-          2000,
-        );
-      } catch {
-        await new Promise((resolve) =>
-          setTimeout(resolve, this.spawnIntervalMs),
+        await this.moduleSwitch.enable(this.host);
+      } catch (error) {
+        throw new Error(
+          `Could not enable the orchestrator on ${this.name}: ${error.message}`,
         );
       }
     }
-    throw new Error(FAILED_TO_START);
+    return this.#usable();
+  }
+
+  #whenSettled(manager) {
+    return settledState(
+      manager,
+      this.managerHost,
+      this.readyTimeoutMs,
+      `The sushiai daemon on ${this.name} did not become ready.`,
+    );
+  }
+
+  async #request(method, params, timeoutMs = 20000) {
+    try {
+      return await this.#manager().request(
+        this.managerHost,
+        ORCH_PREFIX + method,
+        params,
+        { timeoutMs },
+      );
+    } catch (error) {
+      if (error?.code === MODULE_STARTING) {
+        const starting = new Error(
+          `The orchestrator on ${this.name} is still starting. Try again in a moment.`,
+        );
+        starting.code = "ORCH_STARTING";
+        throw starting;
+      }
+      throw error;
+    }
   }
 
   async #withMcp(params) {
@@ -642,26 +572,22 @@ class OrchestratorService {
     }
   }
 
-  /** Full replace, always pushed (connect + after every `settings.set`):
-   * `profiles` is every route's resolved model-profile env + key. Nothing
-   * is staged to disk - `resolveEnv` hands the env map and key back in memory. */
-  /** Replaces what the daemon holds with what is allowed now (a host switched off for
-   * a project gets no values of it). Never throws. */
+  /** Replaces what the daemon holds with what is allowed now (a host switched
+   * off for a project gets no values of it). Never throws. */
   refreshSecrets() {
     return this.#pushSecrets().catch(() => {});
   }
 
+  /** Full replace, always pushed (host ready, task.create, after every
+   * `settings.set`): `profiles` is every route's resolved model-profile env +
+   * key. Secrets live in the daemon's memory only, so a daemon restart loses
+   * them and the next `ready` pushes them again. */
   async #pushSecrets() {
     if (!this.getProjects && (this.remote || !this.getModelProviders)) return;
+    this.#usable();
     let settings;
     try {
-      settings = await orchdRequest(
-        this.socketPath,
-        "settings.get",
-        {},
-        this.token,
-        5000,
-      );
+      settings = await this.#request("settings.get", {}, 5000);
     } catch {
       return;
     }
@@ -669,16 +595,17 @@ class OrchestratorService {
     // values are resolved per host, which honours "don't send to this host".
     const providers =
       !this.remote && this.getModelProviders ? this.getModelProviders() : null;
-    const profileIds = [
+    const routes = settings?.routes || [];
+    const idsOf = (key) => [
       ...new Set(
-        (settings?.routes || [])
-          .map((route) => route.profileId)
+        routes
+          .map((route) => route[key])
           .filter((id) => typeof id === "string" && id),
       ),
     ];
     const profiles = {};
     const accounts = {};
-    for (const id of providers ? profileIds : []) {
+    for (const id of providers ? idsOf("profileId") : []) {
       try {
         const { settings: env, key } = await providers.resolveEnv(id);
         profiles[id] = { env, key };
@@ -687,58 +614,40 @@ class OrchestratorService {
         // to the tier's plain route, per the profile-fallback contract.
       }
     }
-    for (const id of providers
-      ? new Set(
-          (settings?.routes || [])
-            .map((route) => route.accountId)
-            .filter((id) => typeof id === "string" && id),
-        )
-      : []) {
+    for (const id of providers ? idsOf("accountId") : []) {
       try {
         accounts[id] = await providers.resolveClaudeAccount(id);
       } catch {
         // An account without a saved value is omitted and uses the host login.
       }
     }
-    await orchdRequest(
-      this.socketPath,
+    const projects = this.getProjects?.();
+    const target = this.remote ? this.host : "local";
+    await this.#request(
       "secrets.set",
       {
         profiles,
         accounts,
-        projects: this.getProjects
-          ? await this.getProjects()
-              .agentEnvironments(this.remote ? this.host : "local")
-              .catch(() => ({}))
+        projects: projects
+          ? await projects.agentEnvironments(target).catch(() => ({}))
           : {},
-        projectMcp: this.getProjects
-          ? await this.getProjects()
-              .mcpEnvironments(this.remote ? this.host : "local")
-              .catch(() => ({}))
+        projectMcp: projects
+          ? await projects.mcpEnvironments(target).catch(() => ({}))
           : {},
-        projectRepos: this.getProjects
-          ? await Promise.resolve(
-              this.getProjects().repoProjects?.(
-                this.remote ? this.host : "local",
-              ),
-            )
+        projectRepos: projects
+          ? await Promise.resolve(projects.repoProjects?.(target))
               .then((map) => map ?? {})
               .catch(() => ({}))
           : {},
       },
-      this.token,
       5000,
-    ).catch(() => {});
+    );
   }
 
   async call(method, params = {}) {
     if (!ALLOWED_METHODS.has(method))
       throw new Error("Invalid orchestrator request");
-    await this.#ensureRunning();
-    // The first real request starts the subscribe loop, which from then on
-    // may respawn a daemon that went away.
-    this.used = true;
-    if (!this.looping && !this.closed) this.connect();
+    await this.ready();
     const sendParams =
       // A task the owner or the orchestrator agent creates gets the
       // project's own MCP servers, resolved here where the config lives.
@@ -747,122 +656,60 @@ class OrchestratorService {
       method === "chat.edit"
         ? await this.#withMcp(params)
         : params;
-    if (method === "task.create") await this.#pushSecrets();
-    const result = await orchdRequest(
-      this.socketPath,
+    if (method === "task.create") await this.refreshSecrets();
+    const result = await this.#request(
       method,
       sendParams,
-      this.token,
       // Pushing and opening a pull request can take minutes.
       method === "task.pr" ? 600000 : 20000,
     );
     // Awaited (not fire-and-forget) so a caller who follows this with another
     // settings-dependent call never races the push.
-    if (method === "settings.set") await this.#pushSecrets().catch(() => {});
+    if (method === "settings.set") await this.refreshSecrets();
     return this.remote && TASK_RESULT_METHODS.has(method)
       ? tagTasks(result, this.host)
       : result;
   }
 
-  /** A liveness check with no side effects: a ping on the socket already in
-   * use. It never spawns, restarts or provisions a daemon, so a panel polling
-   * it cannot bypass the reconnect backoff; a call or Retry does that. */
-  async probe() {
-    if (this.closed) throw new Error("orchestrator closed");
-    if (!this.socketPath) throw new Error("The orchestrator is not connected.");
-    return orchdRequest(this.socketPath, "ping", {}, this.token, 2000);
+  /** A liveness check with no side effects: the host is ready and has the
+   * `orch` capability. It never connects or provisions a host. */
+  probe() {
+    this.#usable();
+    return { pid: 0 };
   }
 
-  /** Starts relaying a daemon that is already running; never spawns one and
-   * does nothing when there is none. A remote host connects on first use. */
-  async attach() {
-    if (this.remote) return;
-    this.closed = false;
-    const epoch = this.epoch;
-    try {
-      await this.#pingRunning();
-    } catch {
-      return;
-    }
-    if (!this.closed && epoch === this.epoch && !this.looping) this.connect();
-  }
-
-  /** True when a task on disk is not finished: such a task needs the daemon
-   * (landing retries, autopilot, the badge), so launch starts it. Reads only
-   * each small task.json; a remote host never scans. */
-  async hasPendingTasks() {
-    if (this.remote || !this.dataDir) return false;
-    const root = path.join(this.dataDir, "tasks");
-    let names;
-    try {
-      names = await fs.readdir(root);
-    } catch {
-      return false;
-    }
-    for (const name of names) {
-      try {
-        const file = path.join(root, name, "task.json");
-        if ((await fs.stat(file)).size > 1_000_000) continue;
-        const { status, archived } = JSON.parse(
-          await fs.readFile(file, "utf8"),
-        );
-        if (
-          typeof status === "string" &&
-          !archived &&
-          !FINISHED_STATUSES.has(status)
-        )
-          return true;
-      } catch {
-        // No task.json or unreadable: not a pending task.
-      }
-    }
-    return false;
-  }
-
-  /** Treats launch as the first use: starts the daemon (or attaches) and the
-   * event relay. */
-  async resume() {
-    await this.#ensureRunning();
-    this.used = true;
-    if (!this.looping && !this.closed) this.connect();
-  }
-
-  async #pingRunning() {
-    await this.#refreshToken();
-    return orchdRequest(this.socketPath, "ping", {}, this.token, 2000);
-  }
-
-  connect() {
-    this.closed = false;
-    this.epoch += 1;
-    clearTimeout(this.retryTimer);
-    this.remote?.reopen();
-    this.#subscribeLoop(this.epoch);
-  }
-
-  async #subscribeLoop(epoch) {
-    if (this.closed || epoch !== this.epoch) return;
-    this.looping = true;
-    try {
-      if (this.used) await this.#ensureRunning();
-      else await this.#pingRunning();
-      await this.#pushSecrets();
-      await this.#subscribeOnce();
-    } catch {
-      // Daemon not built / not reachable yet: retry with backoff below - but
-      // an attach-only loop just stops, the first real request starts it again.
-      if (!this.used) {
-        if (epoch === this.epoch) this.looping = false;
-        return;
-      }
-    }
-    if (this.closed || epoch !== this.epoch) return;
-    this.backoff = Math.min(this.backoff * 2, this.remote ? 60000 : 15000);
-    this.retryTimer = setTimeout(
-      () => this.#subscribeLoop(epoch),
-      this.backoff,
+  /** What the host offers a route's harness (git, claude, codex), read over
+   * the host's SSH connection. A host with no shell has none. */
+  async refreshPreflight() {
+    if (!this.remote) return null;
+    const connections = this.getConnections();
+    if (!connections.hasShell(this.host)) return null;
+    this.preflight = parsePreflight(
+      await connections.exec(this.host, posixCommand(PREFLIGHT_SCRIPT), {
+        timeout: 40000,
+      }),
     );
-    this.retryTimer.unref?.();
+    return this.preflight;
+  }
+
+  /** Forgets that the host was just retried: the owner's Try again. */
+  forget() {
+    this.lastRetryAt = 0;
+  }
+
+  /** Lagging subscribers are told to refetch: every task is replayed as a task
+   * event, which is what the panel folds into its state. */
+  async resync() {
+    const tasks = await this.#request("task.list", {});
+    for (const task of Array.isArray(tasks) ? tasks : [])
+      this.handleEvent({ event: "task", task });
+  }
+
+  /** One `orch.event` notification of this host. */
+  handleEvent(message) {
+    if (!message || typeof message !== "object" || !message.event) return;
+    this.send("orchestrator-event", message);
+    this.#notifyTransition(message);
   }
 
   /** The transition detector: raises one notice per (task, question) for a
@@ -902,130 +749,62 @@ class OrchestratorService {
     this.notified.add(key);
     this.notify(orchestratorNotice(task));
   }
+}
 
-  #subscribeOnce() {
-    return new Promise((resolve) => {
-      const socket = net.createConnection(this.socketPath);
-      this.subscribeSocket = socket;
-      let buffer = "";
-      socket.setEncoding("utf8");
-      socket.on("connect", () => {
-        this.backoff = 500;
-        const envelope = { id: "subscribe", method: "subscribe" };
-        if (this.token) envelope.auth = this.token;
-        socket.write(JSON.stringify(envelope) + "\n");
-      });
-      socket.on("data", (chunk) => {
-        buffer += chunk;
-        let boundary;
-        while ((boundary = buffer.indexOf("\n")) >= 0) {
-          const line = buffer.slice(0, boundary);
-          buffer = buffer.slice(boundary + 1);
-          if (!line.trim()) continue;
-          let message;
-          try {
-            message = JSON.parse(line);
-          } catch {
-            continue;
-          }
-          if (!message.event) continue;
-          this.send("orchestrator-event", message);
-          this.#notifyTransition(message);
-        }
-      });
-      const done = () => {
-        if (this.subscribeSocket === socket) this.subscribeSocket = null;
-        resolve();
+/** The daemon manager's state as the panel's host record. */
+function hostRecord(id, name, state, enabled) {
+  const base = { id, name, enabled };
+  if (!state) return { ...base, state: "idle" };
+  switch (state.state) {
+    case "ready":
+      return state.capabilities?.includes(ORCH_CAPABILITY)
+        ? { ...base, state: "ready" }
+        : { ...base, state: "error", detail: `Update sushiai on ${name}` };
+    case "connecting":
+      return { ...base, state: "connecting" };
+    case "offline":
+      return { ...base, state: "idle", detail: state.message || "" };
+    default:
+      return {
+        ...base,
+        state: "error",
+        detail: state.message || state.hint || "The host is not reachable.",
       };
-      socket.on("error", done);
-      socket.on("close", done);
-    });
-  }
-
-  // Closes only this app's subscribe connection, never the daemon: tasks
-  // keep running when the window closes. quit() below is what stops one.
-  close() {
-    this.closed = true;
-    this.looping = false;
-    this.epoch += 1;
-    clearTimeout(this.retryTimer);
-    this.retryTimer = null;
-    this.subscribeSocket?.destroy();
-    this.remote?.close();
-  }
-
-  // What close() does, plus stopping the local daemon this app spawned (or,
-  // in a test launch, any it found): `shutdown`, then SIGKILL if it lingers.
-  // Never throws.
-  async quit() {
-    this.close();
-    // A remote daemon is never stopped by the app, nor one it did not spawn.
-    if (this.remote || !(this.spawned || this.stopDaemonOnQuit)) return;
-    this.spawned = false;
-    try {
-      await this.running?.catch(() => {});
-      await this.starting?.catch(() => {});
-      await this.#refreshToken();
-      let pid;
-      try {
-        pid = (
-          await orchdRequest(this.socketPath, "ping", {}, this.token, 1000)
-        )?.pid;
-      } catch {
-        // Daemon not reachable; fall back to the pidfile below.
-      }
-      if (!pid) {
-        const raw = await fs
-          .readFile(path.join(this.dataDir, "orchd.pid"), "utf8")
-          .catch(() => "");
-        pid = Number.parseInt(raw, 10) || undefined;
-      }
-      await orchdRequest(
-        this.socketPath,
-        "shutdown",
-        {},
-        this.token,
-        this.quitTimeoutMs,
-      ).catch(() => {});
-      if (!pid) return;
-      await waitForExit(pid, { timeoutMs: this.quitTimeoutMs });
-      try {
-        process.kill(pid, 0);
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // Already gone.
-      }
-    } catch {
-      // Quitting must never fail on the daemon.
-    }
   }
 }
 
-/** Every orchd the app talks to: the local daemon plus one per SSH profile
- * the owner has used the Orchestrator on. A saved remote host is known at
- * launch but connects on its first request. */
+/** Every host the app's orchestrator talks to: the local daemon plus one per
+ * SSH profile the owner has used the Orchestrator on. A saved remote host is
+ * known at launch but connects on its first request. */
 class OrchestratorHosts {
   constructor({
     local,
     connections,
-    artifacts,
     userDataDir,
     createService,
+    getManager,
+    installHost,
+    moduleSwitch,
+    log = () => {},
     onChange,
     enabled = true,
   }) {
     this.on = enabled;
+    this.moduleSwitch = moduleSwitch;
+    this.log = log;
     this.connected = false;
     this.pending = Promise.resolve();
     this.local = local;
     this.getConnections = connections;
-    this.artifacts = artifacts;
     this.userDataDir = userDataDir;
     this.createService = createService;
+    this.getManager = getManager;
+    this.installHost = installHost;
     this.onChange = onChange;
     this.services = new Map();
     this.enabled = new Set();
     this.loaded = false;
+    this.unsubscribe = null;
   }
 
   #save() {
@@ -1041,30 +820,104 @@ class OrchestratorHosts {
     });
   }
 
-  /** Turns the whole orchestrator on or off without a restart. Off closes the
-   * every remote service and stops the local daemon this app spawned, exactly
-   * as on quit; on attaches to a daemon that is already running and lists the
-   * saved SSH hosts, connecting nothing else. Calls run one after another. */
+  /** Turns the whole orchestrator on or off without a restart. Off forgets
+   * the remote services and stops listening; the daemons keep running and no
+   * task stops. On listens again, lists the saved SSH hosts and pushes the
+   * secrets to every host that is ready. Calls run one after another. */
   setEnabled(value) {
     const next = this.pending.then(async () => {
       if (value === this.on && value === this.connected) return;
       this.on = value;
       if (!value) {
-        await this.quit();
+        const reached = this.#hostsToSwitch();
+        this.close();
         this.services.clear();
         this.connected = false;
+        await this.#switchModule(reached, false);
         return;
       }
       this.connected = true;
-      await this.local.attach();
+      this.#listen();
       await this.init();
+      // Remote hosts are enabled on their first request; the Mac is now.
+      await this.#switchModule([LOCAL_HOST], true);
+      await this.refreshAllSecrets();
     });
     this.pending = next.catch(() => {});
     return next;
   }
 
+  /** The local daemon plus every remote host that is connected now: a host
+   * that is down is not reached over ssh just to be switched off. */
+  #hostsToSwitch() {
+    const states = this.getManager?.()?.states() ?? [];
+    return [LOCAL_HOST, ...this.services.keys()].filter(
+      (host) =>
+        host === LOCAL_HOST ||
+        states.some(
+          (state) =>
+            state.host === managerHostOf(host) && state.state === "ready",
+        ),
+    );
+  }
+
+  /** Registers or unregisters the module on `hosts`, never throwing: a host
+   * that fails keeps the owner's toggle; its next request reports why. */
+  async #switchModule(hosts, on) {
+    if (!this.moduleSwitch) return;
+    await Promise.all(
+      hosts.map((host) =>
+        (on
+          ? this.moduleSwitch.enable(host)
+          : this.moduleSwitch.disable(host)
+        ).catch((error) =>
+          this.log(
+            `orchestrator ${on ? "enable" : "disable"} on ${host}: ${error.message}`,
+          ),
+        ),
+      ),
+    );
+  }
+
   #assertOn() {
     if (!this.on) throw offError();
+  }
+
+  #serviceOfManagerHost(host) {
+    return host === LOCAL_HOST ? this.local : this.services.get(`ssh:${host}`);
+  }
+
+  /** Subscribes to the manager once it exists: events per host, and the
+   * secrets push when a host becomes ready. */
+  #listen() {
+    if (this.unsubscribe) return;
+    const manager = this.getManager?.();
+    if (!manager) return;
+    const offEvent = manager.on("event", (event) => {
+      if (!this.on) return;
+      const service = this.#serviceOfManagerHost(event.host);
+      if (!service) return;
+      if (event.method === `${ORCH_PREFIX}event`)
+        service.handleEvent(event.params);
+      else if (event.method === "session.resync")
+        void service.resync().catch(() => {});
+    });
+    const offState = manager.on("state", (state) => {
+      if (!this.on) return;
+      const service = this.#serviceOfManagerHost(state.host);
+      this.onChange?.();
+      if (state.state !== "ready" || !service) return;
+      // A daemon that restarted lost the secrets held in its memory.
+      void service.refreshSecrets();
+      void service
+        .refreshPreflight()
+        .then(() => this.onChange?.())
+        .catch(() => {});
+    });
+    this.unsubscribe = () => {
+      offEvent();
+      offState();
+    };
   }
 
   /** Sending to `host` was switched off or on: its daemon forgets values it may no longer
@@ -1120,21 +973,17 @@ class OrchestratorHosts {
   /** Local plus every SSH profile, with what the panel shows about each. */
   list() {
     this.#assertOn();
+    const states = this.getManager?.()?.states() ?? [];
+    const stateOf = (host) => states.find((state) => state.host === host);
     const profiles = this.getConnections?.()?.list() ?? [];
     return [
-      { id: LOCAL_HOST, name: "Local", state: "ready", enabled: true },
+      hostRecord(LOCAL_HOST, "Local", stateOf(LOCAL_HOST), true),
       ...profiles.map((profile) => {
         const id = `ssh:${profile.id}`;
-        const remote = this.services.get(id)?.remote;
+        const service = this.services.get(id);
         return {
-          id,
-          name: profile.name,
-          state: remote?.state ?? "idle",
-          detail: remote?.detail ?? "",
-          enabled: this.services.has(id),
-          preflight: remote?.preflight ?? null,
-          platform: remote?.platform || undefined,
-          orchdInstalled: remote?.orchdInstalled ?? undefined,
+          ...hostRecord(id, profile.name, stateOf(profile.id), !!service),
+          preflight: service?.preflight ?? null,
         };
       }),
     ];
@@ -1145,8 +994,8 @@ class OrchestratorHosts {
     return this.#serviceFor(host).call(method, params);
   }
 
-  /** A side-effect-free ping of a host already connected; never enables or
-   * provisions one. */
+  /** A side-effect-free check of a host already connected; never enables or
+   * connects one. */
   async probe(host = LOCAL_HOST) {
     this.#assertOn();
     if (typeof host !== "string") throw new Error("Invalid orchestrator host");
@@ -1155,33 +1004,40 @@ class OrchestratorHosts {
     return service.probe();
   }
 
-  /** Re-runs the host's preflight (git, claude, codex). */
+  /** The owner's Try again: reconnects the host and re-reads what it offers
+   * (git, claude, codex). A host that stays unreachable answers null; its
+   * state is on the host list. */
   async preflight(host) {
     if (host === LOCAL_HOST) return null;
     const service = this.#serviceFor(host);
-    service.remote.forget();
-    await service.remote.ensure();
-    return service.remote.refreshPreflight();
+    service.forget();
+    await this.getManager?.()
+      ?.retry(service.managerHost)
+      .catch(() => {});
+    this.onChange?.();
+    return service.refreshPreflight().catch(() => null);
   }
 
-  /** The owner's "Install Rust and set up": provisions the host, installing
-   * Rust there first when orchd has to be built and cargo is missing. */
+  /** The owner's "Update sushiai": installs the bundled sushiai on the host
+   * through the one host installer, which restarts the daemon there. */
   async setup(host) {
     if (typeof host !== "string" || host === LOCAL_HOST)
       throw new Error("Invalid orchestrator host");
     const service = this.#serviceFor(host);
-    await service.remote.setup();
-    return service.remote.refreshPreflight();
+    if (!this.installHost)
+      throw new Error("Installing sushiai is unavailable.");
+    await this.installHost(service.managerHost);
+    return service.refreshPreflight().catch(() => null);
   }
 
+  /** Stops listening. The daemons are never stopped: tasks keep running. */
   close() {
-    this.local.close();
-    for (const service of this.services.values()) service.close();
+    this.unsubscribe?.();
+    this.unsubscribe = null;
   }
 
   async quit() {
-    for (const service of this.services.values()) await service.quit();
-    await this.local.quit();
+    this.close();
   }
 }
 
@@ -1190,66 +1046,44 @@ function createOrchestratorHosts({
   send,
   notify,
   onTask,
-  dataDir,
-  root,
-  resourcesPath,
-  packaged,
   getClaudeMcp,
   getModelProviders,
   getProjects,
-  stopDaemonOnQuit,
   getConnections,
+  getManager,
+  installHost,
+  moduleSwitch,
+  log,
   userDataDir,
   hostsChanged,
-  spawnRetries,
-  stopWaitSeconds,
-  spawnIntervalMs,
+  readyTimeoutMs,
   enabled,
 }) {
-  const local = new OrchestratorService({
-    dataDir,
-    root,
-    resourcesPath,
-    packaged,
-    send,
-    notify,
-    onTask,
-    getClaudeMcp,
-    getModelProviders,
-    getProjects,
-    stopDaemonOnQuit,
-  });
-  const artifacts = localArtifacts({
-    root,
-    binary: orchdBinaryPath({ root, resourcesPath, packaged }),
-    resourcesPath,
-    packaged,
-  });
+  const service = (host) =>
+    new OrchestratorService({
+      host,
+      getManager,
+      getConnections,
+      send,
+      notify,
+      onTask,
+      getClaudeMcp,
+      getModelProviders,
+      getProjects,
+      moduleSwitch,
+      readyTimeoutMs,
+    });
   const hosts = new OrchestratorHosts({
-    local,
+    local: service(LOCAL_HOST),
     connections: getConnections ?? (() => null),
-    artifacts,
     userDataDir,
+    getManager,
+    installHost,
+    moduleSwitch,
+    log,
     onChange: hostsChanged,
     enabled,
-    createService: (host) =>
-      new OrchestratorService({
-        host,
-        send,
-        notify,
-        onTask,
-        getProjects,
-        remote: new RemoteOrchd({
-          connections: getConnections(),
-          endpoint: host,
-          artifacts,
-          request: orchdRequest,
-          onChange: hostsChanged,
-          spawnRetries,
-          stopWaitSeconds,
-          spawnIntervalMs,
-        }),
-      }),
+    createService: service,
   });
   // When sending to a host is switched off or on, its daemon's copy of the
   // project values is replaced.
@@ -1262,10 +1096,118 @@ function createOrchestratorHosts({
   return hosts;
 }
 
+/** Stops a standalone `orchd` of a previous build: `orchd.pid` in its data dir
+ * names the process; it must still be an `orchd` (a reused pid is never
+ * signalled). SIGTERM first (it stops its agents), SIGKILL of its process group
+ * after `timeoutMs`; then the pid, socket and control token files go. Resolves
+ * "none" (no pid file), "stale" (no such process), "foreign" (another program
+ * holds the pid) or "stopped". The task data is left untouched. */
+async function stopLegacyOrchd(
+  dir,
+  {
+    timeoutMs = 10000,
+    pollMs = 100,
+    kill = process.kill.bind(process),
+    comm = commOf,
+  } = {},
+) {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const pidFile = path.join(dir, "orchd.pid");
+  let pid;
+  try {
+    pid = Number.parseInt(fs.readFileSync(pidFile, "utf8"), 10);
+  } catch {
+    return "none";
+  }
+  const isAlive = () => {
+    try {
+      kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error.code === "EPERM";
+    }
+  };
+  const clean = () => {
+    for (const name of ["orchd.pid", "orchd.sock", "control.token"])
+      fs.rmSync(path.join(dir, name), { force: true });
+  };
+  if (!Number.isInteger(pid) || pid <= 1 || !isAlive()) {
+    clean();
+    return "stale";
+  }
+  if (!comm(pid).includes("orchd")) {
+    clean();
+    return "foreign";
+  }
+  kill(pid, "SIGTERM");
+  const deadline = Date.now() + timeoutMs;
+  while (isAlive() && Date.now() < deadline) await sleep(pollMs);
+  if (isAlive()) {
+    try {
+      kill(-pid, "SIGKILL");
+    } catch {
+      kill(pid, "SIGKILL");
+    }
+    while (isAlive() && Date.now() < deadline + 2000) await sleep(pollMs);
+  }
+  clean();
+  return "stopped";
+}
+
+function commOf(pid) {
+  try {
+    return childProcess
+      .execFileSync("ps", ["-p", String(pid), "-o", "comm="], {
+        encoding: "utf8",
+        timeout: 5000,
+      })
+      .trim();
+  } catch {
+    return "";
+  }
+}
+
+const MCP_SERVER = "sushiai-orchestrator";
+const FIRST_LAUNCH_STORE = "orchestrator-first-launch";
+
+/** Whether an earlier build left Orchestrator work on this machine: its MCP
+ * server entry in Claude's or Codex's config, or its data folder. Reads only. */
+function legacyOrchestratorPresent({ userDataDir, homeDir, codexHome }) {
+  if (userDataDir && fs.existsSync(path.join(userDataDir, "orchestrator")))
+    return true;
+  try {
+    const claude = JSON.parse(
+      fs.readFileSync(new ClaudeMcp({ home: homeDir }).configFile(), "utf8"),
+    );
+    if (claude?.mcpServers && Object.hasOwn(claude.mcpServers, MCP_SERVER))
+      return true;
+  } catch {
+    // No Claude config, or one that is not JSON.
+  }
+  try {
+    const toml = fs.readFileSync(
+      path.join(codexHome || path.join(homeDir, ".codex"), "config.toml"),
+      "utf8",
+    );
+    return new RegExp(
+      `^\\s*\\[mcp_servers\\.["']?${MCP_SERVER}["']?\\]`,
+      "m",
+    ).test(toml);
+  } catch {
+    return false;
+  }
+}
+
 /** Registers the IPC surface. Nothing connects here: `start()` (called once
- * the connections exist) reads the extension's saved on/off state, and every
- * later toggle from `extensions` connects or closes the orchestrator. */
-function registerOrchestratorExtension({ handle, extensions, ...options }) {
+ * the daemon manager exists) reads the extension's saved on/off state, and
+ * every later toggle from `extensions` listens or stops listening. */
+function registerOrchestratorExtension({
+  handle,
+  extensions,
+  stopLegacy = stopLegacyOrchd,
+  legacy,
+  ...options
+}) {
   const hosts = createOrchestratorHosts({ ...options, enabled: false });
   handle("orchestrator", (method, params, host) =>
     hosts.call(method, params, host),
@@ -1282,13 +1224,43 @@ function registerOrchestratorExtension({ handle, extensions, ...options }) {
   extensions.onChange((id) => {
     if (started && id === ORCHESTRATOR_MANIFEST.id) return apply();
   });
+  const { userDataDir, log } = options;
+  // Cutover from a build whose orchd ran beside the app: the old process
+  // stops once per app run (its data stays where it is), and the first launch
+  // of this build turns the Orchestrator on only for an owner who used it.
+  async function retireLegacy() {
+    if (!userDataDir) return;
+    try {
+      if (
+        (await stopLegacy(path.join(userDataDir, "orchestrator"))) === "stopped"
+      )
+        log?.("stopped a legacy orchd");
+    } catch (error) {
+      log?.(`legacy orchd was not stopped: ${error.message}`);
+    }
+    if (
+      !legacy ||
+      Object.keys(readStore(userDataDir, FIRST_LAUNCH_STORE)).length
+    )
+      return;
+    // Legacy evidence keeps a saved "on" and never overrides a saved "off".
+    const id = ORCHESTRATOR_MANIFEST.id;
+    const evidence = legacyOrchestratorPresent({ userDataDir, ...legacy });
+    await extensions.setEnabled(
+      id,
+      extensions.hasSavedState(id)
+        ? extensions.isEnabled(id) && evidence
+        : evidence,
+    );
+    writeStore(userDataDir, FIRST_LAUNCH_STORE, { settled: true });
+  }
   hosts.start = async () => {
     await extensions.ready;
+    await retireLegacy().catch((error) =>
+      log?.(`orchestrator first launch: ${error.message}`),
+    );
     started = true;
     await apply();
-    // Re-check the switch after the scan: it may have been turned off meanwhile.
-    if (hosts.on && (await hosts.local.hasPendingTasks()) && hosts.on)
-      await hosts.local.resume().catch(() => {});
   };
   return hosts;
 }
@@ -1299,19 +1271,14 @@ module.exports = {
   OrchestratorHosts,
   registerOrchestratorExtension,
   createOrchestratorHosts,
+  createModuleSwitch,
+  stopLegacyOrchd,
+  legacyOrchestratorPresent,
   OFF_MESSAGE,
-  orchdRequest,
   tagTasks,
   tagEvent,
   LOCAL_HOST,
   orchestratorNotice,
-  orchdBinaryPath,
-  socketPathFor,
-  isStalePing,
-  waitForExit,
+  managerHostOf,
   ALLOWED_METHODS,
-  NOT_BUILT,
-  NOT_INSTALLED,
-  notBuiltMessage,
-  FAILED_TO_START,
 };

@@ -1,23 +1,13 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const net = require("node:net");
-const os = require("node:os");
-const path = require("node:path");
-const fs = require("node:fs/promises");
 const {
   OrchestratorService,
   OrchestratorHosts,
+  createOrchestratorHosts,
   orchestratorNotice,
-  socketPathFor,
-  orchdBinaryPath,
-  isStalePing,
-  waitForExit,
   ALLOWED_METHODS,
-  NOT_BUILT,
-  NOT_INSTALLED,
-  notBuiltMessage,
-  FAILED_TO_START,
 } = require("../electron/orchestrator.cjs");
+const { fakeDaemonManager } = require("./helpers/fake-daemon-manager.cjs");
 
 async function waitUntil(check, { timeout = 2000, interval = 5 } = {}) {
   const deadline = Date.now() + timeout;
@@ -28,174 +18,52 @@ async function waitUntil(check, { timeout = 2000, interval = 5 } = {}) {
   throw new Error("waitUntil: condition never became true");
 }
 
-/** A tiny NDJSON-RPC server standing in for `orchd`: `handlers[method]`
- * returns (or throws) the result for one request. Writes `control.token`
- * into its own data dir up front, same file/shape the real daemon writes, so
- * the service under test has something to authenticate with. A `subscribe`
- * request gets no reply and instead marks its socket as the one `pushEvent`
- * writes raw event lines to - the real daemon never answers it either. */
-async function fixtureServer(t, handlers, { token = "test-token" } = {}) {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "orchd-test-"));
-  const socketPath = path.join(directory, "orchd.sock");
-  await fs.writeFile(path.join(directory, "control.token"), token, {
-    mode: 0o600,
-  });
-  const calls = [];
-  const connections = new Set();
-  let subscribeSocket = null;
-  const server = net.createServer((socket) => {
-    connections.add(socket);
-    socket.on("close", () => {
-      connections.delete(socket);
-      if (subscribeSocket === socket) subscribeSocket = null;
-    });
-    let buffer = "";
-    socket.on("data", async (chunk) => {
-      buffer += chunk;
-      let boundary;
-      while ((boundary = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 1);
-        if (!line.trim()) continue;
-        const message = JSON.parse(line);
-        calls.push({
-          method: message.method,
-          params: message.params,
-          auth: message.auth,
-        });
-        if (message.method === "subscribe") {
-          subscribeSocket = socket;
-          continue;
-        }
-        try {
-          const result = await handlers[message.method]?.(message.params);
-          socket.write(
-            JSON.stringify({ id: message.id, result: result ?? {} }) + "\n",
-          );
-        } catch (error) {
-          socket.write(
-            JSON.stringify({
-              id: message.id,
-              error: { message: error.message },
-            }) + "\n",
-          );
-        }
-      }
-    });
-  });
-  await new Promise((resolve) => server.listen(socketPath, resolve));
-  t.after(async () => {
-    connections.forEach((socket) => socket.destroy());
-    await new Promise((resolve) => server.close(resolve));
-    await fs.rm(directory, { recursive: true, force: true });
-  });
-  return {
-    socketPath,
-    directory,
-    calls,
-    token,
-    hasSubscriber: () => Boolean(subscribeSocket),
-    pushEvent: (event) => subscribeSocket?.write(JSON.stringify(event) + "\n"),
-  };
-}
+const REMOTE = "ssh:devbox-id";
+const connections = {
+  get: () => ({ name: "Devbox" }),
+  list: () => [{ id: "devbox-id", name: "Devbox" }],
+  hasShell: () => true,
+  exec: async () => "git=1\nclaude=1\nclaude_login=1\n",
+};
 
-/** A service wired to a running fixture server so `#ensureRunning` never
- * needs to spawn - `binary` just has to exist. */
-async function serviceAgainst(t, socketPath, directory, extra = {}) {
-  const binary = path.join(directory, "orchd");
-  await fs.writeFile(binary, "#!/bin/sh\n", { mode: 0o755 });
-  const service = new OrchestratorService({
-    dataDir: directory,
-    root: directory,
-    resourcesPath: directory,
-    packaged: false,
+/** A service for `host` over a fake daemon manager. */
+function serviceFor(manager, extra = {}) {
+  return new OrchestratorService({
+    host: "local",
+    getManager: () => manager,
+    getConnections: () => connections,
     send: () => {},
     ...extra,
   });
-  service.binary = binary;
-  service.socketPath = socketPath;
-  t.after(() => service.close());
-  return service;
 }
 
-test("socketPathFor keeps a short data dir, falls back for a long one", () => {
-  const short = "/Users/sushi/Library/Application Support/sushiAI/orchestrator";
-  assert.equal(socketPathFor(short), path.join(short, "orchd.sock"));
-  const long = "/Users/sushi/" + "x".repeat(120) + "/orchestrator";
-  const fallback = socketPathFor(long, "/tmp");
-  assert.equal(path.dirname(fallback), "/tmp");
-  assert.match(path.basename(fallback), /^sushi-orchd-[0-9a-f]{8}\.sock$/);
-  // Deterministic per data dir, so a restart reuses the same fallback path.
-  assert.equal(fallback, socketPathFor(long, "/tmp"));
-});
-
-test("orchdBinaryPath resolves dev vs packaged locations", () => {
-  assert.equal(
-    orchdBinaryPath({ root: "/repo", packaged: false }),
-    path.join("/repo", "orchd", "target", "release", "orchd"),
-  );
-  assert.equal(
-    orchdBinaryPath({ resourcesPath: "/App/Resources", packaged: true }),
-    path.join("/App/Resources", "orchd"),
-  );
-});
-
-test("isStalePing: a rebuilt binary replaces an idle daemon at once and a busy one only after the deferral", () => {
-  assert.equal(isStalePing({ binaryMtimeMs: 1000, running: 0 }, 3000), true);
-  assert.equal(isStalePing({ binaryMtimeMs: 1000, running: 0 }, 1500), false);
-  assert.equal(isStalePing({ binaryMtimeMs: 1000, running: 2 }, 5000), false);
-  assert.equal(
-    isStalePing({ binaryMtimeMs: 1000, running: 2 }, 5000, 29 * 60 * 1000),
-    false,
-  );
-  assert.equal(
-    isStalePing({ binaryMtimeMs: 1000, running: 2 }, 5000, 30 * 60 * 1000),
-    true,
-  );
-  assert.equal(
-    isStalePing({ binaryMtimeMs: 1000, running: 0, chatTurns: 1 }, 5000),
-    false,
-  );
-  assert.equal(isStalePing({}, 5000), false);
-  assert.equal(isStalePing(null, 5000), false);
-});
-
-test("waitForExit polls until the pid is gone, and gives up quietly after its timeout", async () => {
-  let attempts = 0;
-  await waitForExit(4242, {
-    killFn: () => {
-      attempts++;
-      if (attempts >= 3) throw new Error("ESRCH");
-    },
-    timeoutMs: 1000,
-    intervalMs: 1,
+/** A manager whose local and remote hosts are both ready with `orch`. */
+function twoHosts(handlers = {}, onRetry) {
+  return fakeDaemonManager({
+    hosts: { local: {}, "devbox-id": {} },
+    handlers,
+    onRetry,
   });
-  assert.equal(attempts, 3);
+}
 
-  const start = Date.now();
-  await waitForExit(4242, {
-    killFn: () => {}, // always "alive"
-    timeoutMs: 20,
-    intervalMs: 5,
-  });
-  assert.ok(Date.now() - start >= 20, "waited out the full timeout");
-});
-
-test("call() rejects a method outside the protocol allowlist before touching the socket", async () => {
-  const service = new OrchestratorService({
-    dataDir: "/tmp/does-not-matter",
-    root: "/tmp/does-not-matter",
-    send: () => {},
-  });
-  for (const method of ["hook.stop", "shutdown", "subscribe", "rm -rf /"])
+test("call() rejects a method outside the protocol allowlist before touching the daemon", async () => {
+  const manager = fakeDaemonManager();
+  const service = serviceFor(manager);
+  for (const method of [
+    "hook.stop",
+    "shutdown",
+    "subscribe",
+    "ping",
+    "rm -rf /",
+  ])
     await assert.rejects(
       service.call(method),
       /Invalid orchestrator request/,
       method,
     );
+  assert.equal(manager.calls.length, 0);
   // Every pre-existing method stays reachable.
   for (const method of [
-    "ping",
     "settings.get",
     "settings.set",
     "task.list",
@@ -219,22 +87,14 @@ test("call() rejects a method outside the protocol allowlist before touching the
     "chat.new",
     "chat.switch",
     "chat.clear",
-  ])
-    assert.equal(ALLOWED_METHODS.has(method), true, method);
-  // Agent-to-agent message threads are reachable the same way as tasks/chat.
-  assert.equal(ALLOWED_METHODS.has("message.list"), true);
-  assert.equal(ALLOWED_METHODS.has("message.send"), true);
-  // Read-only built-in defaults, compared against the saved settings.
-  assert.equal(ALLOWED_METHODS.has("settings.defaults"), true);
-  for (const method of [
+    "message.list",
+    "message.send",
+    "settings.defaults",
     "evolution.run",
     "evolution.list",
     "evolution.approve",
     "evolution.reject",
     "evolution.adopt",
-  ])
-    assert.equal(ALLOWED_METHODS.has(method), true, method);
-  for (const method of [
     "repo.notes.list",
     "repo.notes.add",
     "repo.notes.remove",
@@ -256,175 +116,146 @@ test("every method the renderer client calls is allowlisted in main", () => {
     assert.equal(ALLOWED_METHODS.has(method), true, method);
 });
 
-test("call() reports the daemon as not built rather than hanging on a missing binary", async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "orchd-missing-"));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  const service = new OrchestratorService({
-    dataDir: directory,
-    root: directory,
-    resourcesPath: directory,
-    packaged: false,
-    send: () => {},
+test("every request goes to the daemon as orch.<method> with its own timeout", async () => {
+  const manager = fakeDaemonManager({
+    handlers: { "orch.task.list": () => [{ id: "t1", status: "queued" }] },
   });
-  await assert.rejects(service.call("ping"), new RegExp(NOT_BUILT));
+  const service = serviceFor(manager);
+  const tasks = await service.call("task.list", { repo: "/x" });
+  assert.deepEqual(tasks, [{ id: "t1", status: "queued" }]);
+  await service.call("task.pr", { id: "t1" });
+  assert.deepEqual(
+    manager.calls.map((call) => [call.host, call.method, call.options]),
+    [
+      ["local", "orch.task.list", { timeoutMs: 20000 }],
+      ["local", "orch.task.pr", { timeoutMs: 600000 }],
+    ],
+  );
+  assert.deepEqual(manager.calls[0].params, { repo: "/x" });
 });
 
-test("a binary that cannot be spawned is a failed start, not an uncaught error", async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "orchd-nospawn-"));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  const service = new OrchestratorService({
-    dataDir: directory,
-    root: directory,
-    resourcesPath: directory,
-    packaged: false,
-    send: () => {},
-    spawnRetries: 2,
-    spawnIntervalMs: 10,
+test("a daemon without the orch capability answers Update sushiai on <host>, and nothing is sent", async () => {
+  const manager = fakeDaemonManager({
+    hosts: {
+      local: { capabilities: ["sessions"] },
+      "devbox-id": { capabilities: ["sessions", "attach"] },
+    },
   });
-  // Exists, so it passes the "not built" check, but exec finds no interpreter.
-  service.binary = path.join(directory, "orchd");
-  await fs.writeFile(service.binary, "#!/nonexistent/interpreter\n", {
-    mode: 0o755,
-  });
-  service.socketPath = path.join(directory, "orchd.sock");
-  t.after(() => service.close());
-  await assert.rejects(service.call("ping"), /failed to start/);
-});
-
-test("a packaged app with no daemon says reinstall, not npm run build:orchd", async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "orchd-pkg-"));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  const service = new OrchestratorService({
-    dataDir: directory,
-    root: directory,
-    resourcesPath: directory,
-    packaged: true,
-    send: () => {},
+  await assert.rejects(serviceFor(manager).call("task.list"), {
+    message: "Update sushiai on this Mac",
+    code: "ORCH_MISSING",
   });
   await assert.rejects(
-    service.call("ping"),
-    (error) =>
-      error.message ===
-        "The orchestrator is missing from this installation — reinstall sushiAI." &&
-      !/build:orchd/.test(error.message),
+    serviceFor(manager, { host: REMOTE }).call("task.list"),
+    { message: "Update sushiai on Devbox", code: "ORCH_MISSING" },
   );
-  assert.equal(notBuiltMessage(false), NOT_BUILT);
-  assert.equal(notBuiltMessage(true), NOT_INSTALLED);
+  assert.equal(manager.calls.length, 0);
+  // The panel's host list shows the same instruction instead of "ready".
+  const hosts = createOrchestratorHosts({
+    send: () => {},
+    getConnections: () => connections,
+    getManager: () => manager,
+    enabled: true,
+  });
+  const record = hosts.list().find((host) => host.id === REMOTE);
+  assert.equal(record.state, "error");
+  assert.equal(record.detail, "Update sushiai on Devbox");
 });
 
-test("call() reports a distinct error when a spawned daemon never answers ping (binary exists but is stuck)", async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "orchd-stuck-"));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  const binary = path.join(directory, "orchd");
-  await fs.writeFile(binary, "#!/bin/sh\n", { mode: 0o755 });
+test("without a daemon manager the call says the daemon is not running", async () => {
   const service = new OrchestratorService({
-    dataDir: directory,
-    root: directory,
-    resourcesPath: directory,
-    packaged: false,
+    getManager: () => null,
     send: () => {},
-    spawnRetries: 3,
-    spawnIntervalMs: 5,
   });
-  service.binary = binary;
-  service.socketPath = path.join(directory, "orchd.sock"); // nobody listens here
-  await assert.rejects(service.call("ping"), new RegExp(FAILED_TO_START));
+  await assert.rejects(service.call("task.list"), {
+    message: "The sushiai daemon is not running.",
+  });
 });
 
-test("probe() pings the socket in use and never spawns or provisions a daemon", async (t) => {
-  const { socketPath, directory, calls } = await fixtureServer(t, {
-    ping: () => ({ pid: 7 }),
-  });
-  // No binary: anything that went through #ensureRunning would fail NOT_BUILT.
-  const service = new OrchestratorService({
-    dataDir: directory,
-    root: directory,
-    resourcesPath: directory,
-    packaged: false,
-    send: () => {},
-  });
-  service.binary = path.join(directory, "missing-orchd");
-  service.socketPath = socketPath;
-  assert.deepEqual(await service.probe(), { pid: 7 });
-  assert.deepEqual(
-    calls.map((c) => c.method),
-    ["ping"],
-  );
-  // A dead socket is a plain connection error, not a spawn attempt.
-  service.socketPath = path.join(directory, "nobody.sock");
-  await assert.rejects(service.probe(), (error) => {
-    assert.doesNotMatch(error.message, new RegExp(NOT_BUILT));
-    assert.doesNotMatch(error.message, new RegExp(FAILED_TO_START));
-    return true;
-  });
-
-  // A remote service that has no connection yet never calls ensure().
-  let ensured = 0;
-  const remote = new OrchestratorService({
-    host: "ssh:box",
-    send: () => {},
-    remote: {
-      ensure: async () => {
-        ensured++;
-        return { socketPath, token: "t" };
+test("a module that is still starting is reported as try again, not as a failure", async () => {
+  const manager = fakeDaemonManager({
+    handlers: {
+      "orch.task.list": () => {
+        throw Object.assign(new Error("orch is starting"), { code: 1100 });
       },
-      reopen() {},
-      close() {},
     },
   });
-  await assert.rejects(remote.probe(), /not connected/);
-  assert.equal(ensured, 0);
+  await assert.rejects(serviceFor(manager).call("task.list"), {
+    code: "ORCH_STARTING",
+    message: /still starting/,
+  });
 });
 
-test("OrchestratorHosts.probe never enables or creates a remote host", async () => {
-  let created = 0;
-  let probed = 0;
+test("a connecting host is waited for; one that never settles times out", async () => {
+  const manager = fakeDaemonManager({
+    hosts: { local: { state: "connecting" } },
+  });
+  const service = serviceFor(manager, { readyTimeoutMs: 40 });
+  const pending = service.call("task.list");
+  setTimeout(() => manager.setState("local", { state: "ready" }), 10);
+  await pending;
+  assert.equal(manager.calls.length, 1);
+  // The listener of the wait is gone again.
+  assert.equal(manager.listeners("state"), 0);
+
+  manager.setState("local", { state: "connecting" });
+  await assert.rejects(service.call("task.list"), /did not become ready/);
+  assert.equal(manager.listeners("state"), 0);
+});
+
+test("a remote host that is down is reconnected by the first request, at most every 30 s", async () => {
+  let retries = 0;
+  const manager = twoHosts({}, (host, m) => {
+    retries += 1;
+    if (retries === 2) m.setState(host, { state: "ready" });
+  });
+  manager.setState("devbox-id", {
+    state: "failed",
+    message: "The connection to the host was lost.",
+  });
+  const service = serviceFor(manager, { host: REMOTE });
+  await assert.rejects(service.call("task.list"), {
+    message: "The connection to the host was lost.",
+  });
+  // A second request right after does not retry again.
+  await assert.rejects(service.call("task.list"), {
+    message: "The connection to the host was lost.",
+  });
+  assert.equal(retries, 1);
+  // The owner's Try again clears the pause.
+  service.forget();
+  await service.call("task.list");
+  assert.equal(retries, 2);
+  assert.equal(manager.requestsFor("orch.task.list").length, 1);
+});
+
+test("probe() reports readiness and never connects or retries a host", async () => {
+  let retries = 0;
+  const manager = twoHosts({}, () => (retries += 1));
+  assert.deepEqual(serviceFor(manager).probe(), { pid: 0 });
+  manager.setState("devbox-id", { state: "failed", message: "down" });
+  assert.throws(() => serviceFor(manager, { host: REMOTE }).probe(), {
+    message: "down",
+  });
+  assert.equal(retries, 0);
+
   const hosts = new OrchestratorHosts({
-    local: { probe: async () => ({ pid: 1 }) },
-    connections: () => ({ get: () => ({}), list: () => [] }),
-    createService: () => {
-      created++;
-      return { connect() {}, probe: async () => ({ pid: 2 }) };
-    },
+    local: serviceFor(manager),
+    connections: () => connections,
+    getManager: () => manager,
     onChange: () => {},
+    createService: () => assert.fail("a probe must not create a service"),
   });
-  assert.deepEqual(await hosts.probe("local"), { pid: 1 });
-  await assert.rejects(hosts.probe("ssh:box"), /not connected/);
-  assert.equal(created, 0);
-  assert.equal(
-    hosts.list().find((h) => h.id === "ssh:box"),
-    undefined,
-  );
-  // Once a call connected the host, the probe reaches its service.
-  hosts.services.set("ssh:box", {
-    probe: async () => {
-      probed++;
-      return { pid: 2 };
-    },
-  });
-  assert.deepEqual(await hosts.probe("ssh:box"), { pid: 2 });
-  assert.equal(probed, 1);
-  await assert.rejects(hosts.probe(42), /Invalid orchestrator host/);
+  await assert.rejects(hosts.probe("ssh:other"), /not connected/);
+  assert.equal(hosts.services.size, 0);
 });
 
-test("every request but ping carries the daemon's control token", async (t) => {
-  const { socketPath, directory, calls, token } = await fixtureServer(t, {
-    ping: () => ({}),
-    "task.list": () => [],
-  });
-  const service = await serviceAgainst(t, socketPath, directory);
-  await service.call("task.list", { repo: "/x" });
-  assert.equal(calls.find((c) => c.method === "ping").auth, undefined);
-  assert.equal(calls.find((c) => c.method === "task.list").auth, token);
-});
-
-test("task.create is enriched with the repo's enabled MCP launch config", async (t) => {
-  const { socketPath, directory, calls, token } = await fixtureServer(t, {
-    ping: () => ({}),
-    "task.create": (params) => ({ id: "t1", ...params }),
+test("task.create is enriched with the repo's enabled MCP launch config", async () => {
+  const manager = fakeDaemonManager({
+    handlers: { "orch.task.create": (params) => ({ id: "t1", ...params }) },
   });
   const mcpSnapshot = { mcpServers: { fs: { command: "fs-server" } } };
-  const service = await serviceAgainst(t, socketPath, directory, {
+  const service = serviceFor(manager, {
     getClaudeMcp: () => ({ launchConfig: async () => mcpSnapshot }),
   });
   const result = await service.call("task.create", {
@@ -432,18 +263,16 @@ test("task.create is enriched with the repo's enabled MCP launch config", async 
     title: "Export CSV",
   });
   assert.equal(result.id, "t1");
-  const sent = calls.find((c) => c.method === "task.create");
+  const sent = manager.requestsFor("orch.task.create")[0];
   assert.deepEqual(sent.params.mcp, mcpSnapshot);
   assert.equal(sent.params.title, "Export CSV");
-  assert.equal(sent.auth, token);
 });
 
-test("task.create proceeds without mcp when the project has no readable MCP config", async (t) => {
-  const { socketPath, directory, calls } = await fixtureServer(t, {
-    ping: () => ({}),
-    "task.create": (params) => ({ id: "t2", ...params }),
+test("task.create proceeds without mcp when the project has no readable MCP config", async () => {
+  const manager = fakeDaemonManager({
+    handlers: { "orch.task.create": (params) => ({ id: "t2", ...params }) },
   });
-  const service = await serviceAgainst(t, socketPath, directory, {
+  const service = serviceFor(manager, {
     getClaudeMcp: () => ({
       launchConfig: async () => {
         throw new Error("no such project");
@@ -451,11 +280,11 @@ test("task.create proceeds without mcp when the project has no readable MCP conf
     }),
   });
   await service.call("task.create", { repo: "/nope", title: "x" });
-  const sent = calls.find((c) => c.method === "task.create").params;
+  const sent = manager.requestsFor("orch.task.create")[0].params;
   assert.equal("mcp" in sent, false);
 });
 
-test("settings.set pushes a full-replace secrets.set: each route's resolved profile env", async (t) => {
+test("settings.set pushes a full-replace secrets.set: each route's resolved profile env", async () => {
   const settings = {
     routes: [
       {
@@ -468,13 +297,13 @@ test("settings.set pushes a full-replace secrets.set: each route's resolved prof
       { id: "r2", label: "Codex", harness: "codex" },
     ],
   };
-  const { socketPath, directory, calls } = await fixtureServer(t, {
-    ping: () => ({}),
-    "settings.set": () => settings,
-    "settings.get": () => settings,
-    "secrets.set": () => ({}),
+  const manager = fakeDaemonManager({
+    handlers: {
+      "orch.settings.set": () => settings,
+      "orch.settings.get": () => settings,
+    },
   });
-  const service = await serviceAgainst(t, socketPath, directory, {
+  const service = serviceFor(manager, {
     getModelProviders: () => ({
       resolveEnv: async (id) => {
         if (id !== "prof-1") throw new Error("Model profile not found.");
@@ -487,7 +316,7 @@ test("settings.set pushes a full-replace secrets.set: each route's resolved prof
     }),
   });
   await service.call("settings.set", { settings });
-  const secretsCall = calls.find((c) => c.method === "secrets.set");
+  const secretsCall = manager.requestsFor("orch.secrets.set")[0];
   assert.ok(secretsCall, "secrets.set was pushed");
   assert.deepEqual(secretsCall.params, {
     profiles: { "prof-1": { env: { ANTHROPIC_MODEL: "x" }, key: "prof-key" } },
@@ -500,15 +329,15 @@ test("settings.set pushes a full-replace secrets.set: each route's resolved prof
   });
 });
 
-test("secrets.set is always pushed, even to clear it: no profiles means profiles:{}", async (t) => {
+test("secrets.set is always pushed, even to clear it: no profiles means profiles:{}", async () => {
   const settings = { routes: [] };
-  const { socketPath, directory, calls } = await fixtureServer(t, {
-    ping: () => ({}),
-    "settings.set": () => settings,
-    "settings.get": () => settings,
-    "secrets.set": () => ({}),
+  const manager = fakeDaemonManager({
+    handlers: {
+      "orch.settings.set": () => settings,
+      "orch.settings.get": () => settings,
+    },
   });
-  const service = await serviceAgainst(t, socketPath, directory, {
+  const service = serviceFor(manager, {
     getModelProviders: () => ({
       resolveEnv: async () => {
         throw new Error("should not be called");
@@ -516,11 +345,7 @@ test("secrets.set is always pushed, even to clear it: no profiles means profiles
     }),
   });
   await service.call("settings.set", { settings });
-  const secretsCall = calls.find((c) => c.method === "secrets.set");
-  assert.ok(
-    secretsCall,
-    "a full replace is pushed even when everything clears",
-  );
+  const secretsCall = manager.requestsFor("orch.secrets.set")[0];
   assert.deepEqual(secretsCall.params, {
     profiles: {},
     accounts: {},
@@ -530,31 +355,28 @@ test("secrets.set is always pushed, even to clear it: no profiles means profiles
   });
 });
 
-test("remote orchd receives only trusted project values and project MCP config", async (t) => {
-  const { socketPath, directory, calls } = await fixtureServer(t, {
-    ping: () => ({}),
-    "settings.get": () => ({ routes: [] }),
-    "secrets.set": () => ({}),
-    "task.create": (params) => params,
+test("a remote daemon receives only trusted project values and project MCP config, never provider keys", async () => {
+  const manager = twoHosts({
+    "orch.settings.get": () => ({
+      routes: [{ id: "r", profileId: "prof-1" }],
+    }),
+    "orch.task.create": (params) => ({ id: "t1", status: "queued", ...params }),
   });
-  const host = "ssh:devbox-id";
   const project = {
     id: "project-1",
     mcp: { mcpServers: { lookup: { command: "lookup" } } },
   };
-  const service = await serviceAgainst(t, socketPath, directory, {
-    host,
-    remote: {
-      ensure: async () => ({ socketPath, token: "test-token" }),
-      reopen() {},
-      close() {},
-    },
+  const service = serviceFor(manager, {
+    host: REMOTE,
+    getModelProviders: () => ({
+      resolveEnv: async () => assert.fail("provider keys stay on this Mac"),
+    }),
     getProjects: () => ({
       get: async (id) => (id === project.id ? project : null),
       agentEnvironments: async (target) =>
-        target === host ? { [project.id]: { PROJECT_KEY: "invented" } } : {},
+        target === REMOTE ? { [project.id]: { PROJECT_KEY: "invented" } } : {},
       mcpEnvironments: async (target) =>
-        target === host
+        target === REMOTE
           ? { [project.id]: { LOOKUP_TOKEN: "invented-mcp" } }
           : {},
     }),
@@ -565,8 +387,10 @@ test("remote orchd receives only trusted project values and project MCP config",
     title: "remote task",
   });
   assert.equal(result.projectId, project.id);
+  assert.equal(result.host, REMOTE);
   assert.deepEqual(result.mcp.mcpServers, project.mcp.mcpServers);
-  const secrets = calls.find((call) => call.method === "secrets.set");
+  const secrets = manager.requestsFor("orch.secrets.set")[0];
+  assert.equal(secrets.host, "devbox-id");
   assert.deepEqual(secrets.params, {
     profiles: {},
     accounts: {},
@@ -576,37 +400,73 @@ test("remote orchd receives only trusted project values and project MCP config",
   });
 });
 
-test("connect() relays subscribe events and raises one notice per (task, question)", async (t) => {
-  const { socketPath, directory, hasSubscriber, pushEvent } =
-    await fixtureServer(t, {
-      ping: () => ({}),
-      "settings.get": () => ({ routes: [] }),
-    });
+/** Hosts over a fake manager, listening, with `notices` and `relayed`. */
+async function listening(manager, extra = {}) {
   const relayed = [];
   const notices = [];
-  const service = await serviceAgainst(t, socketPath, directory, {
+  const hosts = createOrchestratorHosts({
     send: (channel, value) => relayed.push([channel, value]),
-    notify: (notice) => {
-      notices.push(notice);
-    },
+    notify: (notice) => notices.push(notice),
+    getConnections: () => connections,
+    getManager: () => manager,
+    enabled: false,
+    ...extra,
   });
-  service.connect();
-  await waitUntil(hasSubscriber);
+  await hosts.setEnabled(true);
+  return { hosts, relayed, notices };
+}
 
-  const task = (question) => ({
+test("orch.event arrives per host: a local one as is, a remote one tagged with its host", async () => {
+  const manager = twoHosts({ "orch.task.list": () => [] });
+  const { hosts, relayed } = await listening(manager);
+  await hosts.call("task.list", {}, REMOTE);
+  const task = (id) => ({ id, title: id, repo: "/r", status: "running" });
+  manager.notify("local", "orch.event", { event: "task", task: task("l1") });
+  manager.notify("devbox-id", "orch.event", {
+    event: "task",
+    task: task("r1"),
+  });
+  // A host the app never used, and other notifications, are not relayed.
+  manager.notify("other", "orch.event", { event: "task", task: task("x") });
+  manager.notify("local", "session.exited", { id: "s" });
+  manager.notify("local", "orch.event", { nothing: true });
+  assert.deepEqual(relayed, [
+    ["orchestrator-event", { event: "task", task: task("l1") }],
+    [
+      "orchestrator-event",
+      {
+        event: "task",
+        task: { ...task("r1"), host: REMOTE },
+        host: REMOTE,
+      },
+    ],
+  ]);
+  hosts.close();
+  manager.notify("local", "orch.event", { event: "task", task: task("l2") });
+  assert.equal(relayed.length, 2);
+});
+
+test("events and notices are kept per host: the same task id on two hosts notifies twice", async () => {
+  const manager = twoHosts({ "orch.task.list": () => [] });
+  const { hosts, notices } = await listening(manager);
+  await hosts.call("task.list", {}, REMOTE);
+  const waiting = {
     id: "t1",
     title: "Do the thing",
     repo: "/repo",
     status: "waiting",
-    question: question ? { text: question, options: [] } : undefined,
-  });
-  pushEvent({ event: "task", task: task("Delete old keys?") });
-  await waitUntil(() => notices.length > 0);
-  assert.equal(relayed.length, 1);
-  assert.deepEqual(relayed[0], [
-    "orchestrator-event",
-    { event: "task", task: task("Delete old keys?") },
-  ]);
+    question: { text: "Delete old keys?", options: [] },
+  };
+  manager.notify("local", "orch.event", { event: "task", task: waiting });
+  manager.notify("local", "orch.event", { event: "task", task: waiting });
+  manager.notify("devbox-id", "orch.event", { event: "task", task: waiting });
+  assert.deepEqual(
+    notices.map((notice) => [notice.taskId, notice.host]),
+    [
+      ["t1", undefined],
+      ["t1", REMOTE],
+    ],
+  );
   assert.deepEqual(notices[0], {
     taskId: "t1",
     repo: "/repo",
@@ -616,34 +476,162 @@ test("connect() relays subscribe events and raises one notice per (task, questio
     focus: "question",
     repoName: "repo",
   });
-
-  // The same task re-entering `waiting` with the same question never re-notifies.
-  pushEvent({ event: "task", task: task("Delete old keys?") });
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.equal(notices.length, 1);
-
-  // A genuinely new question on the same task does raise a second notice.
-  pushEvent({ event: "task", task: task("Something else?") });
-  await waitUntil(() => notices.length === 2);
-  assert.equal(notices[1].body, "Something else?");
 });
 
-test("the transition detector notifies done and failed once, only for live top-level tasks; a fresh report titles the done notice", async (t) => {
-  const { socketPath, directory, hasSubscriber, pushEvent } =
-    await fixtureServer(t, {
-      ping: () => ({}),
-      "settings.get": () => ({ routes: [] }),
-    });
-  const notices = [];
-  const service = await serviceAgainst(t, socketPath, directory, {
+test("secrets are pushed when a host becomes ready and again after its daemon restarts", async () => {
+  const manager = twoHosts({
+    "orch.settings.get": () => ({ routes: [] }),
+  });
+  const pushed = () => manager.requestsFor("orch.secrets.set");
+  const hosts = createOrchestratorHosts({
     send: () => {},
-    notify: (notice) => {
-      notices.push(notice);
+    getConnections: () => connections,
+    getManager: () => manager,
+    getProjects: () => ({
+      agentEnvironments: async () => ({}),
+      mcpEnvironments: async () => ({}),
+    }),
+    enabled: false,
+  });
+  await hosts.setEnabled(true);
+  // Enabling pushes to the local daemon that is ready already.
+  assert.equal(pushed().length, 1);
+  assert.equal(pushed()[0].host, "local");
+
+  // A daemon that was killed and came back is ready again: pushed again.
+  manager.setState("local", { state: "offline" });
+  assert.equal(pushed().length, 1);
+  manager.setState("local", { state: "ready" });
+  await waitUntil(() => pushed().length === 2);
+
+  // A remote host is pushed to once it is in use and ready, not before.
+  manager.setState("devbox-id", { state: "offline" });
+  manager.setState("devbox-id", { state: "ready" });
+  assert.equal(pushed().length, 2);
+  await hosts.call("task.list", {}, REMOTE);
+  manager.setState("devbox-id", { state: "offline" });
+  manager.setState("devbox-id", { state: "ready" });
+  await waitUntil(() => pushed().length === 3);
+  assert.equal(pushed()[2].host, "devbox-id");
+});
+
+test("a lagging subscriber's resync refetches the task list and replays it as events", async () => {
+  const manager = fakeDaemonManager({
+    handlers: {
+      "orch.task.list": () => [
+        { id: "a", status: "running", title: "A", repo: "/r" },
+        { id: "b", status: "done", title: "B", repo: "/r" },
+      ],
     },
   });
-  service.connect();
-  await waitUntil(hasSubscriber);
+  const { relayed } = await listening(manager);
+  manager.notify("local", "session.resync", {});
+  await waitUntil(() => relayed.length === 2);
+  assert.deepEqual(
+    relayed.map(([channel, event]) => [channel, event.event, event.task.id]),
+    [
+      ["orchestrator-event", "task", "a"],
+      ["orchestrator-event", "task", "b"],
+    ],
+  );
+});
 
+test("the host list is the daemon manager's states, and a host change is announced", async () => {
+  const manager = twoHosts();
+  const changes = [];
+  const { hosts } = await listening(manager, {
+    hostsChanged: () => changes.push(1),
+  });
+  const byId = () =>
+    Object.fromEntries(hosts.list().map((host) => [host.id, host]));
+  assert.equal(byId().local.state, "ready");
+  assert.equal(byId()[REMOTE].state, "ready");
+  assert.equal(byId()[REMOTE].enabled, false);
+  manager.setState("devbox-id", { state: "connecting" });
+  assert.equal(byId()[REMOTE].state, "connecting");
+  manager.setState("devbox-id", { state: "need_auth", message: "Needs a key" });
+  assert.equal(byId()[REMOTE].state, "error");
+  assert.equal(byId()[REMOTE].detail, "Needs a key");
+  manager.setState("devbox-id", { state: "offline", message: "" });
+  assert.equal(byId()[REMOTE].state, "idle");
+  assert.ok(changes.length >= 3);
+});
+
+test("Try again reconnects the host and reads what it offers; Update sushiai runs the host installer", async () => {
+  const retried = [];
+  const manager = twoHosts({}, (host) => retried.push(host));
+  const installed = [];
+  const { hosts } = await listening(manager, {
+    installHost: async (host) => installed.push(host),
+  });
+  const preflight = await hosts.preflight(REMOTE);
+  assert.deepEqual(retried, ["devbox-id"]);
+  assert.equal(preflight.git, true);
+  assert.deepEqual(preflight.claude, { installed: true, loggedIn: true });
+  assert.equal(
+    hosts.list().find((host) => host.id === REMOTE).preflight.git,
+    true,
+  );
+  assert.equal(await hosts.preflight("local"), null);
+
+  await hosts.setup(REMOTE);
+  assert.deepEqual(installed, ["devbox-id"]);
+  await assert.rejects(hosts.setup("local"), /Invalid orchestrator host/);
+});
+
+test("turning the orchestrator off stops listening and sends nothing; on starts again; no daemon is touched", async () => {
+  const manager = twoHosts({
+    "orch.settings.get": () => ({ routes: [] }),
+    "orch.task.list": () => [],
+  });
+  const { hosts, relayed } = await listening(manager, {
+    getProjects: () => ({
+      agentEnvironments: async () => ({}),
+      mcpEnvironments: async () => ({}),
+    }),
+  });
+  await hosts.call("task.list", {}, REMOTE);
+  assert.equal(manager.listeners("event"), 1);
+  const before = manager.calls.length;
+  await hosts.setEnabled(false);
+  assert.equal(manager.listeners("event"), 0);
+  assert.equal(manager.listeners("state"), 0);
+  for (const call of [
+    () => hosts.call("task.list", {}),
+    () => hosts.list(),
+    () => hosts.probe("local"),
+  ])
+    await assert.rejects(async () => call(), {
+      message: "The orchestrator is off.",
+    });
+  manager.notify("local", "orch.event", { event: "task", task: { id: "x" } });
+  assert.equal(relayed.length, 0);
+  assert.equal(manager.calls.length, before);
+  assert.equal(
+    manager.calls.some((call) => /shutdown/.test(call.method)),
+    false,
+  );
+  await hosts.setEnabled(true);
+  assert.equal(manager.listeners("event"), 1);
+  assert.equal(hosts.services.size, 0);
+});
+
+test("a remote notice names its host; a local one does not", () => {
+  const task = { id: "t", repo: "/r", title: "x", status: "waiting" };
+  assert.equal("host" in orchestratorNotice(task), false);
+  assert.equal(orchestratorNotice({ ...task, host: "local" }).host, undefined);
+  assert.equal(
+    orchestratorNotice({ ...task, host: "ssh:abc" }).host,
+    "ssh:abc",
+  );
+});
+
+test("the transition detector notifies done and failed once, only for live top-level tasks; a fresh report titles the done notice", () => {
+  const notices = [];
+  const service = serviceFor(fakeDaemonManager(), {
+    notify: (notice) => notices.push(notice),
+  });
+  const push = (task) => service.handleEvent({ event: "task", task });
   const base = {
     title: "Ship it",
     repo: "/repo",
@@ -661,59 +649,36 @@ test("the transition detector notifies done and failed once, only for live top-l
     report: "# Ship it",
     reportAt: Date.now(),
   };
-  pushEvent({ event: "task", task: done });
-  pushEvent({ event: "task", task: { ...done, costUsd: 2 } });
-  pushEvent({ event: "task", task: { ...base, id: "d2", status: "done" } });
-  pushEvent({
-    event: "task",
-    task: { ...base, id: "d3", status: "done", report: "# Old", reportAt: 1 },
-  });
-  pushEvent({ event: "task", task: { ...base, id: "f1", status: "running" } });
-  pushEvent({
-    event: "task",
-    task: {
-      ...base,
-      id: "f1",
-      status: "failed",
-      attempts: [{ n: 1, failure: { kind: "verify" } }],
-    },
+  push(done);
+  push({ ...done, costUsd: 2 });
+  push({ ...base, id: "d2", status: "done" });
+  push({ ...base, id: "d3", status: "done", report: "# Old", reportAt: 1 });
+  push({ ...base, id: "f1", status: "running" });
+  push({
+    ...base,
+    id: "f1",
+    status: "failed",
+    attempts: [{ n: 1, failure: { kind: "verify" } }],
   });
   // Subtask and archived tasks raise nothing.
-  pushEvent({
-    event: "task",
-    task: { ...base, id: "s1", status: "done", parent: "d1" },
-  });
-  pushEvent({
-    event: "task",
-    task: { ...base, id: "s2", status: "failed", parent: "d1" },
-  });
-  pushEvent({
-    event: "task",
-    task: { ...base, id: "a1", status: "done", archived: true },
-  });
+  push({ ...base, id: "s1", status: "done", parent: "d1" });
+  push({ ...base, id: "s2", status: "failed", parent: "d1" });
+  push({ ...base, id: "a1", status: "done", archived: true });
   // A waiting subtask still asks.
-  pushEvent({
-    event: "task",
-    task: {
-      ...base,
-      id: "s3",
-      status: "waiting",
-      parent: "d1",
-      question: { text: "Which?" },
-    },
+  push({
+    ...base,
+    id: "s3",
+    status: "waiting",
+    parent: "d1",
+    question: { text: "Which?" },
   });
-  pushEvent({
-    event: "task",
-    task: {
-      ...base,
-      id: "a2",
-      status: "waiting",
-      archived: true,
-      question: { text: "Archived?" },
-    },
+  push({
+    ...base,
+    id: "a2",
+    status: "waiting",
+    archived: true,
+    question: { text: "Archived?" },
   });
-  await waitUntil(() => notices.length >= 5);
-  await new Promise((resolve) => setTimeout(resolve, 50));
   assert.deepEqual(
     notices.map((n) => [n.taskId, n.kind, n.title, n.body, n.focus]),
     [
@@ -732,21 +697,12 @@ test("the transition detector notifies done and failed once, only for live top-l
   );
 });
 
-test("the transition detector notifies once when a top-level task lands dirty, fails or is stopped by the engine, never for an owner stop", async (t) => {
-  const { socketPath, directory, hasSubscriber, pushEvent } =
-    await fixtureServer(t, {
-      ping: () => ({}),
-      "settings.get": () => ({ routes: [] }),
-    });
+test("the transition detector notifies once when a top-level task lands dirty, fails or is stopped by the engine, never for an owner stop", () => {
   const notices = [];
-  const service = await serviceAgainst(t, socketPath, directory, {
-    send: () => {},
-    notify: (notice) => {
-      notices.push(notice);
-    },
+  const service = serviceFor(fakeDaemonManager(), {
+    notify: (notice) => notices.push(notice),
   });
-  service.connect();
-  await waitUntil(hasSubscriber);
+  const push = (task) => service.handleEvent({ event: "task", task });
   const base = {
     title: "Ship it",
     repo: "/repo",
@@ -755,47 +711,32 @@ test("the transition detector notifies once when a top-level task lands dirty, f
     attempts: [],
     decisions: [],
   };
-  const running = (id, extra = {}) =>
-    pushEvent({
-      event: "task",
-      task: { ...base, id, status: "running", ...extra },
-    });
-  for (const id of ["l1", "e1", "o1", "o2", "f1", "a1"]) running(id);
+  for (const id of ["l1", "e1", "o1", "o2", "f1", "a1"])
+    push({ ...base, id, status: "running" });
   const landing = { ...base, id: "l1", status: "landing" };
-  pushEvent({ event: "task", task: landing });
-  pushEvent({ event: "task", task: { ...landing, costUsd: 1 } });
+  push(landing);
+  push({ ...landing, costUsd: 1 });
   const engineStopped = {
     ...base,
     id: "e1",
     status: "stopped",
     decisions: ["Orchestrator: no subtasks are left"],
   };
-  pushEvent({ event: "task", task: engineStopped });
-  pushEvent({ event: "task", task: { ...engineStopped, costUsd: 2 } });
+  push(engineStopped);
+  push({ ...engineStopped, costUsd: 2 });
   const failed = { ...base, id: "f1", status: "failed" };
-  pushEvent({ event: "task", task: failed });
-  pushEvent({ event: "task", task: { ...failed, costUsd: 3 } });
-  pushEvent({
-    event: "task",
-    task: { ...base, id: "o1", status: "stopped", decisions: ["Owner: stop"] },
+  push(failed);
+  push({ ...failed, costUsd: 3 });
+  push({ ...base, id: "o1", status: "stopped", decisions: ["Owner: stop"] });
+  push({
+    ...base,
+    id: "o2",
+    status: "stopped",
+    attempts: [{ n: 1, status: "interrupted" }],
   });
-  pushEvent({
-    event: "task",
-    task: {
-      ...base,
-      id: "o2",
-      status: "stopped",
-      attempts: [{ n: 1, status: "interrupted" }],
-    },
-  });
-  pushEvent({
-    event: "task",
-    task: { ...base, id: "a1", status: "landing", archived: true },
-  });
+  push({ ...base, id: "a1", status: "landing", archived: true });
   // Already landing when first seen: not a transition, no notice.
-  pushEvent({ event: "task", task: { ...base, id: "n1", status: "landing" } });
-  await waitUntil(() => notices.length >= 3);
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  push({ ...base, id: "n1", status: "landing" });
   assert.deepEqual(
     notices.map((n) => [n.taskId, n.kind, n.body]),
     [
@@ -878,85 +819,12 @@ test("orchestratorNotice shapes input, done and failed notices and trims to the 
   });
 });
 
-test("a test-mode quit() sends an authenticated shutdown and kills a daemon that ignores it", async (t) => {
-  const { spawn } = require("node:child_process");
-  const child = spawn("sleep", ["60"], { stdio: "ignore" });
-  t.after(() => child.kill("SIGKILL"));
-  const exited = new Promise((resolve) => child.on("exit", resolve));
-  const { socketPath, directory, calls, token } = await fixtureServer(t, {
-    ping: () => ({ pid: child.pid }),
-    shutdown: () => {},
-  });
-  const service = await serviceAgainst(t, socketPath, directory, {
-    stopDaemonOnQuit: true,
-    quitTimeoutMs: 300,
-  });
-  await service.quit();
-  const shutdown = calls.find((c) => c.method === "shutdown");
-  assert.ok(shutdown, "quit() must send shutdown");
-  assert.equal(shutdown.auth, token);
-  await Promise.race([
-    exited,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("daemon still alive")), 2000),
-    ),
-  ]);
-});
-
-test("a normal quit() leaves the daemon alone and only closes the subscribe socket", async (t) => {
-  const { spawn } = require("node:child_process");
-  const child = spawn("sleep", ["60"], { stdio: "ignore" });
-  t.after(() => child.kill("SIGKILL"));
-  const { socketPath, directory, calls, hasSubscriber } = await fixtureServer(
-    t,
-    { ping: () => ({ pid: child.pid }) },
-  );
-  const service = await serviceAgainst(t, socketPath, directory);
-  service.connect();
-  await waitUntil(hasSubscriber);
-  await service.quit();
-  await waitUntil(() => !hasSubscriber());
-  assert.equal(
-    calls.some((c) => c.method === "shutdown"),
-    false,
-  );
-  assert.doesNotThrow(() => process.kill(child.pid, 0));
-});
-
-test("quit() during a slow first ping never lets a later spawn start a daemon", async (t) => {
-  let release;
-  const gate = new Promise((resolve) => (release = resolve));
-  const { socketPath, directory } = await fixtureServer(t, {
-    ping: async () => {
-      await gate;
-      throw new Error("no daemon");
-    },
-  });
-  const service = await serviceAgainst(t, socketPath, directory, {
-    stopDaemonOnQuit: true,
-    quitTimeoutMs: 100,
-  });
-  const marker = path.join(directory, "spawned");
-  await fs.writeFile(service.binary, `#!/bin/sh\ntouch "${marker}"\n`, {
-    mode: 0o755,
-  });
-  const call = service.call("task.list", {}).catch(() => {});
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  const quitting = service.quit();
-  release();
-  await quitting;
-  await call;
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  await assert.rejects(fs.access(marker));
-});
-
-test("a real project store delivers values and MCP to a remote orchd only once the host is trusted", async (t) => {
+test("a real project store delivers values and MCP to a remote daemon only once the host is trusted", async (t) => {
   const { makeStore } = require("./helpers/fake-host.cjs");
   const { projects } = await makeStore(t);
-  const host = "ssh:devbox-id";
   const project = await projects.upsert({
     name: "Demo",
-    targets: [host],
+    targets: [REMOTE],
     mcp: { mcpServers: { lookup: { command: "lookup" } } },
     env: [
       { name: "PROJECT_KEY", secret: true, availableTo: ["setup", "agent"] },
@@ -966,20 +834,13 @@ test("a real project store delivers values and MCP to a remote orchd only once t
   await projects.setSecret(project.id, "PROJECT_KEY", "invented-key");
   await projects.setSecret(project.id, "LOOKUP_TOKEN", "invented-mcp");
   const pushed = async (trusted) => {
-    await projects.setHostWithheld(project.id, host, !trusted);
-    const { socketPath, directory, calls } = await fixtureServer(t, {
-      ping: () => ({}),
-      "settings.get": () => ({ routes: [] }),
-      "secrets.set": () => ({}),
-      "task.create": (params) => params,
+    await projects.setHostWithheld(project.id, REMOTE, !trusted);
+    const manager = twoHosts({
+      "orch.settings.get": () => ({ routes: [] }),
+      "orch.task.create": (params) => params,
     });
-    const service = await serviceAgainst(t, socketPath, directory, {
-      host,
-      remote: {
-        ensure: async () => ({ socketPath, token: "test-token" }),
-        reopen() {},
-        close() {},
-      },
+    const service = serviceFor(manager, {
+      host: REMOTE,
       getProjects: () => projects,
     });
     const task = await service.call("task.create", {
@@ -987,10 +848,7 @@ test("a real project store delivers values and MCP to a remote orchd only once t
       projectId: project.id,
       title: "remote task",
     });
-    return {
-      task,
-      secrets: calls.find((call) => call.method === "secrets.set").params,
-    };
+    return { task, secrets: manager.requestsFor("orch.secrets.set")[0].params };
   };
   let seen = await pushed(false);
   assert.deepEqual(seen.secrets.projects[project.id] ?? {}, {});
@@ -1005,12 +863,9 @@ test("a real project store delivers values and MCP to a remote orchd only once t
   });
 });
 
-test("a server the project switched off is not handed to a task", async (t) => {
-  const { socketPath, directory } = await fixtureServer(t, {
-    ping: () => ({}),
-    "settings.get": () => ({ routes: [] }),
-    "secrets.set": () => ({}),
-    "task.create": (params) => params,
+test("a server the project switched off is not handed to a task", async () => {
+  const manager = fakeDaemonManager({
+    handlers: { "orch.task.create": (params) => params },
   });
   const project = {
     id: "p1",
@@ -1019,7 +874,7 @@ test("a server the project switched off is not handed to a task", async (t) => {
       disabledMcpServers: ["off"],
     },
   };
-  const service = await serviceAgainst(t, socketPath, directory, {
+  const service = serviceFor(manager, {
     getProjects: () => ({
       get: async () => project,
       resolveDirectory: async () => project,
@@ -1035,62 +890,46 @@ test("a server the project switched off is not handed to a task", async (t) => {
   assert.deepEqual(Object.keys(result.mcp.mcpServers), ["on"]);
 });
 
-/** A real store, a real hosts wrapper and a real service against a fake
- * orchd: what the daemon was last told about project values on a host. */
+/** A real store, the real hosts wiring and a service over a fake manager:
+ * what the daemon was last told about project values on a host. */
 async function sendRig(t) {
   const { makeStore } = require("./helpers/fake-host.cjs");
-  const { createOrchestratorHosts } = require("../electron/orchestrator.cjs");
   const { projects } = await makeStore(t);
-  const host = "ssh:devbox-id";
   const project = await projects.upsert({
     name: "Mine",
     git: { url: "git@example.test:acme/mine.git" },
-    targets: [host],
+    targets: [REMOTE],
     env: [{ name: "KEY", secret: true, availableTo: ["setup", "agent"] }],
   });
   await projects.setSecret(project.id, "KEY", "invented-mine");
-  const fixture = await fixtureServer(t, {
-    ping: () => ({}),
-    "settings.get": () => ({ routes: [] }),
-    "secrets.set": () => ({}),
-    "task.create": (params) => ({ id: "t1", status: "queued", ...params }),
+  const manager = twoHosts({
+    "orch.settings.get": () => ({ routes: [] }),
+    "orch.task.create": (params) => ({
+      id: "t1",
+      status: "queued",
+      ...params,
+    }),
   });
-  const service = await serviceAgainst(
-    t,
-    fixture.socketPath,
-    fixture.directory,
-    {
-      host,
-      remote: {
-        ensure: async () => ({
-          socketPath: fixture.socketPath,
-          token: "test-token",
-        }),
-        reopen() {},
-        close() {},
-      },
-      getProjects: () => projects,
-    },
-  );
-  // The real wiring: the hosts wrapper sets the store's change hook.
+  const service = serviceFor(manager, {
+    host: REMOTE,
+    getProjects: () => projects,
+  });
+  // The real wiring: the hosts wrapper sets the store's change hooks.
   const hosts = createOrchestratorHosts({
     send: () => {},
-    dataDir: fixture.directory,
-    root: fixture.directory,
-    resourcesPath: fixture.directory,
     getProjects: () => projects,
-    getConnections: () => ({}),
+    getConnections: () => connections,
+    getManager: () => manager,
     enabled: false,
   });
-  hosts.services.set(host, service);
-  const pushes = () =>
-    fixture.calls.filter((call) => call.method === "secrets.set");
+  hosts.services.set(REMOTE, service);
+  const pushes = () => manager.requestsFor("orch.secrets.set");
   const lastSecrets = () => pushes().at(-1)?.params;
-  return { projects, host, project, fixture, service, pushes, lastSecrets };
+  return { projects, project, manager, service, pushes, lastSecrets };
 }
 
 test("a host the owner added gets a task's project values with no approval step", async (t) => {
-  const { host, project, service, lastSecrets } = await sendRig(t);
+  const { project, service, lastSecrets } = await sendRig(t);
   await service.call("task.create", {
     repo: "/home/user/sushiai/mine",
     projectId: project.id,
@@ -1099,21 +938,17 @@ test("a host the owner added gets a task's project values with no approval step"
   assert.deepEqual(lastSecrets().projects[project.id], {
     KEY: "invented-mine",
   });
-  assert.ok(host);
 });
 
 test("switching sending off empties the daemon's copy at once, and switching it on gives the values back", async (t) => {
-  const { projects, host, project, service, pushes, lastSecrets } =
-    await sendRig(t);
+  const { projects, project, service, pushes, lastSecrets } = await sendRig(t);
   await service.call("task.list", {}).catch(() => {});
-  const settled = async (check) => {
-    await waitUntil(() => lastSecrets() && check(lastSecrets()));
-  };
-  await settled((s) => s.projects[project.id]?.KEY === "invented-mine");
+  await service.refreshSecrets();
+  assert.equal(lastSecrets().projects[project.id].KEY, "invented-mine");
   const before = pushes().length;
-  await projects.setHostWithheld(project.id, host, true);
+  await projects.setHostWithheld(project.id, REMOTE, true);
   await waitUntil(() => pushes().length > before);
-  await settled((s) => !s.projects[project.id]?.KEY);
+  await waitUntil(() => !lastSecrets().projects[project.id]?.KEY);
   assert.deepEqual(lastSecrets().projects[project.id] ?? {}, {});
   // A task made while it is off carries no value either.
   await service.call("task.create", {
@@ -1122,16 +957,17 @@ test("switching sending off empties the daemon's copy at once, and switching it 
     title: "later",
   });
   assert.deepEqual(lastSecrets().projects[project.id] ?? {}, {});
-  await projects.setHostWithheld(project.id, host, false);
-  await settled((s) => s.projects[project.id]?.KEY === "invented-mine");
+  await projects.setHostWithheld(project.id, REMOTE, false);
+  await waitUntil(
+    () => lastSecrets().projects[project.id]?.KEY === "invented-mine",
+  );
 });
 
 test("a task started in a folder without naming its project still gets that project's values, and an edit reaches the host at once", async (t) => {
-  const { projects, host, project, service, fixture, lastSecrets } =
-    await sendRig(t);
+  const { projects, project, service, pushes, lastSecrets } = await sendRig(t);
   await projects.attach({
     remote: "git@example.test:acme/mine.git",
-    endpoint: host,
+    endpoint: REMOTE,
     cwd: "/home/user/sushiai/mine",
     name: "Mine",
   });
@@ -1146,26 +982,24 @@ test("a task started in a folder without naming its project still gets that proj
     project.id,
   );
   // An edit in Project settings is pushed without waiting for a task.
-  const pushes = () =>
-    fixture.calls.filter((call) => call.method === "secrets.set").length;
-  const before = pushes();
+  const before = pushes().length;
   await projects.setSecret(project.id, "KEY", "changed-value");
   await waitUntil(
     () =>
-      pushes() > before &&
+      pushes().length > before &&
       lastSecrets().projects[project.id]?.KEY === "changed-value",
     { timeout: 4000 },
   );
 });
 
 test("a host gets only the projects that run on it", async (t) => {
-  const { projects, host, project } = await sendRig(t);
+  const { projects, project } = await sendRig(t);
   const stranger = await projects.upsert({
     name: "Stranger",
     env: [{ name: "OTHER", secret: true }],
   });
   await projects.setSecret(stranger.id, "OTHER", "not-for-this-host");
-  const sent = await projects.agentEnvironments(host);
+  const sent = await projects.agentEnvironments(REMOTE);
   assert.deepEqual(Object.keys(sent), [project.id]);
   assert.deepEqual(
     Object.keys(await projects.agentEnvironments("local")).sort(),

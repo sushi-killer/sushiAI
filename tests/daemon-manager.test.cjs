@@ -770,3 +770,32 @@ test("real daemon: kill -9 and the manager is ready again with the session still
   const listed = await manager.request("local", "session.list", {});
   assert.ok(listed.some((entry) => entry.id === session.id));
 });
+
+test("request forwards a per-call timeout to the client and none by default", async () => {
+  const calls = [];
+  const client = new EventEmitter();
+  client.hello = { daemon: "1", host: "h", capabilities: [] };
+  client.request = async (method, params, options) => {
+    calls.push({ method, params, options });
+    return {};
+  };
+  client.close = () => {};
+  const manager = createDaemonManager({
+    connectors: { h: { kind: "ssh", connect: async () => client } },
+    backoffMinMs: 5,
+  });
+  cleanups.push(() => manager.close());
+  manager.start();
+  await until(
+    () => manager.states().every((state) => state.state === "ready"),
+    3000,
+    "ready",
+  );
+  calls.length = 0;
+  await manager.request("h", "a.long", { x: 1 }, { timeoutMs: 600000 });
+  await manager.request("h", "a.short", {});
+  assert.deepEqual(calls, [
+    { method: "a.long", params: { x: 1 }, options: { timeoutMs: 600000 } },
+    { method: "a.short", params: {}, options: undefined },
+  ]);
+});

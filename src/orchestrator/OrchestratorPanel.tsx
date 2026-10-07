@@ -313,7 +313,7 @@ function OrchestratorBody({
   useEffect(() => reportDaemon.current(daemonState), [daemonState]);
 
   // The subscribe relay doesn't tell the renderer when the daemon goes away,
-  // so an open panel pings it: one that stops answering flips the panel to
+  // so an open panel checks it: one that stops answering flips the panel to
   // the unreachable state within a few seconds, and one that answers again -
   // or answers as a new process, restarted in between - reloads the task
   // list, whose events the old subscription missed.
@@ -329,7 +329,7 @@ function OrchestratorBody({
       let timer = 0;
       const timeout = new Promise<never>((_, reject) => {
         timer = window.setTimeout(
-          () => reject(new Error("orchd did not respond")),
+          () => reject(new Error("The sushiai daemon did not respond")),
           PING_TIMEOUT_MS,
         );
       });
@@ -1349,7 +1349,7 @@ function OrchestratorPanelBody({
             void window.bridge?.orchestratorPreflight(host).catch(() => {});
             setAttempt((n) => n + 1);
           }}
-          onInstallRust={() => {
+          onInstallSushiai={() => {
             retry();
             void window.bridge?.orchestratorHostSetup(host).catch(() => {});
             setAttempt((n) => n + 1);

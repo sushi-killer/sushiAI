@@ -1,0 +1,21 @@
+[package]
+name = "sushiai-orch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "sushiAI task orchestration pipeline"
+
+[lib]
+name = "sushiai_orch"
+path = "src/lib.rs"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

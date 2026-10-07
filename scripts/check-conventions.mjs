@@ -12,7 +12,7 @@ import { addsMarkdownFragment } from "./lib/release-notes.mjs";
 const run = promisify(execFile);
 const root = process.cwd();
 const CYRILLIC = /[Ѐ-ӿ]/;
-const SOURCE_DIRS = ["src", "electron", "orchd/src", "crates"];
+const SOURCE_DIRS = ["src", "electron", "crates"];
 const SOURCE_FILES = /\.(ts|tsx|cjs|mjs|js|css|html|rs)$/;
 const TRAILERS = [
   /^\s*co-authored-by:/im,
@@ -223,6 +223,58 @@ for (const file of shellFiles) {
     problems.push(
       `${file} resolves an extension surface; only SectionPage draws a contributed page`,
     );
+}
+
+// The main process core (daemon client, IPC, attention, mascot) never loads a
+// module that main.cjs plugs in. Besides other core files, the extension
+// contract and packages, it may use only the shared app services listed here.
+// Any other file that main.cjs requires is a module: it reaches the core
+// through main.cjs, never the other way. A new shared service is a deliberate
+// edit of this list.
+const CORE_SHARED = new Set(
+  [
+    "app-db",
+    "connections",
+    "terminal-flow",
+    "chat-args",
+    "agent-models",
+    "worktree",
+    "project-git",
+    "project-git-ssh",
+    "project-import",
+    "project-hosts",
+    "project-slug",
+    "projects",
+    "preview",
+    "git-remote",
+  ].map((name) => `electron/${name}.cjs`),
+);
+const coreRoot = process.env.CORE_ISOLATION_ROOT_OVERRIDE || root;
+const CORE_FILE =
+  /^electron\/(daemon\/|ipc\/|attention\.cjs$|mascot[^/]*\.cjs$|extensions\/)/;
+const REQUIRE_CALL = /\brequire\(\s*["'](\.[^"']*)["']\s*\)/g;
+const requiredBy = async (file) => {
+  const text = await readFile(path.join(coreRoot, file), "utf8").catch(
+    () => "",
+  );
+  return [...text.matchAll(REQUIRE_CALL)].map(([, source]) => {
+    const target = path.posix.join(path.posix.dirname(file), source);
+    return /\.(cjs|js|json)$/.test(target) ? target : `${target}.cjs`;
+  });
+};
+const mainRequires = new Set(await requiredBy("electron/main.cjs"));
+for await (const file of walk("electron", coreRoot)) {
+  if (!CORE_FILE.test(file) || file.startsWith("electron/extensions/"))
+    continue;
+  for (const target of await requiredBy(file))
+    if (
+      mainRequires.has(target) &&
+      !CORE_FILE.test(target) &&
+      !CORE_SHARED.has(target)
+    )
+      problems.push(
+        `${file} requires ${target}, a module main.cjs plugs in; core files never load modules`,
+      );
 }
 
 // docs/LESSONS.md is meant to be read every session, so a promoted entry

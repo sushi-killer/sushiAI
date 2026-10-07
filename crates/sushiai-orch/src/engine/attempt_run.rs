@@ -248,8 +248,7 @@ fn tail_file(
     tokio::spawn(async move {
         let mut offset = 0u64;
         loop {
-            let over =
-                exit.exists() || wrapper_gone.load(Ordering::SeqCst) || !group_alive(pgid);
+            let over = exit.exists() || wrapper_gone.load(Ordering::SeqCst) || !group_alive(pgid);
             if let Ok(mut f) = tokio::fs::File::open(&file).await {
                 let _ =
                     tokio::io::AsyncSeekExt::seek(&mut f, std::io::SeekFrom::Start(offset)).await;
@@ -426,8 +425,18 @@ pub(super) async fn run_harness(
     let (stdout, stderr): (Source, Source) = if track_attempt {
         let pgid = pgid.unwrap_or(0);
         (
-            tail_file(files.raw.clone(), files.exit.clone(), pgid, wrapper_gone.clone()),
-            tail_file(files.stderr.clone(), files.exit.clone(), pgid, wrapper_gone.clone()),
+            tail_file(
+                files.raw.clone(),
+                files.exit.clone(),
+                pgid,
+                wrapper_gone.clone(),
+            ),
+            tail_file(
+                files.stderr.clone(),
+                files.exit.clone(),
+                pgid,
+                wrapper_gone.clone(),
+            ),
         )
     } else {
         if let Some(mut stdin) = child.stdin.take() {

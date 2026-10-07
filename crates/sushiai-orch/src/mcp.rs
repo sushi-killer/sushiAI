@@ -73,7 +73,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
         (
             "task_list",
             "task.list",
-            "List orchd tasks, optionally filtered by repo.",
+            "List tasks, optionally filtered by repo.",
             json!({
                 "type": "object",
                 "properties": {
@@ -106,7 +106,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "criteria": {"type": "array", "items": {"type": "string"}},
                     "verify": {"type": "array", "items": {"type": "string"}},
                     "finalVerify": {"type": "array", "items": {"type": "string"}, "description": "Slow checks (full CI, desktop smoke) run once, after review passes."},
-                    "screenshot": {"type": "string", "description": "Repo command that captures the screenshot evidence for a UI task; orchd runs it after verify passes and saves the images. The attempt still fails its evidence gate when the images the visual criteria name are missing after it ran. Leave out when the repo has no such command."},
+                    "screenshot": {"type": "string", "description": "Repo command that captures the screenshot evidence for a UI task; the orchestrator runs it after verify passes and saves the images. The attempt still fails its evidence gate when the images the visual criteria name are missing after it ran. Leave out when the repo has no such command."},
                     "paths": {"type": "array", "items": {"type": "string"}, "description": "Repo-relative files or directories the task edits; it waits while another live task on the same base holds any of them."},
                     "branch": {"type": "string"},
                     "base": {"type": "string", "description": "Branch or commit to start from; defaults to the repo's current HEAD."},
@@ -160,7 +160,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
         (
             "task_lead_touch",
             "task.leadTouch",
-            "Mark whether a done task's work needed a fix from a person or the lead session after orchd said done (touched true) or was clean (touched false); omit touched to clear the mark. An owner's touched mark with a non-empty note also creates one follow-up task from that note (the same note never creates a second one). The autonomy metric behind costs.summary's leadTouch rate.",
+            "Mark whether a done task's work needed a fix from a person or the lead session after the orchestrator said done (touched true) or was clean (touched false); omit touched to clear the mark. An owner's touched mark with a non-empty note also creates one follow-up task from that note (the same note never creates a second one). The autonomy metric behind costs.summary's leadTouch rate.",
             json!({
                 "type": "object",
                 "properties": {
@@ -212,7 +212,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
         (
             "settings_get",
             "settings.get",
-            "Read the orchd settings (parallelism, planner, profiles).",
+            "Read the orchestrator settings (parallelism, planner, profiles).",
             json!({"type": "object", "properties": {}}),
         ),
         (

@@ -10,7 +10,7 @@ const DEFAULTS: &str = include_str!("../prompts/orchestrator.yaml");
 
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Where `prompts.yaml` is looked up; set once by `orchd serve` / `orchd mcp`.
+/// Where `prompts.yaml` is looked up; set once by `sushiai mcp`.
 pub fn set_data_dir(dir: &Path) {
     let _ = DATA_DIR.set(dir.to_path_buf());
 }
@@ -31,7 +31,7 @@ fn lookup(dir: Option<&Path>, key: &str) -> String {
                         return prompt;
                     }
                 }
-                Err(e) => eprintln!("orchd: ignoring {}: {e}", path.display()),
+                Err(e) => eprintln!("sushiai: ignoring {}: {e}", path.display()),
             }
         }
     }

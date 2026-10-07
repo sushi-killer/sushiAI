@@ -114,7 +114,7 @@ pub(super) fn prepare_run(
             }
             allow.extend(tools.allowed().into_iter().map(serde_json::Value::String));
         }
-        let _ = store::write_json_atomic(&settings_path, &claude_settings);
+        let _ = store::write_json_private(&settings_path, &claude_settings);
         let ctx = HookContext::new(task, attempt_n, worktree, base_sha);
         app.register_hook(&token, &ctx, run_dir);
         registered = Some((token.clone(), ctx));

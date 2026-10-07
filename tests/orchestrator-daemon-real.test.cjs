@@ -262,7 +262,7 @@ test(
 );
 
 test(
-  "turning the Orchestrator off with a task run going leaves no agent process behind",
+  "turning the Orchestrator off with a task running and another queued leaves no agent process behind",
   { skip: !fs.existsSync(binary) && "debug sushiai binary is not built" },
   async (t) => {
     // A fake `claude` that streams one message and then waits for a minute.
@@ -270,7 +270,7 @@ test(
     t.after(() => fs.rmSync(bin, { recursive: true, force: true }));
     fs.writeFileSync(
       path.join(bin, "claude"),
-      `#!/bin/sh\ncat > /dev/null\necho '${INIT}'\necho '${MESSAGE}'\nsleep 60\n`,
+      `#!/bin/sh\necho started >> ${bin}/starts\ncat > /dev/null\necho '${INIT}'\necho '${MESSAGE}'\nsleep 60\n`,
       { mode: 0o755 },
     );
     const { root, home, connector, manager, ready } = world(t, {
@@ -327,8 +327,12 @@ test(
         briefCheckRoute: "",
         answerPolicy: false,
         sandbox: "host",
+        parallel: 1,
       },
     });
+    // One slot (read at daemon start): the second task waits behind the first.
+    await connector.restart();
+    await until(() => ready.length > 1, "the daemon to restart");
     const task = await manager.request("local", "orch.task.create", {
       repo,
       title: "Stops with the module",
@@ -337,6 +341,14 @@ test(
       verify: ["true"],
     });
     t.after(() => fs.rmSync(task.worktree, { recursive: true, force: true }));
+    const queued = await manager.request("local", "orch.task.create", {
+      repo,
+      title: "Waits behind the first",
+      goal: "g",
+      criteria: [],
+      verify: ["true"],
+    });
+    t.after(() => fs.rmSync(queued.worktree, { recursive: true, force: true }));
     const events = path.join(
       home,
       "orchestrator/tasks",
@@ -361,5 +373,11 @@ test(
 
     await hosts.setEnabled(false);
     await until(() => !alive(pgid), "the agent to end", 5000);
+    // The queued task never got its turn: one agent ever started.
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    assert.equal(
+      fs.readFileSync(path.join(bin, "starts"), "utf8").trim(),
+      "started",
+    );
   },
 );

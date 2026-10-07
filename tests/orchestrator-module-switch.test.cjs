@@ -98,47 +98,6 @@ test("disabling unregisters and restarts a daemon that serves the module", async
   assert.deepEqual(w.manager.states()[0].capabilities, []);
 });
 
-test("disabling stops the tasks with an agent running first, and waits until they have ended", async () => {
-  const w = world({ local: ["orch"] });
-  w.registered.local = true;
-  const status = { t1: "running", t2: "landing", t3: "done", t4: "waiting" };
-  w.manager.handlers["orch.task.list"] = () =>
-    Object.entries(status).map(([id, s]) => ({ id, status: s }));
-  w.manager.handlers["orch.task.stop"] = ({ id }) => {
-    w.log.push(`stop ${id}`);
-    // The agent takes a moment to end: the task stays live for a while.
-    setTimeout(() => (status[id] = "stopped"), 150);
-  };
-  await w.moduleSwitch.disable("local");
-  assert.deepEqual(w.log, [
-    "stop t1",
-    "stop t2",
-    "local orch unregister",
-    "restart local",
-    "restarted local",
-  ]);
-  assert.deepEqual(status, {
-    t1: "stopped",
-    t2: "stopped",
-    t3: "done",
-    t4: "waiting",
-  });
-});
-
-test("disabling still goes on when the tasks cannot be listed", async () => {
-  const w = world({ local: ["orch"] });
-  w.registered.local = true;
-  w.manager.handlers["orch.task.list"] = () => {
-    throw new Error("module is not serving");
-  };
-  await w.moduleSwitch.disable("local");
-  assert.deepEqual(w.log, [
-    "local orch unregister",
-    "restart local",
-    "restarted local",
-  ]);
-});
-
 test("a remote host registers over the exec path and restarts through daemon.shutdown", async () => {
   const w = world({ remote: [] });
   await w.moduleSwitch.enable("ssh:box");

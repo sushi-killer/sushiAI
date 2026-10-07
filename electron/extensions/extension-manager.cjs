@@ -178,6 +178,11 @@ class ExtensionManager {
     let stateWritable = true;
     let stateChanged = false;
     const stateFile = readDoc(this.dataDir, "extensions");
+    this.savedIds = new Set(
+      stateFile.exists && validState(stateFile.value)
+        ? Object.keys(stateFile.value.extensions)
+        : [],
+    );
     if (!stateFile.exists) {
       this.state = defaultState([...this.manifests.values()]);
     } else if (validState(stateFile.value)) {
@@ -313,6 +318,11 @@ class ExtensionManager {
   /** Synchronous, for main-process gating; false until settings are read. */
   isEnabled(extensionId) {
     return this.state.extensions[extensionId]?.enabled === true;
+  }
+
+  /** Whether the settings file already held a choice for the extension when it was last read. */
+  hasSavedState(extensionId) {
+    return this.savedIds?.has(extensionId) === true;
   }
 
   /** Calls `listener(extensionId, enabled)` after a state change is saved. */

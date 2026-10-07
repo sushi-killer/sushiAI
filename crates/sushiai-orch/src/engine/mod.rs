@@ -338,6 +338,8 @@ pub struct App {
     /// Set by `shutdown()`: the loops it cancels end `stopped`, and that
     /// must not read as a dependency ending.
     shutting_down: AtomicBool,
+    /// Set with `shutting_down` when the module is switched off: no agent run outlives it.
+    disabling: AtomicBool,
     /// Held across the check-and-append of evolution signal detection so one
     /// task is never recorded twice.
     evolution_lock: tokio::sync::Mutex<()>,
@@ -510,6 +512,7 @@ impl App {
             parallel_limit,
             landing_locks: StdMutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
+            disabling: AtomicBool::new(false),
             evolution_lock: tokio::sync::Mutex::new(()),
             proposals: std::sync::Mutex::new(HashMap::new()),
             proposal_lock: tokio::sync::Mutex::new(()),
@@ -550,6 +553,17 @@ impl App {
     /// child is just as capable of leaking past the daemon exiting as a task
     /// attempt's, so it needs the same cancel-on-shutdown treatment.
     pub fn shutdown(&self) {
+        self.shutdown_for(false);
+    }
+
+    /// `true` while a daemon shutdown leaves agent runs going for the next daemon to adopt.
+    pub(super) fn runs_survive_shutdown(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst) && !self.disabling.load(Ordering::SeqCst)
+    }
+
+    /// `shutdown`; `disabling` also kills every agent run (see `runs_survive_shutdown`).
+    pub fn shutdown_for(&self, disabling: bool) {
+        self.disabling.store(disabling, Ordering::SeqCst);
         self.shutting_down.store(true, Ordering::SeqCst);
         for ctrl in self.controls.lock().unwrap().values() {
             ctrl.cancel.cancel();

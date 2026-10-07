@@ -440,7 +440,7 @@ pub(super) async fn run_harness(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                if track == RunTrack::Resumable && app.shutting_down.load(Ordering::SeqCst) {
+                if track == RunTrack::Resumable && app.runs_survive_shutdown() {
                     // A daemon shutdown leaves the run going: the next daemon
                     // finds it by its process group and files.
                     return Err(RunError::Cancelled);

@@ -61,6 +61,7 @@ pub fn slots(home: &Home) -> Vec<ModuleSlot> {
 }
 
 struct OrchModule {
+    home: PathBuf,
     started: watch::Receiver<Started>,
 }
 
@@ -69,6 +70,7 @@ impl OrchModule {
     /// legacy process and opens the store, which block.
     fn start(home: PathBuf, notify: ModuleNotify) -> OrchModule {
         let (tx, started) = watch::channel(None);
+        let flag_home = home.clone();
         let spawned = std::thread::Builder::new()
             .name("orch-start".into())
             .spawn({
@@ -91,7 +93,10 @@ impl OrchModule {
         if let Err(e) = spawned {
             let _ = tx.send(Some(Err(e.to_string())));
         }
-        OrchModule { started }
+        OrchModule {
+            home: flag_home,
+            started,
+        }
     }
 
     /// The running pipeline, once it started.
@@ -155,9 +160,11 @@ impl Module for OrchModule {
 
     fn shutdown(&self) -> BoxFuture<()> {
         let started = self.started.clone();
+        // The switch-off removes the flag before the daemon stops: no next daemon adopts a run.
+        let disabling = !enabled(&self.home);
         Box::pin(async move {
             if let Ok(orch) = Self::ready(&started).await {
-                orch.shutdown().await;
+                orch.shutdown_with(disabling).await;
             }
         })
     }

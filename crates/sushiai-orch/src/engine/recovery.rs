@@ -236,7 +236,7 @@ pub(super) async fn follow_run(
         }
         tokio::select! {
             _ = cancel.cancelled() => {
-                if !app.shutting_down.load(Ordering::SeqCst) {
+                if !app.runs_survive_shutdown() {
                     stop_group(pgid, &files.exit).await;
                     tail.pump(&secrets, true);
                 }
@@ -314,7 +314,7 @@ impl App {
     /// `true` when a daemon shutdown must leave attempt `idx` as it is:
     /// its implement run files stay for the next daemon to adopt.
     pub(super) fn leaves_run_going(&self, task: &Task, idx: usize) -> bool {
-        self.shutting_down.load(Ordering::SeqCst) && resumable_attempt(self, task) == Some(idx)
+        self.runs_survive_shutdown() && resumable_attempt(self, task) == Some(idx)
     }
 
     /// Deletes the unredacted output of every attempt of `task` that is

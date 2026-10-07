@@ -154,7 +154,12 @@ test("an orchd that ignores SIGTERM is killed with its process group after the t
 
 /** `registerOrchestratorExtension` over a fake manager and a fake extension
  * manager that records every `setEnabled`. Nothing touches the real home. */
-function wire({ enabled = false, withLegacy = true, stopLegacy } = {}) {
+function wire({
+  enabled = false,
+  saved = false,
+  withLegacy = true,
+  stopLegacy,
+} = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "first-launch-"));
   const userDataDir = path.join(root, "userData");
   const homeDir = path.join(root, "home");
@@ -169,6 +174,7 @@ function wire({ enabled = false, withLegacy = true, stopLegacy } = {}) {
     ready: Promise.resolve(),
     enabled,
     isEnabled: () => extensions.enabled,
+    hasSavedState: () => saved,
     onChange: () => {},
     setEnabled: async (id, value) => {
       calls.push([id, value]);
@@ -219,13 +225,29 @@ test("a legacy stop that fails never blocks start", async () => {
 });
 
 test("the first launch leaves a fresh install's Orchestrator off, once", async () => {
-  const w = wire({ enabled: true });
+  const w = wire({ enabled: true, saved: true });
   await w.hosts.start();
   assert.deepEqual(w.calls, [["builtin.orchestrator", false]]);
   // The owner switches it on later: a restart must not undo that.
   w.calls.length = 0;
   await w.hosts.start();
   assert.deepEqual(w.calls, []);
+});
+
+test("legacy evidence never turns a saved off back on, and keeps a saved on", async () => {
+  const off = wire({ saved: true, enabled: false });
+  fs.mkdirSync(path.join(off.userDataDir, "orchestrator", "tasks"), {
+    recursive: true,
+  });
+  await off.hosts.start();
+  assert.deepEqual(off.calls, [["builtin.orchestrator", false]]);
+
+  const on = wire({ saved: true, enabled: true });
+  fs.mkdirSync(path.join(on.userDataDir, "orchestrator", "tasks"), {
+    recursive: true,
+  });
+  await on.hosts.start();
+  assert.deepEqual(on.calls, [["builtin.orchestrator", true]]);
 });
 
 test("the first launch turns the Orchestrator on for a legacy orchd data dir", async () => {

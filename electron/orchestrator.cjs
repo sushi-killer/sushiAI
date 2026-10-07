@@ -27,8 +27,6 @@ const ORCH_PREFIX = "orch.";
 const MODULE_STARTING = 1100;
 // A host that is connecting gets this long to become ready.
 const READY_TIMEOUT_MS = 30000;
-// Stopped tasks get this long to end their agents before the module goes.
-const STOP_WAIT_MS = 15000;
 // A host that is down is not reconnected on every request.
 const RETRY_AFTER_MS = 30000;
 
@@ -320,34 +318,6 @@ function settledState(manager, host, timeoutMs, timeoutMessage) {
   });
 }
 
-/** Task states with an agent process behind them. */
-const LIVE_STATUSES = new Set(["running", "drafting", "landing"]);
-
-/** Stops the tasks of a host that have an agent running and waits (at most
- * `waitMs`) until none is left. Best effort: a host that cannot answer has
- * nothing the app can stop. */
-async function stopLiveTasks(manager, name, waitMs) {
-  const live = async () => {
-    const tasks = await manager.request(name, `${ORCH_PREFIX}task.list`, {});
-    return Array.isArray(tasks)
-      ? tasks.filter((task) => LIVE_STATUSES.has(task.status))
-      : [];
-  };
-  try {
-    const first = await live();
-    await Promise.all(
-      first.map((task) =>
-        manager.request(name, `${ORCH_PREFIX}task.stop`, { id: task.id }),
-      ),
-    );
-    const end = Date.now() + waitMs;
-    while (first.length && (await live()).length && Date.now() < end)
-      await new Promise((resolve) => setTimeout(resolve, 100));
-  } catch {
-    // The module is not serving: no run of it to stop.
-  }
-}
-
 /** The opt-in of the `orch` module on a host (owner O1). Enabling runs
  * `sushiai orch register` there (local: the bundled binary; remote: over the
  * existing ssh exec path), disabling runs `sushiai orch unregister`; then the
@@ -362,7 +332,6 @@ function createModuleSwitch({
   readyTimeoutMs = READY_TIMEOUT_MS,
   settleMs,
   attempts,
-  stopWaitMs = STOP_WAIT_MS,
 }) {
   const enabling = new Map();
 
@@ -371,9 +340,6 @@ function createModuleSwitch({
     if (!manager) throw new Error("The sushiai daemon is not running.");
     const name = managerHostOf(host);
     const verb = on ? "register" : "unregister";
-    // A restart without the module leaves implement runs going with no
-    // supervisor: they stop first.
-    if (!on) await stopLiveTasks(manager, name, stopWaitMs);
     if (host === LOCAL_HOST) await runLocal(["orch", verb]);
     else
       await exec(
@@ -1277,9 +1243,14 @@ function registerOrchestratorExtension({
       Object.keys(readStore(userDataDir, FIRST_LAUNCH_STORE)).length
     )
       return;
+    // Legacy evidence keeps a saved "on" and never overrides a saved "off".
+    const id = ORCHESTRATOR_MANIFEST.id;
+    const evidence = legacyOrchestratorPresent({ userDataDir, ...legacy });
     await extensions.setEnabled(
-      ORCHESTRATOR_MANIFEST.id,
-      legacyOrchestratorPresent({ userDataDir, ...legacy }),
+      id,
+      extensions.hasSavedState(id)
+        ? extensions.isEnabled(id) && evidence
+        : evidence,
     );
     writeStore(userDataDir, FIRST_LAUNCH_STORE, { settled: true });
   }

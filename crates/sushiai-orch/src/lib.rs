@@ -137,7 +137,13 @@ impl Orch {
     /// Cancels task loops, chat turns and audits, waits up to 10 s for them to end, then stops
     /// the runtime. Agent runs the pipeline may re-adopt after a restart are not killed here.
     pub async fn shutdown(&self) {
-        self.app.shutdown();
+        self.shutdown_with(false).await;
+    }
+
+    /// Like `shutdown`; with `disabling` every agent run is killed instead of left for the
+    /// next daemon.
+    pub async fn shutdown_with(&self, disabling: bool) {
+        self.app.shutdown_for(disabling);
         let app = self.app.clone();
         let drained = self.handle.spawn(async move {
             let deadline = tokio::time::Instant::now() + DRAIN;

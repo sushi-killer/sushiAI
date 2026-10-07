@@ -8,7 +8,6 @@ import {
   failList,
   feedEvent,
   finishList,
-  readHibernateSecs,
   reconcileSessions,
   startList,
   type HostFeed,
@@ -134,7 +133,12 @@ export function useDaemon({
       if (entry.ready && state.generation === known) return;
       hosts.current[state.host] = { ...entry, ready: true, listed: false };
       // The idle-sleep delay is the app's setting; a host learns it on hello.
-      configureHibernation(bridge, state, readHibernateSecs()).catch(() => {});
+      bridge
+        .appPreferences()
+        .then((prefs) =>
+          configureHibernation(bridge, state, prefs.hibernateAfterSecs),
+        )
+        .catch(() => {});
       load(state.host);
     };
     const onEvent = (event: DaemonEvent) => {

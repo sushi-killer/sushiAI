@@ -118,9 +118,8 @@ test("only a ready host that reported hibernate supports it", async () => {
   assert.equal(hostSupports(states, "missing", "hibernate"), false);
 });
 
-test("the settings value maps to seconds; unset or unknown is four hours", async () => {
-  const { HIBERNATE_CHOICES, readHibernateSecs, writeHibernateSecs } =
-    await library;
+test("the settings choices map to seconds and the default is four hours", async () => {
+  const { HIBERNATE_CHOICES, DEFAULT_HIBERNATE_SECS } = await library;
   assert.deepEqual(
     HIBERNATE_CHOICES.map((choice) => [choice.label, choice.secs]),
     [
@@ -130,18 +129,7 @@ test("the settings value maps to seconds; unset or unknown is four hours", async
       ["12 h", 43200],
     ],
   );
-  const store = new Map();
-  const storage = {
-    getItem: (key) => (store.has(key) ? store.get(key) : null),
-    setItem: (key, value) => store.set(key, value),
-  };
-  assert.equal(readHibernateSecs(storage), 14400);
-  writeHibernateSecs(0, storage);
-  assert.equal(readHibernateSecs(storage), 0, "Off is kept, not defaulted");
-  writeHibernateSecs(43200, storage);
-  assert.equal(readHibernateSecs(storage), 43200);
-  writeHibernateSecs(777, storage);
-  assert.equal(readHibernateSecs(storage), 14400);
+  assert.equal(DEFAULT_HIBERNATE_SECS, 14400);
 });
 
 test("configure goes only to ready hosts that report the capability", async () => {

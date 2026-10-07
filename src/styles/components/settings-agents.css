@@ -1,0 +1,7 @@
+/* Settings -> General, "Agents" group: the one-line hint under its heading. */
+.setting-block .setting-hint {
+  margin: -4px 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 16px;
+}

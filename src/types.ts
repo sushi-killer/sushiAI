@@ -549,6 +549,8 @@ export type AppPreferences = {
   desktopMascot: boolean;
   /** Opt-in global shortcut that toggles the mascot. */
   mascotShortcut: boolean;
+  /** Seconds an idle agent session runs before it sleeps; 0 is off. */
+  hibernateAfterSecs: number;
 };
 export type MascotShortcutStatus = {
   accelerator: string;

@@ -453,28 +453,6 @@ export const HIBERNATE_CHOICES = [
   { secs: 43200, label: "12 h" },
 ] as const;
 export const DEFAULT_HIBERNATE_SECS = 14400;
-const HIBERNATE_STORAGE = "sushiai.hibernateAfter";
-
-/** The saved choice in seconds; nothing saved, or an unknown value, is the default. */
-export function readHibernateSecs(storage?: Storage): number {
-  try {
-    const raw = (storage || localStorage).getItem(HIBERNATE_STORAGE);
-    const value = raw === null ? NaN : Number(raw);
-    return HIBERNATE_CHOICES.some((choice) => choice.secs === value)
-      ? value
-      : DEFAULT_HIBERNATE_SECS;
-  } catch {
-    return DEFAULT_HIBERNATE_SECS;
-  }
-}
-
-export function writeHibernateSecs(secs: number, storage?: Storage): void {
-  try {
-    (storage || localStorage).setItem(HIBERNATE_STORAGE, String(secs));
-  } catch {
-    // Losing the preference is survivable.
-  }
-}
 
 /** Pushes the idle-sleep delay to one host, only when it can hibernate. */
 export async function configureHibernation(

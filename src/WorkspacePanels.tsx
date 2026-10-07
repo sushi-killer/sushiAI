@@ -1,8 +1,8 @@
-import { memo, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import { Maximize2, Minimize2, MoreHorizontal, Plus, X } from "lucide-react";
 import type { Layout, Panel } from "./types";
 import { TerminalPanel } from "./TerminalPanel";
-import { daemonHost } from "./daemonSessions";
+import { daemonHost, hostSupports } from "./daemonSessions";
 import { BrowserPanel } from "./BrowserPanel";
 import { ChatPanel } from "./ChatPanel";
 import { ProjectPanel } from "./ProjectPanel";
@@ -60,6 +60,26 @@ type PanelHostProps = {
   onCompanion(panelId: string, patch: CompanionPatch): void;
 };
 
+/** Whether the panel's host can put sessions to sleep; an older host cannot,
+ * so a sleep control would do nothing there. */
+function useHostSleeps(host: string, enabled: boolean): boolean {
+  const [sleeps, setSleeps] = useState(false);
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    void Promise.resolve(window.bridge?.daemonStates?.())
+      .then((states) => {
+        if (!cancelled)
+          setSleeps(hostSupports(states ?? [], host, "hibernate"));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [host, enabled]);
+  return enabled && sleeps;
+}
+
 export const PanelHost = memo(function PanelHost({
   panel,
   cwd,
@@ -90,6 +110,12 @@ export const PanelHost = memo(function PanelHost({
   onCompanion,
 }: PanelHostProps) {
   const companion = companionTarget(extensionRegistry, panel.companion);
+  const canKeepAwake =
+    panel.kind === "agent" &&
+    !!panel.sessionId &&
+    !panel.ended &&
+    (panel.agent === "claude" || panel.agent === "codex");
+  const hostSleeps = useHostSleeps(daemonHost(endpoint), canKeepAwake);
   return (
     <RenderProfiler id={`panel:${panel.id}`}>
       <PanelFrame
@@ -106,10 +132,7 @@ export const PanelHost = memo(function PanelHost({
         onAdd={onAdd}
         onRename={(title) => onRename(panel.id, title)}
         onKeepAwake={
-          panel.kind === "agent" &&
-          panel.sessionId &&
-          !panel.ended &&
-          (panel.agent === "claude" || panel.agent === "codex")
+          hostSleeps
             ? (on) =>
                 void window.bridge
                   ?.sessionUpdate(daemonHost(endpoint), {

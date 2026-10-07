@@ -1,5 +1,6 @@
 import type { ConnectionProfile, Workspace } from "../types";
 import type { ProjectGit } from "./useProjectGit";
+import type { WorktreeClaim } from "../extensions/modules";
 
 /** Groups the flat workspace list by which host (this Mac or an SSH host) owns
  * it. Shared by Sidebar (which draws the grouping) and App (which needs to
@@ -209,66 +210,54 @@ export function computeHostMergeGroups(
   return groups;
 }
 
-/** The slice of an orchd task the sidebar needs to name its worktree. */
-export type WorktreeTask = {
-  title: string;
-  branch: string;
-  worktree: string;
-  repo: string;
-  updatedAt: number;
-  status: string;
-};
-
 const trimSlashes = (path: string) => (path || "").replace(/\/+$/, "");
 
-/** The orchd task a local member's checkout belongs to: by worktree path, or
- * by branch inside the same repository. The newest match wins. */
-export function memberTask(
+/** The claim a member's checkout belongs to: same host, then by worktree
+ * path, or by branch inside the same repository. The first match wins, so a
+ * module lists its preferred claim first. */
+export function memberClaim(
   member: MergedMember,
-  tasks: WorktreeTask[],
-): WorktreeTask | undefined {
-  if (member.hostKey !== LOCAL_GROUP) return undefined;
+  claims: WorktreeClaim[],
+): WorktreeClaim | undefined {
   const { checkout, branch, commonDir } = member.git;
-  let best: WorktreeTask | undefined;
-  for (const task of tasks) {
-    const match =
-      (Boolean(task.worktree) &&
-        trimSlashes(task.worktree) === trimSlashes(checkout)) ||
-      (Boolean(task.branch) &&
-        task.branch === branch &&
-        `${trimSlashes(task.repo)}/.git` === commonDir);
-    if (match && (!best || task.updatedAt > best.updatedAt)) best = task;
-  }
-  return best;
+  return claims.find(
+    (claim) =>
+      claim.host === member.hostKey &&
+      ((Boolean(claim.path) &&
+        trimSlashes(claim.path ?? "") === trimSlashes(checkout)) ||
+        (Boolean(claim.branch) &&
+          claim.branch === branch &&
+          `${trimSlashes(claim.repo)}/.git` === commonDir)),
+  );
 }
 
 /** What names one member inside its row: the host, as before, until a host
- * contributes several worktrees - then the orchd task's title when the
- * worktree belongs to one, else the branch, prefixed by the host only off
+ * contributes several worktrees - then a claim's label when a module owns
+ * the worktree, else the branch, prefixed by the host only off
  * this Mac (a detached checkout reports its short commit). */
 export function memberLabel(
   group: MergeGroup,
   member: MergedMember,
   profiles: ConnectionProfile[],
-  tasks: WorktreeTask[] = [],
+  claims: WorktreeClaim[] = [],
 ): string {
   const host = groupLabel(member.hostKey, profiles);
   if (!group.worktrees) return host;
-  const title = memberTask(member, tasks)?.title;
+  const title = memberClaim(member, claims)?.label;
   if (title) return title;
   const branch = member.git.branch || basenameOf(member.git.checkout);
   return member.hostKey === LOCAL_GROUP ? branch : `${host} · ${branch}`;
 }
 
-/** The label, plus the branch when the label is a task title. */
+/** The label, plus the branch when the label is a claim label. */
 export function memberTooltip(
   group: MergeGroup,
   member: MergedMember,
   profiles: ConnectionProfile[],
-  tasks: WorktreeTask[] = [],
+  claims: WorktreeClaim[] = [],
 ): string {
-  const label = memberLabel(group, member, profiles, tasks);
-  const titled = group.worktrees && memberTask(member, tasks);
+  const label = memberLabel(group, member, profiles, claims);
+  const titled = group.worktrees && memberClaim(member, claims);
   return titled && member.git.branch
     ? `${label} (${member.git.branch})`
     : label;
@@ -297,13 +286,13 @@ export function mergedRowStatusKey(
 export function shouldCollapseHostMarkers(
   group: MergeGroup,
   profiles: ConnectionProfile[],
-  tasks: WorktreeTask[] = [],
+  claims: WorktreeClaim[] = [],
 ): boolean {
   if (group.members.length >= 3) return true;
   const charCount = group.members
     .filter((m) => group.worktrees || m.hostKey !== LOCAL_GROUP)
     .reduce(
-      (total, m) => total + memberLabel(group, m, profiles, tasks).length,
+      (total, m) => total + memberLabel(group, m, profiles, claims).length,
       0,
     );
   return charCount > 12;
@@ -325,10 +314,10 @@ export function mergedMarkerAccessibleName(
   group: MergeGroup,
   profiles: ConnectionProfile[],
   statusByEndpoint: Record<string, string>,
-  tasks: WorktreeTask[] = [],
+  claims: WorktreeClaim[] = [],
 ): string {
   const parts = group.members.map((m) => {
-    const label = memberLabel(group, m, profiles, tasks);
+    const label = memberLabel(group, m, profiles, claims);
     const status = groupStatus(m.hostKey, statusByEndpoint);
     return `${label} (${stateWord(status)})`;
   });

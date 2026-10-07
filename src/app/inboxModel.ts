@@ -1,22 +1,12 @@
-// The Inbox's items and filters, without React: orchd tasks and agent
-// sessions in one queue, grouped by what the owner has to do with them.
+// The Inbox's items and filters, without React: module attention rows and
+// agent sessions in one queue, grouped by what the owner has to do with them.
 import type { InboxGroup, InboxRow } from "./attention.ts";
+import { elapsedLabel, plural } from "../lib/text.ts";
 import { groupKey } from "./workspaceMerge.ts";
-import { formatCost } from "../orchestrator/helpers.ts";
-import {
-  elapsedLabel,
-  enterAnswer,
-  inboxHeadline,
-  inboxZeroSummary,
-  landTasks,
-  matchesOwnerTask,
-  ownerKind,
-  projectName,
-  type AnswerChoice,
-} from "../orchestrator/ownerAttention.ts";
-import type { Task } from "../orchestrator/types.ts";
+import type { AttentionAction, AttentionItem } from "../extensions/modules.ts";
 
-export type Kind = "answer" | "decide" | "land" | "panels" | "working" | "idle";
+export type Kind =
+  "answer" | "decide" | "review" | "panels" | "working" | "idle";
 
 type Base = {
   key: string;
@@ -26,28 +16,30 @@ type Base = {
   host: string;
   at: number | null;
 };
-export type TaskItem = Base & {
-  source: "task";
-  kind: "answer" | "decide" | "land";
-  task: Task;
+/** A row a module asks the owner to act on. */
+export type ModuleEntry = { extensionId: string; item: AttentionItem };
+export type ModuleItem = Base & {
+  source: "module";
+  kind: AttentionItem["kind"];
+  entry: ModuleEntry;
 };
 export type SessionItem = Base & {
   source: "session";
   kind: "answer" | "panels" | "working" | "idle";
   row: InboxRow;
 };
-export type Item = TaskItem | SessionItem;
+export type Item = ModuleItem | SessionItem;
 
 /** Display order; the first four are what "needs you" counts. */
 export const KINDS: Kind[] = [
   "answer",
   "decide",
-  "land",
+  "review",
   "panels",
   "working",
   "idle",
 ];
-const NEEDS: Kind[] = ["answer", "decide", "land", "panels"];
+const NEEDS: Kind[] = ["answer", "decide", "review", "panels"];
 export const needsYou = (item: Item) => NEEDS.includes(item.kind);
 
 export const AGENT_NAMES: Record<string, string> = {
@@ -71,28 +63,22 @@ const SESSION_KIND = {
 /** Every item, in group order and newest first within a group. Shells are
  * left out: they only ever appear in the cleanup review. */
 export function inboxItems(
-  ownerTasks: Task[],
-  allTasks: Task[],
+  modules: ModuleEntry[],
   groups: InboxGroup[],
-  orchestrator = true,
   askPanels: ReadonlySet<string> = new Set(),
 ): Item[] {
   const out: Item[] = [];
-  const task = (kind: TaskItem["kind"], t: Task, prefix: string) =>
+  for (const entry of modules)
     out.push({
-      source: "task",
-      key: `${prefix}:${t.id}`,
-      kind,
-      title: t.title,
-      project: projectName(t.repo),
-      host: groupKey(t.host),
-      at: t.updatedAt,
-      task: t,
+      source: "module",
+      key: `${entry.extensionId}:${entry.item.key}`,
+      kind: entry.item.kind,
+      title: entry.item.title,
+      project: entry.item.project,
+      host: entry.item.host,
+      at: entry.item.at,
+      entry,
     });
-  if (orchestrator) {
-    for (const t of ownerTasks) task(ownerKind(t), t, "task");
-    for (const t of landTasks(allTasks)) task("land", t, "land");
-  }
   for (const group of groups) {
     if (group.key === "shells") continue;
     for (const row of group.rows)
@@ -121,17 +107,25 @@ export function inScope(item: Item, { project, host, query }: Scope): boolean {
   if (host && item.host !== host) return false;
   const needle = query.trim().toLowerCase();
   if (!needle) return true;
-  return item.source === "task"
-    ? matchesOwnerTask(item.task, needle)
+  return item.source === "module"
+    ? item.entry.item.search.toLowerCase().includes(needle)
     : `${item.row.panel.title} ${item.title}`.toLowerCase().includes(needle);
 }
 
-/** What "Land N" lands: exactly the LAND rows on screen, never the ones a
- * filter hides. */
-export function landTargets(visible: Item[]): Task[] {
-  return visible.flatMap((item) =>
-    item.source === "task" && item.kind === "land" ? [item.task] : [],
-  );
+/** What a module's "review all" acts on: exactly the review rows on screen,
+ * never the ones a filter hides, as the module's own item keys. */
+export function reviewTargets(
+  visible: Item[],
+): { extensionId: string; keys: string[] }[] {
+  const out: { extensionId: string; keys: string[] }[] = [];
+  for (const item of visible) {
+    if (item.source !== "module" || item.kind !== "review") continue;
+    const { extensionId, item: row } = item.entry;
+    const group = out.find((target) => target.extensionId === extensionId);
+    if (group) group.keys.push(row.key);
+    else out.push({ extensionId, keys: [row.key] });
+  }
+  return out;
 }
 
 /** What "Clean up" offers for review within the current host and project
@@ -148,12 +142,6 @@ export function cleanupCandidates(
         (!project || row.workspace.name === project),
     );
   return { agents: rows("idle"), shells: rows("shells") };
-}
-
-/** "1 idle session", "2 idle sessions": a count and its noun, whose last
- * word takes an "s" unless the count is one. */
-export function plural(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 /** "<1m" under a minute, else "2m", "1h", "3d". */
@@ -174,60 +162,50 @@ export function scopedHeadline(
   const oldest = Math.min(
     ...needs.map((item) => (item.at == null ? now : item.at)),
   );
-  const base = inboxHeadline(
-    needs.length,
-    new Set(needs.map((item) => item.project)).size,
-    new Set(needs.map((item) => item.host)).size,
-    null,
-  );
+  const projects = new Set(needs.map((item) => item.project)).size;
+  const hosts = new Set(needs.map((item) => item.host)).size;
+  const base = `${needs.length} ${needs.length === 1 ? "thing needs" : "things need"} you across ${plural(projects, "project")} on ${plural(hosts, "host")}`;
   return needs.some((item) => item.at != null)
     ? `${base} · oldest ${ageLabel(now - oldest)}`
     : base;
 }
 
-/** What Enter sends in the Inbox. Enter stays unarmed for a moment after the
- * selection moves (see `enterAnswer`), except after a digit or click pick
- * made while this question was shown: that pick is as deliberate as a click
- * on Answer, so the Enter right after it sends it. */
-export function inboxEnterAnswer(
-  choice: AnswerChoice,
-  selectedAt: number,
-  pickedAt: number | undefined,
-  now: number,
-): string {
-  const picked = pickedAt != null && pickedAt >= selectedAt;
-  return enterAnswer(choice, picked ? -Infinity : selectedAt, now);
+/** Whether a global key belongs to something else: an open dialog, a text
+ * field, or - for anything but J/K - a focused button or link, where Enter is
+ * that button's own click, not a second answer. */
+export function ownsKey(target: EventTarget | null, key: string): boolean {
+  if (document.querySelector("[role=dialog], dialog[open]")) return true;
+  const el = target as HTMLElement | null;
+  if (!el?.closest) return false;
+  if (el.isContentEditable || el.closest("input, textarea, select"))
+    return true;
+  return key !== "j" && key !== "k" && !!el.closest("button, a");
 }
 
-/** The detail's branch box after the branch and +/−: "3 files · attempt 1/4
- * · $0.04", each part only when there is something to say. */
-export function diffFacts(
-  files: number | undefined,
-  attempts: number,
-  maxAttempts: number | undefined,
-  costUsd: number | undefined,
-): string {
-  return [
-    files ? plural(files, "file") : "",
-    attempts > 0
-      ? `attempt ${attempts}${maxAttempts ? `/${maxAttempts}` : ""}`
-      : "",
-    costUsd && costUsd > 0 ? formatCost(costUsd) : "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
+/** The key after `delta` steps from `current`, clamped to the list; the first
+ * key when `current` is not in it. */
+export function stepSelection(
+  keys: string[],
+  current: string | null,
+  delta: number,
+): string | null {
+  if (keys.length === 0) return null;
+  const at = current == null ? -1 : keys.indexOf(current);
+  if (at < 0) return keys[0];
+  return keys[Math.min(keys.length - 1, Math.max(0, at + delta))];
 }
 
-/** The Inbox-zero line, which always says how the day went: "Nothing needs
- * you. Nothing landed today yet." when nothing landed or runs. */
-export function zeroLine(
-  tasks: Task[],
-  now = Date.now(),
-  orchestrator = true,
-): string {
-  if (!orchestrator) return "Nothing needs you.";
-  const summary = inboxZeroSummary(tasks, now);
-  return summary === "Nothing needs you."
-    ? `${summary} Nothing landed today yet.`
-    : summary;
-}
+/** The selected row's action bound to a pressed key, if any. */
+export const actionForKey = (
+  actions: AttentionAction[] | undefined,
+  key: string,
+): AttentionAction | undefined =>
+  actions?.find((action) => action.key === key.toLowerCase());
+
+/** Footer legend entries for the actions that have a key: ["L", "land"]. */
+export const actionLegend = (
+  actions: AttentionAction[] | undefined,
+): string[][] =>
+  (actions ?? [])
+    .filter((action) => action.key)
+    .map((action) => [action.key!.toUpperCase(), action.label.toLowerCase()]);

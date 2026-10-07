@@ -1,5 +1,11 @@
 import { Check, Circle, ListTodo, Plus, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { uid } from "../layout.ts";
 import {
   bucketOf,
@@ -14,6 +20,9 @@ import {
   type Item,
 } from "./records.ts";
 import { projectScope } from "./routes.ts";
+import { mergeArgs, type ArgsPatch } from "./args.ts";
+import { CompanionView } from "./CompanionView.tsx";
+import { coreViews } from "./coreViews.ts";
 import type { ExtensionPanel, Workspace } from "../types.ts";
 import type {
   DeclarativeDocument,
@@ -34,11 +43,14 @@ export function ExtensionSurface({
   cwd,
   connection,
   registry,
+  onArgs,
 }: {
   panel: ExtensionPanel;
   cwd: string;
   connection?: string;
   registry: ExtensionRegistry;
+  /** Saves the pane's arguments on the panel. */
+  onArgs?(patch: ArgsPatch): void;
 }) {
   const surface = registry.resolveSurface(panel);
   if (!surface || !registry.isExtensionActive(panel.extension.extensionId))
@@ -52,6 +64,8 @@ export function ExtensionSurface({
       connection={connection}
       instanceId={panel.extension.instanceId}
       frame="pane"
+      args={panel.extension.args}
+      onArgs={onArgs}
     />
   );
 }
@@ -68,6 +82,8 @@ export function ExtensionSurfaceView({
   workspaces = [],
   instanceId = "page",
   frame = "section",
+  args,
+  onArgs,
 }: {
   surface: SurfaceContribution;
   cwd: string;
@@ -76,7 +92,29 @@ export function ExtensionSurfaceView({
   workspaces?: Workspace[];
   instanceId?: string;
   frame?: SurfaceFrame;
+  /** What a core view reads; the pane keeps them on its panel. */
+  args?: Record<string, string>;
+  onArgs?(patch: ArgsPatch): void;
 }) {
+  if (surface.view.kind === "companion")
+    return (
+      <CompanionView
+        extensionId={surface.extensionId}
+        surfaceId={surface.id}
+        view={surface.view}
+      />
+    );
+  if (surface.view.kind === "core")
+    return (
+      <CoreSurface
+        viewId={surface.view.viewId}
+        extensionId={surface.extensionId}
+        cwd={cwd}
+        connection={connection}
+        args={args}
+        onArgs={onArgs}
+      />
+    );
   if (surface.view.kind !== "declarative")
     return <UnavailableExtensionSurface extensionId={surface.extensionId} />;
   // An aggregate reads every project at once, so it has no scope of its own.
@@ -110,6 +148,39 @@ export function ExtensionSurfaceView({
       tokens={surface.tokens}
       frame={frame}
     />
+  );
+}
+
+/** A built-in's React view filling the pane or page. The arguments live on the
+ * panel when the host gives a saver, and in this component otherwise. */
+function CoreSurface({
+  viewId,
+  extensionId,
+  cwd,
+  connection,
+  args,
+  onArgs,
+}: {
+  viewId: string;
+  extensionId: string;
+  cwd: string;
+  connection?: string;
+  args?: Record<string, string>;
+  onArgs?(patch: ArgsPatch): void;
+}) {
+  const [local, setLocal] = useState<Record<string, string>>({});
+  const entry = coreViews[viewId];
+  if (!entry) return <UnavailableExtensionSurface extensionId={extensionId} />;
+  const { View } = entry;
+  return (
+    <Suspense fallback={<div className="loading">Loading…</div>}>
+      <View
+        args={onArgs ? (args ?? {}) : local}
+        onArgs={onArgs ?? ((patch) => setLocal((cur) => mergeArgs(cur, patch)))}
+        cwd={cwd}
+        connection={connection}
+      />
+    </Suspense>
   );
 }
 

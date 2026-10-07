@@ -178,31 +178,15 @@ test("waitingCount counts blocked and done-not-seen panels across every workspac
   assert.equal(waitingCount(ws, state, []), 1);
 });
 
-test("waitingCount adds orchd tasks that need the owner, not archived or owner-stopped ones", async () => {
+test("waitingCount adds the module items that wait on the owner, not review rows", async () => {
   const { createAttentionState, waitingCount } = await library;
-  const task = (id, status, extra = {}) => ({
-    id,
-    title: id,
-    repo: "/r",
-    status,
-    archived: false,
-    decisions: [],
-    attempts: [],
-    updatedAt: 1,
-    ...extra,
-  });
-  const tasks = [
-    task("w", "waiting"),
-    task("f", "failed"),
-    task("l", "landing"),
-    task("e", "stopped", { decisions: ["Orchestrator: nothing left"] }),
-    task("o", "stopped", { decisions: ["Owner: stop"] }),
-    task("i", "stopped", { attempts: [{ n: 1, status: "interrupted" }] }),
-    task("r", "running"),
-    task("d", "done"),
-    task("a", "failed", { archived: true }),
+  const items = [
+    { kind: "answer" },
+    { kind: "decide" },
+    { kind: "review" },
+    { kind: "review" },
   ];
-  assert.equal(waitingCount([], createAttentionState(), [], tasks), 4);
+  assert.equal(waitingCount([], createAttentionState(), [], items), 2);
   assert.equal(waitingCount([], createAttentionState(), []), 0);
 });
 
@@ -460,25 +444,6 @@ test("the panel statuses the daemon mapping emits carry through to the Inbox gro
     busy: "working",
     shell: "shells",
   });
-});
-
-test("waitingCount ignores orchd tasks while the orchestrator is off", async () => {
-  const { createAttentionState, waitingCount } = await library;
-  const tasks = [
-    {
-      id: "t1",
-      title: "T",
-      repo: "/w/app",
-      status: "waiting",
-      archived: false,
-      decisions: [],
-      attempts: [],
-      updatedAt: 1,
-    },
-  ];
-  const state = createAttentionState();
-  assert.equal(waitingCount([], state, [], tasks), 1);
-  assert.equal(waitingCount([], state, [], tasks, false), 0);
 });
 
 test("daemon agentStatus drives attention: blocked needs you, working then idle is done", async () => {

@@ -52,7 +52,7 @@ write the variable.
 | `--focus` (`#7797d7`)                                     | focus ring and focused input border                                                     |
 | `--tone-{ok,info,warning,danger,neutral,muted}` and `-bg` | meaning of a value; spent through `.ui-tone-*`                                          |
 
-`.ui-tone-ok|warning|danger|info|neutral` (in `src/orchestrator/ui/ui.css`)
+`.ui-tone-ok|warning|danger|info|neutral` (in `src/ui/ui.css`)
 sets `--ui-tone` and `--ui-tone-bg` on an element; `.ui-dot`, `.ui-tag`,
 `.ui-banner`, `.pd-dot` read them. Use a tone class, never a tone colour
 directly on a new component. The `Tone` type is

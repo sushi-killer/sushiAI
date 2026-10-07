@@ -206,7 +206,7 @@ for await (const file of walk("src/styles")) {
 // nothing else.
 const SHELL_DIR = "src/app";
 const SHELL_ALLOWED =
-  /^\.\.\/extensions\/(ExtensionSlots\.tsx|registry\.ts|routes\.ts|types\.ts)$/;
+  /^\.\.\/extensions\/(ExtensionSlots\.tsx|modules\.ts|registry\.ts|routes\.ts|types\.ts)$/;
 const SHELL_IMPORT =
   /(?:\bfrom\s+|\brequire\(\s*|\bimport\(\s*)["']([^"']+)["']/g;
 const shellFiles = (await readdir(path.join(root, SHELL_DIR)))
@@ -275,6 +275,61 @@ for await (const file of walk("electron", coreRoot)) {
       problems.push(
         `${file} requires ${target}, a module main.cjs plugs in; core files never load modules`,
       );
+}
+
+// Core never reaches into a module. The composition root (coreViews.ts and
+// modules.ts) is the one place core names a built-in module, so the module
+// directories are whatever those files import from outside src/extensions
+// itself; no module name is written here. A core file may not import any of
+// those directories.
+const moduleRoot = process.env.MODULE_ROOT_OVERRIDE || root;
+const COMPOSITION_ROOTS = [
+  "src/extensions/coreViews.ts",
+  "src/extensions/modules.ts",
+  "src/extensions/panelMigrations.ts",
+];
+const CORE_FILES =
+  /^(src\/(app|mascot|workspace)\/.+\.(ts|tsx)|src\/(App|WorkspacePanels|Project[A-Za-z]*Tab)\.tsx|src\/workspaceState\.ts|src\/project[A-Za-z]*\.ts|electron\/(attention|mascot[A-Za-z-]*)\.cjs)$/;
+const resolvedDir = (file, source) =>
+  path.posix.join(path.posix.dirname(file), source);
+const listFiles = async (dir) => {
+  const found = [];
+  for (const entry of await readdir(path.join(moduleRoot, dir), {
+    withFileTypes: true,
+  }).catch(() => [])) {
+    const child = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) found.push(...(await listFiles(child)));
+    else found.push(child);
+  }
+  return found;
+};
+const moduleDirs = new Set();
+for (const file of COMPOSITION_ROOTS) {
+  const text = await readFile(path.join(moduleRoot, file), "utf8").catch(
+    () => "",
+  );
+  for (const [, source] of text.matchAll(SHELL_IMPORT)) {
+    if (!source.startsWith(".")) continue;
+    const dir = path.posix.dirname(resolvedDir(file, source));
+    if (dir !== "src/extensions" && dir !== "src") moduleDirs.add(dir);
+  }
+}
+const coreFiles = (
+  await Promise.all(["src", "electron"].map((dir) => listFiles(dir)))
+)
+  .flat()
+  .filter((file) => CORE_FILES.test(file));
+for (const file of coreFiles) {
+  const text = await readFile(path.join(moduleRoot, file), "utf8");
+  for (const [, source] of text.matchAll(SHELL_IMPORT)) {
+    if (!source.startsWith(".")) continue;
+    const target = resolvedDir(file, source);
+    for (const dir of moduleDirs)
+      if (target === dir || target.startsWith(`${dir}/`))
+        problems.push(
+          `${file} imports ${source}; core may not import ${dir}, which the composition root loads as a module`,
+        );
+  }
 }
 
 // docs/LESSONS.md is meant to be read every session, so a promoted entry

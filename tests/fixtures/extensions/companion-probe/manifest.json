@@ -1,0 +1,49 @@
+{
+  "id": "test.companion-probe",
+  "name": "Companion probe",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "scope": "app",
+  "description": "Not a product feature. Declares a companion process and a companion view so the suite tests the generic contract with a synthetic program.",
+  "companion": {
+    "command": "probe-companion",
+    "args": ["serve"],
+    "permissions": ["hosts.read"]
+  },
+  "contributions": {
+    "surfaces": [
+      {
+        "id": "probe.companion-settings",
+        "title": "Companion probe",
+        "allowedHosts": ["settings.page"],
+        "defaultHost": "settings.page",
+        "instancePolicy": "singleton",
+        "stateScope": "global",
+        "view": {
+          "kind": "companion",
+          "fields": [
+            { "id": "service", "label": "Service", "type": "status" },
+            { "id": "pairing", "label": "Pairing code", "type": "qr" },
+            { "id": "note", "label": "Note", "type": "text" }
+          ],
+          "actions": [
+            {
+              "id": "add-device",
+              "label": "Add device",
+              "method": "device.add"
+            },
+            {
+              "id": "import-hosts",
+              "label": "Import hosts",
+              "method": "hosts.import",
+              "send": ["hosts"]
+            }
+          ]
+        }
+      }
+    ],
+    "navigation": [],
+    "actions": [],
+    "commands": []
+  }
+}

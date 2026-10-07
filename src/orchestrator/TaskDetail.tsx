@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
+import { TaskMark, cleanTitle } from "./taskTitle";
 import {
   Archive,
   Check,
@@ -22,9 +23,9 @@ import {
   stageTrack,
   statusBadgeLabel,
   statusTone,
-  type Tone,
   variantLabel,
 } from "./helpers";
+import type { Tone } from "../ui/tone";
 import type { Attempt, Settings, Task } from "./types";
 import { RichText } from "../agents/AgentsView";
 import { TaskCostLine, TaskTimeline } from "./TaskInsights";
@@ -39,7 +40,7 @@ import {
   reportSummary,
   shortBranch,
 } from "./taskDetailModel";
-import { Chip, Criterion, StageTrack, Tag } from "./ui";
+import { Chip, Criterion, StageTrack, Tag } from "../ui";
 import "./task-detail.css";
 
 const DECISION_TAGS = ["Orchestrator"] as const;
@@ -118,9 +119,10 @@ function AttemptRow({ attempt }: { attempt: Attempt }) {
               ? fingerprintLabel(attempt.fingerprint)
               : attempt.model || attempt.routeId}
           </span>
-          <Tag tone={tone}>
-            {attempt.status === "running" ? "running" : attempt.status}
-          </Tag>
+          {/* A blocked attempt already says "Stopped to ask." below. */}
+          {attempt.status !== "blocked" && (
+            <Tag tone={tone}>{attempt.status}</Tag>
+          )}
         </div>
         <p className="td-attempt-meta">
           {formatDuration(attemptDurationMs(attempt))} ·{" "}
@@ -300,10 +302,11 @@ function QuestionCard({
   const source = questionSource(task.question);
   return (
     <div className="td-question">
-      <div className="td-question-head">
-        <Tag tone="warning">Needs you</Tag>
-        {source && <span className="td-question-source">{source}</span>}
-      </div>
+      {source && (
+        <div className="td-question-head">
+          <span className="td-question-source">{source}</span>
+        </div>
+      )}
       <p className="td-question-text">{task.question.text}</p>
       {options.length > 0 && (
         <div className="td-question-options">
@@ -543,7 +546,9 @@ export function TaskDetail({
       ? { tone: "danger", label: statusBadgeLabel(selected) }
       : selected.status === "landing"
         ? { tone: "warning", label: "landing" }
-        : null;
+        : selected.status === "waiting"
+          ? { tone: "warning", label: "needs you" }
+          : null;
   const met = criteriaMet(selected);
   const breakdown = costByStage(selected);
   // A parent's total includes its subtasks' costs.
@@ -571,7 +576,10 @@ export function TaskDetail({
         <div className="td-head">
           <div className="td-title">
             <div className="td-title-row">
-              <h3 title={selected.title}>{selected.title}</h3>
+              <TaskMark size={14} aria-hidden />
+              <h3 title={cleanTitle(selected.title)}>
+                {cleanTitle(selected.title)}
+              </h3>
               {statusTag && <Tag tone={statusTag.tone}>{statusTag.label}</Tag>}
             </div>
             <p className="td-meta">
@@ -695,7 +703,7 @@ export function TaskDetail({
                   act(() => orchestratorClient.taskStop(selected.id))
                 }
               >
-                <Square size={12} /> Stop
+                <Square size={12} /> Stop task
               </button>
             )}
             {/* Archive for a task at rest, delete for one not finished. */}

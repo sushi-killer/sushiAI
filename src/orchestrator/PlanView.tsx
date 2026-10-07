@@ -11,7 +11,7 @@ import {
   type PlanItem,
 } from "./planModel";
 import type { BacklogBucket, Settings, Task } from "./types";
-import { Tag } from "./ui";
+import { Tag } from "../ui";
 import "./plan.css";
 
 function StartButton({

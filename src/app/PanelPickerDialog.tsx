@@ -6,7 +6,6 @@ import {
   GitBranch,
   Globe,
   Lock,
-  ListTodo,
   Sparkles,
   TerminalSquare,
 } from "lucide-react";
@@ -14,7 +13,6 @@ import { agentTitle } from "./agent-title.ts";
 import { Icon } from "../PanelIcon.tsx";
 import { openSettings } from "./openSettings.ts";
 import { checkoutPath, tildePath as tilde } from "../projectPrepare.ts";
-import { useOrchestratorEnabled } from "../orchestrator/enabled.ts";
 import {
   launchTarget,
   projectChoices,
@@ -80,13 +78,6 @@ const TOOLS = [
     detail: "Talk to an agent",
     icon: Sparkles,
   },
-  {
-    key: "o",
-    kind: "orchestrator",
-    title: "Orchestrator",
-    detail: "Tasks carried to done",
-    icon: ListTodo,
-  },
 ] as const;
 
 type Tone = "ok" | "warning" | "danger";
@@ -133,7 +124,6 @@ export function PanelPickerDialog({
   extensionRegistry: ExtensionRegistry;
   hostContext: SessionHostContext;
 }) {
-  const orchestrator = useOrchestratorEnabled();
   // The project the picker targets: the one it opened for, or another from
   // the title's list (its own open workspace).
   const [baseId, setBaseId] = useState(opened.id);
@@ -413,9 +403,7 @@ export function PanelPickerDialog({
     ],
   );
   const extensionTools = extensionPanelOptions(extensionRegistry);
-  const tools = TOOLS.filter(
-    (item) => orchestrator || item.kind !== "orchestrator",
-  );
+  const tools = TOOLS;
   // An extension's tool takes the first letter of its label that no other
   // tool already owns.
   const taken = new Set<string>(tools.map((item) => item.key));
@@ -478,12 +466,10 @@ export function PanelPickerDialog({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-    // `tools` and `extensionKeys` are rebuilt from `orchestrator` and the
-    // registry, which are listed.
+    // `extensionKeys` is rebuilt from the registry, which is listed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     focusedAgent,
-    orchestrator,
     extensionRegistry,
     targetWorkspaceId,
     worktreeArg,

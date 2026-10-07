@@ -327,8 +327,17 @@
 }
 
 .extension-card-title {
+  display: flex;
   align-items: center;
   justify-content: flex-start;
+  gap: 8px;
+}
+
+/* Where it comes from, then the program state, with room between. */
+.extension-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
 }
 
 .extension-card-title strong {
@@ -336,8 +345,8 @@
   font-size: 13px;
 }
 
-.extension-card-title span,
-.extension-card-copy > small {
+.extension-card-title > span:not(.extension-companion-state),
+.extension-card-meta > small {
   color: var(--text-faint);
   font-family: "SFMono-Regular", Menlo, monospace;
   font-size: 10px;
@@ -365,6 +374,13 @@
 .extension-toggle.active {
   border-color: var(--line-selected);
   color: var(--accent);
+}
+
+/* Enabled is the quiet state while the program needs attention. */
+.extension-toggle.active.quiet {
+  border-color: var(--line);
+  background: none;
+  color: var(--text-muted);
 }
 
 @container (max-width: 620px) {
@@ -790,4 +806,164 @@
 
 .extension-layout-table .extension-row:last-child {
   border-bottom: 0;
+}
+
+/* Companion view: fields and buttons whose values come from a program the
+ * owner approved. Tones are the app's own; the view never names a colour. */
+.companion-view {
+  display: grid;
+  gap: var(--gap-md);
+}
+
+.companion-field {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-divider);
+}
+
+.companion-field[data-type="qr"] {
+  align-items: start;
+}
+
+.companion-label {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.companion-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.companion-empty {
+  color: var(--text-faint);
+}
+
+.companion-status {
+  justify-self: start;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--tone-neutral);
+  background: var(--tone-neutral-bg);
+  border: 1px solid currentColor;
+}
+
+.companion-status[data-tone="ok"] {
+  color: var(--tone-ok);
+  background: var(--tone-ok-bg);
+}
+
+.companion-status[data-tone="info"] {
+  color: var(--tone-info);
+  background: var(--tone-info-bg);
+}
+
+.companion-status[data-tone="warning"] {
+  color: var(--tone-warning);
+  background: var(--tone-warning-bg);
+}
+
+.companion-status[data-tone="danger"] {
+  color: var(--tone-danger);
+  background: var(--tone-danger-bg);
+}
+
+.companion-status[data-tone="muted"] {
+  color: var(--tone-muted);
+}
+
+/* A QR code must keep dark modules on a light ground in every theme, so it
+ * uses the two keywords rather than the surface tokens. */
+.companion-qr {
+  width: 176px;
+  height: 176px;
+  border-radius: var(--radius-sm);
+}
+
+.companion-qr-paper {
+  fill: white;
+}
+
+.companion-qr-ink {
+  fill: black;
+}
+
+.companion-qr-missing {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.companion-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.companion-message {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* Approval dialog and the state line on an extension card. */
+.extension-approval {
+  width: min(520px, calc(100vw - 48px));
+}
+
+.extension-approval-facts {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 8px 12px;
+  margin: 0 0 12px;
+  font-size: 12px;
+}
+
+.extension-approval-facts dt {
+  color: var(--text-muted);
+}
+
+.extension-approval-facts dd {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.extension-approval-stderr {
+  max-height: 140px;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--danger-line);
+  border-radius: var(--radius-sm);
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+.extension-approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.extension-companion-state[data-state="running"] {
+  color: var(--tone-ok);
+}
+
+.extension-companion-state[data-state="needs-approval"] {
+  color: var(--tone-warning);
+}
+
+.extension-companion-state[data-state="failed"] {
+  color: var(--tone-danger);
 }

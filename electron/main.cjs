@@ -10,6 +10,7 @@ const {
   safeStorage,
   powerMonitor,
   globalShortcut,
+  Notification,
 } = require("electron");
 const path = require("node:path");
 const os = require("node:os");
@@ -60,17 +61,22 @@ const {
 } = require("./window-state.cjs");
 const { registerMascot, watchPresenting } = require("./mascot.cjs");
 const { createMascotShortcut } = require("./mascot-shortcut.cjs");
+const { createNotices } = require("./extensions/notices.cjs");
+const { createOrchestratorNotices } = require("./orchestrator-notices.cjs");
 const { DEV_RESTART_EXIT_CODE, watchCore } = require("./dev-restart.cjs");
 const { testWindow } = require("./test-window.cjs");
 
 const testMode = testWindow();
 const { SurfaceStateStore } = require("./extensions/surface-state.cjs");
 const { ExtensionManager } = require("./extensions/extension-manager.cjs");
+const { createCompanions } = require("./extensions/companion-process.cjs");
 const { ARTIFACTS_MANIFEST } = require("./extensions/builtin-artifacts.cjs");
 const { configureArtifactsSkill } = require("./artifacts-skill.cjs");
 const { syncLocalBuiltinSkills } = require("./extensions/builtin-skills.cjs");
 const {
   ORCHESTRATOR_MANIFEST,
+} = require("./extensions/builtin-orchestrator.cjs");
+const {
   registerOrchestratorExtension,
   createModuleSwitch,
   orchestratorNotice,
@@ -90,11 +96,20 @@ let mainWindow;
 const root = path.join(__dirname, "..");
 const dataDir = process.env.BRIDGE_DATA_DIR;
 if (dataDir) app.setPath("userData", path.resolve(dataDir));
+// The PATH extended below is on process.env before any companion starts; the
+// supervisor passes the child only an allowlist of it.
+const companions = createCompanions({
+  getHosts: () => connections?.profiles ?? [],
+  env: process.env,
+});
 const extensions = new ExtensionManager({
   dataDir: app.getPath("userData"),
+  companions,
   builtins: [ORCHESTRATOR_MANIFEST, ARTIFACTS_MANIFEST],
-  // Folders dropped here are read as JSON manifests, never executed. The
-  // override exists so the desktop smoke can point at its own fixtures.
+  // Folders dropped here are read as JSON manifests and carry no code; the
+  // extension folder is never executed. A manifest may name a companion
+  // program installed elsewhere, which runs only after the owner approves it.
+  // The override exists so the desktop smoke can point at its own fixtures.
   localDir: process.env.SUSHIAI_EXTENSIONS_DIR
     ? path.resolve(root, process.env.SUSHIAI_EXTENSIONS_DIR)
     : // A sibling of the settings folder, not inside it: this one is meant to
@@ -284,6 +299,7 @@ registerExtensionIpc({
   getExtensions: () => extensions,
   getSurfaceState: () => surfaceState,
   announce: (change) => send("extensions-state-changed", change),
+  announceCompanion: (change) => send("extensions-companion-changed", change),
 });
 registerWorkspaceSnapshot({
   ipcMain,
@@ -330,20 +346,21 @@ const mascot = registerMascot({
   root,
   policy: testMode.mascot,
   devURL: process.env.BRIDGE_DEV_URL,
-  getService: () => orchestrator,
+  act: (source, key, actionId, text) =>
+    notices.act(source, key, actionId, text),
   showMainWindow: () => attention.showWindow(),
   send,
-  restart: () => {
-    devRestart = true;
-    app.quit();
-  },
 });
 function coreUpdated(file) {
   console.log(`[dev] electron/${file} changed - restart from the mascot`);
-  mascot.add({
-    kind: "core-update",
+  notices.publish("app", {
+    key: "core-update",
+    kind: "info",
+    label: "Update",
     title: "sushiAI core",
     body: "Core updated - restart?",
+    sticky: true,
+    actions: [{ id: "restart", label: "Restart", emphasis: "primary" }],
   });
 }
 if (process.env.BRIDGE_DEV_URL)
@@ -367,12 +384,30 @@ const attention = registerAttentionIpc({
     if (!testMode.test) mascotShortcut.sync(preferences.mascotShortcut);
   },
 });
+const notices = createNotices({
+  preferences: () => attention.getPreferences(),
+  mascot,
+  showWindow: () => attention.showWindow(),
+  Notification,
+  icon: () => attention.mascotImage(),
+});
+notices.register("app", async (_key, actionId) => {
+  if (actionId !== "restart") return;
+  devRestart = true;
+  app.quit();
+});
+const orchestratorNotices = createOrchestratorNotices({
+  notices,
+  getService: () => orchestrator,
+  showWindow: () => attention.showWindow(),
+  send,
+});
 orchestrator = registerOrchestratorExtension({
   handle,
   extensions,
   send,
-  notify: (notice) => attention.notifyTask(notice),
-  onTask: (task) => mascot.onTask(task),
+  notify: (notice) => orchestratorNotices.publish(notice),
+  onTask: (task) => orchestratorNotices.onTask(task),
   getClaudeMcp: () => claudeMcp,
   getModelProviders: () => modelProviders,
   getProjects: () => projects,
@@ -397,9 +432,9 @@ orchestrator = registerOrchestratorExtension({
     : { homeDir: app.getPath("home"), codexHome: process.env.CODEX_HOME },
   hostsChanged: () => send("orchestrator-hosts-changed"),
 });
-// Turning the orchestrator off also drops the notices it already queued.
+// Turning an extension off also drops the notices it already queued.
 extensions.onChange((id, enabled) => {
-  if (id === ORCHESTRATOR_MANIFEST.id && !enabled) mascot.clear();
+  if (!enabled) notices.clear(id);
 });
 function validWebURL(value) {
   try {
@@ -490,6 +525,10 @@ app.whenReady().then(async () => {
     daemonManager.start();
   }
   await orchestrator.start();
+  // After the saved on/off state and approvals are loaded and the host list
+  // is known: wanted companion processes start now.
+  await extensions.ready;
+  await companions.start();
   updates = new Updates({
     directory: app.getPath("userData"),
     currentVersion: app.getVersion(),
@@ -549,7 +588,7 @@ app.whenReady().then(async () => {
   // Evidence seam: pushes a task through the real notice path (no daemon).
   if (process.env.SUSHIAI_TEST_MASCOT === "1")
     globalThis.__sushiaiMascot = {
-      notify: (task) => attention.notifyTask(orchestratorNotice(task)),
+      notify: (task) => orchestratorNotices.publish(orchestratorNotice(task)),
       coreUpdated: () => coreUpdated("<seam>"),
       queue: () => mascot.snapshot(),
       window: () => mascot.getWindow(),
@@ -716,6 +755,7 @@ app.on("before-quit", (event) => {
     Promise.resolve(connections?.close()),
     agents.close(),
     orchestrator.quit(),
+    companions.stopAll(),
   ]).finally(() => {
     quitReady = true;
     app.quit();

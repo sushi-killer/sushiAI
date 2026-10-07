@@ -1,5 +1,6 @@
 // Pure helpers the renderer bends the protocol into a screen with - no
 // window.bridge access here, so they're cheap to unit test directly.
+import type { Tone } from "../ui/tone.ts";
 import { needsOwner, questionCount, questionsLabel } from "./ownerAttention.ts";
 import type {
   Attempt,
@@ -519,8 +520,6 @@ export function sortTasks(tasks: Task[]): Task[] {
 }
 
 /** The four words the design system colours by (`--tone-*`). */
-export type Tone = "ok" | "warning" | "danger" | "info" | "neutral";
-
 /** A rail row's dot and reason colour: needs you amber, went wrong red, in
  * flight blue, finished green. */
 export function taskTone(task: Task): Tone {
@@ -829,29 +828,10 @@ export function unreadChatCount(
     .length;
 }
 
-/** The main process says the daemon binary is absent in one of two ways: a
- * source checkout ("is not built") or a packaged app ("is missing from this
- * installation"). */
-export function isDaemonMissing(message: string): boolean {
-  return (
-    message.includes("is not built") ||
-    message.includes("is missing from this installation")
-  );
-}
-
-/** Whether the missing daemon is a packaged app's broken install (reinstall)
- * rather than an unbuilt source checkout (`npm run build:orchd`). */
-export function isPackagedInstall(message: string): boolean {
-  return message.includes("is missing from this installation");
-}
-
 /** Whether an RPC error means the host's daemon itself is unusable (not
  * running, not ready, without the orchestrator module, or the connection
  * dropped), as opposed to the daemon refusing one request. */
-export function daemonDown(
-  message: string,
-): "not-built" | "unavailable" | null {
-  if (isDaemonMissing(message)) return "not-built";
+export function daemonDown(message: string): "unavailable" | null {
   return /sushiai daemon is not running|not ready|Update sushiai on|did not become ready|did not respond|daemon connection closed|ECONNREFUSED|ENOENT|ECONNRESET|EPIPE/.test(
     message,
   )

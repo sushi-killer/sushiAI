@@ -20,6 +20,8 @@ flowchart TB
       panels["Panels<br/>terminal, chat, browser, files, git"]
       orchPanel["Orchestrator panel<br/>src/orchestrator"]
       slots["Extension slots<br/>src/extensions"]
+      settingsTabs["Settings tabs + companion view<br/>settings.page surfaces: status, QR, text, action buttons"]
+      moduleUi["Module UI API - src/extensions/modules.ts<br/>built-ins only: attention items, worktree claims,<br/>shell hook, panel migrations"]
       previewPane["Preview pane - src/extensions/preview<br/>core view of builtin.artifacts: Markdown,<br/>sandboxed HTML, images, PDF; comments; Start task"]
       inbox["Inbox page - src/app/InboxPage.tsx<br/>inboxModel.ts, attention.ts, useAttention.ts<br/>queue, badge count, reminders"]
       wsState["src/workspaceState.ts<br/>layout, panes, mode"]
@@ -33,7 +35,10 @@ flowchart TB
       direction TB
       ipc["ipc/* - app, chat, daemon,<br/>projects"]
       orchSvc["orchestrator.cjs<br/>orch.* requests over the daemon connection, per-host events and secrets;<br/>the Extensions switch<br/>(builtin.orchestrator, the only disableable built-in)<br/>calls OrchestratorHosts.setEnabled (register or unregister the module on each host,<br/>then restart its daemon), and while off<br/>every IPC rejects with ORCHESTRATOR_OFF"]
-      extMgr["extensions/*<br/>manifest validator"]
+      extMgr["extensions/*<br/>manifest validator, consent state"]
+      companionSup["extensions/companion-process.cjs<br/>companion supervisor: starts only after approval of<br/>path + args + permissions, minimal env, bounded restart,<br/>SIGTERM then SIGKILL; hosts.cjs lists ssh hosts for hosts.read"]
+      companionProc[("Companion process<br/>native command outside the extension folder")]
+      notices["extensions/notices.cjs<br/>Notices API, built-ins only: one notice source per module,<br/>routes to the mascot, a native notification or nothing"]
       conns["connections.cjs<br/>SSH profiles, exec, inspect, port forwards"]
       daemonMgr["daemon/manager.cjs, client.cjs, connectors.cjs, local.cjs<br/>one connection per host: local socket, ssh proxy or command;<br/>state, reconnect, session events"]
       sessionLaunch["session-launch.cjs<br/>host checkout + worktree, environment and accounts,<br/>then session.create with an idempotency key"]
@@ -50,6 +55,10 @@ flowchart TB
       artSkill["artifacts-skill.cjs + extensions/builtin-skills.cjs<br/>global sushiai-artifacts skill in ~/.claude, ~/.codex, ~/.agents,<br/>CLAUDE_CONFIG_DIR / CODEX_HOME, Codex account homes, SSH hosts; removed when disabled"]
     end
     orchPanel <--> preload <--> orchSvc
+    settingsTabs <--> preload <--> extMgr
+    extMgr --> companionSup
+    companionSup <-->|"hello, view.read, actions, view.changed<br/>over stdio frames"| companionProc
+    moduleUi -.->|"rows and claims from a built-in module"| shell
     orchSvc --> daemonMgr --> conns
     projectStore -->|task values through orch.secrets.set;<br/>session values in session.create, both over the daemon protocol| sushiaiDaemon
     projectStore -->|"prepare: clone + install over ssh,<br/>values on stdin (none for a host switched off)"| remoteHost[("SSH host ~/sushiai/slug")]
@@ -64,12 +73,14 @@ flowchart TB
     hostInstall --> daemonMgr
     inbox -->|attention-badge, attention-notify| preload --> attention
     wsState <-->|workspace-state-read / -flush sendSync,<br/>-write invoke| preload <--> wsSnap
-    orchSvc -->|task notice| attention
-    attention -->|desktop mascot on| mascotSvc
+    orchSvc -->|"module notice"| notices
+    notices -->|"mascot on: queue"| mascotSvc
+    notices -->|"mascot off: native notification"| attention
     mascotPage <-->|mascot-* IPC| mascotPreload <--> mascotSvc
-    mascotSvc -->|task.answer, land, rerun| orchSvc
+    mascotSvc -->|"notice action"| notices
+    notices -->|"onAction"| orchSvc
     mascotSvc & attention -->|orchestrator-open, open-inbox,<br/>attention-open| preload
-    devRestart -->|Core updated notice| mascotSvc
+    devRestart -->|Core updated notice| notices
     wsState -->|"session.open -> useOpenSignals:<br/>open a core surface as the companion half of the agent pane"| previewPane
     previewPane <-->|"project-preview (annotate), project-inspect read"| preload <--> previewSrv
     previewPane -->|"comments: session.input;<br/>Start task: session launch with a prompt /goal"| preload
@@ -141,6 +152,8 @@ flowchart TB
 ```
 
 The app talks to one `sushiai` daemon per host. `electron/daemon/manager.cjs` owns a connector per host (`local`: the daemon socket in `$SUSHIAI_HOME` or `~/.sushiai`, started by the app when missing; `ssh`: `sushiai proxy` over the host's ssh; `command`: a local command that speaks the protocol on stdio) and publishes `daemon-state` and `daemon-event` to the renderer. The renderer never opens a socket: `useDaemon` lists the sessions of each ready host once, then applies events, and `reconcileSessions` binds every panel to its session by `panel.sessionId` (a session that is gone ends its panel with Reopen; a saved panel without a `sessionId` restores ended). Terminals attach through `daemon/terminals.cjs` (a snapshot, then output with a byte credit and acknowledgements; xterm keeps the scrollback). Sessions are held by `sushiai hold` processes, so the daemon can be killed or upgraded and the app can quit or crash without ending a session; on the next start the panels reattach to the same screens. Agents report status through hooks (`sushiai hook`), ask for permission through the daemon (Inbox **Allow** and **Deny** answer it) and ask for a Preview with `sushiai open <extension>/<surface> <path>`, which the daemon delivers as a `session.open` event. A remote host gets `sushiai` from **Connections → Install** (`createHostInstaller` in `host-setup.cjs`: upload over ssh, sha256 check, atomic link, hooks installed, daemon restarted). Project and group catalogs sync to every daemon (`catalog-sync.cjs`).
+
+An extension manifest may add a Settings tab (`settings.page`) and name a companion program. The supervisor in `electron/extensions/companion-process.cjs` starts it only after the owner approves its resolved path, args and permissions, and the tab shows the values it serves (`docs/extensions/companion.md`). Built-in modules attach rows, worktree claims and notices through `src/extensions/modules.ts` and `electron/extensions/notices.cjs`; both are internal APIs, not part of the manifest contract.
 
 A `session.open` event opens a Preview: `src/extensions/useOpenSignals.ts` acts on each new event once and opens the builtin core surface as the companion half of that pane (one pane, a draggable seam, hidden and shown from the pane header), without moving focus. Only `view.kind: "core"` surfaces, which only builtins may declare, can be opened this way. The Preview reads files only inside its workspace folder, through the main process with the project as root, so a symlink out of it is refused. HTML runs in an `allow-scripts` iframe without same-origin, so it cannot reach `window.bridge`; the injected comment script only posts what the owner pointed at.
 

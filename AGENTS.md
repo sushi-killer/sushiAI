@@ -71,6 +71,22 @@ label`), because two identical labels break `getByRole` selectors in
   deprecation warning), then drop it. Every `docs/releases/<version>.md`
   states the `Extension API:` version(s) it ships with, generated from that
   same constant — never hand-maintain a separate compat table.
+- **Settings pages**: the host `settings.page` draws a surface as one tab in
+  the Settings dialog, after the core tabs, ordered by extension id then
+  surface id. The tab is dialog content, never chrome.
+- **Companion view**: `view.kind: "companion"` is allowed only on
+  `settings.page`, and only when the manifest has a `companion` block. It has
+  at most 8 `fields` (types `text`, `status`, `qr`) and at most 4 `actions`
+  (`method` matches `/^[a-z][a-z0-9.]*$/`, labels unique). An action with
+  `send: ["hosts"]` needs `hosts.read` in `companion.permissions`; the app then
+  sends the ssh host list (`id, name, host, port?`) as `params.hosts`. Values
+  are never stored or logged. See `docs/extensions/companion.md`.
+- **Internal APIs (built-ins only, not the contract)**: the Module UI API
+  (`src/extensions/modules.ts`: attention items, worktree claims, the shell
+  hook, `panelMigrations`) and the Notices API (`electron/extensions/notices.cjs`)
+  let a built-in module add rows, claims and notices without core naming it.
+  They have no manifest field and no API version impact. A third-party
+  extension cannot use them.
 - **Navigation**: `toggleSection` (`src/app/navigation.ts`) forces
   `mode: "Code"` when opening an extension page, because Agent/Chat modes own
   the sidebar and would go blank if a page opened there; closing a section
@@ -126,14 +142,25 @@ TypeScript issues; `tsc --noEmit` runs with `strict: true` plus
 
 ## Security boundary
 
-Extensions are declarative `manifest.json` only, size-capped
-(`electron/extensions/local-extensions.cjs`, `MAX_MANIFEST_BYTES`). The
-renderer runs with `contextIsolation: true`, `sandbox: true`,
-`nodeIntegration: false` (`electron/main.cjs`). This is the actual security
-model for third-party extensions: they describe UI and data, they never ship
-executable code. Any task that would have an extension carry its own JS/native
-code breaks this invariant — stop and ask before implementing it, don't just
-build it because it's technically possible.
+Extension folders carry no code: a local extension is a size-capped
+`manifest.json` (`electron/extensions/local-extensions.cjs`,
+`MAX_MANIFEST_BYTES`). The renderer runs with `contextIsolation: true`,
+`sandbox: true`, `nodeIntegration: false` (`electron/main.cjs`). An extension
+describes UI and data; it never ships executable code.
+
+An optional top-level `companion` names a native command that is installed
+outside the extension folder. The app resolves the command to a path and
+refuses a path inside the extension folder. The process starts only when the
+extension is enabled, the app is ready, and the owner has approved the
+resolved path, the args and the permissions together. The approval has no
+binary hash (owner decision 2026-10-07), so an update of the program does not
+ask again. A change of path, args or permissions asks again. The process gets
+a minimal environment allowlist (`PATH`, `HOME`, `USER`, `LANG`, `TMPDIR`,
+`SUSHIAI_HOME`), restarts with a bounded backoff, and stops with SIGTERM, then
+SIGKILL after a grace period. This is consent, not a sandbox: the process keeps
+the owner's OS rights. The `hosts.read` permission limits only what the app
+sends it. Any change that lets an extension carry its own code, or widens the
+companion, needs the owner first.
 
 ## Vision & boundaries
 

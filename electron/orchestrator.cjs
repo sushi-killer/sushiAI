@@ -19,6 +19,10 @@ const {
   reconnectUntilReady,
 } = require("./host-setup.cjs");
 
+const {
+  ORCHESTRATOR_MANIFEST,
+} = require("./extensions/builtin-orchestrator.cjs");
+
 const LOCAL_HOST = "local";
 const OFF_MESSAGE = "The orchestrator is off.";
 const ORCH_CAPABILITY = "orch";
@@ -37,17 +41,6 @@ function offError() {
   error.code = "ORCHESTRATOR_OFF";
   return error;
 }
-
-const ORCHESTRATOR_MANIFEST = {
-  id: "builtin.orchestrator",
-  name: "Orchestrator",
-  version: "1.0.0",
-  apiVersion: 1,
-  source: { kind: "builtin" },
-  scope: "app",
-  description: "Carries tasks to a verified, committed done.",
-  contributions: { surfaces: [], navigation: [], actions: [], commands: [] },
-};
 
 // The renderer only ever reaches these; `hook.stop` (the Claude Stop hook)
 // and `shutdown` are daemon-internal / CLI-only, never IPC-reachable.
@@ -1266,7 +1259,6 @@ function registerOrchestratorExtension({
 }
 
 module.exports = {
-  ORCHESTRATOR_MANIFEST,
   OrchestratorService,
   OrchestratorHosts,
   registerOrchestratorExtension,

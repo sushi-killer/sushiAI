@@ -17,8 +17,8 @@ import type {
   Project,
   ProjectGitFailure,
 } from "./types";
-import { Tag, Toggle } from "./orchestrator/ui";
-import { GitRecovery } from "./orchestrator/GitRecovery";
+import { Tag, Toggle } from "./ui";
+import { GitRecovery } from "./ui/GitRecovery";
 import { inspectProjectSource } from "./projectSource";
 import { LOCAL_ENDPOINT } from "./daemonSessions";
 import { openSettings } from "./app/openSettings";

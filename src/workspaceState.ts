@@ -1,5 +1,6 @@
 import type { Layout, Panel, Workspace } from "./types";
 import { contains, isValidLayout, leaf, split, uid } from "./layout.ts";
+import { panelMigrations } from "./extensions/panelMigrations.ts";
 import { validRoute, type RouteRef } from "./extensions/routes.ts";
 import type { ProjectGit } from "./app/useProjectGit.ts";
 import { LOCAL_ENDPOINT } from "./daemonSessions.ts";
@@ -321,6 +322,19 @@ export function sweepLeftovers(saved: Saved): Saved {
   };
 }
 
+const CORE_KINDS = new Set(["agent", "terminal", "browser", "chat", "files"]);
+
+/** A panel of a kind core does not know goes through the modules' migrations;
+ * the first one that claims it supplies the current shape. */
+function migratePanel(panel: Panel): Panel {
+  if (CORE_KINDS.has(panel.kind) || panel.kind === "extension") return panel;
+  for (const migrate of panelMigrations) {
+    const next = migrate(panel);
+    if (next) return next;
+  }
+  return panel;
+}
+
 /** A terminal or agent panel that ran without a daemon session (the host had
  * reported its state, or the agent was started) has nothing to bind to: it
  * comes back ended, with Reopen, and keeps its agent so Reopen starts the same
@@ -354,7 +368,7 @@ const restoreWorkspace =
       ...w,
       connection:
         localEndpoint(w.connection) ?? (backed ? fallback : undefined),
-      panels: w.panels.map(restorePanel),
+      panels: w.panels.map((p) => restorePanel(migratePanel(p))),
     };
   };
 

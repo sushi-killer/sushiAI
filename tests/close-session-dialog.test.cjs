@@ -26,7 +26,7 @@ vm.runInNewContext(
     require: (name) =>
       name === "../app/worktreeCleanup"
         ? require("../src/app/worktreeCleanup.ts")
-        : name === "../orchestrator/ui"
+        : name === "../ui"
           ? // JSX sources cannot be type-stripped; the dialog only needs
             // their markup shape here.
             {

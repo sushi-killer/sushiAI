@@ -6,8 +6,8 @@ import type {
   Project,
   ProjectHostReadiness,
 } from "./types";
-import { Tag, Toggle } from "./orchestrator/ui";
-import { GitRecovery } from "./orchestrator/GitRecovery";
+import { Tag, Toggle } from "./ui";
+import { GitRecovery } from "./ui/GitRecovery";
 import { openSettings } from "./app/openSettings";
 import { ProjectPage } from "./ProjectPage";
 import {

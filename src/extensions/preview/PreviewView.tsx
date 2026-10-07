@@ -12,7 +12,7 @@ import { createPortal } from "react-dom";
 import { errorText } from "../../app/errors.ts";
 import { orchestratorClientFor } from "../../orchestrator/client.ts";
 import { useOrchestratorEnabled } from "../../orchestrator/enabled.ts";
-import { Tag } from "../../orchestrator/ui/index.ts";
+import { Tag } from "../../ui/index.ts";
 import type { CoreViewProps } from "../coreViews.ts";
 import {
   acceptAnnotation,

@@ -44,9 +44,9 @@ import {
   mixedRemotes,
   shouldCollapseHostMarkers,
   type MergeGroup,
-  type WorktreeTask,
 } from "./workspaceMerge.ts";
 import type { ConnectionProfile, Panel, Workspace } from "../types";
+import { useWorktreeClaims } from "./useWorktreeClaims.ts";
 import type { ProjectGit } from "./useProjectGit.ts";
 
 /** The left nav is the app's own sections followed by whatever manifests add.
@@ -168,7 +168,6 @@ export function Sidebar({
   connected,
   connection,
   connectionProfiles,
-  worktreeTasks,
   statusByEndpoint,
   projectGit,
   readyWorkspaceIds,
@@ -206,8 +205,6 @@ export function Sidebar({
   connected: boolean;
   connection: string;
   connectionProfiles: ConnectionProfile[];
-  /** orchd tasks, so a task's worktree is named by the task's title. */
-  worktreeTasks: WorktreeTask[];
   /** Real, current poll status per endpoint - every connected host is polled
    * independently, so this is never just the default connection's status. */
   statusByEndpoint: Record<string, string>;
@@ -227,6 +224,7 @@ export function Sidebar({
   openExtensionTarget(extensionId: string, targetSurfaceId: string): void;
   runExtensionCommand(extensionId: string, commandId: string): void;
 }) {
+  const worktreeClaims = useWorktreeClaims();
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
     () => new Set(),
   );
@@ -339,7 +337,7 @@ export function Sidebar({
     const collapse = shouldCollapseHostMarkers(
       group,
       connectionProfiles,
-      worktreeTasks,
+      worktreeClaims,
     );
     // On one machine every pane's icon would be identical noise.
     const manyHosts = new Set(group.members.map((m) => m.hostKey)).size > 1;
@@ -347,12 +345,12 @@ export function Sidebar({
       group,
       connectionProfiles,
       statusByEndpoint,
-      worktreeTasks,
+      worktreeClaims,
     );
     const rowTitle = group.members
       .map(
         (m) =>
-          `${memberTooltip(group, m, connectionProfiles, worktreeTasks)} - ${m.workspace.cwd}`,
+          `${memberTooltip(group, m, connectionProfiles, worktreeClaims)} - ${m.workspace.cwd}`,
       )
       .join("\n");
     return (
@@ -405,7 +403,7 @@ export function Sidebar({
                           group,
                           m,
                           connectionProfiles,
-                          worktreeTasks,
+                          worktreeClaims,
                         )}
                       </span>
                     </span>
@@ -426,13 +424,13 @@ export function Sidebar({
                 group,
                 m,
                 connectionProfiles,
-                worktreeTasks,
+                worktreeClaims,
               );
               const tooltip = memberTooltip(
                 group,
                 m,
                 connectionProfiles,
-                worktreeTasks,
+                worktreeClaims,
               );
               const offline =
                 groupStatus(m.hostKey, statusByEndpoint) === "offline";

@@ -2,9 +2,9 @@ import { useState } from "react";
 import { useOrchestratorClient } from "./hostContext";
 import { errorText } from "./helpers";
 import { actionOutcome, parseArgsText, payloadPreview } from "./toolsModel";
-import type { Tone } from "./helpers";
+import type { Tone } from "../ui/tone";
 import type { ChatAction, ChatActionState } from "./types";
-import { Tag } from "./ui";
+import { Tag } from "../ui";
 
 const TAGS: Record<ChatActionState, { tone: Tone; text: string }> = {
   pending: { tone: "warning", text: "needs your OK" },

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { Tone } from "../helpers";
+import type { Tone } from "./tone.ts";
 
 /** Attention/Item: one thing that needs the owner - a toned marker, the
  * title and its age, a context line, the actions and a muted meta line.
@@ -8,6 +8,7 @@ import type { Tone } from "../helpers";
 export function AttentionItem({
   tone,
   title,
+  icon,
   time,
   context,
   question = false,
@@ -18,6 +19,8 @@ export function AttentionItem({
 }: {
   tone: Tone;
   title: string;
+  /** Provenance mark drawn before the title. */
+  icon?: ReactNode;
   time?: string;
   context?: ReactNode;
   question?: boolean;
@@ -33,6 +36,7 @@ export function AttentionItem({
       </span>
       <div className="ui-attention-body">
         <div className="ui-attention-head">
+          {icon && <span className="ui-attention-icon">{icon}</span>}
           {onOpen ? (
             <button
               type="button"

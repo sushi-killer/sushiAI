@@ -198,19 +198,15 @@ if (!seedPath || !title) {
     const page = await app.firstWindow();
     page.on("pageerror", (error) => report.pageErrors.push(error.message));
     await page.waitForSelector(".panel-agent");
+    // The orchestrator extension is off in a fresh profile.
+    await page.getByRole("button", { name: "Extensions", exact: true }).click();
+    await page.getByRole("button", { name: "Enable Orchestrator" }).click();
+    await page.getByRole("button", { name: "Disable Orchestrator" }).waitFor();
+    await page.getByRole("button", { name: "Extensions", exact: true }).click();
 
-    // A fresh profile has no project open yet - a Local workspace pointed at
-    // this repo gives the Orchestrator panel a `cwd` its seeded tasks' own
-    // `repo` field matches (`task.list` filters on exact equality).
-    await page.getByRole("button", { name: "New workspace" }).click();
-    const workspaceDialog = page.getByRole("dialog", { name: "New workspace" });
-    await workspaceDialog.locator('input[name="name"]').fill("Evidence");
-    await workspaceDialog.getByLabel("Project folder").fill(root);
-    await workspaceDialog
-      .getByRole("button", { name: "Create workspace" })
-      .click();
-
-    await page.getByRole("button", { name: "Add panel" }).click();
+    // The first-run workspace already runs in this repo, so the seeded tasks'
+    // own `repo` field matches its `cwd` (`task.list` filters on equality).
+    await page.getByRole("button", { name: "Add panel" }).first().click();
     const panelDialog = page.getByRole("dialog", { name: "Add panel" });
     await panelDialog.getByRole("button", { name: "Orchestrator" }).click();
     // Maximized, not split beside the workspace's other panel: below ~640px
@@ -218,17 +214,13 @@ if (!seedPath || !title) {
     await page.getByRole("button", { name: "Maximize Orchestrator" }).click();
 
     await page
-      .locator(
-        ".orch-rail, [data-orchestrator-not-built], .orch-view-scroll.offline",
-      )
+      .locator(".orch-rail, .orch-view-scroll.offline")
       .first()
       .waitFor({ timeout: 15000 });
-    const notBuilt = page.locator(
-      "[data-orchestrator-not-built], .orch-view-scroll.offline",
-    );
-    if (await notBuilt.count()) {
+    const offlinePanel = page.locator(".orch-view-scroll.offline");
+    if (await offlinePanel.count()) {
       throw new Error(
-        `the orchestrator panel could not open: ${(await notBuilt.first().innerText()).trim()}`,
+        `the orchestrator panel could not open: ${(await offlinePanel.first().innerText()).trim()}`,
       );
     }
 

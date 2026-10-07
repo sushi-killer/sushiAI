@@ -27,6 +27,8 @@ import {
   movePanel as moveInLayout,
   openCompanion as openCompanionIn,
   patchCompanion as patchCompanionIn,
+  patchPanel,
+  type PanelUpdate,
   removeClosedSessions,
   removePanel,
   renameRequest,
@@ -131,15 +133,8 @@ export function useWorkspaces({
     [],
   );
   const updatePanel = useCallback(
-    (panelId: string, patch: Partial<Omit<Panel, "kind" | "extension">>) =>
-      setWorkspaces((items) =>
-        items.map((w) => ({
-          ...w,
-          panels: w.panels.map((p) =>
-            p.id === panelId ? ({ ...p, ...patch } as Panel) : p,
-          ),
-        })),
-      ),
+    (panelId: string, patch: PanelUpdate) =>
+      setWorkspaces((items) => patchPanel(items, panelId, patch)),
     [],
   );
   const openCompanion = useCallback(
@@ -411,9 +406,7 @@ export function useWorkspaces({
                   ? "Browser"
                   : kind === "files"
                     ? "Files & Git"
-                    : kind === "orchestrator"
-                      ? "Orchestrator"
-                      : "Thread",
+                    : "Thread",
           agent: kind === "agent" || kind === "chat" ? agent : undefined,
           started: kind === "agent",
           messages: kind === "chat" ? [] : undefined,

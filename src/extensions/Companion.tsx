@@ -15,10 +15,11 @@ import {
   type LaunchAgentRequest,
 } from "./coreViews.ts";
 import { daemonHost } from "../daemonSessions.ts";
+import type { ArgsPatch } from "./args.ts";
 import type { ExtensionRegistry } from "./registry.ts";
 
 export type CompanionPatch = {
-  args?: Record<string, string>;
+  args?: ArgsPatch;
   open?: boolean;
   ratio?: number;
 };

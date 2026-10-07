@@ -47,7 +47,7 @@ export function GitRecovery({
 
   return (
     <div className="orch-git-recovery">
-      <div className="orch-prep-caption">Repository access over SSH</div>
+      <div className="host-prep-caption">Repository access over SSH</div>
       <p>
         {failure.transport === "ssh"
           ? "The SSH checkout failed. You can finish repository access here, then try again."
@@ -76,7 +76,7 @@ export function GitRecovery({
         </p>
       )}
       <>
-        <div className="orch-prep-actions">
+        <div className="host-prep-actions">
           <button
             type="button"
             className="ui-button secondary"

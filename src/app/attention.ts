@@ -1,6 +1,4 @@
 import { isHidden } from "./workspaceMerge.ts";
-import { ownerTasks } from "../orchestrator/ownerAttention.ts";
-import type { Task } from "../orchestrator/types.ts";
 import type {
   AttentionNotice,
   ConnectionProfile,
@@ -229,15 +227,15 @@ export function inboxGroups(
 /** What the Dock badge and the Inbox nav count show: needing input, plus
  * finished-and-unseen. Hidden hosts are skipped exactly as `inboxGroups`
  * skips them, so the count never promises a row the Inbox cannot show.
- * Orchestrator tasks that need the owner (see `ownerTasks`) add to it. */
+ * `moduleItems` are the rows the modules put in the Inbox; those that wait
+ * on the owner (answer, decide) add to it, a review row does not. */
 export function waitingCount(
   workspaces: Workspace[],
   state: AttentionState,
   profiles: ConnectionProfile[],
-  tasks: Task[] = [],
-  orchestrator = true,
+  moduleItems: { kind: string }[] = [],
 ): number {
-  let count = orchestrator ? ownerTasks(tasks).length : 0;
+  let count = moduleItems.filter((item) => item.kind !== "review").length;
   for (const workspace of workspaces) {
     if (isHidden(workspace.connection, profiles)) continue;
     for (const panel of workspace.panels) {

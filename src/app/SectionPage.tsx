@@ -33,8 +33,7 @@ import type { WorkspaceController } from "../workspace/useWorkspaces.ts";
 import type { ProjectGit } from "./useProjectGit.ts";
 import { closedMemberIds, dashboardEntries } from "./projects.ts";
 import type { InboxGroup } from "./attention.ts";
-import type { Task } from "../orchestrator/types.ts";
-import type { TaskTarget } from "../orchestrator/notices.ts";
+import type { ModuleEntry } from "./inboxModel.ts";
 
 /** The one page in the working area. A core section and a page an extension
  * contributed are both drawn here, in the same frame - there is no second path
@@ -62,7 +61,6 @@ export function SectionPage({
   projectGit,
   connectionProfiles,
   attention,
-  openOrchestratorTask,
 }: {
   section: SectionRef;
   runExtensionCommand(extensionId: string, commandId: string): void;
@@ -103,14 +101,11 @@ export function SectionPage({
    * groups and its "mark seen" action. */
   attention: {
     groups: InboxGroup[];
-    ownerTasks: Task[];
-    tasks: Task[];
+    moduleItems: ModuleEntry[];
     markSeen(panelId: string): void;
     /** What each daemon host runs; Inbox shows the open asks in it. */
     daemonSessions: SessionsByHost;
   };
-  /** Opens an orchd task in its Orchestrator panel (adding the panel if missing). */
-  openOrchestratorTask(target: TaskTarget): void;
 }) {
   const surface =
     section.kind === "extension" ? activePage(registry, section) : undefined;
@@ -147,9 +142,7 @@ export function SectionPage({
       <InboxPage
         groups={attention.groups}
         markSeen={attention.markSeen}
-        ownerTasks={attention.ownerTasks}
-        allTasks={attention.tasks}
-        openOrchestratorTask={openOrchestratorTask}
+        moduleItems={attention.moduleItems}
         switchWorkspace={switchWorkspace}
         ws={ws}
         connectionProfiles={connectionProfiles}

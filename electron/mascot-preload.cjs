@@ -8,8 +8,8 @@ contextBridge.exposeInMainWorld("mascot", {
     ipcRenderer.send("mascot-sync");
     return () => ipcRenderer.removeListener("mascot-notices", listener);
   },
-  answer: (taskId, text) => ipcRenderer.invoke("mascot-answer", taskId, text),
-  open: (taskId, focus) => ipcRenderer.invoke("mascot-open", taskId, focus),
+  act: (id, actionId, text) =>
+    ipcRenderer.invoke("mascot-act", id, actionId, text),
   onToggle: (callback) => {
     const listener = () => callback();
     ipcRenderer.on("mascot-toggle", listener);
@@ -20,11 +20,8 @@ contextBridge.exposeInMainWorld("mascot", {
     ipcRenderer.on("mascot-presenting", listener);
     return () => ipcRenderer.removeListener("mascot-presenting", listener);
   },
-  rerun: (taskId) => ipcRenderer.invoke("mascot-rerun", taskId),
   openInbox: () => ipcRenderer.invoke("mascot-inbox"),
   focus: () => ipcRenderer.invoke("mascot-focus"),
-  land: (taskId) => ipcRenderer.invoke("mascot-land", taskId),
-  restart: () => ipcRenderer.invoke("mascot-restart"),
   resize: (height) => {
     if (typeof height === "number") ipcRenderer.send("mascot-resize", height);
   },

@@ -106,7 +106,17 @@ test("badge and Inbox rows include tasks from every host and opening one selects
 
 test("opening a remote task picks a panel on its host, else any panel, else adds one", () => {
   const leaf = (id) => ({ type: "leaf", id });
-  const panel = (id) => ({ id, kind: "orchestrator", title: "O" });
+  const panel = (id) => ({
+    id,
+    kind: "extension",
+    title: "O",
+    extension: {
+      extensionId: "builtin.orchestrator",
+      contributionId: "orchestration",
+      instanceId: id,
+      stateVersion: 1,
+    },
+  });
   const ws = (id, cwd, connection, panels) => ({
     id,
     name: id,

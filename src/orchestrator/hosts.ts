@@ -68,7 +68,7 @@ export function repoSuggestions(
 export type HostTone = "ok" | "warning" | "danger" | "neutral";
 
 /** The daemon state the panel body last saw for the host it shows. */
-export type DaemonReach = "loading" | "ready" | "not-built" | "unavailable";
+export type DaemonReach = "loading" | "ready" | "unavailable";
 
 /** The error a host with an older sushiai answers: it has no `orch`
  * capability (electron/orchestrator.cjs `missingCapability`). */
@@ -117,8 +117,6 @@ export function hostStatus(
 ): { tone: HostTone; detail: string } {
   const local = host.id === LOCAL_HOST;
   const where = local ? "This Mac" : "SSH";
-  if (daemon === "not-built")
-    return { tone: "warning", detail: `${where} · sushiai not built` };
   if (daemon === "unavailable")
     return { tone: "danger", detail: `${where} · sushiai unreachable` };
   if (local)

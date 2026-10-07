@@ -268,16 +268,15 @@ try {
   const page = await app.firstWindow();
   page.on("pageerror", (error) => report.pageErrors.push(error.message));
   await page.waitForSelector(".panel-agent");
+  // The orchestrator extension is off in a fresh profile.
+  await page.getByRole("button", { name: "Extensions", exact: true }).click();
+  await page.getByRole("button", { name: "Enable Orchestrator" }).click();
+  await page.getByRole("button", { name: "Disable Orchestrator" }).waitFor();
+  await page.getByRole("button", { name: "Extensions", exact: true }).click();
 
-  // A Local workspace on this repo: the notices' `repo` matches its cwd. No
-  // Orchestrator panel is added - opening a notice has to add it.
-  await page.getByRole("button", { name: "New workspace" }).click();
-  const workspaceDialog = page.getByRole("dialog", { name: "New workspace" });
-  await workspaceDialog.locator('input[name="name"]').fill("Evidence");
-  await workspaceDialog.getByLabel("Project folder").fill(root);
-  await workspaceDialog
-    .getByRole("button", { name: "Create workspace" })
-    .click();
+  // The first-run workspace already runs in this repo, so the notices' `repo`
+  // matches its cwd. No Orchestrator panel is added - opening a notice has to
+  // add it.
   await page.waitForSelector(".panel-agent, .panel-terminal");
   report.panelBefore = await page.locator(".orchestrator-panel").count();
 
@@ -474,7 +473,7 @@ try {
     }, selector);
   const selectedTitle = () =>
     page
-      .locator(".ui-task-row.selected .ui-task-row-title")
+      .locator(".ui-task-row.selected .ui-task-row-title, .orch-switcher-label")
       .first()
       .innerText()
       .catch(() => "");
@@ -492,7 +491,7 @@ try {
     await page.waitForFunction(
       ({ sel, expected }) => {
         const picked = document.querySelector(
-          ".ui-task-row.selected .ui-task-row-title",
+          ".ui-task-row.selected .ui-task-row-title, .orch-switcher-label",
         );
         if (picked?.textContent !== expected) return false;
         const el = document.querySelector(sel);
@@ -503,11 +502,9 @@ try {
       { sel: selector, expected: title },
       { timeout: 10000 },
     );
-    // The panel fills the canvas: exactly one pane is left to maximize.
+    // Opening focuses the one Orchestrator pane; it never adds a second.
     await page.waitForFunction(
-      () =>
-        document.querySelectorAll('button[aria-label^="Maximize"]').length ===
-        1,
+      () => document.querySelectorAll(".orchestrator-panel").length === 1,
       undefined,
       { timeout: 10000 },
     );
@@ -535,13 +532,14 @@ try {
     report.leftSection = (await routines.count()) === 0;
   } catch (error) {
     report.openFlowError = String(error.message ?? error).split("\n")[0];
+    await page.screenshot({ path: shot("orchestrator-open-failure") });
   }
 
   // Quick answer: the Stop option, then the short confirmation.
   await mascot.locator(".bubble.input").waitFor();
   await mascot.getByRole("button", { name: "Stop", exact: true }).click();
   await mascot.getByRole("button", { name: "Send answer" }).click();
-  await mascot.locator(".bubble.answered").waitFor({ timeout: 10000 });
+  await mascot.locator(".bubble.confirmed").waitFor({ timeout: 10000 });
   await shotMascot("mascot-answered");
   report.mascot.answered = await bubbleText();
   await mascot
@@ -717,7 +715,7 @@ try {
     problems.push("a second Answer all closed the Inbox");
   if (!report.rerun.restarted)
     problems.push("Run again did not restart the task");
-  if (!/the task carries on\.$/.test(report.mascot.answered))
+  if (!/The task carries on\.$/.test(report.mascot.answered))
     problems.push("no Answered confirmation");
   if (report.openFlowError) problems.push(`open flow: ${report.openFlowError}`);
   if (problems.length) report.error = problems.join("; ");

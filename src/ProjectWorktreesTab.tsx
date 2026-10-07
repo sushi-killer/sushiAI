@@ -6,8 +6,8 @@ import type {
   WorktreeList,
   Workspace,
 } from "./types";
-import { Tag, Toggle } from "./orchestrator/ui";
-import { useWorktreeTasks } from "./orchestrator/useWorktreeTasks";
+import { Tag, Toggle } from "./ui";
+import { useWorktreeClaims } from "./app/useWorktreeClaims";
 import { relativeTime } from "./chat-threads";
 import { ProjectPage } from "./ProjectPage";
 import { tildePath } from "./projectPrepare";
@@ -37,11 +37,11 @@ function StateTag({ row }: { row: WorktreeRow }) {
         locked
       </Tag>
     );
-  if (row.task)
+  if (row.claim)
     return (
-      <span title={row.task.title}>
+      <span title={row.claim.label}>
         <Tag tone="neutral" dot={false}>
-          task
+          claimed
         </Tag>
       </span>
     );
@@ -109,7 +109,7 @@ export function ProjectWorktreesTab({
   workspaces: Workspace[];
   onEndWorkspace(workspace: Workspace): Promise<void>;
 }) {
-  const tasks = useWorktreeTasks();
+  const claims = useWorktreeClaims();
   const [lists, setLists] = useState<WorktreeList[] | null>(null);
   const [error, setError] = useState("");
   const [confirm, setConfirm] = useState<Confirm | null>(null);
@@ -140,7 +140,7 @@ export function ProjectWorktreesTab({
     void load();
   }, [load]);
 
-  const rows = worktreeRows(lists ?? [], workspaces, tasks, hosts);
+  const rows = worktreeRows(lists ?? [], workspaces, claims, hosts);
   const failed = (lists ?? []).filter((list) => "error" in list);
   const linked = rows.filter((row) => !row.worktree.main);
   const merged = linked.filter(
@@ -290,7 +290,7 @@ export function ProjectWorktreesTab({
                           ? "Remove…"
                           : row.worktree.locked
                             ? "Locked with git worktree lock"
-                            : `orchd task "${row.task?.title}" still uses it`
+                            : `"${row.claim?.label}" still uses it`
                       }
                       disabled={busy || !removable(row)}
                       onClick={() =>

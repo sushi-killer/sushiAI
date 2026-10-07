@@ -147,6 +147,11 @@ test("opening a remote task picks a panel on its host, else any panel, else adds
     orchestratorTarget([local, remote], "/srv/app").workspaceId,
     "w-local",
   );
+  // ...and never lands on an SSH workspace that has the same path.
+  assert.equal(
+    orchestratorTarget([remote], "/home/me/app").kind,
+    "create-workspace",
+  );
 });
 
 test("a remote reveal is taken by any panel; a local one only by its repo's panel", () => {

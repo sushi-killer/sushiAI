@@ -434,6 +434,38 @@ test("a singleton surface is revealed instead of opened twice", async () => {
   assert.equal(result.panel.id, "p1");
 });
 
+test("openSurface shows a hidden singleton pane instead of adding a second", async () => {
+  const { placeSurface } = await import("../src/extensions/useModuleShell.ts");
+  const { registry } = await paneRegistry("singleton");
+  const hidden = pane("test.probe", "probe.ledger");
+  const workspace = {
+    id: "w",
+    name: "w",
+    cwd: "/r",
+    panels: [hidden],
+    layout: null,
+  };
+  const place = placeSurface(
+    [workspace],
+    { workspaceId: "w" },
+    registry,
+    "test.probe",
+    "probe.ledger",
+  );
+  assert.equal(place.kind, "reveal");
+  assert.equal(place.panel.id, "p1");
+  assert.equal(
+    placeSurface(
+      [workspace],
+      { workspaceId: "w" },
+      registry,
+      "test.probe",
+      "probe.gone",
+    ).kind,
+    "unavailable",
+  );
+});
+
 test("a multi-instance surface still opens another pane", async () => {
   const { resolvePaneOpen } = await library;
   const { registry } = await paneRegistry("multiple");

@@ -65,8 +65,7 @@ export function ExtensionIcon({
       </svg>
     );
   const Glyph =
-    (icon?.kind === "named" && ICONS[icon.name as keyof typeof ICONS]) ||
-    ListTodo;
+    (icon?.kind === "named" && ICONS[icon.name as keyof typeof ICONS]) || Plug;
   return <Glyph size={size} />;
 }
 

@@ -189,3 +189,22 @@ test("a session with an open ask is an ANSWER whatever its status says", async (
     ],
   );
 });
+
+test("a row's action keys bind case-insensitively and fill the footer legend", async () => {
+  const { actionForKey, actionLegend } =
+    await import("../src/app/inboxModel.ts");
+  const actions = [
+    { id: "land", label: "Land", key: "l", primary: true },
+    { id: "fix", label: "Needed a fix" },
+    { id: "archive", label: "Archive", key: "e" },
+  ];
+  assert.equal(actionForKey(actions, "L").id, "land");
+  assert.equal(actionForKey(actions, "e").id, "archive");
+  assert.equal(actionForKey(actions, "x"), undefined);
+  assert.equal(actionForKey(undefined, "l"), undefined);
+  assert.deepEqual(actionLegend(actions), [
+    ["L", "land"],
+    ["E", "archive"],
+  ]);
+  assert.deepEqual(actionLegend(undefined), []);
+});

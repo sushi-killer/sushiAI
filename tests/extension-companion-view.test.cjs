@@ -133,8 +133,11 @@ test("a companion panel draws status tone, a QR SVG, text and buttons", async ()
   assert.match(html, /<svg class="companion-qr"[^>]*aria-label="Pairing code"/);
   assert.match(html, /<path d="M\d+ \d+h\d+v1h-\d+z/);
   assert.match(html, /Hello &lt;b&gt;there&lt;\/b&gt;/);
-  assert.match(html, /companion-empty/);
-  assert.match(html, />Add device</);
+  // A field without a value is left out, not drawn as a dash.
+  assert.doesNotMatch(html, /companion-empty/);
+  assert.equal((html.match(/companion-field/g) || []).length, 3);
+  assert.match(html, /<button class="primary"[^>]*>Add device</);
+  assert.match(html, /<button class="secondary"/);
   assert.doesNotMatch(html, /disabled/);
 
   const busy = renderToStaticMarkup(

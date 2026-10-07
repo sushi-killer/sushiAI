@@ -648,3 +648,8 @@ body,
 .mascot {
   padding-bottom: 14px;
 }
+/* The compact answered bubble is short: the working dots would sit half
+ * hidden against its corner, so they are left out there. */
+.bubble-wrap:has(.bubble.confirmed) + .sushi-hop .fx {
+  display: none;
+}

@@ -107,3 +107,70 @@ test("the branch box facts omit a zero cost and an unknown cap", async () => {
   assert.equal(diffFacts(1, 1, undefined, 0), "1 file · attempt 1");
   assert.equal(diffFacts(undefined, 0, 4, undefined), "");
 });
+
+test("rows carry their second line, action chips and keys, and drop an orch: title prefix", async () => {
+  const { attentionItems } = await load();
+  const items = attentionItems(
+    [
+      task({
+        id: "q",
+        status: "waiting",
+        title: "orch: Pick one",
+        question: {
+          text: "Which cache?\nMore detail",
+          options: ["LRU", "Disk"],
+        },
+      }),
+      task({ id: "f", status: "failed", costUsd: 0.41 }),
+      task({ id: "l", status: "landing" }),
+      task({ id: "d", status: "done", costUsd: 0.51 }),
+    ],
+    true,
+  );
+  const by = Object.fromEntries(items.map((item) => [item.key, item]));
+  assert.equal(by["task:q"].title, "Pick one");
+  assert.equal(by["task:q"].meta, "Which cache?");
+  assert.deepEqual(
+    by["task:q"].actions.map((a) => [a.id, a.label, a.key]),
+    [
+      ["answer:0", "LRU", undefined],
+      ["answer:1", "Disk", undefined],
+    ],
+  );
+  assert.match(by["task:f"].meta, /\$0\.41$/);
+  assert.deepEqual(
+    by["task:f"].actions.map((a) => [a.id, a.key]),
+    [
+      ["run", "r"],
+      ["note", undefined],
+      ["archive", "e"],
+    ],
+  );
+  // A landing task cannot be run again.
+  assert.ok(!by["task:l"].actions.some((a) => a.id === "run"));
+  assert.match(by["land:d"].meta, /^done · \$0\.51 · not landed · → main$/);
+  assert.deepEqual(
+    by["land:d"].actions.map((a) => [a.id, a.key, !!a.primary]),
+    [
+      ["land", "l", true],
+      ["fix", undefined, false],
+      ["clean", undefined, false],
+    ],
+  );
+});
+
+test("answer chips show the first choice as picked until the owner picks another, and unpicking shows none", async () => {
+  const { attentionItems } = await load();
+  const waiting = task({
+    id: "q",
+    status: "waiting",
+    question: { text: "Which?", options: ["A", "B"] },
+  });
+  const picked = (state) =>
+    attentionItems([waiting], true, state)[0]
+      .actions.filter((a) => a.selected)
+      .map((a) => a.label);
+  assert.deepEqual(picked({}), ["A"]);
+  assert.deepEqual(picked({ "task:q": "B" }), ["B"]);
+  assert.deepEqual(picked({ "task:q": "" }), []);
+});

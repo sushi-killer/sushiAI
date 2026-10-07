@@ -7,7 +7,7 @@ test("moduleUis is a frozen list of complete ModuleUi entries", async () => {
   assert.ok(moduleUis.length > 0);
   for (const ui of moduleUis) {
     assert.equal(typeof ui.extensionId, "string");
-    for (const key of ["useAttention", "useWorktreeClaims", "useShell"])
+    for (const key of ["useAttention", "useWorktreeClaims", "useShell", "act"])
       assert.equal(typeof ui[key], "function", key);
     assert.ok(ui.AttentionDetail);
   }

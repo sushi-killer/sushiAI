@@ -3,7 +3,7 @@
 import type { InboxGroup, InboxRow } from "./attention.ts";
 import { elapsedLabel, plural } from "../lib/text.ts";
 import { groupKey } from "./workspaceMerge.ts";
-import type { AttentionItem } from "../extensions/modules.ts";
+import type { AttentionAction, AttentionItem } from "../extensions/modules.ts";
 
 export type Kind =
   "answer" | "decide" | "review" | "panels" | "working" | "idle";
@@ -194,3 +194,18 @@ export function stepSelection(
   if (at < 0) return keys[0];
   return keys[Math.min(keys.length - 1, Math.max(0, at + delta))];
 }
+
+/** The selected row's action bound to a pressed key, if any. */
+export const actionForKey = (
+  actions: AttentionAction[] | undefined,
+  key: string,
+): AttentionAction | undefined =>
+  actions?.find((action) => action.key === key.toLowerCase());
+
+/** Footer legend entries for the actions that have a key: ["L", "land"]. */
+export const actionLegend = (
+  actions: AttentionAction[] | undefined,
+): string[][] =>
+  (actions ?? [])
+    .filter((action) => action.key)
+    .map((action) => [action.key!.toUpperCase(), action.label.toLowerCase()]);

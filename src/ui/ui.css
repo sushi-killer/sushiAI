@@ -172,7 +172,14 @@
   background: var(--bg-control);
   color: var(--text-muted);
   font-size: var(--text-sm);
+  max-width: 100%;
   white-space: nowrap;
+}
+/* A long option shortens with an ellipsis instead of running off its row. */
+.ui-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .ui-chip:hover {
   color: var(--text);
@@ -501,6 +508,11 @@
   align-items: center;
   gap: 8px;
 }
+.ui-attention-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-faint);
+}
 .ui-attention-title {
   flex: 1;
   min-width: 0;
@@ -518,9 +530,14 @@
   font-size: var(--text-xs);
 }
 .ui-attention-context {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
   color: var(--text-muted);
   font-size: var(--text-sm);
   line-height: 15px;
+  overflow-wrap: anywhere;
 }
 .ui-attention-context.question {
   color: var(--text);

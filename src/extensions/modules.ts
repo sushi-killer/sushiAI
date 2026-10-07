@@ -8,6 +8,17 @@ import { orchestratorModule } from "../orchestrator/module.ts";
 
 export type AttentionKind = "answer" | "decide" | "review";
 
+/** One thing a module lets the owner do with an Inbox row. `key` binds a
+ * keyboard shortcut for the selected row; `primary` draws it filled. */
+export type AttentionAction = {
+  id: string;
+  label: string;
+  key?: string;
+  primary?: boolean;
+  /** Drawn as picked (a choice that waits for a confirm). */
+  selected?: boolean;
+};
+
 /** One Inbox row a module asks the owner to act on. */
 export type AttentionItem = {
   key: string;
@@ -17,6 +28,10 @@ export type AttentionItem = {
   host: string;
   at: number | null;
   search: string;
+  /** The second line of the row, for example "failed · 0/0 attempts · $0.41". */
+  meta?: string;
+  /** Inline actions of the row, drawn as chips in this order. */
+  actions?: AttentionAction[];
 };
 
 /** A module's statement that a worktree is its own. */
@@ -44,9 +59,13 @@ export type ModuleShell = {
 
 export type ModuleUi = {
   extensionId: string;
+  /** Drawn at the title of the module's rows (provenance). */
+  icon?: ComponentType<{ size?: number }>;
   /** [] when the module is off. */
   useAttention(): AttentionItem[];
   AttentionDetail: ComponentType<{ item: AttentionItem }>;
+  /** Runs one of a row's actions. `text` carries what the owner typed. */
+  act(key: string, actionId: string, text?: string): Promise<void>;
   reviewAll?: { label: string; run(keys: string[]): Promise<void> };
   useWorktreeClaims(): WorktreeClaim[];
   /** Called once from App.tsx. */

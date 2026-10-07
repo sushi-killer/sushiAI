@@ -1,7 +1,8 @@
 import type { ConnectionProfile, Workspace } from "../types";
 import type { ProjectGit } from "./useProjectGit";
 import type { WorktreeClaim } from "../extensions/modules";
-import { LOCAL_GROUP, groupKey } from "../lib/hostGroup";
+import { LOCAL_GROUP, groupKey } from "../lib/hostGroup.ts";
+import { claimFor } from "../lib/worktreeClaims.ts";
 
 /** Groups the flat workspace list by which host (this Mac or an SSH host) owns
  * it. Shared by Sidebar (which draws the grouping) and App (which needs to
@@ -207,25 +208,17 @@ export function computeHostMergeGroups(
   return groups;
 }
 
-const trimSlashes = (path: string) => (path || "").replace(/\/+$/, "");
-
-/** The claim a member's checkout belongs to: same host, then by worktree
- * path, or by branch inside the same repository. The first match wins, so a
- * module lists its preferred claim first. */
+/** The claim a member's checkout belongs to (see `claimFor`). */
 export function memberClaim(
   member: MergedMember,
   claims: WorktreeClaim[],
 ): WorktreeClaim | undefined {
   const { checkout, branch, commonDir } = member.git;
-  return claims.find(
-    (claim) =>
-      claim.host === member.hostKey &&
-      ((Boolean(claim.path) &&
-        trimSlashes(claim.path ?? "") === trimSlashes(checkout)) ||
-        (Boolean(claim.branch) &&
-          claim.branch === branch &&
-          `${trimSlashes(claim.repo)}/.git` === commonDir)),
-  );
+  return claimFor(claims, member.hostKey, {
+    path: checkout,
+    branch,
+    commonDir,
+  });
 }
 
 /** What names one member inside its row: the host, as before, until a host

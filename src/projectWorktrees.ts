@@ -5,6 +5,7 @@ import type {
   Workspace,
 } from "./types";
 import type { WorktreeClaim } from "./extensions/modules";
+import { claimFor } from "./lib/worktreeClaims.ts";
 
 export type WorktreeRow = {
   key: string;
@@ -31,29 +32,6 @@ export function hostLabel(host: string, profiles: ConnectionProfile[]) {
   if (host === "local") return "This Mac";
   const profile = profiles.find((item) => `ssh:${item.id}` === host);
   return profile?.name || profile?.host || host.slice(4);
-}
-
-const trimSlashes = (path: string) => (path || "").replace(/\/+$/, "");
-
-/** The claim a worktree belongs to, on the same host, by path or by branch
- * in the same repository (as `memberClaim` matches a sidebar member); an
- * active one wins over an inactive one on the same checkout. */
-function claimOf(
-  worktree: Worktree,
-  host: string,
-  root: string,
-  claims: WorktreeClaim[],
-) {
-  const mine = claims.filter(
-    (claim) =>
-      claim.host === host &&
-      ((!!claim.path &&
-        trimSlashes(claim.path) === trimSlashes(worktree.path)) ||
-        (!!claim.branch &&
-          claim.branch === worktree.branch &&
-          trimSlashes(claim.repo) === trimSlashes(root))),
-  );
-  return mine.find((claim) => claim.active) ?? mine[0];
 }
 
 const inside = (folder: string, root: string) =>
@@ -84,7 +62,11 @@ export function worktreeRows(
                 !!w.cwd &&
                 inside(w.cwd, worktree.path),
             ),
-            claim: claimOf(worktree, list.host, list.root, claims),
+            claim: claimFor(claims, list.host, {
+              path: worktree.path,
+              branch: worktree.branch,
+              repo: list.root,
+            }),
           })),
     )
     .sort((a, b) =>

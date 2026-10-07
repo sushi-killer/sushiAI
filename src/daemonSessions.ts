@@ -511,3 +511,37 @@ export async function wakeInPlace(
     return false;
   throw new Error(result.message);
 }
+
+/** Wakes a sleeping session for a click or a keystroke. When the host has no such
+ * record or no stored launch (1003, 1012) the same fallback as Reopen runs
+ * (`reopen`: a new session that resumes). Returns the refusal text, or null. */
+export async function wakeOrReopen(
+  bridge: Pick<Bridge, "sessionWake">,
+  request: { host: string; id: string },
+  reopen: () => void,
+): Promise<string | null> {
+  const result = await bridge.sessionWake(request.host, request.id);
+  if (result.ok) return null;
+  if (result.code !== undefined && WAKE_FALLBACK_CODES.includes(result.code)) {
+    reopen();
+    return null;
+  }
+  return result.message;
+}
+
+/** What a terminal does with a daemon state of its host: null when it changes nothing
+ * (another host, not ready, a generation already handled), else the capability read
+ * again. A new generation (hello, daemon restart) also means the host forgot what it
+ * was told, so the caller resets its `reported` flag and says "focused" again. */
+export function hostGenerationChange(
+  seen: number,
+  state: Pick<DaemonState, "host" | "state" | "capabilities" | "generation">,
+  host: string,
+): { generation: number; canFocus: boolean } | null {
+  if (state.host !== host || state.state !== "ready") return null;
+  if (state.generation === seen) return null;
+  return {
+    generation: state.generation,
+    canFocus: hostSupports([state], host, "hibernate"),
+  };
+}

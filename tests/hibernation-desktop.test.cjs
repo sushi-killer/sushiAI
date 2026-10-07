@@ -273,3 +273,45 @@ test("the wake, focus and configure channels send the contract's methods", async
       channel,
     );
 });
+
+test("a wake from a click or a keystroke that the host refuses with 1012 or 1003 runs the Reopen fallback", async () => {
+  const { wakeOrReopen } = await library;
+  const request = { host: "local", id: "s1" };
+  for (const code of [1012, 1003]) {
+    let reopened = 0;
+    const bridge = {
+      sessionWake: async () => ({ ok: false, code, message: "no" }),
+    };
+    assert.equal(await wakeOrReopen(bridge, request, () => reopened++), null);
+    assert.equal(reopened, 1, `${code} reopens`);
+  }
+  let reopened = 0;
+  const ok = { sessionWake: async () => ({ ok: true }) };
+  assert.equal(await wakeOrReopen(ok, request, () => reopened++), null);
+  const broken = {
+    sessionWake: async () => ({ ok: false, code: 1001, message: "boom" }),
+  };
+  assert.equal(await wakeOrReopen(broken, request, () => reopened++), "boom");
+  assert.equal(reopened, 0, "only a woken or a refused session never reopens");
+});
+
+test("a new connection generation of the host re-reads the capability; others change nothing", async () => {
+  const { hostGenerationChange } = await library;
+  const ready = (generation, capabilities, extra = {}) =>
+    state("local", capabilities, { generation, ...extra });
+  assert.deepEqual(hostGenerationChange(-1, ready(1, ["hibernate"]), "local"), {
+    generation: 1,
+    canFocus: true,
+  });
+  assert.equal(hostGenerationChange(1, ready(1, ["hibernate"]), "local"), null);
+  // A restart brings an older daemon: the capability is gone.
+  assert.deepEqual(hostGenerationChange(1, ready(2, []), "local"), {
+    generation: 2,
+    canFocus: false,
+  });
+  assert.equal(hostGenerationChange(1, ready(2, []), "other"), null);
+  assert.equal(
+    hostGenerationChange(1, ready(2, [], { state: "connecting" }), "local"),
+    null,
+  );
+});

@@ -98,6 +98,7 @@ async fn run(home: Home, modules: Vec<ModuleSlot>) -> Result<(fs::File, Arc<Regi
     let mut int = signal(SignalKind::interrupt())?;
     tokio::select! {
         () = server::serve(listener, registry.clone()) => {}
+        () = prune_loop(registry.clone()) => {}
         () = registry.stopped() => {
             // The response to `daemon.shutdown` is queued; give its connection time to send it.
             tokio::time::sleep(STOP_GRACE).await;
@@ -111,6 +112,16 @@ async fn run(home: Home, modules: Vec<ModuleSlot>) -> Result<(fs::File, Arc<Regi
     stop_modules(&registry).await;
     registry.flush();
     Ok((lock, registry))
+}
+
+/// Once an hour: hibernated sessions older than 30 days are forgotten, with their files.
+async fn prune_loop(registry: Arc<Registry>) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+    tick.tick().await;
+    loop {
+        tick.tick().await;
+        registry.prune_hibernated(agent::now_ms());
+    }
 }
 
 /// Saves the screen of every running agent session, all at once.
@@ -269,11 +280,20 @@ fn load_state(registry: &Arc<Registry>) -> Result<Vec<Pending>> {
             registry.update(listed);
             pending.push(Pending { info, probed });
         } else if info.status == SessionStatus::Hibernated {
-            session::start_hibernated(registry.clone(), info);
+            let mut info = info;
+            if registry.launches().opens(&info.id) {
+                session::start_hibernated(registry.clone(), info);
+            } else {
+                // It could never wake: Reopen starts it again from its conversation.
+                tracing::warn!("session {} has no launch that opens; it is exited", info.id);
+                mark_exited(&mut info, None);
+                registry.update(info);
+            }
         } else {
             registry.update(info);
         }
     }
+    registry.prune_hibernated(agent::now_ms());
     Ok(pending)
 }
 
@@ -325,7 +345,12 @@ fn reattach_all(registry: &Arc<Registry>, pending: Vec<Pending>) {
                     registry.settle();
                     return;
                 }
-                if can_hibernate(&info, registry.launches().exists(&id)) {
+                let (store, key) = (registry.clone(), id.clone());
+                let opens = tokio::task::spawn_blocking(move || store.launches().opens(&key))
+                    .await
+                    .unwrap_or(false);
+                let resumable = agent::agent_of(info.agent.name.as_deref()).is_some();
+                if can_hibernate(&info, opens, resumable) {
                     // The process died with the machine (or the holder was killed): the
                     // conversation is still there, so the session sleeps instead of ending.
                     mark_hibernated(&mut info, agent::now_ms());

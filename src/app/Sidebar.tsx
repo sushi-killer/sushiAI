@@ -18,6 +18,7 @@ import {
   Workflow,
 } from "lucide-react";
 import { Icon } from "../PanelIcon.tsx";
+import { SleepMark } from "../ui/SleepMark.tsx";
 import {
   ExtensionActionSlot,
   ExtensionIcon,
@@ -306,6 +307,11 @@ export function Sidebar({
                   ? p.url.replace(/^https?:\/\//, "").replace(/\/$/, "")
                   : p.title}
               </span>
+              <SleepMark
+                sleeping={p.status === "sleeping"}
+                keepAwake={!!p.keepAwake}
+                size={11}
+              />
               {p.status === "working" && (
                 <i className="status-dot green pulse" />
               )}
@@ -447,6 +453,11 @@ export function Sidebar({
                       ? p.url.replace(/^https?:\/\//, "").replace(/\/$/, "")
                       : p.title}
                   </span>
+                  <SleepMark
+                    sleeping={p.status === "sleeping"}
+                    keepAwake={!!p.keepAwake}
+                    size={11}
+                  />
                   {(group.worktrees || manyHosts) && (
                     <span className="remote-tag pane-branch" title={tooltip}>
                       {manyHosts && <HostIcon size={10} />}

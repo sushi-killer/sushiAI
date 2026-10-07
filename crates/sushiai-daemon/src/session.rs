@@ -104,6 +104,10 @@ enum Cmd {
     Respond(AskRespond, Reply),
     Wake(Box<Prepared>, Reply),
     Hibernate(Reply),
+    /// A wake was asked while the session is going to sleep: remembered for the sleep's end.
+    WakeAsked(Reply),
+    /// The wake that followed a sleep with input waiting failed: that input is dropped.
+    SleepInputDropped,
     SaveTail(oneshot::Sender<()>),
     /// From the task that started a holder for a waking session.
     Spawned(Result<(HolderConn, u32), Fail>),
@@ -175,6 +179,11 @@ impl Handle {
         self.ask(|r| Cmd::Wake(Box::new(prepared), r)).await
     }
 
+    /// A `session.wake` that arrived while the session goes to sleep.
+    pub async fn wake_asked(&self) -> Result<(), Fail> {
+        self.ask(Cmd::WakeAsked).await
+    }
+
     pub async fn hibernate(&self) -> Result<(), Fail> {
         self.ask(Cmd::Hibernate).await
     }
@@ -237,6 +246,8 @@ struct Wake {
     /// Typed meanwhile, sent in order once the agent is ready.
     queue: Vec<u8>,
     last_output: Option<Instant>,
+    /// A hook came before the holder was connected: finish as soon as it is.
+    hooked: bool,
     /// A resize that came before the holder was there.
     resize: Option<(u16, u16)>,
 }
@@ -282,6 +293,10 @@ struct Actor {
     last_input_ms: u64,
     /// A TERM was sent to put the session to sleep: the exit that follows is a sleep.
     hibernating: bool,
+    /// Typed while the process ends for a sleep (at most `WAKE_QUEUE_MAX`): handed to the wake.
+    sleep_queue: Vec<u8>,
+    /// A wake was asked while the process ended for a sleep.
+    wake_asked: bool,
     /// The owner closed the session: its launch and tail go when it ends.
     closing: bool,
     wake: Option<Wake>,
@@ -372,6 +387,8 @@ fn spawn_actor(
         has_launch,
         last_input_ms: 0,
         hibernating: false,
+        sleep_queue: Vec::new(),
+        wake_asked: false,
         closing: false,
         wake: None,
         wake_due: None,
@@ -544,7 +561,12 @@ impl Actor {
                 self.closing = true;
                 let signal = if graceful { Signal::Term } else { Signal::Kill };
                 self.track(reply, |h| h.close(signal), Pending::Ack);
-                if graceful && self.running() {
+                if graceful
+                    && matches!(
+                        self.info.status,
+                        SessionStatus::Running | SessionStatus::Waking
+                    )
+                {
                     self.kill_at = Some(Instant::now() + TERM_GRACE);
                 }
             }
@@ -572,11 +594,19 @@ impl Actor {
                 self.begin_wake(*prepared);
                 let _ = reply.send(Ok(()));
             }
+            Cmd::WakeAsked(reply) => {
+                self.wake_asked |= self.hibernating;
+                let _ = reply.send(Ok(()));
+            }
+            Cmd::SleepInputDropped => {
+                self.sleep_queue.clear();
+                self.wake_asked = false;
+            }
             Cmd::Hibernate(reply) => {
                 let _ = reply.send(self.hibernate_now());
             }
             Cmd::SaveTail(reply) => {
-                if self.running() && can_hibernate(&self.info, self.has_launch) {
+                if self.running() && self.can_sleep() {
                     self.save_tail();
                 }
                 let _ = reply.send(());
@@ -600,6 +630,16 @@ impl Actor {
                     Err((code::INPUT_BACKPRESSURE, "input queue is full".into()))
                 } else {
                     wake.queue.extend(data);
+                    Ok(())
+                };
+                let _ = reply.send(result);
+            }
+            // The process is ending for a sleep: its input would die with it.
+            _ if self.hibernating && self.info.status == SessionStatus::Running => {
+                let result = if self.sleep_queue.len() + data.len() > WAKE_QUEUE_MAX {
+                    Err((code::INPUT_BACKPRESSURE, "input queue is full".into()))
+                } else {
+                    self.sleep_queue.extend(data);
                     Ok(())
                 };
                 let _ = reply.send(result);
@@ -1210,6 +1250,15 @@ impl Actor {
 
 /// Hibernation and wake.
 impl Actor {
+    /// An agent the daemon can resume, with a conversation and a stored launch.
+    fn can_sleep(&self) -> bool {
+        can_hibernate(
+            &self.info,
+            self.has_launch,
+            agent::agent_of(self.info.agent.name.as_deref()).is_some(),
+        )
+    }
+
     fn candidate(&self) -> Candidate {
         let record = &self.info.agent;
         Candidate {
@@ -1225,7 +1274,7 @@ impl Actor {
 
     /// Once a second: a session that has been idle long enough goes to sleep.
     fn hibernate_tick(&mut self) {
-        if !self.running() || !can_hibernate(&self.info, self.has_launch) {
+        if !self.running() || !self.can_sleep() {
             return;
         }
         let Some(after) = self.registry.hibernate_after() else {
@@ -1329,6 +1378,19 @@ impl Actor {
         self.registry.update(self.info.clone());
         self.registry.announce_updated(&self.info.id);
         self.announce_asks_dropped(dropped);
+        if !self.sleep_queue.is_empty() || self.wake_asked {
+            // Someone typed or asked during the grace: wake at once; the queue goes along.
+            self.wake_asked = false;
+            let (registry, id, me) = (self.registry.clone(), self.info.id.clone(), self.me.clone());
+            tokio::spawn(async move {
+                if let Err((_, message)) = crate::wake::wake(&registry, &id).await {
+                    tracing::warn!("session {id} cannot wake after its sleep: {message}");
+                    if let Some(tx) = me.upgrade() {
+                        let _ = tx.send(Cmd::SleepInputDropped).await;
+                    }
+                }
+            });
+        }
     }
 
     fn save_tail(&mut self) {
@@ -1345,7 +1407,7 @@ impl Actor {
     /// A tail so a reboot has something to show; at most once a minute.
     fn save_tail_throttled(&mut self) {
         let lately = self.tail_saved.is_some_and(|at| at.elapsed() < TAIL_EVERY);
-        if self.running() && !lately && can_hibernate(&self.info, self.has_launch) {
+        if self.running() && !lately && self.can_sleep() {
             self.save_tail();
         }
     }
@@ -1387,8 +1449,9 @@ impl Actor {
         self.base = self.seq;
         self.wake = Some(Wake {
             started: Instant::now(),
-            queue: Vec::new(),
+            queue: std::mem::take(&mut self.sleep_queue),
             last_output: None,
+            hooked: false,
             resize: None,
         });
         self.wake_due = Some(Instant::now() + WAKE_CAP);
@@ -1456,12 +1519,21 @@ impl Actor {
         self.holder = Some(conn);
         self.holder_open = true;
         self.registry.update(self.info.clone());
+        if self.wake.as_ref().is_some_and(|w| w.hooked) {
+            self.finish_wake();
+        }
     }
 
     /// The process could not start: back to sleep, so a later wake can try again.
     fn wake_failed(&mut self) {
         if self.closing {
             return self.exited(None);
+        }
+        if self.wake.as_ref().is_some_and(|w| !w.queue.is_empty()) {
+            tracing::warn!(
+                "session {} could not wake: the input typed meanwhile is dropped",
+                self.info.id
+            );
         }
         self.wake = None;
         self.wake_due = None;
@@ -1499,11 +1571,23 @@ impl Actor {
 
     /// The agent is up: the input typed meanwhile goes in, in order.
     fn finish_wake(&mut self) {
+        if self.holder.is_none() {
+            // The queue needs the holder: finish once `spawned` has connected it.
+            if let Some(wake) = self.wake.as_mut() {
+                wake.hooked = true;
+            }
+            return;
+        }
         let Some(wake) = self.wake.take() else {
             return;
         };
         self.wake_due = None;
         self.info.status = SessionStatus::Running;
+        // A resumed agent may send no hook until the first prompt: it is idle, not starting.
+        if let Some(agent) = self.agent.as_mut() {
+            agent.status.ready(now_ms());
+        }
+        self.publish();
         if let (Some(holder), false) = (self.holder.as_mut(), wake.queue.is_empty()) {
             let _ = holder.input(wake.queue);
         }

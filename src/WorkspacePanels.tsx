@@ -1,6 +1,14 @@
 import { memo, useEffect, useRef, useState, type ReactNode } from "react";
-import { Maximize2, Minimize2, MoreHorizontal, Plus, X } from "lucide-react";
-import type { Layout, Panel } from "./types";
+import {
+  Check,
+  Maximize2,
+  Minimize2,
+  MoreHorizontal,
+  Plus,
+  X,
+} from "lucide-react";
+import { SleepMark } from "./ui/SleepMark";
+import type { DaemonState, Layout, Panel } from "./types";
 import { TerminalPanel } from "./TerminalPanel";
 import { daemonHost, hostSupports } from "./daemonSessions";
 import { BrowserPanel } from "./BrowserPanel";
@@ -67,14 +75,18 @@ function useHostSleeps(host: string, enabled: boolean): boolean {
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
+    // Every ready state of the host (first hello, a daemon restart) answers again.
+    const apply = (state: DaemonState) => {
+      if (!cancelled && state.host === host && state.state === "ready")
+        setSleeps(hostSupports([state], host, "hibernate"));
+    };
+    const unsubscribe = window.bridge?.onDaemonState?.(apply);
     void Promise.resolve(window.bridge?.daemonStates?.())
-      .then((states) => {
-        if (!cancelled)
-          setSleeps(hostSupports(states ?? [], host, "hibernate"));
-      })
+      .then((states) => (states ?? []).forEach(apply))
       .catch(() => {});
     return () => {
       cancelled = true;
+      unsubscribe?.();
     };
   }, [host, enabled]);
   return enabled && sleeps;
@@ -363,6 +375,8 @@ function PanelFrame({
   const [edge, setEdge] = useState(""),
     [menu, setMenu] = useState(false),
     [rename, setRename] = useState(false);
+  const sleeping = panel.status === "sleeping";
+  const marked = sleeping || !!panel.keepAwake;
   const main = (
     <>
       <header
@@ -398,7 +412,19 @@ function PanelFrame({
             }}
           />
         ) : (
-          <span className="panel-title">{panel.title}</span>
+          <>
+            <span
+              className={`panel-title ${marked ? "with-mark" : ""}`}
+              title={marked && sleeping ? "Sleeping" : undefined}
+            >
+              {panel.title}
+            </span>
+            <SleepMark
+              sleeping={sleeping}
+              keepAwake={!!panel.keepAwake}
+              size={12}
+            />
+          </>
         )}
         <div className="panel-actions">
           {companionToggle}
@@ -438,14 +464,19 @@ function PanelFrame({
             </button>
             {onKeepAwake && (
               <button
-                aria-pressed={!!panel.keepAwake}
+                role="menuitemcheckbox"
+                aria-checked={!!panel.keepAwake}
+                className="panel-menu-check"
                 title="A kept-awake agent never sleeps when idle."
                 onClick={() => {
                   onKeepAwake(!panel.keepAwake);
                   setMenu(false);
                 }}
               >
-                Keep awake · {panel.keepAwake ? "on" : "off"}
+                <span className="panel-menu-tick" aria-hidden="true">
+                  {panel.keepAwake && <Check size={12} />}
+                </span>
+                Keep awake
               </button>
             )}
             <button onClick={onClose}>

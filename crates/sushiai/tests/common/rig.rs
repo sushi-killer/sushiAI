@@ -30,7 +30,8 @@ log('size ' + process.stdout.columns + 'x' + process.stdout.rows);
 process.stdin.setRawMode(true);
 process.stdin.resume();
 process.stdin.on('data', (d) => log('stdin ' + d.toString()));
-process.on('SIGTERM', () => process.exit(0));
+// FAKE_TERM_DELAY_MS keeps the process alive that long after TERM (a slow shutdown).
+process.on('SIGTERM', () => setTimeout(() => process.exit(0), Number(process.env.FAKE_TERM_DELAY_MS || 0)));
 function commandFor(event) {
   if (KIND === 'claude') {
     const s = JSON.parse(process.argv[process.argv.indexOf('--settings') + 1]);
@@ -43,11 +44,13 @@ function commandFor(event) {
 function run(event, file) {
   spawnSync('sh', ['-c', commandFor(event)], { input: fs.readFileSync(path.join(F, file)) });
 }
+// FAKE_QUIET_RESUME: a resumed agent sends no hook until its first prompt (Codex).
+const QUIET = process.env.FAKE_QUIET_RESUME && process.argv.includes('resume');
 for (let i = 0; i < FLOOD; i++) console.log('flood-' + KIND + '-' + i + ' ' + 'x'.repeat(180));
 console.log('tail-marker-' + KIND);
 Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
-run('SessionStart', 'SessionStart-startup.json');
-if (KIND === 'codex') {
+if (!QUIET) run('SessionStart', 'SessionStart-startup.json');
+if (KIND === 'codex' && !QUIET) {
   run('UserPromptSubmit', 'UserPromptSubmit.json');
   run('Stop', 'Stop.json');
 }

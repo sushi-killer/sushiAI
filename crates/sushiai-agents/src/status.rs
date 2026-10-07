@@ -128,6 +128,14 @@ impl SessionStatus {
         }
     }
 
+    /// The process is up and has sent no hook yet (a resumed Codex): idle, so it can sleep
+    /// again. Any other status stays.
+    pub fn ready(&mut self, now: u64) {
+        if self.status == Status::Starting {
+            self.set(Status::Idle, None, now);
+        }
+    }
+
     fn set(&mut self, status: Status, kind: Option<BlockedKind>, now: u64) {
         if self.status != status || self.blocked_kind != kind {
             self.status = status;

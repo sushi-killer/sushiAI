@@ -3,8 +3,12 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { ArrowUpRight, Command, Play, RotateCcw } from "lucide-react";
 import { agentTitle } from "./app/agent-title";
-import { daemonHost, hostSupports } from "./daemonSessions";
-import type { Panel } from "./types";
+import {
+  daemonHost,
+  hostGenerationChange,
+  wakeOrReopen,
+} from "./daemonSessions";
+import type { DaemonState, Panel } from "./types";
 import {
   fitTerminal,
   queueTerminalFit,
@@ -60,6 +64,11 @@ export function TerminalPanel({
   onReopen(): void;
 }) {
   const host = useRef<HTMLDivElement>(null);
+  const sleeping = panel.status === "sleeping";
+  const sleepingRef = useRef(sleeping);
+  sleepingRef.current = sleeping;
+  const onReopenRef = useRef(onReopen);
+  onReopenRef.current = onReopen;
   const attachmentsAllowed = useRef(false);
   attachmentsAllowed.current = !!panel.agent;
   const [error, setError] = useState("");
@@ -169,6 +178,20 @@ export function TerminalPanel({
       const input = createTerminalInput(
         (data) => window.bridge!.daemonTerminalWrite(panel.id, data),
         (message) => {
+          // Typing into a sleeping pane whose launch is gone: Reopen takes over.
+          if (sleepingRef.current) {
+            void wakeOrReopen(
+              window.bridge!,
+              { host: daemonHost(endpoint), id: sessionId },
+              () => onReopenRef.current(),
+            ).then((refused) => {
+              if (refused) {
+                entry.error = refused;
+                entry.notify?.();
+              }
+            });
+            return;
+          }
           entry.error = message;
           entry.notify?.();
         },
@@ -366,7 +389,8 @@ export function TerminalPanel({
     const hostId = daemonHost(endpoint);
     const sessionId = panel.sessionId!;
     let canFocus = false,
-      reported = false;
+      reported = false,
+      generation = -1;
     const report = (focused: boolean) => {
       if (!canFocus || reported === focused) return;
       reported = focused;
@@ -379,15 +403,23 @@ export function TerminalPanel({
     };
     current.element.addEventListener("focusin", onFocusIn);
     current.element.addEventListener("focusout", onFocusOut);
+    // A new connection generation (hello, daemon restart) forgets what the host was
+    // told: the capability is read again and a focused terminal says so again.
+    const apply = (state: DaemonState) => {
+      const change = hostGenerationChange(generation, state, hostId);
+      if (disposed || !change) return;
+      generation = change.generation;
+      canFocus = change.canFocus;
+      reported = false;
+      if (current.element.contains(document.activeElement)) report(true);
+    };
+    const unsubscribeState = window.bridge.onDaemonState?.(apply);
     void Promise.resolve(window.bridge.daemonStates?.())
-      .then((states) => {
-        canFocus = hostSupports(states ?? [], hostId, "hibernate");
-        if (!disposed && current.element.contains(document.activeElement))
-          report(true);
-      })
+      .then((states) => (states ?? []).forEach(apply))
       .catch(() => {});
     return () => {
       disposed = true;
+      unsubscribeState?.();
       report(false);
       current.element.removeEventListener("focusin", onFocusIn);
       current.element.removeEventListener("focusout", onFocusOut);
@@ -456,22 +488,28 @@ export function TerminalPanel({
         </div>
       </div>
     );
-  const sleeping = panel.status === "sleeping";
   return (
     <div
       className="terminal-wrap"
       // Typing already wakes the session; a click into the pane does too.
       onMouseDownCapture={() => {
         if (!sleeping) return;
-        window.bridge
-          ?.sessionWake(daemonHost(endpoint), panel.sessionId!)
-          .then((result) => {
-            if (!result.ok) setError(result.message);
+        if (!window.bridge) return;
+        wakeOrReopen(
+          window.bridge,
+          { host: daemonHost(endpoint), id: panel.sessionId! },
+          onReopen,
+        )
+          .then((refused) => {
+            if (refused) setError(refused);
           })
           .catch((e) => setError(e instanceof Error ? e.message : String(e)));
       }}
     >
-      <div ref={host} className="terminal-host" />
+      <div
+        ref={host}
+        className={`terminal-host ${sleeping ? "is-sleeping" : ""}`}
+      />
       {(sleeping || panel.status === "waking") && (
         <div className="terminal-sleep" role="status">
           {sleeping ? "Sleeping — type or click to wake" : "Waking…"}

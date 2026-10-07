@@ -439,7 +439,8 @@ export function useWorkspaces({
       !owner ||
       !ended ||
       (ended.kind !== "agent" && ended.kind !== "terminal") ||
-      (!ended.ended && ended.sessionId)
+      // A sleeping pane is not ended, but its wake failed: Reopen takes over.
+      (!ended.ended && ended.sessionId && ended.status !== "sleeping")
     )
       return Promise.resolve();
     const request: SessionLaunchRequest = reopenRequest(

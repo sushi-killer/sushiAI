@@ -7,6 +7,7 @@ export { Banner } from "./Banner";
 export { Chip } from "./Chip";
 export { Criterion, type CriterionState } from "./Criterion";
 export { GroupLabel } from "./GroupLabel";
+export { SleepMark } from "./SleepMark";
 export { StageTrack } from "./StageTrack";
 export { Stepper } from "./Stepper";
 export { Tag } from "./Tag";

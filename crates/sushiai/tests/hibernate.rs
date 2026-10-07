@@ -382,3 +382,87 @@ fn resizing_a_sleeping_session_succeeds_and_the_wake_uses_the_new_size() {
         rig.log().contains("size 132x41")
     });
 }
+
+#[test]
+fn input_typed_while_the_agent_ends_for_a_sleep_arrives_after_the_wake_in_order() {
+    let rig = Rig::new("claude");
+    // The default threshold: only `session.hibernate` puts it to sleep. The fake needs 2.5 s
+    // to end after TERM, which is the grace the input used to be lost in.
+    let mut sandbox = rig.sandbox(None);
+    sandbox
+        .env
+        .push(("FAKE_TERM_DELAY_MS".into(), "2500".into()));
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let id = rig.create(&mut client);
+    wait_idle(&mut client, &id);
+    client.call("session.hibernate", json!({"id": id}));
+    assert_eq!(status_of(&mut client, &id), "running", "still ending");
+    client.type_text(&id, "abc");
+    client.type_text(&id, "def");
+    wait_until("the wake after the sleep", 30, || {
+        entry(&mut client, &id)["incarnation"] == 1
+    });
+    wait_until("the typed text to arrive", 20, || rig.typed() == "abcdef");
+    wait_status(&mut client, &id, "running");
+}
+
+#[test]
+fn a_wake_asked_while_the_agent_ends_for_a_sleep_wakes_it_once_asleep() {
+    let rig = Rig::new("claude");
+    let mut sandbox = rig.sandbox(None);
+    sandbox
+        .env
+        .push(("FAKE_TERM_DELAY_MS".into(), "2000".into()));
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let id = rig.create(&mut client);
+    wait_idle(&mut client, &id);
+    client.call("session.hibernate", json!({"id": id}));
+    client.call("session.wake", json!({"id": id}));
+    wait_until("the wake after the sleep", 30, || {
+        entry(&mut client, &id)["incarnation"] == 1
+    });
+    wait_status(&mut client, &id, "running");
+    assert_eq!(rig.argvs().len(), 2);
+}
+
+#[test]
+fn a_woken_codex_that_sends_no_hook_is_idle_so_it_can_sleep_again() {
+    let rig = Rig::new("codex");
+    rig.install_codex_hooks();
+    let mut sandbox = rig.sandbox(None);
+    sandbox.env.push(("FAKE_QUIET_RESUME".into(), "1".into()));
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let id = rig.create(&mut client);
+    wait_idle(&mut client, &id);
+    client.call("session.hibernate", json!({"id": id}));
+    wait_status(&mut client, &id, "hibernated");
+    client.call("session.wake", json!({"id": id}));
+    wait_status(&mut client, &id, "running");
+    wait_until("idle after the wake", 10, || {
+        entry(&mut client, &id)["agentStatus"] == "idle"
+    });
+    // And idle means it sleeps again once the threshold passes.
+    client.call("daemon.configure", json!({"hibernateAfterSecs": 1}));
+    wait_status(&mut client, &id, "hibernated");
+}
+
+#[test]
+fn a_hibernated_record_whose_launch_does_not_open_at_start_is_exited() {
+    let rig = Rig::new("claude");
+    let mut sandbox = rig.sandbox(None);
+    let daemon = sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let id = rig.create(&mut client);
+    wait_idle(&mut client, &id);
+    client.call("session.hibernate", json!({"id": id}));
+    wait_status(&mut client, &id, "hibernated");
+    client.call("daemon.shutdown", Value::Null);
+    wait_until("the daemon to stop", 10, || !alive(daemon));
+    fs::write(launch_file(&sandbox, &id), b"SLK1garbage-garbage-garbage").expect("corrupt");
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    assert_eq!(status_of(&mut client, &id), "exited");
+}

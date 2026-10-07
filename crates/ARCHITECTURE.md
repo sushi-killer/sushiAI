@@ -247,9 +247,9 @@ wire is additive (`PROTOCOL_VERSION` stays 1, capability `hibernate`).
   is set while asleep. `state.json` is schema 2; schema 1 still loads. A `waking`
   session is saved as `running`.
 - **Launch store.** `session.create` for claude/codex seals `{env, claudeSettings, model,
-  extraArgs}` into `<home>/sessions/<id>.launch` (0600) with ChaCha20-Poly1305: random
+extraArgs}` into `<home>/sessions/<id>.launch` (0600) with ChaCha20-Poly1305: random
   nonce, the session id as associated data. The key is a login keychain item on macOS
-  (default home only), else `SUSHIAI_LAUNCH_KEY_FILE`, else `<home>/keys/launch.key`
+  (default home only; Security framework, never argv; made only on errSecItemNotFound), else `SUSHIAI_LAUNCH_KEY_FILE`, else `<home>/keys/launch.key`
   (0600). It is deleted when the session is closed or removed (or pruned). Env and
   `claudeSettings` are still never logged or sent to clients. A file that cannot be opened
   is `WAKE_NEEDS_LAUNCH` (1012). On a headless host the key file sits beside the data: a
@@ -279,8 +279,15 @@ wire is additive (`PROTOCOL_VERSION` stays 1, capability `hibernate`).
   by 800 ms of quiet, or 20 s; the queue is then sent in order and the status is `running`.
   A start failure puts the session back to sleep; an exit while waking is `exited`. An
   exited record with a stored launch wakes the same way (Reopen on the same id).
+  Input typed, or a `session.wake` asked, while the process still ends for a sleep (the TERM
+  grace) is kept (64 KiB) and starts the wake as soon as the sleep completes; the queue goes
+  with it. A wake that fails drops that input with a warning and leaves the record wakeable.
+  A hook that arrives before the holder is connected finishes the wake once it is. A ready
+  agent that sent no hook (a resumed Codex) is set to idle, so it can sleep again.
 - **Restart.** A restored session whose holder is gone (reboot, killed holder) and that can
-  hibernate becomes `hibernated` instead of `exited`. Hibernated records are never pruned.
+  hibernate (its launch opens) becomes `hibernated` instead of `exited`; a hibernated record
+  whose launch no longer opens at start becomes `exited`. Hibernated records older than 30
+  days are pruned (at start and hourly) with their launch and tail.
 
 ## Invariants
 

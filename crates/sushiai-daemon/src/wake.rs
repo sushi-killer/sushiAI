@@ -19,6 +19,13 @@ pub async fn wake(registry: &Arc<Registry>, id: &str) -> Result<(), Fail> {
     let info = registry.stored(id).ok_or_else(not_found)?;
     match info.status {
         SessionStatus::Hibernated | SessionStatus::Exited => {}
+        SessionStatus::Running => {
+            // An agent that is ending for a sleep wakes as soon as it is asleep.
+            if let Some(handle) = registry.handle(id) {
+                return handle.wake_asked().await;
+            }
+            return Ok(());
+        }
         _ => return Ok(()),
     }
     let (Some(name), Some(conversation)) = (
@@ -72,7 +79,7 @@ pub async fn wake(registry: &Arc<Registry>, id: &str) -> Result<(), Fail> {
         None => {
             // An exited record whose actor is gone sleeps first, so the actor has one start.
             let mut record = info;
-            if !can_hibernate(&record, true) {
+            if !can_hibernate(&record, true, true) {
                 return Err(needs_launch());
             }
             mark_hibernated(&mut record, now_ms());

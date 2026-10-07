@@ -3,8 +3,8 @@
 //! is `sessions/<id>.launch` (0600): `SLK1`, a random 12-byte nonce, then ChaCha20-Poly1305
 //! text with the session id as associated data (a file moved to another id does not open).
 //!
-//! The key lives in the macOS login keychain (service `sushiai-launch-key`) for the default
-//! home, else in a key file (0600): `SUSHIAI_LAUNCH_KEY_FILE`, or `<home>/keys/launch.key`. A
+//! The key lives in the macOS login keychain (service `sushiai-launch-key`, through the
+//! Security framework, never on a command line) for the default home, else in a key file (0600): `SUSHIAI_LAUNCH_KEY_FILE`, or `<home>/keys/launch.key`. A
 //! daemon whose home is not `~/.sushiai` never touches the keychain. Headless hosts have no
 //! keyring, so the key file sits beside the data it protects: a stolen copy of the file alone
 //! stays sealed, a stolen home does not. Nothing here is ever logged.
@@ -14,7 +14,6 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Mutex;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -141,6 +140,11 @@ impl LaunchStore {
         serde_json::from_slice(&plain).map_err(|_| bad())
     }
 
+    /// True when the launch exists and opens (the key is there and the file is intact).
+    pub fn opens(&self, id: &str) -> bool {
+        self.open(id).is_ok()
+    }
+
     pub fn delete(&self, id: &str) {
         let _ = fs::remove_file(self.home.launch_file(id));
     }
@@ -190,40 +194,50 @@ fn file_key(path: &Path) -> io::Result<[u8; 32]> {
     }
 }
 
-/// The key of the login keychain, made when it is missing. The key reaches `security` as an
-/// argument for a moment: the same exposure as any `security add-generic-password -w`.
+/// The login name of the running user, from the account database (not `$USER`, which a
+/// caller can set to anything).
+#[cfg(target_os = "macos")]
+fn account_name() -> io::Result<String> {
+    // SAFETY: `getpwuid` returns null or a pointer to a static record; the name is copied out
+    // at once, before any other call can overwrite it.
+    let name = unsafe {
+        let entry = libc::getpwuid(libc::getuid());
+        if entry.is_null() {
+            return Err(io::Error::other("no account for the current user"));
+        }
+        std::ffi::CStr::from_ptr((*entry).pw_name)
+            .to_string_lossy()
+            .into_owned()
+    };
+    Ok(name)
+}
+
+/// The key of the login keychain, made only when the item is missing (`errSecItemNotFound`).
+/// Any other failure is an error and is not cached, so a locked or denied keychain never
+/// makes a second key. The key goes through the Security framework, never through argv.
+#[cfg(target_os = "macos")]
 fn keychain_key() -> io::Result<[u8; 32]> {
-    let account = std::env::var("USER").unwrap_or_else(|_| "sushiai".into());
-    let found = Command::new("/usr/bin/security")
-        .args([
-            "find-generic-password",
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-a",
-            &account,
-            "-w",
-        ])
-        .output()?;
-    if found.status.success() {
-        return parse_key(&String::from_utf8_lossy(&found.stdout));
+    use security_framework::passwords::{get_generic_password, set_generic_password};
+    // errSecItemNotFound
+    const NOT_FOUND: i32 = -25300;
+
+    let account = account_name()?;
+    let refused = |_| io::Error::other("the keychain refused the launch key");
+    match get_generic_password(KEYCHAIN_SERVICE, &account) {
+        Ok(found) => return parse_key(&String::from_utf8_lossy(&found)),
+        Err(e) if e.code() == NOT_FOUND => {}
+        Err(e) => return Err(refused(e)),
     }
     let made = random_hex(32)?;
-    let added = Command::new("/usr/bin/security")
-        .args([
-            "add-generic-password",
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-a",
-            &account,
-            "-w",
-            &made,
-            "-U",
-        ])
-        .output()?;
-    if !added.status.success() {
-        return Err(io::Error::other("the keychain refused the launch key"));
-    }
-    parse_key(&made)
+    set_generic_password(KEYCHAIN_SERVICE, &account, made.as_bytes()).map_err(refused)?;
+    // Use what the keychain holds: if another process added a key in between, both agree.
+    let stored = get_generic_password(KEYCHAIN_SERVICE, &account).map_err(refused)?;
+    parse_key(&String::from_utf8_lossy(&stored))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keychain_key() -> io::Result<[u8; 32]> {
+    Err(io::Error::other("no keychain on this platform"))
 }
 
 #[cfg(test)]

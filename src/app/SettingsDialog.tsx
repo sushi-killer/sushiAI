@@ -279,7 +279,7 @@ export function SettingsDialog({
                   </div>
                 </div>
                 <div className="setting-block">
-                  <h4>Sleep</h4>
+                  <h4>Mac sleep</h4>
                   <label className="setting-check">
                     <input
                       type="checkbox"
@@ -296,15 +296,18 @@ export function SettingsDialog({
                   </label>
                 </div>
                 <div className="setting-block">
-                  <h4>Agents</h4>
+                  <h4>Idle agents</h4>
                   <p className="setting-hint">
-                    Idle Claude and Codex sessions stop after this long and
-                    resume where they left off when you type.
+                    Sleep idle Claude and Codex agents after this long. They
+                    resume where they left off when you type or click.
                   </p>
+                  <span className="setting-label" id="hibernate-label">
+                    Sleep idle agents after
+                  </span>
                   <div
                     className="workspace-control-tabs"
-                    role="group"
-                    aria-label="Sleep idle agents after"
+                    role="radiogroup"
+                    aria-labelledby="hibernate-label"
                   >
                     {HIBERNATE_CHOICES.map(({ secs, label }) => (
                       <button

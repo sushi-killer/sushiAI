@@ -1,6 +1,13 @@
-/* Settings -> General, "Agents" group: the one-line hint under its heading. */
+/* Settings -> General, "Idle agents" group: the one-line hint under its heading. */
 .setting-block .setting-hint {
   margin: -4px 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 16px;
+}
+/* The visible label above the idle-sleep control. */
+.setting-block .setting-label {
+  margin-bottom: -4px;
   color: var(--text-muted);
   font-size: var(--text-xs);
   line-height: 16px;

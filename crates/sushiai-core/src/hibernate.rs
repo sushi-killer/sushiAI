@@ -9,12 +9,11 @@ pub const BUSY_CPU_MS: u64 = 2_000;
 /// ... within this window keep the session awake (a build, a test run). MCP servers idle at ~0.
 pub const BUSY_WINDOW_MS: u64 = 10 * 60 * 1000;
 
-/// True for a session that can sleep and be woken: a claude or codex session with a
-/// conversation to resume and a stored launch (it was launched by the app).
-pub fn can_hibernate(info: &SessionInfo, has_launch: bool) -> bool {
-    has_launch
-        && matches!(info.agent.name.as_deref(), Some("claude" | "codex"))
-        && info.agent.agent_session.is_some()
+/// True for a session that can sleep and be woken: an agent the daemon can resume
+/// (`resumable`, decided by the daemon's agent list), with a conversation to resume and a
+/// stored launch (it was launched by the app).
+pub fn can_hibernate(info: &SessionInfo, has_launch: bool, resumable: bool) -> bool {
+    has_launch && resumable && info.agent.agent_session.is_some()
 }
 
 /// What the daemon knows about one session at a tick.

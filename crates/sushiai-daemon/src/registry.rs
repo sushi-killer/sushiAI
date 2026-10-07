@@ -177,6 +177,9 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8], tmp_ext: &str) -> std::io:
 /// The state file keeps at most this many exited sessions; the oldest are forgotten.
 const MAX_EXITED: usize = 50;
 
+/// A hibernated session older than this is forgotten.
+pub const HIBERNATED_MAX_AGE_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
 struct Entry {
     info: SessionInfo,
     handle: Option<Handle>,
@@ -615,6 +618,34 @@ impl Registry {
         self.save(&catalog);
     }
 
+    /// Forgets hibernated sessions that slept longer than `HIBERNATED_MAX_AGE_MS` before
+    /// `now_ms`, with their launch and tail.
+    pub fn prune_hibernated(&self, now_ms: u64) {
+        let mut catalog = self.catalog();
+        let old: Vec<String> = catalog
+            .sessions
+            .iter()
+            .filter(|(_, e)| {
+                e.info.status == SessionStatus::Hibernated
+                    && e.info
+                        .agent
+                        .hibernated_at
+                        .is_some_and(|at| now_ms.saturating_sub(at) > HIBERNATED_MAX_AGE_MS)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if old.is_empty() {
+            return;
+        }
+        for id in old {
+            // Dropping the entry drops the actor's handle: the idle actor ends.
+            catalog.sessions.remove(&id);
+            self.drop_files(&id);
+            self.notify(method::SESSION_REMOVED, SessionRemoved { id });
+        }
+        self.save(&catalog);
+    }
+
     /// Sends `session.updated` for a session whose status just settled (after a reattach).
     pub fn announce_updated(&self, id: &str) {
         let info = self.catalog().sessions.get(id).map(|e| public(&e.info));
@@ -730,6 +761,30 @@ mod tests {
         let saved = StateFile::from_bytes(&fs::read(dir.path().join("state.json")).expect("read"))
             .expect("state");
         assert_eq!(saved.sessions.len(), MAX_EXITED);
+    }
+
+    #[test]
+    fn a_hibernated_session_older_than_thirty_days_is_forgotten_with_its_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = Home::new(dir.path().to_path_buf());
+        fs::create_dir_all(home.sessions()).expect("sessions");
+        let registry = Registry::new(home.clone());
+        let now = 100 * 24 * 60 * 60 * 1000;
+        let asleep = |n: usize, at: u64| {
+            let mut info = exited(n);
+            info.status = SessionStatus::Hibernated;
+            info.exit_code = None;
+            info.agent.hibernated_at = Some(at);
+            info
+        };
+        registry.update(asleep(1, now - HIBERNATED_MAX_AGE_MS - 1));
+        registry.update(asleep(2, now - HIBERNATED_MAX_AGE_MS + 1000));
+        registry.update(exited(3));
+        fs::write(home.tail_file("s001"), b"x").expect("tail");
+        registry.prune_hibernated(now);
+        let ids: Vec<String> = registry.list().into_iter().map(|i| i.id).collect();
+        assert_eq!(ids, ["s002", "s003"]);
+        assert!(!home.tail_file("s001").exists());
     }
 
     #[test]

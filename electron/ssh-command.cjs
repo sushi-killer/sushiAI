@@ -14,9 +14,19 @@ const MAX_COMMAND_CHARS = 100000;
 
 function remoteCommand(argv) {
   const b64 = Buffer.from(argv.map(quote).join(" "), "utf8").toString("base64");
-  const decode =
-    "{ base64 -d 2>/dev/null || base64 -D 2>/dev/null || openssl base64 -d; }";
-  const command = `exec /bin/sh -c 'eval "$(printf %s ${b64} | ${decode})"'`;
+  // Each decoder gets its own fresh input; an empty or failed decode tries
+  // the next, and nothing is ever eval'd empty. The text between the single
+  // quotes holds no quote, backslash or exclamation mark, so every login shell
+  // reads it as one literal word.
+  const script = [
+    `B=${b64}`,
+    'd=$(printf %s "$B" | base64 -d 2>/dev/null)',
+    '[ -n "$d" ] || d=$(printf %s "$B" | base64 -D 2>/dev/null)',
+    '[ -n "$d" ] || d=$(echo "$B" | openssl base64 -d 2>/dev/null)',
+    '[ -n "$d" ] || { echo "sushiai: cannot decode the command on this host" >&2; exit 127; }',
+    'eval "$d"',
+  ].join("; ");
+  const command = `exec /bin/sh -c '${script}'`;
   if (command.length > MAX_COMMAND_CHARS)
     throw new Error("The command is too long to send to a host.");
   return command;

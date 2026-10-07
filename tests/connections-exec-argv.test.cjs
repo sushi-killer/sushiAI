@@ -46,7 +46,7 @@ exit 7`,
   const command = await fs.readFile(path.join(dir, "command"), "utf8");
   assert.match(
     command,
-    /^exec \/bin\/sh -c 'eval "\$\(printf %s [A-Za-z0-9+/=]+ \| /,
+    /^exec \/bin\/sh -c 'B=[A-Za-z0-9+/=]+; d=\$\(printf %s /,
   );
   assert.deepEqual(await fs.readFile(path.join(dir, "stdin")), input);
 });
@@ -127,4 +127,66 @@ test("stdin reaches the program untouched through the wrapper", () => {
 test("a command too long for one argument is refused", () => {
   const { remoteCommand } = require("../electron/ssh-command.cjs");
   assert.throws(() => remoteCommand(["x".repeat(80000)]), /too long/);
+});
+
+test("a host whose decoders fail or return nothing exits 127 and runs nothing", async (t) => {
+  const { remoteCommand } = require("../electron/ssh-command.cjs");
+  const { spawnSync } = require("node:child_process");
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sushiai-decoders-"));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const marker = path.join(dir, "ran");
+  const command = remoteCommand(["touch", marker]);
+  const fake = async (name, body) =>
+    fs.writeFile(path.join(dir, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  const run = () =>
+    spawnSync("sh", ["-c", command], {
+      encoding: "utf8",
+      env: { PATH: `${dir}:/usr/bin:/bin` },
+    });
+  const nothingRan = async () =>
+    assert.equal(
+      await fs.access(marker).then(
+        () => true,
+        () => false,
+      ),
+      false,
+    );
+  // base64 fails after eating its input; openssl exits 0 with no output.
+  await fake("base64", "cat >/dev/null; exit 1");
+  await fake("openssl", "cat >/dev/null; exit 0");
+  let result = run();
+  assert.equal(result.status, 127);
+  assert.match(result.stderr, /cannot decode/);
+  await nothingRan();
+  // Every decoder fails.
+  await fake("openssl", "cat >/dev/null; exit 1");
+  result = run();
+  assert.equal(result.status, 127);
+  await nothingRan();
+  // -d returns nothing with exit 0, -D works: the second decoder is tried
+  // on fresh input and the command runs.
+  await fake(
+    "base64",
+    'if [ "$1" = -D ]; then exec /usr/bin/base64 -d; fi; cat >/dev/null; exit 0',
+  );
+  result = run();
+  assert.equal(result.status, 0, result.stderr);
+  await fs.access(marker);
+  await fs.rm(marker);
+  // Only openssl works, and it needs the final newline the wrapper adds.
+  await fake("base64", "cat >/dev/null; exit 1");
+  await fake(
+    "openssl",
+    'tr -d "\\n" | { read -r line; printf %s "$line" | /usr/bin/base64 -d; }; exit 0',
+  );
+  result = run();
+  assert.equal(result.status, 0, result.stderr);
+  await fs.access(marker);
+});
+
+test("the wrapper's quoted text has no quote, backslash or exclamation mark", () => {
+  const { remoteCommand } = require("../electron/ssh-command.cjs");
+  const command = remoteCommand(["echo", "it's", "!x", "\\y"]);
+  const inner = command.slice(command.indexOf("-c '") + 4, -1);
+  assert.ok(!/['\\!]/.test(inner), inner);
 });

@@ -1,7 +1,9 @@
 import type {
+  Bridge,
   DaemonAsk,
   DaemonEvent,
   DaemonSession,
+  DaemonState,
   Panel,
   Workspace,
 } from "./types";
@@ -246,6 +248,9 @@ function panelStatus(
   session: DaemonSession,
   previous: string | undefined,
 ): string | undefined {
+  // A sleeping or waking agent is alive, not ended; it counts like idle.
+  if (session.status === "hibernated") return "sleeping";
+  if (session.status === "waking") return "waking";
   switch (session.agentStatus) {
     case "starting":
       return "starting";
@@ -318,6 +323,8 @@ function livePanel(panel: Panel, session: DaemonSession): Panel {
   if (title) next.title = title;
   if (session.cwd) next.paneCwd = session.cwd;
   if (session.agentSession) next.agentSession = session.agentSession;
+  if (session.pinned) next.keepAwake = true;
+  else delete next.keepAwake;
   // The icon follows the agent the daemon runs in the session. A terminal also
   // follows one the owner started by hand, and drops it (with its conversation
   // id and folder) when that agent is gone.
@@ -422,4 +429,107 @@ export function askDecision(
   decision: "allow" | "deny",
 ): [string, { sessionId: string; askId: string; decision: "allow" | "deny" }] {
   return [ask.host, { sessionId: ask.session, askId: ask.askId, decision }];
+}
+
+/** True when the host's daemon reported the capability in its hello. */
+export function hostSupports(
+  states: Pick<DaemonState, "host" | "state" | "capabilities">[],
+  host: string,
+  capability: string,
+): boolean {
+  return states.some(
+    (state) =>
+      state.host === host &&
+      state.state === "ready" &&
+      !!state.capabilities?.includes(capability),
+  );
+}
+
+/** The idle-sleep choices of Settings -> General, in seconds; 0 is off. */
+export const HIBERNATE_CHOICES = [
+  { secs: 0, label: "Off" },
+  { secs: 3600, label: "1 h" },
+  { secs: 14400, label: "4 h" },
+  { secs: 43200, label: "12 h" },
+] as const;
+export const DEFAULT_HIBERNATE_SECS = 14400;
+const HIBERNATE_STORAGE = "sushiai.hibernateAfter";
+
+/** The saved choice in seconds; nothing saved, or an unknown value, is the default. */
+export function readHibernateSecs(storage?: Storage): number {
+  try {
+    const raw = (storage || localStorage).getItem(HIBERNATE_STORAGE);
+    const value = raw === null ? NaN : Number(raw);
+    return HIBERNATE_CHOICES.some((choice) => choice.secs === value)
+      ? value
+      : DEFAULT_HIBERNATE_SECS;
+  } catch {
+    return DEFAULT_HIBERNATE_SECS;
+  }
+}
+
+export function writeHibernateSecs(secs: number, storage?: Storage): void {
+  try {
+    (storage || localStorage).setItem(HIBERNATE_STORAGE, String(secs));
+  } catch {
+    // Losing the preference is survivable.
+  }
+}
+
+/** Pushes the idle-sleep delay to one host, only when it can hibernate. */
+export async function configureHibernation(
+  bridge: Pick<Bridge, "daemonConfigure">,
+  state: Pick<DaemonState, "host" | "state" | "capabilities">,
+  secs: number,
+): Promise<void> {
+  if (!hostSupports([state], state.host, "hibernate")) return;
+  await bridge.daemonConfigure(state.host, secs);
+}
+
+/** Pushes the delay to every ready host that can hibernate. */
+export async function configureAllHosts(
+  bridge: Pick<Bridge, "daemonStates" | "daemonConfigure">,
+  secs: number,
+): Promise<void> {
+  const states = await bridge.daemonStates();
+  await Promise.all(
+    states.map((state) =>
+      configureHibernation(bridge, state, secs).catch(() => {}),
+    ),
+  );
+}
+
+/** `session.wake` errors that mean "start a new session instead": the host has
+ * no such record (1003) or no stored launch for it (1012). */
+const WAKE_FALLBACK_CODES = [1003, 1012];
+
+/** The wake call for a Reopen, or null when Reopen must create a session: only
+ * an agent panel whose session holds the agent's own conversation id wakes. A
+ * terminal (shell or hand-started agent) reopens as before. */
+export function wakeRequest(
+  owner: Workspace,
+  ended: Panel,
+  defaultEndpoint: string,
+): { host: string; id: string } | null {
+  if (ended.kind !== "agent" || !ended.sessionId || !ended.agentSession)
+    return null;
+  return {
+    host: daemonHost(owner.connection || defaultEndpoint),
+    id: ended.sessionId,
+  };
+}
+
+/** Tries to wake the session in place. True when it is waking; false when the
+ * caller must fall back to `session.create {resume}`. Any other refusal throws. */
+export async function wakeInPlace(
+  bridge: Pick<Bridge, "daemonStates" | "sessionWake">,
+  request: { host: string; id: string },
+): Promise<boolean> {
+  const states = await bridge.daemonStates();
+  if (!hostSupports(states, request.host, "hibernate")) return false;
+  const result = await bridge.sessionWake(request.host, request.id);
+  if (result.ok) return true;
+  if (result.code !== undefined && WAKE_FALLBACK_CODES.includes(result.code))
+    return false;
+  throw new Error(result.message);
 }

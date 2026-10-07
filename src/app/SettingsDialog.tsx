@@ -13,6 +13,12 @@ import { RenderProfiler } from "../RenderProfiler.tsx";
 import { agentTitle } from "./agent-title.ts";
 import { errorText } from "../lib/errors.ts";
 import {
+  HIBERNATE_CHOICES,
+  configureAllHosts,
+  readHibernateSecs,
+  writeHibernateSecs,
+} from "../daemonSessions.ts";
+import {
   OPEN_PROJECT_SETTINGS_EVENT,
   OPEN_SETTINGS_EVENT,
   setPendingProjectTab,
@@ -149,6 +155,13 @@ export function SettingsDialog({
     };
   }, []);
 
+  const [hibernateSecs, setHibernateSecs] = useState(readHibernateSecs);
+  function changeHibernate(secs: number) {
+    setHibernateSecs(secs);
+    writeHibernateSecs(secs);
+    if (window.bridge) void configureAllHosts(window.bridge, secs);
+  }
+
   function refreshShortcutStatus() {
     return window.bridge
       ?.mascotShortcutStatus()
@@ -256,6 +269,26 @@ export function SettingsDialog({
                         aria-checked={fontScale === value}
                         className={fontScale === value ? "selected" : ""}
                         onClick={() => setFontScale(value)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="setting-block">
+                  <h4>Sleep idle agents after</h4>
+                  <div
+                    className="workspace-control-tabs"
+                    role="group"
+                    aria-label="Sleep idle agents after"
+                  >
+                    {HIBERNATE_CHOICES.map(({ secs, label }) => (
+                      <button
+                        key={secs}
+                        role="radio"
+                        aria-checked={hibernateSecs === secs}
+                        className={hibernateSecs === secs ? "selected" : ""}
+                        onClick={() => changeHibernate(secs)}
                       >
                         {label}
                       </button>

@@ -46,7 +46,7 @@ shell or core. This is deliberate, not incidental — the contract exists so a
 third-party extension can't destabilize the shell:
 
 - **Shell isolation**: every `src/app/*.tsx` file except `SectionPage.tsx`
-  may import only `../extensions/{ExtensionSlots.tsx,registry.ts,routes.ts,types.ts}`
+  may import only `../extensions/{ExtensionSlots.tsx,modules.ts,registry.ts,routes.ts,types.ts}`
   (`scripts/check-conventions.mjs`) and must not reference
   `SurfaceRenderer`/`activePage`/`resolveNavigation` in their source — only
   `src/app/SectionPage.tsx` may draw a contributed page.
@@ -245,7 +245,7 @@ by `scripts/check-conventions.mjs` in CI, not just a naming convention:
   (`tests/app-boundary.test.cjs`) - move logic out instead of growing it.
 - Screenshots of the built app come from the `ui-evidence` scripts:
   `.agents/skills/ui-evidence/scripts/<screen>.mjs` (orchestrator panel,
-  notices, remote host, mascot) or a copy of `driver-template.mjs`; each
+  notices, worktrees, mascot) or a copy of `driver-template.mjs`; each
   needs `npm run build` first.
 - `npm run dev` is not a build. `npm run package` **overwrites
   `release/mac-arm64` with no backup** — confirm before running it.

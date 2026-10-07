@@ -30,7 +30,7 @@
     "test:core": "node --test tests/layout.test.cjs tests/navigation.test.cjs tests/workspace-actions.test.cjs tests/chat-threads.test.cjs tests/dialog-state.test.cjs tests/app-boundary.test.cjs tests/workspace-state.test.cjs tests/inspection-worker.test.cjs tests/git-history.test.cjs",
     "ci": "npm run build && cargo build -p sushiai && npm test && npm run test:daemon && npm run check:conventions && npm run lint && prettier --check src electron scripts tests *.json *.ts *.html README.md && git diff --check",
     "release:prepare": "node scripts/release.mjs",
-    "test:daemon": "cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && node scripts/check-crate-deps.mjs"
+    "test:daemon": "cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace --no-fail-fast && node scripts/check-crate-deps.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",

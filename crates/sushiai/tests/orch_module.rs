@@ -155,11 +155,17 @@ fn a_hook_role_connection_cannot_call_orch() {
 fn fake_orchd(dir: &Path) -> Child {
     let exe = dir.join("orchd");
     std::fs::copy("/bin/sleep", &exe).expect("copy sleep");
-    Command::new(&exe)
-        .arg("120")
-        .stdout(Stdio::null())
-        .spawn()
-        .expect("spawn fake orchd")
+    // On Linux a test forking in parallel can briefly inherit the copy's write
+    // descriptor, and exec then fails with "Text file busy": try again.
+    for _ in 0..50 {
+        match Command::new(&exe).arg("120").stdout(Stdio::null()).spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => return other.expect("spawn fake orchd"),
+        }
+    }
+    panic!("fake orchd stayed busy");
 }
 
 #[test]

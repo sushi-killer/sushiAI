@@ -9,4 +9,5 @@ import "./styles/components/project.css";
 import "./styles/components/close-session.css";
 import "./styles/components/picker.css";
 import "./styles/components/new-project.css";
+import "./styles/components/terminal-sleep.css";
 createRoot(document.getElementById("root")!).render(<App />);

@@ -2,6 +2,7 @@ import { memo, useRef, useState, type ReactNode } from "react";
 import { Maximize2, Minimize2, MoreHorizontal, Plus, X } from "lucide-react";
 import type { Layout, Panel } from "./types";
 import { TerminalPanel } from "./TerminalPanel";
+import { daemonHost } from "./daemonSessions";
 import { BrowserPanel } from "./BrowserPanel";
 import { ChatPanel } from "./ChatPanel";
 import { ProjectPanel } from "./ProjectPanel";
@@ -104,6 +105,20 @@ export const PanelHost = memo(function PanelHost({
         onZoom={() => onZoom(panel.id)}
         onAdd={onAdd}
         onRename={(title) => onRename(panel.id, title)}
+        onKeepAwake={
+          panel.kind === "agent" &&
+          panel.sessionId &&
+          !panel.ended &&
+          (panel.agent === "claude" || panel.agent === "codex")
+            ? (on) =>
+                void window.bridge
+                  ?.sessionUpdate(daemonHost(endpoint), {
+                    id: panel.sessionId!,
+                    pinned: on,
+                  })
+                  .catch(() => {})
+            : undefined
+        }
         frame={
           panel.kind === "terminal" || panel.kind === "agent"
             ? (main) => (
@@ -298,6 +313,7 @@ function PanelFrame({
   onZoom,
   onAdd,
   onRename,
+  onKeepAwake,
   frame,
   companionToggle,
   children,
@@ -314,6 +330,8 @@ function PanelFrame({
   onZoom(): void;
   onAdd(): void;
   onRename(title: string): void;
+  /** Set for an agent session that can sleep: pins or unpins it on its host. */
+  onKeepAwake?(on: boolean): void;
   /** Wraps the header and body, so a companion half can sit beside both. */
   frame?: (main: ReactNode) => ReactNode;
   companionToggle: ReactNode;
@@ -395,6 +413,18 @@ function PanelFrame({
             >
               {zoomed ? "Restore layout" : "Focus panel"}
             </button>
+            {onKeepAwake && (
+              <button
+                aria-pressed={!!panel.keepAwake}
+                title="A kept-awake agent never sleeps when idle."
+                onClick={() => {
+                  onKeepAwake(!panel.keepAwake);
+                  setMenu(false);
+                }}
+              >
+                Keep awake · {panel.keepAwake ? "on" : "off"}
+              </button>
+            )}
             <button onClick={onClose}>
               {panel.sessionId ? "Close / end session…" : "Close panel"}
             </button>

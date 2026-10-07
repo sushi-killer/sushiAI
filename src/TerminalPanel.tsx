@@ -3,7 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { ArrowUpRight, Command, Play, RotateCcw } from "lucide-react";
 import { agentTitle } from "./app/agent-title";
-import { daemonHost } from "./daemonSessions";
+import { daemonHost, hostSupports } from "./daemonSessions";
 import type { Panel } from "./types";
 import {
   fitTerminal,
@@ -361,8 +361,36 @@ export function TerminalPanel({
     void document.fonts.ready.then(() => {
       if (!disposed) scheduleFit();
     });
+    // The host never puts a session to sleep while a window looks at it, and
+    // only a host that can hibernate is told.
+    const hostId = daemonHost(endpoint);
+    const sessionId = panel.sessionId!;
+    let canFocus = false,
+      reported = false;
+    const report = (focused: boolean) => {
+      if (!canFocus || reported === focused) return;
+      reported = focused;
+      window.bridge?.sessionFocus(hostId, sessionId, focused).catch(() => {});
+    };
+    const onFocusIn = () => report(true);
+    const onFocusOut = (event: FocusEvent) => {
+      if (!current.element.contains(event.relatedTarget as Node | null))
+        report(false);
+    };
+    current.element.addEventListener("focusin", onFocusIn);
+    current.element.addEventListener("focusout", onFocusOut);
+    void Promise.resolve(window.bridge.daemonStates?.())
+      .then((states) => {
+        canFocus = hostSupports(states ?? [], hostId, "hibernate");
+        if (!disposed && current.element.contains(document.activeElement))
+          report(true);
+      })
+      .catch(() => {});
     return () => {
       disposed = true;
+      report(false);
+      current.element.removeEventListener("focusin", onFocusIn);
+      current.element.removeEventListener("focusout", onFocusOut);
       observer.disconnect();
       window.clearTimeout(resizeTimer);
       current.notify = undefined;
@@ -428,9 +456,27 @@ export function TerminalPanel({
         </div>
       </div>
     );
+  const sleeping = panel.status === "sleeping";
   return (
-    <div className="terminal-wrap">
+    <div
+      className="terminal-wrap"
+      // Typing already wakes the session; a click into the pane does too.
+      onMouseDownCapture={() => {
+        if (!sleeping) return;
+        window.bridge
+          ?.sessionWake(daemonHost(endpoint), panel.sessionId!)
+          .then((result) => {
+            if (!result.ok) setError(result.message);
+          })
+          .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+      }}
+    >
       <div ref={host} className="terminal-host" />
+      {(sleeping || panel.status === "waking") && (
+        <div className="terminal-sleep" role="status">
+          {sleeping ? "Sleeping — type or click to wake" : "Waking…"}
+        </div>
+      )}
       {transfer && (
         <div className="terminal-transfer" role="status">
           {transfer}

@@ -36,8 +36,14 @@ export type DaemonSession = {
   cwd: string;
   title?: string | null;
   /** Process status. */
-  status: "running" | "detached" | "exited";
+  status: "running" | "detached" | "exited" | "hibernated" | "waking";
   exitCode?: number;
+  /** 0 for the first process, +1 per wake. Absent when 0. */
+  incarnation?: number;
+  /** "Keep awake": the daemon never hibernates a pinned session. */
+  pinned?: boolean;
+  /** Unix milliseconds; present while the session is hibernated. */
+  hibernatedAt?: number;
   holderPid?: number;
   cols: number;
   rows: number;
@@ -177,6 +183,8 @@ type PanelState = {
   agentSession?: string;
   /** The folder an agent started by hand in this terminal ran in, for Reopen. */
   agentCwd?: string;
+  /** The host's "Keep awake" flag for this pane's session. */
+  keepAwake?: boolean;
   pinned?: boolean;
   updatedAt?: number;
   note?: string;
@@ -626,8 +634,24 @@ export interface Bridge {
   sessionClose(host: string, id: string, graceful: boolean): Promise<void>;
   sessionUpdate(
     host: string,
-    patch: { id: string; project?: string; group?: string; title?: string },
+    patch: {
+      id: string;
+      project?: string;
+      group?: string;
+      title?: string;
+      pinned?: boolean;
+    },
   ): Promise<void>;
+  /** Wakes a hibernated or exited agent session on the same id. A refusal
+   * resolves with the daemon's error code instead of throwing. */
+  sessionWake(
+    host: string,
+    id: string,
+  ): Promise<{ ok: true } | { ok: false; code?: number; message: string }>;
+  /** Tells the host this window is looking at a session (never hibernates). */
+  sessionFocus(host: string, id: string, focused: boolean): Promise<void>;
+  /** Sets the host's idle-sleep delay in seconds; 0 turns it off. */
+  daemonConfigure(host: string, hibernateAfterSecs: number): Promise<void>;
   sessionRead(
     host: string,
     id: string,

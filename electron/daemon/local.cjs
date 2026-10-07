@@ -310,6 +310,7 @@ function createLocalConnector({
 module.exports = {
   createLocalConnector,
   resolveHome,
+  daemonEnv,
   ensureHome,
   resolveBinary,
   HOOKS_STAMP,

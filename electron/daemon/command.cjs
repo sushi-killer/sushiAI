@@ -12,6 +12,8 @@ const {
   tail,
 } = require("./connectors.cjs");
 
+const { daemonEnv, resolveHome } = require("./local.cjs");
+
 const HELLO_TIMEOUT_MS = 20000;
 const PING_INTERVAL_MS = 15000;
 const PING_TIMEOUT_MS = 10000;
@@ -55,7 +57,9 @@ function createCommandConnector({
     ping: { intervalMs: pingIntervalMs, timeoutMs: pingTimeoutMs },
     connect() {
       return connectOverPipe({
-        pipe: spawnProcess(command, args),
+        pipe: spawnProcess(command, args, {
+          env: daemonEnv(process.env, resolveHome()),
+        }),
         helloTimeoutMs,
         classify(exit) {
           const { message, ...rest } = describeExit(exit);

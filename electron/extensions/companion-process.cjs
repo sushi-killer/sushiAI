@@ -19,7 +19,6 @@ const {
   failure,
   tail,
 } = require("../daemon/connectors.cjs");
-const { describeExit } = require("../daemon/command.cjs");
 const { resolveHome } = require("../daemon/local.cjs");
 const { CONTRACT } = require("./manifest.cjs");
 
@@ -100,6 +99,16 @@ function approvalMatches(approved, config) {
     Array.isArray(approved.permissions) &&
     sameList([...approved.permissions].sort(), [...config.permissions].sort()),
   );
+}
+
+/** Why a companion ended, for the status line. */
+function describeExit({ code, signal, error } = {}) {
+  if (error?.code === "ENOENT")
+    return `Cannot run the companion: ${error.message}`;
+  if (error) return error.message;
+  return signal
+    ? `The companion ended with ${signal}.`
+    : `The companion exited with ${code}.`;
 }
 
 function childEnv(source, home) {
@@ -225,7 +234,7 @@ function createCompanions({
         pipe,
         clientName: CLIENT_NAME,
         helloTimeoutMs,
-        classify: (exit) => failure(describeExit(exit).message, { exit }),
+        classify: (exit) => failure(describeExit(exit), { exit }),
       });
     } catch (error) {
       void exited(entry, run, error.exit || pipe.exit, error);
@@ -264,7 +273,7 @@ function createCompanions({
     entry.exits.push(now);
     const detail =
       tail(exit?.stderr) ||
-      describeExit({ ...exit, error: error ?? exit?.error }).message;
+      describeExit({ ...exit, error: error ?? exit?.error });
     if (entry.exits.length >= maxExits) {
       setState(entry, "failed", detail);
       return;
@@ -433,5 +442,6 @@ module.exports = {
   resolveCommand,
   approvalMatches,
   checkResult,
+  describeExit,
   ENV_ALLOWLIST,
 };

@@ -16,6 +16,7 @@ const { connectDaemon } = require("./client.cjs");
 
 const STDERR_TAIL = 4000;
 const EXIT_GRACE_MS = 3000;
+const STREAM_GRACE_MS = 1000;
 
 /** A child's stdout/stdin as the socket client.cjs expects. The child's exit
  * is recorded in `pipe.exit` ({code, signal, stderr}) before the stream
@@ -58,6 +59,16 @@ function spawnPipe(command, args, options = {}) {
     pipe.exit = { code: null, signal: null, stderr, error };
     done(pipe.exit);
     pipe.destroy(error);
+  });
+  // A grandchild that kept stdout or stderr open would hold "close" back for
+  // as long as it lives; after a short grace the streams are cut so it fires.
+  child.once("exit", () => {
+    const cut = setTimeout(() => {
+      child.stdout.destroy();
+      child.stderr.destroy();
+    }, STREAM_GRACE_MS);
+    cut.unref();
+    child.once("close", () => clearTimeout(cut));
   });
   child.once("close", (code, signal) => {
     pipe.exit = { code, signal, stderr };

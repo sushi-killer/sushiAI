@@ -13,16 +13,15 @@ const DISABLEABLE_BUILTINS = new Set([
   "builtin.artifacts",
 ]);
 
-/** Built-ins that start switched off: opting in is the owner's act. */
-const DEFAULT_OFF_BUILTINS = new Set(["builtin.orchestrator"]);
-
-function defaultEnabled(manifest, externalEnabled = false) {
+/** `startsOff` lists the built-in ids that begin switched off: the code that
+ * registers a built-in decides, opting in is then the owner's act. */
+function defaultEnabled(manifest, externalEnabled = false, startsOff = []) {
   return manifest.source.kind === "builtin"
-    ? !DEFAULT_OFF_BUILTINS.has(manifest.id)
+    ? !startsOff.includes(manifest.id)
     : externalEnabled;
 }
 
-function defaultState(manifests = [], externalEnabled = false) {
+function defaultState(manifests = [], externalEnabled = false, startsOff = []) {
   return {
     schemaVersion: SCHEMA_VERSION,
     revision: 0,
@@ -30,7 +29,7 @@ function defaultState(manifests = [], externalEnabled = false) {
       manifests.map((manifest) => [
         manifest.id,
         {
-          enabled: defaultEnabled(manifest, externalEnabled),
+          enabled: defaultEnabled(manifest, externalEnabled, startsOff),
           overrides: {},
         },
       ]),
@@ -111,6 +110,7 @@ class ExtensionManager {
   constructor({
     dataDir,
     builtins = [],
+    builtinsStartOff = [],
     installed = [],
     localDir,
     companions,
@@ -118,6 +118,7 @@ class ExtensionManager {
     if (typeof dataDir !== "string" || !path.isAbsolute(dataDir))
       throw new Error("Extension data directory must be absolute.");
     this.dataDir = dataDir;
+    this.startsOff = builtinsStartOff;
     this.extensionDir = path.join(dataDir, "extensions");
     this.localDir = localDir;
     this.problems = [];
@@ -137,7 +138,11 @@ class ExtensionManager {
       this.static.set(normalized.id, normalized);
     }
     this.manifests = new Map(this.static);
-    this.state = defaultState([...this.manifests.values()]);
+    this.state = defaultState(
+      [...this.manifests.values()],
+      false,
+      this.startsOff,
+    );
     this.lock = defaultLock();
     this.diagnostic = undefined;
     this.revision = 0;
@@ -161,7 +166,7 @@ class ExtensionManager {
       this.diagnostic = `Extension settings could not be initialized: ${error?.message || error}`;
       for (const manifest of this.manifests.values())
         this.state.extensions[manifest.id] = {
-          enabled: defaultEnabled(manifest),
+          enabled: defaultEnabled(manifest, false, this.startsOff),
           overrides: {},
         };
     });
@@ -244,7 +249,11 @@ class ExtensionManager {
         : [],
     );
     if (!stateFile.exists) {
-      this.state = defaultState([...this.manifests.values()]);
+      this.state = defaultState(
+        [...this.manifests.values()],
+        false,
+        this.startsOff,
+      );
     } else if (validState(stateFile.value)) {
       this.state = stateFile.value;
       this.revision = Number.isInteger(this.state.revision)
@@ -252,7 +261,11 @@ class ExtensionManager {
         : 0;
     } else {
       stateWritable = false;
-      this.state = defaultState([...this.manifests.values()], false);
+      this.state = defaultState(
+        [...this.manifests.values()],
+        false,
+        this.startsOff,
+      );
       this.diagnostic =
         "Extension settings were damaged or created by a newer version; external extensions were disabled.";
     }
@@ -327,7 +340,7 @@ class ExtensionManager {
       }
       if (!this.state.extensions[manifest.id]) {
         this.state.extensions[manifest.id] = {
-          enabled: defaultEnabled(manifest),
+          enabled: defaultEnabled(manifest, false, this.startsOff),
           overrides: {},
         };
         stateChanged = true;

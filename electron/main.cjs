@@ -106,6 +106,8 @@ const extensions = new ExtensionManager({
   dataDir: app.getPath("userData"),
   companions,
   builtins: [ORCHESTRATOR_MANIFEST, ARTIFACTS_MANIFEST],
+  // Opting in to the Orchestrator is the owner's act.
+  builtinsStartOff: [ORCHESTRATOR_MANIFEST.id],
   // Folders dropped here are read as JSON manifests and carry no code; the
   // extension folder is never executed. A manifest may name a companion
   // program installed elsewhere, which runs only after the owner approves it.
@@ -444,12 +446,7 @@ function validWebURL(value) {
   }
 }
 app.whenReady().then(async () => {
-  // A hidden test run may hand in a fake ssh (evidence and smoke runs).
-  const fakeSsh = testMode.hidden ? process.env.SUSHIAI_TEST_SSH : "";
-  connections = new Connections(
-    app.getPath("userData"),
-    fakeSsh ? { ssh: fakeSsh } : undefined,
-  );
+  connections = new Connections(app.getPath("userData"));
   await connections.init();
   // The local machine gets what sessions need (Claude Code, Codex) on its own; a test run never installs anything.
   if (!testMode.test)
@@ -524,11 +521,20 @@ app.whenReady().then(async () => {
     });
     daemonManager.start();
   }
-  await orchestrator.start();
+  // Neither start may hold the window back: the orchestrator registers with
+  // the daemon and each companion answers a hello, which can take a while.
+  void orchestrator
+    .start()
+    .catch((error) =>
+      console.error(`Orchestrator start failed: ${error.message}`),
+    );
   // After the saved on/off state and approvals are loaded and the host list
   // is known: wanted companion processes start now.
-  await extensions.ready;
-  await companions.start();
+  void extensions.ready
+    .then(() => companions.start())
+    .catch((error) =>
+      console.error(`Companion start failed: ${error.message}`),
+    );
   updates = new Updates({
     directory: app.getPath("userData"),
     currentVersion: app.getVersion(),
@@ -747,8 +753,8 @@ app.on("before-quit", (event) => {
   updates?.close();
   attention.close();
   mascot.destroy();
-  // The daemon may take several seconds to stop its agents; the app should
-  // look closed meanwhile, not frozen.
+  // Stopping companions and the connections can take a moment; the app
+  // should look closed meanwhile, not frozen.
   for (const window of BrowserWindow.getAllWindows())
     if (!window.isDestroyed()) window.hide();
   preview?.close();

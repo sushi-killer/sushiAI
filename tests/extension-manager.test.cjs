@@ -442,6 +442,7 @@ test("the orchestrator built-in starts off, can be turned on and off, stays off 
     const manager = new ExtensionManager({
       dataDir: dir,
       builtins: [PINNED_MANIFEST, orchestrator],
+      builtinsStartOff: [orchestrator.id],
     });
     await manager.ready;
     // A fresh install opts in; every other built-in starts on.
@@ -462,6 +463,7 @@ test("the orchestrator built-in starts off, can be turned on and off, stays off 
     const restarted = new ExtensionManager({
       dataDir: dir,
       builtins: [PINNED_MANIFEST, orchestrator],
+      builtinsStartOff: [orchestrator.id],
     });
     const snapshot = await restarted.list();
     const record = (id) =>

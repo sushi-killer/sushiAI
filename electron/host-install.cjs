@@ -34,8 +34,11 @@ const { quote } = require("./connections.cjs");
 const REMOTE_BIN = "$HOME/.sushiai/bin";
 const REMOTE_VERSIONS = "$HOME/.sushiai/versions";
 // A non-interactive ssh shell often lacks the user's tool directories.
-const REMOTE_PATH =
-  'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"';
+// CLIs installed with npm (nvm, a user prefix) count as installed.
+const REMOTE_PATH = `export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+for d in "$HOME"/.nvm/versions/node/*/bin "$HOME/.npm-global/bin"; do
+  [ -d "$d" ] && PATH="$PATH:$d"
+done`;
 const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 const PROBE_TIMEOUT_MS = 30 * 1000;
 const HOOKS_TIMEOUT_MS = 60 * 1000;

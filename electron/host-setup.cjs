@@ -9,15 +9,8 @@ const {
 const { quote } = require("./connections.cjs");
 const { syncBuiltinSkillsOnHost } = require("./extensions/builtin-skills.cjs");
 
-const HOST_PATH = `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
-# CLIs installed with npm (nvm, a user prefix) count as installed.
-for d in "$HOME"/.nvm/versions/node/*/bin "$HOME/.npm-global/bin"; do
-  [ -d "$d" ] && PATH="$PATH:$d"
-done
-`;
-
 const SETUP_SCRIPT = `set -u
-${HOST_PATH}
+${REMOTE_PATH}
 have() { command -v "$1" >/dev/null 2>&1; }
 say() { printf 'SUSHIAI_SETUP %s %s\\n' "$1" "$2"; }
 # The app reads a host's files with python3; it is not installed here.
@@ -142,21 +135,10 @@ function cleanEnvironment(env = process.env) {
   );
 }
 
-/** Setups under way, by endpoint: a second connect waits for the first
- * instead of running the installers twice. */
-const running = new Map();
-
 /** Runs the setup on an SSH host (over its connection) or on the local
  * machine. */
 function setupHost(connections, endpoint, options = {}) {
-  const key = typeof endpoint === "string" ? endpoint : "local";
-  if (!running.has(key)) {
-    const run = Promise.resolve()
-      .then(() => runSetup(connections, endpoint, options))
-      .finally(() => running.delete(key));
-    running.set(key, run);
-  }
-  return running.get(key);
+  return runSetup(connections, endpoint, options);
 }
 
 function localScript(script, timeout) {

@@ -1,6 +1,7 @@
 import { daemonHost, sessionPanelId } from "../daemonSessions.ts";
 import { appendPanel, reopenInSlot } from "./workspace-actions.ts";
 import { leaf } from "../layout.ts";
+import { launchTerminalSize } from "../terminal-sizing.ts";
 import type {
   DaemonLaunchRequest,
   Panel,
@@ -12,7 +13,7 @@ import type {
  * idempotency key: the renderer makes one per launch and reuses it on retry. */
 export function toDaemonLaunch(
   request: SessionLaunchRequest,
-  size = { cols: 120, rows: 32 },
+  size = launchTerminalSize(),
 ): DaemonLaunchRequest {
   return {
     host: daemonHost(request.endpoint),

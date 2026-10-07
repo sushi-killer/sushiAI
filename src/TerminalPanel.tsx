@@ -8,6 +8,7 @@ import type { Panel } from "./types";
 import {
   fitTerminal,
   queueTerminalFit,
+  rememberTerminalSize,
   terminalDimensions,
 } from "./terminal-sizing";
 import { installTerminalInteractions } from "./terminal-interactions";
@@ -270,6 +271,7 @@ export function TerminalPanel({
         if (started || !size) return;
         started = true;
         terminal.resize(size.cols, size.rows);
+        rememberTerminalSize(size);
         entry.cols = size.cols;
         entry.rows = size.rows;
         window

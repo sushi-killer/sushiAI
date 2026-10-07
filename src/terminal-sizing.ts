@@ -12,9 +12,25 @@ export function terminalDimensions(size?: { cols: number; rows: number }) {
   };
 }
 
+const DEFAULT_LAUNCH_SIZE = { cols: 120, rows: 32 };
+let measured: { cols: number; rows: number } | undefined;
+
+/** Remembers the last size a terminal pane really measured. */
+export function rememberTerminalSize(size?: { cols: number; rows: number }) {
+  measured = terminalDimensions(size) ?? measured;
+}
+
+/** The size a new session starts at: the last measured pane, so the child
+ * draws its first prompt at the width it will be shown at. */
+export function launchTerminalSize() {
+  return measured ? { ...measured } : { ...DEFAULT_LAUNCH_SIZE };
+}
+
 export function fitTerminal(terminal: Terminal, fit: FitAddon) {
   const size = terminalDimensions(fit.proposeDimensions());
-  if (size) terminal.resize(size.cols, size.rows);
+  if (!size) return;
+  terminal.resize(size.cols, size.rows);
+  rememberTerminalSize(size);
 }
 
 // xterm.write is asynchronous, while resize is synchronous. Drain output

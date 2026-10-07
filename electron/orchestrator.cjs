@@ -7,7 +7,11 @@
 // desktop pushes whenever a host becomes ready, and the host list. It starts,
 // stops and installs nothing itself: the daemon manager connects hosts and the
 // host installer provisions them.
-const { appDb, transaction } = require("./app-db.cjs");
+const fs = require("node:fs");
+const path = require("node:path");
+const childProcess = require("node:child_process");
+const { ClaudeMcp } = require("./claude-mcp.cjs");
+const { appDb, readStore, transaction, writeStore } = require("./app-db.cjs");
 const { posixCommand, REMOTE_PATH, REMOTE_BIN } = require("./host-install.cjs");
 const {
   PREFLIGHT_SCRIPT,
@@ -23,6 +27,8 @@ const ORCH_PREFIX = "orch.";
 const MODULE_STARTING = 1100;
 // A host that is connecting gets this long to become ready.
 const READY_TIMEOUT_MS = 30000;
+// Stopped tasks get this long to end their agents before the module goes.
+const STOP_WAIT_MS = 15000;
 // A host that is down is not reconnected on every request.
 const RETRY_AFTER_MS = 30000;
 
@@ -314,6 +320,34 @@ function settledState(manager, host, timeoutMs, timeoutMessage) {
   });
 }
 
+/** Task states with an agent process behind them. */
+const LIVE_STATUSES = new Set(["running", "drafting", "landing"]);
+
+/** Stops the tasks of a host that have an agent running and waits (at most
+ * `waitMs`) until none is left. Best effort: a host that cannot answer has
+ * nothing the app can stop. */
+async function stopLiveTasks(manager, name, waitMs) {
+  const live = async () => {
+    const tasks = await manager.request(name, `${ORCH_PREFIX}task.list`, {});
+    return Array.isArray(tasks)
+      ? tasks.filter((task) => LIVE_STATUSES.has(task.status))
+      : [];
+  };
+  try {
+    const first = await live();
+    await Promise.all(
+      first.map((task) =>
+        manager.request(name, `${ORCH_PREFIX}task.stop`, { id: task.id }),
+      ),
+    );
+    const end = Date.now() + waitMs;
+    while (first.length && (await live()).length && Date.now() < end)
+      await new Promise((resolve) => setTimeout(resolve, 100));
+  } catch {
+    // The module is not serving: no run of it to stop.
+  }
+}
+
 /** The opt-in of the `orch` module on a host (owner O1). Enabling runs
  * `sushiai orch register` there (local: the bundled binary; remote: over the
  * existing ssh exec path), disabling runs `sushiai orch unregister`; then the
@@ -328,6 +362,7 @@ function createModuleSwitch({
   readyTimeoutMs = READY_TIMEOUT_MS,
   settleMs,
   attempts,
+  stopWaitMs = STOP_WAIT_MS,
 }) {
   const enabling = new Map();
 
@@ -336,6 +371,9 @@ function createModuleSwitch({
     if (!manager) throw new Error("The sushiai daemon is not running.");
     const name = managerHostOf(host);
     const verb = on ? "register" : "unregister";
+    // A restart without the module leaves implement runs going with no
+    // supervisor: they stop first.
+    if (!on) await stopLiveTasks(manager, name, stopWaitMs);
     if (host === LOCAL_HOST) await runLocal(["orch", verb]);
     else
       await exec(
@@ -1092,10 +1130,118 @@ function createOrchestratorHosts({
   return hosts;
 }
 
+/** Stops a standalone `orchd` of a previous build: `orchd.pid` in its data dir
+ * names the process; it must still be an `orchd` (a reused pid is never
+ * signalled). SIGTERM first (it stops its agents), SIGKILL of its process group
+ * after `timeoutMs`; then the pid, socket and control token files go. Resolves
+ * "none" (no pid file), "stale" (no such process), "foreign" (another program
+ * holds the pid) or "stopped". The task data is left untouched. */
+async function stopLegacyOrchd(
+  dir,
+  {
+    timeoutMs = 10000,
+    pollMs = 100,
+    kill = process.kill.bind(process),
+    comm = commOf,
+  } = {},
+) {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const pidFile = path.join(dir, "orchd.pid");
+  let pid;
+  try {
+    pid = Number.parseInt(fs.readFileSync(pidFile, "utf8"), 10);
+  } catch {
+    return "none";
+  }
+  const isAlive = () => {
+    try {
+      kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error.code === "EPERM";
+    }
+  };
+  const clean = () => {
+    for (const name of ["orchd.pid", "orchd.sock", "control.token"])
+      fs.rmSync(path.join(dir, name), { force: true });
+  };
+  if (!Number.isInteger(pid) || pid <= 1 || !isAlive()) {
+    clean();
+    return "stale";
+  }
+  if (!comm(pid).includes("orchd")) {
+    clean();
+    return "foreign";
+  }
+  kill(pid, "SIGTERM");
+  const deadline = Date.now() + timeoutMs;
+  while (isAlive() && Date.now() < deadline) await sleep(pollMs);
+  if (isAlive()) {
+    try {
+      kill(-pid, "SIGKILL");
+    } catch {
+      kill(pid, "SIGKILL");
+    }
+    while (isAlive() && Date.now() < deadline + 2000) await sleep(pollMs);
+  }
+  clean();
+  return "stopped";
+}
+
+function commOf(pid) {
+  try {
+    return childProcess
+      .execFileSync("ps", ["-p", String(pid), "-o", "comm="], {
+        encoding: "utf8",
+        timeout: 5000,
+      })
+      .trim();
+  } catch {
+    return "";
+  }
+}
+
+const MCP_SERVER = "sushiai-orchestrator";
+const FIRST_LAUNCH_STORE = "orchestrator-first-launch";
+
+/** Whether an earlier build left Orchestrator work on this machine: its MCP
+ * server entry in Claude's or Codex's config, or its data folder. Reads only. */
+function legacyOrchestratorPresent({ userDataDir, homeDir, codexHome }) {
+  if (userDataDir && fs.existsSync(path.join(userDataDir, "orchestrator")))
+    return true;
+  try {
+    const claude = JSON.parse(
+      fs.readFileSync(new ClaudeMcp({ home: homeDir }).configFile(), "utf8"),
+    );
+    if (claude?.mcpServers && Object.hasOwn(claude.mcpServers, MCP_SERVER))
+      return true;
+  } catch {
+    // No Claude config, or one that is not JSON.
+  }
+  try {
+    const toml = fs.readFileSync(
+      path.join(codexHome || path.join(homeDir, ".codex"), "config.toml"),
+      "utf8",
+    );
+    return new RegExp(
+      `^\\s*\\[mcp_servers\\.["']?${MCP_SERVER}["']?\\]`,
+      "m",
+    ).test(toml);
+  } catch {
+    return false;
+  }
+}
+
 /** Registers the IPC surface. Nothing connects here: `start()` (called once
  * the daemon manager exists) reads the extension's saved on/off state, and
  * every later toggle from `extensions` listens or stops listening. */
-function registerOrchestratorExtension({ handle, extensions, ...options }) {
+function registerOrchestratorExtension({
+  handle,
+  extensions,
+  stopLegacy = stopLegacyOrchd,
+  legacy,
+  ...options
+}) {
   const hosts = createOrchestratorHosts({ ...options, enabled: false });
   handle("orchestrator", (method, params, host) =>
     hosts.call(method, params, host),
@@ -1112,8 +1258,36 @@ function registerOrchestratorExtension({ handle, extensions, ...options }) {
   extensions.onChange((id) => {
     if (started && id === ORCHESTRATOR_MANIFEST.id) return apply();
   });
+  const { userDataDir, log } = options;
+  // Cutover from a build whose orchd ran beside the app: the old process
+  // stops once per app run (its data stays where it is), and the first launch
+  // of this build turns the Orchestrator on only for an owner who used it.
+  async function retireLegacy() {
+    if (!userDataDir) return;
+    try {
+      if (
+        (await stopLegacy(path.join(userDataDir, "orchestrator"))) === "stopped"
+      )
+        log?.("stopped a legacy orchd");
+    } catch (error) {
+      log?.(`legacy orchd was not stopped: ${error.message}`);
+    }
+    if (
+      !legacy ||
+      Object.keys(readStore(userDataDir, FIRST_LAUNCH_STORE)).length
+    )
+      return;
+    await extensions.setEnabled(
+      ORCHESTRATOR_MANIFEST.id,
+      legacyOrchestratorPresent({ userDataDir, ...legacy }),
+    );
+    writeStore(userDataDir, FIRST_LAUNCH_STORE, { settled: true });
+  }
   hosts.start = async () => {
     await extensions.ready;
+    await retireLegacy().catch((error) =>
+      log?.(`orchestrator first launch: ${error.message}`),
+    );
     started = true;
     await apply();
   };
@@ -1127,6 +1301,8 @@ module.exports = {
   registerOrchestratorExtension,
   createOrchestratorHosts,
   createModuleSwitch,
+  stopLegacyOrchd,
+  legacyOrchestratorPresent,
   OFF_MESSAGE,
   tagTasks,
   tagEvent,

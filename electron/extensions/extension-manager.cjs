@@ -12,6 +12,15 @@ const DISABLEABLE_BUILTINS = new Set([
   "builtin.artifacts",
 ]);
 
+/** Built-ins that start switched off: opting in is the owner's act. */
+const DEFAULT_OFF_BUILTINS = new Set(["builtin.orchestrator"]);
+
+function defaultEnabled(manifest, externalEnabled = false) {
+  return manifest.source.kind === "builtin"
+    ? !DEFAULT_OFF_BUILTINS.has(manifest.id)
+    : externalEnabled;
+}
+
 function defaultState(manifests = [], externalEnabled = false) {
   return {
     schemaVersion: SCHEMA_VERSION,
@@ -20,7 +29,7 @@ function defaultState(manifests = [], externalEnabled = false) {
       manifests.map((manifest) => [
         manifest.id,
         {
-          enabled: manifest.source.kind === "builtin" || externalEnabled,
+          enabled: defaultEnabled(manifest, externalEnabled),
           overrides: {},
         },
       ]),
@@ -130,7 +139,7 @@ class ExtensionManager {
       this.diagnostic = `Extension settings could not be initialized: ${error?.message || error}`;
       for (const manifest of this.manifests.values())
         this.state.extensions[manifest.id] = {
-          enabled: manifest.source.kind === "builtin",
+          enabled: defaultEnabled(manifest),
           overrides: {},
         };
     });
@@ -253,7 +262,7 @@ class ExtensionManager {
       }
       if (!this.state.extensions[manifest.id]) {
         this.state.extensions[manifest.id] = {
-          enabled: manifest.source.kind === "builtin",
+          enabled: defaultEnabled(manifest),
           overrides: {},
         };
         stateChanged = true;

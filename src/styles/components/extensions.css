@@ -327,8 +327,17 @@
 }
 
 .extension-card-title {
+  display: flex;
   align-items: center;
   justify-content: flex-start;
+  gap: 8px;
+}
+
+/* Where it comes from, then the program state, with room between. */
+.extension-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
 }
 
 .extension-card-title strong {
@@ -336,8 +345,8 @@
   font-size: 13px;
 }
 
-.extension-card-title span,
-.extension-card-copy > small {
+.extension-card-title > span:not(.extension-companion-state),
+.extension-card-meta > small {
   color: var(--text-faint);
   font-family: "SFMono-Regular", Menlo, monospace;
   font-size: 10px;
@@ -365,6 +374,13 @@
 .extension-toggle.active {
   border-color: var(--line-selected);
   color: var(--accent);
+}
+
+/* Enabled is the quiet state while the program needs attention. */
+.extension-toggle.active.quiet {
+  border-color: var(--line);
+  background: none;
+  color: var(--text-muted);
 }
 
 @container (max-width: 620px) {
@@ -797,7 +813,6 @@
 .companion-view {
   display: grid;
   gap: var(--gap-md);
-  max-width: 560px;
 }
 
 .companion-field {
@@ -805,10 +820,8 @@
   grid-template-columns: 150px minmax(0, 1fr);
   align-items: center;
   gap: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--bg-raised);
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-divider);
 }
 
 .companion-field[data-type="qr"] {

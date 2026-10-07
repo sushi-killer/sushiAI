@@ -45,6 +45,10 @@ function FieldValue({
   return <span className="companion-text">{value}</span>;
 }
 
+/** A field with nothing to show is left out rather than drawn as a dash. */
+const hasValue = (value: CompanionValue | undefined) =>
+  value !== null && value !== undefined && value !== "";
+
 /** The drawing of a companion view for given values; it holds no state. */
 export function CompanionPanel({
   view,
@@ -57,22 +61,29 @@ export function CompanionPanel({
 }) {
   return (
     <div className="companion-view" aria-busy={state.busy ? true : undefined}>
-      {view.fields.map((field) => (
-        <div className="companion-field" key={field.id} data-type={field.type}>
-          <span className="companion-label">{field.label}</span>
-          <FieldValue
-            type={field.type}
-            label={field.label}
-            value={state.values[field.id]}
-          />
-        </div>
-      ))}
+      {view.fields
+        .filter((field) => hasValue(state.values[field.id]))
+        .map((field) => (
+          <div
+            className="companion-field"
+            key={field.id}
+            data-type={field.type}
+          >
+            <span className="companion-label">{field.label}</span>
+            <FieldValue
+              type={field.type}
+              label={field.label}
+              value={state.values[field.id]}
+            />
+          </div>
+        ))}
       {view.actions.length > 0 && (
         <div className="companion-actions">
-          {view.actions.map((action) => (
+          {view.actions.map((action, index) => (
             <button
               key={action.id}
-              className="secondary"
+              // The first action is the view's main one.
+              className={index === 0 ? "primary" : "secondary"}
               disabled={state.busy !== null}
               aria-busy={state.busy === action.id ? true : undefined}
               onClick={() => onAction(action.id)}

@@ -7,6 +7,8 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { Tag } from "../ui/index.ts";
+import type { Tone } from "../ui/tone.ts";
 import type {
   CompanionState,
   ExtensionManifest,
@@ -32,6 +34,14 @@ const COMPANION_STATE_LABELS: Record<CompanionState, string> = {
   starting: "Starting",
   running: "Running",
   failed: "Failed",
+};
+
+const COMPANION_TONES: Record<CompanionState, Tone> = {
+  off: "neutral",
+  "needs-approval": "warning",
+  starting: "info",
+  running: "ok",
+  failed: "danger",
 };
 
 /** Shows exactly what would run, and records consent to it. The approval is
@@ -81,7 +91,12 @@ function CompanionApproval({
         >
           <X size={17} />
         </button>
-        <h2>{extension.manifest.name} wants to run a program</h2>
+        <h2>
+          {extension.manifest.name}{" "}
+          {companion.state === "failed"
+            ? "failed to start"
+            : "wants to run a program"}
+        </h2>
         <p>
           It runs on this computer with your account's permissions. sushiAI
           limits what the extension can ask the app for, but it does not sandbox
@@ -295,6 +310,17 @@ export function ExtensionsView({
                 <div className="extension-card-title">
                   <strong>{extension.manifest.name}</strong>
                   <span>{extension.manifest.version}</span>
+                  {extension.companion &&
+                    extension.companion.state !== "running" && (
+                      <span
+                        className="extension-companion-state"
+                        data-state={extension.companion.state}
+                      >
+                        <Tag tone={COMPANION_TONES[extension.companion.state]}>
+                          {COMPANION_STATE_LABELS[extension.companion.state]}
+                        </Tag>
+                      </span>
+                    )}
                 </div>
                 <p>
                   {extension.manifest.description ||
@@ -303,15 +329,19 @@ export function ExtensionsView({
                 {extension.error && (
                   <small className="settings-error">{extension.error}</small>
                 )}
-                <small>{extensionSourceLabel(extension.manifest.source)}</small>
-                {extension.companion && (
-                  <small
-                    className="extension-companion-state"
-                    data-state={extension.companion.state}
-                  >
-                    Program: {COMPANION_STATE_LABELS[extension.companion.state]}
+                <div className="extension-card-meta">
+                  <small>
+                    {extensionSourceLabel(extension.manifest.source)}
                   </small>
-                )}
+                  {extension.companion?.state === "running" && (
+                    <small
+                      className="extension-companion-state"
+                      data-state="running"
+                    >
+                      Program running
+                    </small>
+                  )}
+                </div>
               </div>
               <div className="extension-card-actions">
                 {extension.companion && (
@@ -332,7 +362,13 @@ export function ExtensionsView({
                   </span>
                 ) : (
                   <button
-                    className={`extension-toggle ${enabled ? "active" : ""}`}
+                    className={`extension-toggle ${enabled ? "active" : ""}${
+                      enabled &&
+                      extension.companion &&
+                      extension.companion.state !== "running"
+                        ? " quiet"
+                        : ""
+                    }`}
                     aria-label={`${enabled ? "Disable" : "Enable"} ${extension.manifest.name}`}
                     onClick={() =>
                       onSetEnabled(extension.manifest.id, !enabled)

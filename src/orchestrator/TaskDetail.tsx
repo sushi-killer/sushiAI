@@ -300,10 +300,11 @@ function QuestionCard({
   const source = questionSource(task.question);
   return (
     <div className="td-question">
-      <div className="td-question-head">
-        <Tag tone="warning">Needs you</Tag>
-        {source && <span className="td-question-source">{source}</span>}
-      </div>
+      {source && (
+        <div className="td-question-head">
+          <span className="td-question-source">{source}</span>
+        </div>
+      )}
       <p className="td-question-text">{task.question.text}</p>
       {options.length > 0 && (
         <div className="td-question-options">
@@ -543,7 +544,9 @@ export function TaskDetail({
       ? { tone: "danger", label: statusBadgeLabel(selected) }
       : selected.status === "landing"
         ? { tone: "warning", label: "landing" }
-        : null;
+        : selected.status === "waiting"
+          ? { tone: "warning", label: "needs you" }
+          : null;
   const met = criteriaMet(selected);
   const breakdown = costByStage(selected);
   // A parent's total includes its subtasks' costs.
@@ -695,7 +698,7 @@ export function TaskDetail({
                   act(() => orchestratorClient.taskStop(selected.id))
                 }
               >
-                <Square size={12} /> Stop
+                <Square size={12} /> Stop task
               </button>
             )}
             {/* Archive for a task at rest, delete for one not finished. */}

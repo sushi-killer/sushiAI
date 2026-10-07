@@ -113,15 +113,14 @@ pub(super) async fn owner_accepts(
         app,
         task_id,
         attempt_n,
-        false,
+        RunTrack::No,
         &worktree,
         &req,
         CostTag::task("triage", &route.id),
         &brief_text,
         &events_path,
         cancel,
-        None,
-        None,
+        Guard::off(),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
@@ -302,15 +301,14 @@ async fn run_triage(
         app,
         task_id,
         attempt_n,
-        false,
+        RunTrack::No,
         worktree,
         &req,
         CostTag::task("triage", &route.id),
         &brief_text,
         &events_path,
         cancel,
-        None,
-        None,
+        Guard::off(),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);

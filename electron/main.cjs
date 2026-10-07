@@ -426,6 +426,10 @@ orchestrator = registerOrchestratorExtension({
       }),
   log: (message) => console.log(message),
   userDataDir: app.getPath("userData"),
+  // A test run never reads the owner's Claude or Codex files.
+  legacy: testMode.test
+    ? undefined
+    : { homeDir: app.getPath("home"), codexHome: process.env.CODEX_HOME },
   hostsChanged: () => send("orchestrator-hosts-changed"),
 });
 // Turning an extension off also drops the notices it already queued.
@@ -461,8 +465,6 @@ app.whenReady().then(async () => {
       appVersion: app.getVersion(),
       isPackaged: app.isPackaged,
       resourcesPath: process.resourcesPath,
-      // A standalone orchd of a previous build is stopped before the daemon starts.
-      legacyOrchdDir: path.join(app.getPath("userData"), "orchestrator"),
       log: (message) => console.log(`daemon: ${message}`),
     });
     localConnector = local;

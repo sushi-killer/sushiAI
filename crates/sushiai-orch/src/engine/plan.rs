@@ -640,15 +640,14 @@ pub(super) async fn run_plan_stage(
                 app,
                 task_id,
                 attempt_n,
-                true,
+                RunTrack::Attempt,
                 &worktree,
                 &req,
                 CostTag::task("plan", &route.id),
                 &brief_text,
                 &events_path,
                 cancel,
-                None,
-                None,
+                Guard::off(),
             )
             .await;
             if let Ok(Some(reloaded)) = app.store.load_task(task_id) {

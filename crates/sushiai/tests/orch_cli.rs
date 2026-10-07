@@ -382,3 +382,36 @@ fn register_is_idempotent_and_keeps_other_mcp_entries() {
     assert!(toml_gone.contains("[mcp_servers.other]"));
     assert!(!home.join(".claude/skills/sushiai-orchestrator").exists());
 }
+
+#[test]
+fn register_points_the_entry_at_the_bin_of_the_daemon_home() {
+    let tmp = tempfile::Builder::new()
+        .prefix("sd")
+        .tempdir_in("/tmp")
+        .expect("tempdir");
+    let user = tmp.path().join("user");
+    let codex = user.join(".codex");
+    std::fs::create_dir_all(&codex).expect("dirs");
+    std::fs::write(user.join(".claude.json"), "{}").expect("write");
+    // A daemon home that is not `<HOME>/.sushiai`.
+    let daemon_home = tmp.path().join("daemon-home");
+    let out = Command::new(BIN)
+        .args(["orch", "register"])
+        .env("HOME", &user)
+        .env("CODEX_HOME", &codex)
+        .env("SUSHIAI_HOME", &daemon_home)
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let claude: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(
+        claude["mcpServers"]["sushiai-orchestrator"]["command"],
+        daemon_home.join("bin/sushiai").to_str().unwrap()
+    );
+    assert!(!user.join(".sushiai").exists(), "HOME must stay clean");
+}

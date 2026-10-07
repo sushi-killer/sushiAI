@@ -60,6 +60,169 @@ pub(super) fn group_alive(pgid: i32) -> bool {
     pgid > 0 && unsafe { libc::kill(pgid, 0) == 0 }
 }
 
+/// `true` while group `pgid` is alive and is the run whose wrapper shell was
+/// given `exit` as its `$0`. A pgid saved by an earlier daemon can have been
+/// reused by a stranger's process since.
+pub(super) fn run_group_alive(pgid: i32, exit: &Path) -> bool {
+    group_alive(pgid) && store::group_started_with(pgid, exit)
+}
+
+/// Creates `path` empty, readable by the owner only.
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// Removes the unredacted output files (`*.raw`, `*.stderr.log`) of a run
+/// directory. Only a settled attempt that nothing can resume loses them.
+pub(super) fn remove_raw_output(run_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(run_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".raw") || name.ends_with(".stderr.log") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// How a run relates to its attempt.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RunTrack {
+    /// A nested run (review, triage, audit, chat): pipes, no recovery.
+    No,
+    /// The attempt's own run, on files: its pgid and session are saved. A
+    /// daemon shutdown kills it.
+    Attempt,
+    /// As `Attempt`, and a daemon shutdown leaves it running for the next
+    /// daemon to adopt (the implement run).
+    Resumable,
+}
+
+/// What ends a run early: silence, a loop, or spend past the cap. The same
+/// guard watches a run this daemon started and one it adopted.
+pub(super) struct Guard {
+    stall: Option<Stall>,
+    detector: Option<LoopDetector>,
+    /// Dollars one attempt may spend; `None` = no cap.
+    cap: Option<f64>,
+    last_output: tokio::time::Instant,
+}
+
+/// Why a guard stopped a run.
+pub(super) enum Trip {
+    Stalled(String),
+    Looped(String),
+    OverBudget(String),
+}
+
+impl Trip {
+    pub fn apply(self, outcome: &mut harness::RunOutcome) {
+        match self {
+            Trip::Stalled(error) => {
+                outcome.stalled = true;
+                outcome.error = Some(error);
+            }
+            Trip::Looped(note) => outcome.looped = Some(note),
+            Trip::OverBudget(error) => {
+                outcome.over_budget = true;
+                outcome.error = Some(error);
+            }
+        }
+    }
+}
+
+impl Guard {
+    /// No watch: a nested run.
+    pub fn off() -> Self {
+        Guard {
+            stall: None,
+            detector: None,
+            cap: None,
+            last_output: tokio::time::Instant::now(),
+        }
+    }
+
+    /// The watch a variant asks for; `hook_running` pauses the stall clock.
+    pub fn for_variant(variant: &Variant, hook_running: Option<Arc<AtomicBool>>) -> Self {
+        Guard {
+            stall: (variant.stall_timeout_secs > 0).then(|| Stall {
+                limit: Duration::from_secs(variant.stall_timeout_secs),
+                paused: hook_running.unwrap_or_default(),
+            }),
+            detector: variant.loop_detect.then(LoopDetector::new),
+            cap: (variant.max_attempt_cost_usd > 0.0).then_some(variant.max_attempt_cost_usd),
+            last_output: tokio::time::Instant::now(),
+        }
+    }
+
+    pub(super) fn armed(&self) -> bool {
+        self.stall.is_some()
+    }
+
+    /// When the silence limit runs out. An unset limit still needs a
+    /// deadline that does not overflow `Instant` (select! builds a disabled
+    /// branch's future too).
+    pub(super) fn deadline(&self) -> tokio::time::Instant {
+        let limit = self
+            .stall
+            .as_ref()
+            .map_or(Duration::from_secs(365 * 24 * 3600), |s| s.limit);
+        self.last_output + limit
+    }
+
+    pub(super) fn heard(&mut self) {
+        self.last_output = tokio::time::Instant::now();
+    }
+
+    /// The silence limit ran out. Silence is the only stall signal; a long
+    /// Bash call or the Stop hook's verify (up to 540s) is silent too, so the
+    /// limit must sit above them and the clock pauses while the hook runs.
+    pub(super) fn stall_expired(&mut self) -> Option<Trip> {
+        let stall = self.stall.as_ref()?;
+        if stall.paused.load(Ordering::SeqCst) {
+            self.heard();
+            return None;
+        }
+        Some(Trip::Stalled(format!(
+            "No output for {}s; the run was stopped as stalled.",
+            stall.limit.as_secs()
+        )))
+    }
+
+    /// One more output line (`outcome` already has it): `Some` when the run
+    /// must stop.
+    pub(super) fn line(
+        &mut self,
+        app: &App,
+        (harness, model): (Harness, Option<&str>),
+        line: &str,
+        outcome: &harness::RunOutcome,
+    ) -> Option<Trip> {
+        self.heard();
+        if let Some(hit) = self.detector.as_mut().and_then(|d| d.feed(line)) {
+            return Some(Trip::Looped(format!(
+                "{} Do not repeat it; change approach.",
+                hit.detail
+            )));
+        }
+        let cap = self.cap?;
+        let spent = streamed_spend(app, harness, model, outcome);
+        (outcome.over_budget || spent.is_some_and(|c| c > cap)).then(|| {
+            Trip::OverBudget(format!(
+                "The attempt spent about ${:.4}, past its ${cap} cap; the run was stopped.",
+                spent.unwrap_or(cap)
+            ))
+        })
+    }
+}
+
 /// Reads the lines `file` gains, as they arrive, until the run is over: its
 /// exit file exists or its process group is gone. What was written before
 /// that moment is still delivered.
@@ -113,9 +276,9 @@ pub(super) enum RunError {
 /// after 5s (spec: "Each child in its own process group; stop = SIGTERM to
 /// the group, SIGKILL after 5s").
 ///
-/// `track_attempt` gates the mid-run `pgid`/`session_id` persistence below:
-/// `true` for a session that *is* `task.attempts[_]` with number `attempt_n`
-/// (the implement or plan attempt itself); `false` for a nested session
+/// `track` gates the mid-run `pgid`/`session_id` persistence below:
+/// `Attempt`/`Resumable` for a session that *is* `task.attempts[_]` with
+/// number `attempt_n` (the implement or plan attempt itself); `No` for a nested session
 /// that merely borrows that attempt's number for its run directory (review,
 /// orchestrator triage) -- otherwise its own pgid/session id would
 /// overwrite the real attempt's, leaving it stuck `running` with a session
@@ -129,16 +292,16 @@ pub(super) async fn run_harness(
     app: &Arc<App>,
     task_id: &str,
     attempt_n: u32,
-    track_attempt: bool,
+    track: RunTrack,
     worktree: &Path,
     req: &harness::RunRequest<'_>,
     tag: CostTag,
     brief_text: &str,
     events_path: &Path,
     cancel: &CancelToken,
-    stall: Option<Stall>,
-    mut detector: Option<LoopDetector>,
+    mut guard: Guard,
 ) -> Result<harness::RunOutcome, RunError> {
+    let track_attempt = track != RunTrack::No;
     let started_at = now_ms();
     let mut argv = harness::build_argv(req);
     let mut bin = resolve_binary(req.harness);
@@ -187,14 +350,8 @@ pub(super) async fn run_harness(
         bin = "/bin/sh".to_string();
         {
             use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let _ = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&files.stdin)
-                .and_then(|mut f| f.write_all(brief_text.as_bytes()));
+            let _ =
+                create_private(&files.stdin).and_then(|mut f| f.write_all(brief_text.as_bytes()));
         }
         let _ = std::fs::remove_file(&files.exit);
         let _ = std::fs::write(
@@ -215,11 +372,10 @@ pub(super) async fn run_harness(
         cmd.env("SUSHIAI_ORCH_TOKEN", token);
     }
     if track_attempt {
-        let open = |p: &Path| std::fs::File::create(p).map(std::process::Stdio::from);
         match (
             std::fs::File::open(&files.stdin).map(std::process::Stdio::from),
-            open(&files.raw),
-            open(&files.stderr),
+            create_private(&files.raw).map(std::process::Stdio::from),
+            create_private(&files.stderr).map(std::process::Stdio::from),
         ) {
             (Ok(i), Ok(o), Ok(e)) => cmd.stdin(i).stdout(o).stderr(e),
             _ => return Err(RunError::Io("could not open the run files".into())),
@@ -279,20 +435,12 @@ pub(super) async fn run_harness(
     let mut stderr_done = false;
     let mut stderr_tail = String::new();
     let mut session_persisted = false;
-    // ponytail: silence is the only stall signal; a long Bash call or the
-    // Stop hook's verify (up to 540s) is silent too, so the timeout must sit
-    // above them.
-    // select! builds a disabled branch's future too: an unset timeout still
-    // needs a deadline that doesn't overflow `Instant`.
-    let stall_limit = stall
-        .as_ref()
-        .map_or(Duration::from_secs(365 * 24 * 3600), |s| s.limit);
-    let mut last_output = tokio::time::Instant::now();
+    let model = req.model;
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                if track_attempt && app.shutting_down.load(Ordering::SeqCst) {
+                if track == RunTrack::Resumable && app.shutting_down.load(Ordering::SeqCst) {
                     // A daemon shutdown leaves the run going: the next daemon
                     // finds it by its process group and files.
                     return Err(RunError::Cancelled);
@@ -322,47 +470,24 @@ pub(super) async fn run_harness(
                 }
                 return Err(RunError::Cancelled);
             }
-            _ = tokio::time::sleep_until(last_output + stall_limit), if stall.is_some() => {
-                if stall.as_ref().is_some_and(|s| s.paused.load(Ordering::SeqCst)) {
-                    last_output = tokio::time::Instant::now();
-                    continue;
-                }
+            _ = tokio::time::sleep_until(guard.deadline()), if guard.armed() => {
+                let Some(trip) = guard.stall_expired() else { continue };
                 kill_group(pgid, &mut child).await;
-                outcome.stalled = true;
-                outcome.error = Some(format!(
-                    "No output for {}s; the run was stopped as stalled.",
-                    stall_limit.as_secs()
-                ));
+                trip.apply(&mut outcome);
                 break;
             }
             line = out_lines.next_line(), if !stdout_done => {
                 match line {
                     Ok(Some(l)) => {
-                        last_output = tokio::time::Instant::now();
                         let l = redact(&l, &redaction_env);
                         append_line(events_path, &l);
                         if let Some(note) = harness::feed_stream_line(harness_kind, &l, &mut outcome) {
                             app.broadcast_log(task_id, attempt_n, note);
                         }
-                        if let Some(hit) = detector.as_mut().and_then(|d| d.feed(&l)) {
+                        if let Some(trip) = guard.line(app, (harness_kind, model), &l, &outcome) {
                             kill_group(pgid, &mut child).await;
-                            outcome.looped = Some(format!(
-                                "{} Do not repeat it; change approach.",
-                                hit.detail
-                            ));
+                            trip.apply(&mut outcome);
                             break;
-                        }
-                        if let Some(cap) = req.max_budget_usd {
-                            let spent = streamed_spend(app, req, &outcome);
-                            if outcome.over_budget || spent.is_some_and(|c| c > cap) {
-                                kill_group(pgid, &mut child).await;
-                                outcome.over_budget = true;
-                                outcome.error = Some(format!(
-                                    "The attempt spent about ${:.4}, past its ${cap} cap; the run was stopped.",
-                                    spent.unwrap_or(cap)
-                                ));
-                                break;
-                            }
                         }
                         if track_attempt && !session_persisted {
                             if let Some(sid) = outcome.session_id.clone() {
@@ -377,7 +502,7 @@ pub(super) async fn run_harness(
             line = err_lines.next_line(), if !stderr_done => {
                 match line {
                     Ok(Some(l)) => {
-                        last_output = tokio::time::Instant::now();
+                        guard.heard();
                         let l = redact(&l, &redaction_env);
                         append_line(events_path, &format!("[stderr] {l}"));
                         stderr_tail.push_str(&l);
@@ -554,13 +679,14 @@ pub(super) fn record_run(
 /// covers earlier attempts, which the cap must not count.
 fn streamed_spend(
     app: &App,
-    req: &harness::RunRequest<'_>,
+    harness: Harness,
+    model: Option<&str>,
     outcome: &harness::RunOutcome,
 ) -> Option<f64> {
     let settings = app.settings.read().unwrap();
-    match req.harness {
+    match harness {
         Harness::Claude => outcome.streamed_cost(&settings.prices),
-        Harness::Codex => req.model.and_then(|m| settings.prices.get(m)).map(|p| {
+        Harness::Codex => model.and_then(|m| settings.prices.get(m)).map(|p| {
             p.codex_cost(
                 outcome.usage_input,
                 outcome.usage_cached,

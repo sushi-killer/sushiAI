@@ -192,15 +192,14 @@ async fn run(
                 app,
                 &audit.id,
                 0,
-                false,
+                RunTrack::No,
                 &repo,
                 &req,
                 CostTag::repo("audit", &route.id, &audit.repo),
                 &brief_text,
                 &events_path,
                 &cancel,
-                None,
-                None,
+                Guard::off(),
             )
             .await;
             let _ = std::fs::remove_file(&key_path);

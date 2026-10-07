@@ -260,3 +260,106 @@ test(
     assert.equal(done.attempts[0].costUsd, 0.3);
   },
 );
+
+test(
+  "turning the Orchestrator off with a task run going leaves no agent process behind",
+  { skip: !fs.existsSync(binary) && "debug sushiai binary is not built" },
+  async (t) => {
+    // A fake `claude` that streams one message and then waits for a minute.
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), "orch-fake-bin-"));
+    t.after(() => fs.rmSync(bin, { recursive: true, force: true }));
+    fs.writeFileSync(
+      path.join(bin, "claude"),
+      `#!/bin/sh\ncat > /dev/null\necho '${INIT}'\necho '${MESSAGE}'\nsleep 60\n`,
+      { mode: 0o755 },
+    );
+    const { root, home, connector, manager, ready } = world(t, {
+      binDir: bin,
+      enabled: true,
+    });
+    fs.writeFileSync(
+      path.join(root, ".gitconfig"),
+      "[user]\n\tname = orch test\n\temail = orch-test@example.invalid\n",
+    );
+    const repo = path.join(root, "repo");
+    fs.mkdirSync(repo);
+    const git = (...args) =>
+      childProcess.execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+    git("init", "-q");
+    fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+    git("add", ".");
+    git(
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@example.invalid",
+      "commit",
+      "-qm",
+      "init",
+    );
+    const hosts = createOrchestratorHosts({
+      send: () => {},
+      getConnections: () => ({ get: () => ({}), list: () => [] }),
+      getManager: () => manager,
+      getProjects: () => ({
+        agentEnvironments: async () => ({}),
+        mcpEnvironments: async () => ({}),
+      }),
+      moduleSwitch: createModuleSwitch({
+        getManager: () => manager,
+        runLocal: (args) => connector.runCli(args),
+        restartLocal: () => connector.restart(),
+        exec: async () => {
+          throw new Error("no ssh in this test");
+        },
+      }),
+      enabled: false,
+    });
+
+    manager.start();
+    await until(() => ready.length > 0, "the daemon to be ready");
+    await hosts.setEnabled(true);
+    const settings = await manager.request("local", "orch.settings.get", {});
+    await manager.request("local", "orch.settings.set", {
+      settings: {
+        ...settings,
+        review: "",
+        briefCheckRoute: "",
+        answerPolicy: false,
+        sandbox: "host",
+      },
+    });
+    const task = await manager.request("local", "orch.task.create", {
+      repo,
+      title: "Stops with the module",
+      goal: "g",
+      criteria: [],
+      verify: ["true"],
+    });
+    t.after(() => fs.rmSync(task.worktree, { recursive: true, force: true }));
+    const events = path.join(
+      home,
+      "orchestrator/tasks",
+      task.id,
+      "runs/1/events.jsonl",
+    );
+    const running = await until(async () => {
+      const current = await manager.request("local", "orch.task.get", {
+        id: task.id,
+      });
+      const seen =
+        fs.existsSync(events) &&
+        fs.readFileSync(events, "utf8").includes("msg_1");
+      return seen && current.attempts[0]?.pgid ? current : null;
+    }, "the run to stream");
+    const pgid = running.attempts[0].pgid;
+    t.after(() => {
+      try {
+        process.kill(-pgid, "SIGKILL");
+      } catch {}
+    });
+
+    await hosts.setEnabled(false);
+    await until(() => !alive(pgid), "the agent to end", 5000);
+  },
+);

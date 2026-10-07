@@ -516,15 +516,14 @@ pub(super) async fn run_review(
         app,
         task_id,
         attempt_n,
-        false,
+        RunTrack::No,
         worktree,
         &req,
         CostTag::task("review", &review_route.id),
         &brief_text,
         &events_path,
         cancel,
-        None,
-        None,
+        Guard::off(),
     )
     .await
     {

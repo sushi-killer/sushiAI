@@ -1,6 +1,7 @@
 // Cutover from a standalone orchd of a previous build: only the old process
-// stops (electron/daemon/local.cjs stopLegacyOrchd). Its task data stays where
-// it is; the orchestrator in the daemon starts clean.
+// stops (electron/orchestrator.cjs stopLegacyOrchd, run by `start()`). Its task
+// data stays where it is; the orchestrator in the daemon starts clean. The first
+// launch of this build turns the Orchestrator on only for an owner who used it.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -8,9 +9,12 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const {
+  legacyOrchestratorPresent,
+  registerOrchestratorExtension,
   stopLegacyOrchd,
-  createLocalConnector,
-} = require("../electron/daemon/local.cjs");
+} = require("../electron/orchestrator.cjs");
+const { closeAppDb } = require("../electron/app-db.cjs");
+const { fakeDaemonManager } = require("./helpers/fake-daemon-manager.cjs");
 
 const cleanups = [];
 test.afterEach(async () => {
@@ -148,46 +152,121 @@ test("an orchd that ignores SIGTERM is killed with its process group after the t
   filesGone(dir);
 });
 
-test("the local connector stops a legacy orchd once per app run, before it runs anything of the new daemon", async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "legacy-home-"));
-  cleanups.push(() => fs.rmSync(home, { recursive: true, force: true }));
-  const order = [];
-  const connector = createLocalConnector({
-    env: {
-      HOME: home,
-      SUSHIAI_HOME: path.join(home, "home"),
-      SUSHIAI_DAEMON_BIN: path.join(home, "missing-sushiai"),
-    },
-    appVersion: "1.0.0",
-    legacyOrchdDir: "/legacy/orchestrator",
-    stopLegacy: async (dir) => order.push(["legacy", dir]),
-    execFile: (_binary, args, _options, callback) => {
-      order.push(["run", args[0]]);
-      callback(new Error("no binary here"), "", "");
-    },
+/** `registerOrchestratorExtension` over a fake manager and a fake extension
+ * manager that records every `setEnabled`. Nothing touches the real home. */
+function wire({ enabled = false, withLegacy = true, stopLegacy } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "first-launch-"));
+  const userDataDir = path.join(root, "userData");
+  const homeDir = path.join(root, "home");
+  fs.mkdirSync(userDataDir);
+  fs.mkdirSync(homeDir);
+  cleanups.push(() => {
+    closeAppDb(userDataDir);
+    fs.rmSync(root, { recursive: true, force: true });
   });
-  await assert.rejects(connector.connect(), /no binary here|ENOENT/);
-  await assert.rejects(connector.connect(), /no binary here|ENOENT/);
-  assert.deepEqual(
-    order.filter(([kind]) => kind === "legacy"),
-    [["legacy", "/legacy/orchestrator"]],
-  );
-  assert.equal(order[0][0], "legacy");
-
-  // A failing stop never blocks the daemon from starting.
-  const failing = createLocalConnector({
-    env: {
-      HOME: home,
-      SUSHIAI_HOME: path.join(home, "home2"),
-      SUSHIAI_DAEMON_BIN: path.join(home, "missing-sushiai"),
+  const calls = [];
+  const extensions = {
+    ready: Promise.resolve(),
+    enabled,
+    isEnabled: () => extensions.enabled,
+    onChange: () => {},
+    setEnabled: async (id, value) => {
+      calls.push([id, value]);
+      extensions.enabled = value;
     },
-    appVersion: "1.0.0",
-    legacyOrchdDir: "/legacy/orchestrator",
+  };
+  const logs = [];
+  const stops = [];
+  const hosts = registerOrchestratorExtension({
+    handle: () => {},
+    extensions,
+    send: () => {},
+    getConnections: () => ({ get: () => ({}), list: () => [] }),
+    getManager: () => fakeDaemonManager(),
+    userDataDir,
+    log: (message) => logs.push(message),
+    hostsChanged: () => {},
+    stopLegacy:
+      stopLegacy ??
+      (async (dir) => {
+        stops.push(dir);
+        return "stopped";
+      }),
+    legacy: withLegacy
+      ? { homeDir, codexHome: path.join(homeDir, ".codex") }
+      : undefined,
+  });
+  cleanups.push(() => hosts.quit());
+  return { root, userDataDir, homeDir, calls, logs, stops, hosts };
+}
+
+test("start stops a legacy orchd of the app's own data dir, once per start", async () => {
+  const w = wire();
+  await w.hosts.start();
+  assert.deepEqual(w.stops, [path.join(w.userDataDir, "orchestrator")]);
+  assert.ok(w.logs.includes("stopped a legacy orchd"));
+});
+
+test("a legacy stop that fails never blocks start", async () => {
+  const w = wire({
     stopLegacy: async () => {
       throw new Error("EPERM");
     },
-    execFile: (_binary, _args, _options, callback) =>
-      callback(new Error("no binary here"), "", ""),
   });
-  await assert.rejects(failing.connect(), /no binary here|ENOENT/);
+  await w.hosts.start();
+  assert.deepEqual(w.logs, ["legacy orchd was not stopped: EPERM"]);
+  assert.deepEqual(w.calls, [["builtin.orchestrator", false]]);
+});
+
+test("the first launch leaves a fresh install's Orchestrator off, once", async () => {
+  const w = wire({ enabled: true });
+  await w.hosts.start();
+  assert.deepEqual(w.calls, [["builtin.orchestrator", false]]);
+  // The owner switches it on later: a restart must not undo that.
+  w.calls.length = 0;
+  await w.hosts.start();
+  assert.deepEqual(w.calls, []);
+});
+
+test("the first launch turns the Orchestrator on for a legacy orchd data dir", async () => {
+  const w = wire();
+  fs.mkdirSync(path.join(w.userDataDir, "orchestrator", "tasks"), {
+    recursive: true,
+  });
+  await w.hosts.start();
+  assert.deepEqual(w.calls, [["builtin.orchestrator", true]]);
+});
+
+test("the first launch turns the Orchestrator on for a legacy MCP entry in Claude's or Codex's config", async () => {
+  const claude = wire();
+  fs.writeFileSync(
+    path.join(claude.homeDir, ".claude.json"),
+    JSON.stringify({
+      mcpServers: { "sushiai-orchestrator": { command: "x" } },
+    }),
+  );
+  await claude.hosts.start();
+  assert.deepEqual(claude.calls, [["builtin.orchestrator", true]]);
+
+  const codex = wire();
+  fs.mkdirSync(path.join(codex.homeDir, ".codex"));
+  fs.writeFileSync(
+    path.join(codex.homeDir, ".codex", "config.toml"),
+    '[mcp_servers.other]\ncommand = "o"\n\n[mcp_servers.sushiai-orchestrator]\ncommand = "x"\n',
+  );
+  await codex.hosts.start();
+  assert.deepEqual(codex.calls, [["builtin.orchestrator", true]]);
+});
+
+test("another MCP entry is not a legacy Orchestrator", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "no-legacy-"));
+  cleanups.push(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, ".claude.json"),
+    JSON.stringify({ mcpServers: { other: { command: "o" } } }),
+  );
+  assert.equal(
+    legacyOrchestratorPresent({ userDataDir: root, homeDir: root }),
+    false,
+  );
 });

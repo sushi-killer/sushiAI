@@ -165,15 +165,14 @@ pub(super) async fn run_judge(
         app,
         &task.id,
         attempt_n,
-        false,
+        RunTrack::No,
         &worktree,
         &req,
         CostTag::task(stage, &route.id),
         prompt,
         &events_path,
         cancel,
-        None,
-        None,
+        Guard::off(),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);

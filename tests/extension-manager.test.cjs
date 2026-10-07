@@ -427,7 +427,7 @@ test("an unreadable extensions folder does not stop the app", async (t) => {
   );
 });
 
-test("the orchestrator built-in can be turned off, stays off across a restart, and a pinned built-in still refuses", async () => {
+test("the orchestrator built-in starts off, can be turned on and off, stays off across a restart, and a pinned built-in still refuses", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "sushiai-extension-manager-"));
   const orchestrator = {
     id: "builtin.orchestrator",
@@ -444,11 +444,17 @@ test("the orchestrator built-in can be turned off, stays off across a restart, a
       builtins: [PINNED_MANIFEST, orchestrator],
     });
     await manager.ready;
-    assert.equal(manager.isEnabled("builtin.orchestrator"), true);
+    // A fresh install opts in; every other built-in starts on.
+    assert.equal(manager.isEnabled("builtin.orchestrator"), false);
+    assert.equal(manager.isEnabled("builtin.pinned"), true);
     const seen = [];
     manager.onChange((id, enabled) => seen.push([id, enabled]));
+    await manager.setEnabled("builtin.orchestrator", true);
     await manager.setEnabled("builtin.orchestrator", false);
-    assert.deepEqual(seen, [["builtin.orchestrator", false]]);
+    assert.deepEqual(seen, [
+      ["builtin.orchestrator", true],
+      ["builtin.orchestrator", false],
+    ]);
     await assert.rejects(
       () => manager.setEnabled("builtin.pinned", false),
       /cannot be disabled/,

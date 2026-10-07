@@ -117,7 +117,7 @@ Modules attach at the composition bin (`crates/sushiai`); nothing else knows whi
   `session.list` as `asks`). `ask.respond` answers it. Timeout or a vanished hook
   process hands it back to the terminal (`PermissionClosed {decided: false}`).
   Asks are not persisted: they die with the daemon.
-- `state.json` keeps `schemaVersion` 1: the new fields are optional with
+- `state.json` carried `schemaVersion` 1 here (the daemon now writes 2 and reads both): the new fields are optional with
   defaults, so an older file loads unchanged. A restored `blocked` status stays
   `blocked`: the agent may still show its dialog. The ask is gone, so the
   machine is told it went back to the terminal (`PermissionClosed {decided:
@@ -234,6 +234,53 @@ target, arg, nonce}` to normal clients.
   a restored session's holder like any other request; a stopping daemon refuses a keyed
   `session.create` as well (`SHUTTING_DOWN`); the idempotent return of an existing
   session sends no second `session.created`.
+
+## Hibernation and wake
+
+An idle claude or codex session launched by the app goes to sleep and wakes on demand. The
+wire is additive (`PROTOCOL_VERSION` stays 1, capability `hibernate`).
+
+- **States.** `SessionStatus` gains `hibernated` (no process; record, `agentSession` and a
+  saved screen tail kept) and `waking` (a holder is being respawned with the resume
+  command; input is queued). `agent.incarnation` counts the processes of one session id,
+  `agent.pinned` is "keep awake" (owned by the registry like the title), `hibernatedAt`
+  is set while asleep. `state.json` is schema 2; schema 1 still loads. A `waking`
+  session is saved as `running`.
+- **Launch store.** `session.create` for claude/codex seals `{env, claudeSettings, model,
+  extraArgs}` into `<home>/sessions/<id>.launch` (0600) with ChaCha20-Poly1305: random
+  nonce, the session id as associated data. The key is a login keychain item on macOS
+  (default home only), else `SUSHIAI_LAUNCH_KEY_FILE`, else `<home>/keys/launch.key`
+  (0600). It is deleted when the session is closed or removed (or pruned). Env and
+  `claudeSettings` are still never logged or sent to clients. A file that cannot be opened
+  is `WAKE_NEEDS_LAUNCH` (1012). On a headless host the key file sits beside the data: a
+  copy of the launch file alone stays sealed, a copy of the whole home does not.
+- **Decision.** `sushiai_core::hibernate::decide` is pure and table-tested: a claude or
+  codex session with an `agentSession` and a stored launch, `agentStatus` idle, no open
+  ask, not pinned, not focused by any connection (`session.focus`, cleared when the
+  connection ends), idle for the threshold since the later of `statusSince` and the last
+  input, and whose child processes did not use more than 2 s of CPU in 10 minutes
+  (`BusyMeter`, sampled from `ps` at most once a minute, from one window before the
+  threshold). The session actor evaluates it on its 1 s tick. The threshold is
+  `daemon.configure {hibernateAfterSecs}` (0 = never, default 4 h, saved in
+  `<home>/settings.json`); `SUSHIAI_HIBERNATE_AFTER_MS` overrides it for tests.
+- **Sleep.** The actor saves the formatted screen with history (at most 1 MiB) to
+  `sessions/<id>.tail` (0600), sends TERM through the holder (the existing grace and KILL
+  path), and on the exit becomes `hibernated`: token cleared, asks closed, screen dropped.
+  The actor and its output stream stay. `session.attach` and `session.read` of a
+  hibernated session show the tail and do not wake it. A tail is also written at a change
+  to idle (at most once a minute) and for every running agent session when the daemon
+  stops, so a reboot has something to show.
+- **Wake.** `session.wake`, or `session.input` on a hibernated session, rebuilds the launch
+  (`prepare` with `resume` = `agentSession`, a new token), sets `waking`, raises
+  `incarnation`, publishes a synthetic `ESC c` chunk and starts a holder with the same id.
+  The holder counts its stream from 0, so the actor keeps an offset (`base`): the client
+  stream continues the same sequence. Input is queued (64 KiB, then
+  `INPUT_BACKPRESSURE`). Ready is the first hook of the new process, or output followed
+  by 800 ms of quiet, or 20 s; the queue is then sent in order and the status is `running`.
+  A start failure puts the session back to sleep; an exit while waking is `exited`. An
+  exited record with a stored launch wakes the same way (Reopen on the same id).
+- **Restart.** A restored session whose holder is gone (reboot, killed holder) and that can
+  hibernate becomes `hibernated` instead of `exited`. Hibernated records are never pruned.
 
 ## Invariants
 

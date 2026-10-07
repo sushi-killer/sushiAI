@@ -109,4 +109,7 @@ pub struct SessionUpdate {
     pub group: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// "Keep awake": a pinned agent session never hibernates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
 }

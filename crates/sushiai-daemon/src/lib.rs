@@ -10,10 +10,13 @@ mod foreground;
 mod framed;
 mod holder;
 mod home;
+mod launch_store;
 mod module;
+mod procs;
 mod registry;
 mod server;
 mod session;
+mod wake;
 
 use std::fs;
 use std::io::Write;
@@ -23,7 +26,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sushiai_core::{mark_exited, Screen, StateError, StateFile};
+use sushiai_core::hibernate::can_hibernate;
+use sushiai_core::{mark_exited, mark_hibernated, Screen, StateError, StateFile};
 use sushiai_protocol::{
     method, Frame, Hello, Message, Request, SessionInfo, SessionStatus, PROTOCOL_VERSION,
 };
@@ -77,6 +81,7 @@ async fn run(home: Home, modules: Vec<ModuleSlot>) -> Result<(fs::File, Arc<Regi
     }
     let socket = home.socket();
     let registry = Arc::new(Registry::new(home.clone()));
+    registry.load_settings();
     load_catalog(&registry);
     // A newer state schema stops the daemon here, before anything listens.
     let pending = load_state(&registry)?;
@@ -101,9 +106,23 @@ async fn run(home: Home, modules: Vec<ModuleSlot>) -> Result<(fs::File, Arc<Regi
         _ = int.recv() => {}
     }
     let _ = fs::remove_file(&socket);
+    // A reboot that follows has something to show for each agent session.
+    save_tails(&registry).await;
     stop_modules(&registry).await;
     registry.flush();
     Ok((lock, registry))
+}
+
+/// Saves the screen of every running agent session, all at once.
+async fn save_tails(registry: &Registry) {
+    let saves: Vec<_> = registry
+        .handles()
+        .into_iter()
+        .map(|handle| tokio::spawn(async move { handle.save_tail().await }))
+        .collect();
+    for save in saves {
+        let _ = save.await;
+    }
 }
 
 /// Builds the hosted modules once the socket answers. Two modules with one namespace are a
@@ -249,6 +268,8 @@ fn load_state(registry: &Arc<Registry>) -> Result<Vec<Pending>> {
             listed.status = SessionStatus::Detached;
             registry.update(listed);
             pending.push(Pending { info, probed });
+        } else if info.status == SessionStatus::Hibernated {
+            session::start_hibernated(registry.clone(), info);
         } else {
             registry.update(info);
         }
@@ -304,8 +325,15 @@ fn reattach_all(registry: &Arc<Registry>, pending: Vec<Pending>) {
                     registry.settle();
                     return;
                 }
-                mark_exited(&mut info, None);
-                registry.update(info);
+                if can_hibernate(&info, registry.launches().exists(&id)) {
+                    // The process died with the machine (or the holder was killed): the
+                    // conversation is still there, so the session sleeps instead of ending.
+                    mark_hibernated(&mut info, agent::now_ms());
+                    session::start_hibernated(registry.clone(), info);
+                } else {
+                    mark_exited(&mut info, None);
+                    registry.update(info);
+                }
             }
             registry.announce_updated(&id);
             registry.settle();

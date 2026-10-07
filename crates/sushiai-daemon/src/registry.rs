@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -19,6 +19,7 @@ use sushiai_protocol::{method, Notification, SessionInfo, SessionRemoved, Sessio
 use tokio::sync::{broadcast, Notify};
 
 use crate::home::Home;
+use crate::launch_store::LaunchStore;
 use crate::module::Module;
 use crate::session::Handle;
 
@@ -29,7 +30,7 @@ pub fn hash_token(token: &str) -> String {
         .collect()
 }
 
-fn unhex(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn unhex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
     }
@@ -53,14 +54,24 @@ fn digest_matches(stored_hex: &str, token: &str) -> bool {
     stored.len() == given.len() && diff == 0
 }
 
-/// How a record is saved: asks die with the daemon, and a detached session may still run.
+/// How a record is saved: asks die with the daemon, and a detached or waking session has a
+/// process (or a holder about to have one).
 fn persisted(info: &SessionInfo) -> SessionInfo {
     let mut info = info.clone();
     info.agent.asks.clear();
-    if info.status == SessionStatus::Detached {
+    if matches!(info.status, SessionStatus::Detached | SessionStatus::Waking) {
         info.status = SessionStatus::Running;
     }
     info
+}
+
+/// Hibernate after this long idle unless `daemon.configure` says otherwise.
+const DEFAULT_HIBERNATE_SECS: u64 = 4 * 60 * 60;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Settings {
+    hibernate_after_secs: u64,
 }
 
 /// The state file is written by one thread, never by a session actor: the latest snapshot
@@ -128,13 +139,13 @@ fn write_loop(writer: Arc<Writer>, path: PathBuf, catalog_path: PathBuf) {
             let written = state
                 .to_bytes()
                 .map_err(std::io::Error::other)
-                .and_then(|bytes| write_atomic(&path, &bytes));
+                .and_then(|bytes| write_atomic(&path, &bytes, "json.tmp"));
             if let Err(e) = written {
                 tracing::warn!("cannot write state file: {e}");
             }
         }
         if let Some(bytes) = catalog {
-            if let Err(e) = write_atomic(&catalog_path, &bytes) {
+            if let Err(e) = write_atomic(&catalog_path, &bytes, "json.tmp") {
                 tracing::warn!("cannot write catalog file: {e}");
             }
         }
@@ -145,8 +156,8 @@ fn write_loop(writer: Arc<Writer>, path: PathBuf, catalog_path: PathBuf) {
 
 /// Temp file, fsync, rename, fsync of the directory: a crash leaves the old or the new
 /// file, never a partial one. An error never writes an empty file.
-fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
+fn write_atomic(path: &std::path::Path, bytes: &[u8], tmp_ext: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension(tmp_ext);
     // The file holds commands and directories: owner only.
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -216,8 +227,17 @@ pub struct Registry {
     settled: Notify,
     /// Serializes launches that carry an idempotency key (check, create).
     pub keyed_create: tokio::sync::Mutex<()>,
+    /// Serializes wakes.
+    pub wake_lock: tokio::sync::Mutex<()>,
     /// Hosted modules, set once at startup (none in a bare daemon).
     modules: std::sync::OnceLock<Vec<Arc<dyn Module>>>,
+    launches: LaunchStore,
+    /// Which connections look at which session: a session someone looks at stays awake.
+    focus: Mutex<HashMap<String, HashSet<u64>>>,
+    /// Idle seconds before an agent session sleeps; 0 = never.
+    hibernate_secs: std::sync::atomic::AtomicU64,
+    /// `SUSHIAI_HIBERNATE_AFTER_MS` (tests): wins over the settings.
+    hibernate_override_ms: Option<u64>,
 }
 
 impl Registry {
@@ -231,7 +251,6 @@ impl Registry {
         let (thread_writer, path, catalog_path) = (writer.clone(), home.state(), home.catalog());
         std::thread::spawn(move || write_loop(thread_writer, path, catalog_path));
         Registry {
-            home,
             host,
             events: broadcast::channel(256).0,
             catalog: Mutex::new(Catalog::default()),
@@ -241,8 +260,114 @@ impl Registry {
             stopping: AtomicBool::new(false),
             settled: Notify::new(),
             keyed_create: tokio::sync::Mutex::new(()),
+            wake_lock: tokio::sync::Mutex::new(()),
             modules: std::sync::OnceLock::new(),
+            launches: LaunchStore::new(&home),
+            focus: Mutex::new(HashMap::new()),
+            hibernate_secs: std::sync::atomic::AtomicU64::new(DEFAULT_HIBERNATE_SECS),
+            hibernate_override_ms: std::env::var("SUSHIAI_HIBERNATE_AFTER_MS")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+            home,
         }
+    }
+
+    pub fn launches(&self) -> &LaunchStore {
+        &self.launches
+    }
+
+    /// Idle time that puts an agent session to sleep; `None` = never.
+    pub fn hibernate_after(&self) -> Option<Duration> {
+        let ms = self.hibernate_override_ms.unwrap_or_else(|| {
+            self.hibernate_secs
+                .load(Ordering::Relaxed)
+                .saturating_mul(1000)
+        });
+        (ms > 0).then(|| Duration::from_millis(ms))
+    }
+
+    /// Reads `settings.json` (daemon start). A missing or unreadable file keeps the default.
+    pub fn load_settings(&self) {
+        let read = fs::read(self.home.settings());
+        if let Some(settings) = read
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Settings>(&b).ok())
+        {
+            self.hibernate_secs
+                .store(settings.hibernate_after_secs, Ordering::Relaxed);
+        }
+    }
+
+    /// `daemon.configure`: applies and saves the settings.
+    pub fn configure(&self, hibernate_after_secs: u64) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(&Settings {
+            hibernate_after_secs,
+        })
+        .map_err(std::io::Error::other)?;
+        let path = self.home.settings();
+        write_atomic(&path, &bytes, "json.tmp")?;
+        self.hibernate_secs
+            .store(hibernate_after_secs, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// A connection starts or stops looking at a session.
+    pub fn set_focus(&self, conn: u64, id: &str, focused: bool) {
+        let mut focus = self.focus.lock().unwrap_or_else(PoisonError::into_inner);
+        if focused {
+            focus.entry(id.to_string()).or_default().insert(conn);
+        } else if let Some(conns) = focus.get_mut(id) {
+            conns.remove(&conn);
+        }
+        focus.retain(|_, conns| !conns.is_empty());
+    }
+
+    /// The connection ended: it looks at nothing any more.
+    pub fn clear_focus(&self, conn: u64) {
+        let mut focus = self.focus.lock().unwrap_or_else(PoisonError::into_inner);
+        for conns in focus.values_mut() {
+            conns.remove(&conn);
+        }
+        focus.retain(|_, conns| !conns.is_empty());
+    }
+
+    pub fn focused(&self, id: &str) -> bool {
+        let focus = self.focus.lock().unwrap_or_else(PoisonError::into_inner);
+        focus.get(id).is_some_and(|conns| !conns.is_empty())
+    }
+
+    /// "Keep awake", owned by the registry like the title.
+    pub fn pinned(&self, id: &str) -> bool {
+        self.catalog()
+            .sessions
+            .get(id)
+            .is_some_and(|e| e.info.agent.pinned)
+    }
+
+    /// The whole record, token hash included. For the daemon's own use.
+    pub(crate) fn stored(&self, id: &str) -> Option<SessionInfo> {
+        self.catalog().sessions.get(id).map(|e| e.info.clone())
+    }
+
+    /// The record as clients see it.
+    pub fn info(&self, id: &str) -> Option<SessionInfo> {
+        self.catalog().sessions.get(id).map(|e| public(&e.info))
+    }
+
+    /// The actors of all sessions that have one.
+    pub fn handles(&self) -> Vec<Handle> {
+        self.catalog()
+            .sessions
+            .values()
+            .filter_map(|e| e.handle.clone())
+            .collect()
+    }
+
+    /// Deletes what a session leaves on disk besides its holder socket: the sealed launch and
+    /// the saved screen.
+    pub fn drop_files(&self, id: &str) {
+        self.launches.delete(id);
+        let _ = fs::remove_file(self.home.tail_file(id));
     }
 
     /// Hosts `modules` (once; a second call is ignored).
@@ -386,6 +511,9 @@ impl Registry {
         if let Some(title) = update.title {
             next.title = Some(title).filter(|t| !t.trim().is_empty());
         }
+        if let Some(pinned) = update.pinned {
+            next.agent.pinned = pinned;
+        }
         if next == entry.info {
             return Some(public(&next));
         }
@@ -414,6 +542,7 @@ impl Registry {
         catalog.sessions.remove(id);
         catalog.exited.retain(|e| e != id);
         self.save(&catalog);
+        self.drop_files(id);
         self.notify(method::SESSION_REMOVED, SessionRemoved { id: id.into() });
         Ok(())
     }
@@ -461,6 +590,7 @@ impl Registry {
                 info.title = kept.title.clone();
                 info.project = kept.project.clone();
                 info.group = kept.group.clone();
+                info.agent.pinned = kept.agent.pinned;
                 entry.info = info;
             }
             None => {
@@ -469,12 +599,16 @@ impl Registry {
                     .insert(id.clone(), Entry { info, handle: None });
             }
         }
-        if exited && !catalog.exited.contains(&id) {
+        if !exited {
+            // A woken session is no longer a candidate for pruning.
+            catalog.exited.retain(|e| *e != id);
+        } else if !catalog.exited.contains(&id) {
             catalog.exited.push_back(id);
         }
         while catalog.exited.len() > MAX_EXITED {
             if let Some(old) = catalog.exited.pop_front() {
                 catalog.sessions.remove(&old);
+                self.drop_files(&old);
                 self.notify(method::SESSION_REMOVED, SessionRemoved { id: old });
             }
         }
@@ -719,6 +853,7 @@ mod tests {
             project: None,
             group: None,
             title: None,
+            pinned: None,
         }
     }
 

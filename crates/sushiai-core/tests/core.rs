@@ -1,4 +1,4 @@
-use sushiai_core::{mark_exited, Screen, StateError, StateFile};
+use sushiai_core::{mark_exited, mark_hibernated, Screen, StateError, StateFile};
 use sushiai_protocol::{SessionInfo, SessionStatus};
 
 fn info(id: &str) -> SessionInfo {
@@ -43,15 +43,31 @@ fn state_file_round_trips() {
 
 #[test]
 fn unknown_schema_version_is_rejected() {
-    let bytes = br#"{"schemaVersion":2,"sessions":[]}"#;
+    let bytes = br#"{"schemaVersion":3,"sessions":[]}"#;
     assert!(matches!(
         StateFile::from_bytes(bytes),
-        Err(StateError::UnsupportedSchema(Some(2)))
+        Err(StateError::UnsupportedSchema(Some(3)))
     ));
     assert!(matches!(
         StateFile::from_bytes(br#"{"sessions":[]}"#),
         Err(StateError::UnsupportedSchema(None))
     ));
+}
+
+#[test]
+fn schema_two_keeps_the_sleep_fields_and_schema_one_still_loads() {
+    let mut asleep = info("a");
+    mark_hibernated(&mut asleep, 42);
+    asleep.agent.incarnation = 2;
+    asleep.agent.pinned = true;
+    let state = StateFile::new(vec![asleep]);
+    let bytes = state.to_bytes().expect("serialize");
+    assert!(String::from_utf8_lossy(&bytes).contains("\"schemaVersion\": 2"));
+    let back = StateFile::from_bytes(&bytes).expect("load");
+    assert_eq!(back.sessions[0].status, SessionStatus::Hibernated);
+    assert_eq!(back.sessions[0].agent.hibernated_at, Some(42));
+    assert_eq!(back.sessions[0].agent.incarnation, 2);
+    assert!(back.sessions[0].agent.pinned);
 }
 
 #[test]

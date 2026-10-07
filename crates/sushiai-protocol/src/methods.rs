@@ -10,6 +10,7 @@ pub const CAPABILITIES: &[&str] = &[
     "agents",
     "catalog",
     "catalogRead",
+    "hibernate",
 ];
 
 pub mod method {
@@ -73,6 +74,16 @@ pub mod method {
     /// Request: stop the daemon; holders and sessions keep running and the next client starts
     /// a new daemon. Not available to a hook connection.
     pub const DAEMON_SHUTDOWN: &str = "daemon.shutdown";
+
+    // Session hibernation (additive).
+    /// Request: wake a hibernated (or exited) agent session from its stored launch.
+    pub const SESSION_WAKE: &str = "session.wake";
+    /// Request: hibernate an agent session now.
+    pub const SESSION_HIBERNATE: &str = "session.hibernate";
+    /// Request: this connection looks at a session; a focused session never hibernates.
+    pub const SESSION_FOCUS: &str = "session.focus";
+    /// Request: change the daemon's settings (`hibernateAfterSecs`).
+    pub const DAEMON_CONFIGURE: &str = "daemon.configure";
 }
 
 pub mod code {
@@ -95,6 +106,8 @@ pub mod code {
     pub const SESSION_STILL_RUNNING: i64 = 1010;
     /// The daemon is stopping and takes no more changes.
     pub const SHUTTING_DOWN: i64 = 1011;
+    /// The session has no stored launch (or it cannot be opened): it cannot be woken.
+    pub const WAKE_NEEDS_LAUNCH: i64 = 1012;
     /// A hosted module is still starting; the request waited and gave up.
     pub const MODULE_STARTING: i64 = 1100;
 }
@@ -160,7 +173,8 @@ pub struct SessionCreate {
     pub model: Option<String>,
     #[serde(default)]
     pub extra_args: Vec<String>,
-    /// Extra variables for the child. Never logged or persisted.
+    /// Extra variables for the child. Never logged. A claude or codex launch keeps them sealed
+    /// on disk (see the daemon's launch store) so the session can wake.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
     /// Project to bind to. Without it the daemon picks the project whose folder holds `cwd`.
@@ -170,7 +184,8 @@ pub struct SessionCreate {
     pub group: Option<String>,
     /// Claude only: extra keys for the single `--settings` JSON (for example `apiKeyHelper`
     /// and `env`). A `hooks` key is rejected; the daemon's hooks always win. May hold secrets:
-    /// never logged, never persisted, and not part of any record clients can read back.
+    /// never logged, kept only in the sealed launch store, and not part of any record clients
+    /// can read back.
     #[serde(default)]
     pub claude_settings: Option<serde_json::Map<String, serde_json::Value>>,
     /// A key that matches an existing session record returns that session.
@@ -190,6 +205,10 @@ pub enum SessionStatus {
     /// The daemon lost its holder connection; the session may still run. Never persisted.
     Detached,
     Exited,
+    /// No process: the record, the agent session and a saved screen tail are kept.
+    Hibernated,
+    /// The holder is being respawned with the agent's resume command; input is queued.
+    Waking,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +272,23 @@ pub struct AgentInfo {
     /// Launch idempotency key of the session. Kept in the state file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// 0 for the first process of the session, plus one per wake.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub incarnation: u32,
+    /// "Keep awake": a pinned session never hibernates. Owned by the registry.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
+    /// Unix milliseconds the session went to sleep; present while hibernated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hibernated_at: Option<u64>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -306,6 +342,26 @@ pub struct SessionAttach {
     pub id: String,
     #[serde(default)]
     pub scrollback: Option<u32>,
+}
+
+/// Params of `session.wake`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionWake {
+    pub id: String,
+}
+
+/// Params of `session.focus`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionFocus {
+    pub id: String,
+    pub focused: bool,
+}
+
+/// Params of `daemon.configure`. 0 turns hibernation off.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonConfigure {
+    pub hibernate_after_secs: u64,
 }
 
 /// Params of `session.read`.

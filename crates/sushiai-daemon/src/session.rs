@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 use std::future::pending;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +14,8 @@ use serde_json::Value;
 use sushiai_agents::heuristic::{self, ScreenAgent};
 use sushiai_agents::hooks::{self, HookEvent};
 use sushiai_agents::status::{Detected, ExitInfo, Input, SessionStatus as AgentState, Status};
-use sushiai_core::{mark_exited, Screen};
+use sushiai_core::hibernate::{can_hibernate, decide, BusyMeter, Candidate, Decision};
+use sushiai_core::{mark_exited, mark_hibernated, Screen, SCROLLBACK_LINES};
 use sushiai_protocol::{
     code, method, Ask, AskClosed, AskRespond, Frame, HoldAttach, HoldAttachResult, HoldExited,
     Message, Notification, SessionExited, SessionInfo, SessionMeta, SessionStatus,
@@ -21,10 +24,11 @@ use sushiai_protocol::{
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{interval, sleep_until, timeout, Instant};
 
-use crate::agent::{self, now_ms, random_hex};
+use crate::agent::{self, now_ms, random_hex, Prepared};
 use crate::error::Fail;
 use crate::foreground;
-use crate::holder::{HolderConn, SendError};
+use crate::holder::{self, HolderConn, SendError};
+use crate::procs;
 use crate::registry::Registry;
 
 const TERM_GRACE: Duration = Duration::from_secs(5);
@@ -45,6 +49,20 @@ const MAX_ASKS: usize = 20;
 const FOREGROUND_POLL: Duration = Duration::from_secs(2);
 /// Formatted history bytes one attach may carry; the oldest lines go first.
 const HISTORY_BUDGET: usize = 4 * 1024 * 1024;
+/// The saved screen of a sleeping session, history included.
+const TAIL_MAX: usize = 1024 * 1024;
+/// A tail is saved on a change to idle at most this often per session.
+const TAIL_EVERY: Duration = Duration::from_secs(60);
+/// Input typed while a session wakes, kept until it is ready.
+const WAKE_QUEUE_MAX: usize = 64 * 1024;
+/// A waking session is ready once its output has been quiet this long ...
+const WAKE_QUIET: Duration = Duration::from_millis(800);
+/// ... and at the latest this long after the wake began.
+const WAKE_CAP: Duration = Duration::from_secs(20);
+/// The old holder of a session that slept gets this long to be gone before a new one starts.
+const HOLDER_GONE_WAIT: Duration = Duration::from_secs(3);
+/// Most often the CPU of an agent's children is measured.
+const SAMPLE_EVERY: Duration = Duration::from_secs(60);
 
 /// A piece of output and its offset in the session's stream.
 pub struct Chunk {
@@ -84,6 +102,13 @@ enum Cmd {
     Snapshot(oneshot::Sender<Snap>),
     Hook(Vec<u8>, oneshot::Sender<HookReply>),
     Respond(AskRespond, Reply),
+    Wake(Box<Prepared>, Reply),
+    Hibernate(Reply),
+    SaveTail(oneshot::Sender<()>),
+    /// From the task that started a holder for a waking session.
+    Spawned(Result<(HolderConn, u32), Fail>),
+    /// From the task that measured the CPU of the agent's children.
+    Cpu(Option<u64>),
 }
 
 /// Result of a hook event. For a permission ask: the receiver of the answer. The sender is
@@ -145,6 +170,23 @@ impl Handle {
         self.ask(|r| Cmd::Respond(answer, r)).await
     }
 
+    /// Starts waking a hibernated or exited session with its freshly prepared launch.
+    pub async fn wake(&self, prepared: Prepared) -> Result<(), Fail> {
+        self.ask(|r| Cmd::Wake(Box::new(prepared), r)).await
+    }
+
+    pub async fn hibernate(&self) -> Result<(), Fail> {
+        self.ask(Cmd::Hibernate).await
+    }
+
+    /// Saves the screen tail of a running agent session (daemon stop).
+    pub async fn save_tail(&self) {
+        let (tx, rx) = oneshot::channel();
+        if self.tx.send(Cmd::SaveTail(tx)).await.is_ok() {
+            let _ = timeout(ANSWER_TIMEOUT, rx).await;
+        }
+    }
+
     /// Attaches with up to `scrollback` history lines before the screen snapshot.
     pub async fn attach(&self, scrollback: usize) -> Option<Attached> {
         let (tx, rx) = oneshot::channel();
@@ -189,12 +231,26 @@ struct Agent {
     asks: Vec<OpenAsk>,
 }
 
+/// A session that is waking: its process starts and its input waits.
+struct Wake {
+    started: Instant,
+    /// Typed meanwhile, sent in order once the agent is ready.
+    queue: Vec<u8>,
+    last_output: Option<Instant>,
+    /// A resize that came before the holder was there.
+    resize: Option<(u16, u16)>,
+}
+
 struct Actor {
     agent: Option<Agent>,
     info: SessionInfo,
     screen: Screen,
     seq: u64,
-    holder: HolderConn,
+    /// None while the session sleeps.
+    holder: Option<HolderConn>,
+    /// Offset of the holder's stream start in this session's stream: a new holder counts
+    /// from 0 again after a wake, the stream seen by clients does not.
+    base: u64,
     holder_open: bool,
     pending: HashMap<u64, Pending>,
     output: broadcast::Sender<Arc<Chunk>>,
@@ -219,6 +275,23 @@ struct Actor {
     foreground_polled: Option<Instant>,
     /// Leader of the foreground group at the last poll: a new leader is a new agent process.
     foreground_leader: Option<u32>,
+    me: mpsc::WeakSender<Cmd>,
+    /// A sealed launch exists: the session can be woken.
+    has_launch: bool,
+    /// Unix ms of the last input a client sent.
+    last_input_ms: u64,
+    /// A TERM was sent to put the session to sleep: the exit that follows is a sleep.
+    hibernating: bool,
+    /// The owner closed the session: its launch and tail go when it ends.
+    closing: bool,
+    wake: Option<Wake>,
+    wake_due: Option<Instant>,
+    /// Pid of the holder that ended with the last sleep; a new holder waits for it to be gone.
+    dead_holder: Option<u32>,
+    tail_saved: Option<Instant>,
+    meter: BusyMeter,
+    sampling: bool,
+    sampled: Option<Instant>,
 }
 
 /// Starts the actor for a session whose holder is attached and replayed up to `seq`.
@@ -231,11 +304,34 @@ pub fn start(
     sock: PathBuf,
     created: bool,
 ) -> Handle {
+    spawn_actor(registry, info, Some(holder), screen, seq, sock, created)
+}
+
+/// Starts the actor of a session that has no process: a hibernated record (daemon start, or
+/// a wake of an exited one). It serves attach and read from the saved tail.
+pub fn start_hibernated(registry: Arc<Registry>, info: SessionInfo) -> Handle {
+    let sock = registry.home.sessions().join(format!("{}.sock", info.id));
+    let screen = Screen::new(info.rows, info.cols);
+    spawn_actor(registry, info, None, screen, 0, sock, false)
+}
+
+fn spawn_actor(
+    registry: Arc<Registry>,
+    info: SessionInfo,
+    holder: Option<HolderConn>,
+    screen: Screen,
+    seq: u64,
+    sock: PathBuf,
+    created: bool,
+) -> Handle {
     let (tx, rx) = mpsc::channel(64);
+    let me = tx.downgrade();
     let handle = Handle { tx };
     let mut info = info;
     let info_name = info.agent.name.clone();
-    info.holder_pid = holder.holder_pid.or(info.holder_pid);
+    if let Some(holder) = &holder {
+        info.holder_pid = holder.holder_pid.or(info.holder_pid);
+    }
     registry.update(info.clone());
     if created {
         // Before the handle exists and the actor runs: `session.created` precedes any
@@ -245,14 +341,18 @@ pub fn start(
     registry.set_handle(&info.id, handle.clone());
     let watch_foreground = agent::agent_of(info_name.as_deref()).is_none()
         && agent::screen_agent_of(info_name.as_deref()).is_none();
-    let child = foreground::child_pid(holder.child_pid, info.holder_pid);
+    let child = holder
+        .as_ref()
+        .and_then(|h| foreground::child_pid(h.child_pid, info.holder_pid));
+    let has_launch = registry.launches().exists(&info.id);
     let mut actor = Actor {
         agent: restore_agent(&info),
         info,
         screen,
         seq,
+        base: 0,
+        holder_open: holder.is_some(),
         holder,
-        holder_open: true,
         pending: HashMap::new(),
         output: broadcast::channel(OUTPUT_BACKLOG).0,
         registry,
@@ -268,6 +368,18 @@ pub fn start(
         watch_foreground,
         foreground_polled: None,
         foreground_leader: None,
+        me,
+        has_launch,
+        last_input_ms: 0,
+        hibernating: false,
+        closing: false,
+        wake: None,
+        wake_due: None,
+        dead_holder: None,
+        tail_saved: None,
+        meter: BusyMeter::default(),
+        sampling: false,
+        sampled: None,
     };
     // The screen was replayed before the actor existed: read it once now.
     actor.screen_changed();
@@ -319,19 +431,23 @@ impl Actor {
                     Some(command) => self.command(command),
                     None => break,
                 },
-                frame = self.holder.reader.next(), if self.holder_open => {
+                frame = next_frame(&mut self.holder), if self.holder_open => {
                     self.holder_frame(frame.ok().flatten());
                 }
+                () = until(self.wake_due) => self.wake_check(),
                 () = until(self.kill_at) => {
                     self.kill_at = None;
                     // Fire and forget: the answer is not tracked.
-                    let _ = self.holder.close(Signal::Kill);
+                    if let Some(holder) = self.holder.as_mut() {
+                        let _ = holder.close(Signal::Kill);
+                    }
                 }
                 () = until(self.retry.map(|(at, _)| at)) => self.reconnect().await,
                 () = until(self.screen_due) => self.read_screen(),
                 _ = tick.tick() => {
                     self.sweep();
                     self.poll_foreground();
+                    self.hibernate_tick();
                 }
             }
             // An exited session with nobody attached has nothing left to serve.
@@ -346,6 +462,14 @@ impl Actor {
         self.info.status == SessionStatus::Running
     }
 
+    /// The holder takes requests: the session runs or is waking and its holder is here.
+    fn live(&self) -> bool {
+        matches!(
+            self.info.status,
+            SessionStatus::Running | SessionStatus::Waking
+        ) && self.holder.is_some()
+    }
+
     /// Sends a request to the holder and parks `pending` until its answer arrives.
     /// `build` gets the holder connection and returns the request id.
     fn track(
@@ -354,12 +478,15 @@ impl Actor {
         build: impl FnOnce(&mut HolderConn) -> Result<u64, SendError>,
         pending: impl FnOnce(Reply) -> Pending,
     ) {
-        if !self.running() {
+        let live = self.live();
+        let Some(holder) = self.holder.as_mut().filter(|_| live) else {
             let _ = reply.send(Err(not_running()));
-        } else if self.pending.len() >= MAX_PENDING {
+            return;
+        };
+        if self.pending.len() >= MAX_PENDING {
             let _ = reply.send(Err((code::INPUT_BACKPRESSURE, "too many requests".into())));
         } else {
-            match build(&mut self.holder) {
+            match build(holder) {
                 Ok(id) => {
                     self.pending.insert(id, pending(reply));
                 }
@@ -375,23 +502,46 @@ impl Actor {
 
     fn command(&mut self, command: Cmd) {
         match command {
-            Cmd::Input(data, reply) => {
-                self.track(reply, |h| h.input(data), Pending::Ack);
-            }
-            Cmd::Resize(cols, rows, reply) => {
-                self.track(
+            Cmd::Input(data, reply) => self.input(data, reply),
+            Cmd::Resize(cols, rows, reply) => match self.info.status {
+                SessionStatus::Hibernated => {
+                    // The size the session wakes at.
+                    self.info.cols = cols;
+                    self.info.rows = rows;
+                    self.screen.resize(rows, cols);
+                    self.registry.update(self.info.clone());
+                    let _ = reply.send(Ok(()));
+                }
+                SessionStatus::Waking if self.holder.is_none() => {
+                    if let Some(wake) = self.wake.as_mut() {
+                        wake.resize = Some((cols, rows));
+                    }
+                    let _ = reply.send(Ok(()));
+                }
+                _ => self.track(
                     reply,
                     |h| h.resize(cols, rows),
                     |r| Pending::Resize(cols, rows, r),
-                );
+                ),
+            },
+            Cmd::Close(_, reply) if self.info.status == SessionStatus::Hibernated => {
+                // Nothing runs: the session ends as exited, and its launch and tail go.
+                self.closing = true;
+                self.exited(None);
+                let _ = reply.send(Ok(()));
             }
-            Cmd::Close(graceful, reply) if self.info.status == SessionStatus::Detached => {
+            Cmd::Close(graceful, reply)
+                if self.info.status == SessionStatus::Detached
+                    || (self.info.status == SessionStatus::Waking && self.holder.is_none()) =>
+            {
                 // Not connected to the holder right now: close as soon as it is back, or end
                 // as exited if it turns out to be gone.
+                self.closing = true;
                 self.close_pending = Some(graceful);
                 let _ = reply.send(Ok(()));
             }
             Cmd::Close(graceful, reply) => {
+                self.closing = true;
                 let signal = if graceful { Signal::Term } else { Signal::Kill };
                 self.track(reply, |h| h.close(signal), Pending::Ack);
                 if graceful && self.running() {
@@ -418,6 +568,43 @@ impl Actor {
             Cmd::Respond(answer, reply) => {
                 let _ = reply.send(self.respond(answer));
             }
+            Cmd::Wake(prepared, reply) => {
+                self.begin_wake(*prepared);
+                let _ = reply.send(Ok(()));
+            }
+            Cmd::Hibernate(reply) => {
+                let _ = reply.send(self.hibernate_now());
+            }
+            Cmd::SaveTail(reply) => {
+                if self.running() && can_hibernate(&self.info, self.has_launch) {
+                    self.save_tail();
+                }
+                let _ = reply.send(());
+            }
+            Cmd::Spawned(spawned) => self.spawned(spawned),
+            Cmd::Cpu(total) => {
+                self.sampling = false;
+                if let Some(total) = total {
+                    self.meter.observe(now_ms(), total);
+                }
+            }
+        }
+    }
+
+    /// Input from a client: sent on, or kept while the session wakes.
+    fn input(&mut self, data: Vec<u8>, reply: Reply) {
+        self.last_input_ms = now_ms();
+        match (&mut self.wake, self.info.status) {
+            (Some(wake), SessionStatus::Waking) => {
+                let result = if wake.queue.len() + data.len() > WAKE_QUEUE_MAX {
+                    Err((code::INPUT_BACKPRESSURE, "input queue is full".into()))
+                } else {
+                    wake.queue.extend(data);
+                    Ok(())
+                };
+                let _ = reply.send(result);
+            }
+            _ => self.track(reply, |h| h.input(data), Pending::Ack),
         }
     }
 
@@ -453,6 +640,10 @@ impl Actor {
             None => None,
         };
         self.publish();
+        // A hook from the new process: the agent is up.
+        if self.info.status == SessionStatus::Waking {
+            self.finish_wake();
+        }
         Ok(answer)
     }
 
@@ -688,6 +879,9 @@ impl Actor {
             return;
         }
         self.registry.update(self.info.clone());
+        if status_changed && status.0 == Some(sushiai_protocol::AgentStatus::Idle) {
+            self.save_tail_throttled();
+        }
         let id = self.info.id.clone();
         if let (true, Some(status), Some(status_source), Some(status_since)) =
             (status_changed, status.0, status.1, status.2)
@@ -712,11 +906,21 @@ impl Actor {
     /// scrolled up out of the way first: the cursor goes to the bottom row and one line break
     /// per row pushes the last of them into the terminal's own scrollback.
     fn with_history(&mut self, scrollback: usize, snapshot: Vec<u8>) -> Vec<u8> {
+        self.with_history_within(scrollback, snapshot, HISTORY_BUDGET)
+    }
+
+    /// `with_history` with at most `budget` bytes of history lines.
+    fn with_history_within(
+        &mut self,
+        scrollback: usize,
+        snapshot: Vec<u8>,
+        budget: usize,
+    ) -> Vec<u8> {
         let mut lines = self.screen.history_formatted(scrollback);
         // Each line also costs its reset and line break.
         let mut size: usize = lines.iter().map(|l| l.len() + 5).sum();
         let mut skip = 0;
-        while size > HISTORY_BUDGET && skip < lines.len() {
+        while size > budget && skip < lines.len() {
             size -= lines[skip].len() + 5;
             skip += 1;
         }
@@ -736,17 +940,28 @@ impl Actor {
     }
 
     fn text(&mut self, scrollback: usize) -> Text {
-        let (rows, cols) = self.screen.size();
-        let mut text = self.screen.history_text(scrollback);
-        text.push_str(&self.screen.text());
-        text.truncate(text.trim_end().len());
-        Text { text, rows, cols }
+        if self.info.status == SessionStatus::Hibernated {
+            // The tail replayed on a screen of the session's size.
+            let mut screen = Screen::new(self.info.rows, self.info.cols);
+            screen.feed(&self.read_tail());
+            return screen_text(&mut screen, scrollback);
+        }
+        screen_text(&mut self.screen, scrollback)
+    }
+
+    fn read_tail(&self) -> Vec<u8> {
+        std::fs::read(self.registry.home.tail_file(&self.info.id)).unwrap_or_default()
     }
 
     fn snap(&self) -> Snap {
         let (rows, cols) = self.screen.size();
+        // A sleeping session shows what it showed when it went to sleep.
+        let snapshot = match self.info.status {
+            SessionStatus::Hibernated => self.read_tail(),
+            _ => self.screen.snapshot(),
+        };
         Snap {
-            snapshot: self.screen.snapshot(),
+            snapshot,
             seq: self.seq,
             cols,
             rows,
@@ -780,10 +995,15 @@ impl Actor {
             let (Pending::Ack(reply) | Pending::Resize(_, _, reply)) = pending;
             let _ = reply.send(Err(not_running()));
         }
-        if self.info.status != SessionStatus::Exited {
-            self.info.status = SessionStatus::Detached;
-            self.registry.update(self.info.clone());
-            self.retry = Some((Instant::now() + RECONNECT_FIRST, RECONNECT_FIRST));
+        match self.info.status {
+            SessionStatus::Exited | SessionStatus::Hibernated => {}
+            status => {
+                if status == SessionStatus::Running {
+                    self.info.status = SessionStatus::Detached;
+                    self.registry.update(self.info.clone());
+                }
+                self.retry = Some((Instant::now() + RECONNECT_FIRST, RECONNECT_FIRST));
+            }
         }
     }
 
@@ -804,9 +1024,9 @@ impl Actor {
         match HolderConn::connect(&self.sock).await {
             Ok(mut conn) => {
                 // Ask for everything after the last byte seen; a gap shows up as a jump in seq.
-                let from_seq = self.seq;
+                let from_seq = self.seq.saturating_sub(self.base);
                 if let Ok(id) = conn.request(method::HOLD_ATTACH, HoldAttach { from_seq }) {
-                    self.holder = conn;
+                    self.holder = Some(conn);
                     self.holder_open = true;
                     self.attaching = Some(id);
                     return;
@@ -831,7 +1051,9 @@ impl Actor {
                 .result
                 .and_then(|r| serde_json::from_value::<HoldAttachResult>(r).ok());
             if let Some(attached) = attached {
-                self.info.status = SessionStatus::Running;
+                if self.info.status != SessionStatus::Waking {
+                    self.info.status = SessionStatus::Running;
+                }
                 self.info.holder_pid = Some(attached.pid).filter(|p| *p != 0);
                 self.child =
                     foreground::child_pid(attached.child.filter(|p| *p != 0), self.info.holder_pid)
@@ -839,7 +1061,9 @@ impl Actor {
                 self.registry.update(self.info.clone());
                 if let Some(graceful) = self.close_pending.take() {
                     let signal = if graceful { Signal::Term } else { Signal::Kill };
-                    let _ = self.holder.close(signal);
+                    if let Some(holder) = self.holder.as_mut() {
+                        let _ = holder.close(signal);
+                    }
                     if graceful {
                         self.kill_at = Some(Instant::now() + TERM_GRACE);
                     }
@@ -874,6 +1098,13 @@ impl Actor {
     }
 
     fn output_chunk(&mut self, seq: u64, mut data: Vec<u8>) {
+        let seq = seq + self.base;
+        if let Some(wake) = self.wake.as_mut() {
+            // Ready once the output goes quiet.
+            let now = Instant::now();
+            wake.last_output = Some(now);
+            self.wake_due = Some((now + WAKE_QUIET).min(wake.started + WAKE_CAP));
+        }
         // Skip bytes already seen; a gap (holder ring wrapped) just moves the offset forward.
         let (seq, skip) = if seq < self.seq {
             (self.seq, (self.seq - seq) as usize)
@@ -934,9 +1165,14 @@ impl Actor {
     }
 
     fn exited(&mut self, code: Option<i32>) {
+        if self.hibernating && !self.closing {
+            return self.hibernated();
+        }
         self.kill_at = None;
         self.retry = None;
         self.close_pending = None;
+        self.wake = None;
+        self.wake_due = None;
         mark_exited(&mut self.info, code);
         // An exited session takes no more hooks: its token stops working.
         self.info.agent.token_hash = None;
@@ -954,9 +1190,328 @@ impl Actor {
         }
         self.registry.update(self.info.clone());
         self.publish();
+        if self.closing {
+            self.registry.drop_files(&self.info.id);
+        }
         if forget {
             self.send_meta();
         }
+        self.announce_asks_dropped(dropped);
+        let note = Notification::new(
+            method::SESSION_EXITED,
+            SessionExited {
+                id: self.info.id.clone(),
+                code,
+            },
+        );
+        let _ = self.registry.events.send(note);
+    }
+}
+
+/// Hibernation and wake.
+impl Actor {
+    fn candidate(&self) -> Candidate {
+        let record = &self.info.agent;
+        Candidate {
+            eligible: true,
+            running: self.running() && !self.hibernating && self.child.is_some(),
+            agent_status: record.agent_status,
+            open_asks: self.agent.as_ref().map_or(0, |a| a.asks.len()),
+            pinned: self.registry.pinned(&self.info.id),
+            focused: self.registry.focused(&self.info.id),
+            quiet_since_ms: record.status_since.unwrap_or(0).max(self.last_input_ms),
+        }
+    }
+
+    /// Once a second: a session that has been idle long enough goes to sleep.
+    fn hibernate_tick(&mut self) {
+        if !self.running() || !can_hibernate(&self.info, self.has_launch) {
+            return;
+        }
+        let Some(after) = self.registry.hibernate_after() else {
+            return;
+        };
+        let threshold = u64::try_from(after.as_millis()).unwrap_or(u64::MAX);
+        let now = now_ms();
+        match decide(&self.candidate(), now, threshold, self.meter.busy(now)) {
+            Decision::Keep => self.meter = BusyMeter::default(),
+            Decision::Sample => self.sample(after),
+            Decision::Hibernate => self.go_to_sleep(),
+        }
+    }
+
+    /// Measures the CPU of the agent's children without waiting for the answer.
+    fn sample(&mut self, after: Duration) {
+        let every = (after / 3).clamp(Duration::from_millis(100), SAMPLE_EVERY);
+        if self.sampling || self.sampled.is_some_and(|at| at.elapsed() < every) {
+            return;
+        }
+        let Some(child) = self.child else {
+            return;
+        };
+        self.sampling = true;
+        self.sampled = Some(Instant::now());
+        let me = self.me.clone();
+        tokio::spawn(async move {
+            let total = procs::sample(child).await;
+            if let Some(tx) = me.upgrade() {
+                let _ = tx.send(Cmd::Cpu(total)).await;
+            }
+        });
+    }
+
+    /// `session.hibernate`: sleep now, idle or not.
+    fn hibernate_now(&mut self) -> Result<(), Fail> {
+        if agent::agent_of(self.info.agent.name.as_deref()).is_none() {
+            return Err((
+                code::INVALID_PARAMS,
+                "only claude and codex sessions hibernate".into(),
+            ));
+        }
+        match self.info.status {
+            SessionStatus::Hibernated => return Ok(()),
+            SessionStatus::Running if self.hibernating => return Ok(()),
+            SessionStatus::Running => {}
+            _ => return Err(not_running()),
+        }
+        if self.info.agent.agent_session.is_none() {
+            return Err((
+                code::INVALID_PARAMS,
+                "the session has no agent conversation yet".into(),
+            ));
+        }
+        if !self.has_launch {
+            return Err((
+                code::WAKE_NEEDS_LAUNCH,
+                "the session has no stored launch".into(),
+            ));
+        }
+        self.go_to_sleep();
+        Ok(())
+    }
+
+    /// Saves the screen, then asks the agent to end. Its exit completes the sleep.
+    fn go_to_sleep(&mut self) {
+        if self.holder.is_none() {
+            return;
+        }
+        self.save_tail();
+        self.hibernating = true;
+        if let Some(holder) = self.holder.as_mut() {
+            let _ = holder.close(Signal::Term);
+        }
+        self.kill_at = Some(Instant::now() + TERM_GRACE);
+    }
+
+    /// The agent's process ended because the session went to sleep.
+    fn hibernated(&mut self) {
+        self.hibernating = false;
+        self.kill_at = None;
+        self.retry = None;
+        self.close_pending = None;
+        self.attaching = None;
+        for (_, pending) in self.pending.drain() {
+            let (Pending::Ack(reply) | Pending::Resize(_, _, reply)) = pending;
+            let _ = reply.send(Err(not_running()));
+        }
+        self.holder = None;
+        self.holder_open = false;
+        self.child = None;
+        self.dead_holder = self.info.holder_pid;
+        let mut dropped = Vec::new();
+        if let Some(agent) = self.agent.as_mut() {
+            dropped = agent.asks.drain(..).map(|a| a.ask.ask_id).collect();
+            agent.ending_at = None;
+        }
+        mark_hibernated(&mut self.info, now_ms());
+        // Dropped with its history: the saved tail shows it.
+        self.screen = Screen::new(self.info.rows, self.info.cols);
+        self.registry.update(self.info.clone());
+        self.registry.announce_updated(&self.info.id);
+        self.announce_asks_dropped(dropped);
+    }
+
+    fn save_tail(&mut self) {
+        self.tail_saved = Some(Instant::now());
+        let snapshot = self.screen.snapshot();
+        let budget = TAIL_MAX.saturating_sub(snapshot.len());
+        let bytes = self.with_history_within(SCROLLBACK_LINES, snapshot, budget);
+        let path = self.registry.home.tail_file(&self.info.id);
+        if let Err(e) = write_private(&path, &bytes) {
+            tracing::warn!("session {} cannot save its tail: {e}", self.info.id);
+        }
+    }
+
+    /// A tail so a reboot has something to show; at most once a minute.
+    fn save_tail_throttled(&mut self) {
+        let lately = self.tail_saved.is_some_and(|at| at.elapsed() < TAIL_EVERY);
+        if self.running() && !lately && can_hibernate(&self.info, self.has_launch) {
+            self.save_tail();
+        }
+    }
+
+    /// Starts the agent again from its stored launch. The session keeps its id and stream.
+    fn begin_wake(&mut self, prepared: Prepared) {
+        if !matches!(
+            self.info.status,
+            SessionStatus::Hibernated | SessionStatus::Exited
+        ) {
+            return;
+        }
+        let now = now_ms();
+        let dead = self.dead_holder.take().or(self.info.holder_pid);
+        let record = &mut self.info.agent;
+        record.token_hash = prepared.agent.token_hash;
+        record.incarnation += 1;
+        record.hibernated_at = None;
+        record.asks.clear();
+        record.agent_status = Some(sushiai_protocol::AgentStatus::Starting);
+        record.status_source = Some(sushiai_protocol::StatusSource::Heuristic);
+        record.status_since = Some(now);
+        self.info.cmd = prepared.cmd;
+        self.info.status = SessionStatus::Waking;
+        self.info.exit_code = None;
+        self.info.holder_pid = None;
+        self.agent = restore_agent(&self.info);
+        self.screen = Screen::new(self.info.rows, self.info.cols);
+        self.meter = BusyMeter::default();
+        self.closing = false;
+        self.hibernating = false;
+        // Clients clear their terminal; the new process then writes on a blank screen.
+        let at = self.seq;
+        self.seq += 2;
+        let _ = self.output.send(Arc::new(Chunk {
+            seq: at,
+            data: b"\x1bc".to_vec(),
+        }));
+        self.base = self.seq;
+        self.wake = Some(Wake {
+            started: Instant::now(),
+            queue: Vec::new(),
+            last_output: None,
+            resize: None,
+        });
+        self.wake_due = Some(Instant::now() + WAKE_CAP);
+        self.registry.update(self.info.clone());
+        self.registry.announce_updated(&self.info.id);
+
+        let (me, sock, dir) = (
+            self.me.clone(),
+            self.sock.clone(),
+            self.registry.home.sessions(),
+        );
+        let (id, cols, rows, cwd) = (
+            self.info.id.clone(),
+            self.info.cols,
+            self.info.rows,
+            self.info.cwd.clone(),
+        );
+        tokio::spawn(async move {
+            holder_gone(&sock, dead).await;
+            let started = start_holder(&holder::Spawn {
+                id: &id,
+                dir: &dir,
+                cols,
+                rows,
+                cwd: &cwd,
+                cmd: &prepared.run_cmd,
+                env: &prepared.env,
+            })
+            .await;
+            if let Some(tx) = me.upgrade() {
+                let _ = tx.send(Cmd::Spawned(started)).await;
+            }
+        });
+    }
+
+    /// The new holder is up (or failed): attach to it from its first byte.
+    fn spawned(&mut self, started: Result<(HolderConn, u32), Fail>) {
+        if self.wake.is_none() || self.info.status != SessionStatus::Waking {
+            if let Ok((_, pid)) = started {
+                holder::kill_group(pid);
+            }
+            return;
+        }
+        let (mut conn, pid) = match started {
+            Ok(started) => started,
+            Err((_, message)) => {
+                tracing::warn!("session {} cannot wake: {message}", self.info.id);
+                return self.wake_failed();
+            }
+        };
+        self.info.holder_pid = Some(pid);
+        match conn.request(method::HOLD_ATTACH, HoldAttach { from_seq: 0 }) {
+            Ok(id) => self.attaching = Some(id),
+            Err(_) => {
+                holder::kill_group(pid);
+                return self.wake_failed();
+            }
+        }
+        if let Some((cols, rows)) = self.wake.as_mut().and_then(|w| w.resize.take()) {
+            let _ = conn.resize(cols, rows);
+            self.screen.resize(rows, cols);
+            self.info.cols = cols;
+            self.info.rows = rows;
+        }
+        self.holder = Some(conn);
+        self.holder_open = true;
+        self.registry.update(self.info.clone());
+    }
+
+    /// The process could not start: back to sleep, so a later wake can try again.
+    fn wake_failed(&mut self) {
+        if self.closing {
+            return self.exited(None);
+        }
+        self.wake = None;
+        self.wake_due = None;
+        self.holder = None;
+        self.holder_open = false;
+        self.attaching = None;
+        self.close_pending = None;
+        mark_hibernated(&mut self.info, now_ms());
+        self.screen = Screen::new(self.info.rows, self.info.cols);
+        self.registry.update(self.info.clone());
+        self.registry.announce_updated(&self.info.id);
+    }
+
+    /// The wake timer fired: ready after quiet output, or give up at the cap.
+    fn wake_check(&mut self) {
+        self.wake_due = None;
+        let Some(wake) = &self.wake else {
+            return;
+        };
+        let quiet = wake
+            .last_output
+            .is_some_and(|at| at.elapsed() >= WAKE_QUIET);
+        if wake.started.elapsed() >= WAKE_CAP {
+            if self.holder.is_some() {
+                self.finish_wake();
+            } else {
+                self.wake_failed();
+            }
+        } else if quiet {
+            self.finish_wake();
+        } else {
+            self.wake_due = Some(wake.started + WAKE_CAP);
+        }
+    }
+
+    /// The agent is up: the input typed meanwhile goes in, in order.
+    fn finish_wake(&mut self) {
+        let Some(wake) = self.wake.take() else {
+            return;
+        };
+        self.wake_due = None;
+        self.info.status = SessionStatus::Running;
+        if let (Some(holder), false) = (self.holder.as_mut(), wake.queue.is_empty()) {
+            let _ = holder.input(wake.queue);
+        }
+        self.registry.update(self.info.clone());
+        self.registry.announce_updated(&self.info.id);
+    }
+
+    fn announce_asks_dropped(&self, dropped: Vec<String>) {
         for ask_id in dropped {
             let params = AskClosed {
                 ask_id,
@@ -967,14 +1522,64 @@ impl Actor {
                 .events
                 .send(Notification::new(method::SESSION_ASK_CLOSED, params));
         }
-        let note = Notification::new(
-            method::SESSION_EXITED,
-            SessionExited {
-                id: self.info.id.clone(),
-                code,
-            },
-        );
-        let _ = self.registry.events.send(note);
+    }
+}
+
+async fn start_holder(spec: &holder::Spawn<'_>) -> Result<(HolderConn, u32), Fail> {
+    let fail = |e: &dyn std::fmt::Display| (code::SPAWN_FAILED, e.to_string());
+    let pid = holder::spawn(spec).await.map_err(|e| fail(&e))?;
+    let sock = spec.dir.join(format!("{}.sock", spec.id));
+    match HolderConn::connect(&sock).await {
+        Ok(conn) => Ok((conn, pid)),
+        Err(e) => {
+            holder::kill_group(pid);
+            let _ = std::fs::remove_file(&sock);
+            Err(fail(&e))
+        }
+    }
+}
+
+/// Writes `bytes` to `path` (0600) through a temp file, so a reader never sees half of it.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    file.write_all(bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// The next frame of the holder; never ready while there is none.
+async fn next_frame(holder: &mut Option<HolderConn>) -> crate::Result<Option<Frame>> {
+    match holder {
+        Some(holder) => holder.reader.next().await,
+        None => pending().await,
+    }
+}
+
+fn screen_text(screen: &mut Screen, scrollback: usize) -> Text {
+    let (rows, cols) = screen.size();
+    let mut text = screen.history_text(scrollback);
+    text.push_str(&screen.text());
+    text.truncate(text.trim_end().len());
+    Text { text, rows, cols }
+}
+
+/// Waits until the process `pid` is gone or its socket is: only then may a new holder bind
+/// the same socket path (the old one removes it as its last step).
+async fn holder_gone(sock: &std::path::Path, pid: Option<u32>) {
+    let alive = |pid: u32| {
+        i32::try_from(pid).is_ok_and(|p| {
+            // SAFETY: kill(2) with signal 0 only checks that the process exists.
+            unsafe { libc::kill(p, 0) == 0 }
+        })
+    };
+    let deadline = Instant::now() + HOLDER_GONE_WAIT;
+    while sock.exists() && pid.is_some_and(alive) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 

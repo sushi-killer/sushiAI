@@ -7,6 +7,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const childProcess = require("node:child_process");
 const { createDaemonManager } = require("../electron/daemon/manager.cjs");
 const { createLocalConnector } = require("../electron/daemon/local.cjs");
 const {
@@ -36,46 +37,58 @@ const alive = (pid) => {
   }
 };
 
+/** A temporary home, a local connector and a manager over it. `binDir` goes
+ * first in the daemon's PATH (a fake harness); `enabled` writes the module's
+ * flag before the first start. Everything is removed after the test. */
+function world(t, { binDir = "", enabled = false } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "orch-real-"));
+  const home = path.join(root, "home");
+  fs.mkdirSync(home, { mode: 0o700 });
+  if (enabled) {
+    fs.mkdirSync(path.join(home, "modules"));
+    fs.writeFileSync(path.join(home, "modules/orch.enabled"), "");
+  }
+  const daemonEnv = {
+    PATH: [binDir, process.env.PATH].filter(Boolean).join(path.delimiter),
+    HOME: root,
+    CODEX_HOME: path.join(root, "codex"),
+    SUSHIAI_HOME: home,
+    SUSHIAI_DAEMON_BIN: binary,
+    SUSHIAI_LOG: "off",
+  };
+  const connector = createLocalConnector({
+    env: daemonEnv,
+    appVersion: "0.0.0-test",
+    startTimeoutMs: 20000,
+    testMode: true,
+  });
+  const manager = createDaemonManager({
+    connectors: { local: connector },
+    backoffMinMs: 50,
+    backoffMaxMs: 500,
+    random: () => 1,
+  });
+  const pidOf = () =>
+    Number(fs.readFileSync(path.join(home, "daemon.lock"), "utf8").trim());
+  t.after(async () => {
+    manager.close();
+    const pid = pidOf();
+    if (alive(pid)) process.kill(pid, "SIGTERM");
+    await until(() => !alive(pid), "the daemon to stop").catch(() => {});
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const ready = [];
+  manager.on("state", (state) => {
+    if (state.state === "ready") ready.push(state.generation);
+  });
+  return { root, home, connector, manager, pidOf, ready };
+}
+
 test(
   "the local daemon offers orch, answers orch.*, and a kill -9 of it ends in a ready daemon with the secrets pushed again",
   { skip: !fs.existsSync(binary) && "debug sushiai binary is not built" },
   async (t) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "orch-real-"));
-    const home = path.join(root, "home");
-    fs.mkdirSync(home, { mode: 0o700 });
-    const env = {
-      PATH: process.env.PATH,
-      HOME: root,
-      CODEX_HOME: path.join(root, "codex"),
-      SUSHIAI_HOME: home,
-      SUSHIAI_DAEMON_BIN: binary,
-      SUSHIAI_LOG: "off",
-    };
-    const connector = createLocalConnector({
-      env,
-      appVersion: "0.0.0-test",
-      startTimeoutMs: 20000,
-      testMode: true,
-    });
-    const manager = createDaemonManager({
-      connectors: { local: connector },
-      backoffMinMs: 50,
-      backoffMaxMs: 500,
-      random: () => 1,
-    });
-    const pidOf = () =>
-      Number(fs.readFileSync(path.join(home, "daemon.lock"), "utf8").trim());
-    t.after(async () => {
-      manager.close();
-      const pid = pidOf();
-      if (alive(pid)) process.kill(pid, "SIGTERM");
-      await until(() => !alive(pid), "the daemon to stop").catch(() => {});
-      fs.rmSync(root, { recursive: true, force: true });
-    });
-    const ready = [];
-    manager.on("state", (state) => {
-      if (state.state === "ready") ready.push(state.generation);
-    });
+    const { home, connector, manager, pidOf, ready } = world(t);
     const hosts = createOrchestratorHosts({
       send: () => {},
       getConnections: () => ({ get: () => ({}), list: () => [] }),
@@ -141,5 +154,109 @@ test(
     assert.ok(!fs.existsSync(path.join(home, "modules/orch.enabled")));
     const off = manager.states().find((item) => item.host === "local");
     assert.ok(!off.capabilities.includes("orch"), "no orch after disabling");
+  },
+);
+
+const INIT = '{"type":"system","subtype":"init","session_id":"sess-fake"}';
+const MESSAGE =
+  '{"type":"assistant","message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[],"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":100}},"parent_tool_use_id":null,"session_id":"sess-fake"}';
+const RESULT =
+  '{"type":"result","total_cost_usd":0.3,"usage":{"input_tokens":1,"output_tokens":1},"result":"done"}';
+
+test(
+  "with the module enabled, a task run survives a kill -9 of the daemon and finishes with one attempt",
+  { skip: !fs.existsSync(binary) && "debug sushiai binary is not built" },
+  async (t) => {
+    // A fake `claude` first in the daemon's PATH: it streams one message,
+    // waits, then reports its cost and exits 0.
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), "orch-fake-bin-"));
+    t.after(() => fs.rmSync(bin, { recursive: true, force: true }));
+    fs.writeFileSync(
+      path.join(bin, "claude"),
+      `#!/bin/sh\ncat > /dev/null\necho changed > CHANGED_MARKER.txt\necho '${INIT}'\necho '${MESSAGE}'\nsleep 4\necho '${RESULT}'\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const { root, home, manager, pidOf, ready } = world(t, {
+      binDir: bin,
+      enabled: true,
+    });
+    fs.writeFileSync(
+      path.join(root, ".gitconfig"),
+      "[user]\n\tname = orch test\n\temail = orch-test@example.invalid\n",
+    );
+    const repo = path.join(root, "repo");
+    fs.mkdirSync(repo);
+    const git = (...args) =>
+      childProcess.execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+    git("init", "-q");
+    fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+    git("add", ".");
+    git(
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@example.invalid",
+      "commit",
+      "-qm",
+      "init",
+    );
+
+    manager.start();
+    await until(() => ready.length > 0, "the daemon to be ready");
+    const settings = await manager.request("local", "orch.settings.get", {});
+    await manager.request("local", "orch.settings.set", {
+      settings: {
+        ...settings,
+        review: "",
+        briefCheckRoute: "",
+        answerPolicy: false,
+        sandbox: "host",
+      },
+    });
+    const task = await manager.request("local", "orch.task.create", {
+      repo,
+      title: "Survives",
+      goal: "g",
+      criteria: [],
+      verify: ["true"],
+    });
+    t.after(() => fs.rmSync(task.worktree, { recursive: true, force: true }));
+    const get = () =>
+      manager.request("local", "orch.task.get", { id: task.id });
+    const events = path.join(
+      home,
+      "orchestrator/tasks",
+      task.id,
+      "runs/1/events.jsonl",
+    );
+    const running = await until(async () => {
+      const current = await get();
+      const seen =
+        fs.existsSync(events) &&
+        fs.readFileSync(events, "utf8").includes("msg_1");
+      return seen && current.attempts[0]?.pgid ? current : null;
+    }, "the run to stream");
+    const pgid = running.attempts[0].pgid;
+
+    // kill -9 mid-run: the run is the daemon's child in its own group and
+    // goes on without it.
+    const daemon = pidOf();
+    process.kill(daemon, "SIGKILL");
+    await until(() => !alive(daemon), "the daemon to die");
+    assert.ok(alive(pgid), "the run outlives the daemon");
+    await manager.retry("local");
+    await until(() => ready.length >= 2, "the daemon to be ready again");
+
+    const done = await until(
+      async () => {
+        const current = await get();
+        return current.status === "done" ? current : null;
+      },
+      "the task to finish",
+      30000,
+    );
+    assert.equal(done.attempts.length, 1, "no requeue");
+    assert.equal(done.attempts[0].status, "passed");
+    assert.equal(done.attempts[0].costUsd, 0.3);
   },
 );

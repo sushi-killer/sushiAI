@@ -55,9 +55,10 @@ impl RunFiles {
     }
 }
 
-/// `true` while some process of group `pgid` is alive.
+/// `true` while some process of group `pgid` is alive, not only its leader
+/// (`kill(-pgid, 0)` signals every member).
 pub(super) fn group_alive(pgid: i32) -> bool {
-    pgid > 0 && unsafe { libc::kill(pgid, 0) == 0 }
+    pgid > 0 && unsafe { libc::kill(-pgid, 0) == 0 }
 }
 
 /// `true` while group `pgid` is alive and is the run whose wrapper shell was
@@ -232,19 +233,22 @@ impl Guard {
 }
 
 /// Reads the lines `file` gains, as they arrive, until the run is over: its
-/// exit file exists or its process group is gone. What was written before
-/// that moment is still delivered.
+/// exit file exists, its process group is gone, or `wrapper_gone` is set (the
+/// daemon reaped the wrapper shell, which can die before it writes the exit
+/// file and then stays a zombie that still counts as alive). What was written
+/// before that moment is still delivered.
 fn tail_file(
     file: PathBuf,
     exit: PathBuf,
     pgid: i32,
+    wrapper_gone: Arc<AtomicBool>,
 ) -> Box<dyn tokio::io::AsyncRead + Unpin + Send> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let (mut tx, rx) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
         let mut offset = 0u64;
         loop {
-            let over = exit.exists() || !group_alive(pgid);
+            let over = exit.exists() || wrapper_gone.load(Ordering::SeqCst) || !group_alive(pgid);
             if let Ok(mut f) = tokio::fs::File::open(&file).await {
                 let _ =
                     tokio::io::AsyncSeekExt::seek(&mut f, std::io::SeekFrom::Start(offset)).await;
@@ -417,11 +421,22 @@ pub(super) async fn run_harness(
     }
 
     type Source = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+    let wrapper_gone = Arc::new(AtomicBool::new(false));
     let (stdout, stderr): (Source, Source) = if track_attempt {
         let pgid = pgid.unwrap_or(0);
         (
-            tail_file(files.raw.clone(), files.exit.clone(), pgid),
-            tail_file(files.stderr.clone(), files.exit.clone(), pgid),
+            tail_file(
+                files.raw.clone(),
+                files.exit.clone(),
+                pgid,
+                wrapper_gone.clone(),
+            ),
+            tail_file(
+                files.stderr.clone(),
+                files.exit.clone(),
+                pgid,
+                wrapper_gone.clone(),
+            ),
         )
     } else {
         if let Some(mut stdin) = child.stdin.take() {
@@ -483,6 +498,13 @@ pub(super) async fn run_harness(
                 kill_group(pgid, &mut child).await;
                 trip.apply(&mut outcome);
                 break;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(200)),
+                if track_attempt && !wrapper_gone.load(Ordering::SeqCst) =>
+            {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    wrapper_gone.store(true, Ordering::SeqCst);
+                }
             }
             line = out_lines.next_line(), if !stdout_done => {
                 match line {

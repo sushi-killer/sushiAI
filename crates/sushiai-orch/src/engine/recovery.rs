@@ -128,7 +128,8 @@ impl RawTail {
     }
 }
 
-/// Stops a run's process group: SIGTERM, SIGKILL after 5 s.
+/// Stops a run's process group: SIGTERM, SIGKILL after 5 s if any member
+/// (not only the leader) is still alive.
 /// Does nothing for a group that is not the run of `exit` (a reused pgid).
 async fn stop_group(pgid: i32, exit: &Path) {
     if !run_group_alive(pgid, exit) {
@@ -224,8 +225,15 @@ pub(super) async fn follow_run(
     let mut tail = RawTail::rebuild(&files, &events);
     let mut notes = harness::RunOutcome::default();
     let mut caught_up = false;
+    let mut stderr_len = 0u64;
     loop {
         let over = files.exit.exists() || !group_alive(pgid);
+        // Growing stderr is activity, as in `run_harness`.
+        let len = std::fs::metadata(&files.stderr).map_or(0, |m| m.len());
+        if len > stderr_len {
+            stderr_len = len;
+            guard.heard();
+        }
         for line in tail.pump(&secrets, over) {
             let note = harness::feed_stream_line(attempt.harness, &line, &mut notes);
             if let (true, Some(note)) = (caught_up, note) {

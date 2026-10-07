@@ -1,7 +1,7 @@
 //! The orchestrator agent's conversations: several named chat sessions per
 //! repository, run by the daemon so a reply keeps coming (and stays readable)
 //! when the app window closes or restarts. Each turn is one CLI run that only
-//! reads the repository and manages tasks through `orchd mcp`; the harness
+//! reads the repository and manages tasks through `sushiai mcp`; the harness
 //! session id carries a session's conversation from turn to turn. A repo has
 //! one live turn at most, and it always belongs to the `current` session.
 

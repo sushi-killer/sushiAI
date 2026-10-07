@@ -265,9 +265,10 @@ fn write_atomic(path: &Path, value: &Value, ts: u64) -> Result<(), HooksFileErro
     write_text_atomic(path, &text, ts)
 }
 
-/// Temp file in the same directory, fsync, mode copied from the old file,
+/// Temp file in the same directory, created with the old file's mode (0600
+/// when there is none) so the content is never readable by others, fsync,
 /// rename over it.
-pub(crate) fn write_text_atomic(path: &Path, text: &str, ts: u64) -> Result<(), HooksFileError> {
+pub fn write_text_atomic(path: &Path, text: &str, ts: u64) -> Result<(), HooksFileError> {
     // Unique per process and call: two installs at once must not share a temp file.
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -277,12 +278,17 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str, ts: u64) -> Result<(), 
         std::process::id()
     ));
     let res = (|| {
-        let mut f = fs::File::create(&tmp)?;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        let mode = fs::metadata(path).map_or(0o600, |meta| meta.mode() & 0o7777);
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&tmp)?;
+        // The creation mode is cut by the umask; the old file's mode is kept exactly.
+        f.set_permissions(fs::Permissions::from_mode(mode))?;
         f.write_all(text.as_bytes())?;
         f.sync_all()?;
-        if let Ok(meta) = fs::metadata(path) {
-            fs::set_permissions(&tmp, meta.permissions())?;
-        }
         fs::rename(&tmp, path)
     })();
     if res.is_err() {
@@ -292,7 +298,7 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str, ts: u64) -> Result<(), 
 }
 
 /// Copy `path` to `<name>.bak-<ts>` and keep the newest three.
-pub(crate) fn backup_file(path: &Path, ts: u64) -> Result<PathBuf, HooksFileError> {
+pub fn backup_file(path: &Path, ts: u64) -> Result<PathBuf, HooksFileError> {
     let b = path.with_file_name(format!("{}.bak-{ts}", file_name(path)));
     fs::copy(path, &b).map_err(io_err(&b))?;
     prune_backups(path);

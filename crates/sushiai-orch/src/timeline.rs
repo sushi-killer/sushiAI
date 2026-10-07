@@ -1,6 +1,6 @@
 //! Where a task's time and money went, and which failures recur across
 //! tasks. Both are computed on demand from the task records and each run's
-//! `events.jsonl`; nothing here is stored. `orchd failures --data <dir>`
+//! `events.jsonl`; nothing here is stored. `sushiai orch failures --data <dir>`
 //! prints the catalogue as a table.
 
 use crate::ab::work_breakdown;
@@ -391,21 +391,21 @@ pub fn failures_table(rows: &[FailureRow], now: i64) -> String {
     out
 }
 
-/// `orchd failures --data <dir> [--repo <path>] [--since-days <n>]`.
+/// `sushiai orch failures --data <dir> [--repo <path>] [--since-days <n>]`.
 pub fn run(args: &[String]) -> i32 {
     let flag = |name: &str| args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone());
     let Some(data) = flag("--data").map(PathBuf::from) else {
-        eprintln!("orchd failures: --data <dir> is required");
+        eprintln!("sushiai orch failures: --data <dir> is required");
         return 2;
     };
     if !data.join("tasks").is_dir() {
-        eprintln!("orchd failures: no task store at {}", data.display());
+        eprintln!("sushiai orch failures: no task store at {}", data.display());
         return 1;
     }
     let since = match flag("--since-days").map(|v| v.parse::<u32>()) {
         Some(Ok(d)) => Some(d),
         Some(Err(_)) => {
-            eprintln!("orchd failures: --since-days takes a whole number");
+            eprintln!("sushiai orch failures: --since-days takes a whole number");
             return 2;
         }
         None => None,
@@ -413,7 +413,7 @@ pub fn run(args: &[String]) -> i32 {
     let tasks = match Store::new(&data).and_then(|s| s.list_tasks()) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("orchd failures: {e}");
+            eprintln!("sushiai orch failures: {e}");
             return 1;
         }
     };

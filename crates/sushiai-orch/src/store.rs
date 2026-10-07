@@ -354,18 +354,35 @@ pub fn group_started_with(pgid: i32, path: &Path) -> bool {
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&*path.to_string_lossy()))
 }
 
-/// Write `value` as JSON to `path` atomically: serialize to a sibling temp
-/// file, then rename over the destination. The rename is atomic on the same
-/// filesystem, so a reader never observes a partially written file.
 pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    write_atomic(path, &json_bytes(value)?, None)
+}
+
+/// As `write_json_atomic`, for JSON that carries a secret: mode 0600 from the
+/// first byte (a run's settings embed its hook token).
+pub fn write_json_private<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    write_atomic(path, &json_bytes(value)?, Some(0o600))
+}
+
+fn json_bytes<T: serde::Serialize>(value: &T) -> io::Result<Vec<u8>> {
+    serde_json::to_vec_pretty(value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Atomically write a secret-bearing file (a per-run API key) restricted to
+/// owner read/write (mode 0600): per-run key files are deleted once their run
+/// ends, so this is always a small, short-lived plain-text file, never JSON.
+pub fn write_secret_file(path: &Path, contents: &str) -> io::Result<()> {
+    write_atomic(path, contents.as_bytes(), Some(0o600))
+}
+
+/// Writes `bytes` to a uniquely named temp file next to `path` and renames it
+/// over `path`. `mode` is the file's mode from creation on (`None`: the
+/// umask's default); the temp name is unique per call, so overlapping writes
+/// of one path never collide.
+fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir)?;
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("data.json");
-    // Unique per call: two saves of one task can overlap, and a shared
-    // temp name made the slower rename fail.
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("data");
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp_path = dir.join(format!(
         ".{}.tmp-{}-{}",
@@ -373,36 +390,16 @@ pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> io::Res
         std::process::id(),
         WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    let json = serde_json::to_vec_pretty(value)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     {
-        let mut f = fs::File::create(&tmp_path)?;
-        f.write_all(&json)?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp_path, path)?;
-    Ok(())
-}
-
-/// Atomically write a secret-bearing file (a per-run API key) restricted to
-/// owner read/write (mode 0600): per-run key files are deleted once their run
-/// ends, so this is always a small, short-lived plain-text file, never JSON.
-pub fn write_secret_file(path: &Path, contents: &str) -> io::Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(dir)?;
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("secret");
-    let tmp_path = dir.join(format!(".{}.tmp-{}", file_name, std::process::id()));
-    {
-        let mut f = fs::File::create(&tmp_path)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            f.set_permissions(fs::Permissions::from_mode(0o600))?;
+        if let Some(mode) = mode {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(mode);
         }
-        f.write_all(contents.as_bytes())?;
+        let mut f = options.open(&tmp_path)?;
+        f.write_all(bytes)?;
         f.sync_all()?;
     }
     fs::rename(&tmp_path, path)?;
@@ -716,6 +713,35 @@ mod tests {
         );
         let _ = stranger.kill();
         let _ = stranger.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_json_private_is_mode_0600_and_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        write_json_private(&path, &serde_json::json!({"token": "t"})).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn concurrent_secret_writes_of_one_path_do_not_collide() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key");
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    (0..50).all(|_| write_secret_file(&path, &format!("k{i}")).is_ok())
+                })
+            })
+            .collect();
+        for t in threads {
+            assert!(t.join().unwrap(), "a write failed on a shared temp name");
+        }
     }
 
     #[test]

@@ -13,7 +13,10 @@ use sushiai_orch::mcp::Caller;
 use sushiai_protocol::{encode, Decoder, Frame, Message, Request, PROTOCOL_VERSION};
 
 pub enum CallError {
-    /// The connection ended before an answer; a fresh one may work.
+    /// The request was never written; a fresh connection may work.
+    NotSent(String),
+    /// The connection ended after the request was written: the daemon may have
+    /// run it, so it is not sent again.
     Closed(String),
     /// The daemon answered with an error.
     Rpc(String),
@@ -22,7 +25,7 @@ pub enum CallError {
 impl CallError {
     pub fn message(self) -> String {
         match self {
-            CallError::Closed(e) | CallError::Rpc(e) => e,
+            CallError::NotSent(e) | CallError::Closed(e) | CallError::Rpc(e) => e,
         }
     }
 }
@@ -85,7 +88,7 @@ impl Conn {
         self.writer
             .write_all(&encode(&frame))
             .and_then(|()| self.writer.flush())
-            .map_err(|e| CallError::Closed(format!("daemon write failed: {e}")))?;
+            .map_err(|e| CallError::NotSent(format!("daemon write failed: {e}")))?;
         let mut buf = [0u8; 8192];
         loop {
             let n = match self.reader.read(&mut buf) {
@@ -133,25 +136,103 @@ impl Drop for Conn {
 }
 
 /// A [`Caller`] for `orch.<method>` over a lazily opened connection (through `sushiai proxy`,
-/// which starts the daemon when nobody answers). A dropped connection is retried once on a
-/// fresh one.
+/// which starts the daemon when nobody answers). A request that could not be written is
+/// retried once on a fresh connection; one that was written is never sent twice.
 pub fn orch_caller(client: &'static str) -> Caller {
     let conn: RefCell<Option<Conn>> = RefCell::new(None);
     Box::new(move |method, params| {
         let method = format!("orch.{method}");
-        let mut slot = conn.borrow_mut();
-        for attempt in 0..2 {
-            if slot.is_none() {
-                *slot = Some(Conn::via_proxy(client)?);
-            }
-            let Some(live) = slot.as_mut() else { break };
-            match live.call(&method, params.clone()) {
-                Err(CallError::Closed(e)) if attempt == 1 => return Err(e),
-                Err(CallError::Closed(_)) => *slot = None,
-                Err(CallError::Rpc(e)) => return Err(e),
-                Ok(v) => return Ok(v),
-            }
-        }
-        Err("the daemon connection failed".to_string())
+        call_once_sent(
+            &mut conn.borrow_mut(),
+            || Conn::via_proxy(client),
+            &method,
+            params,
+        )
     })
+}
+
+fn call_once_sent(
+    slot: &mut Option<Conn>,
+    mut connect: impl FnMut() -> Result<Conn, String>,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    for attempt in 0..2 {
+        if slot.is_none() {
+            *slot = Some(connect()?);
+        }
+        let Some(live) = slot.as_mut() else { break };
+        match live.call(method, params.clone()) {
+            Err(CallError::NotSent(e)) if attempt == 1 => return Err(e),
+            Err(CallError::NotSent(_)) => *slot = None,
+            Err(CallError::Closed(e)) => {
+                *slot = None;
+                return Err(e);
+            }
+            Err(CallError::Rpc(e)) => return Err(e),
+            Ok(v) => return Ok(v),
+        }
+    }
+    Err("the daemon connection failed".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct BrokenPipe;
+    impl Write for BrokenPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn conn(writer: Box<dyn Write>) -> Conn {
+        Conn {
+            reader: Box::new(std::io::empty()),
+            writer,
+            decoder: Decoder::new(),
+            next_id: 1,
+            child: None,
+        }
+    }
+
+    #[test]
+    fn a_request_the_daemon_may_have_received_is_not_sent_again() {
+        let mut connects = 0;
+        let result = call_once_sent(
+            &mut None,
+            || {
+                connects += 1;
+                Ok(conn(Box::new(std::io::sink())))
+            },
+            "orch.task_create",
+            json!({}),
+        );
+        assert!(result.is_err());
+        assert_eq!(connects, 1, "EOF after the write must not trigger a resend");
+    }
+
+    #[test]
+    fn a_request_that_could_not_be_written_is_retried_on_a_fresh_connection() {
+        let mut connects = 0;
+        let result = call_once_sent(
+            &mut None,
+            || {
+                connects += 1;
+                Ok(conn(if connects == 1 {
+                    Box::new(BrokenPipe)
+                } else {
+                    Box::new(std::io::sink())
+                }))
+            },
+            "orch.task_create",
+            json!({}),
+        );
+        assert!(result.is_err(), "the second connection hits EOF");
+        assert_eq!(connects, 2);
+    }
 }

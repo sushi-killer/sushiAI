@@ -96,9 +96,13 @@ async fn a_dead_run_without_an_exit_file_is_interrupted_and_its_spend_kept() {
 /// A process group that looks like a run's wrapper shell: the exit file is
 /// its `$0`. A thread reaps it, as init would reap a run of an earlier daemon.
 fn spawn_group(exit: &Path, foreign: bool) -> i32 {
+    spawn_group_running("sleep 30; echo $? > \"$0\"", exit, foreign)
+}
+
+fn spawn_group_running(script: &str, exit: &Path, foreign: bool) -> i32 {
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new("/bin/sh");
-    cmd.arg("-c").arg("sleep 30; echo $? > \"$0\"");
+    cmd.arg("-c").arg(script);
     cmd.arg(if foreign { Path::new("/no-run") } else { exit });
     unsafe {
         cmd.pre_exec(|| {
@@ -186,6 +190,58 @@ async fn a_stalled_adopted_run_is_killed_after_the_stall_timeout() {
 
     assert!(outcome.stalled, "{:?}", outcome.error);
     assert!(!group_alive(pgid), "the adopted run must be stopped");
+}
+
+#[tokio::test]
+async fn a_stalled_adopted_run_whose_member_traps_sigterm_is_still_killed() {
+    let (app, dir) = test_app();
+    let (mut task, run_dir) = running_implement_task(&app, dir.path());
+    std::fs::write(run_dir.join("events.raw"), "").unwrap();
+    // The leader dies on SIGTERM at once; a member ignores it.
+    let pgid = spawn_group_running(
+        "(trap '' TERM; exec sleep 60) & wait",
+        &run_dir.join("events.exit"),
+        false,
+    );
+    task.attempts[0].pgid = Some(pgid);
+    app.store.save_task(&task).unwrap();
+    let variant = Variant {
+        stall_timeout_secs: 1,
+        ..Default::default()
+    };
+
+    let outcome = follow_within(&app, &task, Guard::for_variant(&variant, None)).await;
+
+    assert!(outcome.stalled, "{:?}", outcome.error);
+    // Any member, not just the leader (which is reaped by now).
+    assert!(
+        unsafe { libc::kill(-pgid, 0) } != 0,
+        "a member that traps SIGTERM must still be killed"
+    );
+}
+
+#[tokio::test]
+async fn an_adopted_run_that_only_writes_stderr_is_not_stalled() {
+    let (app, dir) = test_app();
+    let (mut task, run_dir) = running_implement_task(&app, dir.path());
+    std::fs::write(run_dir.join("events.raw"), "").unwrap();
+    // Five seconds of stderr lines and no stdout, then a clean exit.
+    let pgid = spawn_group_running(
+        "for i in 1 2 3 4 5 6 7 8 9 10; do echo x >> \"${0%.exit}.stderr.log\"; sleep 0.5; done; echo 0 > \"$0\"",
+        &run_dir.join("events.exit"),
+        false,
+    );
+    task.attempts[0].pgid = Some(pgid);
+    app.store.save_task(&task).unwrap();
+    let variant = Variant {
+        stall_timeout_secs: 2,
+        ..Default::default()
+    };
+
+    let outcome = follow_within(&app, &task, Guard::for_variant(&variant, None)).await;
+
+    assert!(!outcome.stalled, "{:?}", outcome.error);
+    kill_group(pgid);
 }
 
 #[tokio::test]

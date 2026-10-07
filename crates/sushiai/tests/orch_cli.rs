@@ -313,7 +313,7 @@ fn backups(dir: &std::path::Path) -> usize {
     std::fs::read_dir(dir)
         .expect("dir")
         .filter_map(Result::ok)
-        .filter(|e| e.file_name().to_string_lossy().contains("sushiai-bak"))
+        .filter(|e| e.file_name().to_string_lossy().contains(".bak-"))
         .count()
 }
 

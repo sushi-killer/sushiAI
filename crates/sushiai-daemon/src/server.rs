@@ -297,6 +297,7 @@ impl Conn {
             }
             method::SESSION_RESIZE => {
                 let p: SessionResize = params(request)?;
+                check_size(p.cols, p.rows)?;
                 self.session(&p.id).await?.resize(p.cols, p.rows).await?;
                 Ok(json!({}))
             }
@@ -625,17 +626,24 @@ async fn keyed_create(
     create_new(registry, p, Some(key.to_string())).await
 }
 
+/// A terminal grid is `cols x rows` cells of memory in the daemon and the holder, so both
+/// sides are bounded.
+fn check_size(cols: u16, rows: u16) -> Result<(), Fail> {
+    if (1..=1000).contains(&cols) && (1..=500).contains(&rows) {
+        return Ok(());
+    }
+    Err((
+        code::INVALID_PARAMS,
+        "cols must be 1 to 1000 and rows 1 to 500".into(),
+    ))
+}
+
 async fn create_new(
     registry: &Arc<Registry>,
     p: SessionCreate,
     key: Option<String>,
 ) -> Result<Value, Fail> {
-    if p.cols == 0 || p.rows == 0 {
-        return Err((
-            code::INVALID_PARAMS,
-            "cmd, cols and rows are required".into(),
-        ));
-    }
+    check_size(p.cols, p.rows)?;
     let spawn_failed = |e: &dyn std::fmt::Display| (code::SPAWN_FAILED, e.to_string());
     let id = agent::random_hex(8).map_err(|e| spawn_failed(&e))?;
     let socket = registry.home.socket().to_string_lossy().into_owned();

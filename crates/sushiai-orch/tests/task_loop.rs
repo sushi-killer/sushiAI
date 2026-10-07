@@ -586,6 +586,44 @@ fn a_silent_harness_is_stopped_as_stalled_when_the_variant_sets_a_stall_timeout(
 }
 
 #[test]
+fn a_run_whose_wrapper_is_killed_before_its_exit_file_does_not_hang_the_task() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    // The harness SIGKILLs the wrapper shell that is its parent (and the
+    // daemon's own unreaped child), so no exit file is ever written.
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude-orphaned.sh",
+        "#!/bin/sh\ncat > /dev/null\nkill -9 $PPID\nexit 0\n",
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["maxAttempts"] = serde_json::json!(1);
+    settings["review"] = serde_json::json!("");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Wrapper killed",
+            "goal": "The wrapper dies at once",
+            "verify": ["true"],
+            "variant": {"stallTimeoutSecs": 0},
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    assert_ne!(settled["status"], "running", "{settled}");
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
 fn a_fresh_retry_starts_a_new_session_that_reads_the_earlier_handoff() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts_dir.path(), "fake-retry.sh", FAKE_RETRY_SCRIPT);

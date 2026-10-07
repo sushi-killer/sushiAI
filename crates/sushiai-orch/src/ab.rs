@@ -1,4 +1,4 @@
-//! `orchd ab --data <dir>`: every task grouped by the experiment variant it
+//! `sushiai orch ab --data <dir>`: every task grouped by the experiment variant it
 //! ran with, one row per variant, read straight from the task store.
 //! `--eval <set>` limits it to one eval set's tasks and adds a per-task table.
 
@@ -14,11 +14,11 @@ pub fn run(args: &[String]) -> i32 {
         .find(|w| w[0] == "--data")
         .map(|w| PathBuf::from(&w[1]));
     let Some(data) = data else {
-        eprintln!("orchd ab: --data <dir> is required");
+        eprintln!("sushiai orch ab: --data <dir> is required");
         return 2;
     };
     if !data.join("tasks").is_dir() {
-        eprintln!("orchd ab: no task store at {}", data.display());
+        eprintln!("sushiai orch ab: no task store at {}", data.display());
         return 1;
     }
     let eval = args
@@ -28,7 +28,7 @@ pub fn run(args: &[String]) -> i32 {
     let store = match Store::new(&data) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("orchd ab: {e}");
+            eprintln!("sushiai orch ab: {e}");
             return 1;
         }
     };
@@ -52,7 +52,7 @@ pub fn run(args: &[String]) -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("orchd ab: {e}");
+            eprintln!("sushiai orch ab: {e}");
             1
         }
     }

@@ -645,7 +645,7 @@ impl App {
     }
 
     /// Whether any task loop is still winding down after `shutdown()` --
-    /// `main.rs` polls this briefly before actually exiting the process, so
+    /// `Orch::shutdown_with` polls this briefly before the daemon exits, so
     /// a cancelled child gets a real chance to be killed instead of just
     /// orphaned by the daemon disappearing out from under it.
     pub fn any_task_loop_running(&self) -> bool {

@@ -280,6 +280,47 @@ fn a_session_that_cannot_start_reports_why_and_leaves_nothing() {
 }
 
 #[test]
+fn a_terminal_size_outside_the_bounds_is_refused_on_create_and_resize() {
+    let mut sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    for (cols, rows) in [(65535, 65535), (1001, 24), (80, 501), (0, 24), (80, 0)] {
+        let refused = client
+            .try_call(
+                "session.create",
+                json!({"cmd": ["/bin/sh"], "cwd": "/tmp", "cols": cols, "rows": rows}),
+            )
+            .expect_err("an oversized grid must be refused");
+        assert_eq!(
+            refused.code,
+            code::INVALID_PARAMS,
+            "{cols}x{rows}: {refused:?}"
+        );
+    }
+    let id = sandbox.create_shell(&mut client);
+    for (cols, rows) in [(65535, 65535), (0, 24), (80, 0)] {
+        let refused = client
+            .try_call(
+                "session.resize",
+                json!({"id": id, "cols": cols, "rows": rows}),
+            )
+            .expect_err("a bad size must be refused");
+        assert_eq!(
+            refused.code,
+            code::INVALID_PARAMS,
+            "{cols}x{rows}: {refused:?}"
+        );
+    }
+    assert_eq!(
+        client
+            .call("session.list", Value::Null)
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+}
+
+#[test]
 fn graceful_close_escalates_to_kill_after_the_grace_period() {
     let mut sandbox = Sandbox::new();
     sandbox.start_daemon();

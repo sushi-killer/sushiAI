@@ -164,13 +164,24 @@ impl App {
         }
         let (_, secrets) = run_secrets(self, &task.id);
         RawTail::rebuild(&files, &events).pump(&secrets, true);
-        if files.exit.exists()
-            || attempt
+        fate_of_run(&files.exit, || {
+            attempt
                 .pgid
                 .is_some_and(|p| run_group_alive(p, &files.exit))
-        {
-            return RunFate::Resume;
-        }
+        })
+    }
+}
+
+/// `Resume` when the run's group lives or its exit file exists. The group is
+/// asked first: the wrapper writes the exit file before its group can die, so
+/// a run that ends between the two checks is seen as ended, never as lost.
+/// (Checking the file first let a run finishing at that instant be
+/// interrupted and requeued, a duplicate run.)
+pub(super) fn fate_of_run(exit: &Path, group_alive: impl FnOnce() -> bool) -> RunFate {
+    let alive = group_alive();
+    if alive || exit.exists() {
+        RunFate::Resume
+    } else {
         RunFate::Interrupted
     }
 }

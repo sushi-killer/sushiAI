@@ -203,3 +203,21 @@ async fn an_over_budget_adopted_run_is_killed() {
     assert!(outcome.over_budget, "{:?}", outcome.error);
     assert!(!group_alive(pgid), "the adopted run must be stopped");
 }
+
+#[test]
+fn a_run_that_ends_while_its_fate_is_decided_is_resumed_not_interrupted() {
+    let dir = tempfile::tempdir().unwrap();
+    let exit = dir.path().join("events.exit");
+    // The group is seen dead, and the exit file lands in the same instant:
+    // the wrapper writes it before its group can die.
+    let fate = recovery::fate_of_run(&exit, || {
+        std::fs::write(&exit, "0\n").unwrap();
+        false
+    });
+    assert!(matches!(fate, crate::store::RunFate::Resume));
+    let gone = dir.path().join("never.exit");
+    assert!(matches!(
+        recovery::fate_of_run(&gone, || false),
+        crate::store::RunFate::Interrupted
+    ));
+}

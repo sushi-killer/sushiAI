@@ -63,8 +63,20 @@ pub(super) fn group_alive(pgid: i32) -> bool {
 /// `true` while group `pgid` is alive and is the run whose wrapper shell was
 /// given `exit` as its `$0`. A pgid saved by an earlier daemon can have been
 /// reused by a stranger's process since.
+///
+/// `ps` can fail to name a live process under load, so an unnamed group that
+/// still exists is asked twice more before it counts as a stranger's.
 pub(super) fn run_group_alive(pgid: i32, exit: &Path) -> bool {
-    group_alive(pgid) && store::group_started_with(pgid, exit)
+    for pause_ms in [0, 50, 100] {
+        std::thread::sleep(Duration::from_millis(pause_ms));
+        if !group_alive(pgid) {
+            return false;
+        }
+        if store::group_started_with(pgid, exit) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Creates `path` empty, readable by the owner only.

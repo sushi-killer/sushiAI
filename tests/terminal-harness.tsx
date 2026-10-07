@@ -9,6 +9,7 @@ const calls = {
   closed: 0,
   drops: 0,
   opened: [] as string[],
+  attaches: [] as { cols: number; rows: number }[],
 };
 let output: (event: any) => void;
 let failAttachment = false;
@@ -18,7 +19,8 @@ window.bridge = {
     output = callback;
     return () => {};
   },
-  daemonTerminalAttach: async () => {
+  daemonTerminalAttach: async (input: { cols: number; rows: number }) => {
+    calls.attaches.push({ cols: input.cols, rows: input.rows });
     // The daemon answers an attach with its screen as a snapshot.
     setTimeout(
       () =>

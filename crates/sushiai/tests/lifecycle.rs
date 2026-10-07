@@ -860,3 +860,41 @@ fn agent_session_markers_never_reach_a_session() {
         assert!(!text.contains(marker), "{marker} leaked:\n{text}");
     }
 }
+
+#[test]
+fn a_reattach_at_the_same_size_does_not_resize_the_child() {
+    let mut sandbox = Sandbox::new();
+    let daemon = sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let marks = sandbox.home().join("winch");
+    let script = format!(
+        "trap 'echo W >> {}' WINCH; printf 'prompt-%s-end\\n' 0123456789012345678901234567890123456789012345678901234567890123456789; while :; do sleep 0.05; done",
+        marks.display()
+    );
+    let created = client.call(
+        "session.create",
+        json!({"cmd": ["/bin/sh", "-c", script], "cwd": "/tmp", "cols": 45, "rows": 24}),
+    );
+    let id = created["id"].as_str().expect("id").to_string();
+    wait_snapshot_contains(&mut client, &id, "-end");
+    let before = client.attach_result(&id);
+    wait_until("the state file to hold the size", 5, || {
+        fs::read_to_string(sandbox.home().join("state.json")).is_ok_and(|t| t.contains("45"))
+    });
+    kill(daemon, "-KILL");
+    wait_until("daemon to die", 5, || !alive(daemon));
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    wait_until("the session to come back", 10, || {
+        info_of(&mut sandbox.client(), &id)["status"] == "running"
+    });
+    let after = client.attach_result(&id);
+    assert_eq!(
+        (after["cols"].as_u64(), after["rows"].as_u64()),
+        (Some(45), Some(24))
+    );
+    assert_eq!(after["snapshot"], before["snapshot"]);
+    sleep(Duration::from_millis(500));
+    assert!(!marks.exists(), "the child got a SIGWINCH");
+    client.call("session.close", json!({"id": id, "graceful": false}));
+}

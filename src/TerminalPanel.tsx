@@ -5,7 +5,11 @@ import { ArrowUpRight, Command, Play, RotateCcw } from "lucide-react";
 import { agentTitle } from "./app/agent-title";
 import { daemonHost } from "./daemonSessions";
 import type { Panel } from "./types";
-import { fitTerminal, queueTerminalFit } from "./terminal-sizing";
+import {
+  fitTerminal,
+  queueTerminalFit,
+  terminalDimensions,
+} from "./terminal-sizing";
 import { installTerminalInteractions } from "./terminal-interactions";
 import { createTerminalLinkProvider, openTerminalLink } from "./terminal-links";
 import { createTerminalInput } from "./terminal-output";
@@ -21,6 +25,7 @@ type CachedTerminal = {
   unsubscribe: () => void;
   notify?: () => void;
   requestFit?: () => void;
+  start?: () => void;
   transfer?: string;
   disposeInteractions?: () => void;
   cols: number;
@@ -256,24 +261,36 @@ export function TerminalPanel({
         },
         true,
       );
-      window.bridge
-        .daemonTerminalAttach({
-          panelId: panel.id,
-          host: daemonHost(endpoint),
-          sessionId,
-          cols: terminal.cols,
-          rows: terminal.rows,
-        })
-        .then(() => {
-          if (cache.get(panel.id) !== entry) return;
-          entry.ready = true;
-          entry.requestFit?.();
-          entry.notify?.();
-        })
-        .catch((e) => {
-          entry.error = e.message;
-          entry.notify?.();
-        });
+      // The attach carries the measured size: attaching at xterm's 80x24
+      // default and resizing afterwards sends the shell two SIGWINCHes and
+      // makes it redraw its prompt at the wrong width.
+      let started = false;
+      entry.start = () => {
+        const size = terminalDimensions(fit.proposeDimensions());
+        if (started || !size) return;
+        started = true;
+        terminal.resize(size.cols, size.rows);
+        entry.cols = size.cols;
+        entry.rows = size.rows;
+        window
+          .bridge!.daemonTerminalAttach({
+            panelId: panel.id,
+            host: daemonHost(endpoint),
+            sessionId,
+            cols: size.cols,
+            rows: size.rows,
+          })
+          .then(() => {
+            if (cache.get(panel.id) !== entry) return;
+            entry.ready = true;
+            entry.requestFit?.();
+            entry.notify?.();
+          })
+          .catch((e) => {
+            entry.error = e.message;
+            entry.notify?.();
+          });
+      };
     } else host.current.appendChild(runtime.element);
     const current = runtime;
     current.notify = () => {
@@ -290,7 +307,11 @@ export function TerminalPanel({
       !!host.current?.clientWidth &&
       !!host.current.clientHeight;
     const fit = () => {
-      if (!visible() || !current.ready) return;
+      if (!visible()) return;
+      if (!current.ready) {
+        current.start?.();
+        return;
+      }
       queueTerminalFit(
         current.terminal,
         current.fit,

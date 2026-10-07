@@ -255,6 +255,12 @@ try {
     () => window.terminalHarness.calls.files.length === 1,
   );
   let calls = await page.evaluate(() => window.terminalHarness.calls);
+  assert.equal(calls.attaches.length, 1);
+  assert.notDeepEqual(
+    calls.attaches[0],
+    { cols: 80, rows: 24 },
+    "attach must carry the measured size, not the xterm default",
+  );
   assert.deepEqual(calls.files, ["image one.png"]);
   assert.equal(calls.drops, 0, "file drops must not reach panel rearrangement");
   assert.deepEqual(

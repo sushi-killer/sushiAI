@@ -312,3 +312,29 @@ test("a script that sets SUSHIAI_HOME without HOME is rejected", () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a core main-process file that requires a module main.cjs loads fails the check", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "core-isolation-"));
+  try {
+    fs.mkdirSync(path.join(dir, "electron/ipc"), { recursive: true });
+    const write = (name, text) =>
+      fs.writeFileSync(path.join(dir, "electron", name), text);
+    write("main.cjs", 'require("./plugin.cjs");\nrequire("./ipc/hub.cjs");\n');
+    write("plugin.cjs", "module.exports = {};\n");
+    write("ipc/hub.cjs", 'require("../plugin.cjs");\n');
+    const bad = run({ CORE_ISOLATION_ROOT_OVERRIDE: dir });
+    assert.equal(bad.status, 1);
+    assert.match(
+      bad.stderr,
+      /electron\/ipc\/hub\.cjs requires electron\/plugin\.cjs, a module main\.cjs plugs in/,
+    );
+    write("ipc/hub.cjs", 'require("node:path");\nrequire("./peer.cjs");\n');
+    write("ipc/peer.cjs", "module.exports = {};\n");
+    assert.equal(run({ CORE_ISOLATION_ROOT_OVERRIDE: dir }).status, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

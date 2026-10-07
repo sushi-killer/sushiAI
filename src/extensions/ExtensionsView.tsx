@@ -1,13 +1,7 @@
-import {
-  Check,
-  ChevronRight,
-  ListTodo,
-  Power,
-  RefreshCw,
-  X,
-} from "lucide-react";
+import { Check, ChevronRight, Power, RefreshCw, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Tag } from "../ui/index.ts";
+import { ExtensionIcon } from "./ExtensionSlots.tsx";
 import type { Tone } from "../ui/tone.ts";
 import type {
   CompanionState,
@@ -43,6 +37,12 @@ const COMPANION_TONES: Record<CompanionState, Tone> = {
   running: "ok",
   failed: "danger",
 };
+
+/** The icon the manifest itself declares: its first navigation entry, else
+ * its first surface. Without one the card shows the default glyph. */
+const manifestIcon = (manifest: ExtensionManifest) =>
+  manifest.contributions.navigation[0]?.icon ??
+  manifest.contributions.surfaces.find((surface) => surface.icon)?.icon;
 
 /** Shows exactly what would run, and records consent to it. The approval is
  * bound to this path, these arguments and these permissions: if any changes,
@@ -125,8 +125,13 @@ function CompanionApproval({
                 ))
               : "None"}
           </dd>
-          <dt>State</dt>
-          <dd>{COMPANION_STATE_LABELS[companion.state]}</dd>
+          {companion.state !== "failed" &&
+            companion.state !== "needs-approval" && (
+              <>
+                <dt>State</dt>
+                <dd>{COMPANION_STATE_LABELS[companion.state]}</dd>
+              </>
+            )}
         </dl>
         {companion.stderrTail && (
           <pre className="extension-approval-stderr" aria-label="Last errors">
@@ -303,24 +308,26 @@ export function ExtensionsView({
                   )
                 }
               >
-                <ListTodo size={18} />
+                <ExtensionIcon
+                  icon={manifestIcon(extension.manifest)}
+                  size={18}
+                />
                 <ChevronRight className="chevron" size={12} />
               </button>
               <div className="extension-card-copy">
                 <div className="extension-card-title">
                   <strong>{extension.manifest.name}</strong>
                   <span>{extension.manifest.version}</span>
-                  {extension.companion &&
-                    extension.companion.state !== "running" && (
-                      <span
-                        className="extension-companion-state"
-                        data-state={extension.companion.state}
-                      >
-                        <Tag tone={COMPANION_TONES[extension.companion.state]}>
-                          {COMPANION_STATE_LABELS[extension.companion.state]}
-                        </Tag>
-                      </span>
-                    )}
+                  {extension.companion && (
+                    <span
+                      className="extension-companion-state"
+                      data-state={extension.companion.state}
+                    >
+                      <Tag tone={COMPANION_TONES[extension.companion.state]}>
+                        {COMPANION_STATE_LABELS[extension.companion.state]}
+                      </Tag>
+                    </span>
+                  )}
                 </div>
                 <p>
                   {extension.manifest.description ||
@@ -333,14 +340,6 @@ export function ExtensionsView({
                   <small>
                     {extensionSourceLabel(extension.manifest.source)}
                   </small>
-                  {extension.companion?.state === "running" && (
-                    <small
-                      className="extension-companion-state"
-                      data-state="running"
-                    >
-                      Program running
-                    </small>
-                  )}
                 </div>
               </div>
               <div className="extension-card-actions">

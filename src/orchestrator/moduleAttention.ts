@@ -22,6 +22,7 @@ import {
   projectName,
 } from "./ownerAttention.ts";
 import type { TaskTarget } from "./notices.ts";
+import { cleanTitle } from "./taskTitle.ts";
 import { ownerTarget } from "./ownerAttention.ts";
 import type { Task } from "./types.ts";
 import { currentTasks, useTasks } from "./useTasks.ts";
@@ -49,10 +50,6 @@ export function usePicks(): Readonly<Record<string, string>> {
     () => picks,
   );
 }
-
-/** A title as the owner reads it: a leading "orch:" tag is provenance, which
- * the row icon already shows. */
-const cleanTitle = (title: string) => title.replace(/^orch:\s*/i, "");
 
 /** The row's second line: the question, what finished, or why it stopped. */
 function rowMeta(

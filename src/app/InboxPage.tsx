@@ -463,12 +463,21 @@ export function InboxPage({
    * comes from. */
   function moduleView(item: ModuleItem) {
     const { meta: line, actions: chips = [] } = item.entry.item;
+    // A list row shows two choices at most; the detail footer has them all.
+    const shownIndexes =
+      item.kind === "answer"
+        ? new Set([0, 1, chips.findIndex((action) => action.selected)])
+        : null;
+    const hidden = shownIndexes
+      ? chips.filter((_, index) => !shownIndexes.has(index)).length
+      : 0;
     return {
       meta: `${item.project} · ${hostName(item)}`,
       context: line || undefined,
       actions: chips.length ? (
         <>
           {chips.map((action, index) => {
+            if (shownIndexes && !shownIndexes.has(index)) return null;
             const title = action.key
               ? `${action.label} (${action.key.toUpperCase()})`
               : undefined;
@@ -504,13 +513,25 @@ export function InboxPage({
               </button>
             );
           })}
+          {hidden > 0 && (
+            <button type="button" className="ui-chip">
+              <span className="ui-chip-label">+{hidden} more</span>
+            </button>
+          )}
         </>
       ) : undefined,
     };
   }
 
+  // The mark tells sources apart, so it only shows when rows come from more
+  // than one; the default source (sessions) never carries one.
+  const sourceCount = new Set(
+    items.map((item) =>
+      item.source === "module" ? item.entry.extensionId : "session",
+    ),
+  ).size;
   const rowIcon = (item: Item) => {
-    if (item.source !== "module") return undefined;
+    if (item.source !== "module" || sourceCount < 2) return undefined;
     const Mark = moduleUis.find(
       (m) => m.extensionId === item.entry.extensionId,
     )?.icon;

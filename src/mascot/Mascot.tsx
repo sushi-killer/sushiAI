@@ -190,20 +190,26 @@ function Bubble({
       .catch((failure) => setError(cleanError(failure)));
 
   if (confirmed) {
-    // "Label \u2014 detail": the label is the tag, the whole message the text.
+    // "Label \u2014 detail": the label is the tag, the detail the text, so the
+    // label is not said twice.
     const message = notice.confirmed ?? "";
+    const [label, ...rest] = message.split(" \u2014 ");
+    const detail = rest.join(" \u2014 ");
+    const line = detail
+      ? detail.charAt(0).toUpperCase() + detail.slice(1)
+      : message;
     return (
       <div className="bubble confirmed" role="status">
         <div className="bubble-head">
           <span className="tag ok">
             <i />
-            {message.split(" \u2014 ")[0]}
+            {label}
           </span>
           <span className="bubble-source">{sourceText(notice, now)}</span>
         </div>
         <div className="bubble-msg">
           <Check size={14} />
-          <span>{message}</span>
+          <span>{line}</span>
         </div>
       </div>
     );

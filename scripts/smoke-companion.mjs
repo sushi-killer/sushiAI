@@ -116,13 +116,17 @@ try {
   );
   assert.ok(shown.includes(manifest.companion.args.join(" ")));
   assert.deepEqual(await readStarts(), [], "no process while reviewing");
-  await shot(page, "s7-final-approval.png");
+  await shot(page, "s7-polish-approval.png");
   await dialog.getByRole("button", { name: "Approve", exact: true }).click();
   await dialog.waitFor({ state: "detached" });
   await card
     .locator(".extension-companion-state")
     .filter({ hasText: "Running" })
     .waitFor();
+  await page
+    .locator(".extensions-view")
+    .evaluate((view) => view.parentElement?.scrollTo(0, 0));
+  await shot(page, "s7-polish-extensions-running.png");
   const [pid] = await until(readStarts, (list) => list.length > 0);
   assert.ok(pid && alive(pid), "the companion runs after approval");
 
@@ -135,7 +139,7 @@ try {
     .filter({ hasText: "Connected" })
     .waitFor();
   await settings.locator("svg[role=img]").first().waitFor();
-  await shot(page, "s7-final-companion-settings.png");
+  await shot(page, "s7-polish-companion-settings.png");
   await page.getByRole("button", { name: "Close dialog" }).click();
 
   await page

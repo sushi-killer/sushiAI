@@ -268,6 +268,11 @@ try {
   const page = await app.firstWindow();
   page.on("pageerror", (error) => report.pageErrors.push(error.message));
   await page.waitForSelector(".panel-agent");
+  // The orchestrator extension is off in a fresh profile.
+  await page.getByRole("button", { name: "Extensions", exact: true }).click();
+  await page.getByRole("button", { name: "Enable Orchestrator" }).click();
+  await page.getByRole("button", { name: "Disable Orchestrator" }).waitFor();
+  await page.getByRole("button", { name: "Extensions", exact: true }).click();
 
   // The first-run workspace already runs in this repo, so the notices' `repo`
   // matches its cwd. No Orchestrator panel is added - opening a notice has to
@@ -710,7 +715,7 @@ try {
     problems.push("a second Answer all closed the Inbox");
   if (!report.rerun.restarted)
     problems.push("Run again did not restart the task");
-  if (!/the task carries on\.$/.test(report.mascot.answered))
+  if (!/The task carries on\.$/.test(report.mascot.answered))
     problems.push("no Answered confirmation");
   if (report.openFlowError) problems.push(`open flow: ${report.openFlowError}`);
   if (problems.length) report.error = problems.join("; ");

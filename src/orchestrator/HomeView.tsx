@@ -26,6 +26,7 @@ import { ownerTasks, projectName } from "./ownerAttention";
 import { weekSummary } from "./stats";
 import type { SpendSummary, Task } from "./types";
 import { AttentionItem, Chip, StageTrack } from "../ui";
+import { TaskMark, cleanTitle } from "./taskTitle";
 import "./home.css";
 
 const TRY = [
@@ -260,7 +261,8 @@ export function HomeView({
             <AttentionItem
               key={task.id}
               tone="warning"
-              title={task.title}
+              title={cleanTitle(task.title)}
+              icon={<TaskMark size={13} />}
               time={elapsedLabel(Date.now() - task.updatedAt)}
               question
               context={task.question?.text}
@@ -284,7 +286,8 @@ export function HomeView({
           <AttentionItem
             key={task.id}
             tone={taskTone(task)}
-            title={task.title}
+            title={cleanTitle(task.title)}
+            icon={<TaskMark size={13} />}
             time={elapsedLabel(Date.now() - task.updatedAt)}
             context={`${taskReason(task, tasks, maxAttempts)} \u00b7 ${formatCost(task.costUsd)}${sameFailureNote(task)}`}
             actions={

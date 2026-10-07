@@ -471,6 +471,21 @@ test("quitting stops the process", async (t) => {
   assert.ok(!alive(pid));
 });
 
+test("after quit, start and sync spawn nothing", async (t) => {
+  const dirs = layout(t);
+  const { manager, companions } = await build(t, dirs);
+  await manager.setEnabled(ID, true);
+  await manager.approve(ID);
+  await companions.stopAll();
+  await waitFor(() => dirs.pids().every((pid) => !alive(pid)), "all dead");
+  const count = dirs.pids().length;
+  await companions.start();
+  await manager.setEnabled(ID, false);
+  await manager.setEnabled(ID, true);
+  await sleep(150);
+  assert.equal(dirs.pids().length, count, "nothing spawned after stopAll");
+});
+
 test("companion values are never logged", async (t) => {
   const dirs = layout(t);
   const lines = [];

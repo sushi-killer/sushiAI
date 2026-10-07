@@ -175,6 +175,9 @@ function createCompanions({
   const entries = new Map();
   const listeners = new Set();
   let started = false;
+  // Set by stopAll (quit): nothing may spawn afterwards, even if start() or
+  // sync() was still waiting on startup work.
+  let stopped = false;
 
   const emit = (event) => {
     for (const listener of listeners) {
@@ -302,6 +305,7 @@ function createCompanions({
     extensionId,
     { manifest, enabled, approved, extensionDir },
   ) {
+    if (stopped) return;
     const block = manifest?.companion;
     if (!block) return remove(extensionId);
     let entry = entries.get(extensionId);
@@ -371,6 +375,7 @@ function createCompanions({
     remove,
     /** The app is ready: processes that are wanted may start. */
     async start() {
+      if (stopped) return;
       started = true;
       for (const entry of entries.values())
         if (entry.wanted() && idle(entry) && entry.state !== "failed")
@@ -378,6 +383,7 @@ function createCompanions({
     },
     /** Stops every process (quit). */
     async stopAll() {
+      stopped = true;
       started = false;
       await Promise.all([...entries.values()].map((entry) => halt(entry)));
     },

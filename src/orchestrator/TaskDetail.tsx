@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
+import { TaskMark, cleanTitle } from "./taskTitle";
 import {
   Archive,
   Check,
@@ -118,9 +119,10 @@ function AttemptRow({ attempt }: { attempt: Attempt }) {
               ? fingerprintLabel(attempt.fingerprint)
               : attempt.model || attempt.routeId}
           </span>
-          <Tag tone={tone}>
-            {attempt.status === "running" ? "running" : attempt.status}
-          </Tag>
+          {/* A blocked attempt already says "Stopped to ask." below. */}
+          {attempt.status !== "blocked" && (
+            <Tag tone={tone}>{attempt.status}</Tag>
+          )}
         </div>
         <p className="td-attempt-meta">
           {formatDuration(attemptDurationMs(attempt))} ·{" "}
@@ -574,7 +576,10 @@ export function TaskDetail({
         <div className="td-head">
           <div className="td-title">
             <div className="td-title-row">
-              <h3 title={selected.title}>{selected.title}</h3>
+              <TaskMark size={14} aria-hidden />
+              <h3 title={cleanTitle(selected.title)}>
+                {cleanTitle(selected.title)}
+              </h3>
               {statusTag && <Tag tone={statusTag.tone}>{statusTag.label}</Tag>}
             </div>
             <p className="td-meta">

@@ -47,6 +47,41 @@ function run(binary, args, input = "", timeout = 20000) {
     proc.stdin.end(input);
   });
 }
+/** Like run(), but for a caller that wants the exit code and the end of both
+ * streams (at most `tailBytes` each, kept as raw bytes) whatever the code is.
+ * A timeout kills the process and reports code null. */
+function runTail(binary, args, input, timeout, tailBytes) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(binary, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let out = Buffer.alloc(0);
+    let err = Buffer.alloc(0);
+    let timedOut = false;
+    const keep = (buffer, chunk) =>
+      Buffer.concat([buffer, chunk]).subarray(-tailBytes);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill("SIGKILL");
+    }, timeout);
+    proc.stdout.on("data", (chunk) => (out = keep(out, chunk)));
+    proc.stderr.on("data", (chunk) => (err = keep(err, chunk)));
+    proc.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({
+        code: timedOut ? null : code,
+        stdout: out.toString("utf8"),
+        stderr: timedOut
+          ? `${err.toString("utf8")}\nTimed out after ${timeout} ms.`.trim()
+          : err.toString("utf8"),
+      });
+    });
+    proc.stdin.on("error", () => {});
+    proc.stdin.end(input);
+  });
+}
 // `ssh -G` prints the resolved config as one lowercase "key value" per line.
 // Anchored on purpose: forwardagent, forwardx11, exitonforwardfailure and
 // clearallforwardings are printed for every host and are not forwards.
@@ -291,6 +326,24 @@ class Connections {
       [...this.args(profile), profile.host, command],
       input,
       timeout,
+    );
+  }
+  /** Runs argv on the host over the same ssh path as exec(); resolves with
+   * {code, stdout, stderr} (the last `tailBytes` of each) for any exit code.
+   * The words are quoted for the remote shell. `input` is a Buffer or string. */
+  async execArgv(
+    endpoint,
+    argv,
+    { input = "", timeout = 120000, tailBytes = 65536 } = {},
+  ) {
+    const profile = this.get(endpoint);
+    this.#needShell(endpoint);
+    return runTail(
+      this.ssh,
+      [...this.args(profile), profile.host, argv.map(quote).join(" ")],
+      input,
+      timeout,
+      tailBytes,
     );
   }
   /** Starts `ssh -L specification` (through the shared master when it has

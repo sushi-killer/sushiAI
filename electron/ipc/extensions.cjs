@@ -1,3 +1,5 @@
+const { randomUUID } = require("node:crypto");
+
 const MAX_RECORDS = 1000;
 
 /** The surface a request names, if it exists and is switched on. State is
@@ -79,6 +81,7 @@ function registerExtensionIpc({
   getSurfaceState,
   announce = () => {},
   announceCompanion = () => {},
+  announceExec = () => {},
 }) {
   // A companion's view.changed (or its process changing state) reaches the
   // renderer as {extensionId, surfaceId}. Subscribed once, when the manager
@@ -162,6 +165,34 @@ function registerExtensionIpc({
       name(actionId, "action id"),
     ),
   );
+
+  handle("extensions-companion-row", (extensionId, surfaceId, fieldId, rowId) =>
+    manager().companionRow(
+      name(extensionId, "extension id"),
+      name(surfaceId, "surface id"),
+      name(fieldId, "field id"),
+      name(rowId, "row id"),
+    ),
+  );
+
+  // The card that asks the owner before a companion runs commands on a host.
+  // One pending question per id; the renderer answers by id.
+  const questions = new Map();
+  getExtensions()?.companions?.setAskOwner(
+    (question) =>
+      new Promise((resolve) => {
+        const id = randomUUID();
+        questions.set(id, resolve);
+        // The exec layer gives up after 2 minutes; drop the stale entry too.
+        setTimeout(() => questions.delete(id), 150000).unref();
+        announceExec({ id, ...question });
+      }),
+  );
+  handle("extensions-companion-exec-answer", (id, allow) => {
+    const resolve = questions.get(name(id, "question id"));
+    questions.delete(id);
+    resolve?.(allow === true);
+  });
 
   handle("extensions-approve", async (extensionId) => {
     await manager().approve(name(extensionId, "extension id"));

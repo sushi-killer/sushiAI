@@ -77,10 +77,15 @@ label`), because two identical labels break `getByRole` selectors in
 - **Companion view**: `view.kind: "companion"` is allowed only on
   `settings.page`, and only when the manifest has a `companion` block. It has
   at most 8 `fields` (types `text`, `status`, `qr`) and at most 4 `actions`
-  (`method` matches `/^[a-z][a-z0-9.]*$/`, labels unique). An action with
-  `send: ["hosts"]` needs `hosts.read` in `companion.permissions`; the app then
-  sends the ssh host list (`id, name, host, port?`) as `params.hosts`. Values
-  are never stored or logged. See `docs/extensions/companion.md`.
+  (`method` matches `/^[a-z][a-z0-9.]*$/`, labels unique). At most one field
+  is a `list` (rows with a status and an optional button, optional `method`).
+  An action with `send: ["hosts"]` needs `hosts.read` in `companion.permissions`;
+  the app then sends the ssh host list (`id, name, host, port?`) as
+  `params.hosts`, and `hosts.changed` on start and on change. `hosts.exec`
+  (needs `hosts.read`) lets the companion ask the app to run argv on a saved
+  ssh host; every call needs its own in-app owner card showing the exact argv
+  (no standing allowance). Values, argv and output are never stored or logged. See
+  `docs/extensions/companion.md`.
 - **Internal APIs (built-ins only, not the contract)**: the Module UI API
   (`src/extensions/modules.ts`: attention items, worktree claims, the shell
   hook, `panelMigrations`) and the Notices API (`electron/extensions/notices.cjs`)
@@ -159,7 +164,8 @@ a minimal environment allowlist (`PATH`, `HOME`, `USER`, `LANG`, `TMPDIR`,
 `SUSHIAI_HOME`), restarts with a bounded backoff, and stops with SIGTERM, then
 SIGKILL after a grace period. This is consent, not a sandbox: the process keeps
 the owner's OS rights. The `hosts.read` permission limits only what the app
-sends it. Any change that lets an extension carry its own code, or widens the
+sends it. The `hosts.exec` permission (owner decision 2026-10-07) lets it run commands
+on saved ssh hosts through the app, each call behind an owner card. Any change that lets an extension carry its own code, or widens the
 companion, needs the owner first.
 
 ## Vision & boundaries

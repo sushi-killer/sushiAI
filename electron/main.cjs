@@ -100,6 +100,8 @@ if (dataDir) app.setPath("userData", path.resolve(dataDir));
 // supervisor passes the child only an allowlist of it.
 const companions = createCompanions({
   getHosts: () => connections?.profiles ?? [],
+  execOnHost: (...args) => connections.execArgv(...args),
+  subscribeHosts: (listener) => connections.onProfilesChange(listener),
   env: process.env,
 });
 const extensions = new ExtensionManager({
@@ -302,6 +304,7 @@ registerExtensionIpc({
   getSurfaceState: () => surfaceState,
   announce: (change) => send("extensions-state-changed", change),
   announceCompanion: (change) => send("extensions-companion-changed", change),
+  announceExec: (question) => send("extensions-companion-exec", question),
 });
 registerWorkspaceSnapshot({
   ipcMain,

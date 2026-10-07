@@ -878,6 +878,28 @@ export interface Bridge {
     surfaceId: string,
     actionId: string,
   ): Promise<import("./extensions/types.ts").CompanionResult>;
+  companionRow(
+    extensionId: string,
+    surfaceId: string,
+    fieldId: string,
+    rowId: string,
+  ): Promise<import("./extensions/types.ts").CompanionResult>;
+  /** Answers the owner card of one host.exec call (Allow or Deny). */
+  companionExecAnswer(id: string, allow: boolean): Promise<void>;
+  onCompanionExec(
+    callback: (question: {
+      id: string;
+      extensionId: string;
+      extensionName: string;
+      hostName: string;
+      hostAddress: string;
+      /** The extension's own words; not verified. */
+      title: string;
+      argv: string[];
+      stdinBytes: number;
+      stdinSha256: string | null;
+    }) => void,
+  ): () => void;
   /** Records consent to the exact path, args and permissions in the listing. */
   extensionApprove(extensionId: string): Promise<void>;
   onCompanionChanged(

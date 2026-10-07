@@ -7,8 +7,10 @@
 // side is spawnPipe + connectOverPipe from electron/daemon/connectors.cjs.
 //
 // App -> companion: hello, view.read {surfaceId}, <action.method> {surfaceId,
-// hosts?}. Companion -> app: the notification view.changed {surfaceId} only.
-// There are no companion -> app requests. Values are never stored or logged.
+// hosts?}, <row method> {surfaceId, row}, and with hosts.read the notification
+// hosts.changed {hosts}. Companion -> app: the notification view.changed
+// {surfaceId} and, with hosts.exec, the request host.exec (companion-exec.cjs).
+// Values are never stored or logged.
 // Approval is consent, not a sandbox: the process keeps the owner's rights.
 
 const fs = require("node:fs");
@@ -21,6 +23,8 @@ const {
 } = require("../daemon/connectors.cjs");
 const { resolveHome } = require("../daemon/local.cjs");
 const { CONTRACT } = require("./manifest.cjs");
+const { createHostExec } = require("./companion-exec.cjs");
+const { listSshHosts } = require("./hosts.cjs");
 
 // Only these reach the child, plus SUSHIAI_HOME.
 const ENV_ALLOWLIST = [
@@ -41,6 +45,9 @@ const ACTION_TIMEOUT_MS = 30000;
 const MAX_TEXT = 1000;
 const MAX_QR = 2048;
 const MAX_MESSAGE = 500;
+const MAX_ROWS = 50;
+const MAX_ROW_ID = 100;
+const MAX_ROW_TEXT = 200;
 const CLIENT_NAME = "sushiai-desktop";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -118,6 +125,39 @@ function childEnv(source, home) {
   return out;
 }
 
+const hasControl = (text) =>
+  // eslint-disable-next-line no-control-regex
+  /[\u0000-\u001f\u007f]/.test(text);
+const rowText = (value, max) =>
+  typeof value === "string" && value.length <= max && !hasControl(value);
+
+/** The valid rows of a `list` value, at most 50. An invalid row is dropped,
+ * not the whole value. */
+function cleanRows(value) {
+  const rows = [];
+  const seen = new Set();
+  for (const row of value) {
+    if (rows.length >= MAX_ROWS) break;
+    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+    if (!rowText(row.id, MAX_ROW_ID) || !row.id || seen.has(row.id)) continue;
+    if (!rowText(row.label, MAX_ROW_TEXT) || !row.label) continue;
+    const clean = { id: row.id, label: row.label };
+    let ok = true;
+    for (const key of ["detail", "status", "action"]) {
+      if (row[key] === undefined || row[key] === null) continue;
+      if (rowText(row[key], MAX_ROW_TEXT)) clean[key] = row[key];
+      else ok = false;
+    }
+    // An unknown tone keeps the row and reads as neutral.
+    if (row.tone !== undefined && row.tone !== null)
+      clean.tone = CONTRACT.TONES.has(row.tone) ? row.tone : "neutral";
+    if (!ok) continue;
+    seen.add(row.id);
+    rows.push(clean);
+  }
+  return rows;
+}
+
 /** Checks a companion's reply against the view that asked for it. A value the
  * view did not declare, or of the wrong shape, rejects the whole reply. */
 function checkResult(result, view) {
@@ -151,6 +191,13 @@ function checkResult(result, view) {
         ok = ok || (typeof value === "string" && value.length <= MAX_TEXT);
       if (field.type === "qr")
         ok = ok || (typeof value === "string" && value.length <= MAX_QR);
+      if (field.type === "list") {
+        ok = ok || Array.isArray(value);
+        if (Array.isArray(value)) {
+          out.values[key] = cleanRows(value);
+          continue;
+        }
+      }
       if (field.type === "status")
         ok =
           ok ||
@@ -169,6 +216,14 @@ function checkResult(result, view) {
 
 function createCompanions({
   getHosts = () => [],
+  // (endpoint, argv, {input, timeout, tailBytes}) -> {code, stdout, stderr}
+  execOnHost = async () => {
+    throw new Error("Running commands on hosts is not available.");
+  },
+  // Binds the profile-list change feed (listener) -> unsubscribe; called once
+  // the app is ready.
+  subscribeHosts,
+  audit = (line) => console.info(`companion host.exec ${JSON.stringify(line)}`),
   home,
   env = process.env,
   spawnProcess = spawnPipe,
@@ -184,6 +239,15 @@ function createCompanions({
   const entries = new Map();
   const listeners = new Set();
   let started = false;
+  let unsubscribeHosts;
+  // The owner card; set by the IPC layer. Without one every ask is a refusal.
+  let askOwner = async () => false;
+  const hostExec = createHostExec({
+    getProfiles: getHosts,
+    execOnHost: (...args) => execOnHost(...args),
+    askOwner: (question) => askOwner(question),
+    audit,
+  });
   // Set by stopAll (quit): nothing may spawn afterwards, even if start() or
   // sync() was still waiting on startup work.
   let stopped = false;
@@ -220,9 +284,21 @@ function createCompanions({
     await done;
   }
 
+  /** Tells a companion with hosts.read the host list when it changed. */
+  function sendHosts(entry) {
+    if (!entry.client || !entry.permissions.includes("hosts.read")) return;
+    const hosts = listSshHosts(getHosts);
+    const text = JSON.stringify(hosts);
+    if (entry.sentHosts === text) return;
+    entry.sentHosts = text;
+    entry.client.notify("hosts.changed", { hosts });
+  }
+
   async function launch(entry) {
     if (!entry.wanted()) return;
     const run = ++entry.run;
+    hostExec.forget(entry.id);
+    entry.sentHosts = undefined;
     setState(entry, "starting");
     const pipe = spawnProcess(entry.resolvedPath, entry.args, {
       env: childEnv(env, base),
@@ -254,12 +330,22 @@ function createCompanions({
         });
     });
     client.on("disconnect", () => void exited(entry, run, pipe.exit, null));
+    client.handle("host.exec", (params) =>
+      entry.run === run
+        ? hostExec.run(
+            { id: entry.id, name: entry.name, permissions: entry.permissions },
+            params,
+          )
+        : Promise.reject(new Error("The companion was restarted.")),
+    );
     setState(entry, "running", "");
+    sendHosts(entry);
   }
 
   async function exited(entry, run, exit, error) {
     if (entry.run !== run) return;
     entry.client = null;
+    hostExec.forget(entry.id);
     // The process may outlive its pipe (a bad hello, a malformed frame). Keep
     // the pipe on the entry until the process is gone, so halt() can still
     // reach it and a retry never stacks a second process on a live one.
@@ -291,6 +377,7 @@ function createCompanions({
   /** Ends the process and any pending restart; the entry reads as off. */
   async function halt(entry) {
     entry.run += 1;
+    hostExec.forget(entry.id);
     clearTimeout(entry.timer);
     entry.timer = null;
     const { pipe, client } = entry;
@@ -322,6 +409,7 @@ function createCompanions({
       entry = {
         id: extensionId,
         state: "off",
+        name: extensionId,
         run: 0,
         exits: [],
         timer: null,
@@ -340,6 +428,7 @@ function createCompanions({
       pathEnv: env.PATH,
       extensionDir,
     });
+    entry.name = manifest.name || extensionId;
     const before = config(entry);
     entry.resolvedPath = resolved.path;
     entry.args = [...block.args];
@@ -386,6 +475,9 @@ function createCompanions({
     async start() {
       if (stopped) return;
       started = true;
+      unsubscribeHosts ??= subscribeHosts?.(() => {
+        for (const entry of entries.values()) sendHosts(entry);
+      });
       for (const entry of entries.values())
         if (entry.wanted() && idle(entry) && entry.state !== "failed")
           await launch(entry);
@@ -394,6 +486,7 @@ function createCompanions({
     async stopAll() {
       stopped = true;
       started = false;
+      unsubscribeHosts?.();
       await Promise.all([...entries.values()].map((entry) => halt(entry)));
     },
     /** What an approval would bind: the resolved path, args and permissions. */
@@ -413,11 +506,26 @@ function createCompanions({
       };
     },
     hosts: () => getHosts(),
+    /** Sets how the owner is asked before a companion runs commands on a
+     * host: ask({extensionId, extensionName, hostId, hostName, title}) resolves
+     * true (Allow) or false (Deny). */
+    setAskOwner(ask) {
+      askOwner = ask;
+    },
     async read(extensionId, surfaceId, view) {
       const result = await running(extensionId).client.request(
         "view.read",
         { surfaceId },
         { timeoutMs: readTimeoutMs },
+      );
+      return checkResult(result, view);
+    },
+    /** A list row's button: calls the companion's `method` with {row}. */
+    async callRow(extensionId, method, surfaceId, row, view) {
+      const result = await running(extensionId).client.request(
+        method,
+        { surfaceId, row },
+        { timeoutMs: actionTimeoutMs },
       );
       return checkResult(result, view);
     },

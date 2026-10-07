@@ -17,7 +17,7 @@ The example here is the fixture `tests/fixtures/extensions/companion-probe`.
 - `command` is a bare name. The app looks in `$SUSHIAI_HOME/bin`, then in the app PATH.
 - The app refuses a command whose real path is inside the extension folder.
 - `args`: at most 8 strings, 200 characters each.
-- `permissions`: only `hosts.read` exists.
+- `permissions`: `hosts.read` and `hosts.exec`. `hosts.exec` needs `hosts.read`.
 - A built-in extension never declares `companion`.
 
 The view is a surface on the host `settings.page`:
@@ -28,7 +28,8 @@ The view is a surface on the host `settings.page`:
   "fields": [
     { "id": "service", "label": "Service", "type": "status" },
     { "id": "pairing", "label": "Scan code", "type": "qr" },
-    { "id": "note", "label": "Note", "type": "text" }
+    { "id": "note", "label": "Note", "type": "text" },
+    { "id": "hosts", "label": "Hosts", "type": "list", "method": "host.add" }
   ],
   "actions": [
     { "id": "add-device", "label": "Add device", "method": "device.add" },
@@ -64,6 +65,11 @@ The program talks over stdin and stdout with the same frames as the sushiai daem
    button. The program replies `{values?, message?}`.
 4. The program may send the notification `view.changed {surfaceId}`. The app
    then calls `view.read` again.
+5. With `hosts.read`, the app sends the notification `hosts.changed {hosts}`
+   when the program starts and whenever the saved ssh host list changes. The
+   program may ignore it.
+6. With `hosts.exec`, the program may send the request `host.exec` (see
+   "Running commands on a host").
 
 The program sends no other request to the app.
 
@@ -71,17 +77,96 @@ Values:
 
 - `text`: a string, at most 1000 characters.
 - `status`: `{text, tone}`. `tone` is one of the known tones.
+- `list`: see "List field".
 - `qr`: a string, at most 2048 characters. The app draws the QR code. It never
   accepts image bytes.
 - `null` means empty.
 
 The app never stores or logs values.
 
+## List field
+
+`{ "id": "hosts", "label": "Hosts", "type": "list", "method": "host.add" }`.
+A view has at most one list field. It counts toward the 8 fields. `method` is
+optional and matches the same pattern as an action method.
+
+The value is a list of rows:
+
+```json
+[
+  {
+    "id": "h1",
+    "label": "ra2",
+    "detail": "user@devbox:22",
+    "tone": "ok",
+    "status": "In Remote",
+    "action": "Add to Remote"
+  }
+]
+```
+
+- At most 50 rows. `id` is at most 100 characters. `label`, `detail`,
+  `status` and `action` are at most 200 characters. No control characters.
+  A row that breaks a rule is dropped. The rest of the value stays.
+- `tone` is one of the known tones. An unknown tone keeps the row and shows as
+  `neutral`.
+- A row with `action` shows a button when the field has a `method`. The button
+  calls that method with `{surfaceId, row: "<row id>"}`. The 30 s action
+  timeout applies, so a long job answers at once and reports progress by
+  changing the rows and sending `view.changed`.
+- When the program sends `view.changed`, the app reads the whole view again,
+  lists included. An error from a row button shows like an action error.
+- The list is Settings content. It never draws chrome.
+
 ## Hosts
 
 An action with `send: ["hosts"]` needs `hosts.read` in `permissions`. The app
 then adds `params.hosts`: a list of `{id, name, host, port?}` for the saved ssh
 hosts. It leaves out hosts that use a command connector. A profile holds no secret.
+
+## Running commands on a host
+
+A program with `hosts.exec` can run a command on a saved ssh host through the
+app. The app uses its own ssh connection (ssh-agent and `~/.ssh/config`).
+Request:
+
+```json
+{
+  "host": "<host id>",
+  "title": "<up to 120 characters>",
+  "argv": ["sh", "-c", "uname -m"],
+  "stdin": "<base64, optional>",
+  "timeoutMs": 120000
+}
+```
+
+Reply: `{ "code": <int or null>, "stdout": "...", "stderr": "..." }`. The app
+keeps the last 64 KiB of each stream. `code` is null after a timeout.
+
+- `local` and unknown hosts are refused. So are hosts that use a command
+  connector.
+- `stdin` is at most 32 MiB decoded. `timeoutMs` is at most 300000.
+- **Every call needs its own owner confirmation.** There is no standing
+  allowance. The app draws a card outside the extension's tab. It shows the
+  extension name and id, the host name and address, the exact argv (monospace,
+  scrollable, never cut), the `title` labelled "Extension's description" (the
+  extension's own words, not verified), and for stdin only its size and
+  SHA-256.
+- Deny is the default. Enter and Escape deny. Allow needs a mouse click (or Tab
+  to the button and Space), and the button is disabled for the first second.
+  No answer in 2 minutes refuses; the 2 minutes start when the card shows.
+- One card shows at a time. More calls from the same program queue behind it,
+  each with its own card. A call counts its `timeoutMs` from when it starts to
+  run. A card answered after the program restarted is void.
+- `hosts.changed` never lists `local`.
+- At most one command per host and 4 in total.
+- The app never logs or stores argv, stdin or output text. The audit line holds
+  the extension id, host id, SHA-256 of argv, SHA-256 of stdin, the decision
+  (`allowed`, `denied`, `timeout`), the exit code and the time.
+
+Error codes: `-32001` the owner refused, `-32002` busy, `-32003` no
+`hosts.exec` permission, `-32004` unknown or unsupported host, `-32602` bad
+parameters, `-32000` the run failed.
 
 ## Limits and lifecycle
 

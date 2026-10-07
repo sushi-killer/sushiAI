@@ -159,6 +159,14 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   extensionsSetEnabled: invoke("extensions-set-enabled"),
   companionRead: invoke("extensions-companion-read"),
   companionAction: invoke("extensions-companion-action"),
+  companionRow: invoke("extensions-companion-row"),
+  companionExecAnswer: invoke("extensions-companion-exec-answer"),
+  onCompanionExec: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on("extensions-companion-exec", listener);
+    return () =>
+      ipcRenderer.removeListener("extensions-companion-exec", listener);
+  },
   extensionApprove: invoke("extensions-approve"),
   onCompanionChanged: (callback) => {
     const listener = (_, data) => callback(data);

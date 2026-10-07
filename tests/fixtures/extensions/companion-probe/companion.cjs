@@ -4,6 +4,9 @@
 //   exit-now      write "boom" to stderr and exit 1 before answering hello
 //   ignore-term   ignore SIGTERM, so only SIGKILL ends it
 //   no-hello      never answer hello (the app gives up on it)
+//   list-rows     JSON: the value view.read gives a field named "hosts"
+//   exec-request  JSON: the host.exec request host.add sends to the app; the
+//                 app's answer is written to exec-response
 // It records what it was started with and what it was asked.
 const fs = require("node:fs");
 const path = require("node:path");
@@ -35,9 +38,23 @@ const send = (message) =>
     encode({ kind: "J", json: JSON.stringify({ jsonrpc: "2.0", ...message }) }),
   );
 const decoder = createDecoder();
+let nextRequest = 1000;
+const waiting = new Map();
+const readControl = (name) => {
+  const file = path.join(dir, name);
+  return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null;
+};
 process.stdin.on("data", (chunk) => {
   for (const frame of decoder.push(chunk)) {
-    const { id, method, params } = JSON.parse(frame.json);
+    const { id, method, params, result, error } = JSON.parse(frame.json);
+    if (!method) {
+      waiting.get(id)?.({ result, error });
+      continue;
+    }
+    if (id === undefined) {
+      note("notes", JSON.stringify({ method, params }) + "\n");
+      continue;
+    }
     if (method === "hello") {
       if (!fs.existsSync(path.join(dir, "no-hello")))
         send({ id, result: { protocol: 1 } });
@@ -49,10 +66,26 @@ process.stdin.on("data", (chunk) => {
             service: { text: "Connected", tone: "ok" },
             pairing: "probe-pairing-code",
             note: null,
+            ...(readControl("list-rows")
+              ? { hosts: readControl("list-rows") }
+              : {}),
           },
         },
       });
-    else if (method === "hosts.import") {
+    else if (method === "host.add") {
+      note("calls", JSON.stringify({ method, params }) + "\n");
+      const requestId = nextRequest++;
+      const answer = new Promise((resolve) => waiting.set(requestId, resolve));
+      send({
+        id: requestId,
+        method: "host.exec",
+        params: readControl("exec-request"),
+      });
+      answer.then((reply) => {
+        note("exec-responses", JSON.stringify(reply) + "\n");
+        send({ id, result: { message: "added" } });
+      });
+    } else if (method === "hosts.import") {
       note("calls", JSON.stringify({ method, params }) + "\n");
       send({
         id,

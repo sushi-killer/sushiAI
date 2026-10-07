@@ -106,12 +106,27 @@ export type DeclarativeDocument = {
 
 /** A value a companion process reports for one field. `null` is empty. Never
  * stored on disk or logged. */
-export type CompanionFieldType = "text" | "status" | "qr";
+export type CompanionFieldType = "text" | "status" | "qr" | "list";
 
 export type CompanionField = {
   id: string;
   label: string;
   type: CompanionFieldType;
+  /** `list` only: the companion method a row's button calls with `{row}`.
+   * Matches /^[a-z][a-z0-9.]*$/. Without it rows have no buttons. */
+  method?: string;
+};
+
+/** One row of a `list` value. At most 50 rows; `id` up to 100 characters, the
+ * other texts up to 200, none with control characters. */
+export type CompanionRow = {
+  id: string;
+  label: string;
+  detail?: string;
+  tone?: Tone;
+  status?: string;
+  /** The button label; shown only when the field has a `method`. */
+  action?: string;
 };
 
 export type CompanionValue =
@@ -119,6 +134,8 @@ export type CompanionValue =
   | string
   /** `status` */
   | { text: string; tone: Tone }
+  /** `list` */
+  | CompanionRow[]
   | null;
 
 export type CompanionValues = Record<string, CompanionValue>;
@@ -135,7 +152,7 @@ export type CompanionAction = {
 
 export type CompanionView = {
   kind: "companion";
-  /** At most 8. */
+  /** At most 8, of which at most 1 is a `list`. */
   fields: CompanionField[];
   /** At most 4, labels unique. */
   actions: CompanionAction[];
@@ -144,7 +161,7 @@ export type CompanionView = {
 /** Result of `view.read` and of an action call. */
 export type CompanionResult = { values?: CompanionValues; message?: string };
 
-export type CompanionPermission = "hosts.read";
+export type CompanionPermission = "hosts.read" | "hosts.exec";
 
 /** Optional top-level manifest block naming a native companion process. */
 export type CompanionBlock = {

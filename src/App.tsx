@@ -22,6 +22,7 @@ import { DialogHost } from "./dialogs/DialogHost";
 import { resolveDialog, type Dialog } from "./dialogs/dialog-state";
 import { UpdateSettings } from "./dialogs/lazy-settings";
 import { NotificationsDialog } from "./app/NotificationsDialog";
+import { CompanionExecPrompt } from "./extensions/CompanionExecPrompt";
 import { RoutineDialog } from "./app/RoutineDialog";
 import { useOpenSignals } from "./extensions/useOpenSignals.ts";
 import { SettingsDialog, useSettingsTab } from "./app/SettingsDialog";
@@ -564,6 +565,7 @@ export function App() {
             />
           ))}
       </DialogHost>
+      <CompanionExecPrompt />
     </div>
   );
 }

@@ -1,4 +1,4 @@
-// Pure logic behind the orchd task notices: which workspace a notice opens. No React, no bridge.
+// Pure logic behind the orchestrator task notices: which workspace a notice opens. No React, no bridge.
 import { LOCAL_ENDPOINT } from "../daemonSessions.ts";
 import { contains } from "../layout.ts";
 import { projectName } from "./ownerAttention.ts";

@@ -91,7 +91,7 @@ flowchart TB
   attention --> macos
   wsSnap & winState --> profile
 
-  subgraph orchd["orchestrator module (crates/sushiai-orch) - hosted by the sushiai daemon, loaded only when the Orchestrator extension is on; desktop calls orch.* over the daemon connection and receives orch.event; file-backed runs are re-adopted by process group after a daemon restart"]
+  subgraph orch["orchestrator module (crates/sushiai-orch) - hosted by the sushiai daemon, loaded only when the Orchestrator extension is on; desktop calls orch.* over the daemon connection and receives orch.event; file-backed runs are re-adopted by process group after a daemon restart"]
     direction LR
     proto["protocol.rs<br/>orch.* request and result types"]
     engine["engine/<br/>task loop, gates, routing"]
@@ -99,12 +99,12 @@ flowchart TB
     audit["audit.rs<br/>repo.audit, read-only"]
     insights["timeline.rs<br/>task.timeline, failures.catalogue"]
     evolution["evolution/<br/>signals when a task ends,<br/>clusters, proposals, measurement"]
-    evolveCli["orchd evolve<br/>evolution.run / evolution.adopt"]
-    costs["costs.rs<br/>costs.summary, orchd costs"]
+    evolveCli["sushiai orch evolve<br/>evolution.run / evolution.adopt"]
+    costs["costs.rs<br/>costs.summary, sushiai orch costs"]
     harness["harness.rs<br/>claude -p / codex exec"]
     side["git.rs (worktrees, commit)<br/>messages.rs (merging)"]
     store[("data dir<br/>tasks/, runs/, settings.json,<br/>costs.jsonl, chats/, audits/,<br/>evolution/ (signals.jsonl, detected.jsonl,<br/>proposals/)")]
-    mcp["orchd mcp<br/>task_* tools, stdio"]
+    mcp["sushiai mcp<br/>task_* tools, stdio"]
     chatTools["engine/chat_tools.rs<br/>connected MCP servers, OK-card writes"]
     mcpConfig[("owner's MCP config<br/>~/.claude.json, plugins")]
     prompts[("prompts/orchestrator.yaml<br/>+ data dir prompts.yaml override")]
@@ -159,7 +159,7 @@ A `session.open` event opens a Preview: `src/extensions/useOpenSignals.ts` acts 
 
 App state lives in one database, `sushiai.db` (`node:sqlite`, `electron/app-db.cjs`, one cached handle per profile, WAL, owner-only file mode, migrations on `user_version`). Each old JSON store (`projects.json`, `workspace-state.json`, `connections.json`, `orchestrator-hosts.json`) is imported once into its tables and renamed `<name>.imported`. The renderer's workspace snapshot keeps its IPC (`workspace-state-read/write/flush`); the main process splits it into `workspaces` rows (the id is the daemon group) and `app_state` keys, and writes only what changed in one transaction. SSH connection profiles and enabled orchestrator hosts are tables too. Every other main-process store (model providers and profiles, Claude and Codex account lists, provider and project secrets, window bounds, update settings, app preferences) is a named map in the generic `store(name, key, value)` table, read with `readStore` and written with `writeStore`/`putStore` (changed keys only, one transaction). Secrets keep their `safeStorage` ciphertext, whose key lives in the macOS Keychain; when secure storage is unavailable, provider keys fall back to unencrypted storage, as before. Files stay files only where another program reads them or they can be regenerated: Codex homes, CLI settings staged for a launch, extension manifests, attachments, update downloads, the skills catalog cache. `scripts/check-conventions.mjs` fails on a new `*.json` name under `electron/` that is not on its allowlist. Project metadata is a `projects` table and a `folders` table keyed by host and path, which holds each folder's attached project and its last git identity (remote key, common dir, checkout, branch); environment and account values are stored in the `project-secrets` store, encrypted through Electron `safeStorage`, and deleted in the same transaction as their project. The renderer receives presence and masked hints, while the main process resolves values for the selected project, stage, and host. Local sessions receive their stage-specific environment at launch. Every SSH host the owner added receives a project's values (adding the host is the consent) unless the owner switched sending off for that project and host; remote task values cross through `orch.secrets.set` over the daemon connection; remote session values travel in `session.create` `env` over the daemon protocol (through the ssh proxy) and live only in the holder's environment and the daemon's memory, never in `argv` or `state.json`. Codex accounts are not values in that store: each one is its own Codex home under userData (`codex-accounts/<id>`), signed in by `codex login` and refreshed by Codex itself, with the rest of `~/.codex` linked in. A local session runs Codex with `CODEX_HOME` set to it; an SSH session gets the account's login through the same `session.create` `env`, for that session only. A ChatGPT login refreshed there (its refresh token is single-use) is left in a named session home on the host and collected over SSH at the account's next start, the newer login winning. Switching sending off prevents later reads from including that host's project values and replaces what that host's daemon already holds (when the host is offline, at the next connection).
 
-Every writer of the project store (`upsert`, `updateEnv`, `updateMcp`, `mergeImport`, `setSecret`, `setHostSecret`, `clearSecret`, `setHostWithheld`, `setHostOverrides`, `setGitToken`, `delete`) runs one at a time under a single lock and reads fresh state; `upsert` never rewrites the variables or MCP servers of an existing project, and ids that are not own keys of the store are unknown projects. Project IPCs: `projects:env:update` and `projects:mcp:update` (variables and servers, MCP credentials become `${VAR}` references), `projects:git-token:set`, `projects:import-local`, `projects:import-mcp-text`, `projects:scan-source`, `projects:env:review-text`, `projects:env:classify`, `projects:local-install`, and `projects:host:prepare`. A host the owner added gets a project's values with no prompt: the "+" picker's "Prepare <host> and start" and the New project flow just clone, install, send the values and go on. The one control is "Don't send secrets to this host" (Project settings → Hosts, off by default, stored as `hosts[host].withheld`): with it on, `projects:host:prepare` clones with the host's own git login and installs with no value, task and terminal reads return none, and `setHostWithheld` makes `OrchestratorHosts.refreshSecrets(host)` re-push the allowed values so the host's daemon drops what it holds. Tasks and sessions get the values. `#withMcp` sends the enabled server definitions, with `${VAR}` references, to a remote orchd regardless of that switch; the values behind those references and the project's variables reach a remote orchd only through `#pushSecrets`, which honours it. Every folder has a project: `Projects.resolveProject` is the one resolver - the project the folder is attached to, else the project of its git remote (the branch's upstream remote, else `origin`, else the first one, through `insteadOf`), else a project with an attached folder of the same common git dir on that host - and a folder that gains a remote later keeps its project, which follows the remote. `projects:identify` gives the sidebar a folder's project id and git identity: it answers from the stored row at once and reads git once per run in the background (the local active workspace re-reads on a slow timer for its branch, a remote host is never polled), writing only when something changed, so an offline host's checkouts still join their project. The sidebar merges rows by that project id, then by remote, then by common dir on one host; grouping by host only splits the display; `projects:import-local` pulls a folder's `.env`, `.env.local`, `.mcp.json` and Claude config into the project (new keys only, empty secrets filled, removed keys not brought back unless asked), previewable. `claude-mcp-usage` counts MCP tool calls per server and plugin from Claude Code's own transcripts for the last 30 days.
+Every writer of the project store (`upsert`, `updateEnv`, `updateMcp`, `mergeImport`, `setSecret`, `setHostSecret`, `clearSecret`, `setHostWithheld`, `setHostOverrides`, `setGitToken`, `delete`) runs one at a time under a single lock and reads fresh state; `upsert` never rewrites the variables or MCP servers of an existing project, and ids that are not own keys of the store are unknown projects. Project IPCs: `projects:env:update` and `projects:mcp:update` (variables and servers, MCP credentials become `${VAR}` references), `projects:git-token:set`, `projects:import-local`, `projects:import-mcp-text`, `projects:scan-source`, `projects:env:review-text`, `projects:env:classify`, `projects:local-install`, and `projects:host:prepare`. A host the owner added gets a project's values with no prompt: the "+" picker's "Prepare <host> and start" and the New project flow just clone, install, send the values and go on. The one control is "Don't send secrets to this host" (Project settings → Hosts, off by default, stored as `hosts[host].withheld`): with it on, `projects:host:prepare` clones with the host's own git login and installs with no value, task and terminal reads return none, and `setHostWithheld` makes `OrchestratorHosts.refreshSecrets(host)` re-push the allowed values so the host's daemon drops what it holds. Tasks and sessions get the values. `#withMcp` sends the enabled server definitions, with `${VAR}` references, to a remote orchestrator regardless of that switch; the values behind those references and the project's variables reach a remote orchestrator only through `#pushSecrets`, which honours it. Every folder has a project: `Projects.resolveProject` is the one resolver - the project the folder is attached to, else the project of its git remote (the branch's upstream remote, else `origin`, else the first one, through `insteadOf`), else a project with an attached folder of the same common git dir on that host - and a folder that gains a remote later keeps its project, which follows the remote. `projects:identify` gives the sidebar a folder's project id and git identity: it answers from the stored row at once and reads git once per run in the background (the local active workspace re-reads on a slow timer for its branch, a remote host is never polled), writing only when something changed, so an offline host's checkouts still join their project. The sidebar merges rows by that project id, then by remote, then by common dir on one host; grouping by host only splits the display; `projects:import-local` pulls a folder's `.env`, `.env.local`, `.mcp.json` and Claude config into the project (new keys only, empty secrets filled, removed keys not brought back unless asked), previewable. `claude-mcp-usage` counts MCP tool calls per server and plugin from Claude Code's own transcripts for the last 30 days.
 
 ## 2. Task lifecycle
 
@@ -192,11 +192,11 @@ A task can be parked in the planning backlog (`task.backlog`, or `backlog` on
 `task.create`): a `next` or `later` bucket with an integer order. A backlog
 task is started only by `task.start` or the autopilot; recovery and the graph
 never start it (a drafting one resumes planning but stops after the plan). With
-`settings.autopilot` on, orchd starts the ready `next` tasks (every `dependsOn`
+`settings.autopilot` on, the orchestrator starts the ready `next` tasks (every `dependsOn`
 done) in (order, createdAt, id) order while live loops are below `parallel`.
 Starting clears the backlog and records who started it in `decisions`.
 
-A task graph is state orchd keeps, never a split it decides: the planner
+A task graph is state the orchestrator keeps, never a split it decides: the planner
 may answer a top-level request with `subtasks` (keys, requests, `dependsOn`
 between keys), or the orchestrator agent builds one with `task.create
 {parent, dependsOn}`. A parent runs no implement attempt unless finishing fails (below); each child
@@ -229,7 +229,7 @@ drop it, or stop.
 
 ### Self-healing briefs
 
-`engine/healing.rs` lets orchd repair a task's own contract without the owner,
+`engine/healing.rs` lets the orchestrator repair a task's own contract without the owner,
 each change a decision line plus an assumption (`by: orchd`) the owner can
 overturn. Before the first attempt every verify/finalVerify/check command runs
 on the base (`base_check.rs`); one that fails goes to the cheap judge
@@ -237,7 +237,7 @@ on the base (`base_check.rs`); one that fails goes to the cheap judge
 or marks it non-gating. When review marks the same criterion unmet in two
 attempts, the judge rules `code gap` (retry) or `infeasible as written` (the
 criterion is amended and the same attempt reviewed again). A planner-named
-screenshot command is run by orchd itself; otherwise an earlier attempt's
+screenshot command is run by the orchestrator itself; otherwise an earlier attempt's
 images count while no UI file it changed has changed. After the first attempt
 only P0/P1 findings about the task's own work block; the rest are report
 follow-ups. An owner or policy answer that contradicts a criterion amends it
@@ -254,7 +254,7 @@ flowchart LR
   gate -->|weakens a check or protected path,<br/>targets AGENTS.md or memory| rejected([stored rejected, with a reason])
   gate -->|passes| proposed([proposed])
   proposed -->|repo track: Approve| task[task runs] -->|done| adopted([adopted])
-  proposed -->|harness track: orchd eval run,<br/>evolution.adopt| adopted
+  proposed -->|harness track: sushiai orch eval run,<br/>evolution.adopt| adopted
   adopted --> measure[measure later tasks] -->|metric regressed| revert([revert_suggested])
 ```
 
@@ -283,7 +283,7 @@ flowchart TD
   done([done])
   fail["Failure<br/>signature dedup, maybe escalate tier"]
   budget{"Budget left?"}
-  ab[["orchd ab<br/>metrics per variant"]]
+  ab[["sushiai orch ab<br/>metrics per variant"]]
   triage["Orchestrator triages, max 2 per task<br/>continue / reject finding / escalate"]
   ownerQ(["Owner question"])
 

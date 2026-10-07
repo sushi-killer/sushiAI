@@ -314,7 +314,7 @@ or `./node_modules/.bin/<tool>`, never `npx`. The owner merges.
   picks proof; `$ui-evidence` measures and photographs the built UI;
   `$deslop` then `$autoreview` clean and review a diff before commit.
 
-- `docs/architecture.md` — Mermaid map of the app, orchd, the task
+- `docs/architecture.md` — Mermaid map of the app, the orchestrator, the task
   lifecycle and the references we borrowed from; update it in the same
   commit as a change that moves a box or an arrow.
 - `docs/AGENTS-INTEGRATION.md` — documents the in-app "Agents" **feature**

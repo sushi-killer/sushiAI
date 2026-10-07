@@ -531,7 +531,7 @@ export type AppPreferences = {
   runInMenuBar: boolean;
   /** macOS notifications for agents that need input or finished. */
   notifications: boolean;
-  /** Shows orchd task notices in a desktop mascot instead of a native
+  /** Shows orchestrator task notices in a desktop mascot instead of a native
    * notification (needs notifications on). */
   desktopMascot: boolean;
   /** Opt-in global shortcut that toggles the mascot. */
@@ -692,7 +692,7 @@ export interface Bridge {
       event: import("./orchestrator/types.ts").OrchestratorEvent,
     ) => void,
   ): () => void;
-  /** The owner clicked a native orchd notification or the desktop mascot's
+  /** The owner clicked a native orchestrator notification or the desktop mascot's
    * Open button. */
   onOrchestratorOpen(
     callback: (target: import("./orchestrator/notices.ts").TaskTarget) => void,

@@ -164,7 +164,7 @@ const JSON_ALLOWED = {
     [/^manifest\.json$/, "host binary manifest written by build:host"],
   ],
   "electron/ipc/app.cjs": [[/^skills-catalog\.json$/, "regenerable cache"]],
-  "electron/orchestrator.cjs": [[/^task\.json$/, "orchd task file"]],
+  "electron/orchestrator.cjs": [[/^task\.json$/, "orchestrator task file"]],
   "electron/project-hosts.cjs": [[/^package-lock\.json$/, "repo lockfile"]],
 };
 const stateRoot = process.env.STATE_STORE_ROOT_OVERRIDE || root;

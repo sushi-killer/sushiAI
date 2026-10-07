@@ -26,6 +26,8 @@ import { daemonHost } from "../daemonSessions.ts";
 import { errorText } from "./errors.ts";
 import {
   KINDS,
+  actionForKey,
+  actionLegend,
   ageLabel,
   agentName,
   cleanupCandidates,
@@ -326,6 +328,12 @@ export function InboxPage({
     void act(() => ui.reviewAll!.run(keys));
   };
 
+  /** Runs a module row's action through the module that owns the row. */
+  const runAction = (item: ModuleItem, actionId: string, text?: string) => {
+    const ui = moduleUis.find((m) => m.extensionId === item.entry.extensionId);
+    if (ui) void act(() => ui.act(item.entry.item.key, actionId, text));
+  };
+
   const handlers = useRef<(event: KeyboardEvent) => void>(() => {});
   handlers.current = (event) => {
     if (event.metaKey || event.ctrlKey || event.altKey) return;
@@ -339,8 +347,15 @@ export function InboxPage({
     if (key === "j") return move(1);
     if (key === "k") return move(-1);
     if (!item || busy) return;
-    // A module's own keys are handled by its detail.
-    if (item.source !== "session") return;
+    if (item.source === "module") {
+      // The selected row's action keys; its detail owns digits and Enter.
+      const action = actionForKey(item.entry.item.actions, key);
+      if (action) {
+        event.preventDefault();
+        runAction(item, action.id);
+      }
+      return;
+    }
     const prompt = prompts[item.row.panel.id];
     if (item.kind === "answer" && prompt && /^[1-9]$/.test(key)) {
       const option = prompt.options[Number(key) - 1];
@@ -444,15 +459,63 @@ export function InboxPage({
     return { meta, context, actions };
   }
 
-  /** A module row: title, age and where it comes from. What to do with it
-   * is in the detail. */
+  /** A module row: its own second line and action chips, then where it
+   * comes from. */
   function moduleView(item: ModuleItem) {
+    const { meta: line, actions: chips = [] } = item.entry.item;
     return {
       meta: `${item.project} · ${hostName(item)}`,
-      context: undefined,
-      actions: undefined,
+      context: line || undefined,
+      actions: chips.length ? (
+        <>
+          {chips.map((action, index) => {
+            const title = action.key
+              ? `${action.label} (${action.key.toUpperCase()})`
+              : undefined;
+            const click = (event: { stopPropagation(): void }) => {
+              event.stopPropagation();
+              runAction(item, action.id);
+            };
+            if (item.kind === "answer")
+              return (
+                <Chip
+                  key={action.id}
+                  selected={action.selected}
+                  disabled={busy}
+                  onClick={() => runAction(item, action.id)}
+                >
+                  {action.label}
+                </Chip>
+              );
+            const look = action.primary
+              ? "primary"
+              : index === chips.findIndex((a) => !a.primary)
+                ? "secondary"
+                : "ghost";
+            return (
+              <button
+                key={action.id}
+                className={`ui-button ${look}`}
+                disabled={busy}
+                title={title}
+                onClick={click}
+              >
+                {action.label}
+              </button>
+            );
+          })}
+        </>
+      ) : undefined,
     };
   }
+
+  const rowIcon = (item: Item) => {
+    if (item.source !== "module") return undefined;
+    const Mark = moduleUis.find(
+      (m) => m.extensionId === item.entry.extensionId,
+    )?.icon;
+    return Mark ? <Mark size={13} /> : undefined;
+  };
 
   function itemView(item: Item) {
     if (item.kind === "working" || item.kind === "idle")
@@ -471,6 +534,7 @@ export function InboxPage({
           title={item.title}
           time={item.at != null ? ageLabel(Date.now() - item.at) : undefined}
           context={context}
+          icon={rowIcon(item)}
           question={item.kind === "answer"}
           actions={actions}
           meta={meta}
@@ -958,7 +1022,9 @@ export function InboxPage({
               ["J K", "move"],
               ["1–9", "pick"],
               ["⏎", "answer"],
-              ["E", "done"],
+              ...(selected?.source === "module"
+                ? actionLegend(selected.entry.item.actions)
+                : [["E", "done"]]),
             ].map(([key, text]) => (
               <span key={text}>
                 <kbd>{key}</kbd>

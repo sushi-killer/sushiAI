@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { ArrowUpRight, GitBranch, RefreshCw } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ArrowUpRight, GitBranch } from "lucide-react";
 import type { AttentionItem } from "../extensions/modules.ts";
 import { ownsKey } from "../app/inboxModel.ts";
 import { groupKey } from "../app/workspaceMerge.ts";
@@ -8,14 +8,17 @@ import { hostOf } from "./hosts.ts";
 import {
   criteriaMet,
   errorText,
-  formatCost,
   implementAttemptCount,
   latestImplementAttempt,
-  reviewOf,
   stageTrack,
-  taskReason,
 } from "./helpers.ts";
-import { diffFacts, inboxEnterAnswer, openTask } from "./moduleAttention.ts";
+import {
+  diffFacts,
+  inboxEnterAnswer,
+  openTask,
+  setPick,
+  usePicks,
+} from "./moduleAttention.ts";
 import {
   clickReply,
   shownPick,
@@ -34,7 +37,26 @@ type DiffStat = { files: number; added: number; removed: number };
 const diffOf = (task: Task): DiffStat | undefined =>
   (task as Task & { diffStat?: DiffStat }).diffStat;
 
-const files = (count: number) => `${count} file${count === 1 ? "" : "s"}`;
+/** A text block that scrolls past a height cap, with a fade while there is
+ * more below, so a long body never pushes the footer off screen. */
+function ClampedText({ text, className }: { text: string; className: string }) {
+  const ref = useRef<HTMLParagraphElement>(null);
+  const [more, setMore] = useState(false);
+  const measure = () => {
+    const el = ref.current;
+    if (el) setMore(el.scrollTop + el.clientHeight < el.scrollHeight - 1);
+  };
+  useLayoutEffect(measure, [text]);
+  return (
+    <p
+      ref={ref}
+      className={`${className} inbox-clamp${more ? " more" : ""}`}
+      onScroll={measure}
+    >
+      {text}
+    </p>
+  );
+}
 
 /** The Inbox detail of one task row: answer choices, decide, land, diff and
  * cost, with the task keys (1-9, Enter, L, R, E). Drawn by the module's
@@ -43,12 +65,10 @@ export function InboxTaskDetail({ item }: { item: AttentionItem }) {
   const tasks = useTasks(true);
   const id = item.key.slice(item.key.indexOf(":") + 1);
   const task = tasks.find((t) => t.id === id && groupKey(t.host) === item.host);
-  const [picks, setPicks] = useState<Record<string, string>>({}),
-    [notes, setNotes] = useState<Record<string, string>>({}),
+  const picks = usePicks();
+  const [notes, setNotes] = useState<Record<string, string>>({}),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
-    [fixing, setFixing] = useState<string | null>(null),
-    [fixNote, setFixNote] = useState(""),
     [maxAttempts, setMaxAttempts] = useState<Record<string, number>>({});
   const inFlight = useRef(false);
   const pickedAt = useRef<Record<string, number>>({});
@@ -88,7 +108,7 @@ export function InboxTaskDetail({ item }: { item: AttentionItem }) {
     setNotes((old) => ({ ...old, [item.key]: text }));
   const pickOption = (option: string) => {
     pickedAt.current[item.key] = Date.now();
-    setPicks((old) => ({ ...old, [item.key]: option }));
+    setPick(item.key, option);
   };
   async function act(run: () => Promise<unknown>) {
     if (inFlight.current) return;
@@ -115,7 +135,7 @@ export function InboxTaskDetail({ item }: { item: AttentionItem }) {
         return next;
       };
       setNotes(drop);
-      setPicks(drop);
+      setPick(item.key, undefined);
       delete pickedAt.current[item.key];
     });
   };
@@ -128,9 +148,6 @@ export function InboxTaskDetail({ item }: { item: AttentionItem }) {
         Date.now(),
       ),
     );
-  const runAgain = () => task && void act(() => client().taskStart(task.id));
-  const archive = () => task && void act(() => client().taskArchive(task.id));
-  const land = () => task && void act(() => client().taskLand(task.id));
 
   const handlers = useRef<(event: KeyboardEvent) => void>(() => {});
   handlers.current = (event) => {
@@ -142,10 +159,6 @@ export function InboxTaskDetail({ item }: { item: AttentionItem }) {
       const option = task.question?.options[Number(key) - 1];
       if (option) pickOption(option);
     } else if (key === "enter" && item.kind === "answer") answerByKey();
-    else if (key === "l" && item.kind === "review") land();
-    else if (key === "r" && item.kind === "decide" && task.status !== "landing")
-      runAgain();
-    else if (key === "e" && item.kind !== "answer") archive();
   };
   useEffect(() => {
     const listener = (event: KeyboardEvent) => handlers.current(event);
@@ -173,157 +186,27 @@ export function InboxTaskDetail({ item }: { item: AttentionItem }) {
     maxAttempts[item.host],
     task.costUsd,
   );
-  let context: string;
-  if (item.kind === "answer")
-    context = (task.question?.text ?? "").split("\n")[0];
-  else if (item.kind === "review") {
-    const count = latestImplementAttempt(task)?.changedFiles.length;
-    const review = reviewOf(task);
-    context = [
-      review ? `review ${review.verdict}` : "done",
-      count ? files(count) : "",
-      formatCost(task.costUsd),
-      `not landed · → ${task.baseRef}`,
-    ]
-      .filter(Boolean)
-      .join(" · ");
-  } else context = `${taskReason(task, tasks)} · ${formatCost(task.costUsd)}`;
+  const context =
+    item.kind === "answer" ? (task.question?.text ?? "") : (item.meta ?? "");
 
-  /** Needed a fix / Clean: a fix takes a note (the follow-up task is made
-   * from it), pressing an active mark clears it. */
-  function marks(target: Task) {
-    const mark = target.leadTouch;
-    if (fixing === target.id)
-      return (
-        <form
-          className="inbox-fix"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void act(async () => {
-              await client().taskLeadTouch(target.id, true, fixNote.trim());
-              setFixing(null);
-              setFixNote("");
-            });
-          }}
-        >
-          <input
-            aria-label="What had to be fixed"
-            placeholder="What is missing or wrong? A follow-up task will be created."
-            value={fixNote}
-            autoFocus
-            onChange={(event) => setFixNote(event.target.value)}
-          />
-          <button type="submit" className="ui-button primary" disabled={busy}>
-            Save
-          </button>
-          <button
-            type="button"
-            className="ui-button ghost"
-            onClick={() => setFixing(null)}
-          >
-            Cancel
-          </button>
-        </form>
-      );
-    return (
-      <>
-        <button
-          className="ui-button ghost"
-          disabled={busy}
-          aria-pressed={mark?.touched === true}
-          onClick={() => {
-            if (mark?.touched === true)
-              void act(() => client().taskLeadTouch(target.id));
-            else {
-              setFixNote("");
-              setFixing(target.id);
-            }
-          }}
-        >
-          Needed a fix
-        </button>
-        <button
-          className="ui-button ghost"
-          disabled={busy}
-          aria-pressed={mark?.touched === false}
-          onClick={() =>
-            void act(() =>
-              client().taskLeadTouch(
-                target.id,
-                mark?.touched === false ? undefined : false,
-              ),
-            )
-          }
-        >
-          Clean
-        </button>
-      </>
-    );
-  }
-
-  let actions;
-  if (item.kind === "answer")
-    actions = (task.question?.options ?? []).map((option) => (
-      <Chip
-        key={option}
-        selected={shownPick(choice) === option}
-        onClick={() => {
-          pickOption(togglePick(choice, option));
-          setNote("");
-        }}
-      >
-        {option}
-      </Chip>
-    ));
-  else if (item.kind === "decide")
-    actions = (
-      <>
-        {task.status !== "landing" && (
-          <button
-            className="ui-button secondary"
-            disabled={busy}
-            title="Run again (R)"
-            onClick={runAgain}
-          >
-            <RefreshCw size={14} /> Run again
-          </button>
-        )}
-        <button
-          className="ui-button ghost"
-          onClick={() => openTask(ownerTarget(task))}
-        >
-          Run with a note
-        </button>
-        <button
-          className="ui-button ghost"
-          disabled={busy}
-          title="Archive (E)"
-          onClick={archive}
-        >
-          Archive
-        </button>
-      </>
-    );
-  else
-    actions = (
-      <>
-        <button
-          className="ui-button primary"
-          disabled={busy}
-          title="Land (L)"
-          onClick={land}
-        >
-          Land
-        </button>
-        {marks(task)}
-      </>
-    );
+  const choices = (task.question?.options ?? []).map((option) => (
+    <Chip
+      key={option}
+      selected={shownPick(choice) === option}
+      onClick={() => {
+        pickOption(togglePick(choice, option));
+        setNote("");
+      }}
+    >
+      {option}
+    </Chip>
+  ));
 
   const met = criteriaMet(task);
   return (
     <>
       <div className="inbox-preview-head">
-        <h2 title={task.title}>{task.title}</h2>
+        <h2 title={item.title}>{item.title}</h2>
         <button
           className="inbox-link"
           onClick={() => openTask(ownerTarget(task))}
@@ -333,17 +216,15 @@ export function InboxTaskDetail({ item }: { item: AttentionItem }) {
         </button>
       </div>
       {context && (
-        <p
+        <ClampedText
+          text={context}
           className={
             item.kind === "answer"
               ? "inbox-prompt-question"
               : "inbox-session-line"
           }
-        >
-          {context}
-        </p>
+        />
       )}
-      <div className="inbox-prompt-options">{actions}</div>
       <StageTrack steps={stageTrack(task)} />
       {task.criteria.length > 0 && (
         <div className="inbox-criteria">
@@ -373,29 +254,32 @@ export function InboxTaskDetail({ item }: { item: AttentionItem }) {
       )}
       <div className="inbox-preview-spacer" />
       {item.kind === "answer" && (
-        <form
-          className="inbox-reply"
-          onSubmit={(event) => {
-            // Enter in the field: typed text or an explicit pick only.
-            event.preventDefault();
-            answerByKey();
-          }}
-        >
-          <input
-            aria-label="Answer note"
-            placeholder="Answer with a note, or pick above…"
-            value={note}
-            onChange={(event) => setNote(event.target.value)}
-          />
-          <button
-            type="button"
-            className="ui-button primary"
-            disabled={busy || !clickReply(choice)}
-            onClick={() => answer(clickReply(choice))}
+        <div className="inbox-foot">
+          <div className="inbox-prompt-options">{choices}</div>
+          <form
+            className="inbox-reply"
+            onSubmit={(event) => {
+              // Enter in the field: typed text or an explicit pick only.
+              event.preventDefault();
+              answerByKey();
+            }}
           >
-            Answer
-          </button>
-        </form>
+            <input
+              aria-label="Answer note"
+              placeholder="Answer with a note, or pick above…"
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+            />
+            <button
+              type="button"
+              className="ui-button primary"
+              disabled={busy || !clickReply(choice)}
+              onClick={() => answer(clickReply(choice))}
+            >
+              Answer
+            </button>
+          </form>
+        </div>
       )}
     </>
   );

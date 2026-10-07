@@ -18,9 +18,10 @@ export function Chip({
       className={`ui-chip${selected ? " selected" : ""}`}
       aria-pressed={selected}
       disabled={disabled}
+      title={typeof children === "string" ? children : undefined}
       onClick={onClick}
     >
-      {children}
+      <span className="ui-chip-label">{children}</span>
     </button>
   );
 }

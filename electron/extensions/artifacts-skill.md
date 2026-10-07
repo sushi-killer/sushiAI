@@ -133,16 +133,15 @@ flowchart LR
 
 ## Open it
 
-After the file is written, run this one command. The path is relative to
-your current folder, or absolute. Herdr cuts each token at 80 characters,
-so keep the path short and keep both tokens in one call:
+After the file is written, run this one command. The path must be absolute
+(`$(pwd)/artifacts/<slug>.md` works):
 
 ```sh
-herdr workspace report-metadata "$HERDR_WORKSPACE_ID" --source sushiai --token "sushiai_open=$HERDR_PANE_ID builtin.artifacts/preview $(date +%s)-$$" --token "sushiai_open_arg=artifacts/<slug>.md"
+sushiai open artifacts/preview "$(pwd)/artifacts/<slug>.md"
 ```
 
-If `HERDR_PANE_ID` is not set you are not inside sushiAI: give the owner the
-path instead. Run the command again only to bring a closed Preview back or
+If `SUSHIAI_SESSION_ID` is not set you are not inside sushiAI: give the owner
+the path instead. Run the command again only to bring a closed Preview back or
 to switch it to another file.
 
 ## Comments

@@ -434,6 +434,38 @@ test("a singleton surface is revealed instead of opened twice", async () => {
   assert.equal(result.panel.id, "p1");
 });
 
+test("openSurface shows a hidden singleton pane instead of adding a second", async () => {
+  const { placeSurface } = await import("../src/extensions/useModuleShell.ts");
+  const { registry } = await paneRegistry("singleton");
+  const hidden = pane("test.probe", "probe.ledger");
+  const workspace = {
+    id: "w",
+    name: "w",
+    cwd: "/r",
+    panels: [hidden],
+    layout: null,
+  };
+  const place = placeSurface(
+    [workspace],
+    { workspaceId: "w" },
+    registry,
+    "test.probe",
+    "probe.ledger",
+  );
+  assert.equal(place.kind, "reveal");
+  assert.equal(place.panel.id, "p1");
+  assert.equal(
+    placeSurface(
+      [workspace],
+      { workspaceId: "w" },
+      registry,
+      "test.probe",
+      "probe.gone",
+    ).kind,
+    "unavailable",
+  );
+});
+
 test("a multi-instance surface still opens another pane", async () => {
   const { resolvePaneOpen } = await library;
   const { registry } = await paneRegistry("multiple");
@@ -478,7 +510,7 @@ test("a project is its path, unless it lives on another machine", async () => {
   const cwd = "/Users/me/app";
   assert.equal(projectScope(cwd), cwd);
   assert.equal(
-    projectScope(cwd, "/Users/me/.config/herdr/herdr.sock"),
+    projectScope(cwd, "/Users/me/.sushiai/daemon.sock"),
     cwd,
     "a local daemon socket is still this machine, not part of identity",
   );
@@ -488,4 +520,18 @@ test("a project is its path, unless it lives on another machine", async () => {
     "the same path on a remote host is a different project",
   );
   assert.equal(projectScope("", "ssh:build-box"), "", "no folder, no scope");
+});
+
+test("compareOrder is the one ordering: order, then extension id, then id", async () => {
+  const { compareOrder } = await import("../src/extensions/registry.ts");
+  const items = [
+    { extensionId: "b", id: "x", order: 1 },
+    { extensionId: "b", id: "a" },
+    { extensionId: "a", id: "z" },
+    { extensionId: "a", id: "y", order: 2 },
+  ];
+  assert.deepEqual(
+    items.sort(compareOrder).map((item) => `${item.extensionId}.${item.id}`),
+    ["a.z", "b.a", "b.x", "a.y"],
+  );
 });

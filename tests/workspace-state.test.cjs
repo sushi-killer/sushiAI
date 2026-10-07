@@ -15,9 +15,9 @@ test("restore normalizes durable state and resets transient panel runtime", asyn
     id: "remote",
     name: "Remote",
     cwd: "/remote",
-    herdrId: "herdr-1",
     panels: [
       panel("terminal", "terminal", {
+        sessionId: "s-1",
         busy: true,
         started: true,
         status: "working",
@@ -58,23 +58,28 @@ test("restore normalizes durable state and resets transient panel runtime", asyn
   );
 });
 
-test("restore preserves explicit Herdr connection and clears local connection", async () => {
+test("restore keeps a workspace's connection and binds a legacy host workspace to the saved socket", async () => {
   const { restore } = await library;
   const workspaces = [
     {
       id: "explicit",
       name: "Explicit",
       cwd: "/a",
-      herdrId: "one",
       connection: "ssh:one",
-      panels: [panel("one")],
+      panels: [panel("one", "terminal", { sessionId: "s-one" })],
       layout: { type: "leaf", id: "one" },
+    },
+    {
+      id: "legacy",
+      name: "Legacy",
+      cwd: "/c",
+      panels: [panel("three", "terminal", { paneCwd: "/c" })],
+      layout: { type: "leaf", id: "three" },
     },
     {
       id: "local",
       name: "Local",
       cwd: "/b",
-      connection: "stale",
       panels: [panel("two")],
       layout: { type: "leaf", id: "two" },
     },
@@ -83,7 +88,8 @@ test("restore preserves explicit Herdr connection and clears local connection", 
     read: () => JSON.stringify({ workspaces, socket: "ssh:fallback" }),
   });
   assert.equal(saved.workspaces[0].connection, "ssh:one");
-  assert.equal(saved.workspaces[1].connection, undefined);
+  assert.equal(saved.workspaces[1].connection, "ssh:fallback");
+  assert.equal(saved.workspaces[2].connection, undefined);
 });
 
 test("restore keeps the worktree branch a workspace was launched on", async () => {
@@ -219,7 +225,7 @@ test("restore accepts only a well-formed closedProjects array", async () => {
     name: "app",
     cwd: "/home/dev/app",
     endpoint: "ssh:devbox",
-    herdr: true,
+    backed: true,
     closedAt: 1700000000000,
     git: {
       projectId: "project-app",
@@ -270,11 +276,10 @@ test("restore accepts only a well-formed closedProjects array", async () => {
   assert.deepEqual(notAnArray.closedProjects, []);
 });
 
-test("restore keeps an empty Herdr project while sweeping an old ended-only row", async () => {
+test("restore keeps an empty session project while sweeping an old ended-only row", async () => {
   const { restore } = await library;
   const empty = {
-    id: "herdr-empty",
-    herdrId: "empty",
+    id: "host-empty",
     connection: "ssh:devbox",
     name: "Checkout",
     cwd: "/tmp/checkout",
@@ -283,10 +288,9 @@ test("restore keeps an empty Herdr project while sweeping an old ended-only row"
   };
   const ended = {
     ...empty,
-    id: "herdr-ended",
-    herdrId: "ended",
+    id: "host-ended",
     cwd: "/tmp/old-checkout",
-    panels: [panel("old-pane", "terminal", { herdrId: "pane", ended: true })],
+    panels: [panel("old-pane", "terminal", { sessionId: "gone", ended: true })],
     layout: { type: "leaf", id: "old-pane" },
   };
   const local = {
@@ -330,4 +334,132 @@ test("initialWorkspace and codePanels preserve layout and panel identity invaria
   const withoutCodeChat = { ...workspace, layout: null };
   assert.equal(codePanels(withoutCodeChat).length, 3);
   assert.equal(codePanels(withoutCodeChat)[0], workspace.panels[0]);
+});
+
+test("restored panels that ran without a session stay in their workspace, ended, with Reopen", async () => {
+  const { restore } = await library;
+  const saved = restore({
+    read: () =>
+      JSON.stringify({
+        workspaces: [
+          {
+            id: "kept",
+            name: "Kept",
+            cwd: "/kept",
+            panels: [panel("a", "agent", { status: "idle", agent: "codex" })],
+            layout: { type: "leaf", id: "a" },
+          },
+          {
+            id: "other",
+            name: "Other",
+            cwd: "/other",
+            panels: [panel("b")],
+            layout: { type: "leaf", id: "b" },
+          },
+        ],
+        socket: "local",
+      }),
+  });
+  assert.deepEqual(
+    saved.workspaces.map((w) => w.id),
+    ["kept", "other"],
+  );
+  assert.equal(saved.workspaces[0].panels[0].ended, true);
+  assert.equal(saved.workspaces[0].panels[0].agent, "codex");
+  assert.equal(saved.closedProjects.length, 0);
+});
+
+test("a restored agent that ran without a session comes back ended and keeps its kind", async () => {
+  const { restore } = await library;
+  const saved = restore({
+    read: () =>
+      JSON.stringify({
+        workspaces: [
+          {
+            id: "w",
+            name: "W",
+            cwd: "/w",
+            panels: [
+              panel("ran", "agent", { agent: "codex", started: true }),
+              panel("idle", "agent", { agent: "claude" }),
+            ],
+            layout: { type: "leaf", id: "ran" },
+          },
+        ],
+      }),
+  });
+  const [ran, idle] = saved.workspaces[0].panels;
+  assert.equal(ran.ended, true);
+  assert.equal(ran.agent, "codex");
+  assert.equal(idle.ended, undefined);
+});
+
+test("an old snapshot that named This Mac by its socket path or by nothing is remapped to local", async () => {
+  const { restore } = await library;
+  const old = {
+    workspaces: [
+      {
+        id: "by-path",
+        name: "By path",
+        cwd: "/a",
+        connection: "/Users/me/.sushiai/daemon.sock",
+        panels: [panel("one", "terminal", { sessionId: "s-one" })],
+        layout: { type: "leaf", id: "one" },
+      },
+      {
+        id: "empty",
+        name: "Empty string",
+        cwd: "/b",
+        connection: "",
+        panels: [panel("two")],
+        layout: { type: "leaf", id: "two" },
+      },
+      {
+        id: "ssh",
+        name: "Remote",
+        cwd: "/c",
+        connection: "ssh:lab",
+        panels: [panel("three", "terminal", { sessionId: "s-three" })],
+        layout: { type: "leaf", id: "three" },
+      },
+    ],
+    socket: "/Users/me/.sushiai/daemon.sock",
+    closedProjects: [
+      {
+        id: "closed:/Users/me/.sushiai/daemon.sock:/old",
+        name: "old",
+        cwd: "/old",
+        endpoint: "/Users/me/.sushiai/daemon.sock",
+        backed: true,
+        closedAt: 1,
+        git: {},
+      },
+      {
+        id: "closed:ssh:lab:/lab",
+        name: "lab",
+        cwd: "/lab",
+        endpoint: "ssh:lab",
+        backed: true,
+        closedAt: 2,
+        git: {},
+      },
+    ],
+  };
+  const saved = restore({ read: () => JSON.stringify(old) });
+  assert.deepEqual(
+    saved.workspaces.map((w) => w.connection),
+    ["local", "local", "ssh:lab"],
+  );
+  assert.deepEqual(
+    saved.closedProjects.map((p) => [p.id, p.endpoint]),
+    [
+      ["closed:local:/old", "local"],
+      ["closed:ssh:lab:/lab", "ssh:lab"],
+    ],
+  );
+  assert.equal("socket" in saved, false);
+  // What the next save writes restores to the same thing: the remap is stable.
+  const again = restore({ read: () => JSON.stringify(saved) });
+  assert.deepEqual(again.workspaces, saved.workspaces);
+  assert.deepEqual(again.closedProjects, saved.closedProjects);
 });

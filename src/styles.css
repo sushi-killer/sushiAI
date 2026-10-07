@@ -834,7 +834,7 @@ textarea::placeholder {
   gap: var(--gap-xs);
   pointer-events: none;
 }
-.herdr-terminal-note {
+.terminal-host-note {
   font-size: 9px;
   background: #151515dd;
   color: #727d76;
@@ -3213,42 +3213,6 @@ iframe {
 .providers-settings > .muted:first-child {
   margin-top: 18px;
 }
-/* The socket row keeps the status beside its label and the Reconnect button on
-   the input's line instead of on a row of its own. */
-.modal .socket-form {
-  gap: 8px;
-  margin-top: 16px;
-}
-.socket-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-}
-.socket-head label {
-  font-size: 12px;
-  color: #aaa;
-  flex-shrink: 0;
-}
-.socket-head .connection-detail {
-  justify-content: flex-end;
-  text-align: right;
-}
-.socket-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.socket-controls input {
-  flex: 1;
-  min-width: 0;
-}
-.socket-controls .primary {
-  height: 38px;
-  flex-shrink: 0;
-  padding: 0 13px;
-}
 .connection-card {
   border: 1px solid #333;
   border-radius: 8px;
@@ -4813,7 +4777,7 @@ iframe {
     color 0.15s ease;
 }
 
-/* Herdr owns scrollback; a local xterm thumb only moves stale rendered frames. */
+/* The wheel scrolls the terminal's own history; its thumb stays hidden. */
 .terminal-surface .xterm-scrollable-element > .scrollbar {
   display: none;
 }
@@ -5642,4 +5606,97 @@ iframe {
   to {
     transform: rotate(360deg);
   }
+}
+/* Connection rows: the daemon state under the name, in tone colours. */
+.connection-card {
+  flex-wrap: wrap;
+}
+.connection-card > .host-status {
+  flex: 0 0 100%;
+  display: flex;
+  text-align: left;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--gap-sm);
+  margin-top: var(--gap-sm);
+  padding-top: var(--gap-sm);
+  border-top: 1px solid var(--line-divider);
+  min-width: 0;
+}
+.host-status p {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+.host-status-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--gap-sm);
+  font-size: var(--text-xs);
+  color: var(--tone-neutral);
+}
+.connection-card .host-status-line small {
+  max-width: none;
+  white-space: normal;
+  color: var(--text-muted);
+}
+.host-status .status-dot {
+  align-self: center;
+  background: var(--tone-neutral);
+}
+.host-status.tone-ok .host-status-line {
+  color: var(--tone-ok);
+}
+.host-status.tone-ok .status-dot {
+  background: var(--tone-ok);
+}
+.host-status.tone-info .host-status-line {
+  color: var(--tone-info);
+}
+.host-status.tone-info .status-dot {
+  background: var(--tone-info);
+}
+.host-status.tone-warning .host-status-line {
+  color: var(--tone-warning);
+}
+.host-status.tone-warning .status-dot {
+  background: var(--tone-warning);
+}
+.host-status.tone-danger .host-status-line {
+  color: var(--tone-danger);
+}
+.host-status.tone-danger .status-dot {
+  background: var(--tone-danger);
+}
+.host-status > .secondary {
+  padding: 4px 10px;
+}
+.copy-text {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+}
+.copy-text code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.copy-text button {
+  padding: 2px;
+  color: var(--text-muted);
+}
+.ssh-form .advanced summary {
+  cursor: pointer;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.ssh-form .advanced label {
+  margin-top: var(--gap-sm);
 }

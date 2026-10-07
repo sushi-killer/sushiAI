@@ -1,8 +1,9 @@
 import type { Layout, Panel, Workspace } from "./types";
 import { contains, isValidLayout, leaf, split, uid } from "./layout.ts";
+import { panelMigrations } from "./extensions/panelMigrations.ts";
 import { validRoute, type RouteRef } from "./extensions/routes.ts";
 import type { ProjectGit } from "./app/useProjectGit.ts";
-import { closedProjectKey, migrateHerdrIdentities } from "./herdrIdentity.ts";
+import { LOCAL_ENDPOINT } from "./daemonSessions.ts";
 
 /** Where the snapshot lives when there is no desktop bridge (dev:web). With
  * the bridge it is <userData>/sushiai.db, written by the main process. */
@@ -16,6 +17,22 @@ const LEGACY_AGENT_FOCUS = "sushiai.agent-focus.v1";
 const LEGACY_CHAT_FOCUS = "sushiai.chat-focus.v1";
 export const MAX_AGENT_TABS = 30;
 
+/** The id of a closed project: its host endpoint and folder. */
+export function closedProjectKey(
+  endpoint: string | undefined,
+  cwd: string,
+): string {
+  return `closed:${endpoint || LOCAL_ENDPOINT}:${cwd}`;
+}
+
+/** Snapshots saved before This Mac was the endpoint "local" named it by the
+ * daemon's socket path (or by nothing at all). Every endpoint that is not an
+ * ssh host is This Mac; an unset one stays unset. */
+const localEndpoint = (endpoint: string | undefined) =>
+  endpoint === undefined || endpoint.startsWith("ssh:")
+    ? endpoint
+    : LOCAL_ENDPOINT;
+
 export type Routine = { id: string; name: string; command: string };
 
 /** A workspace the sidebar dropped ("Close workspace and sessions") but the
@@ -27,7 +44,8 @@ export type ClosedProject = {
   name: string;
   cwd: string;
   endpoint?: string;
-  herdr: boolean;
+  /** The workspace ran daemon sessions, so reopening starts one. */
+  backed: boolean;
   closedAt: number;
   git: ProjectGit;
 };
@@ -54,7 +72,6 @@ export type AgentFocus = {
 export type Saved = {
   workspaces: Workspace[];
   activeId: string;
-  socket: string;
   routines: Routine[];
   fontScale: number;
   mode?: "Agent" | "Code" | "Chat";
@@ -142,7 +159,7 @@ function normalizeClosedProjects(value: unknown): ClosedProject[] {
       name: typeof p.name === "string" ? p.name : "",
       cwd: p.cwd as string,
       endpoint: typeof p.endpoint === "string" ? p.endpoint : undefined,
-      herdr: p.herdr === true,
+      backed: p.backed === true,
       closedAt: typeof p.closedAt === "number" ? p.closedAt : 0,
       git: normalizeGit(p.git),
     }));
@@ -254,13 +271,13 @@ function importLegacy(store: SnapshotStore): string | null {
   return text;
 }
 
-/** A Herdr workspace with ended panes and nothing else open moves to Recently
- * closed on start. An intentionally empty project stays in the workspace list. */
+/** A workspace whose panels are all ended daemon sessions moves to Recently
+ * closed on start. Panels that come back ended without a session (saved by an
+ * older release) stay in place with Reopen, so they never count here. An
+ * intentionally empty project stays in the workspace list. */
 export function sweepLeftovers(saved: Saved): Saved {
   const leftover = (w: Workspace) =>
-    Boolean(w.herdrId) &&
-    w.panels.length > 0 &&
-    w.panels.every((p) => p.herdrId && p.ended);
+    w.panels.length > 0 && w.panels.every((p) => p.sessionId && p.ended);
   const rest = saved.workspaces.filter((w) => !leftover(w));
   if (rest.length === saved.workspaces.length || !rest.length) return saved;
   const closedAt = Date.now();
@@ -272,7 +289,7 @@ export function sweepLeftovers(saved: Saved): Saved {
       name: w.name,
       cwd: w.cwd,
       endpoint: w.connection,
-      herdr: true,
+      backed: true,
       closedAt,
       git: {
         projectId: "",
@@ -305,6 +322,68 @@ export function sweepLeftovers(saved: Saved): Saved {
   };
 }
 
+const CORE_KINDS = new Set(["agent", "terminal", "browser", "chat", "files"]);
+
+/** A panel of a kind core does not know goes through the modules' migrations;
+ * the first one that claims it supplies the current shape. */
+function migratePanel(panel: Panel): Panel {
+  if (CORE_KINDS.has(panel.kind) || panel.kind === "extension") return panel;
+  for (const migrate of panelMigrations) {
+    const next = migrate(panel);
+    if (next) return next;
+  }
+  return panel;
+}
+
+/** A terminal or agent panel that ran without a daemon session (the host had
+ * reported its state, or the agent was started) has nothing to bind to: it
+ * comes back ended, with Reopen, and keeps its agent so Reopen starts the same
+ * one. A panel that never ran keeps its Launch button. */
+function restorePanel(panel: Panel): Panel {
+  const ran =
+    !panel.sessionId &&
+    (panel.kind === "terminal" || panel.kind === "agent") &&
+    (panel.started === true ||
+      panel.status !== undefined ||
+      panel.paneCwd !== undefined);
+  return {
+    ...panel,
+    busy: false,
+    started: false,
+    ...(ran ? { ended: true } : {}),
+    // A reply that never arrived leaves an empty bubble; drop it.
+    ...(panel.messages && {
+      messages: panel.messages.filter((m) => m.role === "user" || m.text),
+    }),
+  } as Panel;
+}
+
+/** `socket` is the old snapshot's default endpoint: a workspace with session
+ * panels and no connection of its own was bound to it. */
+const restoreWorkspace =
+  (fallback: string) =>
+  (w: Workspace): Workspace => {
+    const backed = w.panels.some((p) => p.sessionId || p.paneCwd);
+    return {
+      ...w,
+      connection:
+        localEndpoint(w.connection) ?? (backed ? fallback : undefined),
+      panels: w.panels.map((p) => restorePanel(migratePanel(p))),
+    };
+  };
+
+/** A remembered project whose endpoint was This Mac's old socket path moves to
+ * "local", and its id (`closed:<endpoint>:<cwd>`) with it. */
+function restoreClosedProject(project: ClosedProject): ClosedProject {
+  const endpoint = localEndpoint(project.endpoint);
+  if (endpoint === project.endpoint) return project;
+  return {
+    ...project,
+    endpoint,
+    id: closedProjectKey(endpoint, project.cwd),
+  };
+}
+
 export function restore(store: SnapshotStore = snapshotStore()): Saved | null {
   try {
     const value = JSON.parse(store.read() ?? importLegacy(store) ?? "null");
@@ -323,29 +402,26 @@ export function restore(store: SnapshotStore = snapshotStore()): Saved | null {
       route: validRoute(value.route) ? value.route : undefined,
       workspaceGrouping:
         value.workspaceGrouping === "flat" ? "flat" : "grouped",
-      closedProjects: normalizeClosedProjects(value.closedProjects),
+      closedProjects: normalizeClosedProjects(value.closedProjects).map(
+        restoreClosedProject,
+      ),
       views: normalizeViews(value.views),
       mergedLayouts: normalizeMergedLayouts(value.mergedLayouts),
       agentTabs: normalizeAgentTabs(value.agentTabs),
       agentFocus: normalizeAgentFocus(value.agentFocus),
       chatFocus: typeof value.chatFocus === "string" ? value.chatFocus : "",
-      workspaces: value.workspaces.map((w: Workspace) => ({
-        ...w,
-        // Tokens are live host state: the first snapshot after start sets them.
-        herdrTokens: undefined,
-        connection: w.herdrId ? w.connection || value.socket : undefined,
-        panels: w.panels.map((p) => ({
-          ...p,
-          busy: false,
-          started: false,
-          // A reply that never arrived leaves an empty bubble; drop it.
-          ...(p.messages && {
-            messages: p.messages.filter((m) => m.role === "user" || m.text),
-          }),
-        })),
-      })),
+      workspaces: value.workspaces.map(
+        restoreWorkspace(
+          typeof value.socket === "string" && value.socket.startsWith("ssh:")
+            ? value.socket
+            : LOCAL_ENDPOINT,
+        ),
+      ),
     };
-    const migrated = sweepLeftovers(migrateHerdrIdentities(normalized));
+    // The old snapshots' `socket` is gone: This Mac is "local" (see localEndpoint).
+    // The next save writes the new shape; until then the remap repeats harmlessly.
+    delete (normalized as { socket?: string }).socket;
+    const migrated = sweepLeftovers(normalized);
     if (migrated !== normalized) {
       try {
         store.flush(JSON.stringify(migrated));

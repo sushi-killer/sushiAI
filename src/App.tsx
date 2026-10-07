@@ -6,7 +6,7 @@ import { ChatView } from "./ChatView";
 import { AgentsView } from "./agents/AgentsView";
 import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
 import { WorkspaceDialog } from "./WorkspaceDialog";
-import { errorText } from "./app/errors";
+import { errorText } from "./lib/errors";
 import { useAppPersistence } from "./app/useAppPersistence";
 import { useSessionState } from "./app/useSessionState";
 import { useAttention } from "./app/useAttention";
@@ -30,13 +30,14 @@ import { Sidebar } from "./app/Sidebar";
 import { TitleBar } from "./app/TitleBar";
 import { useExtensions } from "./app/useExtensions";
 import { useConnectionProfiles } from "./app/useConnectionProfiles";
-import { useHerdr } from "./app/useHerdr";
+import { useDaemon } from "./app/useDaemon";
+import { LOCAL_ENDPOINT } from "./daemonSessions.ts";
 import { useHostContext, useProjectGit } from "./app/useProjectGit";
 import { useMergedCanvas } from "./workspace/mergedLayouts";
 import { useProjectView } from "./workspace/projectView";
 import { useSkills } from "./app/useSkills";
 import { useToast } from "./app/useToast";
-import { useOrchestratorNotices } from "./orchestrator/useOrchestratorNotices";
+import { useModuleShell } from "./extensions/useModuleShell";
 import { useUpdates } from "./app/useUpdates";
 import {
   activePage,
@@ -90,21 +91,10 @@ export function App() {
   });
   const { connectionProfiles, refreshConnectionProfiles } =
     useConnectionProfiles();
-  const {
-    system,
-    socket,
-    setSocket,
-    connection,
-    connectionError,
-    refreshHerdr,
-    invalidateHerdr,
-    statusByEndpoint,
-  } = useHerdr({
-    savedSocket: saved?.socket || "",
+  const { system, connection, statusByEndpoint, sessions } = useDaemon({
     notify,
     setWorkspaces,
     connectionProfiles,
-    workspaces,
   });
   const skills = useSkills(sectionName, notify);
   const [sidebar, setSidebar] = useState(
@@ -124,10 +114,6 @@ export function App() {
     workspaces,
     setWorkspaces,
     saved,
-    socket,
-    refreshHerdr,
-    useEndpoint: setSocket,
-    invalidateHerdr,
     notify,
     showWorkspace,
     confirmClose: ({ workspace, panel }) =>
@@ -172,8 +158,7 @@ export function App() {
   });
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const closeDialog = useCallback(() => setDialog(null), []);
-  const [settingsTab, setSettingsTab, openConnections] =
-    useSettingsTab(setDialog);
+  const [settingsTab, setSettingsTab] = useSettingsTab(setDialog);
   const target = resolveDialog(dialog, workspaces);
   const [workspaceQuery, setWorkspaceQuery] = useState("");
   const [compact, canvasRef] = useCompact();
@@ -182,7 +167,7 @@ export function App() {
   // Held here, not in SettingsDialog: the blocker runs whenever the app is open.
   const [keepAwake, setKeepAwake] = useKeepAwake();
   const connected = connection === "connected";
-  const activeEndpoint = active.connection || socket;
+  const activeEndpoint = active.connection || LOCAL_ENDPOINT;
   const { projectGit, readyWorkspaceIds, hydratedHostKeys } = useProjectGit(
     workspaces,
     active.id,
@@ -194,7 +179,6 @@ export function App() {
     projectGit,
     connectionProfiles,
     workspaceGrouping,
-    socket,
     session,
   );
   const { tabMode, setTabMode, views } = useProjectView(
@@ -202,14 +186,12 @@ export function App() {
     ws,
     saved,
   );
-  const orchestrator = useOrchestratorNotices({
-    workspaces,
+  useModuleShell({
+    ws,
+    registry: extensionRegistry,
     showWorkspace,
     switchWorkspace,
-    setSelected,
-    setZoomed,
-    addPanel: ws.addPanel,
-    createWorkspace: ws.createWorkspace,
+    notify,
   });
   const hostContext = useHostContext(
     { workspaces, projectGit, connectionProfiles, workspaceGrouping },
@@ -227,7 +209,6 @@ export function App() {
     {
       workspaces,
       activeId: active.id,
-      socket,
       routines,
       fontScale,
       mode,
@@ -245,7 +226,7 @@ export function App() {
     notify,
   );
 
-  useOpenSignals(workspaces, extensionRegistry, ws, notify);
+  useOpenSignals(workspaces, extensionRegistry, ws);
   function addExtensionPanel(
     extensionId: string,
     contributionId: string,
@@ -372,7 +353,6 @@ export function App() {
       <div className="app-body">
         {sidebar && (
           <Sidebar
-            worktreeTasks={orchestrator.worktreeTasks}
             registry={extensionRegistry}
             openExtensionTarget={openExtensionTarget}
             runExtensionCommand={runExtensionCommand}
@@ -411,7 +391,6 @@ export function App() {
             selected={selected}
             connected={connected}
             connection={connection}
-            localSocket={system?.socketPath || ""}
             connectionProfiles={connectionProfiles}
             statusByEndpoint={statusByEndpoint}
             projectGit={projectGit}
@@ -446,7 +425,6 @@ export function App() {
               activeEndpoint={activeEndpoint}
               home={system?.home}
               switchWorkspace={switchWorkspace}
-              openOrchestratorTask={orchestrator.openTask}
               addExtensionPanel={addExtensionPanel}
               setExtensionEnabled={(extensionId, enabled) =>
                 void setExtensionEnabled(extensionId, enabled)
@@ -457,7 +435,7 @@ export function App() {
               ws={ws}
               projectGit={projectGit}
               connectionProfiles={connectionProfiles}
-              attention={attention}
+              attention={{ ...attention, daemonSessions: sessions }}
             />
           ) : mode === "Agent" ? (
             <AgentsView slot={slot} session={session} />
@@ -482,12 +460,10 @@ export function App() {
           ) : (
             <WorkspaceCanvas
               ws={ws}
-              activeEndpoint={activeEndpoint}
               extensionRegistry={extensionRegistry}
               tabMode={tabMode}
               compact={compact}
               openPanelPicker={openPanelPicker}
-              openConnections={openConnections}
               merged={merged}
             />
           )}
@@ -515,7 +491,6 @@ export function App() {
               panel={target.panel}
               workspaces={workspaces}
               projectGit={projectGit}
-              hidePanel={ws.hidePanel}
               endSessions={endSessions}
               onClose={closeDialog}
             />
@@ -554,11 +529,7 @@ export function App() {
               workspaces={workspaces}
               settingsTab={settingsTab}
               setSettingsTab={setSettingsTab}
-              socket={socket}
-              setSocket={setSocket}
-              connected={connected}
-              connectionError={connectionError}
-              refreshHerdr={refreshHerdr}
+              endpoint={activeEndpoint}
               fontScale={fontScale}
               setFontScale={setFontScale}
               keepAwake={keepAwake}
@@ -573,7 +544,6 @@ export function App() {
             <WorkspaceDialog
               defaultCwd={active.cwd}
               activeEndpoint={active.connection}
-              localSocket={system?.socketPath || ""}
               connectionProfiles={connectionProfiles}
               statusByEndpoint={statusByEndpoint}
               onCreate={(...args) => ws.createWorkspace(...args)}

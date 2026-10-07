@@ -4,7 +4,8 @@ import type {
   WorktreeList,
   Workspace,
 } from "./types";
-import type { WorktreeTask } from "./app/workspaceMerge";
+import type { WorktreeClaim } from "./extensions/modules";
+import { claimFor } from "./lib/worktreeClaims.ts";
 
 export type WorktreeRow = {
   key: string;
@@ -18,12 +19,10 @@ export type WorktreeRow = {
   worktree: Worktree;
   /** Workspaces whose folder is this worktree or inside it. */
   open: Workspace[];
-  task?: WorktreeTask;
+  claim?: WorktreeClaim;
 };
 
-const FINISHED = new Set(["done", "stopped", "failed"]);
-
-/** "local" for this Mac (a Herdr socket included), else the ssh endpoint -
+/** "local" for this Mac (any non-ssh endpoint), else the ssh endpoint -
  * the host keys the worktree IPC uses. */
 export function hostOf(connection: string | undefined): string {
   return connection?.startsWith("ssh:") ? connection : "local";
@@ -35,23 +34,6 @@ export function hostLabel(host: string, profiles: ConnectionProfile[]) {
   return profile?.name || profile?.host || host.slice(4);
 }
 
-const trimSlashes = (path: string) => (path || "").replace(/\/+$/, "");
-
-/** The orchd task a worktree belongs to, by path or by branch in the same
- * repository (as `memberTask` matches a sidebar member); an unfinished one
- * wins over an older finished task on the same checkout. */
-function taskOf(worktree: Worktree, root: string, tasks: WorktreeTask[]) {
-  const mine = tasks.filter(
-    (task) =>
-      (!!task.worktree &&
-        trimSlashes(task.worktree) === trimSlashes(worktree.path)) ||
-      (!!task.branch &&
-        task.branch === worktree.branch &&
-        trimSlashes(task.repo) === trimSlashes(root)),
-  );
-  return mine.find((task) => !FINISHED.has(task.status)) ?? mine[0];
-}
-
 const inside = (folder: string, root: string) =>
   folder === root || folder.startsWith(root.endsWith("/") ? root : `${root}/`);
 
@@ -60,7 +42,7 @@ const inside = (folder: string, root: string) =>
 export function worktreeRows(
   lists: WorktreeList[],
   workspaces: Workspace[],
-  tasks: WorktreeTask[],
+  claims: WorktreeClaim[],
   profiles: ConnectionProfile[],
 ): WorktreeRow[] {
   return lists
@@ -80,11 +62,11 @@ export function worktreeRows(
                 !!w.cwd &&
                 inside(w.cwd, worktree.path),
             ),
-            // orchd runs on this Mac, so only a local worktree is a task's.
-            task:
-              list.host === "local"
-                ? taskOf(worktree, list.root, tasks)
-                : undefined,
+            claim: claimFor(claims, list.host, {
+              path: worktree.path,
+              branch: worktree.branch,
+              repo: list.root,
+            }),
           })),
     )
     .sort((a, b) =>
@@ -99,13 +81,9 @@ export function worktreeRows(
 }
 
 /** A row the trash button may act on: never the main checkout, a locked
- * worktree, or the checkout of an orchd task that is still going. */
+ * worktree, or the checkout of a claim that is still in use. */
 export function removable(row: WorktreeRow): boolean {
-  return (
-    !row.worktree.main &&
-    !row.worktree.locked &&
-    !(row.task && !FINISHED.has(row.task.status))
-  );
+  return !row.worktree.main && !row.worktree.locked && !row.claim?.active;
 }
 
 /** What removing a row loses, in the order the confirmation says it. */

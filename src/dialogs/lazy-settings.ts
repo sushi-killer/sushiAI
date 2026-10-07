@@ -17,8 +17,3 @@ export const UpdateSettings = lazy(() =>
     default: Component,
   })),
 );
-export const OrchestratorSettings = lazy(() =>
-  import("../orchestrator/OrchestratorSettings").then(
-    ({ OrchestratorSettings: Component }) => ({ default: Component }),
-  ),
-);

@@ -1,11 +1,11 @@
 // Creates a linked git worktree on a new branch, next to the repository that
 // holds a project's working directory. Used for the "New worktree" launch
-// choice on local (non-Herdr) sessions - the Herdr-backed equivalent goes
-// through the `worktree.create` socket RPC instead (builtin-herdr.cjs).
+// choice.
 const fs = require("node:fs");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
+const { REMOTE_PATH } = require("./host-install.cjs");
 const execute = promisify(execFile);
 
 const FORBIDDEN_SEQUENCES = [
@@ -134,11 +134,6 @@ async function createWorktree(
 
 const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 
-// A non-interactive ssh shell often lacks the user's tool directories (as in
-// orchestrator-remote.cjs).
-const PATH_SH =
-  'export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"';
-
 /** Lists every worktree of the repository holding `cwd`, one `WT` line each
  * (path, branch, head, last commit time, folder exists, changed files,
  * merged, commits ahead, locked), after a `ROOT` line naming the base
@@ -151,7 +146,7 @@ const PATH_SH =
  * never merged: removing them as merged would delete the base or a worktree
  * just cut. */
 function worktreeListScript(cwd) {
-  return `${PATH_SH}
+  return `${REMOTE_PATH}
 cd ${quote(cwd)} 2>/dev/null || { echo NOFOLDER; exit 0; }
 git rev-parse --show-toplevel >/dev/null 2>&1 || { echo NOREPO; exit 0; }
 base=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)
@@ -250,7 +245,7 @@ function worktreeRemoveScript(root, path, branch, discardChanges = true) {
   // says (git worktree remove obeys that setting), so a change made after the
   // caller looked is never lost.
   const force = discardChanges ? " --force" : "";
-  return `${PATH_SH}
+  return `${REMOTE_PATH}
 cd ${quote(root)} || exit 1
 if [ -d ${quote(path)} ]; then
   ${

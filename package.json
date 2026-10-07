@@ -2,43 +2,41 @@
   "name": "sushiai-workspace",
   "version": "0.5.0",
   "private": true,
-  "description": "A macOS workspace for terminal agents, powered by Herdr",
+  "description": "A macOS workspace for terminal agents",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:web": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
+    "build:daemon": "cargo build --release -p sushiai",
+    "build:host": "node scripts/build-host-binaries.mjs",
     "start": "electron .",
     "test": "node --test tests/*.test.cjs",
-    "test:desktop": "npm run build && node scripts/smoke.mjs",
+    "test:desktop": "npm run build && node scripts/smoke.mjs && node scripts/smoke-companion.mjs",
     "test:terminal": "node scripts/terminal-rendering.mjs",
-    "test:herdr": "node scripts/herdr-integration.cjs",
-    "package": "npm run build && npm run build:orchd && npm run pack:orchd-src && electron-builder --mac dir",
+    "package": "npm run build:daemon && npm run build:host && npm run build && electron-builder --mac dir",
     "postinstall": "electron-builder install-app-deps",
     "format": "prettier --write src electron scripts tests *.json *.ts *.html README.md",
     "icon": "node scripts/icon.mjs",
-    "test:stream": "node scripts/stream-integration.cjs",
     "test:remote": "node scripts/features-smoke.mjs",
     "promo": "node scripts/promo.mjs",
-    "package:dmg": "npm run build && npm run build:orchd && npm run pack:orchd-src && electron-builder --mac dmg --arm64 --publish never",
+    "package:dmg": "npm run build:daemon && npm run build:host && npm run build && electron-builder --mac dmg --arm64 --publish never",
     "test:unicode": "node scripts/terminal-unicode.mjs",
     "perf": "node scripts/perf-benchmark.mjs",
     "check:conventions": "node scripts/check-conventions.mjs",
     "lint": "eslint .",
     "test:contracts": "node --test tests/app-ipc.test.cjs tests/navigation.test.cjs tests/extension-manifest.test.cjs tests/extension-registry.test.cjs tests/extension-routes.test.cjs tests/extension-contract-coverage.test.cjs tests/extension-records.test.cjs",
     "test:extensions": "node --test tests/extension-manager.test.cjs tests/extension-manifest.test.cjs tests/extension-registry.test.cjs tests/local-extensions.test.cjs tests/surface-state.test.cjs",
-    "test:core": "node --test tests/layout.test.cjs tests/navigation.test.cjs tests/workspace-actions.test.cjs tests/chat-threads.test.cjs tests/dialog-state.test.cjs tests/app-boundary.test.cjs tests/workspace-state.test.cjs tests/herdr-snapshot.test.cjs tests/inspection-worker.test.cjs tests/git-history.test.cjs",
-    "ci": "npm run build && npm test && npm run test:orchd && npm run check:conventions && npm run lint && prettier --check src electron scripts tests *.json *.ts *.html README.md && git diff --check",
+    "test:core": "node --test tests/layout.test.cjs tests/navigation.test.cjs tests/workspace-actions.test.cjs tests/chat-threads.test.cjs tests/dialog-state.test.cjs tests/app-boundary.test.cjs tests/workspace-state.test.cjs tests/inspection-worker.test.cjs tests/git-history.test.cjs",
+    "ci": "npm run build && cargo build -p sushiai && npm test && npm run test:daemon && npm run check:conventions && npm run lint && prettier --check src electron scripts tests *.json *.ts *.html README.md && git diff --check",
     "release:prepare": "node scripts/release.mjs",
-    "pack:orchd-src": "node scripts/pack-orchd-src.mjs",
-    "build:orchd": "cargo build --release --manifest-path orchd/Cargo.toml",
-    "test:orchd": "cargo fmt --check --manifest-path orchd/Cargo.toml && cargo clippy --all-targets --manifest-path orchd/Cargo.toml -- -D warnings && cargo test --manifest-path orchd/Cargo.toml"
+    "test:daemon": "cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace --no-fail-fast && node scripts/check-crate-deps.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "lucide-react": "^0.577.0",
-    "node-pty": "^1.1.0",
+    "qrcode-generator": "^2.0.4",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",
@@ -74,9 +72,6 @@
       "THIRD_PARTY_NOTICES.md",
       "LICENSE"
     ],
-    "asarUnpack": [
-      "node_modules/node-pty/**/*"
-    ],
     "mac": {
       "icon": "build/icon.icns",
       "category": "public.app-category.developer-tools",
@@ -88,12 +83,12 @@
     "artifactName": "sushiAI-${version}-${arch}.${ext}",
     "extraResources": [
       {
-        "from": "orchd/target/release/orchd",
-        "to": "orchd"
+        "from": "target/release/sushiai",
+        "to": "sushiai"
       },
       {
-        "from": "build/orchd-src.tar.gz",
-        "to": "orchd-src.tar.gz"
+        "from": "target/host",
+        "to": "host"
       }
     ]
   },

@@ -2,7 +2,6 @@ import {
   Blocks,
   FolderOpen,
   Globe,
-  ListChecks,
   Sparkles,
   TerminalSquare,
 } from "lucide-react";
@@ -35,8 +34,6 @@ export const Icon = ({
     <FolderOpen size={size} />
   ) : kind === "extension" ? (
     <Blocks size={size} />
-  ) : kind === "orchestrator" ? (
-    <ListChecks size={size} />
   ) : (
     <Sparkles size={size} />
   );

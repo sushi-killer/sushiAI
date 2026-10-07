@@ -230,3 +230,177 @@ test("template and concatenated .json names in electron/ are rejected, comments 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("the retired session backend's name fails the check in any shipped tree", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "retired-name-"));
+  try {
+    fs.mkdirSync(path.join(root, "electron"));
+    fs.mkdirSync(path.join(root, ".agents"));
+    // Built at runtime: this file is itself scanned.
+    const name = ["Her", "dr"].join("");
+    fs.writeFileSync(path.join(root, "electron", "clean.cjs"), "// fine\n");
+    assert.equal(
+      run({
+        HEAD_BRANCH: "chore/x",
+        PR_TITLE: "chore: x",
+        RETIRED_NAME_ROOT_OVERRIDE: root,
+      }).status,
+      0,
+    );
+    fs.writeFileSync(path.join(root, ".agents", "note.md"), `uses ${name}\n`);
+    const result = run({
+      HEAD_BRANCH: "chore/x",
+      PR_TITLE: "chore: x",
+      RETIRED_NAME_ROOT_OVERRIDE: root,
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /\.agents\/note\.md:1 names the retired/);
+    // promo/, crates/, README.md and AGENTS.md are scanned too.
+    fs.rmSync(path.join(root, ".agents", "note.md"));
+    fs.mkdirSync(path.join(root, "crates", "x"), { recursive: true });
+    fs.mkdirSync(path.join(root, "promo"));
+    for (const file of [
+      "crates/x/lib.rs",
+      "promo/mock.cjs",
+      "README.md",
+      "AGENTS.md",
+    ]) {
+      fs.writeFileSync(path.join(root, file), `// ${name}\n`);
+      const hit = run({
+        HEAD_BRANCH: "chore/x",
+        PR_TITLE: "chore: x",
+        RETIRED_NAME_ROOT_OVERRIDE: root,
+      });
+      assert.equal(hit.status, 1, file);
+      assert.ok(hit.stderr.includes(`${file}:1 names the retired`), file);
+      fs.writeFileSync(path.join(root, file), "// fine\n");
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a script that sets SUSHIAI_HOME without HOME is rejected", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "home-rule-"));
+  try {
+    fs.mkdirSync(path.join(root, "scripts"));
+    const vars = {
+      HEAD_BRANCH: "chore/x",
+      PR_TITLE: "chore: x",
+      HOME_RULE_ROOT_OVERRIDE: root,
+    };
+    const file = path.join(root, "scripts", "launch.mjs");
+    fs.writeFileSync(file, 'const e = { SUSHIAI_HOME: "/tmp/x/sushiai" };\n');
+    const bad = run(vars);
+    assert.equal(bad.status, 1);
+    assert.match(
+      bad.stderr,
+      /scripts\/launch\.mjs: sets SUSHIAI_HOME without HOME/,
+    );
+    fs.writeFileSync(
+      file,
+      'const e = { SUSHIAI_HOME: "/tmp/x/sushiai", HOME: "/tmp/x" };\n',
+    );
+    assert.equal(run(vars).status, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a core main-process file that requires a module main.cjs loads fails the check", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "core-isolation-"));
+  try {
+    fs.mkdirSync(path.join(dir, "electron/ipc"), { recursive: true });
+    const write = (name, text) =>
+      fs.writeFileSync(path.join(dir, "electron", name), text);
+    write(
+      "main.cjs",
+      'require("./plugin.cjs");\nrequire("./ipc/router.cjs");\n',
+    );
+    write("plugin.cjs", "module.exports = {};\n");
+    write("ipc/router.cjs", 'require("../plugin.cjs");\n');
+    const bad = run({ CORE_ISOLATION_ROOT_OVERRIDE: dir });
+    assert.equal(bad.status, 1);
+    assert.match(
+      bad.stderr,
+      /electron\/ipc\/router\.cjs requires electron\/plugin\.cjs, a module main\.cjs plugs in/,
+    );
+    write("ipc/router.cjs", 'require("node:path");\nrequire("./peer.cjs");\n');
+    write("ipc/peer.cjs", "module.exports = {};\n");
+    assert.equal(run({ CORE_ISOLATION_ROOT_OVERRIDE: dir }).status, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("core may not import a directory the composition root loads as a module", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "core-module-"));
+  const write = (file, text) => {
+    fs.mkdirSync(path.dirname(path.join(tree, file)), { recursive: true });
+    fs.writeFileSync(path.join(tree, file), text);
+  };
+  write(
+    "src/extensions/modules.ts",
+    'import { widget } from "../gadget/module.ts";\nexport const modules = [widget];\n',
+  );
+  write("src/extensions/coreViews.ts", "export const views = [];\n");
+  write("src/gadget/module.ts", "export const widget = {};\n");
+  write("src/gadget/Panel.tsx", "export const Panel = null;\n");
+  write("src/ui/Tag.tsx", "export const Tag = null;\n");
+  write("src/app/Fine.tsx", 'import { Tag } from "../ui/Tag.tsx";\n');
+  const clean = run({ MODULE_ROOT_OVERRIDE: tree });
+  assert.equal(clean.status, 0, clean.stderr);
+
+  write("src/app/Leak.tsx", 'import { Panel } from "../gadget/Panel.tsx";\n');
+  const failed = run({ MODULE_ROOT_OVERRIDE: tree });
+  assert.equal(failed.status, 1);
+  assert.match(
+    failed.stderr,
+    /src\/app\/Leak\.tsx imports \.\.\/gadget\/Panel\.tsx; core may not import src\/gadget/,
+  );
+
+  fs.rmSync(tree, { recursive: true, force: true });
+});
+
+test("a module directory may not import the shell", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "module-shell-"));
+  const write = (file, text) => {
+    fs.mkdirSync(path.dirname(path.join(tree, file)), { recursive: true });
+    fs.writeFileSync(path.join(tree, file), text);
+  };
+  write(
+    "src/extensions/modules.ts",
+    'import { widget } from "../gadget/module.ts";\nexport const modules = [widget];\n',
+  );
+  write("src/extensions/coreViews.ts", "export const views = [];\n");
+  write("src/gadget/module.ts", "export const widget = {};\n");
+  write("src/lib/keys.ts", "export const keys = [];\n");
+  write("src/gadget/Panel.tsx", 'import { keys } from "../lib/keys.ts";\n');
+  assert.equal(run({ MODULE_ROOT_OVERRIDE: tree }).status, 0);
+
+  write("src/app/model.ts", "export const model = 1;\n");
+  write("src/gadget/Leak.tsx", 'import { model } from "../app/model.ts";\n');
+  const failed = run({ MODULE_ROOT_OVERRIDE: tree });
+  assert.equal(failed.status, 1);
+  assert.match(
+    failed.stderr,
+    /src\/gadget\/Leak\.tsx imports \.\.\/app\/model\.ts; a module may not import the shell/,
+  );
+
+  fs.rmSync(tree, { recursive: true, force: true });
+});

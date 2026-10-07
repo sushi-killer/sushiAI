@@ -16,7 +16,7 @@ import {
   stageRows,
   type NarrationKind,
 } from "./taskDetailModel";
-import { Tag } from "./ui";
+import { Tag } from "../ui";
 import type { SpendSummary, Task, TimelineSegment } from "./types";
 
 function segmentTitle(segment: TimelineSegment): string {

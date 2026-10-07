@@ -30,10 +30,8 @@ import {
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import { codePanels } from "../workspaceState.ts";
 import {
-  LOCAL_GROUP,
   computeHostMergeGroups,
   computeMergeGroups,
-  groupKey,
   groupLabel,
   groupStatus,
   isHidden,
@@ -44,9 +42,10 @@ import {
   mixedRemotes,
   shouldCollapseHostMarkers,
   type MergeGroup,
-  type WorktreeTask,
 } from "./workspaceMerge.ts";
+import { LOCAL_GROUP, groupKey } from "../lib/hostGroup.ts";
 import type { ConnectionProfile, Panel, Workspace } from "../types";
+import { useWorktreeClaims } from "./useWorktreeClaims.ts";
 import type { ProjectGit } from "./useProjectGit.ts";
 
 /** The left nav is the app's own sections followed by whatever manifests add.
@@ -167,9 +166,7 @@ export function Sidebar({
   selected,
   connected,
   connection,
-  localSocket,
   connectionProfiles,
-  worktreeTasks,
   statusByEndpoint,
   projectGit,
   readyWorkspaceIds,
@@ -206,12 +203,7 @@ export function Sidebar({
   selected: string;
   connected: boolean;
   connection: string;
-  /** This Mac's own Herdr socket, so the "Local" group can look up its
-   * real poll status the same way an SSH group looks up its own. */
-  localSocket: string;
   connectionProfiles: ConnectionProfile[];
-  /** orchd tasks, so a task's worktree is named by the task's title. */
-  worktreeTasks: WorktreeTask[];
   /** Real, current poll status per endpoint - every connected host is polled
    * independently, so this is never just the default connection's status. */
   statusByEndpoint: Record<string, string>;
@@ -231,6 +223,7 @@ export function Sidebar({
   openExtensionTarget(extensionId: string, targetSurfaceId: string): void;
   runExtensionCommand(extensionId: string, commandId: string): void;
 }) {
+  const worktreeClaims = useWorktreeClaims();
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
     () => new Set(),
   );
@@ -291,10 +284,10 @@ export function Sidebar({
             {tag}
           </span>
         )}
-        {w.herdrId && (
+        {w.connection && (
           <i
             className={`status-dot ${live ? "green" : ""}`}
-            title={tag ? `${tag} workspace` : "Herdr workspace"}
+            title={tag ? `${tag} workspace` : "Session workspace"}
           />
         )}
       </button>
@@ -339,26 +332,24 @@ export function Sidebar({
     const anchor =
       group.members.find((m) => m.hostKey === LOCAL_GROUP) || group.members[0];
     const statusKey = mergedRowStatusKey(group, active.id);
-    const live =
-      groupStatus(statusKey, localSocket, statusByEndpoint) === "connected";
+    const live = groupStatus(statusKey, statusByEndpoint) === "connected";
     const collapse = shouldCollapseHostMarkers(
       group,
       connectionProfiles,
-      worktreeTasks,
+      worktreeClaims,
     );
     // On one machine every pane's icon would be identical noise.
     const manyHosts = new Set(group.members.map((m) => m.hostKey)).size > 1;
     const markerName = mergedMarkerAccessibleName(
       group,
       connectionProfiles,
-      localSocket,
       statusByEndpoint,
-      worktreeTasks,
+      worktreeClaims,
     );
     const rowTitle = group.members
       .map(
         (m) =>
-          `${memberTooltip(group, m, connectionProfiles, worktreeTasks)} - ${m.workspace.cwd}`,
+          `${memberTooltip(group, m, connectionProfiles, worktreeClaims)} - ${m.workspace.cwd}`,
       )
       .join("\n");
     return (
@@ -411,7 +402,7 @@ export function Sidebar({
                           group,
                           m,
                           connectionProfiles,
-                          worktreeTasks,
+                          worktreeClaims,
                         )}
                       </span>
                     </span>
@@ -432,17 +423,16 @@ export function Sidebar({
                 group,
                 m,
                 connectionProfiles,
-                worktreeTasks,
+                worktreeClaims,
               );
               const tooltip = memberTooltip(
                 group,
                 m,
                 connectionProfiles,
-                worktreeTasks,
+                worktreeClaims,
               );
               const offline =
-                groupStatus(m.hostKey, localSocket, statusByEndpoint) ===
-                "offline";
+                groupStatus(m.hostKey, statusByEndpoint) === "offline";
               const HostIcon = m.hostKey === LOCAL_GROUP ? Server : Globe;
               return codePanels(m.workspace).map((p) => (
                 <button
@@ -606,8 +596,7 @@ export function Sidebar({
                     }
                     const key = groupKey(w.connection);
                     const live =
-                      groupStatus(key, localSocket, statusByEndpoint) ===
-                      "connected";
+                      groupStatus(key, statusByEndpoint) === "connected";
                     const tag =
                       key !== LOCAL_GROUP
                         ? groupLabel(key, connectionProfiles)
@@ -662,11 +651,7 @@ export function Sidebar({
                 return keys.map((key) => {
                   const members = groups.get(key)!;
                   const label = groupLabel(key, connectionProfiles);
-                  const status = groupStatus(
-                    key,
-                    localSocket,
-                    statusByEndpoint,
-                  );
+                  const status = groupStatus(key, statusByEndpoint);
                   const live = status === "connected";
                   const collapsed = collapsedGroups.has(key);
                   const consumed = new Set<string>();
@@ -753,7 +738,7 @@ export function Sidebar({
           </div>
           <footer className="sidebar-footer">
             <button className="backend-status" onClick={() => openSettings()}>
-              <span>Herdr</span>
+              <span>Daemon</span>
               <span className={`status-pill ${connected ? "live" : ""}`}>
                 <i />
                 {connected

@@ -7,8 +7,6 @@ import type { Preflight } from "./types";
 import { useOrchestratorHosts } from "./useHosts";
 import {
   errorText,
-  isDaemonMissing,
-  isPackagedInstall,
   landRepos,
   withLandRepos,
   type DefaultableSetting,
@@ -16,7 +14,7 @@ import {
   settingValue,
   settingsDifferingFromDefaults,
 } from "./helpers";
-import { Stepper } from "./ui";
+import { Stepper } from "../ui";
 import { formatSettingsJson, parseSettingsJson } from "./settingsJson";
 import { ConnectedTools } from "./ConnectedTools";
 import {
@@ -257,7 +255,7 @@ function SettingsJsonEditor({
       <span className="os-row-desc">
         Every setting as JSON, including keys with no control above. Saving
         sends the whole object. Each key is documented in{" "}
-        <code>docs/orchd-settings.md</code> in the sushiAI repository.
+        <code>docs/orchestrator-settings.md</code> in the sushiAI repository.
       </span>
       <textarea
         className="os-json-text"
@@ -478,7 +476,6 @@ function OrchestratorSettingsBody({
   const [chatModels, setChatModels] = useState<ChatModels>({});
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const [notBuilt, setNotBuilt] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [jsonOpen, setJsonOpen] = useState(false);
   // orchd's built-in defaults; stays null on an older orchd without
@@ -502,7 +499,6 @@ function OrchestratorSettingsBody({
       .catch((e) => {
         const message = errorText(e);
         setError(message);
-        setNotBuilt(isDaemonMissing(message));
       });
     orchestratorClient
       .settingsDefaults()
@@ -512,19 +508,6 @@ function OrchestratorSettingsBody({
       });
   }, [orchestratorClient]);
 
-  if (notBuilt && isPackagedInstall(error))
-    return (
-      <p className="text-muted">
-        The orchestrator is missing from this installation — reinstall sushiAI.
-      </p>
-    );
-  if (notBuilt)
-    return (
-      <p className="text-muted">
-        The orchestrator isn't built yet. Run <code>npm run build:orchd</code>{" "}
-        and reopen Settings.
-      </p>
-    );
   if (!settings || !saved)
     return error ? (
       <p className="inline-error" role="alert">

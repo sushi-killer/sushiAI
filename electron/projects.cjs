@@ -34,7 +34,7 @@ function assertRemote(url) {
 const STAGES = ["setup", "agent", "mcp"];
 
 /** Where a folder lives, as a project knows it: an SSH host by its endpoint,
- * everything else (This Mac, whichever Herdr socket) as "local". */
+ * everything else (This Mac) as "local". */
 function hostOf(endpoint) {
   return typeof endpoint === "string" && endpoint.startsWith("ssh:")
     ? endpoint

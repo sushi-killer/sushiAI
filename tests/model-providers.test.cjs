@@ -99,7 +99,7 @@ test("falls back to a marked plaintext key when encryption is unavailable", asyn
   }
 });
 
-test("stores Claude accounts encrypted and stages subscription tokens separately", async () => {
+test("stores Claude accounts encrypted and resolves them for a session", async () => {
   const f = await fixture();
   try {
     const account = await f.providers.upsertClaudeAccount({
@@ -114,16 +114,6 @@ test("stores Claude accounts encrypted and stages subscription tokens separately
       JSON.stringify(listed).includes("invented-oauth-token"),
       false,
     );
-    const staged = await f.providers.stageClaudeAccount(
-      account.id,
-      f.userDataDir,
-    );
-    assert.equal(staged.kind, "subscription");
-    assert.equal(
-      await fs.readFile(staged.tokenPath, "utf8"),
-      "invented-oauth-token",
-    );
-    assert.equal((await fs.stat(staged.tokenPath)).mode & 0o777, 0o600);
     assert.equal(
       (await f.providers.resolveClaudeAccount(account.id)).value,
       "invented-oauth-token",
@@ -151,7 +141,7 @@ test("refuses Claude account values when secure storage is unavailable", async (
   }
 });
 
-test("stages a --settings file that feeds the key via apiKeyHelper, never ANTHROPIC_API_KEY (interactive Claude Code drops unapproved env keys)", async () => {
+test("resolves a model profile to its provider settings and key", async () => {
   const f = await fixture();
   try {
     const provider = await f.providers.upsertProvider({ kind: "opencode-go" });
@@ -161,17 +151,8 @@ test("stages a --settings file that feeds the key via apiKeyHelper, never ANTHRO
       modelId: "some/model",
       label: "Go model",
     });
-    const settingsPath = await f.providers.stageSettings(
-      profile.id,
-      f.userDataDir,
-    );
-    const staged = JSON.parse(await fs.readFile(settingsPath, "utf8"));
-    const keyPath = settingsPath.replace(/\.json$/, ".key");
-    assert.equal(staged.apiKeyHelper, `cat '${keyPath}'`);
-    assert.equal(await fs.readFile(keyPath, "utf8"), "zen-key");
-    assert.equal(JSON.stringify(staged).includes("zen-key"), false);
     const resolved = await f.providers.resolveEnv(profile.id);
-    assert.deepEqual(staged.env, resolved.settings);
+    assert.equal(resolved.key, "zen-key");
     assert.deepEqual(resolved.settings, {
       ANTHROPIC_BASE_URL: "https://opencode.ai/zen/go",
       ANTHROPIC_MODEL: "some/model",

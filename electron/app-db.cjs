@@ -40,20 +40,11 @@ const MIGRATIONS = [
     id TEXT PRIMARY KEY,
     position INTEGER NOT NULL,
     endpoint TEXT NOT NULL DEFAULT '',
-    herdr_id TEXT,
     data TEXT NOT NULL
   );
-  CREATE UNIQUE INDEX workspaces_herdr ON workspaces(endpoint, herdr_id)
-    WHERE herdr_id IS NOT NULL AND herdr_id != '';
   CREATE TABLE app_state(
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
-  );
-  CREATE TABLE launches(
-    endpoint TEXT NOT NULL,
-    operation_id TEXT NOT NULL,
-    data TEXT NOT NULL,
-    PRIMARY KEY(endpoint, operation_id)
   );
   CREATE TABLE connections(
     id TEXT PRIMARY KEY,
@@ -69,7 +60,33 @@ const MIGRATIONS = [
     value TEXT NOT NULL,
     PRIMARY KEY(name, key)
   );`,
+  // v4: a workspace is bound to its daemon sessions through its panels and
+  // its id is the daemon group, so an older external-id column and its unique
+  // index go. The rows keep their order and data.
+  `CREATE TABLE workspaces_v4(
+    id TEXT PRIMARY KEY,
+    position INTEGER NOT NULL,
+    endpoint TEXT NOT NULL DEFAULT '',
+    data TEXT NOT NULL
+  );
+  INSERT INTO workspaces_v4(id, position, endpoint, data)
+    SELECT id, position, endpoint, data FROM workspaces;
+  DROP TABLE workspaces;
+  ALTER TABLE workspaces_v4 RENAME TO workspaces;`,
+  // v5: launch records of the retired session backend are not read any more.
+  `DROP TABLE IF EXISTS launches;`,
 ];
+
+/** Migration 4 rewrites the workspaces table. A database that is about to run
+ * it is copied once to `sushiai.db.v3.bak`; an existing copy is never replaced. */
+function backupBeforeV4(db, file) {
+  const current = db.prepare("PRAGMA user_version").get().user_version;
+  const backup = `${file}.v3.bak`;
+  if (current < 1 || current >= 4 || fs.existsSync(backup)) return;
+  db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  fs.copyFileSync(file, backup, fs.constants.COPYFILE_EXCL);
+  fs.chmodSync(backup, 0o600);
+}
 
 function migrate(db) {
   transaction(db, () => {
@@ -253,21 +270,6 @@ const writeStore = (userDataDir, name, object) => {
   transaction(db, () => putStore(db, name, object));
 };
 
-/** One launch record as the launcher stores it; false for anything else. */
-function validLaunchRecord(record) {
-  return (
-    isObject(record) &&
-    typeof record.endpoint === "string" &&
-    typeof record.operationId === "string" &&
-    isObject(record.created) &&
-    ["workspaceId", "paneId", "cwd"].every(
-      (field) => typeof record.created[field] === "string",
-    ) &&
-    typeof record.signatureHash === "string" &&
-    typeof record.preparationHash === "string"
-  );
-}
-
 function importAll(db, userDataDir) {
   importLegacy(db, userDataDir, "projects.json", ["projects"], (parsed) => {
     if (!isObject(parsed)) return false;
@@ -295,27 +297,6 @@ function importAll(db, userDataDir) {
       if (!isObject(parsed)) return false;
       applySnapshot(db, parsed);
       return true;
-    },
-  );
-  importLegacy(
-    db,
-    userDataDir,
-    "herdr-launches.json",
-    ["launches"],
-    (parsed) => {
-      if (!isObject(parsed) || !Array.isArray(parsed.operations)) return false;
-      const insert = db.prepare(
-        "INSERT OR REPLACE INTO launches(endpoint, operation_id, data) VALUES(?, ?, ?)",
-      );
-      for (const record of parsed.operations) {
-        if (validLaunchRecord(record))
-          insert.run(
-            record.endpoint,
-            record.operationId,
-            JSON.stringify(record),
-          );
-        else console.warn("Skipping an invalid launch record in the import");
-      }
     },
   );
   importLegacy(
@@ -471,6 +452,7 @@ function appDb(userDataDir) {
     // shared-memory files the database file's mode.
     for (const suffix of ["", "-wal", "-shm"])
       if (fs.existsSync(file + suffix)) fs.chmodSync(file + suffix, 0o600);
+    backupBeforeV4(db, file);
     migrate(db);
     importAll(db, userDataDir);
   } catch (error) {
@@ -496,6 +478,5 @@ module.exports = {
   putStore,
   readStore,
   transaction,
-  validLaunchRecord,
   writeStore,
 };

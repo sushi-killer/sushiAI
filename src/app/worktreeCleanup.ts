@@ -1,5 +1,5 @@
 import type { Panel, Workspace } from "../types";
-import { groupKey } from "./workspaceMerge.ts";
+import { groupKey } from "../lib/hostGroup.ts";
 import type { ProjectGit } from "./useProjectGit";
 
 export type WorktreeCleanupTarget = {

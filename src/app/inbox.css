@@ -241,6 +241,33 @@
   display: flex;
   gap: 8px;
 }
+/* A long body scrolls inside its own box and fades while there is more. */
+.inbox-clamp {
+  max-height: 168px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  flex-shrink: 0;
+}
+.inbox-clamp.more {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    black calc(100% - 28px),
+    transparent
+  );
+  mask-image: linear-gradient(to bottom, black calc(100% - 28px), transparent);
+}
+/* The choices and the answer field stay in view whatever the body length. */
+.inbox-foot {
+  position: sticky;
+  bottom: -18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 -24px -18px;
+  padding: 12px 24px 18px;
+  border-top: 1px solid var(--line-divider);
+  background: var(--bg-sunken);
+}
 .inbox-reply input {
   flex: 1;
 }
@@ -405,6 +432,12 @@
   line-height: 16px;
   white-space: pre-wrap;
 }
+.inbox-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
 .inbox-prompt-options {
   display: flex;
   flex-wrap: wrap;
@@ -498,4 +531,9 @@
   .inbox-queue {
     flex-basis: 50%;
   }
+}
+
+.inbox-foot .inbox-prompt-options {
+  max-height: 116px;
+  overflow-y: auto;
 }

@@ -2,7 +2,6 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import {
   Check,
   Globe,
-  ListTodo,
   RefreshCw,
   Server,
   Settings as SettingsIcon,
@@ -12,19 +11,23 @@ import {
 import "./settings-dialog.css";
 import { RenderProfiler } from "../RenderProfiler.tsx";
 import { agentTitle } from "./agent-title.ts";
-import { errorText } from "./errors.ts";
+import { errorText } from "../lib/errors.ts";
 import {
   OPEN_PROJECT_SETTINGS_EVENT,
   OPEN_SETTINGS_EVENT,
   setPendingProjectTab,
   type ProjectSettingsTab,
-} from "./openSettings.ts";
-import { useOrchestratorEnabled } from "../orchestrator/enabled.ts";
-import { ExtensionSectionSlot } from "../extensions/ExtensionSlots.tsx";
+} from "../lib/openSettings.ts";
+import {
+  ExtensionSectionSlot,
+  ExtensionSettingsPage,
+  ExtensionSettingsTabs,
+  settingsPageKey,
+  settingsPageSurfaces,
+} from "../extensions/ExtensionSlots.tsx";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import {
   ConnectionsSettings,
-  OrchestratorSettings,
   ProvidersSettings,
   UpdateSettings,
 } from "../dialogs/lazy-settings.ts";
@@ -37,11 +40,12 @@ import type {
   Workspace,
 } from "../types";
 
+/** A core tab, or `page:<extension>:<surface>` for one an extension adds. */
 export type SettingsTab =
-  "general" | "connections" | "providers" | "orchestration" | "updates";
+  "general" | "connections" | "providers" | "updates" | `page:${string}`;
 
 const SETTINGS_NAV: {
-  key: SettingsTab;
+  key: Exclude<SettingsTab, `page:${string}`>;
   label: string;
   icon: LucideIcon;
   description: string;
@@ -56,20 +60,13 @@ const SETTINGS_NAV: {
     key: "connections",
     label: "Connections",
     icon: Globe,
-    description: "The Herdr socket and the machines sushiAI can reach.",
+    description: "The machines sushiAI can reach.",
   },
   {
     key: "providers",
     label: "Providers",
     icon: Server,
     description: "Claude and Codex accounts, API keys and model profiles.",
-  },
-  {
-    key: "orchestration",
-    label: "Orchestration",
-    icon: ListTodo,
-    description:
-      "How tasks are planned, run, checked and landed. Saved to orchd for every project on this Mac.",
   },
   {
     key: "updates",
@@ -93,17 +90,13 @@ const DEFAULT_APP_PREFERENCES: AppPreferences = {
 export function SettingsDialog({
   settingsTab,
   setSettingsTab,
-  socket,
-  setSocket,
-  connected,
-  refreshHerdr,
+  endpoint,
   fontScale,
   setFontScale,
   keepAwake,
   setKeepAwake,
   updates,
   system,
-  connectionError,
   registry,
   cwd,
   connection,
@@ -114,17 +107,14 @@ export function SettingsDialog({
 }: {
   settingsTab: SettingsTab;
   setSettingsTab(tab: SettingsTab): void;
-  socket: string;
-  setSocket(value: string): void;
-  connected: boolean;
-  refreshHerdr(path: string): Promise<void>;
+  /** The host of the active workspace; This Mac's card is "Active" otherwise. */
+  endpoint: string;
   fontScale: number;
   setFontScale(value: number): void;
   keepAwake: boolean;
   setKeepAwake(on: boolean): void;
   updates: UpdateState | null;
   system: System | null;
-  connectionError: string;
   registry: ExtensionRegistry;
   cwd: string;
   connection?: string;
@@ -174,15 +164,19 @@ export function SettingsDialog({
       .catch((error) => notify(errorText(error)));
   }
 
-  // Off: no Orchestration tab, and a saved one falls back to General.
-  const orchestrator = useOrchestratorEnabled();
-  const tabs = SETTINGS_NAV.filter(
-    (item) => orchestrator || item.key !== "orchestration",
+  // Pages come from active extensions; a saved tab whose page is gone falls
+  // back to General.
+  const pages = settingsPageSurfaces(registry);
+  const page = pages.find(
+    (surface) => settingsPageKey(surface) === settingsTab,
   );
-  const tab = tabs.some((item) => item.key === settingsTab)
-    ? settingsTab
-    : "general";
-  const current = tabs.find((item) => item.key === tab) || tabs[0];
+  const tab: SettingsTab =
+    page || SETTINGS_NAV.some((item) => item.key === settingsTab)
+      ? settingsTab
+      : "general";
+  const current = page
+    ? { label: page.title, description: page.description || "" }
+    : SETTINGS_NAV.find((item) => item.key === tab) || SETTINGS_NAV[0];
 
   return (
     <div className="settings-shell">
@@ -191,7 +185,7 @@ export function SettingsDialog({
           <p className="settings-nav-eyebrow">PREFERENCES</p>
           <p className="settings-nav-title">Settings</p>
         </div>
-        {tabs.map(({ key, label, icon: Icon }) => (
+        {SETTINGS_NAV.map(({ key, label, icon: Icon }) => (
           <button
             key={key}
             className={`settings-nav-item${tab === key ? " current" : ""}`}
@@ -203,6 +197,11 @@ export function SettingsDialog({
             {label}
           </button>
         ))}
+        <ExtensionSettingsTabs
+          registry={registry}
+          current={tab}
+          onSelect={(key) => setSettingsTab(key as SettingsTab)}
+        />
       </nav>
       <div className="settings-main" role="tabpanel">
         <div className="settings-title">
@@ -211,61 +210,21 @@ export function SettingsDialog({
         </div>
         <Suspense fallback={<div className="loading">Loading settings…</div>}>
           <RenderProfiler id="settings">
-            {tab === "connections" ? (
+            {page ? (
+              <ExtensionSettingsPage
+                surface={page}
+                cwd={cwd}
+                connection={connection}
+              />
+            ) : tab === "connections" ? (
               <ConnectionsSettings
-                endpoint={socket}
-                localSocket={system?.socketPath || ""}
-                onSelect={(value) => setSocket(value)}
+                endpoint={endpoint}
                 profiles={connectionProfiles}
                 onRefresh={refreshConnectionProfiles}
                 notify={notify}
-                socketForm={
-                  <form
-                    className="socket-form"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      const value = String(
-                        new FormData(event.currentTarget).get("socket"),
-                      );
-                      setSocket(value);
-                      refreshHerdr(value);
-                    }}
-                  >
-                    <div className="socket-head">
-                      <label htmlFor="settings-socket">Herdr socket</label>
-                      <div className="connection-detail">
-                        <i
-                          className={`status-dot ${connected ? "green" : ""}`}
-                        />
-                        {connected
-                          ? "Connected · workspaces sync automatically"
-                          : connectionError || "Connecting…"}
-                      </div>
-                    </div>
-                    <div className="socket-controls">
-                      <input
-                        id="settings-socket"
-                        name="socket"
-                        key={socket}
-                        defaultValue={
-                          socket.startsWith("ssh:")
-                            ? system?.socketPath
-                            : socket
-                        }
-                        placeholder="/Users/you/.config/herdr/herdr.sock"
-                        required
-                      />
-                      <button className="primary" type="submit">
-                        <RefreshCw size={14} /> Reconnect
-                      </button>
-                    </div>
-                  </form>
-                }
               />
             ) : tab === "providers" ? (
               <ProvidersSettings />
-            ) : tab === "orchestration" ? (
-              <OrchestratorSettings />
             ) : tab === "updates" ? (
               <UpdateSettings state={updates} />
             ) : (
@@ -354,29 +313,24 @@ export function SettingsDialog({
                       </em>
                     </span>
                   </label>
-                  {orchestrator && (
-                    <label className="setting-check">
-                      <input
-                        type="checkbox"
-                        checked={appPreferences.desktopMascot}
-                        disabled={!appPreferences.notifications}
-                        onChange={(event) =>
-                          setAppPreference(
-                            "desktopMascot",
-                            event.target.checked,
-                          )
-                        }
-                      />
-                      <span>
-                        Desktop mascot
-                        <em>
-                          Shows orchestrator task notices as a mascot in the
-                          corner of your screen. Off sends a native notification
-                          instead.
-                        </em>
-                      </span>
-                    </label>
-                  )}
+                  <label className="setting-check">
+                    <input
+                      type="checkbox"
+                      checked={appPreferences.desktopMascot}
+                      disabled={!appPreferences.notifications}
+                      onChange={(event) =>
+                        setAppPreference("desktopMascot", event.target.checked)
+                      }
+                    />
+                    <span>
+                      Desktop mascot
+                      <em>
+                        Shows notices from sushiAI and its extensions as a
+                        mascot in the corner of your screen. Off sends a native
+                        notification instead.
+                      </em>
+                    </span>
+                  </label>
                   <label className="setting-check">
                     <input
                       type="checkbox"
@@ -398,8 +352,8 @@ export function SettingsDialog({
                 <div className="settings-note">
                   <TerminalSquare size={16} />
                   <p>
-                    Herdr sessions keep running when you close sushiAI. Local
-                    terminals live for as long as the app does.
+                    Sessions keep running in the sushiai daemon when you close
+                    sushiAI.
                   </p>
                 </div>
                 <div className="cli-status">

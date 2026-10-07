@@ -3,7 +3,6 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const net = require("node:net");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const execute = promisify(execFile);
@@ -11,8 +10,6 @@ const execute = promisify(execFile);
 const {
   suggestWorktreeBranch,
   worktreeBranchError,
-  worktreeCreateParams,
-  herdrWorkspaceKey,
   launchesInWorktree,
 } = require("../src/workspace/worktree.ts");
 const cleanupLibrary = import("../src/app/worktreeCleanup.ts");
@@ -22,9 +19,6 @@ const {
   worktreeAddArgs,
   createWorktree,
 } = require("../electron/worktree.cjs");
-const {
-  registerHerdrExtension,
-} = require("../electron/extensions/builtin-herdr.cjs");
 const { registerProjectIpc } = require("../electron/ipc/projects.cjs");
 const { Connections } = require("../electron/connections.cjs");
 
@@ -122,7 +116,7 @@ test("worktree cleanup is offered only for a linked checkout with no other panes
   const localSocketWorkspace = {
     ...workspace,
     id: "w2",
-    connection: "/tmp/herdr.sock",
+    connection: "/tmp/local.sock",
     panels: [other],
   };
   assert.equal(
@@ -211,76 +205,6 @@ test("worktree cleanup defaults on only for a merged pull request", async () => 
   assert.equal(isMergedPullRequest({ state: "OPEN", mergedAt: null }), false);
   assert.equal(isMergedPullRequest({ state: "NONE", mergedAt: null }), false);
   assert.equal(isMergedPullRequest(undefined), false);
-});
-
-test("worktreeCreateParams builds the Herdr worktree.create payload", () => {
-  assert.deepEqual(
-    worktreeCreateParams({ cwd: "/Users/dev/app" }, "feature/x"),
-    {
-      cwd: "/Users/dev/app",
-      branch: "feature/x",
-      base: "refs/heads/main",
-      label: "feature/x",
-      focus: false,
-    },
-  );
-  assert.equal(
-    worktreeCreateParams(
-      { cwd: "/Users/dev/app" },
-      "feature/x",
-      "release/stable",
-    ).base,
-    "release/stable",
-  );
-});
-
-test("herdrWorkspaceKey builds the sushiAI id for local and SSH endpoints", () => {
-  assert.equal(
-    herdrWorkspaceKey("unix:///tmp/herdr.sock", "ws-1"),
-    "herdr:v2:unix%3A%2F%2F%2Ftmp%2Fherdr.sock:ws-1",
-  );
-  assert.equal(
-    herdrWorkspaceKey("ssh:devbox", "ws-2"),
-    "herdr:v2:ssh%3Adevbox:ws-2",
-  );
-  assert.notEqual(
-    herdrWorkspaceKey("/tmp/first.sock", "same"),
-    herdrWorkspaceKey("/tmp/second.sock", "same"),
-  );
-  assert.notEqual(herdrWorkspaceKey("a:b", "c"), herdrWorkspaceKey("a", "b:c"));
-});
-
-test("the Herdr allowlist accepts worktree.create without touching any other method", async () => {
-  const directory = await fs.mkdtemp(
-    path.join(os.tmpdir(), "worktree-session-"),
-  );
-  const socketPath = path.join(directory, "no-gateway-here.sock");
-  const id = (value) => value;
-  const handlers = new Map();
-  registerHerdrExtension({
-    handle: (channel, callback) => handlers.set(channel, callback),
-    getConnections: () => ({
-      socket: async () => socketPath,
-      inspect: async () => ({ cwd: "/tmp", base: "test-commit" }),
-    }),
-    id,
-  });
-  const herdr = handlers.get("herdr");
-  // An unknown method is refused before ever touching the socket.
-  await assert.rejects(
-    herdr("local", "worktree.destroy", { branch: "x" }),
-    /Invalid Herdr request/,
-  );
-  // worktree.create passes the allowlist check and reaches the (absent)
-  // socket instead - a connection failure, not "Invalid Herdr request".
-  await assert.rejects(
-    herdr("local", "worktree.create", { cwd: "/tmp" }),
-    (error) => {
-      assert.doesNotMatch(error.message, /Invalid Herdr request/);
-      return true;
-    },
-  );
-  await fs.rm(directory, { recursive: true, force: true });
 });
 
 test("worktreePath places a new worktree beside the repo root, slugging slashes", () => {
@@ -674,79 +598,6 @@ test("local creation from a linked checkout uses the primary repository and fres
     await git(linked.path, "symbolic-ref", "--short", "HEAD"),
     "feature/existing",
   );
-});
-
-test("Herdr creation prepares the selected SSH target's upstream and primary cwd before sending RPC", async (t) => {
-  const { directory, clone, connections, git, publish } =
-    await remoteRepository(t);
-  const linked = await createWorktree(clone, "feature/existing");
-  const latest = await publish("ssh-latest.txt");
-  const fakeSsh = path.join(directory, "ssh");
-  await fs.writeFile(
-    fakeSsh,
-    "#!/usr/bin/env node\nconst { spawn } = require('node:child_process');\nconst child = spawn('/bin/sh', ['-c', process.argv.at(-1)], { stdio: 'inherit' });\nchild.on('exit', code => process.exit(code));\n",
-    { mode: 0o755 },
-  );
-  connections.ssh = fakeSsh;
-  const profile = await connections.save({
-    name: "Lab",
-    host: "user@devbox",
-    socket: "/tmp/example.sock",
-  });
-  const endpoint = "ssh:" + profile.id;
-  const socketPath = path.join(directory, "gateway.sock");
-  const calls = [];
-  const server = net.createServer((client) => {
-    let buffer = "";
-    client.on("data", (chunk) => {
-      buffer += chunk;
-      if (!buffer.includes("\n")) return;
-      const message = JSON.parse(buffer.trim());
-      calls.push(message);
-      client.end(
-        JSON.stringify({ id: message.id, result: { type: "ok" } }) + "\n",
-      );
-    });
-  });
-  await new Promise((resolve) => server.listen(socketPath, resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
-  const handlers = new Map();
-  registerHerdrExtension({
-    handle: (name, handler) => handlers.set(name, handler),
-    getConnections: () => ({
-      socket: async (selected) => {
-        assert.equal(selected, endpoint);
-        return socketPath;
-      },
-      inspect: (selected, options) => connections.inspect(selected, options),
-    }),
-    id: (value) => value,
-  });
-  await handlers.get("herdr")(endpoint, "worktree.create", {
-    cwd: linked.path,
-    branch: "feature/ssh-fresh",
-  });
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].method, "worktree.create");
-  assert.equal(calls[0].params.cwd, await fs.realpath(clone));
-  assert.equal(calls[0].params.base, latest);
-  assert.equal(connections.inspectionWorkers.has(endpoint), true);
-  assert.equal(connections.inspectionWorkers.has("local"), false);
-  await git(
-    clone,
-    "remote",
-    "set-url",
-    "origin",
-    path.join(directory, "missing.git"),
-  );
-  await assert.rejects(
-    handlers.get("herdr")(endpoint, "worktree.create", {
-      cwd: linked.path,
-      branch: "feature/failed",
-    }),
-    /repository/,
-  );
-  assert.equal(calls.length, 1, "a failed fetch sends no worktree.create RPC");
 });
 
 test("an unavailable main fails without creating a checkout or branch", async (t) => {

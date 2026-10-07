@@ -191,7 +191,7 @@ function lastMeaningful(lines: string[]): string {
   return "";
 }
 
-/** Parses a pane's visible text. `agent` is Herdr's agent id: Claude Code
+/** Parses a pane's visible text. `agent` is the session's agent id: Claude Code
  * answers a numbered menu on its digit alone (captured), anything else is
  * driven with arrows and Enter. */
 export function parseSessionPrompt(

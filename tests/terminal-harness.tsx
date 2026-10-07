@@ -9,30 +9,44 @@ const calls = {
   closed: 0,
   drops: 0,
   opened: [] as string[],
+  attaches: [] as { cols: number; rows: number }[],
 };
 let output: (event: any) => void;
 let failAttachment = false;
 window.bridge = {
-  onTerminal: (callback: typeof output) => {
+  onDaemonState: () => () => {},
+  onDaemonTerminal: (callback: typeof output) => {
     output = callback;
     return () => {};
   },
-  terminalOpen: async () => ({ history: "Ready for images\r\n\x1b[?2004h" }),
-  terminalResize: async () => {},
-  terminalWrite: async (_id: string, data: string) => {
+  daemonTerminalAttach: async (input: { cols: number; rows: number }) => {
+    calls.attaches.push({ cols: input.cols, rows: input.rows });
+    // The daemon answers an attach with its screen as a snapshot.
+    setTimeout(
+      () =>
+        output({
+          panelId: "terminal-test",
+          snapshot: "Ready for images\r\n\x1b[?2004h",
+        }),
+      0,
+    );
+  },
+  daemonTerminalResize: async () => {},
+  daemonTerminalAck: async () => {},
+  daemonTerminalDetach: async () => {
+    calls.closed++;
+  },
+  daemonTerminalWrite: async (_id: string, data: string) => {
     calls.writes.push(data);
   },
-  terminalAttach: async ({ name }: { name: string }) => {
+  pathForFile: () => "",
+  daemonTerminalAttachData: async (_id: string, name: string) => {
     calls.files.push(name);
     await new Promise((resolve) => setTimeout(resolve, 20));
     if (failAttachment) throw Error("Test attachment failed");
-    return `/tmp/attachments/${name}`;
   },
   agentOpenExternal: async (url: string) => {
     calls.opened.push(url);
-  },
-  terminalClose: async () => {
-    calls.closed++;
   },
 } as any;
 document.body.innerHTML =
@@ -46,20 +60,18 @@ root.render(
       kind: "terminal",
       title: "Terminal",
       agent: "claude",
-      herdrId: "test-herdr",
+      sessionId: "session-test",
     }}
-    cwd="/tmp"
-    socket=""
     onStart={() => {}}
+    onReopen={() => {}}
   />,
 );
 (window as any).terminalHarness = {
   calls,
-  shell: () => output({ panelId: "terminal-test", data: "", agent: null }),
+  output: (data: string) => output({ panelId: "terminal-test", data }),
   fail: () => {
     failAttachment = true;
   },
-  output: (data: string) => output({ panelId: "terminal-test", data }),
   dispose: () => {
     root.unmount();
     disposeTerminal("terminal-test");

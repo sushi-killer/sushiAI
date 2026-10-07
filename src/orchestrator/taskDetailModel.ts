@@ -8,7 +8,7 @@ import {
   reviewOf,
   totalDurationMs,
 } from "./helpers.ts";
-import { elapsedLabel } from "./ownerAttention.ts";
+import { elapsedLabel, plural } from "../lib/text.ts";
 import type {
   Attempt,
   Question,
@@ -43,10 +43,6 @@ export type StageRow = {
 
 function segmentMs(segment: TimelineSegment): number {
   return Math.max(0, segment.endedAt - segment.startedAt);
-}
-
-function plural(count: number, word: string): string {
-  return `${count} ${word}${count === 1 ? "" : "s"}`;
 }
 
 function clip(text: string, max: number): string {

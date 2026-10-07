@@ -28,12 +28,12 @@ const git = (remote, checkout, branch = "main") => ({
   subdir: "",
   branch,
 });
-const closedProject = (id, name, cwd, endpoint, herdrFlag, gitId) => ({
+const closedProject = (id, name, cwd, endpoint, backedFlag, gitId) => ({
   id,
   name,
   cwd,
   endpoint,
-  herdr: herdrFlag,
+  backed: backedFlag,
   closedAt: 1,
   git: gitId,
 });
@@ -50,7 +50,7 @@ test("closedProjectId is stable per endpoint+cwd, local when there is no endpoin
   );
 });
 
-test("closedProjectId scopes local Herdr sockets independently", async () => {
+test("closedProjectId scopes local daemon sockets independently", async () => {
   const { closedProjectId } = await library;
   assert.equal(
     closedProjectId("/tmp/sushiai-local.sock", "/Users/dev/app"),
@@ -62,7 +62,7 @@ test("closedProjectId scopes local Herdr sockets independently", async () => {
   );
 });
 
-test("an open project on one local Herdr server cannot hide a closed project on another", async () => {
+test("an open project on one local daemon cannot hide a closed project on another", async () => {
   const { dashboardEntries, closedProjectId } = await library;
   const open = workspace("open", "/tmp/first.sock", "/work/app");
   const closed = closedProject(
@@ -293,7 +293,7 @@ test("dashboardEntries: a closed project already reopened (same endpoint+cwd as 
   assert.equal(entries[0].id, "w-open");
 });
 
-test("dashboardEntries: a stale closed entry keyed on the local Herdr socket dedupes against the now-open workspace (P2-f)", async () => {
+test("dashboardEntries: a stale closed entry keyed on the local socket dedupes against the now-open workspace (P2-f)", async () => {
   const { dashboardEntries } = await library;
   const open = workspace(
     "w-open",

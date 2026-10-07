@@ -3,8 +3,8 @@ const assert = require("node:assert/strict");
 
 const load = () => import("../src/app/sessionPrompt.ts");
 
-// Visible text of real Claude Code 2.1 and Codex 0.159 panes, read with Herdr
-// `pane.read --source visible --format text` at 110 columns. Only the scratch
+// Visible text of real Claude Code 2.1 and Codex 0.159 panes, read as plain
+// screen text at 110 columns. Only the scratch
 // project path was replaced with /home/user/app, and Claude Code screens start
 // at the echoed prompt instead of the conversation above it.
 const SCREENS = {

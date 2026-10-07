@@ -14,111 +14,146 @@ const surface = (over = {}) => ({
   ...over,
 });
 const registryOf = (...surfaces) => ({ availableSurfaces: () => surfaces });
-const agent = { id: "a1", kind: "agent", title: "Claude", herdrId: "w3S:p1D" };
-const signal = {
-  paneId: "w3S:p1D",
-  extensionId: "builtin.artifacts",
-  surfaceId: "preview",
-  nonce: "1-9",
-  arg: "/tmp/a b.md",
-};
-
-test("parseOpenSignal keeps spaces in the argument", async () => {
-  const { parseOpenSignal } = await library;
-  assert.deepEqual(
-    parseOpenSignal(
-      "w3S:p1D builtin.artifacts/preview 17-42 /tmp/my notes/a b.md",
-    ),
-    {
-      paneId: "w3S:p1D",
-      extensionId: "builtin.artifacts",
-      surfaceId: "preview",
-      nonce: "17-42",
-      arg: "/tmp/my notes/a b.md",
-    },
-  );
-  assert.equal(parseOpenSignal("p1 ext/surf n1").arg, "");
+const agent = { id: "a1", kind: "agent", title: "Claude", sessionId: "s1" };
+const shell = { id: "t1", kind: "terminal", title: "zsh", sessionId: "s2" };
+const workspaces = [
+  { id: "w-local", name: "app", cwd: "/w/app", panels: [shell, agent] },
+  {
+    id: "w-remote",
+    name: "app",
+    cwd: "/w/app",
+    connection: "ssh:box",
+    panels: [{ id: "r1", kind: "agent", title: "Codex", sessionId: "s1" }],
+  },
+];
+const event = (params = {}, host = "local", method = "session.open") => ({
+  method,
+  host,
+  generation: 1,
+  params: {
+    id: "s1",
+    target: "artifacts/preview",
+    arg: "/w/app/artifacts/a b.md",
+    nonce: "n1",
+    ...params,
+  },
 });
 
-test("parseOpenSignal rejects malformed values", async () => {
-  const { parseOpenSignal } = await library;
-  for (const value of [
-    "",
-    "p1",
-    " ext/surf n arg",
-    "p1 nosurface n arg",
-    "p1 /surf n arg",
-    "p1 ext/ n arg",
-    "p1 a/b/c n arg",
-    "p1 ext/surf",
-    undefined,
-    42,
+test("parseOpenEvent maps a session.open notification and the short extension name", async () => {
+  const { parseOpenEvent } = await library;
+  assert.deepEqual(parseOpenEvent(event()), {
+    host: "local",
+    sessionId: "s1",
+    extensionId: "builtin.artifacts",
+    surfaceId: "preview",
+    nonce: "n1",
+    arg: "/w/app/artifacts/a b.md",
+  });
+  assert.equal(
+    parseOpenEvent(event({ target: "acme.tools/view" })).extensionId,
+    "acme.tools",
+  );
+});
+
+test("parseOpenEvent ignores other events and rejects malformed ones", async () => {
+  const { parseOpenEvent } = await library;
+  assert.equal(parseOpenEvent(event({}, "local", "session.ask")), null);
+  for (const params of [
+    { target: "nosurface" },
+    { target: "/surf" },
+    { target: "ext/" },
+    { target: "a/b/c" },
+    { nonce: "" },
+    { id: "" },
+    { arg: 4 },
   ])
-    assert.equal(parseOpenSignal(value), null, String(value));
+    assert.equal(parseOpenEvent(event(params)), null, JSON.stringify(params));
 });
 
-test("resolveOpenSignal targets the agent panel itself", async () => {
-  const { resolveOpenSignal } = await library;
-  const other = {
-    id: "t1",
-    kind: "terminal",
-    title: "zsh",
-    herdrId: "w3S:p2D",
-  };
-  assert.deepEqual(
-    resolveOpenSignal(registryOf(surface()), [other, agent], signal),
-    { kind: "companion", panelId: "a1" },
+test("resolveOpenSignal finds the panel by session id and host", async () => {
+  const { parseOpenEvent, resolveOpenSignal } = await library;
+  const registry = registryOf(surface());
+  const local = resolveOpenSignal(
+    registry,
+    workspaces,
+    parseOpenEvent(event()),
   );
+  assert.equal(local.kind, "companion");
+  assert.equal(local.panel.id, "a1");
+  const remote = resolveOpenSignal(
+    registry,
+    workspaces,
+    parseOpenEvent(event({}, "box")),
+  );
+  assert.equal(remote.kind, "companion");
+  assert.equal(remote.panel.id, "r1", "same session id, other host");
 });
 
-test("resolveOpenSignal is unavailable for an unknown pane or host", async () => {
-  const { resolveOpenSignal } = await library;
-  const result = resolveOpenSignal(registryOf(surface()), [agent], {
-    ...signal,
-    paneId: "ssh-other:p9",
-  });
-  assert.equal(result.kind, "unavailable");
-  assert.equal(
-    resolveOpenSignal(registryOf(surface()), [], signal).kind,
-    "unavailable",
-  );
-});
-
-test("resolveOpenSignal ignores a disabled built-in surface and reports an unknown extension", async () => {
-  const { resolveOpenSignal } = await library;
-  // availableSurfaces() already drops a disabled extension's surfaces.
-  assert.deepEqual(resolveOpenSignal(registryOf(), [agent], signal), {
-    kind: "ignored",
-  });
-  assert.deepEqual(
-    resolveOpenSignal(registryOf(surface({ id: "other" })), [agent], signal),
-    { kind: "ignored" },
-  );
-  // Ignored even when the pane is gone: nothing to tell the owner.
-  assert.equal(resolveOpenSignal(registryOf(), [], signal).kind, "ignored");
-  assert.equal(
-    resolveOpenSignal(registryOf(), [agent], {
-      ...signal,
-      extensionId: "acme.tools",
-    }).kind,
-    "unavailable",
-  );
-});
-
-test("resolveOpenSignal rejects declarative views and non-pane hosts", async () => {
-  const { resolveOpenSignal } = await library;
+test("resolveOpenSignal rejects an unknown session, host, surface or kind of surface", async () => {
+  const { parseOpenEvent, resolveOpenSignal } = await library;
+  const resolve = (registry, params, host) =>
+    resolveOpenSignal(
+      registry,
+      workspaces,
+      parseOpenEvent(event(params, host)),
+    );
+  const ok = registryOf(surface());
+  assert.equal(resolve(ok, { id: "nope" }).kind, "rejected");
+  assert.equal(resolve(ok, {}, "other-host").kind, "rejected");
+  assert.equal(resolve(registryOf(), {}).kind, "rejected");
+  assert.equal(resolve(ok, { target: "artifacts/other" }).kind, "rejected");
+  assert.equal(resolve(ok, { target: "acme/tools" }).kind, "rejected");
   const declarative = surface({
     view: { kind: "declarative", schemaVersion: 2, document: {} },
   });
-  assert.equal(
-    resolveOpenSignal(registryOf(declarative), [agent], signal).kind,
-    "unavailable",
-  );
+  assert.equal(resolve(registryOf(declarative), {}).kind, "rejected");
   const page = surface({ allowedHosts: ["app.page"] });
-  assert.equal(
-    resolveOpenSignal(registryOf(page), [agent], signal).kind,
-    "unavailable",
+  assert.equal(resolve(registryOf(page), {}).kind, "rejected");
+});
+
+test("rememberNonce reports a repeated nonce once and stays bounded", async () => {
+  const { rememberNonce } = await library;
+  let step = rememberNonce([], "n1");
+  assert.equal(step.fresh, true);
+  step = rememberNonce(step.seen, "n1");
+  assert.equal(step.fresh, false);
+  step = rememberNonce(step.seen, "n2");
+  assert.equal(step.fresh, true);
+  let seen = [];
+  for (let i = 0; i < 1000; i++) seen = rememberNonce(seen, `n${i}`).seen;
+  assert.ok(seen.length <= 256);
+  assert.equal(rememberNonce(seen, "n999").fresh, false);
+});
+
+test("the open handler opens beside the right panel once per nonce and ignores unknown targets", async () => {
+  const { createOpenHandler } = await library;
+  const opened = [];
+  const warned = [];
+  const handle = createOpenHandler(
+    () => ({ workspaces, registry: registryOf(surface()) }),
+    (...call) => opened.push(call),
+    (message) => warned.push(message),
   );
+  const target = { extensionId: "builtin.artifacts", surfaceId: "preview" };
+  handle(event());
+  assert.deepEqual(opened, [
+    ["a1", target, { arg: "/w/app/artifacts/a b.md" }],
+  ]);
+  // The same nonce again, and an unrelated event: nothing.
+  handle(event());
+  handle(event({}, "local", "session.ask"));
+  assert.equal(opened.length, 1);
+  // A new nonce for the same path opens again (a hidden Preview comes back).
+  handle(event({ nonce: "n2" }));
+  assert.equal(opened.length, 2);
+  // The remote host's session of the same id is another panel.
+  handle(event({ nonce: "n3" }, "box"));
+  assert.equal(opened[2][0], "r1");
+  // An unknown target is dropped with a warning only.
+  handle(event({ nonce: "n4", target: "nope/nothing" }));
+  assert.equal(opened.length, 3);
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], /builtin\.nope\/nothing/);
 });
 
 const workspaceOf = (...panels) => [
@@ -185,96 +220,8 @@ test("a companion goes with its agent panel and survives a reopened session", as
   const reopened = reopenInSlot(list[0], "a1", {
     ...agent,
     id: "a2",
-    herdrId: "w3S:p7D",
+    sessionId: "s7",
   });
   assert.equal(reopened.panels[0].id, "a2");
   assert.equal(reopened.panels[0].companion.args.arg, "/x.md");
-});
-
-test("detectOpenSignals treats the first value as a baseline", async () => {
-  const { detectOpenSignals } = await library;
-  const workspace = (value, extra = {}) => ({
-    id: "w1",
-    name: "w",
-    cwd: "/tmp",
-    panels: [],
-    layout: null,
-    herdrTokens: value === undefined ? {} : { sushiai_open: value },
-    ...extra,
-  });
-  // App start: the stored value is the baseline, not a request.
-  let step = detectOpenSignals({}, [workspace("p1 e/s n1 /f.md")]);
-  assert.deepEqual(step.fresh, []);
-  // Same value on the next snapshot: nothing.
-  step = detectOpenSignals(step.seen, [workspace("p1 e/s n1 /f.md")]);
-  assert.deepEqual(step.fresh, []);
-  // A change is acted on once.
-  step = detectOpenSignals(step.seen, [workspace("p1 e/s n2 /f.md")]);
-  assert.equal(step.fresh.length, 1);
-  assert.equal(step.fresh[0].value, "p1 e/s n2 /f.md");
-  step = detectOpenSignals(step.seen, [workspace("p1 e/s n2 /f.md")]);
-  assert.deepEqual(step.fresh, []);
-  // A workspace without reported tokens yet is not baselined.
-  const pending = detectOpenSignals(step.seen, [
-    workspace("x", { id: "w2", herdrTokens: undefined }),
-  ]);
-  assert.equal("w2" in pending.seen, false);
-  // A workspace that appears later gets its own baseline.
-  step = detectOpenSignals(step.seen, [
-    workspace("p1 e/s n2 /f.md"),
-    workspace("p2 e/s n1 /v.md", { id: "w3" }),
-  ]);
-  assert.deepEqual(step.fresh, []);
-  // No token yet, then one appears: that is a change.
-  step = detectOpenSignals({}, [workspace(undefined)]);
-  step = detectOpenSignals(step.seen, [workspace("p1 e/s n3 /f.md")]);
-  assert.equal(step.fresh.length, 1);
-});
-
-test("a new nonce for the same path is fresh and addresses the same panel", async () => {
-  const { detectOpenSignals, parseOpenSignal, resolveOpenSignal } =
-    await library;
-  const workspace = (value) => ({
-    id: "w1",
-    name: "w",
-    cwd: "/tmp",
-    panels: [],
-    layout: null,
-    herdrTokens: { sushiai_open: value },
-  });
-  const value = (nonce) =>
-    `w3S:p1D builtin.artifacts/preview ${nonce} /tmp/plan.md`;
-  let step = detectOpenSignals({}, [workspace(value("1-10"))]);
-  // The same value again is not a request.
-  step = detectOpenSignals(step.seen, [workspace(value("1-10"))]);
-  assert.deepEqual(step.fresh, []);
-  // Same path, new nonce: fresh, so a hidden companion opens again.
-  step = detectOpenSignals(step.seen, [workspace(value("2-10"))]);
-  assert.equal(step.fresh.length, 1);
-  const parsed = parseOpenSignal(step.fresh[0].value);
-  assert.equal(parsed.arg, "/tmp/plan.md");
-  assert.deepEqual(resolveOpenSignal(registryOf(surface()), [agent], parsed), {
-    kind: "companion",
-    panelId: "a1",
-  });
-});
-
-test("the argument token joins the open token, and a relative path is from the pane", async () => {
-  const { detectOpenSignals, parseOpenSignal, absoluteArg } = await library;
-  const workspace = (tokens) => ({ id: "w1", panels: [], herdrTokens: tokens });
-  let step = detectOpenSignals({}, [workspace({})]);
-  step = detectOpenSignals(step.seen, [
-    workspace({
-      sushiai_open: "p1 e/s n1",
-      sushiai_open_arg: "artifacts/a b.md",
-    }),
-  ]);
-  assert.equal(parseOpenSignal(step.fresh[0].value).arg, "artifacts/a b.md");
-  assert.equal(
-    absoluteArg("artifacts/a.md", "/w/proj/"),
-    "/w/proj/artifacts/a.md",
-  );
-  assert.equal(absoluteArg("./a.md", "/w/proj"), "/w/proj/a.md");
-  assert.equal(absoluteArg("/x/a.md", "/w/proj"), "/x/a.md");
-  assert.equal(absoluteArg("a.md", undefined), "a.md");
 });

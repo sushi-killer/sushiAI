@@ -11,12 +11,7 @@ const { Connections, quote, run } = require("../electron/connections.cjs");
   await c.init();
   let server;
   try {
-    const p = await c.save({
-      host,
-      socket:
-        process.env.SUSHIAI_SSH_SOCKET ||
-        "~/.config/herdr/sessions/sushiai/herdr.sock",
-    });
+    const p = await c.save({ host });
     const code = `from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import threading,sys
 class Handler(BaseHTTPRequestHandler):

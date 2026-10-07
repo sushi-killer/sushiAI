@@ -178,31 +178,15 @@ test("waitingCount counts blocked and done-not-seen panels across every workspac
   assert.equal(waitingCount(ws, state, []), 1);
 });
 
-test("waitingCount adds orchd tasks that need the owner, not archived or owner-stopped ones", async () => {
+test("waitingCount adds the module items that wait on the owner, not review rows", async () => {
   const { createAttentionState, waitingCount } = await library;
-  const task = (id, status, extra = {}) => ({
-    id,
-    title: id,
-    repo: "/r",
-    status,
-    archived: false,
-    decisions: [],
-    attempts: [],
-    updatedAt: 1,
-    ...extra,
-  });
-  const tasks = [
-    task("w", "waiting"),
-    task("f", "failed"),
-    task("l", "landing"),
-    task("e", "stopped", { decisions: ["Orchestrator: nothing left"] }),
-    task("o", "stopped", { decisions: ["Owner: stop"] }),
-    task("i", "stopped", { attempts: [{ n: 1, status: "interrupted" }] }),
-    task("r", "running"),
-    task("d", "done"),
-    task("a", "failed", { archived: true }),
+  const items = [
+    { kind: "answer" },
+    { kind: "decide" },
+    { kind: "review" },
+    { kind: "review" },
   ];
-  assert.equal(waitingCount([], createAttentionState(), [], tasks), 4);
+  assert.equal(waitingCount([], createAttentionState(), [], items), 2);
   assert.equal(waitingCount([], createAttentionState(), []), 0);
 });
 
@@ -366,6 +350,20 @@ test("workingCount counts running sessions and skips hidden hosts", async () => 
   );
 });
 
+test("a starting agent is neutral: idle in the Inbox, not counted as working", async () => {
+  const { createAttentionState, observe, workingCount, inboxGroups } =
+    await library;
+  const ws = [workspace("w1", [panel("a", "agent", { status: "starting" })])];
+  const { state } = observe(createAttentionState(), ws, 0);
+  assert.equal(workingCount(ws, state, []), 0);
+  const groups = inboxGroups(ws, state, []);
+  const idle = groups.find((g) => g.key === "idle");
+  assert.deepEqual(
+    idle?.rows.map((r) => r.panel.id),
+    ["a"],
+  );
+});
+
 test("fitNotice cuts a title and body to the caps the main process enforces", async () => {
   const { fitNotice } = await library;
   const short = {
@@ -390,7 +388,7 @@ test("fitNotice cuts a title and body to the caps the main process enforces", as
 test("a shell is never filed under a status bucket, whatever status it carries", async () => {
   const { createAttentionState, observe, inboxGroups, waitingCount } =
     await library;
-  // Herdr reports "unknown" for a plain shell, but a stale or surprising value
+  // A plain shell has no status, but a stale or surprising value
   // must not put a pane nobody observes into Needs input.
   const ws = [
     workspace("w1", [
@@ -409,10 +407,9 @@ test("a shell is never filed under a status bucket, whatever status it carries",
   assert.equal(waitingCount(ws, state, []), 1, "only the agent is waiting");
 });
 
-test("the statuses Herdr really emits carry through to the Inbox groups", async () => {
+test("the panel statuses the daemon mapping emits carry through to the Inbox groups", async () => {
   const { createAttentionState, observe, inboxGroups } = await library;
-  // Values taken from a live `herdr api snapshot`: done, idle, working, and
-  // unknown for a pane with no agent.
+  // done, idle, working, and unknown for a pane with no agent.
   const ws = [
     workspace("w1", [
       panel("finished", "agent", { agent: "claude", status: "done" }),
@@ -449,21 +446,57 @@ test("the statuses Herdr really emits carry through to the Inbox groups", async 
   });
 });
 
-test("waitingCount ignores orchd tasks while the orchestrator is off", async () => {
-  const { createAttentionState, waitingCount } = await library;
-  const tasks = [
-    {
-      id: "t1",
-      title: "T",
-      repo: "/w/app",
-      status: "waiting",
-      archived: false,
-      decisions: [],
-      attempts: [],
-      updatedAt: 1,
+test("daemon agentStatus drives attention: blocked needs you, working then idle is done", async () => {
+  const { createAttentionState, observe, inboxGroups, waitingCount } =
+    await library;
+  const { reconcileSessions } = await import("../src/daemonSessions.ts");
+  const bound = {
+    id: "p1",
+    kind: "agent",
+    title: "Claude",
+    agent: "claude",
+    sessionId: "s1",
+  };
+  const ws = [workspace("w1", [bound])];
+  const hosts = (agentStatus) => ({
+    local: {
+      ready: true,
+      listed: true,
+      sessions: {
+        s1: { id: "s1", status: "running", cmd: [], cwd: "/w", agentStatus },
+      },
     },
-  ];
-  const state = createAttentionState();
-  assert.equal(waitingCount([], state, [], tasks), 1);
-  assert.equal(waitingCount([], state, [], tasks, false), 0);
+  });
+  const step = (state, list, agentStatus, now) => {
+    const next = reconcileSessions(list, hosts(agentStatus));
+    return { next, ...observe(state, next, now) };
+  };
+  let list = ws;
+  let { state } = observe(createAttentionState(), ws, 0);
+  let result = step(state, list, "working", 1000);
+  ({ state, next: list } = result);
+  assert.deepEqual(result.events, []);
+  assert.equal(list[0].panels[0].status, "working");
+
+  result = step(state, list, "blocked", 2000);
+  ({ state, next: list } = result);
+  assert.deepEqual(
+    result.events.map((e) => e.kind),
+    ["blocked"],
+  );
+  assert.equal(waitingCount(list, state, []), 1);
+
+  result = step(state, list, "working", 3000);
+  ({ state, next: list } = result);
+  assert.deepEqual(result.events, []);
+
+  result = step(state, list, "idle", 4000);
+  ({ state, next: list } = result);
+  assert.deepEqual(
+    result.events.map((e) => e.kind),
+    ["done"],
+  );
+  assert.equal(list[0].panels[0].status, "done");
+  const groupOf = inboxGroups(list, state, []).find((g) => g.rows.length);
+  assert.equal(groupOf.key, "done");
 });

@@ -167,9 +167,9 @@ test("two folders claiming one id load neither", async (t) => {
 test("a folder cannot shadow a bundled extension", async (t) => {
   const base = await fixture(t);
   const root = path.join(base, "extensions");
-  await folder(root, "fake-herdr", manifest("builtin.herdr"));
+  await folder(root, "fake-bundled", manifest("builtin.bundled"));
   const { manifests, problems } = await scanLocalExtensions(root, [
-    "builtin.herdr",
+    "builtin.bundled",
   ]);
   assert.equal(manifests.size, 0);
   assert.match(problems[0].error, /already in use/);

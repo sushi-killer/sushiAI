@@ -19,9 +19,9 @@ export type MergedCanvas = {
 
 /** Draws a merged project's panes from every host on one canvas (flat mode
  * only). A merge group has no workspace of its own to keep a combined
- * layout in - Herdr polls rewrite each member's own `layout` independently
- * every few seconds (see reconcileGroupLayout in workspace-actions.ts) - so
- * it is kept in the workspace snapshot instead (`mergedLayouts`, owned by
+ * layout in - each member's panels change on their own (see
+ * reconcileGroupLayout in workspace-actions.ts) - so it is kept in the
+ * workspace snapshot instead (`mergedLayouts`, owned by
  * App and passed in), keyed by the merge group's stable id, and survives
  * restart the same way a single workspace's layout does. Assigns
  * `ws.groupRef` synchronously each render so `drop`/`resizeSplit`/`tidy` and
@@ -31,7 +31,6 @@ export function useMergedCanvas(
   projectGit: Record<string, ProjectGit>,
   connectionProfiles: ConnectionProfile[],
   workspaceGrouping: "grouped" | "flat",
-  socket: string,
   { mergedLayouts: stored, setMergedLayouts: setStored }: SessionState,
 ): MergedCanvas {
   const setGroupLayout = useCallback(
@@ -60,7 +59,7 @@ export function useMergedCanvas(
     : undefined;
   return {
     group,
-    panes: group ? resolveGroupPanes(group, connectionProfiles, socket) : [],
+    panes: group ? resolveGroupPanes(group, connectionProfiles) : [],
     layout,
   };
 }

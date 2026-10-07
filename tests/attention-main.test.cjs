@@ -9,7 +9,6 @@ const {
   trayIconFile,
   validateNotice,
   mascotIconPath,
-  taskNoticeRoute,
 } = require("../electron/attention.cjs");
 
 test("normalizePreferences keeps valid booleans and falls back to defaults otherwise", () => {
@@ -119,7 +118,7 @@ test("validateNotice accepts a well-formed notice and returns its fields", () =>
 
 test("notifications accept endpoint-scoped IDs and retain a finite bound", () => {
   const endpoint = `/tmp/${String.fromCodePoint(0x044f).repeat(30)}.sock`;
-  const prefix = `herdr:v2:${encodeURIComponent(endpoint)}:`;
+  const prefix = `session:${encodeURIComponent(endpoint)}:`;
   const notice = {
     workspaceId: `${prefix}w1`,
     panelId: `${prefix}w1%3Ap1`,
@@ -226,13 +225,6 @@ test("trayIconFile picks the state's mark and falls back to the plain one", () =
     trayIconFile(base, "attention", () => false),
     base,
   );
-});
-
-test("taskNoticeRoute is silent when off, the mascot when on, native when the mascot is off", () => {
-  for (const mascot of [true, false])
-    assert.equal(taskNoticeRoute({ enabled: false, mascot }), "none");
-  assert.equal(taskNoticeRoute({ enabled: true, mascot: true }), "mascot");
-  assert.equal(taskNoticeRoute({ enabled: true, mascot: false }), "native");
 });
 
 test("mascotIconPath sits beside the tray icon", () => {

@@ -71,6 +71,10 @@
   gap: 8px;
   min-width: 0;
 }
+.td-title-row > svg {
+  flex: none;
+  color: var(--text-faint);
+}
 .td-title-row h3 {
   margin: 0;
   min-width: 0;

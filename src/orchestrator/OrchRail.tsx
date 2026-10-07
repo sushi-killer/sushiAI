@@ -9,7 +9,7 @@ import {
   MessageSquare,
   Sparkles,
 } from "lucide-react";
-import type { OrchestratorView } from "../types";
+import type { OrchestratorView } from "./types";
 import {
   childrenOf,
   railGroups,
@@ -20,7 +20,7 @@ import {
 } from "./helpers";
 import { planOnly } from "./planModel";
 import type { Task } from "./types";
-import { GroupLabel, TaskRow } from "./ui";
+import { GroupLabel, TaskRow } from "../ui";
 
 function NavRow({
   icon,

@@ -9,7 +9,17 @@ const {
   ExtensionManager,
 } = require("../electron/extensions/extension-manager.cjs");
 const { appDb, readStore, writeStore } = require("../electron/app-db.cjs");
-const { HERDR_MANIFEST } = require("../electron/extensions/builtin-herdr.cjs");
+// A bundled extension that is not on the disable list.
+const PINNED_MANIFEST = {
+  id: "builtin.pinned",
+  name: "Pinned",
+  version: "1.0.0",
+  apiVersion: 1,
+  source: { kind: "builtin" },
+  scope: "app",
+  description: "A bundled provider the owner cannot turn off.",
+  contributions: { surfaces: [], navigation: [], actions: [], commands: [] },
+};
 
 const probeFixture = JSON.parse(
   fs.readFileSync(
@@ -80,19 +90,19 @@ test("extension manager persists enabled state, lock metadata and safe overrides
   }
 });
 
-test("Herdr is a bundled extension provider and cannot be disabled as an external package", async () => {
+test("a bundled extension provider cannot be disabled as an external package", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "sushiai-extension-manager-"));
   try {
     const manager = new ExtensionManager({
       dataDir: dir,
-      builtins: [HERDR_MANIFEST],
+      builtins: [PINNED_MANIFEST],
     });
     const snapshot = await manager.list();
-    assert.equal(snapshot.extensions[0].manifest.id, "builtin.herdr");
+    assert.equal(snapshot.extensions[0].manifest.id, "builtin.pinned");
     assert.equal(snapshot.extensions[0].manifest.source.kind, "builtin");
     assert.equal(snapshot.extensions[0].status, "active");
     await assert.rejects(
-      () => manager.setEnabled("builtin.herdr", false),
+      () => manager.setEnabled("builtin.pinned", false),
       /cannot be disabled/,
     );
   } finally {
@@ -417,7 +427,7 @@ test("an unreadable extensions folder does not stop the app", async (t) => {
   );
 });
 
-test("the orchestrator built-in can be turned off, stays off across a restart, and Herdr still refuses", async () => {
+test("the orchestrator built-in starts off, can be turned on and off, stays off across a restart, and a pinned built-in still refuses", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "sushiai-extension-manager-"));
   const orchestrator = {
     id: "builtin.orchestrator",
@@ -431,29 +441,37 @@ test("the orchestrator built-in can be turned off, stays off across a restart, a
   try {
     const manager = new ExtensionManager({
       dataDir: dir,
-      builtins: [HERDR_MANIFEST, orchestrator],
+      builtins: [PINNED_MANIFEST, orchestrator],
+      builtinsStartOff: [orchestrator.id],
     });
     await manager.ready;
-    assert.equal(manager.isEnabled("builtin.orchestrator"), true);
+    // A fresh install opts in; every other built-in starts on.
+    assert.equal(manager.isEnabled("builtin.orchestrator"), false);
+    assert.equal(manager.isEnabled("builtin.pinned"), true);
     const seen = [];
     manager.onChange((id, enabled) => seen.push([id, enabled]));
+    await manager.setEnabled("builtin.orchestrator", true);
     await manager.setEnabled("builtin.orchestrator", false);
-    assert.deepEqual(seen, [["builtin.orchestrator", false]]);
+    assert.deepEqual(seen, [
+      ["builtin.orchestrator", true],
+      ["builtin.orchestrator", false],
+    ]);
     await assert.rejects(
-      () => manager.setEnabled("builtin.herdr", false),
+      () => manager.setEnabled("builtin.pinned", false),
       /cannot be disabled/,
     );
     const restarted = new ExtensionManager({
       dataDir: dir,
-      builtins: [HERDR_MANIFEST, orchestrator],
+      builtins: [PINNED_MANIFEST, orchestrator],
+      builtinsStartOff: [orchestrator.id],
     });
     const snapshot = await restarted.list();
     const record = (id) =>
       snapshot.extensions.find((entry) => entry.manifest.id === id);
     assert.equal(record("builtin.orchestrator").status, "disabled");
     assert.equal(record("builtin.orchestrator").canDisable, true);
-    assert.equal(record("builtin.herdr").status, "active");
-    assert.equal(record("builtin.herdr").canDisable, false);
+    assert.equal(record("builtin.pinned").status, "active");
+    assert.equal(record("builtin.pinned").canDisable, false);
     await restarted.setEnabled("builtin.orchestrator", true);
     assert.equal(restarted.isEnabled("builtin.orchestrator"), true);
   } finally {

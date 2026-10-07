@@ -1,6 +1,8 @@
-// Mirrors artifacts/tasks/orchestrator-mvp.md's "Types (JSON, camelCase)"
-// section exactly - the daemon (orchd, Lane A) and this file are two
-// independent renderings of the same contract, not one importing the other.
+// Mirrors the daemon's `orch.*` protocol types (crates/sushiai-orch,
+// protocol.rs): the daemon and this file are two independent renderings of the
+// same contract, not one importing the other.
+
+import type { HostCliReadiness } from "../types.ts";
 
 export type Harness = "claude" | "codex";
 
@@ -771,33 +773,15 @@ export type OrchestratorEvent = (
 export type OrchestratorHost = {
   id: string;
   name: string;
-  state:
-    | "idle"
-    | "connecting"
-    | "installing"
-    | "building"
-    | "starting"
-    | "ready"
-    | "error";
+  state: "idle" | "connecting" | "ready" | "error";
   detail?: string;
   /** Whether the app keeps this host's daemon connected. */
   enabled: boolean;
   preflight?: Preflight | null;
-  /** `uname -sm` on the host ("Linux x86_64"), once SSH connected. */
-  platform?: string;
-  /** Whether any orchd binary was on the host when it connected. */
-  orchdInstalled?: boolean;
 };
 
 /** What a host offers orchd's routes: git and each harness CLI. */
-export type Preflight = {
-  git: boolean;
-  /** A C linker (cc or gcc), which a Rust build needs; absent on old hosts' data. */
-  cc?: boolean;
-  claude: { installed: boolean; loggedIn: boolean };
-  codex: { installed: boolean; loggedIn: boolean };
-  checkedAt: number;
-};
+export type Preflight = HostCliReadiness;
 
 export type TimelineStage =
   "plan" | "implement" | "verify" | "review" | "advisor" | "final" | "wait";
@@ -862,3 +846,17 @@ export type LeadTouchSummary = LeadTouchRate & {
 };
 
 export type SpendGroup = "stage" | "model" | "route" | "repo" | "task" | "day";
+
+/** What the Orchestrator panel shows: home (the default), the plan, its
+ * chat, one task, improvements, analytics, the archive or the agent
+ * messages. Kept in the pane's extension args so a restart reopens the same
+ * view. */
+export type OrchestratorView =
+  | { kind: "home" }
+  | { kind: "plan" }
+  | { kind: "chat" }
+  | { kind: "task"; id: string }
+  | { kind: "improvements" }
+  | { kind: "analytics" }
+  | { kind: "archive" }
+  | { kind: "messages" };

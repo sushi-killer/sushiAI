@@ -10,13 +10,14 @@ const {
   safeStorage,
   powerMonitor,
   globalShortcut,
+  Notification,
 } = require("electron");
 const path = require("node:path");
 const os = require("node:os");
 const fs = require("node:fs/promises");
 const { existsSync } = require("node:fs");
-const pty = require("node-pty");
 const { Connections } = require("./connections.cjs");
+const { readStore, writeStore } = require("./app-db.cjs");
 const { PreviewServer } = require("./preview.cjs");
 const { Updates } = require("./updates.cjs");
 const { scanLocalSkills } = require("./skills-catalog.cjs");
@@ -30,27 +31,28 @@ const { AgentRegistry } = require("./agents/registry.cjs");
 const { HermesProvider } = require("./agents/hermes-provider.cjs");
 const { registerProjectIpc } = require("./ipc/projects.cjs");
 const {
-  registerTerminalIpc,
-  uploadRemoteFile,
-  removeRemoteFiles,
-  remoteFileCommand,
-} = require("./ipc/terminals.cjs");
-const {
-  sessionEnvironment,
-  sessionEnvPrefix,
-} = require("./project-session.cjs");
-const { setupHost, setupSummary } = require("./host-setup.cjs");
+  setupHost,
+  setupSummary,
+  requireHostManifest,
+  createHostInstaller,
+  serializePerHost,
+} = require("./host-setup.cjs");
 const { registerChatIpc } = require("./ipc/chat.cjs");
 const { registerAppIpc } = require("./ipc/app.cjs");
 const { ipcResult } = require("./ipc/errors.cjs");
-const { registerSessionLaunchIpc } = require("./session-launch.cjs");
-const { assertHerdrCompatibility } = require("./herdr-compatibility.cjs");
+const { createDaemonLaunch } = require("./session-launch.cjs");
 const { registerExtensionIpc } = require("./ipc/extensions.cjs");
+const { registerDaemonIpc, forwardDaemonEvents } = require("./ipc/daemon.cjs");
+const { createDaemonManager } = require("./daemon/manager.cjs");
+const { createLocalConnector } = require("./daemon/local.cjs");
+const { remoteConnectors } = require("./daemon/connectors.cjs");
+const { watchHostTools } = require("./daemon/host-tools.cjs");
 const { registerAttentionIpc } = require("./attention.cjs");
 const {
   registerWorkspaceSnapshot,
   savedWorkspaces,
 } = require("./workspace-snapshot.cjs");
+const { createCatalogSync, revStore } = require("./catalog-sync.cjs");
 const {
   DEFAULT_BOUNDS,
   loadWindowState,
@@ -59,22 +61,24 @@ const {
 } = require("./window-state.cjs");
 const { registerMascot, watchPresenting } = require("./mascot.cjs");
 const { createMascotShortcut } = require("./mascot-shortcut.cjs");
+const { createNotices } = require("./extensions/notices.cjs");
+const { createOrchestratorNotices } = require("./orchestrator-notices.cjs");
 const { DEV_RESTART_EXIT_CODE, watchCore } = require("./dev-restart.cjs");
 const { testWindow } = require("./test-window.cjs");
 
 const testMode = testWindow();
 const { SurfaceStateStore } = require("./extensions/surface-state.cjs");
 const { ExtensionManager } = require("./extensions/extension-manager.cjs");
-const {
-  HERDR_MANIFEST,
-  registerHerdrExtension,
-} = require("./extensions/builtin-herdr.cjs");
+const { createCompanions } = require("./extensions/companion-process.cjs");
 const { ARTIFACTS_MANIFEST } = require("./extensions/builtin-artifacts.cjs");
 const { configureArtifactsSkill } = require("./artifacts-skill.cjs");
 const { syncLocalBuiltinSkills } = require("./extensions/builtin-skills.cjs");
 const {
   ORCHESTRATOR_MANIFEST,
+} = require("./extensions/builtin-orchestrator.cjs");
+const {
   registerOrchestratorExtension,
+  createModuleSwitch,
   orchestratorNotice,
 } = require("./orchestrator.cjs");
 const {
@@ -87,18 +91,27 @@ const agents = new AgentRegistry();
 const claudeMcp = new ClaudeMcp({ home: os.homedir() });
 const claudePlugins = new ClaudePlugins({ home: os.homedir() });
 agents.on("event", (event) => send("agent-event", event));
-const terminals = new Map(),
-  terminalPending = new Map(),
-  chats = new Map();
+const chats = new Map();
 let mainWindow;
 const root = path.join(__dirname, "..");
 const dataDir = process.env.BRIDGE_DATA_DIR;
 if (dataDir) app.setPath("userData", path.resolve(dataDir));
+// The PATH extended below is on process.env before any companion starts; the
+// supervisor passes the child only an allowlist of it.
+const companions = createCompanions({
+  getHosts: () => connections?.profiles ?? [],
+  env: process.env,
+});
 const extensions = new ExtensionManager({
   dataDir: app.getPath("userData"),
-  builtins: [HERDR_MANIFEST, ORCHESTRATOR_MANIFEST, ARTIFACTS_MANIFEST],
-  // Folders dropped here are read as JSON manifests, never executed. The
-  // override exists so the desktop smoke can point at its own fixtures.
+  companions,
+  builtins: [ORCHESTRATOR_MANIFEST, ARTIFACTS_MANIFEST],
+  // Opting in to the Orchestrator is the owner's act.
+  builtinsStartOff: [ORCHESTRATOR_MANIFEST.id],
+  // Folders dropped here are read as JSON manifests and carry no code; the
+  // extension folder is never executed. A manifest may name a companion
+  // program installed elsewhere, which runs only after the owner approves it.
+  // The override exists so the desktop smoke can point at its own fixtures.
   localDir: process.env.SUSHIAI_EXTENSIONS_DIR
     ? path.resolve(root, process.env.SUSHIAI_EXTENSIONS_DIR)
     : // A sibling of the settings folder, not inside it: this one is meant to
@@ -121,6 +134,9 @@ extensions.ready.then(() =>
   ),
 );
 const surfaceState = new SurfaceStateStore(app.getPath("userData"));
+extensions.ready.then(() =>
+  surfaceState.forgetRetired(new Set(extensions.manifests.keys())),
+);
 agents.register(
   new HermesProvider({
     userDataDir: app.getPath("userData"),
@@ -171,16 +187,6 @@ function id(value) {
     throw new Error("Invalid panel ID.");
   return value;
 }
-/** Writes a `claude --settings` file for a model profile; the caller owns
- * where it's used (a local pty's argv, or typed into a herdr pane). */
-async function stageModelSettings(modelProfileId) {
-  id(modelProfileId);
-  return modelProviders.stageSettings(modelProfileId, os.tmpdir());
-}
-async function stageClaudeAccount(accountId) {
-  id(accountId);
-  return modelProviders.stageClaudeAccount(accountId, os.tmpdir());
-}
 function send(channel, value) {
   if (mainWindow && !mainWindow.isDestroyed())
     mainWindow.webContents.send(channel, value);
@@ -195,110 +201,114 @@ function handle(channel, callback) {
     return ipcResult(callback, args);
   });
 }
+// Connect / Retry / Disconnect on a host the daemon manager owns go to the
+// manager ("local" is This Mac). Connecting a host that is ready or connecting
+// does nothing.
+const daemonHost = (endpoint) => {
+  if (endpoint === "local") return daemonManager ? "local" : null;
+  if (typeof endpoint !== "string" || !endpoint.startsWith("ssh:")) return null;
+  const host = endpoint.slice(4);
+  return daemonManager?.states().some((state) => state.host === host)
+    ? host
+    : null;
+};
+// The auto-connect flag is set before the (slow) retry is awaited: a
+// Disconnect clicked meanwhile clears it afterwards, and the late connect
+// result must not turn it back on.
+const connectHost = async (endpoint) => {
+  const host = daemonHost(endpoint);
+  if (!host) throw new Error("The sushiai daemon is not running.");
+  if (host !== "local") await connections.setAutoConnect(endpoint, true);
+  let state = daemonManager.states().find((item) => item.host === host);
+  if (state.state !== "ready" && state.state !== "connecting")
+    state = await daemonManager.retry(host);
+  return { connected: state.state === "ready" };
+};
 registerProjectIpc({
   handle,
+  connectHost,
+  // The manager closes the host's terminals when it reports "disconnected".
+  onDisconnect: (endpoint) => {
+    const host = daemonHost(endpoint);
+    if (host) daemonManager.disconnect(host);
+  },
   getConnections: () => connections,
   getPreview: () => preview,
   getClaudeMcp: () => claudeMcp,
-  terminals,
-  terminalPending,
   projects,
+});
+let daemonManager = null;
+let localConnector = null;
+let catalogSync = null;
+let hostTools = null;
+// Host binaries and their manifest: app resources when packaged, else target/host.
+const hostManifest = () =>
+  requireHostManifest({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+  });
+// The one installer: tools, skills and sushiai.
+const setupDaemonHost = serializePerHost((endpoint, options) =>
+  setupHost(connections, endpoint, options),
+);
+const installDaemonHost = (host) => {
+  if (!daemonManager) throw new Error("daemon manager is not running");
+  return createHostInstaller({
+    manager: daemonManager,
+    connections,
+    manifest: hostManifest,
+    setup: setupDaemonHost,
+    restartLocal: () => localConnector.restart(),
+    markSetup: (name) => hostTools?.mark(name),
+  }).install(host);
+};
+// The manager is created in whenReady; subscribers registered before that
+// are served by one forwarding subscription made when it exists.
+const daemonEventListeners = new Set();
+let daemonIpc = null;
+const onDaemonEvent = (listener) => {
+  daemonEventListeners.add(listener);
+  return () => daemonEventListeners.delete(listener);
+};
+daemonIpc = registerDaemonIpc({
+  handle,
+  send,
+  getManager: () => daemonManager,
+  onEvent: onDaemonEvent,
+  attachmentsDir: path.join(app.getPath("temp"), "sushiai-attachments"),
+  exec: (...args) => connections.exec(...args),
+  installHost: installDaemonHost,
+  launch: createDaemonLaunch({
+    manager: {
+      request: (...args) => {
+        if (!daemonManager) throw new Error("daemon manager is not running");
+        return daemonManager.request(...args);
+      },
+    },
+    projects,
+    // `connections` is created in whenReady.
+    connections: {
+      inspect: (...args) => connections.inspect(...args),
+      exec: (...args) => connections.exec(...args),
+      hasShell: (endpoint) => connections.hasShell(endpoint),
+    },
+    modelProviders,
+    codexAccounts,
+  }).launch,
 });
 registerExtensionIpc({
   handle,
   getExtensions: () => extensions,
   getSurfaceState: () => surfaceState,
   announce: (change) => send("extensions-state-changed", change),
-});
-const herdrExtension = registerHerdrExtension({
-  handle,
-  getConnections: () => connections,
-  id,
-  send,
-  executable,
-});
-registerSessionLaunchIpc({
-  handle,
-  getConnections: () => connections,
-  modelProviders,
-  resolveEnvironment: (input) =>
-    sessionEnvironment({ projects, connections }, input),
-  prepareSession: (input, environment) => {
-    const sshBinary =
-      (testMode.hidden && process.env.SUSHIAI_TEST_SSH) || connections.ssh;
-    const sshArgs = (endpoint) => {
-      const remote = connections.get(endpoint);
-      return [...connections.args(remote), "-T", remote.host];
-    };
-    return sessionEnvPrefix(
-      {
-        projects,
-        connections,
-        upload: (endpoint, payload) =>
-          uploadRemoteFile(
-            sshBinary,
-            [...sshArgs(endpoint), remoteFileCommand()],
-            payload,
-          ),
-        remove: (endpoint, file) =>
-          removeRemoteFiles(sshBinary, sshArgs(endpoint), [file]),
-        resolveAccount: (accountId) =>
-          modelProviders.resolveClaudeAccount(accountId),
-        resolveCodexAccount: (accountId, endpoint) =>
-          codexAccounts.resolve(accountId, endpoint),
-        resolveModel: async () => environment.model,
-      },
-      {
-        ...input,
-        agent: input.kind === "agent" ? input.agent : undefined,
-        nativeEnvironment: environment,
-      },
-    );
-  },
-  readSnapshot: (endpoint) => herdrExtension.snapshots.read(endpoint),
-  userDataDir: app.getPath("userData"),
-  savedWorkspaces: () => savedWorkspaces(app.getPath("userData")),
-  checkCompatibility: (endpoint) =>
-    assertHerdrCompatibility({
-      endpoint,
-      connections,
-      binary: executable("herdr"),
-    }),
+  announceCompanion: (change) => send("extensions-companion-changed", change),
 });
 registerWorkspaceSnapshot({
   ipcMain,
   handle,
   getMainWindow: () => mainWindow,
   userDataDir: () => app.getPath("userData"),
-});
-const terminalIpc = registerTerminalIpc({
-  handle,
-  send,
-  app,
-  pty,
-  getConnections: () => connections,
-  executable,
-  directory,
-  id,
-  terminals,
-  terminalPending,
-  stageModelSettings,
-  stageClaudeAccount,
-  resolveClaudeAccount: (accountId) => {
-    id(accountId);
-    return modelProviders.resolveClaudeAccount(accountId);
-  },
-  resolveCodexAccount: (accountId, endpoint) => {
-    id(accountId);
-    return codexAccounts.resolve(accountId, endpoint);
-  },
-  resolveModel: (profileId) => {
-    id(profileId);
-    return modelProviders.resolveEnv(profileId);
-  },
-  projects,
-  // The test harness runs a fake ssh (see SUSHIAI_TEST_SSH above).
-  sshBinary: (testMode.hidden && process.env.SUSHIAI_TEST_SSH) || undefined,
+  onWrite: () => catalogSync?.notifyChanged(),
 });
 const chatIpc = registerChatIpc({
   handle,
@@ -338,20 +348,21 @@ const mascot = registerMascot({
   root,
   policy: testMode.mascot,
   devURL: process.env.BRIDGE_DEV_URL,
-  getService: () => orchestrator,
+  act: (source, key, actionId, text) =>
+    notices.act(source, key, actionId, text),
   showMainWindow: () => attention.showWindow(),
   send,
-  restart: () => {
-    devRestart = true;
-    app.quit();
-  },
 });
 function coreUpdated(file) {
   console.log(`[dev] electron/${file} changed - restart from the mascot`);
-  mascot.add({
-    kind: "core-update",
+  notices.publish("app", {
+    key: "core-update",
+    kind: "info",
+    label: "Update",
     title: "sushiAI core",
     body: "Core updated - restart?",
+    sticky: true,
+    actions: [{ id: "restart", label: "Restart", emphasis: "primary" }],
   });
 }
 if (process.env.BRIDGE_DEV_URL)
@@ -375,27 +386,57 @@ const attention = registerAttentionIpc({
     if (!testMode.test) mascotShortcut.sync(preferences.mascotShortcut);
   },
 });
+const notices = createNotices({
+  preferences: () => attention.getPreferences(),
+  mascot,
+  showWindow: () => attention.showWindow(),
+  Notification,
+  icon: () => attention.mascotImage(),
+});
+notices.register("app", async (_key, actionId) => {
+  if (actionId !== "restart") return;
+  devRestart = true;
+  app.quit();
+});
+const orchestratorNotices = createOrchestratorNotices({
+  notices,
+  getService: () => orchestrator,
+  showWindow: () => attention.showWindow(),
+  send,
+});
 orchestrator = registerOrchestratorExtension({
   handle,
   extensions,
   send,
-  notify: (notice) => attention.notifyTask(notice),
-  onTask: (task) => mascot.onTask(task),
-  dataDir: path.join(app.getPath("userData"), "orchestrator"),
-  root,
-  resourcesPath: process.resourcesPath,
-  packaged: app.isPackaged,
+  notify: (notice) => orchestratorNotices.publish(notice),
+  onTask: (task) => orchestratorNotices.onTask(task),
   getClaudeMcp: () => claudeMcp,
   getModelProviders: () => modelProviders,
   getProjects: () => projects,
-  stopDaemonOnQuit: testMode.test,
   getConnections: () => connections,
+  getManager: () => daemonManager,
+  installHost: installDaemonHost,
+  // Enabling the Orchestrator registers its module on each host. A test run
+  // must never write the owner's Claude or Codex files.
+  moduleSwitch: testMode.test
+    ? null
+    : createModuleSwitch({
+        getManager: () => daemonManager,
+        runLocal: (args) => localConnector.runCli(args),
+        restartLocal: () => localConnector.restart(),
+        exec: (...args) => connections.exec(...args),
+      }),
+  log: (message) => console.log(message),
   userDataDir: app.getPath("userData"),
+  // A test run never reads the owner's Claude or Codex files.
+  legacy: testMode.test
+    ? undefined
+    : { homeDir: app.getPath("home"), codexHome: process.env.CODEX_HOME },
   hostsChanged: () => send("orchestrator-hosts-changed"),
 });
-// Turning the orchestrator off also drops the notices it already queued.
+// Turning an extension off also drops the notices it already queued.
 extensions.onChange((id, enabled) => {
-  if (id === ORCHESTRATOR_MANIFEST.id && !enabled) mascot.clear();
+  if (!enabled) notices.clear(id);
 });
 function validWebURL(value) {
   try {
@@ -405,15 +446,9 @@ function validWebURL(value) {
   }
 }
 app.whenReady().then(async () => {
-  // A hidden test run may hand in a fake ssh (evidence and smoke runs).
-  const fakeSsh = testMode.hidden ? process.env.SUSHIAI_TEST_SSH : "";
-  connections = new Connections(
-    app.getPath("userData"),
-    fakeSsh ? { ssh: fakeSsh } : undefined,
-  );
+  connections = new Connections(app.getPath("userData"));
   await connections.init();
-  // The local machine gets what sessions need (Herdr running, Claude Code, Codex) on
-  // its own; a test run never installs anything.
+  // The local machine gets what sessions need (Claude Code, Codex) on its own; a test run never installs anything.
   if (!testMode.test)
     void setupHost(connections, "local")
       .then((states) => {
@@ -421,10 +456,85 @@ app.whenReady().then(async () => {
         if (summary) console.log(`Environment: ${summary}`);
       })
       .catch((error) => console.error("Environment setup failed:", error));
-  await orchestrator.start();
-  // Sleep/wake can drop every SSH tunnel at once - retry them all rather than
-  // waiting for each one's own backoff timer to come back around.
-  powerMonitor.on("resume", () => connections.retryAutoConnect());
+  // A test run starts a daemon only when it brings its own SUSHIAI_HOME.
+  if (!testMode.test || process.env.SUSHIAI_HOME) {
+    const local = createLocalConnector({
+      appVersion: app.getVersion(),
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      log: (message) => console.log(`daemon: ${message}`),
+    });
+    localConnector = local;
+    // One daemon host per connection profile; saving or deleting a profile
+    // adds, replaces or removes its host while the app runs.
+    const connectorMap = (profiles) => ({
+      local,
+      ...remoteConnectors(profiles, {
+        ssh: connections.ssh,
+        args: (profile) => connections.args(profile),
+        knownHostsFile: connections.knownHostsFile,
+      }),
+    });
+    daemonManager = createDaemonManager({
+      connectors: connectorMap(connections.profiles),
+      powerMonitor,
+      log: (message) => console.log(`daemon: ${message}`),
+    });
+    daemonManager.on("event", (event) => {
+      for (const listener of [...daemonEventListeners]) listener(event);
+    });
+    forwardDaemonEvents(daemonManager, (channel, value) => {
+      for (const window of BrowserWindow.getAllWindows())
+        if (!window.isDestroyed()) window.webContents.send(channel, value);
+    });
+    connections.onProfilesChange((profiles) =>
+      daemonManager?.setConnectors(connectorMap(profiles)),
+    );
+    // A host that is removed or disconnected ends its terminals.
+    daemonManager.on("state", (state) => {
+      if (state.reason === "removed" || state.reason === "disconnected")
+        void daemonIpc?.terminals.closeHost(state.host);
+    });
+    hostTools = watchHostTools({
+      manager: daemonManager,
+      connections,
+      store: {
+        read: () => readStore(app.getPath("userData"), "host-tools") || {},
+        write: (value) =>
+          writeStore(app.getPath("userData"), "host-tools", value),
+      },
+      setup: setupDaemonHost,
+      manifest: () => {
+        try {
+          return hostManifest();
+        } catch {
+          return null;
+        }
+      },
+      log: (message) => console.log(`daemon: ${message}`),
+    });
+    catalogSync = createCatalogSync({
+      manager: daemonManager,
+      projects,
+      workspaces: () => savedWorkspaces(app.getPath("userData")),
+      store: revStore(app.getPath("userData")),
+    });
+    daemonManager.start();
+  }
+  // Neither start may hold the window back: the orchestrator registers with
+  // the daemon and each companion answers a hello, which can take a while.
+  void orchestrator
+    .start()
+    .catch((error) =>
+      console.error(`Orchestrator start failed: ${error.message}`),
+    );
+  // After the saved on/off state and approvals are loaded and the host list
+  // is known: wanted companion processes start now.
+  void extensions.ready
+    .then(() => companions.start())
+    .catch((error) =>
+      console.error(`Companion start failed: ${error.message}`),
+    );
   updates = new Updates({
     directory: app.getPath("userData"),
     currentVersion: app.getVersion(),
@@ -455,7 +565,11 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionRequestHandler((_, __, callback) =>
     callback(false),
   );
-  const savedWindow = loadWindowState(app.getPath("userData"));
+  // A hidden test window keeps its default size: clamping saved bounds to a small
+  // CI screen would change what screenshots and size checks see after a restart.
+  const savedWindow = testMode.hidden
+    ? null
+    : loadWindowState(app.getPath("userData"));
   const startBounds = savedWindow
     ? clampBounds(
         savedWindow,
@@ -484,7 +598,7 @@ app.whenReady().then(async () => {
   // Evidence seam: pushes a task through the real notice path (no daemon).
   if (process.env.SUSHIAI_TEST_MASCOT === "1")
     globalThis.__sushiaiMascot = {
-      notify: (task) => attention.notifyTask(orchestratorNotice(task)),
+      notify: (task) => orchestratorNotices.publish(orchestratorNotice(task)),
       coreUpdated: () => coreUpdated("<seam>"),
       queue: () => mascot.snapshot(),
       window: () => mascot.getWindow(),
@@ -499,7 +613,7 @@ app.whenReady().then(async () => {
       onChange: (presenting) => mascot.setPresenting(presenting),
     });
   }
-  if (savedWindow && !testMode.hidden) {
+  if (savedWindow) {
     if (savedWindow.isFullScreen) mainWindow.setFullScreen(true);
     else if (savedWindow.isMaximized) mainWindow.maximize();
   }
@@ -538,6 +652,12 @@ app.whenReady().then(async () => {
     if (attention.handleWindowClose(mainWindow)) event.preventDefault();
   });
   mainWindow.webContents.on("will-navigate", (event) => event.preventDefault());
+  // A reloaded or crashed renderer never acks its terminals: release them.
+  const releaseDaemonPanels = () => void daemonIpc?.terminals.detachAll();
+  mainWindow.webContents.on("did-start-navigation", (details) => {
+    if (details.isMainFrame && !details.isSameDocument) releaseDaemonPanels();
+  });
+  mainWindow.webContents.on("render-process-gone", releaseDaemonPanels);
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   mainWindow.webContents.on(
     "will-attach-webview",
@@ -633,21 +753,19 @@ app.on("before-quit", (event) => {
   updates?.close();
   attention.close();
   mascot.destroy();
-  // The daemon may take several seconds to stop its agents; the app should
-  // look closed meanwhile, not frozen.
+  // Stopping companions and the connections can take a moment; the app
+  // should look closed meanwhile, not frozen.
   for (const window of BrowserWindow.getAllWindows())
     if (!window.isDestroyed()) window.hide();
   preview?.close();
-  terminalIpc.close();
-  herdrExtension.close();
-  for (const pending of terminalPending.values()) pending.cancelled = true;
-  for (const terminal of terminals.values())
-    if (!terminal.exited || terminal.source === "herdr") terminal.proc.kill();
+  catalogSync?.stop();
+  daemonManager?.close();
   chatIpc.close();
   Promise.allSettled([
     Promise.resolve(connections?.close()),
     agents.close(),
     orchestrator.quit(),
+    companions.stopAll(),
   ]).finally(() => {
     quitReady = true;
     app.quit();

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { errorText } from "./errors.ts";
+import { errorText } from "../lib/errors.ts";
 import { useExtensionRuntime } from "../extensions/runtime.ts";
 
 /** The extension registry plus its load state. `loaded` starts true outside the

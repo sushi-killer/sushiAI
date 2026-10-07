@@ -7,6 +7,7 @@
 // queueLength is 1, expiresAt is null and exitCode is 75.
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
+import { stopDaemon } from "../../../../scripts/lib/daemon-binary.mjs";
 
 const root = process.cwd();
 const report = { pageErrors: [] };
@@ -21,7 +22,10 @@ try {
     env: {
       ...process.env,
       BRIDGE_DATA_DIR: profile,
-      HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
+      // Never the owner's ~/.codex or ~/.sushiai/bin link.
+      HOME: profile,
+      CODEX_HOME: `${profile}/codex`,
+      SUSHIAI_HOME: `${profile}/sushiai`,
       BRIDGE_DEV_URL: "",
       SUSHIAI_TEST_MASCOT: "1",
       SUSHIAI_TEST_WINDOW: "hidden",
@@ -43,7 +47,7 @@ try {
   if (!mascot) throw new Error("the mascot window never appeared");
   mascot.on("pageerror", (error) => report.pageErrors.push(error.message));
   await mascot
-    .locator(".bubble", { hasText: "Core updated - restart?" })
+    .locator(".bubble.info", { hasText: "Core updated - restart?" })
     .waitFor({ timeout: 10000 });
   await new Promise((resolve) => setTimeout(resolve, 700));
 
@@ -77,7 +81,14 @@ try {
   report.error = String(error?.message ?? error);
 } finally {
   if (app) await app.close().catch(() => {});
-  await fs.rm(profile, { recursive: true, force: true });
+  stopDaemon(`${profile}/sushiai`);
+  // A shell that exits late may still write its history into HOME.
+  await fs.rm(profile, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 200,
+  });
   await fs
     .writeFile(
       `${root}/artifacts/mascot-core-update.json`,

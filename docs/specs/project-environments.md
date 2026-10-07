@@ -14,7 +14,7 @@ variants are archived there.
    connect (not `/sushiai`: that needs sudo). A checkout found elsewhere is used, flagged
    "non-standard path".
 2. The "+" (Add panel) popup is V4. Worktree is a checkbox (off by
-   default). Herdr / Local toggle in the host row. Claude account picker in the Claude Code row.
+   default). Host readiness pills in the host row. Claude account picker in the Claude Code row.
 3. Multiple Claude subscriptions through `claude setup-token`; the account is picked per session.
 4. New project is one window whose steps open in turn (Source → Hosts → Environment → Creating →
    Ready), not a multi-page wizard.
@@ -25,8 +25,10 @@ variants are archived there.
   added: adding the host is the consent, so there is no consent screen and no per-host approval.
   The one control is "Don't send secrets to this host" (Project settings → Hosts, off by default,
   `hosts[host].withheld`); with it on the host gets no value of that project and its daemon drops
-  what it holds. Values travel only in orchd memory, on the prepare script's stdin or in a
-  one-shot 0600 file deleted right after it is sourced, and never to Herdr panes.
+  what it holds. Values travel only in orchd memory, on the prepare script's stdin, or in the
+  `session.create` `env` over the daemon protocol (through the ssh proxy for a remote host). There they
+  live in the holder's environment and in the daemon's memory, and never in a command line, in
+  `argv`, or in `state.json`.
 - **D2 · Core changes: approved.** The owner started this feature knowing every lane touches
   `src/app/*`, `electron/*` or orchd.
 - D3 · Project description in the app only (proposed) vs also a committable
@@ -41,10 +43,11 @@ variants are archived there.
   its `project-secrets` store through `safeStorage`, the same code path as provider keys
   (`electron/model-providers.cjs:133`). The renderer never receives a value, only `hasValue`/`hint`.
 - A Claude subscription token is passed through `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` (checked
-  in CLI 2.1.285), never through env. If fd passing fails under Herdr, the fallback is env plus
+  in CLI 2.1.285), never through env. If fd passing fails in a session, the fallback is env plus
   redaction. That is decided in S7 with a test.
-- Remote values travel only over channels that leave nothing on the host: orchd in memory, or a
-  one-shot 0600 file sent over ssh stdin and deleted after it is sourced.
+- Remote values travel only over channels that leave nothing on the host: orchd in memory, or
+  `session.create` `env` over the daemon protocol (the ssh proxy). They stay in the holder's
+  environment and the daemon's memory; they are never in `argv` or in `state.json`.
 
 ## Out of scope
 
@@ -80,7 +83,7 @@ network{allowedDomains}, sessions{claudeAccount, backend}, targets[]`) in `src/t
 - Replaces the `"workspace-actions"` dialog (`src/ClaudeMcpSettings.tsx`, `src/App.tsx:520`) with
   a rail: General · Environment · MCP servers · Hosts. Rename next to the name, Close project… at
   the bottom of the rail (keeps today's close flow).
-- General: git remote, default branch, Sessions (Claude account, Herdr/Local default), Setup
+- General: git remote, default branch, Sessions (Claude account default), Setup
   (install, check), Network (allowlist chips).
 - **Accept:** everything the old dialog did still works (rename, close, refresh); `src/App.tsx`
   stays under 600 lines (`tests/app-boundary.test.cjs`); screenshots saved and compared with the design concept.
@@ -104,7 +107,7 @@ network{allowedDomains}, sessions{claudeAccount, backend}, targets[]`) in `src/t
 
 ### S5 · Local delivery (depends on S1, S3, S4; after S7 in `terminals.cjs`)
 
-- Local terminals and agents (`electron/ipc/terminals.cjs`, Herdr and local PTY) start with the
+- Local terminals and agents (daemon sessions, `electron/session-launch.cjs`) start with the
   project env for their stage. The setup-only values go only to the install step.
 - Local orchd: `secrets.set` gains `projects: {id: env}` (`electron/orchestrator.cjs:603`,
   `orchd/src/engine/rpc_misc.rs`). `attempt_run.rs` adds the env to the agent process. orchd
@@ -117,7 +120,7 @@ network{allowedDomains}, sessions{claudeAccount, backend}, targets[]`) in `src/t
 ### S6 · "+" popup, V4 (depends on S1; the account picker uses S7)
 
 - `src/app/PanelPickerDialog.tsx` redesigned. Head: project + switcher, environment pill. Host
-  row: pills with readiness, Herdr/Local, New worktree checkbox (branch field on the path line).
+  row: pills with readiness, New worktree checkbox (branch field on the path line).
   Two lists: agents (1–4), tools (letter keys) plus extension panels (`ExtensionPanelOptions`).
   Footer says where it starts; ⏎ starts the focused agent.
 - **Accept:** keyboard (1–4, letters, ⏎, esc); the worktree and backend rules of today's code are
@@ -139,7 +142,7 @@ network{allowedDomains}, sessions{claudeAccount, backend}, targets[]`) in `src/t
 ### S8 · Hosts (depends on S1) — M2
 
 - Hosts tab: readiness matrix (checkout, setup, CLIs, MCP, secrets) from the existing preflight
-  (`electron/orchestrator-remote.cjs:87`) plus a checkout check against the project remote;
+  (`PREFLIGHT_SCRIPT` in `electron/host-setup.cjs`) plus a checkout check against the project remote;
   gets secrets / no secrets; per-host overrides; the "Don't send secrets to this host" switch.
 - `~/sushiai` is created on first connect; a non-standard checkout is detected and flagged.
 - **Accept:** matrix states covered by tests with a fake ssh; the switch stops the next run from
@@ -148,8 +151,9 @@ network{allowedDomains}, sessions{claudeAccount, backend}, targets[]`) in `src/t
 ### S9 · Remote delivery (depends on S5, S8)
 
 - Remote orchd gets `secrets.set` for every host except those switched off for the project (drop
-  the "never leave this machine" branch). SSH terminals get a one-shot 0600 env file over stdin (and the fd
-  for a subscription token), deleted after sourcing. Project MCP reaches remote tasks.
+  the "never leave this machine" branch). SSH sessions get the values in `session.create` `env` over the daemon
+  protocol (ssh proxy), held in the holder's environment and the daemon's memory, never in `argv` or
+  `state.json`. Project MCP reaches remote tasks.
 - **Accept:** live run on a remote SSH host: the agent sees the env, the host has no file left behind, a
   host switched off gets nothing; `docs/architecture.md` arrow updated.
 

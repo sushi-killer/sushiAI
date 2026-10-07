@@ -32,7 +32,8 @@ export type SurfaceHost =
   | "skills.section"
   | "workspace.pane"
   | "workspace.tab"
-  | "settings.section";
+  | "settings.section"
+  | "settings.page";
 
 export type NavigationPlacement =
   | "mode.primary"
@@ -103,8 +104,60 @@ export type DeclarativeDocument = {
   seed: Record<string, unknown>[];
 };
 
+/** A value a companion process reports for one field. `null` is empty. Never
+ * stored on disk or logged. */
+export type CompanionFieldType = "text" | "status" | "qr";
+
+export type CompanionField = {
+  id: string;
+  label: string;
+  type: CompanionFieldType;
+};
+
+export type CompanionValue =
+  /** `text`: at most 1000 characters. `qr`: at most 2048, drawn as an SVG. */
+  | string
+  /** `status` */
+  | { text: string; tone: Tone }
+  | null;
+
+export type CompanionValues = Record<string, CompanionValue>;
+
+/** Something a companion view button asks the companion process to do. */
+export type CompanionAction = {
+  id: string;
+  label: string;
+  /** Matches /^[a-z][a-z0-9.]*$/. */
+  method: string;
+  /** Extra data the host adds to the call; "hosts" needs `hosts.read`. */
+  send?: "hosts"[];
+};
+
+export type CompanionView = {
+  kind: "companion";
+  /** At most 8. */
+  fields: CompanionField[];
+  /** At most 4, labels unique. */
+  actions: CompanionAction[];
+};
+
+/** Result of `view.read` and of an action call. */
+export type CompanionResult = { values?: CompanionValues; message?: string };
+
+export type CompanionPermission = "hosts.read";
+
+/** Optional top-level manifest block naming a native companion process. */
+export type CompanionBlock = {
+  /** A bare command name, never a path. */
+  command: string;
+  /** At most 8 strings of at most 200 characters. */
+  args: string[];
+  permissions: CompanionPermission[];
+};
+
 export type ViewDescriptor =
   | { kind: "core"; viewId: string }
+  | CompanionView
   | {
       kind: "declarative";
       schemaVersion: 2;
@@ -175,6 +228,7 @@ export type ExtensionManifest = {
   source: ExtensionSource;
   scope: "app";
   description?: string;
+  companion?: CompanionBlock;
   contributions: {
     surfaces: SurfaceContribution[];
     navigation: NavigationContribution[];
@@ -185,9 +239,25 @@ export type ExtensionManifest = {
 
 export type ExtensionStatus = "active" | "disabled";
 
+export type CompanionState =
+  "off" | "needs-approval" | "starting" | "running" | "failed";
+
+/** What the listing says about an extension's companion process. */
+export type CompanionStatus = {
+  state: CompanionState;
+  /** The command as the app resolved it on this machine. */
+  resolvedPath?: string;
+  args: string[];
+  permissions: string[];
+  /** The last lines the process wrote to stderr, or why it was refused. */
+  stderrTail?: string;
+};
+
 export type ExtensionRecord = {
   manifest: ExtensionManifest;
   status: ExtensionStatus;
+  /** Present only when the manifest declares a companion. */
+  companion?: CompanionStatus;
   /** False for the built-ins that are part of the shell. */
   canDisable?: boolean;
   error?: string;

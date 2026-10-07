@@ -1,0 +1,28 @@
+[package]
+name = "sushiai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "sushiAI session daemon and holder"
+
+[[bin]]
+name = "sushiai"
+path = "src/main.rs"
+
+[dependencies]
+sushiai-daemon.workspace = true
+sushiai-hold.workspace = true
+sushiai-orch.workspace = true
+sushiai-agents = { path = "../sushiai-agents" }
+sushiai-protocol.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+libc.workspace = true
+tokio.workspace = true
+toml_edit = "0.22"
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+sha2 = "0.10"

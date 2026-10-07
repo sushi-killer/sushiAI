@@ -9,11 +9,18 @@ import {
   swap,
   tidy,
 } from "../layout.ts";
-import { agentTitle } from "../app/agent-title.ts";
 import { memberLabel } from "../app/workspaceMerge.ts";
 import type { MergeGroup } from "../app/workspaceMerge.ts";
 import { codePanels } from "../workspaceState.ts";
-import type { ConnectionProfile, Layout, Panel, Workspace } from "../types";
+import { mergeArgs, type ArgsPatch } from "../extensions/args.ts";
+import { daemonHost } from "../daemonSessions.ts";
+import type {
+  ConnectionProfile,
+  Layout,
+  Panel,
+  SessionLaunchRequest,
+  Workspace,
+} from "../types";
 
 /** A merge group's combined layout has no workspace of its own to live in -
  * `layout` is whatever the caller (mergedLayouts.ts) reconciled for this
@@ -42,22 +49,19 @@ export function appendPanel(
   };
 }
 
-/** Puts the panel that replaces an ended Herdr pane into that pane's layout
- * slot and panel-list position. `herdrId` rebinds the workspace to the Herdr
- * workspace that was created for it. A background poll may already have listed
- * the new pane, so a panel with its id is folded in rather than duplicated. */
+/** Puts the panel that replaces an ended session panel into its layout slot
+ * and panel-list position. A panel with the new id may already be listed, so
+ * it is folded in rather than duplicated. */
 export function reopenInSlot(
   workspace: Workspace,
   endedId: string,
   next: Panel,
-  herdrId?: string,
 ): Workspace {
   const listed = next.id !== endedId && contains(workspace.layout, next.id);
   const layout = listed ? remove(workspace.layout, next.id) : workspace.layout;
   const inSlot = contains(layout, endedId);
   return {
     ...workspace,
-    ...(herdrId ? { herdrId } : {}),
     panels: workspace.panels
       .filter((panel) => panel.id !== next.id || panel.id === endedId)
       .map((panel) =>
@@ -73,7 +77,7 @@ export function reopenInSlot(
   };
 }
 
-/** The line a Herdr pane is typed to start an agent. With values to source,
+/** The line a pane is typed to start an agent. With values to source,
  * the agent runs in a subshell: the values (a token, a key, the project's
  * secrets) live in the agent's process only, and are gone from the pane's
  * shell when it exits. */
@@ -81,14 +85,69 @@ export function agentLine(prefix: string, command: string, settings = "") {
   return prefix ? `(${prefix}exec ${command}${settings})` : command + settings;
 }
 
-/** True for a Herdr workspace whose host no longer lists it: none of its
- * Herdr panes is live. Herdr closes a workspace with its last pane, so one
- * left with no panes at all (its last session closed) is gone too. */
+/** True for a host-backed workspace with no live session: every session panel
+ * of it ended, or it has none left. */
 export function isVanished(workspace: Workspace): boolean {
   return (
-    Boolean(workspace.herdrId) &&
-    !workspace.panels.some((panel) => panel.herdrId && !panel.ended)
+    Boolean(workspace.connection) &&
+    !workspace.panels.some((panel) => panel.sessionId && !panel.ended)
   );
+}
+
+/** The daemon call that renames a session-bound panel, or null when the title
+ * is local only: an ended panel has no session to tell. */
+export function renameRequest(
+  owner: Workspace,
+  panel: Panel,
+  title: string,
+  defaultEndpoint: string,
+): { host: string; patch: { id: string; title: string } } | null {
+  if (!panel.sessionId || panel.ended) return null;
+  return {
+    host: daemonHost(owner.connection || defaultEndpoint),
+    patch: { id: panel.sessionId, title },
+  };
+}
+
+/** The daemon call that ends a panel's session gracefully, or null when no
+ * live session is bound to it. */
+export function closeRequest(
+  owner: Workspace,
+  panel: Panel,
+  defaultEndpoint: string,
+): { host: string; id: string; graceful: true } | null {
+  if (!panel.sessionId || panel.ended) return null;
+  return {
+    host: daemonHost(owner.connection || defaultEndpoint),
+    id: panel.sessionId,
+    graceful: true,
+  };
+}
+
+/** What Reopen asks the launch entry for: a new session in the ended panel's
+ * slot, resuming the agent's own session when the daemon reported one. The
+ * workspace id is the daemon group (one id for both). */
+export function reopenRequest(
+  owner: Workspace,
+  ended: Panel,
+  operationId: string,
+  defaultEndpoint: string,
+): SessionLaunchRequest {
+  const agent = ended.kind === "agent";
+  return {
+    operationId,
+    endpoint: owner.connection || defaultEndpoint,
+    cwd: owner.cwd,
+    label: owner.name,
+    kind: agent ? "agent" : "terminal",
+    agent: agent ? ended.agent || "claude" : undefined,
+    modelProfileId: ended.modelProfileId,
+    claudeAccountId: ended.claudeAccountId,
+    codexAccountId: ended.codexAccountId,
+    workspaceId: owner.id,
+    ...(agent && ended.agentSession ? { resume: ended.agentSession } : {}),
+    restore: true,
+  };
 }
 
 /** The workspace that currently owns a panel id, wherever it lives - not
@@ -106,14 +165,14 @@ export function findPanelOwner(
 }
 
 /** A pane is a view, a thread is a conversation. Closing the view drops it from
- * the layout; Herdr panes and chat threads stay in `panels` so the session and
+ * the layout; session panels and chat threads stay in `panels` so the session and
  * the transcript survive. */
 export function removePanel(workspace: Workspace, panel: Panel): Workspace {
   return {
     ...workspace,
     layout: remove(workspace.layout, panel.id),
     panels:
-      panel.herdrId || panel.kind === "chat"
+      panel.sessionId || panel.kind === "chat"
         ? workspace.panels
         : workspace.panels.filter((item) => item.id !== panel.id),
   };
@@ -222,26 +281,22 @@ export function tidyGroupLayout(group: MergeGroup): Layout | null {
 export type MergedPane = {
   panel: Panel;
   cwd: string;
-  socket: string;
   endpoint?: string;
   hostLabel: string;
 };
 
 /** Every code panel across a merge group's members, each resolved to its own
- * owner's cwd, Herdr endpoint/connection and member label (C1) - the same
+ * owner's cwd, endpoint/connection and member label (C1) - the same
  * fields `PanelHost` computes inline for the single active workspace today,
- * generalized to each member. `appSocket` is the app's default connection,
- * the fallback `activeEndpoint` uses for the active workspace. */
+ * generalized to each member. */
 export function resolveGroupPanes(
   group: MergeGroup,
   profiles: ConnectionProfile[],
-  appSocket: string,
 ): MergedPane[] {
   return group.members.flatMap((member) =>
     codePanels(member.workspace).map((panel) => ({
       panel,
       cwd: panel.filesTarget?.root || member.workspace.cwd,
-      socket: member.workspace.connection || appSocket,
       endpoint: member.workspace.connection,
       hostLabel: memberLabel(group, member, profiles),
     })),
@@ -249,10 +304,10 @@ export function resolveGroupPanes(
 }
 
 /** Reconciles a merge group's stored combined layout against its members'
- * current code panel ids: Herdr polls rewrite each member's own `layout`
- * independently every few seconds, so a pane can appear or vanish between
- * renders here - a dropped id leaves the layout, a new one is appended
- * beside the rest. Falls back to `tidy` the first time, or once nothing from
+ * current code panel ids: a member's panels change on their own (a session
+ * is launched or closed), so a pane can appear or vanish between renders
+ * here - a dropped id leaves the layout, a new one is appended beside the
+ * rest. Falls back to `tidy` the first time, or once nothing from
  * the stored layout survives. */
 export function reconcileGroupLayout(
   stored: Layout | null | undefined,
@@ -271,33 +326,7 @@ export function reconcileGroupLayout(
   );
 }
 
-const DEFAULT_TERMINAL_TITLES = new Set([
-  "zsh",
-  "Claude Code",
-  "Codex",
-  "Gemini CLI",
-  "Cursor Agent",
-]);
-
-/** Follows the agent a terminal is running, but only while the panel still
- * carries a default title - a name the user typed is never overwritten. */
-export function retitleTerminal(
-  panel: Panel,
-  agent: string | null | undefined,
-): Panel {
-  return {
-    ...panel,
-    agent: agent || undefined,
-    title:
-      panel.kind === "terminal" && DEFAULT_TERMINAL_TITLES.has(panel.title)
-        ? agent
-          ? agentTitle(agent)
-          : "zsh"
-        : panel.title,
-  };
-}
-
-/** The Herdr workspace a project already has on a host: the one at its path,
+/** The workspace a project already has on a host: the one at its path,
  * or the one a start just made (before the host's listing catches up). A
  * session for the project is one more panel in it, never another workspace. */
 export function findHostWorkspace(
@@ -309,7 +338,7 @@ export function findHostWorkspace(
 ): Workspace | undefined {
   return workspaces.find(
     (w) =>
-      w.herdrId &&
+      w.connection &&
       !isVanished(w) &&
       (w.connection || defaultEndpoint) === endpoint &&
       (w.cwd === cwd || w.id === madeId),
@@ -322,6 +351,25 @@ export function companionRatio(ratio: number | undefined): number {
   return typeof ratio === "number" && Number.isFinite(ratio)
     ? Math.min(COMPANION_RATIO.max, Math.max(COMPANION_RATIO.min, ratio))
     : COMPANION_RATIO.fallback;
+}
+
+/** A panel update, as a patch or as a function of the panel as it is now. */
+export type PanelUpdate = Partial<Panel> | ((panel: Panel) => Partial<Panel>);
+
+export function patchPanel(
+  workspaces: Workspace[],
+  panelId: string,
+  patch: PanelUpdate,
+): Workspace[] {
+  return mapPanel(
+    workspaces,
+    panelId,
+    (panel) =>
+      ({
+        ...panel,
+        ...(typeof patch === "function" ? patch(panel) : patch),
+      }) as Panel,
+  );
 }
 
 function mapPanel(
@@ -370,7 +418,7 @@ export function openCompanion(
 export function patchCompanion(
   workspaces: Workspace[],
   panelId: string,
-  patch: { args?: Record<string, string>; open?: boolean; ratio?: number },
+  patch: { args?: ArgsPatch; open?: boolean; ratio?: number },
 ): Workspace[] {
   return mapPanel(workspaces, panelId, (panel) =>
     panel.companion
@@ -382,7 +430,7 @@ export function patchCompanion(
             ...(patch.ratio === undefined
               ? {}
               : { ratio: companionRatio(patch.ratio) }),
-            args: { ...panel.companion.args, ...patch.args },
+            args: mergeArgs(panel.companion.args, patch.args ?? {}),
           },
         }
       : panel,

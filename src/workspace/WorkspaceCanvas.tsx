@@ -18,21 +18,17 @@ import type { MergedCanvas } from "./mergedLayouts.ts";
  * empty state. Tab history and the compact breakpoint are its own business. */
 export function WorkspaceCanvas({
   ws,
-  activeEndpoint,
   extensionRegistry,
   tabMode,
   compact,
   openPanelPicker,
-  openConnections,
   merged,
 }: {
   ws: WorkspaceController;
-  activeEndpoint: string;
   extensionRegistry: ExtensionRegistry;
   tabMode: boolean;
   compact: boolean;
   openPanelPicker(): void;
-  openConnections(): void;
   /** The active workspace's merge group (flat mode only, from
    * useMergedCanvas). When set (C1), every member's code panels are drawn
    * together instead of just the active workspace's own. */
@@ -76,7 +72,6 @@ export function WorkspaceCanvas({
         undefined,
         undefined,
         undefined,
-        "herdr",
         findPanelOwner(wsRef.current.workspaces, panelId)?.id,
         { branch: request.branch, base: request.base },
         undefined,
@@ -118,7 +113,6 @@ export function WorkspaceCanvas({
         key={panel.id}
         panel={panel}
         cwd={own ? own.cwd : panel.filesTarget?.root || active.cwd}
-        socket={own ? own.socket : activeEndpoint}
         endpoint={own ? own.endpoint : active.connection}
         hostLabel={own?.hostLabel}
         selected={selected === id}
@@ -131,7 +125,6 @@ export function WorkspaceCanvas({
         onClose={closePanel}
         onZoom={zoomPanel}
         onAdd={openPanelPicker}
-        onOpenConnections={openConnections}
         onRename={renamePanel}
         onStart={startPanel}
         onReopen={reopenPanel}

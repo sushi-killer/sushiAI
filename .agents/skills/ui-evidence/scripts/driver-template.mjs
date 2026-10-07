@@ -2,6 +2,7 @@
 // node from the repo root, read every screenshot, then delete the copy.
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
+import { stopDaemon } from "../../../../scripts/lib/daemon-binary.mjs";
 
 const root = process.cwd();
 const shot = (name) => `${root}/artifacts/${name}.png`;
@@ -9,13 +10,16 @@ const profile = await fs.mkdtemp("/tmp/sushiai-evidence-");
 const app = await electron.launch({
   args: ["."],
   cwd: root,
-  // An absent HERDR_SOCKET_PATH falls back to the owner's real Herdr socket
-  // (electron/ipc/app.cjs), so point it at a path that does not exist.
+  // A test run starts a daemon only with a SUSHIAI_HOME of its own, so the
+  // owner's ~/.sushiai daemon is never touched.
   env: {
     ...process.env,
     SUSHIAI_TEST_WINDOW: "hidden",
     BRIDGE_DATA_DIR: profile,
-    HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
+    // Never the owner's ~/.codex or ~/.sushiai/bin link.
+    HOME: profile,
+    CODEX_HOME: `${profile}/codex`,
+    SUSHIAI_HOME: `${profile}/sushiai`,
     // An agent started from `npm run dev` inherits this; set, the app loads
     // the owner's dev server instead of dist/ (electron/main.cjs).
     BRIDGE_DEV_URL: "",
@@ -43,11 +47,6 @@ try {
     await form
       .locator("input[name=host]")
       .fill(process.env.SUSHIAI_EVIDENCE_SSH);
-    await form
-      .locator("input[name=socket]")
-      .fill(
-        process.env.SUSHIAI_EVIDENCE_SOCKET ?? "~/.config/herdr/herdr.sock",
-      );
     await settings.getByRole("button", { name: "Save and connect" }).click();
     await settings
       .locator(".connection-card.selected")
@@ -102,6 +101,13 @@ try {
       .catch((error) => (report.cleanupError = String(error)));
   }
   await app.close();
-  await fs.rm(profile, { recursive: true, force: true });
+  stopDaemon(`${profile}/sushiai`);
+  // A shell that exits late may still write its history into HOME.
+  await fs.rm(profile, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 200,
+  });
   console.log(JSON.stringify(report, null, 2));
 }

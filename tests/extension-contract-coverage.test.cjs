@@ -15,6 +15,17 @@ const probe = validateExtensionManifest({
   source: { kind: "local", path: "/tmp/probe" },
 });
 const { surfaces, navigation, actions } = probe.contributions;
+// A companion view needs a companion block, which the declarative probe cannot
+// carry, so its closed sets are counted from a second fixture.
+const COMPANION_FIXTURE =
+  "tests/fixtures/extensions/companion-probe/manifest.json";
+const companionProbe = validateExtensionManifest({
+  ...JSON.parse(fs.readFileSync(COMPANION_FIXTURE, "utf8")),
+  source: { kind: "local", path: "/tmp/companion-probe" },
+});
+const companionViews = companionProbe.contributions.surfaces.map(
+  (surface) => surface.view,
+);
 // Only views[0] renders, so only views[0] counts as covered.
 const views = surfaces.map((surface) => surface.view.document.views[0]);
 const named = (icon) => (icon?.kind === "named" ? [icon.name] : []);
@@ -30,14 +41,24 @@ const used = {
   // surface becomes pane-mountable by listing it, and page and tab win first
   // (routes.ts resolveNavigation), so listing it is not the same as reaching
   // it.
-  HOSTS: collect(surfaces, (s) => [
-    s.defaultHost,
-    ...(s.allowedHosts.includes("workspace.pane") &&
-    s.defaultHost !== "app.page" &&
-    s.defaultHost !== "workspace.tab"
-      ? ["workspace.pane"]
-      : []),
-  ]),
+  COMPANION_FIELD_TYPES: collect(companionViews, (view) =>
+    view.fields.map((field) => field.type),
+  ),
+  COMPANION_PERMISSIONS: new Set(companionProbe.companion.permissions),
+  COMPANION_SEND: collect(companionViews, (view) =>
+    view.actions.flatMap((action) => action.send || []),
+  ),
+  HOSTS: collect(
+    [...surfaces, ...companionProbe.contributions.surfaces],
+    (s) => [
+      s.defaultHost,
+      ...(s.allowedHosts.includes("workspace.pane") &&
+      s.defaultHost !== "app.page" &&
+      s.defaultHost !== "workspace.tab"
+        ? ["workspace.pane"]
+        : []),
+    ],
+  ),
   PLACEMENTS: collect(navigation, (n) => [n.defaultPlacement]),
   ACTION_PLACEMENTS: collect(actions, (a) => [a.defaultPlacement]),
   INSTANCE_POLICIES: collect(surfaces, (s) => [s.instancePolicy]),
@@ -190,6 +211,9 @@ test("the types the app compiles against list the same values", () => {
     ["NavigationPlacement", CONTRACT.PLACEMENTS],
     ["WorkspaceActionPlacement", CONTRACT.ACTION_PLACEMENTS],
     ["FieldType", CONTRACT.FIELD_TYPES],
+    ["SurfaceHost", CONTRACT.HOSTS],
+    ["CompanionFieldType", CONTRACT.COMPANION_FIELD_TYPES],
+    ["CompanionPermission", CONTRACT.COMPANION_PERMISSIONS],
     ["Tone", CONTRACT.TONES],
   ])
     assert.deepEqual(

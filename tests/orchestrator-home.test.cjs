@@ -39,12 +39,12 @@ test("greeting and lines pluralise", async () => {
   assert.equal(m.greeting(2), "2 things need you");
   assert.equal(
     m.subLine(4, 1.21),
-    "4 tasks active · $1.21 today · orchd on Local",
+    "4 tasks active · $1.21 today · Orchestrator on Local",
   );
-  assert.equal(m.subLine(1, null), "1 task active · orchd on Local");
+  assert.equal(m.subLine(1, null), "1 task active · Orchestrator on Local");
   assert.equal(
     m.subLine(2, 0.5, "lab"),
-    "orchd on lab keeps running when your Mac sleeps",
+    "Orchestrator on lab keeps running when your Mac sleeps",
   );
   assert.equal(m.clearLine(2, 3), "2 tasks running, 3 landed today.");
   assert.equal(m.clearLine(1, 0), "1 task running, 0 landed today.");

@@ -1,4 +1,4 @@
-import type { Panel, Workspace } from "../types";
+import type { Panel } from "../types";
 
 /** A local-time, minute-precision suggestion for the branch field, prefilled
  * when the "New worktree" launch choice opens. */
@@ -65,22 +65,3 @@ export function worktreeBaseRef(branch: {
 }): string {
   return `refs/${branch.local ? "heads" : "remotes"}/${branch.ref}`;
 }
-
-/** Params for the Herdr `worktree.create` socket RPC: a linked worktree of
- * the workspace's own repository, on the new branch, unfocused so launching
- * it doesn't steal focus from the current pane. */
-export function worktreeCreateParams(
-  workspace: Pick<Workspace, "cwd">,
-  branch: string,
-  base = "refs/heads/main",
-): {
-  cwd: string;
-  branch: string;
-  base: string;
-  label: string;
-  focus: boolean;
-} {
-  return { cwd: workspace.cwd, branch, base, label: branch, focus: false };
-}
-
-export { herdrWorkspaceKey } from "../herdrIdentity.ts";

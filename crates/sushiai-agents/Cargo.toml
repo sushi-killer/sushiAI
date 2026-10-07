@@ -1,0 +1,16 @@
+[package]
+name = "sushiai-agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
+sha2 = "0.10"
+toml_edit = "0.22"
+
+[dev-dependencies]
+tempfile.workspace = true

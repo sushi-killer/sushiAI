@@ -1,0 +1,13 @@
+## Sessions live in the sushiai daemon
+
+- Terminals and agents now run in sessions of the `sushiai` daemon, a small background process the app starts for you. Sessions survive an app restart or crash: open sushiAI again and every panel reattaches to its session with the same screen and layout.
+- Remote hosts get `sushiai` from **Settings → Connections**: choose **Install sushiai** on the host card and sushiAI uploads the matching build over SSH, verifies its checksum and starts it. A host reached through a local command can be added too. An unreachable host, a changed host key or a login that needs attention is reported on its card without retrying in a loop.
+- The Inbox shows an agent's permission requests with **Allow** and **Deny** buttons; answering one sends the decision to the waiting agent. An agent opens a Preview next to its pane with `sushiai open`.
+- Herdr is no longer needed and is no longer used: there is no Herdr setting, extension, CLI check or install step, and the "Herdr 1.0.0" entry is gone from Extensions.
+- Breaking: panels saved by an earlier release that ran in Herdr cannot be reattached. They come back as **Session ended** with **Reopen**, which starts a new session (and resumes an agent's own session when it has one). Sessions that were still running in Herdr are not adopted; end them with Herdr itself.
+- Codex sessions need codex-cli 0.160 or newer (the release with `--no-daemon`); host setup installs the current Codex on a remote host that has none.
+- Sessions keep running after you quit the app: the daemon and every session stay alive in the background. To stop one, close its session (its panel's close button); to stop the daemon itself, choose **Restart daemon** on the **This Mac** card in **Settings → Connections** (it asks the daemon to shut down; running sessions keep going and reattach). An agent session you no longer need is stopped by closing it, not by quitting the app.
+- **This Mac** shows the daemon's state and has its own **Retry** and **Restart daemon** buttons. A remote host whose `sushiai` differs from the one bundled with the app offers **Update sushiai**.
+- A session can start in a new git worktree on a remote host (the sibling `<repo>-<branch>` folder); a host reached through a local command still cannot create one.
+- Gemini CLI and Cursor Agent sessions, and Codex dialogs no hook reports (such as trusting a folder), now show a working, waiting or idle status read from the terminal screen. Statuses from hooks always win.
+- Sessions started outside this app (from the `sushiai` command line or another instance) do not show yet.

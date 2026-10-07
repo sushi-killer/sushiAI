@@ -254,7 +254,7 @@ test("the orchestrator start uses an accepted task source", async () => {
     },
   ]);
   const model = require("node:fs").readFileSync(
-    require("node:path").join(__dirname, "../orchd/src/model.rs"),
+    require("node:path").join(__dirname, "../crates/sushiai-orch/src/model.rs"),
     "utf8",
   );
   const sources = /TASK_SOURCES: \[&str; \d+\] = \[([^\]]*)\]/.exec(model)[1];
@@ -296,16 +296,16 @@ test("shownPath is a name in artifacts/, relative in the project, absolute outsi
   assert.equal(shownPath("/w/pp/plan.md", "/w/p"), "/w/pp/plan.md");
 });
 
-test("a pane folder outside the workspace cannot widen the Preview scope", async () => {
+test("a path outside the workspace cannot widen the Preview scope", async () => {
   const { insideProject, projectRelative } = await artifact;
-  const { absoluteArg } = await import("../src/extensions/openSignal.ts");
-  // A relative signal argument resolves from the pane folder, then must still
-  // be inside the workspace folder.
-  const inside = absoluteArg("artifacts/a.md", "/w/proj/sub");
-  assert.equal(insideProject(inside, "/w/proj"), "/w/proj/sub/artifacts/a.md");
-  const outside = absoluteArg("artifacts/a.md", "/w/proj-wt");
-  assert.equal(insideProject(outside, "/w/proj"), null);
-  assert.equal(insideProject(absoluteArg("a.md", "/"), "/w/proj"), null);
+  // `sushiai open` always sends an absolute path; it must still be inside the
+  // workspace folder.
+  assert.equal(
+    insideProject("/w/proj/sub/artifacts/a.md", "/w/proj"),
+    "/w/proj/sub/artifacts/a.md",
+  );
+  assert.equal(insideProject("/w/proj-wt/artifacts/a.md", "/w/proj"), null);
+  assert.equal(insideProject("/a.md", "/w/proj"), null);
   assert.equal(insideProject("/etc/passwd", "/w/proj"), null);
   assert.equal(
     projectRelative("/w/proj/sub/artifacts/a.md", "/w/proj/"),

@@ -20,7 +20,6 @@ export function useAppPersistence(
   const {
     workspaces,
     activeId,
-    socket,
     routines,
     fontScale,
     mode,
@@ -42,7 +41,6 @@ export function useAppPersistence(
     () => ({
       workspaces,
       activeId,
-      socket,
       routines,
       fontScale,
       mode,
@@ -63,7 +61,6 @@ export function useAppPersistence(
     [
       workspaces,
       activeId,
-      socket,
       routines,
       fontScale,
       mode,

@@ -10,23 +10,11 @@ const {
   declaresForwards,
 } = require("../electron/connections.cjs");
 const { PreviewServer } = require("../electron/preview.cjs");
-const { detectAgent } = require("../electron/terminal-stream.cjs");
 test("SSH validation and POSIX quoting", () => {
-  assert.throws(() =>
-    validate({ host: "-oProxyCommand=bad", socket: "/tmp/sock" }),
-  );
-  assert.throws(() => validate({ host: "lab;echo bad", socket: "/tmp/sock" }));
-  assert.throws(() => validate({ host: "lab", socket: "../sock" }));
-  assert.throws(() =>
-    validate({ host: "lab", socket: "/tmp/sock", port: 70000 }),
-  );
+  assert.throws(() => validate({ host: "-oProxyCommand=bad" }));
+  assert.throws(() => validate({ host: "lab;echo bad" }));
+  assert.throws(() => validate({ host: "lab", port: 70000 }));
   assert.equal(quote("a'b $HOME"), "'a'\\''b $HOME'");
-});
-test("harness names are recognized without substring false positives", () => {
-  assert.equal(detectAgent("/opt/bin/claude"), "claude");
-  assert.equal(detectAgent("node", "codex — project"), "codex");
-  assert.equal(detectAgent("zsh", "gemini"), "gemini");
-  assert.equal(detectAgent("zsh", "my-codex-project"), null);
 });
 test("project inspection: text, images, git, containment and static preview", async () => {
   const root = await fs.mkdtemp("/tmp/sushiai-project-test-");

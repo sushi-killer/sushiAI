@@ -1,6 +1,7 @@
 import type { Bridge } from "./types.ts";
 import { normalizeRemote } from "./app/useProjectGit.ts";
 import { localTarget } from "./projectPrepare.ts";
+import { LOCAL_ENDPOINT } from "./daemonSessions.ts";
 
 type SourceBridge = Pick<
   Bridge,
@@ -27,7 +28,6 @@ export async function inspectProjectSource(
     cwd: string;
     name: string;
     home: string;
-    localSocket: string;
     folderEndpoint: string;
     folderLocal: boolean;
   },
@@ -70,19 +70,17 @@ export async function inspectProjectSource(
       home: input.home,
       name: input.name,
     });
-    const checkout = input.localSocket
-      ? await bridge
-          .projectInspect(input.localSocket, {
-            operation: "git_remote",
-            root,
-          })
-          .catch(() => null)
-      : null;
+    const checkout = await bridge
+      .projectInspect(LOCAL_ENDPOINT, {
+        operation: "git_remote",
+        root,
+      })
+      .catch(() => null);
     if (!current()) return null;
     info.localFound =
       !!checkout?.remote &&
       normalizeRemote(checkout.remote) === normalizeRemote(input.url);
-    endpoint = info.localFound ? input.localSocket : undefined;
+    endpoint = info.localFound ? LOCAL_ENDPOINT : undefined;
     local = info.localFound;
   } else {
     const repository = await bridge

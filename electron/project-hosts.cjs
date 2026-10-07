@@ -1,7 +1,4 @@
-const {
-  parsePreflight,
-  PREFLIGHT_SCRIPT,
-} = require("./orchestrator-remote.cjs");
+const { parsePreflight, PREFLIGHT_SCRIPT } = require("./host-setup.cjs");
 const { normalizeRemote, assertRemote } = require("./projects.cjs");
 const { projectSlug, slugOf } = require("./project-slug.cjs");
 const { prepareGitUrl, gitSshEnv } = require("./project-git-ssh.cjs");

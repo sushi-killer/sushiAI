@@ -1,0 +1,8 @@
+{
+  "session_id": "60122755-5734-4393-954c-c4faaf0c74ba",
+  "transcript_path": "/home/user/.claude/projects/-home-user-proj/60122755-5734-4393-954c-c4faaf0c74ba.jsonl",
+  "cwd": "/home/user/proj",
+  "prompt_id": "c9a945b9-7563-47fc-9c70-9eaac4b004fc",
+  "hook_event_name": "SessionEnd",
+  "reason": "other"
+}

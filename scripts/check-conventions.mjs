@@ -12,7 +12,7 @@ import { addsMarkdownFragment } from "./lib/release-notes.mjs";
 const run = promisify(execFile);
 const root = process.cwd();
 const CYRILLIC = /[Ѐ-ӿ]/;
-const SOURCE_DIRS = ["src", "electron", "orchd/src"];
+const SOURCE_DIRS = ["src", "electron", "crates"];
 const SOURCE_FILES = /\.(ts|tsx|cjs|mjs|js|css|html|rs)$/;
 const TRAILERS = [
   /^\s*co-authored-by:/im,
@@ -68,6 +68,60 @@ for (const dir of ["src", "electron", "tests", "scripts"])
       );
   }
 
+// The retired session backend is gone: its name appears nowhere in shipped
+// code, scripts, tests or agent files (release notes under docs/ keep history).
+// Allowed: this file (it holds the pattern) and the one test that proves a
+// profile saved by an older release still loads (it needs the saved id).
+const RETIRED_NAME = /herdr/i;
+const RETIRED_ALLOWED = new Set([
+  "scripts/check-conventions.mjs",
+  "tests/retired-builtin-state.test.cjs",
+]);
+const retiredRoot = process.env.RETIRED_NAME_ROOT_OVERRIDE || root;
+async function* walkAll(dir, base) {
+  let entries;
+  try {
+    entries = await readdir(path.join(base, dir), { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const relative = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name !== "node_modules") yield* walkAll(relative, base);
+    } else if (
+      /\.(png|jpe?g|gif|icns|woff2?|ttf|otf|node|mp4|wav)$/i.test(entry.name)
+    )
+      continue;
+    else yield relative;
+  }
+}
+const retiredScan = async function* () {
+  for (const dir of [
+    "src",
+    "electron",
+    "scripts",
+    "tests",
+    ".agents",
+    "promo",
+    "crates",
+  ])
+    yield* walkAll(dir, retiredRoot);
+  for (const file of ["README.md", "AGENTS.md"]) yield file;
+};
+for await (const file of retiredScan()) {
+  const name = file.split(path.sep).join("/");
+  if (RETIRED_ALLOWED.has(name) && retiredRoot === root) continue;
+  const text = await readFile(path.join(retiredRoot, file), "utf8").catch(
+    () => "",
+  );
+  const line = text.split("\n").findIndex((value) => RETIRED_NAME.test(value));
+  if (line >= 0)
+    problems.push(
+      `${name}:${line + 1} names the retired session backend; sessions run in the sushiai daemon`,
+    );
+}
+
 // App state lives in one place: `<userData>/sushiai.db`. A string literal that
 // names a `*.json` file in `electron/` - quoted, a template ending in `.json`,
 // or `+ ".json"` - is how a new userData JSON store sneaks back in, so every
@@ -80,7 +134,7 @@ const JSON_NAMES = [
 const JSON_ALLOWED = {
   "electron/app-db.cjs": [
     [
-      /^(agents\/)?(projects|workspace-state|herdr-launches|connections|orchestrator-hosts|providers|secrets|model-profiles|claude-accounts|codex-accounts|project-secrets|window-state|updates|app-preferences|hermes-scheduler|hermes-activity|extensions|extension-lock)\.json$/,
+      /^(agents\/)?(projects|workspace-state|connections|orchestrator-hosts|providers|secrets|model-profiles|claude-accounts|codex-accounts|project-secrets|window-state|updates|app-preferences|hermes-scheduler|hermes-activity|extensions|extension-lock)\.json$/,
       "legacy files taken in once, then renamed or deleted",
     ],
     [/^\.json$/, "legacy surface-state file suffix"],
@@ -106,8 +160,11 @@ const JSON_ALLOWED = {
   "electron/extensions/local-extensions.cjs": [
     [/^manifest\.json$/, "extension manifest"],
   ],
+  "electron/host-setup.cjs": [
+    [/^manifest\.json$/, "host binary manifest written by build:host"],
+  ],
   "electron/ipc/app.cjs": [[/^skills-catalog\.json$/, "regenerable cache"]],
-  "electron/orchestrator.cjs": [[/^task\.json$/, "orchd task file"]],
+  "electron/orchestrator.cjs": [[/^task\.json$/, "orchestrator task file"]],
   "electron/project-hosts.cjs": [[/^package-lock\.json$/, "repo lockfile"]],
 };
 const stateRoot = process.env.STATE_STORE_ROOT_OVERRIDE || root;
@@ -149,7 +206,7 @@ for await (const file of walk("src/styles")) {
 // nothing else.
 const SHELL_DIR = "src/app";
 const SHELL_ALLOWED =
-  /^\.\.\/extensions\/(ExtensionSlots\.tsx|registry\.ts|routes\.ts|types\.ts)$/;
+  /^\.\.\/extensions\/(ExtensionSlots\.tsx|modules\.ts|registry\.ts|routes\.ts|types\.ts)$/;
 const SHELL_IMPORT =
   /(?:\bfrom\s+|\brequire\(\s*|\bimport\(\s*)["']([^"']+)["']/g;
 const shellFiles = (await readdir(path.join(root, SHELL_DIR)))
@@ -166,6 +223,130 @@ for (const file of shellFiles) {
     problems.push(
       `${file} resolves an extension surface; only SectionPage draws a contributed page`,
     );
+}
+
+// The main process core (daemon client, IPC, attention, mascot) never loads a
+// module that main.cjs plugs in. Besides other core files, the extension
+// contract and packages, it may use only the shared app services listed here.
+// Any other file that main.cjs requires is a module: it reaches the core
+// through main.cjs, never the other way. A new shared service is a deliberate
+// edit of this list.
+const CORE_SHARED = new Set(
+  [
+    "app-db",
+    "connections",
+    "terminal-flow",
+    "chat-args",
+    "agent-models",
+    "worktree",
+    "project-git",
+    "project-git-ssh",
+    "project-import",
+    "project-hosts",
+    "project-slug",
+    "projects",
+    "preview",
+    "git-remote",
+  ].map((name) => `electron/${name}.cjs`),
+);
+const coreRoot = process.env.CORE_ISOLATION_ROOT_OVERRIDE || root;
+const CORE_FILE =
+  /^electron\/(daemon\/|ipc\/|attention\.cjs$|mascot[^/]*\.cjs$|extensions\/)/;
+const REQUIRE_CALL = /\brequire\(\s*["'](\.[^"']*)["']\s*\)/g;
+const requiredBy = async (file) => {
+  const text = await readFile(path.join(coreRoot, file), "utf8").catch(
+    () => "",
+  );
+  return [...text.matchAll(REQUIRE_CALL)].map(([, source]) => {
+    const target = path.posix.join(path.posix.dirname(file), source);
+    return /\.(cjs|js|json)$/.test(target) ? target : `${target}.cjs`;
+  });
+};
+const mainRequires = new Set(await requiredBy("electron/main.cjs"));
+for await (const file of walk("electron", coreRoot)) {
+  if (!CORE_FILE.test(file) || file.startsWith("electron/extensions/"))
+    continue;
+  for (const target of await requiredBy(file))
+    if (
+      mainRequires.has(target) &&
+      !CORE_FILE.test(target) &&
+      !CORE_SHARED.has(target)
+    )
+      problems.push(
+        `${file} requires ${target}, a module main.cjs plugs in; core files never load modules`,
+      );
+}
+
+// Core never reaches into a module. The composition root (coreViews.ts and
+// modules.ts) is the one place core names a built-in module, so the module
+// directories are whatever those files import from outside src/extensions
+// itself; no module name is written here. A core file may not import any of
+// those directories.
+const moduleRoot = process.env.MODULE_ROOT_OVERRIDE || root;
+const COMPOSITION_ROOTS = [
+  "src/extensions/coreViews.ts",
+  "src/extensions/modules.ts",
+  "src/extensions/panelMigrations.ts",
+];
+const CORE_FILES =
+  /^(src\/(app|mascot|workspace)\/.+\.(ts|tsx)|src\/(App|WorkspacePanels|Project[A-Za-z]*Tab)\.tsx|src\/workspaceState\.ts|src\/project[A-Za-z]*\.ts|electron\/(attention|mascot[A-Za-z-]*)\.cjs)$/;
+const resolvedDir = (file, source) =>
+  path.posix.join(path.posix.dirname(file), source);
+const listFiles = async (dir) => {
+  const found = [];
+  for (const entry of await readdir(path.join(moduleRoot, dir), {
+    withFileTypes: true,
+  }).catch(() => [])) {
+    const child = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) found.push(...(await listFiles(child)));
+    else found.push(child);
+  }
+  return found;
+};
+const moduleDirs = new Set();
+for (const file of COMPOSITION_ROOTS) {
+  const text = await readFile(path.join(moduleRoot, file), "utf8").catch(
+    () => "",
+  );
+  for (const [, source] of text.matchAll(SHELL_IMPORT)) {
+    if (!source.startsWith(".")) continue;
+    const dir = path.posix.dirname(resolvedDir(file, source));
+    if (dir !== "src/extensions" && dir !== "src") moduleDirs.add(dir);
+  }
+}
+const coreFiles = (
+  await Promise.all(["src", "electron"].map((dir) => listFiles(dir)))
+)
+  .flat()
+  .filter((file) => CORE_FILES.test(file));
+for (const file of coreFiles) {
+  const text = await readFile(path.join(moduleRoot, file), "utf8");
+  for (const [, source] of text.matchAll(SHELL_IMPORT)) {
+    if (!source.startsWith(".")) continue;
+    const target = resolvedDir(file, source);
+    for (const dir of moduleDirs)
+      if (target === dir || target.startsWith(`${dir}/`))
+        problems.push(
+          `${file} imports ${source}; core may not import ${dir}, which the composition root loads as a module`,
+        );
+  }
+}
+
+// The reverse holds too: a module directory reaches the shell only through
+// the module API (extensions/modules.ts) and shared code in src/lib, never by
+// importing a src/app file.
+for (const dir of moduleDirs) {
+  for (const file of await listFiles(dir)) {
+    if (!/\.(ts|tsx)$/.test(file)) continue;
+    const text = await readFile(path.join(moduleRoot, file), "utf8");
+    for (const [, source] of text.matchAll(SHELL_IMPORT)) {
+      if (!source.startsWith(".")) continue;
+      if (resolvedDir(file, source).startsWith("src/app/"))
+        problems.push(
+          `${file} imports ${source}; a module may not import the shell (src/app), move shared code to src/lib`,
+        );
+    }
+  }
 }
 
 // docs/LESSONS.md is meant to be read every session, so a promoted entry
@@ -395,6 +576,28 @@ for (const dir of ["scripts", ".agents", ".github"])
           `${file}: electron.launch without SUSHIAI_TEST_WINDOW; test launchers must run hidden`,
         );
     }
+  }
+// A script or test that gives a daemon its own SUSHIAI_HOME must give it a HOME
+// too: `sushiai hooks install` and Codex's files resolve from HOME, and the
+// owner's real ~/.codex and ~/.sushiai/bin link are never a test's to touch.
+const homeRoot = process.env.HOME_RULE_ROOT_OVERRIDE || root;
+for (const dir of ["scripts", "tests", ".agents"])
+  for await (const file of walkAll(dir, homeRoot)) {
+    const name = file.split(path.sep).join("/");
+    if (
+      !/\.(mjs|cjs|js)$/.test(name) ||
+      name === "scripts/check-conventions.mjs"
+    )
+      continue;
+    if (dir === ".agents" && !/\/scripts\//.test(name)) continue;
+    const text = await readFile(path.join(homeRoot, file), "utf8");
+    if (
+      /SUSHIAI_HOME["']?\s*[:=]/.test(text) &&
+      !/(?<![A-Z_])HOME["']?\s*[:=,]|["']HOME["']/.test(text)
+    )
+      problems.push(
+        `${name}: sets SUSHIAI_HOME without HOME; a test must never reach the owner's ~/.codex or ~/.sushiai/bin`,
+      );
   }
 for (const dir of [
   "src",

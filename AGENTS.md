@@ -46,7 +46,7 @@ shell or core. This is deliberate, not incidental — the contract exists so a
 third-party extension can't destabilize the shell:
 
 - **Shell isolation**: every `src/app/*.tsx` file except `SectionPage.tsx`
-  may import only `../extensions/{ExtensionSlots.tsx,registry.ts,routes.ts,types.ts}`
+  may import only `../extensions/{ExtensionSlots.tsx,modules.ts,registry.ts,routes.ts,types.ts}`
   (`scripts/check-conventions.mjs`) and must not reference
   `SurfaceRenderer`/`activePage`/`resolveNavigation` in their source — only
   `src/app/SectionPage.tsx` may draw a contributed page.
@@ -71,6 +71,22 @@ label`), because two identical labels break `getByRole` selectors in
   deprecation warning), then drop it. Every `docs/releases/<version>.md`
   states the `Extension API:` version(s) it ships with, generated from that
   same constant — never hand-maintain a separate compat table.
+- **Settings pages**: the host `settings.page` draws a surface as one tab in
+  the Settings dialog, after the core tabs, ordered by extension id then
+  surface id. The tab is dialog content, never chrome.
+- **Companion view**: `view.kind: "companion"` is allowed only on
+  `settings.page`, and only when the manifest has a `companion` block. It has
+  at most 8 `fields` (types `text`, `status`, `qr`) and at most 4 `actions`
+  (`method` matches `/^[a-z][a-z0-9.]*$/`, labels unique). An action with
+  `send: ["hosts"]` needs `hosts.read` in `companion.permissions`; the app then
+  sends the ssh host list (`id, name, host, port?`) as `params.hosts`. Values
+  are never stored or logged. See `docs/extensions/companion.md`.
+- **Internal APIs (built-ins only, not the contract)**: the Module UI API
+  (`src/extensions/modules.ts`: attention items, worktree claims, the shell
+  hook, `panelMigrations`) and the Notices API (`electron/extensions/notices.cjs`)
+  let a built-in module add rows, claims and notices without core naming it.
+  They have no manifest field and no API version impact. A third-party
+  extension cannot use them.
 - **Navigation**: `toggleSection` (`src/app/navigation.ts`) forces
   `mode: "Code"` when opening an extension page, because Agent/Chat modes own
   the sidebar and would go blank if a page opened there; closing a section
@@ -90,6 +106,15 @@ label`), because two identical labels break `getByRole` selectors in
 compareRecords, bucketOf, orderBuckets`). `relativeDate`/`dueBucket` are
   deliberately kept module-internal — don't export them "for reuse" without a
   second caller that actually needs them.
+
+## Core stays generic
+
+Core exposes generic module and extension APIs only. Core, protocol and CI never
+name a specific module or plugin. Modules attach at the composition point:
+`crates/sushiai` (bin), `src/extensions/coreViews.ts`, `src/extensions/modules.ts`
+and `electron/main.cjs`. `scripts/check-crate-deps.mjs` enforces the Rust side
+(a core crate never depends on a module crate; a module crate never depends on
+a core crate; only the composition bin depends on both).
 
 ## One owner, complete cutover
 
@@ -117,14 +142,25 @@ TypeScript issues; `tsc --noEmit` runs with `strict: true` plus
 
 ## Security boundary
 
-Extensions are declarative `manifest.json` only, size-capped
-(`electron/extensions/local-extensions.cjs`, `MAX_MANIFEST_BYTES`). The
-renderer runs with `contextIsolation: true`, `sandbox: true`,
-`nodeIntegration: false` (`electron/main.cjs`). This is the actual security
-model for third-party extensions: they describe UI and data, they never ship
-executable code. Any task that would have an extension carry its own JS/native
-code breaks this invariant — stop and ask before implementing it, don't just
-build it because it's technically possible.
+Extension folders carry no code: a local extension is a size-capped
+`manifest.json` (`electron/extensions/local-extensions.cjs`,
+`MAX_MANIFEST_BYTES`). The renderer runs with `contextIsolation: true`,
+`sandbox: true`, `nodeIntegration: false` (`electron/main.cjs`). An extension
+describes UI and data; it never ships executable code.
+
+An optional top-level `companion` names a native command that is installed
+outside the extension folder. The app resolves the command to a path and
+refuses a path inside the extension folder. The process starts only when the
+extension is enabled, the app is ready, and the owner has approved the
+resolved path, the args and the permissions together. The approval has no
+binary hash (owner decision 2026-10-07), so an update of the program does not
+ask again. A change of path, args or permissions asks again. The process gets
+a minimal environment allowlist (`PATH`, `HOME`, `USER`, `LANG`, `TMPDIR`,
+`SUSHIAI_HOME`), restarts with a bounded backoff, and stops with SIGTERM, then
+SIGKILL after a grace period. This is consent, not a sandbox: the process keeps
+the owner's OS rights. The `hosts.read` permission limits only what the app
+sends it. Any change that lets an extension carry its own code, or widens the
+companion, needs the owner first.
 
 ## Vision & boundaries
 
@@ -203,13 +239,13 @@ by `scripts/check-conventions.mjs` in CI, not just a naming convention:
 ## Execution gotchas
 
 - Before finishing, run `./node_modules/.bin/prettier --write` on the files
-  you touched; `prettier --check` in CI fails otherwise. orchd is a bin-only
-  crate: use `cargo test --manifest-path orchd/Cargo.toml` (or
-  `--bin orchd <filter>`), never `--lib`. `src/App.tsx` is capped at 600 lines
+  you touched; `prettier --check` in CI fails otherwise. the Rust workspace is
+  tested by `npm run test:daemon` (`cargo test --workspace`; one package:
+  `cargo test -p sushiai-orch <filter>`). `src/App.tsx` is capped at 600 lines
   (`tests/app-boundary.test.cjs`) - move logic out instead of growing it.
 - Screenshots of the built app come from the `ui-evidence` scripts:
   `.agents/skills/ui-evidence/scripts/<screen>.mjs` (orchestrator panel,
-  notices, remote host, mascot) or a copy of `driver-template.mjs`; each
+  notices, worktrees, mascot) or a copy of `driver-template.mjs`; each
   needs `npm run build` first.
 - `npm run dev` is not a build. `npm run package` **overwrites
   `release/mac-arm64` with no backup** — confirm before running it.
@@ -278,7 +314,7 @@ or `./node_modules/.bin/<tool>`, never `npx`. The owner merges.
   picks proof; `$ui-evidence` measures and photographs the built UI;
   `$deslop` then `$autoreview` clean and review a diff before commit.
 
-- `docs/architecture.md` — Mermaid map of the app, orchd, the task
+- `docs/architecture.md` — Mermaid map of the app, the orchestrator, the task
   lifecycle and the references we borrowed from; update it in the same
   commit as a change that moves a box or an arrow.
 - `docs/AGENTS-INTEGRATION.md` — documents the in-app "Agents" **feature**

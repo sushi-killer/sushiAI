@@ -64,12 +64,10 @@ function registerAppIpc({
     home: os.homedir(),
     cwd: app.isPackaged ? os.homedir() : process.cwd(),
     platform: process.platform,
-    socketPath:
-      process.env.HERDR_SOCKET_PATH ||
-      path.join(os.homedir(), ".config/herdr/herdr.sock"),
-    agents: ["claude", "codex", "gemini", "cursor-agent", "herdr"].map(
-      (name) => ({ name, path: executable(name) }),
-    ),
+    agents: ["claude", "codex", "gemini", "cursor-agent"].map((name) => ({
+      name,
+      path: executable(name),
+    })),
   }));
 
   // Idle sleep kills a long agent turn mid-flight, which is why people end up

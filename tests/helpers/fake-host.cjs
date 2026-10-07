@@ -60,7 +60,6 @@ async function makeHost(t, { bin = {}, userBin = false } = {}) {
     id: "00000000-0000-4000-8000-0000000000aa",
     name: "Devbox",
     host: "user@devbox.example.test",
-    socket: "~/.sushiai/orchestrator/orchd.sock",
   });
   return {
     root,

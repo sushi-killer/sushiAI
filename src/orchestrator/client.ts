@@ -34,8 +34,7 @@ export function orchestratorClientFor(host: string = LOCAL) {
     return window.bridge.orchestrator(method, params, host) as Promise<T>;
   };
   return {
-    ping: () => call<{ version: string; pid: number; dataDir: string }>("ping"),
-    /** Liveness only: pings the connection in use, never starts, restarts or
+    /** Liveness only: checks the connection in use, never starts, restarts or
      * provisions the daemon (the panel's interval check). */
     probe: (): Promise<{ pid: number }> =>
       window.bridge

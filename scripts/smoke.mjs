@@ -6,8 +6,7 @@ import http from "node:http";
 import { readdir, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
-import { existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { daemonBinary, stopDaemon } from "./lib/daemon-binary.mjs";
 const root = process.cwd();
 
 // Polls a check instead of sleeping a fixed time: run straight after
@@ -56,7 +55,7 @@ const fixtureDirs = (
   .sort();
 assert.deepEqual(
   fixtureDirs,
-  ["probe"],
+  ["companion-probe", "probe"],
   "tests/fixtures/extensions holds an unexpected directory - delete a stale fixture or update this list",
 );
 
@@ -67,23 +66,16 @@ const navLabel = (id) => contributed("navigation", id).label;
 const ledger = surfaceOf("probe.ledger");
 const itemLabel = ledger.view.document.itemLabel;
 const profile = await fs.mkdtemp("/tmp/sushiai-smoke-");
-await fs.writeFile(path.join(profile, ".zshrc"), "");
-const orchdBuilt = existsSync(path.join(root, "orchd/target/release/orchd"));
-// Polls `ps` until a daemon for this profile's data dir is (or is no longer)
-// running; true when the wanted state was reached in time.
-async function pollOrchd(wantRunning, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  do {
-    const running = execFileSync("ps", ["-axo", "pid=,command="], {
-      encoding: "utf8",
-    })
-      .split("\n")
-      .some((line) => line.includes(`--data ${profile}/orchestrator`));
-    if (running === wantRunning) return true;
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  } while (Date.now() < deadline);
-  return false;
-}
+// A profile of its own (HOME is the temp profile): no end-of-line mark, which
+// a screen replayed at another width would show as a stray "%" row.
+await fs.writeFile(path.join(profile, ".zshrc"), "unsetopt PROMPT_SP\n");
+// The strict daemon: the app under test starts its own `sushiai` daemon in a
+// home of its own and never touches the owner's ~/.sushiai.
+const daemonHome = path.join(profile, "sushiai");
+const daemonPid = async () =>
+  Number(
+    (await fs.readFile(path.join(daemonHome, "daemon.lock"), "utf8")).trim(),
+  );
 await fs.mkdir("artifacts", { recursive: true });
 // The app under test is the built bundle, not the sources: a stale dist silently
 // tests the previous build. Fail loudly instead.
@@ -103,24 +95,31 @@ assert.ok(
   "dist is older than src - run `npm run build` before the desktop smoke",
 );
 
-const desktop = await electron.launch({
-  ...(process.env.SUSHIAI_EXECUTABLE
-    ? { executablePath: process.env.SUSHIAI_EXECUTABLE }
-    : {}),
-  args: process.env.SUSHIAI_EXECUTABLE ? [] : ["."],
-  cwd: root,
-  env: {
-    ...process.env,
-    BRIDGE_DATA_DIR: profile,
-    ZDOTDIR: profile,
-    SUSHIAI_EXTENSIONS_DIR: "tests/fixtures/extensions",
-    // Inherited from `npm run dev`, it would load the dev server, not dist/.
-    BRIDGE_DEV_URL: "",
-    // The smoke drives a real Electron app: keep its window off screen so a
-    // test run never steals focus or covers what you are working in.
-    SUSHIAI_TEST_WINDOW: "hidden",
-  },
-});
+const launchApp = () =>
+  electron.launch({
+    ...(process.env.SUSHIAI_EXECUTABLE
+      ? { executablePath: process.env.SUSHIAI_EXECUTABLE }
+      : {}),
+    args: process.env.SUSHIAI_EXECUTABLE ? [] : ["."],
+    cwd: root,
+    env: {
+      ...process.env,
+      BRIDGE_DATA_DIR: profile,
+      // Never the owner's ~/.codex or ~/.sushiai/bin link.
+      HOME: profile,
+      CODEX_HOME: path.join(profile, "codex"),
+      ZDOTDIR: profile,
+      SUSHIAI_HOME: daemonHome,
+      SUSHIAI_DAEMON_BIN: process.env.SUSHIAI_DAEMON_BIN || daemonBinary(root),
+      SUSHIAI_EXTENSIONS_DIR: "tests/fixtures/extensions",
+      // Inherited from `npm run dev`, it would load the dev server, not dist/.
+      BRIDGE_DEV_URL: "",
+      // The smoke drives a real Electron app: keep its window off screen so a
+      // test run never steals focus or covers what you are working in.
+      SUSHIAI_TEST_WINDOW: "hidden",
+    },
+  });
+let desktop = await launchApp();
 // A hidden run must put nothing on the owner's screen and still render at the
 // real content size, so screenshots and measurements can be trusted.
 async function assertHiddenWindow(page) {
@@ -161,7 +160,6 @@ async function assertHiddenWindow(page) {
 }
 
 const errors = [];
-const skipped = [];
 const preview = http.createServer((_, response) => {
   response.writeHead(200, { "Content-Type": "text/html" });
   response.end(
@@ -170,7 +168,7 @@ const preview = http.createServer((_, response) => {
 });
 await new Promise((resolve) => preview.listen(0, "127.0.0.1", resolve));
 try {
-  const page = await desktop.firstWindow();
+  let page = await desktop.firstWindow();
   page.on("pageerror", (error) => {
     errors.push(error.message);
     console.error("Renderer:", error.stack);
@@ -184,49 +182,163 @@ try {
     )
     .catch(() => {});
   assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);
+  // 1. The local daemon is ready.
+  const daemonState = () =>
+    page.evaluate(async () =>
+      (await window.bridge.daemonStates()).find((s) => s.host === "local"),
+    );
+  const ready = await until(
+    daemonState,
+    (state) => state?.state === "ready",
+    30000,
+  );
+  assert.equal(ready?.state, "ready", `local daemon: ${JSON.stringify(ready)}`);
+  // 2. A shell panel runs a real command inside a daemon session.
+  await page
+    .locator(".panel-terminal")
+    .getByRole("button", { name: /^Launch / })
+    .click();
+  await page.locator(".panel-terminal .xterm").waitFor();
   const terminalId = await page
     .locator(".panel-terminal")
     .getAttribute("data-panel-id");
-  await page.waitForTimeout(1000);
-  await page.evaluate(async (id) => {
-    await window.bridge.terminalWrite(id, "printf 'BRIDGE_PTY_OK\\n'\r");
-  }, terminalId);
-  const output = await until(
+  const sessionId = await until(
     () =>
       page.evaluate(
-        async (id) =>
-          (
-            await window.bridge.terminalOpen({
-              panelId: id,
-              cwd: (await window.bridge.system()).cwd,
-            })
-          ).history,
-        terminalId,
+        async () =>
+          (await window.bridge.sessionsList("local")).find(
+            (session) => session.status === "running",
+          )?.id,
       ),
-    (history) => /(?:^|\r|\n)BRIDGE_PTY_OK\r?\n/.test(history),
+    Boolean,
   );
-  assert.ok(
-    /(?:^|\r|\n)BRIDGE_PTY_OK\r?\n/.test(output),
-    `PTY must execute a real shell command; received ${JSON.stringify(output)}`,
+  assert.ok(sessionId, "launching the shell panel starts a daemon session");
+  const screen = (id = sessionId) =>
+    page.evaluate(
+      async (value) =>
+        (await window.bridge.sessionRead("local", value, 200)).text,
+      id,
+    );
+  const type = (text) =>
+    page.evaluate(
+      ({ id, data }) => window.bridge.daemonTerminalWrite(id, data),
+      { id: terminalId, data: text },
+    );
+  await type("printf 'BRIDGE_PTY_OK\\n'\r");
+  const echoed = await until(screen, (text) => /^BRIDGE_PTY_OK$/m.test(text));
+  assert.match(
+    echoed,
+    /^BRIDGE_PTY_OK$/m,
+    `the shell must run a real command; screen: ${JSON.stringify(echoed)}`,
   );
-  // Herdr is a separate daemon: it is always there on a developer machine but
-  // never on a clean CI runner. Skip explicitly rather than silently, and let
-  // SUSHIAI_SMOKE_STRICT=1 turn a skip back into a failure.
-  const herdr = await page.evaluate(async () => {
-    const info = await window.bridge.system();
-    try {
-      return {
-        ok: true,
-        result: await window.bridge.herdr(info.socketPath, "ping"),
-      };
-    } catch (error) {
-      return { ok: false, reason: String(error?.message || error) };
+  // 3. kill -9 of the daemon: the session lives in its holder, a new daemon
+  // adopts it and the panel shows the same screen.
+  // The prompt comes after the command's output: wait until the screen rests.
+  const restingScreen = async () => {
+    let last = await screen();
+    for (let i = 0; i < 20; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const next = await screen();
+      if (next === last) return next;
+      last = next;
     }
+    return last;
+  };
+  const before = (await restingScreen()).trimEnd();
+  const oldDaemon = await daemonPid();
+  const generation = (await daemonState()).generation;
+  process.kill(oldDaemon, "SIGKILL");
+  const back = await until(
+    daemonState,
+    (state) => state?.state === "ready" && state.generation > generation,
+    30000,
+  );
+  assert.equal(back?.state, "ready", "the app starts a new daemon");
+  assert.notEqual(await daemonPid(), oldDaemon);
+  const after = await until(
+    async () => (await screen()).trimEnd(),
+    (text) => text === before,
+  );
+  assert.equal(after, before, "the same screen after the daemon died");
+  await page.waitForFunction(() =>
+    document
+      .querySelector(".panel-terminal .xterm-rows")
+      ?.textContent.includes("BRIDGE_PTY_OK"),
+  );
+  // 4. A resize reaches the program (SIGWINCH makes a TUI redraw).
+  await type(
+    "sh -c 'trap \"echo TUI_SIZE \\$(stty size)\" WINCH; while :; do sleep 0.1; done'\r",
+  );
+  await page.waitForTimeout(500);
+  await page.evaluate(
+    (id) => window.bridge.daemonTerminalResize(id, 100, 30),
+    terminalId,
+  );
+  const resized = await until(screen, (text) => /TUI_SIZE 30 100/.test(text));
+  assert.match(resized, /TUI_SIZE 30 100/, "the program saw the new size");
+  await type("\x03");
+  await until(screen, (text) => /❯ $/.test(text.trimEnd() + " "));
+  // 5. An app restart: the daemon stays, the panel reattaches, the layout is back.
+  const layoutOf = async () => {
+    const saved = JSON.parse(readSnapshot(profile) ?? "null");
+    const active = saved?.workspaces.find((w) => w.id === saved.activeId);
+    return active && active.panels.some((p) => p.sessionId === sessionId)
+      ? JSON.stringify(active.layout)
+      : null;
+  };
+  const layout = await until(layoutOf, Boolean);
+  assert.ok(layout, "the bound session and the layout are saved");
+  const keptDaemon = await daemonPid();
+  await desktop.close();
+  desktop = await launchApp();
+  page = await desktop.firstWindow();
+  page.on("pageerror", (error) => {
+    errors.push(error.message);
+    console.error("Renderer:", error.stack);
   });
-  if (herdr.ok) assert.equal(herdr.result.type, "pong");
-  else if (process.env.SUSHIAI_SMOKE_STRICT === "1")
-    assert.fail(`Herdr is required in strict mode: ${herdr.reason}`);
-  else skipped.push(`Herdr ping + workspace sync (${herdr.reason})`);
+  await page.waitForSelector(".panel-agent");
+  await assertHiddenWindow(page);
+  assert.equal(await daemonPid(), keptDaemon, "the daemon outlived the app");
+  assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);
+  assert.equal(await layoutOf(), layout, "the layout is back after a restart");
+  await page.waitForFunction(
+    () =>
+      document
+        .querySelector(".panel-terminal .xterm-rows")
+        ?.textContent.includes("BRIDGE_PTY_OK"),
+    null,
+    { timeout: 30000 },
+  );
+  assert.equal(
+    await page.locator(".terminal-ended").count(),
+    0,
+    "the session is reattached, not ended",
+  );
+  // 6. Closing a live session asks first; cancelling keeps it running.
+  // The session names its panel (the folder), so the shell is found by its
+  // place in the workspace, not by a fixed title.
+  const shellTitle = (
+    await page
+      .locator(".panel-terminal")
+      .first()
+      .getByRole("button", { name: /^Close / })
+      .getAttribute("aria-label")
+  ).replace(/^Close /, "");
+  await page
+    .getByRole("button", { name: `Close ${shellTitle}`, exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .waitFor();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);
+  const stillRunning = await page.evaluate(
+    async (id) =>
+      (await window.bridge.sessionsList("local")).find((s) => s.id === id)
+        ?.status,
+    sessionId,
+  );
+  assert.equal(stillRunning, "running", "Cancel leaves the session running");
   assert.equal(await page.title(), "sushiAI");
   assert.ok(
     await page
@@ -242,7 +354,9 @@ try {
   );
   await page.screenshot({ path: path.join(root, "artifacts/workspace.png") });
   await page.getByRole("button", { name: "Tidy", exact: true }).click();
-  await page.getByRole("button", { name: "Maximize zsh", exact: true }).click();
+  await page
+    .getByRole("button", { name: `Maximize ${shellTitle}`, exact: true })
+    .click();
   await page.waitForFunction(
     () => document.querySelectorAll(".workspace-canvas .panel").length === 1,
   );
@@ -322,11 +436,21 @@ try {
       exact: false,
     })
     .click();
+  // The new shell is a daemon session: its panel appears once it is launched.
+  await page.waitForFunction(
+    () => document.querySelectorAll(".workspace-canvas .panel").length === 5,
+  );
   assert.equal(await page.locator(".workspace-canvas .panel").count(), 5);
   await page
-    .getByRole("button", { name: "Close zsh", exact: true })
+    .getByRole("button", { name: `Close ${shellTitle}`, exact: true })
     .last()
     .click();
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
+  await page.waitForFunction(
+    () => document.querySelectorAll(".workspace-canvas .panel").length === 4,
+  );
   assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);
   // The Inbox replaced the Sessions dialog: it lists the same panels as an
   // attention queue, and Jump gets you back to the workspace the same way
@@ -347,11 +471,12 @@ try {
     .locator(".section-page")
     .getByRole("button", { name: "Clean up", exact: true })
     .click();
-  const shellRow = page
-    .locator(".inbox-cleanup-row")
-    .filter({ hasText: "zsh" })
-    .filter({ hasText: "sushiai" })
-    .first();
+  const shellRow = page.locator(".inbox-cleanup-row").filter({
+    has: page.getByRole("checkbox", {
+      name: "End zsh in sushiai",
+      exact: true,
+    }),
+  });
   await shellRow.waitFor();
   assert.equal(
     await shellRow.getByRole("checkbox").isChecked(),
@@ -579,12 +704,24 @@ try {
     (text) => document.body.innerText.includes(text),
     typed,
   );
-  await page.waitForTimeout(600);
-  const settled = commits();
-  await page.waitForTimeout(1500);
-  assert.equal(
-    commits(),
-    settled,
+  // Other work may still commit shortly after the edit (the catalog sync
+  // follows the workspace list); a surface that loops never goes quiet.
+  let lastCommits = commits();
+  let quietSince = Date.now();
+  for (
+    let waited = 0;
+    Date.now() - quietSince < 2000 && waited < 20000;
+    waited += 200
+  ) {
+    await page.waitForTimeout(200);
+    const now = commits();
+    if (now !== lastCommits) {
+      lastCommits = now;
+      quietSince = Date.now();
+    }
+  }
+  assert.ok(
+    Date.now() - quietSince >= 2000,
     "an idle surface must stop writing once its edit has been saved",
   );
   assert.ok(
@@ -669,14 +806,11 @@ try {
   const settings = page.getByRole("dialog", { name: "Settings" });
   await settings.waitFor();
   await settings.getByRole("tab", { name: "Connections", exact: true }).click();
-  // Same Herdr-availability gate as the ping check above: this text only
-  // ever renders once a real Herdr daemon accepts the connection, which a
-  // clean CI runner never has.
-  if (herdr.ok)
-    await page
-      .getByText("Connected · workspaces sync automatically")
-      .waitFor({ state: "visible" });
-  else skipped.push(`Connections tab "Connected" state (${herdr.reason})`);
+  await settings
+    .locator(".host-status-line")
+    .filter({ hasText: "Connected" })
+    .first()
+    .waitFor({ state: "visible" });
   await settings.getByRole("tab", { name: "Providers", exact: true }).click();
   await settings.locator(".providers-settings").waitFor({ state: "visible" });
   await settings.getByRole("tab", { name: "Updates", exact: true }).click();
@@ -698,27 +832,30 @@ try {
     has: page.getByRole("button", { name: "Close Smoke routine" }),
   });
   await routinePanel.waitFor();
-  const routineId = await routinePanel.getAttribute("data-panel-id");
-  const routineOutput = await until(
+  const routineSession = await until(
     () =>
       page.evaluate(
-        async (id) =>
-          (
-            await window.bridge.terminalOpen({
-              panelId: id,
-              cwd: (await window.bridge.system()).cwd,
-            })
-          ).history,
-        routineId,
+        async () =>
+          (await window.bridge.sessionsList("local")).find((session) =>
+            session.title?.includes("Smoke routine"),
+          )?.id,
       ),
-    (history) => history.includes("\r\nROUTINE_OK"),
+    Boolean,
   );
-  assert.ok(routineOutput.includes("\r\nROUTINE_OK"));
-  // The daemon starts lazily on the first request; send one so the exit check
-  // in `finally` has a daemon to look for.
-  if (orchdBuilt) await page.evaluate(() => window.bridge.orchestrator("ping"));
+  assert.ok(routineSession, "the routine runs in its own daemon session");
+  const routineOutput = await until(
+    () => screen(routineSession),
+    (text) => /^ROUTINE_OK$/m.test(text),
+  );
+  assert.match(routineOutput, /^ROUTINE_OK$/m);
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Close Smoke routine" }).click();
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
+  // The panel must be gone first: a snapshot written before the routine panel
+  // existed would satisfy the check below without the close ever happening.
+  await routinePanel.waitFor({ state: "detached" });
   // The reload must find the close already persisted, not race its write.
   await until(async () => {
     const saved = JSON.parse(readSnapshot(profile) ?? "null");
@@ -731,13 +868,6 @@ try {
   await page.waitForSelector(".panel-agent");
   assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);
   await assertHiddenWindow(page);
-  // orchd starts lazily on the first real orchestrator request; make one so
-  // the teardown below has a daemon to prove it stops with the app.
-  if (orchdBuilt) {
-    await page.evaluate(() =>
-      window.bridge.orchestrator("chat.list", {}).catch(() => null),
-    );
-  }
   assert.deepEqual(errors, [], "No uncaught renderer errors");
   console.log(
     JSON.stringify(
@@ -745,7 +875,12 @@ try {
         passed: true,
         checks: [
           "native window",
-          "real PTY command",
+          "local daemon ready",
+          "real shell command in a daemon session",
+          "resize reaches the program",
+          "kill -9 of the daemon: same screen after reattach",
+          "app restart: reattach and layout",
+          "close confirmation for a live session",
           "Tidy and maximize",
           "drag and drop",
           "divider resize",
@@ -758,11 +893,8 @@ try {
           "settings connection",
           "routine execution",
           "layout persistence",
-          "orchd starts on first use and exits with the app",
           "no renderer errors",
-          ...(skipped.length ? [] : ["Herdr ping + workspace sync"]),
         ],
-        skipped,
         screenshot: "artifacts/workspace.png",
       },
       null,
@@ -776,19 +908,13 @@ try {
   throw error;
 } finally {
   await new Promise((resolve) => preview.close(resolve));
-  // orchd starts on first use, so make one call. A test-launched app stops
-  // its own daemon on quit: prove one ran (so the check below cannot pass
-  // trivially), then that none outlives the app.
-  if (orchdBuilt)
-    await (
-      await desktop.firstWindow()
-    )
-      .evaluate(() => window.bridge.orchestrator("task.list", {}))
-      .catch(() => {});
-  const orchdRan = orchdBuilt && (await pollOrchd(true, 10000));
   await desktop.close();
-  const orchdGone = !orchdBuilt || (await pollOrchd(false, 3000));
-  await fs.rm(profile, { recursive: true, force: true });
-  assert.ok(!orchdBuilt || orchdRan, "orchd never started for this data dir");
-  assert.ok(orchdGone, "orchd for this data dir outlived the app");
+  stopDaemon(daemonHome);
+  // A shell that exits late may still write its history into HOME.
+  await fs.rm(profile, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 200,
+  });
 }

@@ -25,7 +25,7 @@ shasum -a 256 -c SHA256SUMS.txt
 
 ### Update the app
 
-Open **Settings → Software updates** and choose **Install and restart** when an update is ready. The installer prepares and verifies the new app before closing sushiAI, then replaces it and restarts it. Save file edits first: local terminals stop during the restart, while Herdr sessions continue running.
+Open **Settings → Software updates** and choose **Install and restart** when an update is ready. The installer prepares and verifies the new app before closing sushiAI, then replaces it and restarts it. Save file edits first: terminal sessions keep running in the `sushiai` daemon and reattach when the new version opens.
 
 The app must be in a writable folder, such as your personal Applications folder. For manual installation, quit sushiAI and replace the app in Applications using the downloaded DMG.
 
@@ -33,21 +33,26 @@ Version 0.0.1 Alpha does not include an updater. Download and install 0.0.6 manu
 
 ## Set up your tools
 
-- **Shells:** local terminals use your installed shell.
-- **Agents:** install and sign in to Claude Code, Codex, Gemini CLI, or Cursor Agent separately. sushiAI launches the CLIs available on your PATH.
-- **Persistent sessions:** install and start [Herdr](https://github.com/herdrdev/herdr). Use the release pinned in [the Herdr contract](../electron/herdr-contract.cjs). **Settings → Connections** checks daemon and terminal CLI compatibility separately and can install the verified CLI using the pinned SHA-256 checksum. The installer preserves the running daemon; restart it with the verified binary yourself, then check compatibility again. Local terminals do not require Herdr.
+- **Shells:** terminals use your installed shell.
+- **Agents:** install and sign in to Claude Code, Codex, Gemini CLI, or Cursor Agent separately. sushiAI launches the CLIs available on your PATH. Codex needs **codex-cli 0.160 or newer** (the release with `--no-daemon`); host setup installs the current Codex on a remote host that has none.
+- **Persistent sessions:** nothing to install on This Mac. The app starts the bundled `sushiai` daemon in `~/.sushiai`; sessions survive an app restart or crash and reattach when you open the app again.
 - **Files, editing, and Git:** install Python 3 and Git. On macOS, sushiAI uses `/usr/bin/python3`; Xcode Command Line Tools provide these tools. Install them with `xcode-select --install` if needed.
-- **Remote project environments:** configure SSH access and install Herdr, Python 3, Git, and your agent CLIs on the remote host. Verify SSH in Terminal before adding the host in **Settings → Connections**. sushiAI prepares project checkouts under `~/sushiai/<slug>` on each host (and on This Mac for a new project): it clones there, pulls an existing checkout of the same repository with a fast-forward only update, and never reuses a folder that is another repository or not a git checkout. A checkout already located elsewhere can still be used, but is marked as a non-standard path. A host you add there receives a project's environment values (tasks and SSH terminals; never Herdr panes) with no further question; switch "Don't send secrets to this host" on in the project's Hosts settings to keep a project's values off it.
+- **Remote project environments:** configure SSH access and install Python 3, Git, and your agent CLIs on the remote host. Verify SSH in Terminal before adding the host in **Settings → Connections**, then choose **Install sushiai** on the host card: sushiAI uploads the matching `sushiai` build over SSH, checks its SHA-256 digest and installs it under `~/.sushiai` on the host. sushiAI prepares project checkouts under `~/sushiai/<slug>` on each host (and on This Mac for a new project): it clones there, pulls an existing checkout of the same repository with a fast-forward only update, and never reuses a folder that is another repository or not a git checkout. A checkout already located elsewhere can still be used, but is marked as a non-standard path. A host you add there receives a project's environment values (tasks and sessions) with no further question; switch "Don't send secrets to this host" on in the project's Hosts settings to keep a project's values off it.
 
-- **Orchestrator settings:** every orchestrator setting is documented in [orchd settings](orchd-settings.md); the ones without a control are editable under **Settings → Orchestration → Advanced**.
+- **Orchestrator settings:** every orchestrator setting is documented in [orchestrator settings](orchestrator-settings.md); the ones without a control are editable under **Settings → Orchestration → Advanced**.
 
-Use `~/.config/herdr/herdr.sock` for the default Herdr socket or `~/.config/herdr/sessions/<name>/herdr.sock` for a named session. See [connecting to Herdr](../README.md#connect-to-herdr) for details.
+See [sessions and remote hosts](../README.md#sessions-and-remote-hosts) for details. Sessions saved by an older release that used another session backend restore as **Session ended**; choose **Reopen** to start a new one.
 
 ## Build from source
 
 On macOS, install **Node.js 22.18+**, npm, Git, and Xcode Command Line Tools.
 
-The orchestrator daemon (`orchd`) is written in Rust. `npm run build:orchd`, CI and packaging need the Rust toolchain (`cargo`, from [rustup](https://rustup.rs)). The installed app does not: a packaged sushiAI ships the built daemon.
+The `sushiai` daemon, which hosts the orchestrator module, is written in Rust. `npm run build:daemon`, CI and packaging need the Rust toolchain (`cargo`, from [rustup](https://rustup.rs)). The installed app does not: a packaged sushiAI ships the built daemon.
+
+The `sushiai` daemon (sessions, agents, the host proxy) is Rust too. `npm run dev` builds it with `cargo build -p sushiai` before it starts. Packaging needs two more steps, which `npm run package` and `npm run package:dmg` run for you:
+
+- `npm run build:daemon` builds the release `sushiai` for This Mac. The packaged app starts it from its resources and stops with an error that names the missing file when it is not there.
+- `npm run build:host` builds the `sushiai` binaries that **Install sushiai** uploads to remote hosts (Linux x86_64 and aarch64, macOS x86_64 and arm64) and writes `target/host/manifest.json`. The Linux targets need [zig](https://ziglang.org) and `cargo-zigbuild` (`brew install zig && cargo install cargo-zigbuild --locked`); the script names any missing tool and installs nothing.
 
 ```sh
 git clone https://github.com/sushi-killer/sushiAI.git

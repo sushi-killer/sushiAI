@@ -1,10 +1,10 @@
 <p align="center"><img src="public/sushi.svg" width="76" alt="sushiAI"></p>
 <h1 align="center">sushiAI</h1>
-<p align="center">Your agents. One workspace.<br>A terminal workspace for macOS · Herdr · MIT</p>
+<p align="center">Your agents. One workspace.<br>A terminal workspace for macOS · MIT</p>
 
 ![sushiAI workspace](promo/assets/workspace.png)
 
-**sushiAI** brings agent terminals, chats, files, and Git diffs into one macOS window. Run Claude Code, Codex, Gemini CLI, and Cursor Agent with your installed tools and accounts. Use local terminals or persistent Herdr sessions, including over SSH.
+**sushiAI** brings agent terminals, chats, files, and Git diffs into one macOS window. Run Claude Code, Codex, Gemini CLI, and Cursor Agent with your installed tools and accounts. Sessions persist in the `sushiai` daemon, locally and over SSH.
 
 [Watch the demo](promo/sushiAI-launch.mp4) · [Download 0.0.6](https://github.com/sushi-killer/sushiAI/releases/tag/v0.0.6) · [Installation guide](docs/INSTALL.md)
 
@@ -23,7 +23,7 @@ Open the DMG, drag sushiAI to Applications, and launch it. This build is ad-hoc 
 - **Agent terminals:** streaming input and output, resizing, and icons for the running agent.
 - **Flexible workspaces:** draggable split panels, resizable dividers, and tabs that adapt to smaller windows.
 - **Session management:** add shells and agents, search sessions, hide views, or end selected sessions.
-- **Local and remote projects:** connect to Herdr over SSH using your existing SSH configuration.
+- **Local and remote projects:** connect to a host over SSH using your existing SSH configuration.
 - **Files and previews:** browse directories, read text, view images and PDFs, and preview static HTML with relative assets.
 - **Text editing:** edit UTF-8 files with conflict detection if an agent changes the file before you save.
 - **Git history and diffs:** inspect a compact branch graph, browse any local or origin branch without checkout, and review commit files and diffs alongside working-tree and staged changes.
@@ -40,32 +40,27 @@ Use **+**, **⌘K**, or **⌘T** to add a terminal, agent, browser, Files & Git 
 
 When space is limited, panels switch to tabs and the sidebar collapses. You can also select tab mode from the toolbar.
 
-Open **Sessions** to search and filter sessions or end several at once. For Herdr sessions, **Hide** removes the view while **End** stops the underlying process. Use the workspace menu to rename or close a workspace and its sessions.
+Open the **Inbox** to see what needs you, answer permission requests with **Allow** or **Deny**, and clean up idle sessions. **Hide** removes a view while **End** stops the session. Use the workspace menu to rename or close a workspace and its sessions.
 
 Use the workspace menu → **Manage workspace controls** to rename a workspace and turn Claude Code MCP connections and plugins on or off for that project. The same compact table has a **Stats** view with recent local project-usage signals, so plugins with no recent use are easy to review. The New workspace form also lets you choose which discovered plugins start disabled. sushiAI writes Claude Code's native per-project choice to `~/.claude.json` and `.claude/settings.local.json` on the selected host; server definitions, plugin settings and credentials stay untouched. The control applies to new Claude Code sessions and is structured to add other harnesses later.
 
-Local terminals stop when sushiAI quits. Herdr sessions continue independently of the app. Save file edits before quitting; unsaved drafts are kept only in memory. Use terminal panels when an agent requires interactive approval.
+Sessions continue when sushiAI quits and reattach when it opens again. Save file edits before quitting; unsaved drafts are kept only in memory. Use terminal panels when an agent requires interactive approval.
 
-## Connect to Herdr
+## Sessions and remote hosts
 
-Install and start [Herdr](https://github.com/herdrdev/herdr) before connecting. The verified release, protocol, required capabilities, and asset checksums are defined in [the Herdr contract](electron/herdr-contract.cjs). Local terminals also work without Herdr.
-
-In **Settings → Connections**, **Check compatibility** checks the running daemon and terminal CLI separately, on the selected local or SSH endpoint. **Install verified Herdr CLI** installs the pinned, checksum-verified CLI in an application-managed directory; it does not replace your running daemon. Start that verified release on your chosen socket and check compatibility again. Incompatible installations are reported before a terminal stream opens.
-
-The default local socket is `~/.config/herdr/herdr.sock`. Set another socket in Settings or through `HERDR_SOCKET_PATH`.
+Every terminal and agent runs in a session of the `sushiai` daemon, a small background process the app starts for you. Sessions survive an app restart or crash: open the app again and each panel reattaches to its session with the same screen. The daemon lives in `~/.sushiai`; the app and `sushiai status` talk to it over a local socket.
 
 For a remote project:
 
 1. Verify that SSH works in Terminal and accept the host key if prompted.
 2. Open **Settings → Connections → Add SSH host**.
-3. Enter an SSH alias or `user@host`, an optional port, and the remote Herdr socket.
-4. Choose **Save and connect**, then open a workspace or create one using an absolute remote project path.
+3. Enter an SSH alias or `user@host` and an optional port. A host that is reached through a local command (for example a jump or tunnel tool) can use **Connect with a command** instead of SSH.
+4. Choose **Save and connect**. If the host has no `sushiai` yet, **Install sushiai** on the host card uploads the matching build over SSH.
+5. Open a workspace or create one using an absolute remote project path.
 
-Named Herdr sessions usually use `~/.config/herdr/sessions/<session-name>/herdr.sock`. The remote host needs Herdr, Python 3, Git, and the agent CLIs you want to run.
+The remote host needs Python 3, Git, and the agent CLIs you want to run; Codex sessions need codex-cli 0.160 or newer. sushiAI uses your system SSH configuration, keys, and agent. Remote browser URLs such as `http://localhost:3000` are forwarded through SSH automatically.
 
-sushiAI uses your system SSH configuration, keys, and agent. Remote browser URLs such as `http://localhost:3000` are forwarded through SSH automatically. A Herdr terminal supports one controlling client; if another client holds control, disconnect it before choosing **Reconnect**.
-
-Local sockets have separate workspace and panel identities. Existing saved layouts migrate once without removing live sessions, local panels, or conversations. New project launches reuse their canonical checkout on its host, while separate worktrees and checkouts remain separate. Failed agent preparation offers **Retry preparation** on the already-created session. See [Herdr stability evidence](docs/HERDR-STABILITY.md) for measurements and reproduction commands.
+Panels saved by an older release that ran in a different session backend come back as **Session ended** with **Reopen**, which starts a new session (and resumes an agent's own session when it has one).
 
 ## Files and editing
 
@@ -77,7 +72,7 @@ File previews support files up to 16 MB; text output is limited to 2 MB. Static 
 
 Open **Settings → Software updates** to check for a new release. Packaged builds check this project's public GitHub Releases shortly after startup and every six hours. Automatic downloads and alpha/beta releases can be enabled or disabled separately. Development builds check only when requested.
 
-When a compatible update is found, an indicator appears in the toolbar and Notifications. Downloads are verified against the release asset's SHA-256 digest. Choose **Install and restart** to apply a downloaded update. The installer verifies the DMG and application signature, prepares a new copy, waits for sushiAI to exit, replaces the app, and reopens it. A recovery copy is kept until the new version loads; replacement failures restore the previous app. Save edits first: local terminals stop during the restart, while Herdr sessions continue running. Automatic downloads never trigger installation on their own.
+When a compatible update is found, an indicator appears in the toolbar and Notifications. Downloads are verified against the release asset's SHA-256 digest. Choose **Install and restart** to apply a downloaded update. The installer verifies the DMG and application signature, prepares a new copy, waits for sushiAI to exit, replaces the app, and reopens it. A recovery copy is kept until the new version loads; replacement failures restore the previous app. Save edits first: terminal sessions keep running in the `sushiai` daemon and reattach when the new version opens. Automatic downloads never trigger installation on their own.
 
 Install sushiAI in a writable Applications folder before updating; an app running directly from a mounted DMG cannot replace itself. Development builds offer **Open installer** for manual installation instead.
 
@@ -178,7 +173,7 @@ touches what a user has typed:
 ```
 
 `project` scope is keyed by the project folder. The same folder over SSH is a
-different project; a local Herdr session is not. A project-scoped surface
+different project; a local session is not. A project-scoped surface
 opened without a folder renders read-only rather than writing into a shared
 bucket.
 
@@ -221,12 +216,11 @@ npm run dev
 ```sh
 npm test              # Unit tests
 npm run build         # Type checking and production build
-npm run test:desktop  # Desktop integration tests; requires local Herdr
-npm run test:herdr    # Herdr session lifecycle
-npm run test:stream   # Terminal stream, input, and resize
+npm run test:desktop  # Desktop smoke with a daemon of its own (builds `sushiai` if missing)
+npm run test:terminal # Terminal rendering and input
 ```
 
-For SSH integration tests, set `SUSHIAI_SSH_HOST` to your test host and `SUSHIAI_SSH_SOCKET` to its Herdr socket, then run `npm run test:remote`. Without a socket override, SSH tests use `~/.config/herdr/sessions/sushiai/herdr.sock`. Integration tests create temporary workspaces and files and clean them up afterward.
+For SSH integration tests, set `SUSHIAI_SSH_HOST` to a test host that has `sushiai` installed, then run `npm run test:remote`. Integration tests create temporary workspaces and files and clean them up afterward.
 
 Run `node scripts/updates-smoke.mjs` for isolated desktop checks of the update flow using synthetic release data.
 

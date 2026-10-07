@@ -21,10 +21,12 @@ import {
   sameFailureNote,
   subLine,
 } from "./homeModel";
-import { elapsedLabel, ownerTasks, projectName } from "./ownerAttention";
+import { elapsedLabel } from "../lib/text";
+import { ownerTasks, projectName } from "./ownerAttention";
 import { weekSummary } from "./stats";
 import type { SpendSummary, Task } from "./types";
-import { AttentionItem, Chip, StageTrack } from "./ui";
+import { AttentionItem, Chip, StageTrack } from "../ui";
+import { TaskMark, cleanTitle } from "./taskTitle";
 import "./home.css";
 
 const TRY = [
@@ -259,7 +261,8 @@ export function HomeView({
             <AttentionItem
               key={task.id}
               tone="warning"
-              title={task.title}
+              title={cleanTitle(task.title)}
+              icon={<TaskMark size={13} />}
               time={elapsedLabel(Date.now() - task.updatedAt)}
               question
               context={task.question?.text}
@@ -283,7 +286,8 @@ export function HomeView({
           <AttentionItem
             key={task.id}
             tone={taskTone(task)}
-            title={task.title}
+            title={cleanTitle(task.title)}
+            icon={<TaskMark size={13} />}
             time={elapsedLabel(Date.now() - task.updatedAt)}
             context={`${taskReason(task, tasks, maxAttempts)} \u00b7 ${formatCost(task.costUsd)}${sameFailureNote(task)}`}
             actions={
@@ -327,7 +331,7 @@ export function HomeView({
                 </>
               ))
             }
-            meta={`${repo} \u00b7 orchd`}
+            meta={`${repo} \u00b7 orchestrator`}
             onOpen={() => onOpen(task.id)}
           />
         );

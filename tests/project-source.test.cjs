@@ -7,7 +7,6 @@ const source = {
   cwd: "/tmp/projects",
   name: "first",
   home: "/tmp/home",
-  localSocket: "/tmp/source-test.sock",
   folderEndpoint: "ssh:devbox",
   folderLocal: false,
 };

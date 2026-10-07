@@ -597,11 +597,11 @@
   font-size: 11px;
   line-height: 14px;
 }
-.pk-prepare .orch-prep {
+.pk-prepare .host-prep {
   padding: 0;
   overflow: visible;
 }
-.pk-prepare .orch-prep h2 {
+.pk-prepare .host-prep h2 {
   font-size: 18px;
   line-height: 22px;
 }

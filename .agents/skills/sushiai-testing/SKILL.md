@@ -10,17 +10,17 @@ required gate once. Broaden only for a new change, a failure or an open risk.
 
 ## Select the proof
 
-| Change                                                  | Proof                                                                                   |
-| ------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Any code change (required gate before commit)           | `npm run ci` - build, full `node --test`, conventions, eslint, prettier, `git diff --check` |
-| Manifest, registry, routes, IPC surface                 | `npm run test:contracts`                                                                |
-| Extension loading or surface state                      | `npm run test:extensions`                                                               |
-| Layout, navigation, workspace or chat state             | `npm run test:core`                                                                     |
-| `src/app`, `src/extensions` or `electron/`              | `npm run build`, then `npm run test:desktop`, and `$ui-evidence` when a screen changed  |
-| Terminal rendering or unicode                           | `npm run test:terminal`, `npm run test:unicode`                                         |
-| Herdr stream or integration                             | `npm run test:stream`, `npm run test:herdr`                                             |
-| Startup or render cost                                  | `npm run perf`                                                                          |
-| Docs, skills or agent files only                        | `npm run check:conventions` and `git diff --check`                                      |
+| Change                                        | Proof                                                                                       |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Any code change (required gate before commit) | `npm run ci` - build, full `node --test`, conventions, eslint, prettier, `git diff --check` |
+| Manifest, registry, routes, IPC surface       | `npm run test:contracts`                                                                    |
+| Extension loading or surface state            | `npm run test:extensions`                                                                   |
+| Layout, navigation, workspace or chat state   | `npm run test:core`                                                                         |
+| `src/app`, `src/extensions` or `electron/`    | `npm run build`, then `npm run test:desktop`, and `$ui-evidence` when a screen changed      |
+| Terminal rendering or unicode                 | `npm run test:terminal`, `npm run test:unicode`                                             |
+| Daemon sessions, reattach, restart            | `npm run test:desktop` (strict daemon smoke)                                                |
+| Startup or render cost                        | `npm run perf`                                                                              |
+| Docs, skills or agent files only              | `npm run check:conventions` and `git diff --check`                                          |
 
 Run a single file with `node --test tests/<name>.test.cjs`.
 

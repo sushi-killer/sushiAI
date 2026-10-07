@@ -1,8 +1,8 @@
-// Screenshot recipe for orchd task notices on the desktop mascot: the
+// Screenshot recipe for orchestrator task notices on the desktop mascot: the
 // done/failed/needs-input bubbles, the quick answer and the two "Open"
 // landings, Run again, Answer all in Inbox and the pill (Option-Space).
 // Builds nothing itself; run
-//   npm run build && npm run build:orchd && node .agents/skills/ui-evidence/scripts/orchestrator-notices.mjs
+//   npm run build && npm run build:daemon && node .agents/skills/ui-evidence/scripts/orchestrator-notices.mjs
 // It seeds one landed done task with a fresh report, one failed task (last
 // attempt failed with kind "verify") and one waiting task (options Delete it,
 // Keep behind a flag, Stop) into a throwaway profile and opens the Evidence
@@ -26,6 +26,7 @@ import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { stopDaemon } from "../../../../scripts/lib/daemon-binary.mjs";
 
 // "hidden" keeps the run off the owner's screen; "visible" is the opt-out for
 // a run that must show the real mascot window (checks below adapt).
@@ -36,7 +37,7 @@ const shot = (name) => `${root}/artifacts/${name}.png`;
 // Case (c): as long as a notice can get (body cap 2000, option cap 400), so it
 // reaches the 70% cap even on a tall work area.
 const LONG_TITLE =
-  "orchd: a criterion checked by a command is never visual, and task.amend carries visual flags";
+  "orch: a criterion checked by a command is never visual, and task.amend carries visual flags";
 const CAP_SENTENCE =
   "The migration touches the queue, the planner and the review gate, and each of them keeps its own copy of the flag. ";
 const CAP_BODY = CAP_SENTENCE.repeat(17).trim() + " Which way should it go?";
@@ -112,11 +113,11 @@ const SEEDS = [
   },
   {
     title:
-      "orchd: a criterion checked by a command is never visual, and task.amend carries visual flags",
+      "orch: a criterion checked by a command is never visual, and task.amend carries visual flags",
     status: "waiting",
     costUsd: 0.2,
     question: {
-      text: "The planner marked criterion 3 as visual, but its check is node --test tests/mascot.test.cjs, a command whose exit code decides it. A visual flag on it makes orchd demand a screenshot the implementer never needs to take, and the review stalls waiting for one. task.amend currently copies the visual flags from the old criteria by index, so reordering the criteria moves a flag onto the wrong one. How should a criterion that names a command be treated, and what should task.amend do with the flags?",
+      text: "The planner marked criterion 3 as visual, but its check is node --test tests/mascot.test.cjs, a command whose exit code decides it. A visual flag on it makes the orchestrator demand a screenshot the implementer never needs to take, and the review stalls waiting for one. task.amend currently copies the visual flags from the old criteria by index, so reordering the criteria moves a flag onto the wrong one. How should a criterion that names a command be treated, and what should task.amend do with the flags?",
       options: [
         "Treat any criterion whose check names a verify command as non-visual, drop its visual flag at plan time, and have task.amend recompute every flag from the amended criteria instead of copying them from its old list by position.",
         "Keep the visual flag wherever the planner set it, but let a passing verify command satisfy the evidence requirement, and have task.amend carry flags over by matching criterion text rather than by index, so a reorder never moves one.",
@@ -180,7 +181,8 @@ const SEEDS = [
 
 const report = { pageErrors: [], everVisible: false, everFocused: false };
 const profile = await fs.mkdtemp("/tmp/sushiai-evidence-");
-const dataDir = `${profile}/orchestrator`;
+const daemonHome = `${profile}/sushiai`;
+const dataDir = `${daemonHome}/orchestrator`;
 let app = null;
 
 try {
@@ -242,6 +244,10 @@ try {
   }
   await fs.mkdir(`${root}/artifacts`, { recursive: true });
 
+  // The daemon hosts the orchestrator module only when it is enabled.
+  await fs.mkdir(`${daemonHome}/modules`, { recursive: true, mode: 0o700 });
+  await fs.writeFile(`${daemonHome}/modules/orch.enabled`, "");
+
   app = await electron.launch({
     args: ["."],
     cwd: root,
@@ -249,7 +255,10 @@ try {
       ...process.env,
       SUSHIAI_TEST_WINDOW: windowMode,
       BRIDGE_DATA_DIR: profile,
-      HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
+      // Never the owner's ~/.codex or ~/.sushiai/bin link.
+      HOME: profile,
+      CODEX_HOME: `${profile}/codex`,
+      SUSHIAI_HOME: daemonHome,
       BRIDGE_DEV_URL: "",
       SUSHIAI_TEST_MASCOT: "1",
       ORCHD_CLAUDE_BIN: "/usr/bin/false",
@@ -259,16 +268,15 @@ try {
   const page = await app.firstWindow();
   page.on("pageerror", (error) => report.pageErrors.push(error.message));
   await page.waitForSelector(".panel-agent");
+  // The orchestrator extension is off in a fresh profile.
+  await page.getByRole("button", { name: "Extensions", exact: true }).click();
+  await page.getByRole("button", { name: "Enable Orchestrator" }).click();
+  await page.getByRole("button", { name: "Disable Orchestrator" }).waitFor();
+  await page.getByRole("button", { name: "Extensions", exact: true }).click();
 
-  // A Local workspace on this repo: the notices' `repo` matches its cwd. No
-  // Orchestrator panel is added - opening a notice has to add it.
-  await page.getByRole("button", { name: "New workspace" }).click();
-  const workspaceDialog = page.getByRole("dialog", { name: "New workspace" });
-  await workspaceDialog.locator('input[name="name"]').fill("Evidence");
-  await workspaceDialog.getByLabel("Project folder").fill(root);
-  await workspaceDialog
-    .getByRole("button", { name: "Create workspace" })
-    .click();
+  // The first-run workspace already runs in this repo, so the notices' `repo`
+  // matches its cwd. No Orchestrator panel is added - opening a notice has to
+  // add it.
   await page.waitForSelector(".panel-agent, .panel-terminal");
   report.panelBefore = await page.locator(".orchestrator-panel").count();
 
@@ -465,7 +473,7 @@ try {
     }, selector);
   const selectedTitle = () =>
     page
-      .locator(".ui-task-row.selected .ui-task-row-title")
+      .locator(".ui-task-row.selected .ui-task-row-title, .orch-switcher-label")
       .first()
       .innerText()
       .catch(() => "");
@@ -483,7 +491,7 @@ try {
     await page.waitForFunction(
       ({ sel, expected }) => {
         const picked = document.querySelector(
-          ".ui-task-row.selected .ui-task-row-title",
+          ".ui-task-row.selected .ui-task-row-title, .orch-switcher-label",
         );
         if (picked?.textContent !== expected) return false;
         const el = document.querySelector(sel);
@@ -494,11 +502,9 @@ try {
       { sel: selector, expected: title },
       { timeout: 10000 },
     );
-    // The panel fills the canvas: exactly one pane is left to maximize.
+    // Opening focuses the one Orchestrator pane; it never adds a second.
     await page.waitForFunction(
-      () =>
-        document.querySelectorAll('button[aria-label^="Maximize"]').length ===
-        1,
+      () => document.querySelectorAll(".orchestrator-panel").length === 1,
       undefined,
       { timeout: 10000 },
     );
@@ -526,13 +532,14 @@ try {
     report.leftSection = (await routines.count()) === 0;
   } catch (error) {
     report.openFlowError = String(error.message ?? error).split("\n")[0];
+    await page.screenshot({ path: shot("orchestrator-open-failure") });
   }
 
   // Quick answer: the Stop option, then the short confirmation.
   await mascot.locator(".bubble.input").waitFor();
   await mascot.getByRole("button", { name: "Stop", exact: true }).click();
   await mascot.getByRole("button", { name: "Send answer" }).click();
-  await mascot.locator(".bubble.answered").waitFor({ timeout: 10000 });
+  await mascot.locator(".bubble.confirmed").waitFor({ timeout: 10000 });
   await shotMascot("mascot-answered");
   report.mascot.answered = await bubbleText();
   await mascot
@@ -592,7 +599,7 @@ try {
   await page.waitForTimeout(500);
   report.inbox.stillOpen = (await inboxHeading.count()) === 1;
 
-  // Run again restarts the task through orchd's task.start.
+  // Run again restarts the task through the orchestrator's task.start.
   const rerunTask = tasks["Rerun me"];
   const rerunFile = `${dataDir}/tasks/${rerunTask.id}/task.json`;
   await showNotice("Rerun me", "Rerun me");
@@ -708,7 +715,7 @@ try {
     problems.push("a second Answer all closed the Inbox");
   if (!report.rerun.restarted)
     problems.push("Run again did not restart the task");
-  if (!/the task carries on\.$/.test(report.mascot.answered))
+  if (!/The task carries on\.$/.test(report.mascot.answered))
     problems.push("no Answered confirmation");
   if (report.openFlowError) problems.push(`open flow: ${report.openFlowError}`);
   if (problems.length) report.error = problems.join("; ");
@@ -721,7 +728,14 @@ try {
     .catch(() => {});
 } finally {
   if (app) await app.close().catch(() => {});
-  await fs.rm(profile, { recursive: true, force: true });
+  stopDaemon(daemonHome);
+  // A shell that exits late may still write its history into HOME.
+  await fs.rm(profile, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 200,
+  });
   await fs
     .writeFile(
       `${root}/artifacts/mascot-report.json`,

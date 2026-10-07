@@ -74,72 +74,6 @@ async function legacyActivityBurst(file) {
   }
 }
 
-function createHerdrFixture() {
-  const workspaces = Array.from({ length: 100 }, (_, workspaceIndex) => ({
-    workspace_id: `workspace-${workspaceIndex}`,
-    label: `Workspace ${workspaceIndex}`,
-  }));
-  const panes = [];
-  const current = workspaces.map((workspace) => ({
-    id: `herdr:local:${workspace.workspace_id}`,
-    name: workspace.label,
-    cwd: "/tmp",
-    herdrId: workspace.workspace_id,
-    connection: "local",
-    panels: Array.from({ length: 100 }, (_, panelIndex) => ({
-      id: `herdr:local:${workspace.workspace_id}:pane-${panelIndex}`,
-      kind: "terminal",
-      title: "zsh",
-      herdrId: `pane-${panelIndex}`,
-      status: "idle",
-    })),
-    layout: null,
-  }));
-  for (const workspace of workspaces) {
-    for (let paneIndex = 0; paneIndex < 1000; paneIndex += 1) {
-      panes.push({
-        pane_id: `pane-${paneIndex}`,
-        workspace_id: workspace.workspace_id,
-        agent_status: "idle",
-      });
-    }
-  }
-  return { current, snapshot: { workspaces, panes } };
-}
-
-function legacyHerdrMatch({ current, snapshot }) {
-  let matched = 0;
-  for (const workspace of current) {
-    const panes = snapshot.panes.filter(
-      (pane) => pane.workspace_id === workspace.herdrId,
-    );
-    for (const pane of panes) {
-      if (workspace.panels.find((panel) => panel.herdrId === pane.pane_id))
-        matched += 1;
-    }
-  }
-  return matched;
-}
-
-function indexedHerdrMatch({ current, snapshot }) {
-  const panesByWorkspace = new Map();
-  for (const pane of snapshot.panes) {
-    const panes = panesByWorkspace.get(pane.workspace_id) || [];
-    panes.push(pane);
-    panesByWorkspace.set(pane.workspace_id, panes);
-  }
-  let matched = 0;
-  for (const workspace of current) {
-    const panelsByHerdr = new Map(
-      workspace.panels.map((panel) => [panel.herdrId, panel]),
-    );
-    for (const pane of panesByWorkspace.get(workspace.herdrId) || []) {
-      if (panelsByHerdr.has(pane.pane_id)) matched += 1;
-    }
-  }
-  return matched;
-}
-
 function createExtensionSnapshot() {
   const extensions = Array.from({ length: 20 }, (_, extensionIndex) => {
     const extensionId = `user.extension-${extensionIndex}`;
@@ -307,20 +241,6 @@ async function main() {
               await rm(directory, { recursive: true, force: true });
             }
           },
-        },
-      ])),
-    );
-
-    const herdrFixture = createHerdrFixture();
-    results.push(
-      ...(await measureVariants([
-        {
-          label: "herdr-baseline-linear-match",
-          task: () => legacyHerdrMatch(herdrFixture),
-        },
-        {
-          label: "herdr-optimized-indexed-match",
-          task: () => indexedHerdrMatch(herdrFixture),
         },
       ])),
     );

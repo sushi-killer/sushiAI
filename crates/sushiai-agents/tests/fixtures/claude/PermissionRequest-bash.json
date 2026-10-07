@@ -1,0 +1,33 @@
+{
+  "session_id": "ebe952de-3f08-47da-92e5-697ac46fbbc1",
+  "transcript_path": "/home/user/.claude/projects/-home-user-proj/ebe952de-3f08-47da-92e5-697ac46fbbc1.jsonl",
+  "cwd": "/home/user/proj",
+  "prompt_id": "4bd9bf75-0fe7-49c9-8f40-ab646ee03c0c",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "touch probe2.txt && ls /nonexistent_probe_dir",
+    "description": "Create probe file and list a nonexistent directory"
+  },
+  "permission_suggestions": [
+    {
+      "type": "addRules",
+      "rules": [
+        {
+          "toolName": "Bash",
+          "ruleContent": "touch probe2.txt"
+        },
+        {
+          "toolName": "Bash",
+          "ruleContent": "ls /nonexistent_probe_dir"
+        }
+      ],
+      "behavior": "allow",
+      "destination": "localSettings"
+    }
+  ]
+}

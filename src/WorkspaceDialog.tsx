@@ -17,10 +17,11 @@ import type {
   Project,
   ProjectGitFailure,
 } from "./types";
-import { Tag, Toggle } from "./orchestrator/ui";
-import { GitRecovery } from "./orchestrator/GitRecovery";
+import { Tag, Toggle } from "./ui";
+import { GitRecovery } from "./ui/GitRecovery";
 import { inspectProjectSource } from "./projectSource";
-import { openSettings } from "./app/openSettings";
+import { LOCAL_ENDPOINT } from "./daemonSessions";
+import { openSettings } from "./lib/openSettings";
 import {
   DoneRow,
   HostProgress,
@@ -66,7 +67,6 @@ const SOURCES: [Source, string, typeof GitBranch][] = [
 export function WorkspaceDialog({
   defaultCwd,
   activeEndpoint,
-  localSocket,
   connectionProfiles,
   statusByEndpoint,
   onCreate,
@@ -75,13 +75,11 @@ export function WorkspaceDialog({
 }: {
   defaultCwd: string;
   activeEndpoint?: string;
-  localSocket: string;
   connectionProfiles: ConnectionProfile[];
   statusByEndpoint: Record<string, string>;
   onCreate(
     name: string,
     cwd: string,
-    backend: string,
     starter: string,
     endpoint?: string,
     operationId?: string,
@@ -91,16 +89,12 @@ export function WorkspaceDialog({
 }) {
   const hosts = useMemo<Host[]>(
     () => [
-      ...(localSocket
-        ? [
-            {
-              endpoint: localSocket,
-              label: "This Mac",
-              cwd: defaultCwd,
-              local: true,
-            },
-          ]
-        : []),
+      {
+        endpoint: LOCAL_ENDPOINT,
+        label: "This Mac",
+        cwd: defaultCwd,
+        local: true,
+      },
       ...connectionProfiles
         .filter((profile) => !profile.hidden)
         .map((profile) => ({
@@ -110,14 +104,14 @@ export function WorkspaceDialog({
           local: false,
         })),
     ],
-    [localSocket, connectionProfiles, defaultCwd],
+    [connectionProfiles, defaultCwd],
   );
   const [step, setStep] = useState<Step>("source");
   const [source, setSource] = useState<Source>("git");
   const [url, setUrl] = useState("");
   const [cwd, setCwd] = useState(defaultCwd);
   const [folderEndpoint, setFolderEndpoint] = useState(
-    activeEndpoint || localSocket,
+    activeEndpoint || LOCAL_ENDPOINT,
   );
   const [homeDir, setHomeDir] = useState("");
   const [name, setName] = useState("");
@@ -129,9 +123,9 @@ export function WorkspaceDialog({
   const sourceGeneration = useRef(0);
   const [reading, setReading] = useState(false);
   const [recent, setRecent] = useState<string[]>([]);
-  const [selectedHosts, setSelectedHosts] = useState<string[]>(() =>
-    [activeEndpoint || localSocket].filter(Boolean),
-  );
+  const [selectedHosts, setSelectedHosts] = useState<string[]>(() => [
+    activeEndpoint || LOCAL_ENDPOINT,
+  ]);
   const [variables, setVariables] = useState<Variable[]>([]);
   const [plainCount, setPlainCount] = useState(0);
   const [showPlain, setShowPlain] = useState(false);
@@ -194,12 +188,11 @@ export function WorkspaceDialog({
         ),
       )
       .catch(() => {});
-    if (localSocket)
-      window.bridge
-        ?.projectInspect(localSocket, { operation: "home" })
-        .then((info) => setHomeDir(info.home))
-        .catch(() => {});
-  }, [localSocket]);
+    window.bridge
+      ?.projectInspect(LOCAL_ENDPOINT, { operation: "home" })
+      .then((info) => setHomeDir(info.home))
+      .catch(() => {});
+  }, []);
   useEffect(() => {
     if (!accountMenu) return;
     const close = (event: MouseEvent) => {
@@ -277,7 +270,6 @@ export function WorkspaceDialog({
           cwd,
           name: label,
           home: localHome,
-          localSocket,
           folderEndpoint,
           folderLocal: !!hosts.find((host) => host.endpoint === folderEndpoint)
             ?.local,
@@ -398,7 +390,6 @@ export function WorkspaceDialog({
       const created = await onCreate(
         project.name,
         target,
-        project.sessions.backend || "local",
         "shell",
         host.local ? undefined : host.endpoint,
         operationId,
@@ -451,7 +442,6 @@ export function WorkspaceDialog({
         setup: { install, check: "" },
         sessions: {
           claudeAccount: accountId || undefined,
-          backend: selected.some((host) => !host.local) ? "herdr" : "local",
         },
       });
       setProjectRef(project.id);

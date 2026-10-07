@@ -12,8 +12,6 @@
 // crosses the IPC boundary — renderer-facing methods only ever return
 // `hasKey`/`keyHint`.
 const { randomUUID } = require("node:crypto");
-const fs = require("node:fs/promises");
-const path = require("node:path");
 const { appDb, putStore, readStore, transaction } = require("./app-db.cjs");
 
 const PRESETS = {
@@ -150,36 +148,6 @@ class ModelProviders {
     const secrets = this.#read("secrets");
     delete secrets[`claude-account:${id}`];
     this.#write({ "claude-accounts": accounts, secrets });
-  }
-
-  async stageClaudeAccount(id, dir) {
-    const accounts = this.#read("claude-accounts");
-    const account = accounts[id];
-    if (!account) throw new Error("Unknown Claude account.");
-    const secrets = this.#read("secrets");
-    const secret = secrets[`claude-account:${id}`];
-    if (!secret) throw new Error(`Add a value for ${account.label} first.`);
-    const bytes = Buffer.from(secret.ct, "base64");
-    const value =
-      secret.backend === "plain"
-        ? bytes.toString("utf8")
-        : this.safeStorage.decryptString(bytes);
-    const base = path.join(dir, `sushiai-claude-${randomUUID()}`);
-    if (account.kind === "subscription") {
-      await fs.writeFile(`${base}.token`, value, { mode: 0o600 });
-      return { kind: account.kind, tokenPath: `${base}.token` };
-    }
-    await fs.writeFile(`${base}.key`, value, { mode: 0o600 });
-    await fs.writeFile(
-      `${base}.json`,
-      JSON.stringify({ apiKeyHelper: `cat '${base}.key'` }),
-      { mode: 0o600 },
-    );
-    return {
-      kind: account.kind,
-      settingsPath: `${base}.json`,
-      keyPath: `${base}.key`,
-    };
   }
 
   async resolveClaudeAccount(id) {
@@ -344,7 +312,7 @@ class ModelProviders {
         ? `${profile.modelId}[1m]`
         : profile.modelId;
     // No ANTHROPIC_API_KEY/AUTH_TOKEN here: the key goes through
-    // apiKeyHelper (see stageSettings).
+    // apiKeyHelper (a daemon session gets the key in its environment).
     const settings = {
       ANTHROPIC_BASE_URL: provider.baseUrl,
       ANTHROPIC_MODEL: launchModelId,
@@ -357,28 +325,6 @@ class ModelProviders {
     if (profile.contextWindow && !claudeFamily)
       settings.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(profile.contextWindow);
     return { settings, key, model: launchModelId, label: profile.label };
-  }
-
-  /**
-   * Writes `<dir>/sushiai-model-<uuid>.json` for `claude --settings` and the
-   * `.key` file next to it. The key is fed through apiKeyHelper, not
-   * ANTHROPIC_API_KEY: interactive Claude Code only uses an env API key the
-   * user approved once ("Detected a custom API key…"), and a key that got
-   * rejected there, or never answered, is silently dropped. The provider then
-   * returns "401 Missing API key" forever, while `claude -p` works because it
-   * skips that check. apiKeyHelper has no approval step and sends the key as
-   * both x-api-key and Bearer, which covers OpenCode Go and OpenRouter.
-   */
-  async stageSettings(profileId, dir) {
-    const { settings, key } = await this.resolveEnv(profileId);
-    const base = path.join(dir, `sushiai-model-${randomUUID()}`);
-    await fs.writeFile(`${base}.key`, key, { mode: 0o600 });
-    // ponytail: assumes `dir` has no single quote (os.tmpdir() doesn't).
-    const document = { apiKeyHelper: `cat '${base}.key'`, env: settings };
-    await fs.writeFile(`${base}.json`, JSON.stringify(document), {
-      mode: 0o600,
-    });
-    return `${base}.json`;
   }
 
   async testConnection(id) {

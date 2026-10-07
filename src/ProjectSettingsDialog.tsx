@@ -8,7 +8,7 @@ import { ProjectHostsTab } from "./ProjectHostsTab";
 import { ProjectWorktreesTab } from "./ProjectWorktreesTab";
 import { ProjectPage } from "./ProjectPage";
 import { repoSlug } from "./projectPrepare";
-import { takePendingTab } from "./app/openSettings";
+import { takePendingTab } from "./lib/openSettings";
 
 type Tab = "General" | "Environment" | "MCP servers" | "Worktrees" | "Hosts";
 const TABS = [
@@ -191,7 +191,7 @@ export function ProjectSettingsDialog({
               The project disappears from the sidebar and its {sessionCount}{" "}
               {sessionCount === 1 ? "session stops" : "sessions stop"}.
               {remote
-                ? " Herdr sessions on the host are closed."
+                ? " Sessions on the host are closed."
                 : " Local terminals stop and unsaved file edits are lost."}
             </p>
             <div className="pd-confirm-actions">

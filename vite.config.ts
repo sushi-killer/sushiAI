@@ -8,7 +8,7 @@ export default defineConfig({
     strictPort: true,
     // Task worktrees live inside the repo; an agent's edit there must not reload the dev window.
     watch: {
-      ignored: ["**/.sushiai/**", "**/orchd/target/**", "**/release/**"],
+      ignored: ["**/.sushiai/**", "**/target/**", "**/release/**"],
     },
   },
   build: {

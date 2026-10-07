@@ -1,11 +1,119 @@
-export type PanelKind =
-  "agent" | "terminal" | "browser" | "chat" | "files" | "orchestrator";
+export type PanelKind = "agent" | "terminal" | "browser" | "chat" | "files";
+export type Connector = { kind: "ssh" } | { kind: "command"; argv: string[] };
+export type ConnectorState = {
+  /** "local" or a connection id. */
+  host: string;
+  state: "connecting" | "ready" | "need_auth" | "failed" | "offline";
+  reason?:
+    | "host_key_changed"
+    | "revoked"
+    | "incompatible"
+    | "not_installed"
+    | "daemon_died"
+    | (string & {});
+  message?: string;
+  /** A command the owner can copy to fix the problem (e.g. forget a changed host key). */
+  hint?: string;
+  version?: string;
+  capabilities?: string[];
+  /** The daemon's binary differs from the one bundled with this app. */
+  update?: boolean;
+  /** Bumps on every reconnect; events of an older generation are stale. */
+  generation: number;
+};
+/** One entry of `daemonStates()` and the payload of `daemon-state`. */
+export type DaemonState = ConnectorState;
+export type DaemonAsk = {
+  askId: string;
+  session: string;
+  tool?: string | null;
+  input: unknown;
+};
+/** Mirrors the Rust `SessionInfo` (camelCase, agent fields flattened). */
+export type DaemonSession = {
+  id: string;
+  cmd: string[];
+  cwd: string;
+  title?: string | null;
+  /** Process status. */
+  status: "running" | "detached" | "exited";
+  exitCode?: number;
+  holderPid?: number;
+  cols: number;
+  rows: number;
+  agent?: string;
+  agentSession?: string;
+  transcriptPath?: string;
+  agentStatus?: "starting" | "working" | "blocked" | "idle" | "exited";
+  statusSource?: "hook" | "heuristic";
+  /** Unix milliseconds of the last agent status change. */
+  statusSince?: number;
+  asks?: DaemonAsk[];
+  /** Catalog binding (gap G11) and shell title (gap G13); not in Rust yet. */
+  project?: string;
+  group?: string;
+  terminalTitle?: string;
+};
+export type DaemonEventBody =
+  | { method: "session.created"; params: DaemonSession }
+  | { method: "session.updated"; params: DaemonSession }
+  | { method: "session.removed"; params: { id: string } }
+  | { method: "session.exited"; params: { id: string; code: number | null } }
+  | { method: "session.status"; params: unknown }
+  | { method: "session.meta"; params: unknown }
+  | { method: "session.ask"; params: DaemonAsk }
+  | { method: "session.askClosed"; params: { id?: string; askId: string } }
+  | {
+      method: "session.open";
+      params: { id: string; target: string; arg: string; nonce: string };
+    }
+  | { method: "session.resync"; params: { id?: string } };
+export type DaemonEvent = DaemonEventBody & {
+  host: string;
+  generation: number;
+};
+/** Launch through the daemon; process variables and claudeSettings are built in main. */
+export type DaemonLaunchRequest = {
+  host: string;
+  agent?: string;
+  cwd: string;
+  cols: number;
+  rows: number;
+  title?: string;
+  model?: string;
+  prompt?: string;
+  resume?: string;
+  extraArgs?: string[];
+  project?: string;
+  group?: string;
+  claudeAccountId?: string;
+  codexAccountId?: string;
+  modelProfileId?: string;
+  worktree?: { branch: string; base?: string };
+  idempotencyKey: string;
+};
+export type DaemonTerminalEvent = {
+  panelId: string;
+  data?: string;
+  snapshot?: string;
+  cols?: number;
+  rows?: number;
+  exited?: boolean;
+};
+export type HostInstallResult = {
+  status: "installed" | "unchanged" | "restarted";
+  version: string;
+  path: string;
+  platform: string;
+  sha256: string;
+};
 export type ConnectionProfile = {
   id: string;
   name: string;
   host: string;
   port?: number;
-  socket: string;
+  /** How the desktop reaches the sushiai daemon on this host; ssh when unset. */
+  connector?: Connector;
   connected?: boolean;
   /** Hidden from the workspace sidebar - the tunnel itself is unaffected. */
   hidden?: boolean;
@@ -21,18 +129,6 @@ export type Message = {
   /** The model that actually answered, as the CLI resolved it. */
   model?: string;
 };
-/** What the Orchestrator panel shows: home (the default), the plan, its
- * chat, one task, improvements, analytics, the archive or the
- * agent messages. Kept on the panel so a restart reopens the same view. */
-export type OrchestratorView =
-  | { kind: "home" }
-  | { kind: "plan" }
-  | { kind: "chat" }
-  | { kind: "task"; id: string }
-  | { kind: "improvements" }
-  | { kind: "analytics" }
-  | { kind: "archive" }
-  | { kind: "messages" };
 /** Where a Files pane was browsing: its root folder, the folder listed and the
  * open file ("" for none). Not part of the panel's remount key. */
 export type FilesView = { root: string; directory: string; file: string };
@@ -48,12 +144,9 @@ export type Companion = {
 };
 type PanelState = {
   id: string;
-  launchOperationId?: string;
-  launchError?: string;
   title: string;
   agent?: string;
   started?: boolean;
-  herdrId?: string;
   /** The pane's own working folder as the host last reported it. */
   paneCwd?: string;
   companion?: Companion;
@@ -70,15 +163,14 @@ type PanelState = {
     edit?: boolean;
     openToken?: number;
   };
-  orchestratorView?: OrchestratorView;
-  /** The host ("local" or "ssh:<id>") and the repo path on it this Orchestrator
-   * pane was pointed at; unset follows the workspace. */
-  orchestratorHost?: string;
-  orchestratorRepo?: string;
   filesView?: FilesView;
-  /** A Herdr pane that is gone from its host: the slot stays in the layout
+  /** A session that is gone from its host: the slot stays in the layout
    * with a Reopen button until the user reopens or closes it. */
   ended?: boolean;
+  /** The daemon session this panel is bound to. */
+  sessionId?: string;
+  /** The agent CLI's own session id, kept so Reopen can resume it. */
+  agentSession?: string;
   pinned?: boolean;
   updatedAt?: number;
   note?: string;
@@ -101,6 +193,8 @@ export type ExtensionPanel = PanelState & {
     contributionId: string;
     instanceId: string;
     stateVersion: number;
+    /** Opaque per-pane arguments a core view reads and may rewrite. */
+    args?: Record<string, string>;
   };
 };
 export type Panel = CorePanel | ExtensionPanel;
@@ -163,51 +257,8 @@ export type SessionLaunchRequest = {
   worktree?: { branch: string; base?: string };
   /** The agent CLI's first prompt (agent sessions only). */
   prompt?: string;
-};
-export type SessionLaunchValue = {
-  operationId: string;
-  workspaceId: string;
-  paneId: string;
-  cwd: string;
-  createdWorkspace: boolean;
-};
-export type SessionLaunchResult =
-  | { ok: true; value: SessionLaunchValue }
-  | {
-      ok: false;
-      error: {
-        code: string;
-        message: string;
-        retryable: boolean;
-        stage: string;
-        created?: SessionLaunchValue;
-      };
-    };
-export type HerdrCompatibility = {
-  endpoint: string;
-  compatible: boolean;
-  expected: { version: string; protocol: number };
-  daemon: {
-    available: boolean;
-    compatible: boolean;
-    version?: string;
-    protocol?: number;
-  };
-  cli: {
-    available: boolean;
-    compatible: boolean;
-    version?: string;
-    protocol?: number;
-    stream: boolean;
-  };
-  issues: string[];
-};
-export type HerdrEvent = {
-  endpoint: string;
-  generation: number;
-  type: "connected" | "disconnected" | "changed";
-  event?: string;
-  error?: { code: string; message: string };
+  /** The agent CLI session to resume (Reopen). */
+  resume?: string;
 };
 export type Layout =
   | { type: "leaf"; id: string }
@@ -223,13 +274,10 @@ export type Workspace = {
   id: string;
   name: string;
   cwd: string;
-  herdrId?: string;
   localWorktree?: boolean;
   /** The branch of the new worktree this workspace was launched into. */
   worktreeBranch?: string;
   connection?: string;
-  /** Metadata tokens the host reported for this workspace; never saved. */
-  herdrTokens?: Record<string, string>;
   panels: Panel[];
   layout: Layout | null;
 };
@@ -255,7 +303,6 @@ export type Project = {
   sessions: {
     claudeAccount?: string;
     codexAccount?: string;
-    backend?: "herdr" | "local";
   };
   targets: string[];
   hosts?: Record<
@@ -323,6 +370,17 @@ export type WorktreeList =
     }
   | { host: string; cwd: string; error: string };
 
+/** What a host offers a project's runs: git, a C linker and each agent CLI
+ * with whether it is installed and signed in. */
+export type HostCliReadiness = {
+  git: boolean;
+  /** A C linker (cc or gcc), which a Rust build needs; absent on old hosts' data. */
+  cc?: boolean;
+  claude: { installed: boolean; loggedIn: boolean };
+  codex: { installed: boolean; loggedIn: boolean };
+  checkedAt: number;
+};
+
 export type ProjectHostReadiness = {
   /** `uname -sm` of the host, e.g. "Linux x86_64". */
   platform?: string;
@@ -334,7 +392,7 @@ export type ProjectHostReadiness = {
     stale?: boolean;
     lockFile?: string;
   };
-  clis: import("./orchestrator/types.ts").Preflight;
+  clis: HostCliReadiness;
   mcp: {
     ok: boolean;
     count: number;
@@ -345,28 +403,9 @@ export type ProjectHostReadiness = {
   /** The owner switched sending this project's values to the host off. */
   withheld: boolean;
 };
-export type Snapshot = {
-  version: string;
-  workspaces: {
-    workspace_id: string;
-    label: string;
-    worktree?: { checkout_path: string };
-    tokens?: Record<string, string>;
-  }[];
-  panes: {
-    pane_id: string;
-    workspace_id: string;
-    cwd?: string;
-    label?: string;
-    agent?: string;
-    agent_status: string;
-    terminal_title_stripped?: string;
-  }[];
-};
 export type System = {
   home: string;
   cwd: string;
-  socketPath: string;
   platform: string;
   agents: { name: string; path: string | null }[];
 };
@@ -491,7 +530,7 @@ export type AppPreferences = {
   runInMenuBar: boolean;
   /** macOS notifications for agents that need input or finished. */
   notifications: boolean;
-  /** Shows orchd task notices in a desktop mascot instead of a native
+  /** Shows orchestrator task notices in a desktop mascot instead of a native
    * notification (needs notifications on). */
   desktopMascot: boolean;
   /** Opt-in global shortcut that toggles the mascot. */
@@ -571,62 +610,58 @@ export interface Bridge {
   chooseDirectory(): Promise<string | null>;
   chooseAttachments(): Promise<string[]>;
   pathForFile(file: File): string;
-  /** What to type into a Herdr pane so the project's values reach its shell. */
-  projectSessionEnv(options: {
-    endpoint: string;
-    cwd: string;
-    agent?: string;
-    claudeAccountId?: string;
-    codexAccountId?: string;
-    modelProfileId?: string;
-  }): Promise<{ prefix: string; settings: string; launch: string }>;
-  terminalOpen(options: {
-    panelId: string;
-    cwd: string;
-    command?: string;
-    cols?: number;
-    rows?: number;
-    endpoint?: string;
-    herdrId?: string;
-    modelProfileId?: string;
-    claudeAccountId?: string;
-    codexAccountId?: string;
-    streamId?: string;
-  }): Promise<{ history: string; exited?: boolean; streamId?: string }>;
-  terminalAck(
-    panelId: string,
-    streamId: string,
-    sequence: number,
+  daemonStates(): Promise<DaemonState[]>;
+  onDaemonState(callback: (state: DaemonState) => void): () => void;
+  sessionsList(host: string): Promise<DaemonSession[]>;
+  onDaemonEvent(callback: (event: DaemonEvent) => void): () => void;
+  daemonSessionLaunch(
+    request: DaemonLaunchRequest,
+  ): Promise<{ host: string; sessionId: string; cwd: string }>;
+  sessionClose(host: string, id: string, graceful: boolean): Promise<void>;
+  sessionUpdate(
+    host: string,
+    patch: { id: string; project?: string; group?: string; title?: string },
   ): Promise<void>;
-  terminalWrite(panelId: string, data: string): Promise<void>;
-  terminalAttach(input: {
-    panelId: string;
-    name: string;
-    data: string;
-  }): Promise<string>;
-  terminalResize(panelId: string, cols: number, rows: number): Promise<void>;
-  terminalClose(panelId: string): Promise<void>;
-  terminalScroll(
-    panelId: string,
-    direction: string,
-    lines: number,
-    position?: { column: number; row: number; fast?: boolean },
+  sessionRead(
+    host: string,
+    id: string,
+    scrollback?: number,
+  ): Promise<{ text: string; rows: number; cols: number }>;
+  sessionInput(host: string, id: string, data: string): Promise<void>;
+  askRespond(
+    host: string,
+    response: {
+      sessionId: string;
+      askId: string;
+      decision: "allow" | "deny";
+      message?: string;
+    },
   ): Promise<void>;
-  herdr(
-    socket: string,
-    method: string,
-    params?: Record<string, unknown>,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic RPC passthrough, callers narrow the result themselves
-  ): Promise<any>;
-  sessionLaunch(request: SessionLaunchRequest): Promise<SessionLaunchResult>;
-  herdrCompatibility(endpoint: string): Promise<HerdrCompatibility>;
-  herdrInstall(endpoint: string): Promise<{ binary: string }>;
-  herdrSubscribe(
-    endpoint: string,
-    subscriptionId: string,
-  ): Promise<{ generation: number }>;
-  herdrUnsubscribe(endpoint: string, subscriptionId: string): Promise<void>;
-  onHerdr(callback: (event: HerdrEvent) => void): () => void;
+  daemonTerminalAttach(input: {
+    panelId: string;
+    host: string;
+    sessionId: string;
+    cols: number;
+    rows: number;
+    scrollback?: number;
+  }): Promise<void>;
+  daemonTerminalWrite(panelId: string, data: string): Promise<void>;
+  daemonTerminalResize(
+    panelId: string,
+    cols: number,
+    rows: number,
+  ): Promise<void>;
+  daemonTerminalDetach(panelId: string): Promise<void>;
+  daemonTerminalAck(panelId: string, bytes: number): Promise<void>;
+  daemonTerminalAttachFile(panelId: string, path: string): Promise<void>;
+  /** Pasted data with no path on disk (local host only in slice 1). */
+  daemonTerminalAttachData(
+    panelId: string,
+    name: string,
+    bytes: Uint8Array,
+  ): Promise<void>;
+  onDaemonTerminal(callback: (event: DaemonTerminalEvent) => void): () => void;
+  hostInstall(host: string): Promise<HostInstallResult>;
   /** Raw NDJSON-RPC passthrough to the orchestrator daemon; the renderer's
    * typed wrapper is `src/orchestrator/client.ts`. */
   orchestrator(
@@ -642,12 +677,12 @@ export interface Bridge {
   orchestratorPreflight(
     host: string,
   ): Promise<import("./orchestrator/types.ts").Preflight | null>;
-  /** The owner's one button: provisions the host, installing Rust there first
-   * when orchd has to be built and cargo is missing. */
+  /** The owner's one button: installs or updates the bundled sushiai on the
+   * host and restarts its daemon. */
   orchestratorHostSetup(
     host: string,
   ): Promise<import("./orchestrator/types.ts").Preflight | null>;
-  /** A ping of the host's current connection that never starts or
+  /** A liveness check of the host's current connection that never starts or
    * provisions its daemon. */
   orchestratorProbe(host: string): Promise<{ pid: number }>;
   onOrchestratorHosts(callback: () => void): () => void;
@@ -656,7 +691,7 @@ export interface Bridge {
       event: import("./orchestrator/types.ts").OrchestratorEvent,
     ) => void,
   ): () => void;
-  /** The owner clicked a native orchd notification or the desktop mascot's
+  /** The owner clicked a native orchestrator notification or the desktop mascot's
    * Open button. */
   onOrchestratorOpen(
     callback: (target: import("./orchestrator/notices.ts").TaskTarget) => void,
@@ -675,18 +710,6 @@ export interface Bridge {
   }): Promise<unknown>;
   cancelChat(panelId: string): Promise<void>;
   chatModels(): Promise<ChatModels>;
-  onTerminal(
-    callback: (event: {
-      panelId: string;
-      data: string;
-      exitCode?: number;
-      agent?: string | null;
-      streamId?: string;
-      sequence?: number;
-      reset?: boolean;
-      error?: string;
-    }) => void,
-  ): () => void;
   onChat(callback: (event: ChatEvent) => void): () => void;
   catalog(
     kind: string,
@@ -764,7 +787,6 @@ export interface Bridge {
     contextWindow?: number;
   }): Promise<ModelProfile>;
   modelProfilesDelete(id: string): Promise<void>;
-  modelLaunch(modelProfileId: string): Promise<string>;
   claudeAccountsList(): Promise<ClaudeAccount[]>;
   claudeAccountsUpsert(input: {
     id?: string;
@@ -815,6 +837,20 @@ export interface Bridge {
     extensionId: string,
     enabled: boolean,
   ): Promise<import("./extensions/types.ts").ExtensionSnapshot>;
+  companionRead(
+    extensionId: string,
+    surfaceId: string,
+  ): Promise<import("./extensions/types.ts").CompanionResult>;
+  companionAction(
+    extensionId: string,
+    surfaceId: string,
+    actionId: string,
+  ): Promise<import("./extensions/types.ts").CompanionResult>;
+  /** Records consent to the exact path, args and permissions in the listing. */
+  extensionApprove(extensionId: string): Promise<void>;
+  onCompanionChanged(
+    callback: (change: { extensionId: string; surfaceId: string }) => void,
+  ): () => void;
   window(action: string): Promise<void>;
   connectionsList(): Promise<ConnectionProfile[]>;
   connectionsSave(
@@ -825,10 +861,7 @@ export interface Bridge {
     hidden: boolean,
   ): Promise<ConnectionProfile>;
   connectionsDelete(endpoint: string): Promise<void>;
-  /** `setup` says what a fresh host was given ("" when nothing ran). */
-  connectionsConnect(
-    endpoint: string,
-  ): Promise<{ connected: boolean; setup: string }>;
+  connectionsConnect(endpoint: string): Promise<{ connected: boolean }>;
   connectionsDisconnect(endpoint: string): Promise<void>;
   connectionsForward(endpoint: string, url: string): Promise<string>;
   projectsList(): Promise<Project[]>;

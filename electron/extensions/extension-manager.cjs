@@ -2,6 +2,7 @@ const path = require("node:path");
 const { DAMAGED, readStore, writeStore } = require("../app-db.cjs");
 const { validateExtensionManifest } = require("./manifest.cjs");
 const { scanLocalExtensions } = require("./local-extensions.cjs");
+const { listSshHosts } = require("./hosts.cjs");
 
 const SCHEMA_VERSION = 2;
 
@@ -12,7 +13,15 @@ const DISABLEABLE_BUILTINS = new Set([
   "builtin.artifacts",
 ]);
 
-function defaultState(manifests = [], externalEnabled = false) {
+/** `startsOff` lists the built-in ids that begin switched off: the code that
+ * registers a built-in decides, opting in is then the owner's act. */
+function defaultEnabled(manifest, externalEnabled = false, startsOff = []) {
+  return manifest.source.kind === "builtin"
+    ? !startsOff.includes(manifest.id)
+    : externalEnabled;
+}
+
+function defaultState(manifests = [], externalEnabled = false, startsOff = []) {
   return {
     schemaVersion: SCHEMA_VERSION,
     revision: 0,
@@ -20,7 +29,7 @@ function defaultState(manifests = [], externalEnabled = false) {
       manifests.map((manifest) => [
         manifest.id,
         {
-          enabled: manifest.source.kind === "builtin" || externalEnabled,
+          enabled: defaultEnabled(manifest, externalEnabled, startsOff),
           overrides: {},
         },
       ]),
@@ -96,10 +105,20 @@ function lockMatchesManifest(lockEntry, manifest) {
 }
 
 class ExtensionManager {
-  constructor({ dataDir, builtins = [], installed = [], localDir }) {
+  /** `companions` is a createCompanions() supervisor (companion-process.cjs).
+   * Without one, a manifest's companion block is listed but never started. */
+  constructor({
+    dataDir,
+    builtins = [],
+    builtinsStartOff = [],
+    installed = [],
+    localDir,
+    companions,
+  }) {
     if (typeof dataDir !== "string" || !path.isAbsolute(dataDir))
       throw new Error("Extension data directory must be absolute.");
     this.dataDir = dataDir;
+    this.startsOff = builtinsStartOff;
     this.extensionDir = path.join(dataDir, "extensions");
     this.localDir = localDir;
     this.problems = [];
@@ -119,18 +138,35 @@ class ExtensionManager {
       this.static.set(normalized.id, normalized);
     }
     this.manifests = new Map(this.static);
-    this.state = defaultState([...this.manifests.values()]);
+    this.state = defaultState(
+      [...this.manifests.values()],
+      false,
+      this.startsOff,
+    );
     this.lock = defaultLock();
     this.diagnostic = undefined;
     this.revision = 0;
     this.listeners = new Set();
+    this.companions = companions;
+    this.companionIds = new Set();
+    this.companionListeners = new Set();
+    // A companion says a view changed: tell whoever draws it.
+    this.companions?.subscribe((event) => {
+      const surfaceIds =
+        event.type === "changed"
+          ? [event.surfaceId]
+          : this.companionSurfaces(event.extensionId);
+      for (const surfaceId of surfaceIds)
+        for (const listener of this.companionListeners)
+          listener({ extensionId: event.extensionId, surfaceId });
+    });
     // A failed init must not surface as an unhandled rejection: the manager is
     // built at main.cjs module scope, long before anything awaits `ready`.
     this.ready = this.init().catch((error) => {
       this.diagnostic = `Extension settings could not be initialized: ${error?.message || error}`;
       for (const manifest of this.manifests.values())
         this.state.extensions[manifest.id] = {
-          enabled: manifest.source.kind === "builtin",
+          enabled: defaultEnabled(manifest, false, this.startsOff),
           overrides: {},
         };
     });
@@ -139,6 +175,42 @@ class ExtensionManager {
   async init() {
     await this.reload();
     await this.reconcile();
+    await this.syncCompanions();
+  }
+
+  companionSurfaces(extensionId) {
+    return (
+      this.manifests
+        .get(extensionId)
+        ?.contributions.surfaces.filter(
+          (surface) => surface.view.kind === "companion",
+        )
+        .map((surface) => surface.id) ?? []
+    );
+  }
+
+  /** Brings every companion process in line with the enabled state and the
+   * recorded approval. A manifest that went away loses its process. */
+  async syncCompanions(only) {
+    if (!this.companions) return;
+    const ids = only ? [only] : [...this.manifests.keys()];
+    for (const id of only ? [] : this.companionIds)
+      if (!this.manifests.has(id)) {
+        this.companionIds.delete(id);
+        await this.companions.remove(id);
+      }
+    for (const id of ids) {
+      const manifest = this.manifests.get(id);
+      if (!manifest?.companion) continue;
+      this.companionIds.add(id);
+      await this.companions.sync(id, {
+        manifest,
+        enabled: this.isEnabled(id),
+        approved: this.state.extensions[id]?.approved,
+        extensionDir:
+          manifest.source.kind === "local" ? manifest.source.path : undefined,
+      });
+    }
   }
 
   /** Re-reads the local extensions folder. The manifest map is replaced in one
@@ -159,7 +231,9 @@ class ExtensionManager {
   /** Rescans the folder and re-syncs settings without restarting the app. */
   async refresh() {
     this.ready = this.ready.then(() =>
-      this.reload().then(() => this.reconcile()),
+      this.reload()
+        .then(() => this.reconcile())
+        .then(() => this.syncCompanions()),
     );
     await this.ready;
     return this.snapshot();
@@ -169,8 +243,17 @@ class ExtensionManager {
     let stateWritable = true;
     let stateChanged = false;
     const stateFile = readDoc(this.dataDir, "extensions");
+    this.savedIds = new Set(
+      stateFile.exists && validState(stateFile.value)
+        ? Object.keys(stateFile.value.extensions)
+        : [],
+    );
     if (!stateFile.exists) {
-      this.state = defaultState([...this.manifests.values()]);
+      this.state = defaultState(
+        [...this.manifests.values()],
+        false,
+        this.startsOff,
+      );
     } else if (validState(stateFile.value)) {
       this.state = stateFile.value;
       this.revision = Number.isInteger(this.state.revision)
@@ -178,7 +261,11 @@ class ExtensionManager {
         : 0;
     } else {
       stateWritable = false;
-      this.state = defaultState([...this.manifests.values()], false);
+      this.state = defaultState(
+        [...this.manifests.values()],
+        false,
+        this.startsOff,
+      );
       this.diagnostic =
         "Extension settings were damaged or created by a newer version; external extensions were disabled.";
     }
@@ -200,6 +287,20 @@ class ExtensionManager {
           };
     }
     let lockChanged = false;
+    // A built-in the app no longer ships leaves its saved settings and lock
+    // entry behind: they are dropped, never shown and never an error.
+    const retired = (id) =>
+      id.startsWith("builtin.") && !this.manifests.has(id);
+    for (const id of Object.keys(this.state.extensions))
+      if (retired(id)) {
+        delete this.state.extensions[id];
+        stateChanged = true;
+      }
+    for (const id of Object.keys(this.lock.packages))
+      if (retired(id)) {
+        delete this.lock.packages[id];
+        lockChanged = true;
+      }
     for (const manifest of this.manifests.values()) {
       // A local folder has no package identity to pin: bumping the version in
       // your own manifest is the normal edit loop, not a supply-chain event.
@@ -239,7 +340,7 @@ class ExtensionManager {
       }
       if (!this.state.extensions[manifest.id]) {
         this.state.extensions[manifest.id] = {
-          enabled: manifest.source.kind === "builtin",
+          enabled: defaultEnabled(manifest, false, this.startsOff),
           overrides: {},
         };
         stateChanged = true;
@@ -292,6 +393,11 @@ class ExtensionManager {
     return this.state.extensions[extensionId]?.enabled === true;
   }
 
+  /** Whether the settings file already held a choice for the extension when it was last read. */
+  hasSavedState(extensionId) {
+    return this.savedIds?.has(extensionId) === true;
+  }
+
   /** Calls `listener(extensionId, enabled)` after a state change is saved. */
   onChange(listener) {
     this.listeners.add(listener);
@@ -307,6 +413,9 @@ class ExtensionManager {
         manifest,
         status: enabled ? "active" : "disabled",
         canDisable: canDisable(manifest),
+        ...(manifest.companion
+          ? { companion: this.companionStatus(manifest) }
+          : {}),
         ...(this.diagnostic && !enabled ? { error: this.diagnostic } : {}),
       };
     });
@@ -330,6 +439,90 @@ class ExtensionManager {
         (record) => record.manifest.contributions.commands,
       ),
     };
+  }
+
+  companionStatus(manifest) {
+    return (
+      this.companions?.status(manifest.id) ?? {
+        state: "off",
+        args: [...manifest.companion.args],
+        permissions: [...manifest.companion.permissions],
+      }
+    );
+  }
+
+  /** Records the owner's consent to run this extension's companion: the
+   * resolved path, args and permissions as they are now. A later change to any
+   * of the three asks again. There is no binary hash, so an update in place
+   * does not. */
+  async approve(extensionId) {
+    await this.ready;
+    const manifest = this.manifests.get(extensionId);
+    if (!manifest?.companion)
+      throw new Error(`Extension ${extensionId} declares no companion.`);
+    if (this.diagnostic)
+      throw new Error(
+        "External extensions are disabled until extension settings are repaired.",
+      );
+    const bound = this.companions?.describe(extensionId);
+    if (!bound?.resolvedPath)
+      throw new Error("The companion command cannot be resolved.");
+    this.state.extensions[extensionId] = {
+      ...(this.state.extensions[extensionId] || {
+        enabled: false,
+        overrides: {},
+      }),
+      approved: {
+        path: bound.resolvedPath,
+        args: [...bound.args],
+        permissions: [...bound.permissions],
+      },
+    };
+    this.revision += 1;
+    this.state.revision = this.revision;
+    writeDoc(this.dataDir, "extensions", this.state);
+    await this.syncCompanions(extensionId);
+  }
+
+  /** The companion view an enabled extension declared at this address. */
+  companionSurface(extensionId, surfaceId) {
+    const surface = this.activeSurface(extensionId, surfaceId);
+    if (!surface || surface.view.kind !== "companion")
+      throw new Error(
+        `No active companion view at ${extensionId}/${surfaceId}.`,
+      );
+    return surface;
+  }
+
+  async companionRead(extensionId, surfaceId) {
+    await this.ready;
+    const surface = this.companionSurface(extensionId, surfaceId);
+    return this.companions.read(extensionId, surfaceId, surface.view);
+  }
+
+  /** Runs one declared action. The renderer names only the action id: the
+   * method and what the host adds to the call come from the manifest. */
+  async companionAction(extensionId, surfaceId, actionId) {
+    await this.ready;
+    const surface = this.companionSurface(extensionId, surfaceId);
+    const action = surface.view.actions.find((item) => item.id === actionId);
+    if (!action) throw new Error(`Unknown companion action: ${actionId}.`);
+    const params = { surfaceId };
+    if (action.send?.includes("hosts"))
+      params.hosts = listSshHosts(() => this.companions.hosts());
+    return this.companions.call(
+      extensionId,
+      action.method,
+      params,
+      surface.view,
+    );
+  }
+
+  /** listener({extensionId, surfaceId}) when a companion view has new values
+   * or its process changed state. Returns an unsubscribe. */
+  onCompanionChanged(listener) {
+    this.companionListeners.add(listener);
+    return () => this.companionListeners.delete(listener);
   }
 
   async list() {
@@ -359,6 +552,7 @@ class ExtensionManager {
     this.state.revision = this.revision;
     writeDoc(this.dataDir, "extensions", this.state);
     for (const listener of this.listeners) listener(extensionId, enabled);
+    await this.syncCompanions(extensionId);
     return this.snapshot();
   }
 }

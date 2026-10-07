@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Check } from "lucide-react";
-import { Tag } from "./orchestrator/ui";
-import type { Tone } from "./orchestrator/helpers";
+import { Tag } from "./ui";
+import type { Tone } from "./ui/tone";
 
 /** One numbered step of the New project flow. A step that has not started is
  * drawn at half strength; the current one has a filled number. */

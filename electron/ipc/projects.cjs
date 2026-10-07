@@ -27,7 +27,6 @@ const {
 } = require("../project-git-ssh.cjs");
 const { remoteUrl } = require("../git-remote.cjs");
 const { slugOf } = require("../project-slug.cjs");
-const { setupHost, setupSummary } = require("../host-setup.cjs");
 const {
   hostProbeScript,
   FIND_CHECKOUTS_SH,
@@ -47,9 +46,12 @@ function registerProjectIpc({
   getConnections,
   getPreview,
   getClaudeMcp,
-  terminals,
-  terminalPending,
   projects,
+  // Connect / Disconnect go to the daemon manager (main.cjs gives these).
+  connectHost = () => {
+    throw new Error("The sushiai daemon is not running.");
+  },
+  onDisconnect = () => {},
 }) {
   const connections = () => {
     const value = getConnections();
@@ -958,13 +960,6 @@ function registerProjectIpc({
   }
 
   async function disconnectEndpoint(endpoint) {
-    for (const pending of terminalPending.values()) {
-      if (pending.endpoint === endpoint) pending.cancelled = true;
-    }
-    for (const terminal of terminals.values()) {
-      if (terminal.endpoint === endpoint && !terminal.exited)
-        terminal.proc.kill();
-    }
     await connections().disconnect(endpoint);
     if (endpoint?.startsWith("ssh:"))
       await connections().setAutoConnect(endpoint, false);
@@ -979,38 +974,11 @@ function registerProjectIpc({
     await disconnectEndpoint(endpoint);
     await connections().delete(endpoint);
   });
-  handle("connections-connect", async (endpoint) => {
-    const remote = endpoint?.startsWith("ssh:");
-    const socket = remote ? connections().get(endpoint).socket : "";
-    let setup = "";
-    try {
-      await connections().socket(endpoint);
-      // Anything else a session needs that the host lacks comes in behind.
-      if (remote)
-        void setupHost(connections(), endpoint, socket).catch(() => {});
-    } catch (error) {
-      if (!remote) throw error;
-      // A fresh server has no Herdr: set the host up, then connect again. A
-      // host ssh cannot reach fails the setup too, with the first error.
-      const states = await setupHost(connections(), endpoint, socket).catch(
-        () => {
-          throw error;
-        },
-      );
-      setup = setupSummary(states);
-      if (!["running", "started"].includes(states.server))
-        throw new Error(
-          `Couldn't set up the host: ${setupSummary(states) || "nothing ran"}.`,
-        );
-      await connections().socket(endpoint);
-    }
-    if (remote) {
-      await connections().exec(endpoint, 'mkdir -p "$HOME/sushiai"\n');
-      await connections().setAutoConnect(endpoint, true);
-    }
-    return { connected: true, setup };
+  handle("connections-connect", (endpoint) => connectHost(endpoint));
+  handle("connections-disconnect", async (endpoint) => {
+    onDisconnect(endpoint);
+    await disconnectEndpoint(endpoint);
   });
-  handle("connections-disconnect", disconnectEndpoint);
   handle("connections-forward", async (endpoint, url) => {
     const parsed = new URL(url);
     if (

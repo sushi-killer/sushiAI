@@ -19,6 +19,7 @@ const HOSTS = new Set([
   "workspace.pane",
   "workspace.tab",
   "settings.section",
+  "settings.page",
 ]);
 /** Where an entry may appear. Only defaultPlacement is read; the list is the
  * author saying which spots they designed for. */
@@ -227,6 +228,16 @@ const MAX_OPTIONS = 32;
 // The renderer draws views[0] and nothing else. Accepting four and showing one
 // is a promise the app does not keep, so the contract stops making it.
 const MAX_VIEWS = 1;
+// A companion process is a native program the app runs for an extension (see
+// companion-process.cjs). Its view is a form of values the process reports.
+const COMPANION_FIELD_TYPES = new Set(["text", "status", "qr"]);
+const COMPANION_PERMISSIONS = new Set(["hosts.read"]);
+const COMPANION_SEND = new Set(["hosts"]);
+const COMPANION_METHOD = /^[a-z][a-z0-9.]*$/;
+const MAX_COMPANION_ARGS = 8;
+const MAX_COMPANION_ARG_CHARS = 200;
+const MAX_COMPANION_FIELDS = 8;
+const MAX_COMPANION_ACTIONS = 4;
 // Group buckets the host computes rather than the extension storing them.
 // Readable in "meta" and "groupable" only: "sort" and "filterable" compare
 // stored values, and a computed bucket has none.
@@ -468,6 +479,95 @@ function expandCollection(document, at) {
   };
 }
 
+/** The optional top-level `companion` block. Omitted args and permissions
+ * become []. The command is a bare name: where it runs from is the host's
+ * decision, never the manifest's. */
+function validateCompanion(input, sourceKind) {
+  if (input === undefined) return undefined;
+  if (sourceKind === "builtin")
+    throw new Error("Built-in extensions may not declare a companion.");
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw new Error("companion must be an object.");
+  const command = id(input.command, "companion.command");
+  const args = input.args === undefined ? [] : input.args;
+  if (!Array.isArray(args) || args.length > MAX_COMPANION_ARGS)
+    throw new Error(
+      `companion.args must list at most ${MAX_COMPANION_ARGS} strings.`,
+    );
+  for (const arg of args)
+    if (typeof arg !== "string" || arg.length > MAX_COMPANION_ARG_CHARS)
+      throw new Error(
+        `companion.args entries are strings of at most ${MAX_COMPANION_ARG_CHARS} characters.`,
+      );
+  const permissions = input.permissions === undefined ? [] : input.permissions;
+  if (!Array.isArray(permissions))
+    throw new Error("companion.permissions must be a list.");
+  for (const permission of permissions)
+    if (!COMPANION_PERMISSIONS.has(permission))
+      throw new Error(
+        `companion.permissions: ${JSON.stringify(permission)} is not a permission. Use: ${[...COMPANION_PERMISSIONS].join(", ")}.`,
+      );
+  if (new Set(permissions).size !== permissions.length)
+    throw new Error("companion.permissions lists a permission twice.");
+  return { command, args: [...args], permissions: [...permissions] };
+}
+
+function validateCompanionView(view, at) {
+  const fields = Array.isArray(view.fields) ? view.fields : [];
+  if (fields.length > MAX_COMPANION_FIELDS)
+    throw new Error(
+      `${at}.view.fields may declare at most ${MAX_COMPANION_FIELDS} fields.`,
+    );
+  const actions = Array.isArray(view.actions) ? view.actions : [];
+  if (actions.length > MAX_COMPANION_ACTIONS)
+    throw new Error(
+      `${at}.view.actions may declare at most ${MAX_COMPANION_ACTIONS} actions.`,
+    );
+  const ids = new Set();
+  const outFields = fields.map((field, index) => {
+    const where = `${at}.view.fields[${index}]`;
+    const fieldId = id(field?.id, `${where}.id`);
+    if (ids.has(fieldId))
+      throw new Error(`${at}.view.fields: ${fieldId} is declared twice.`);
+    ids.add(fieldId);
+    return {
+      id: fieldId,
+      label: requiredString(field.label ?? fieldId, `${where}.label`),
+      type: choice(field.type, `${where}.type`, COMPANION_FIELD_TYPES, "text"),
+    };
+  });
+  const actionIds = new Set();
+  const labels = new Set();
+  const outActions = actions.map((action, index) => {
+    const where = `${at}.view.actions[${index}]`;
+    const actionId = id(action?.id, `${where}.id`);
+    if (actionIds.has(actionId))
+      throw new Error(`${at}.view.actions: ${actionId} is declared twice.`);
+    actionIds.add(actionId);
+    const label = requiredString(action.label, `${where}.label`);
+    if (labels.has(label))
+      throw new Error(`Duplicate extension action label: ${label}.`);
+    labels.add(label);
+    if (
+      typeof action.method !== "string" ||
+      !COMPANION_METHOD.test(action.method)
+    )
+      throw new Error(`${where}.method must match ${COMPANION_METHOD}.`);
+    const send = action.send === undefined ? [] : action.send;
+    if (!Array.isArray(send) || send.some((item) => !COMPANION_SEND.has(item)))
+      throw new Error(
+        `${where}.send may only list: ${[...COMPANION_SEND].join(", ")}.`,
+      );
+    return {
+      id: actionId,
+      label,
+      method: action.method,
+      ...(send.length ? { send: [...new Set(send)] } : {}),
+    };
+  });
+  return { kind: "companion", fields: outFields, actions: outActions };
+}
+
 function validateView(view, sourceKind, at, aggregate) {
   if (!view || typeof view !== "object")
     throw new Error(`${at}.view is required.`);
@@ -476,6 +576,7 @@ function validateView(view, sourceKind, at, aggregate) {
       throw new Error("Only built-in extensions may request core views.");
     return { kind: "core", viewId: id(view.viewId, "view.viewId") };
   }
+  if (view.kind === "companion") return validateCompanionView(view, at);
   if (view.kind !== "declarative")
     throw new Error(`${at}.view.kind must be "declarative".`);
   if (view.schemaVersion === 1)
@@ -569,6 +670,7 @@ function validateExtensionManifest(input) {
   if (input.scope !== undefined && input.scope !== "app")
     throw new Error("Only app-wide extensions are supported.");
   const source = validateExtensionSource(input.source);
+  const companion = validateCompanion(input.companion, source.kind);
   const contributions = input.contributions || {};
   const surfaces = (contributions.surfaces || []).map((surface) => {
     const surfaceId = id(surface?.id, "surface.id");
@@ -620,6 +722,13 @@ function validateExtensionManifest(input) {
     // An aggregate surface reads every project's slice of itself at once, so
     // it has no single project of its own and cannot be edited in place.
     const aggregate = surface.aggregate === true;
+    if (
+      surface.view?.kind === "companion" &&
+      (aggregate || stateId !== surfaceId)
+    )
+      throw new Error(
+        `${at}: a companion view may not aggregate or borrow state.`,
+      );
     if (aggregate && stateScope !== "project")
       throw new Error(
         `${at}.aggregate needs "stateScope": "project"; there is nothing to aggregate otherwise.`,
@@ -711,6 +820,23 @@ function validateExtensionManifest(input) {
       throw new Error(
         `${at}.stateId: ${owner.id} has no "${stray.id}" field, so that column would always be empty.`,
       );
+  }
+  for (const surface of surfaces) {
+    if (surface.view.kind !== "companion") continue;
+    const at = `surfaces[${surface.id}]`;
+    if (!surface.allowedHosts.every((host) => host === "settings.page"))
+      throw new Error(
+        `${at}: a companion view is only allowed on settings.page.`,
+      );
+    if (!companion)
+      throw new Error(
+        `${at}: a companion view needs a top-level companion block.`,
+      );
+    if (
+      surface.view.actions.some((action) => action.send?.includes("hosts")) &&
+      !companion.permissions.includes("hosts.read")
+    )
+      throw new Error(`${at}: send "hosts" needs the hosts.read permission.`);
   }
   const navigation = (contributions.navigation || []).map((item) => {
     const allowedPlacements = list(
@@ -826,6 +952,7 @@ function validateExtensionManifest(input) {
     ...(typeof input.description === "string"
       ? { description: input.description }
       : {}),
+    ...(companion ? { companion } : {}),
     contributions: { surfaces, navigation, actions, commands },
   };
 }
@@ -849,6 +976,9 @@ const CONTRACT = {
   STATE_SCOPES,
   ICONS,
   FIELD_TYPES,
+  COMPANION_FIELD_TYPES,
+  COMPANION_PERMISSIONS,
+  COMPANION_SEND,
   LAYOUTS,
   TONES,
   FILTER_OPS,

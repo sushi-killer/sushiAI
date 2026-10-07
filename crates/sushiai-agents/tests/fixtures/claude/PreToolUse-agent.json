@@ -1,0 +1,19 @@
+{
+  "session_id": "45c82c1b-a114-4291-8f22-808603b073c9",
+  "transcript_path": "/home/user/.claude/projects/-home-user-proj/45c82c1b-a114-4291-8f22-808603b073c9.jsonl",
+  "cwd": "/home/user/proj",
+  "scratchpad_dir": "/tmp/claude-1000/-home-user-proj/45c82c1b-a114-4291-8f22-808603b073c9/scratchpad",
+  "prompt_id": "8b3e2f4a-14cd-42fa-8878-93bd8c09ff18",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Agent",
+  "tool_input": {
+    "description": "Reply with ok",
+    "prompt": "Reply with just the word \"ok\" and nothing else. Do not use any tools.",
+    "subagent_type": "general-purpose"
+  },
+  "tool_use_id": "toolu_01F6LWQxtShyrzdt4U9CCW4G"
+}

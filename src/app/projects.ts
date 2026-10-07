@@ -1,15 +1,14 @@
 import type { ConnectionProfile, Workspace } from "../types";
 import type { ClosedProject } from "../workspaceState.ts";
-import { codePanels } from "../workspaceState.ts";
+import { closedProjectKey, codePanels } from "../workspaceState.ts";
 import type { ProjectGit } from "./useProjectGit.ts";
-import { closedProjectKey } from "../herdrIdentity.ts";
 import { computeMergeGroups, isHidden, memberLabel } from "./workspaceMerge.ts";
 
 /** A closed project's identity is its host endpoint + cwd - the same pair
  * that decides whether reopening it would just recreate an already-open
  * workspace. Used both as the remembered entry's `id` and as the pseudo
  * workspace id merging keys off (`closed:<endpoint>:<cwd>`), so the two never
- * drift apart. A concrete local socket identifies its own session server. */
+ * drift apart. This Mac is the endpoint "local". */
 export function closedProjectId(
   endpoint: string | undefined,
   cwd: string,

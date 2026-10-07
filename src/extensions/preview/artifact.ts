@@ -395,7 +395,7 @@ export function shownPath(path: string, cwd: string): string {
 
 /** The session started for a plan ended: no workspace runs its branch any more.
  * A fresh start gets a grace period, since its workspace shows up only with the
- * next Herdr snapshot. */
+ * next session list. */
 export function agentEnded(
   record: StartRecord | undefined,
   liveBranches: string[] | undefined,

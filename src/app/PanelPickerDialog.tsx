@@ -6,15 +6,13 @@ import {
   GitBranch,
   Globe,
   Lock,
-  ListTodo,
   Sparkles,
   TerminalSquare,
 } from "lucide-react";
 import { agentTitle } from "./agent-title.ts";
 import { Icon } from "../PanelIcon.tsx";
-import { openSettings } from "./openSettings.ts";
+import { openSettings } from "../lib/openSettings.ts";
 import { checkoutPath, tildePath as tilde } from "../projectPrepare.ts";
-import { useOrchestratorEnabled } from "../orchestrator/enabled.ts";
 import {
   launchTarget,
   projectChoices,
@@ -80,13 +78,6 @@ const TOOLS = [
     detail: "Talk to an agent",
     icon: Sparkles,
   },
-  {
-    key: "o",
-    kind: "orchestrator",
-    title: "Orchestrator",
-    detail: "Tasks carried to done",
-    icon: ListTodo,
-  },
 ] as const;
 
 type Tone = "ok" | "warning" | "danger";
@@ -110,7 +101,6 @@ export function PanelPickerDialog({
   addPanel,
   addExtensionPanel,
   extensionRegistry,
-  connected,
   hostContext,
 }: {
   active: Workspace;
@@ -122,7 +112,6 @@ export function PanelPickerDialog({
     filesTarget?: undefined,
     modelProfile?: ModelProfile,
     claudeAccountId?: string,
-    backend?: "herdr" | "local",
     targetWorkspaceId?: string,
     worktree?: { branch: string; base: string },
   ): void;
@@ -135,7 +124,6 @@ export function PanelPickerDialog({
   extensionRegistry: ExtensionRegistry;
   hostContext: SessionHostContext;
 }) {
-  const orchestrator = useOrchestratorEnabled();
   // The project the picker targets: the one it opened for, or another from
   // the title's list (its own open workspace).
   const [baseId, setBaseId] = useState(opened.id);
@@ -151,9 +139,6 @@ export function PanelPickerDialog({
   const [selectedCodexAccountId, setSelectedCodexAccountId] = useState("");
   const codexTouched = useRef(false);
   const [codexMenu, setCodexMenu] = useState(false);
-  // Only a Herdr-backed workspace has a choice to offer.
-  const herdrWorkspace = Boolean(active.herdrId) && connected;
-  const [backend, setBackend] = useState<"herdr" | "local">("herdr");
   const [selectedModelProfileId, setSelectedModelProfileId] = useState("");
   const [selectedClaudeAccountId, setSelectedClaudeAccountId] = useState("");
   const accountTouched = useRef(false);
@@ -291,13 +276,8 @@ export function PanelPickerDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active.id, hostsKey, projectId]);
   const targetIsSsh = Boolean(targetWorkspace.connection?.startsWith("ssh:"));
-  const canHerdrWorktree =
-    Boolean(targetWorkspace.herdrId) && connected && backend === "herdr";
-  // A worktree launched without Herdr becomes a plain local process on this
-  // Mac, so it needs the target workspace's own checkout to be local too.
-  const canLocalWorktree =
-    !targetIsSsh && (!targetWorkspace.herdrId || backend === "local");
-  const canWorktree = !setupPick && (canHerdrWorktree || canLocalWorktree);
+  // Slice 1 launches on this Mac only, so a worktree needs a local checkout.
+  const canWorktree = !setupPick && !targetIsSsh;
   const [checkout, setCheckout] = useState<"current" | "worktree">("current");
   const [branch, setBranch] = useState(() => suggestWorktreeBranch(new Date()));
   const [base, setBase] = useState("main");
@@ -307,7 +287,7 @@ export function PanelPickerDialog({
     branches: BaseBranch[];
     error: string;
   } | null>(null);
-  // A backend or host switch can take the worktree option away while it is
+  // A host switch can take the worktree option away while it is
   // selected; the radiogroup unmounts, so the choice has to lapse with it or a
   // remote path reaches the local git.
   const wantsWorktree = canWorktree && checkout === "worktree";
@@ -405,7 +385,6 @@ export function PanelPickerDialog({
             : // Untouched: the main process applies the project's account,
               // and the host's login when that one cannot run.
               undefined,
-        backend,
         targetWorkspaceId,
         worktreeArg,
       );
@@ -413,7 +392,6 @@ export function PanelPickerDialog({
     [
       addPanel,
       setupPick,
-      backend,
       modelProfiles,
       selectedClaudeAccountId,
       selectedCodexAccountId,
@@ -425,9 +403,7 @@ export function PanelPickerDialog({
     ],
   );
   const extensionTools = extensionPanelOptions(extensionRegistry);
-  const tools = TOOLS.filter(
-    (item) => orchestrator || item.kind !== "orchestrator",
-  );
+  const tools = TOOLS;
   // An extension's tool takes the first letter of its label that no other
   // tool already owns.
   const taken = new Set<string>(tools.map((item) => item.key));
@@ -475,7 +451,6 @@ export function PanelPickerDialog({
             undefined,
             undefined,
             undefined,
-            backend,
             targetWorkspaceId,
             launchesInWorktree(tool.kind) ? worktreeArg : undefined,
           );
@@ -491,14 +466,11 @@ export function PanelPickerDialog({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-    // `tools` and `extensionKeys` are rebuilt from `orchestrator` and the
-    // registry, which are listed.
+    // `extensionKeys` is rebuilt from the registry, which is listed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     focusedAgent,
-    orchestrator,
     extensionRegistry,
-    backend,
     targetWorkspaceId,
     worktreeArg,
     worktreeInvalid,
@@ -704,25 +676,6 @@ export function PanelPickerDialog({
             </button>
           ))}
         </div>
-        {herdrWorkspace && (
-          <div className="pk-backend" role="group" aria-label="Session backend">
-            {(
-              [
-                ["herdr", "Herdr"],
-                ["local", "Local"],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                className={backend === value ? "selected" : ""}
-                aria-pressed={backend === value}
-                onClick={() => setBackend(value)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        )}
         {canWorktree && (
           <label className={`pk-worktree${wantsWorktree ? " on" : ""}`}>
             <input
@@ -1058,7 +1011,6 @@ export function PanelPickerDialog({
                     undefined,
                     undefined,
                     undefined,
-                    backend,
                     targetWorkspaceId,
                     launchesInWorktree(item.kind) ? worktreeArg : undefined,
                   )

@@ -246,7 +246,7 @@ test("an SSH recovery retry preserves its URL and failure context before startin
 
 test("SSH recovery advice identifies access, trust, network and branch failures", async () => {
   const { sentLine, advice, cloneFailure } =
-    await import("../src/orchestrator/prepareCopy.ts");
+    await import("../src/ui/prepareCopy.ts");
   const input = {
     hostName: "devbox",
     repo: "acme/app",
@@ -289,7 +289,7 @@ test("SSH recovery advice identifies access, trust, network and branch failures"
 
 test("failure screens say what was and was not sent", async () => {
   const { sentLine, advice, cloneFailure } =
-    await import("../src/orchestrator/prepareCopy.ts");
+    await import("../src/ui/prepareCopy.ts");
   const input = {
     hostName: "devbox",
     repo: "acme/app",

@@ -10,13 +10,13 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 
 Agent marks (`public/agents`) are from Simple Icons via Iconify: Claude, OpenAI, Google Gemini and Cursor. Simple Icons artwork is released under CC0-1.0: https://github.com/simple-icons/simple-icons. Brand names and marks belong to their respective owners; sushiAI is an independent project.
 
-Dependencies retain their own licenses. Herdr is installed separately and is not redistributed in this application.
+Dependencies retain their own licenses. The `sushiai` daemon is built from this repository and bundled with the application.
 
 Terminal symbol fallback: Symbols Nerd Font Mono, Nerd Fonts v3.4.0 (https://github.com/ryanoasis/nerd-fonts). Bundled unchanged in public/fonts. License and upstream icon attribution are included as NERD-FONTS-LICENSE and NERD-FONTS-README.md beside the font.
 
 # Prompt attribution
 
-The orchestrator chat's Brainstorm and Plan mode prompts (`orchd/prompts/orchestrator.yaml`) adapt the `brainstorming` and `writing-plans` skills from obra/superpowers (https://github.com/obra/superpowers), licensed under the MIT License. Copyright (c) 2025 Jesse Vincent.
+The orchestrator chat's Brainstorm and Plan mode prompts (`crates/sushiai-orch/prompts/orchestrator.yaml`) adapt the `brainstorming` and `writing-plans` skills from obra/superpowers (https://github.com/obra/superpowers), licensed under the MIT License. Copyright (c) 2025 Jesse Vincent.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 

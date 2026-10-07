@@ -18,7 +18,7 @@ import {
   upsertProposal,
 } from "./improvementsModel";
 import type { FailureRow, Note, Proposal } from "./types";
-import { Tag } from "./ui";
+import { Tag } from "../ui";
 import "./improvements.css";
 
 /** The daemon's evolution proposals for this repo: what to change, the

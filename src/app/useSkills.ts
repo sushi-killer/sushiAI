@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { errorText } from "./errors.ts";
+import { errorText } from "../lib/errors.ts";
 import type { SkillCatalogItem, SkillManagementAction } from "../types";
 
 const catalogFingerprint = (items: SkillCatalogItem[]) =>

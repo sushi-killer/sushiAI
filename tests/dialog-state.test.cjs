@@ -40,7 +40,7 @@ test("a dialog whose target disappeared resolves to null", async () => {
   assert.equal(
     resolveDialog({ kind: "workspace-actions", workspaceId: "gone" }, list),
     null,
-    "a workspace removed by a Herdr snapshot closes its dialog",
+    "a workspace removed by a session update closes its dialog",
   );
   assert.equal(
     resolveDialog(
@@ -118,7 +118,7 @@ test("a folder opens the workspace on the same host, not the same path elsewhere
 
 test("a requested project tab is used once, by its own workspace, and expires", async () => {
   const { setPendingProjectTab, takePendingTab } =
-    await import("../src/app/openSettings.ts");
+    await import("../src/lib/openSettings.ts");
   setPendingProjectTab("Hosts", "/work/app", "ssh:lab");
   assert.equal(takePendingTab("/work/app", undefined), "General"); // same path, other host
   setPendingProjectTab("Hosts", "/work/app", "ssh:lab");

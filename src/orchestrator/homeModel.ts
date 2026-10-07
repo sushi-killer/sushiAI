@@ -20,8 +20,8 @@ export function activeCount(tasks: Task[]): number {
   ).length;
 }
 
-/** "4 tasks active · $1.21 today · orchd on Local"; the cost is left out
- * until it is known. On a remote host the line says where orchd runs
+/** "4 tasks active · $1.21 today · Orchestrator on Local"; the cost is left out
+ * until it is known. On a remote host the line says where the orchestrator runs
  * instead (Figma "Home · remote host"). */
 export function subLine(
   active: number,
@@ -29,11 +29,11 @@ export function subLine(
   remoteHost?: string,
 ): string {
   if (remoteHost)
-    return `orchd on ${remoteHost} keeps running when your Mac sleeps`;
+    return `Orchestrator on ${remoteHost} keeps running when your Mac sleeps`;
   return [
     `${active} task${active === 1 ? "" : "s"} active`,
     todayUsd === null ? "" : `$${todayUsd.toFixed(2)} today`,
-    "orchd on Local",
+    "Orchestrator on Local",
   ]
     .filter(Boolean)
     .join(" · ");

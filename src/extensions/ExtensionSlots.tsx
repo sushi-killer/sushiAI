@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { ExtensionSurfaceView } from "./SurfaceRenderer.tsx";
 import { actionsFor, navigationFor, surfacesFor } from "./routes.ts";
-import type { ExtensionRegistry } from "./registry.ts";
+import { compareOrder, type ExtensionRegistry } from "./registry.ts";
 import type {
   ExtensionIcon as ExtensionIconValue,
   NavigationPlacement,
@@ -65,8 +65,7 @@ export function ExtensionIcon({
       </svg>
     );
   const Glyph =
-    (icon?.kind === "named" && ICONS[icon.name as keyof typeof ICONS]) ||
-    ListTodo;
+    (icon?.kind === "named" && ICONS[icon.name as keyof typeof ICONS]) || Plug;
   return <Glyph size={size} />;
 }
 
@@ -228,5 +227,70 @@ export function ExtensionSectionSlot({
         </section>
       ))}
     </div>
+  );
+}
+
+/** The surfaces that contribute a Settings tab, in `compareOrder` (a surface
+ * has no `order`, so extension id then surface id) so the tabs never shuffle
+ * between runs. */
+export function settingsPageSurfaces(
+  registry: ExtensionRegistry,
+): SurfaceContribution[] {
+  return surfacesFor(registry, "settings.page").sort(compareOrder);
+}
+
+export const settingsPageKey = (surface: SurfaceContribution) =>
+  `page:${surface.extensionId}:${surface.id}`;
+
+/** One Settings navigation button per contributed page. The dialog draws them
+ * after its own tabs; the page itself is Settings content, never chrome. */
+export function ExtensionSettingsTabs({
+  registry,
+  current,
+  onSelect,
+}: {
+  registry: ExtensionRegistry;
+  current: string;
+  onSelect(key: string): void;
+}) {
+  return (
+    <>
+      {settingsPageSurfaces(registry).map((surface) => {
+        const key = settingsPageKey(surface);
+        return (
+          <button
+            key={key}
+            className={`settings-nav-item${current === key ? " current" : ""}`}
+            role="tab"
+            aria-selected={current === key}
+            onClick={() => onSelect(key)}
+          >
+            <ExtensionIcon icon={surface.icon} size={15} />
+            {surface.title}
+          </button>
+        );
+      })}
+    </>
+  );
+}
+
+/** The content of a contributed Settings tab. */
+export function ExtensionSettingsPage({
+  surface,
+  cwd,
+  connection,
+}: {
+  surface: SurfaceContribution;
+  cwd: string;
+  connection?: string;
+}) {
+  return (
+    <ExtensionSurfaceView
+      surface={surface}
+      cwd={cwd}
+      connection={connection}
+      instanceId="settings.page"
+      frame="page"
+    />
   );
 }

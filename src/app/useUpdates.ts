@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { errorText } from "./errors.ts";
+import { errorText } from "../lib/errors.ts";
 import type { UpdateState } from "../types";
 
 /** Live update state. The push subscription wins over the initial fetch, so a

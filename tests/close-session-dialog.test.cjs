@@ -26,7 +26,7 @@ vm.runInNewContext(
     require: (name) =>
       name === "../app/worktreeCleanup"
         ? require("../src/app/worktreeCleanup.ts")
-        : name === "../orchestrator/ui"
+        : name === "../ui"
           ? // JSX sources cannot be type-stripped; the dialog only needs
             // their markup shape here.
             {
@@ -52,7 +52,7 @@ function render({ cwd = "/tmp/project", git } = {}) {
     id: "workspace",
     name: "Project",
     cwd,
-    panels: [{ id: "pane", herdrId: "session" }],
+    panels: [{ id: "pane", sessionId: "session" }],
   };
   const panel = workspace.panels[0];
   return renderToStaticMarkup(
@@ -61,7 +61,6 @@ function render({ cwd = "/tmp/project", git } = {}) {
       panel,
       workspaces: [workspace],
       projectGit: git ? { [workspace.id]: git } : {},
-      hidePanel: () => {},
       endSessions: async () => {},
       onClose: () => {},
     }),
@@ -93,4 +92,11 @@ test("close dialog waits for PR status before enabling session end", () => {
   assert.match(markup, /Delete worktree feature\/task/);
   assert.match(markup, /Checking whether its pull request was merged/);
   assert.match(markup, /<button class="ui-button danger" disabled="">/);
+});
+
+test("close dialog offers only Close session and Cancel", () => {
+  const markup = render({ git: { linkedWorktree: false } });
+  assert.match(markup, />Cancel</);
+  assert.match(markup, />Close session</);
+  assert.doesNotMatch(markup, /Hide only/);
 });

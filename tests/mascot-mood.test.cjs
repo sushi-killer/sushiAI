@@ -6,9 +6,8 @@ test("maps every notice kind to a mood", () => {
   assert.equal(mascotMood({ kind: "input" }, false), "needs-you");
   assert.equal(mascotMood({ kind: "done" }, false), "done");
   assert.equal(mascotMood({ kind: "failed" }, false), "failed");
-  assert.equal(mascotMood({ kind: "stopped" }, false), "failed");
-  assert.equal(mascotMood({ kind: "landing" }, false), "idle");
-  assert.equal(mascotMood({ kind: "core-update" }, false), "idle");
+  assert.equal(mascotMood({ kind: "info" }, false), "idle");
+  assert.equal(mascotMood({ kind: "info", sticky: true }, false), "idle");
 });
 
 test("an input notice listens while the owner types", () => {
@@ -16,9 +15,10 @@ test("an input notice listens while the owner types", () => {
   assert.equal(mascotMood({ kind: "done" }, true), "done");
 });
 
-test("an answered notice means the task carries on", () => {
-  assert.equal(mascotMood({ kind: "input", answered: true }, false), "working");
-  assert.equal(mascotMood({ kind: "input", answered: true }, true), "working");
+test("a confirmed notice means the source carries on", () => {
+  const confirmed = { kind: "input", confirmed: "Sent" };
+  assert.equal(mascotMood(confirmed, false), "working");
+  assert.equal(mascotMood(confirmed, true), "working");
 });
 
 test("typing belongs to one notice and never leaks to the next", () => {
@@ -27,7 +27,7 @@ test("typing belongs to one notice and never leaks to the next", () => {
   let state = { id: first.id, on: true };
   assert.equal(isTyping(state, first), true);
   assert.equal(isTyping(state, { id: "input:t2" }), false);
-  assert.equal(isTyping(state, { ...first, answered: true }), false);
+  assert.equal(isTyping(state, { ...first, confirmed: "Sent" }), false);
   // The field unmounts on answer (its cleanup reports off); a follow-up
   // question for the same task then starts as needs-you.
   state = { id: first.id, on: false };

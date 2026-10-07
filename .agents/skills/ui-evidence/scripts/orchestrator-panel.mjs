@@ -1,25 +1,26 @@
 // One-command screenshot recipe for the Orchestrator panel's task detail
-// view. Builds nothing itself: `npm run build` and `cargo build --release
-// --manifest-path orchd/Cargo.toml` must already be done. Usage:
+// view. Builds nothing itself: `npm run build` and `cargo build -p sushiai`
+// must already be done. Usage:
 //
 //   node .agents/skills/ui-evidence/scripts/orchestrator-panel.mjs <seed.json> <task title>
 //
 // <seed.json> is a JSON array of task objects, or {tasks, proposals, notes} (see
 // SKILL.md for the shape); only `title` is required on a task, everything
 // else defaults. The tasks are written as task.json files into the throwaway
-// profile's orchd data dir before the app starts; the app then spawns orchd
-// on that profile as usual, which loads them. Each proposal is completed
+// daemon home's orchestrator dir, with the module's enabled flag, before the
+// app starts; the app's sushiai daemon then loads them. Each proposal is completed
 // (id, repo, createdAt) and written to <dataDir>/evolution/proposals/<id>.json,
-// the path orchd's store reads; when any were seeded the run also opens Improvements from the rail and saves
+// the path the orchestrator's store reads; when any were seeded the run also opens Improvements from the rail and saves
 // artifacts/orchestrator-improvements.png plus artifacts/orchestrator-proposals.png, a crop of the first proposal card. Each note is completed (id, source
 // "owner", createdAt) and written under this repo's root in
-// <dataDir>/repo-notes.json ({repo: [note]}, what orchd's store reads); when
+// <dataDir>/repo-notes.json ({repo: [note]}, what the store reads); when
 // any were seeded the run also saves artifacts/orchestrator-repo-notes.png,
-// a crop of the REPO NOTES list. Only finished/waiting statuses are accepted, because orchd resumes
+// a crop of the REPO NOTES list. Only finished/waiting statuses are accepted, because the orchestrator resumes
 // queued/running/drafting tasks on start - a fixture must never run a harness.
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { stopDaemon } from "../../../../scripts/lib/daemon-binary.mjs";
 
 const root = process.cwd();
 const shot = (name) => `${root}/artifacts/${name}.png`;
@@ -30,7 +31,7 @@ function escapeRegExp(text) {
 
 const FIXTURE_STATUSES = new Set(["done", "failed", "stopped", "waiting"]);
 
-/** A seed object completed to the task.json shape orchd's store loads.
+/** A seed object completed to the task.json shape the orchestrator's store loads.
  * `ids` maps each seed's `key` to its generated id, so `parent`,
  * `dependsOn`, `followUps` and `followUpOf` can name other seeds by key. */
 function taskJson(seed, repo, now, id, ids) {
@@ -115,7 +116,8 @@ if (!seedPath || !title) {
   process.exitCode = 1;
 } else {
   const profile = await fs.mkdtemp("/tmp/sushiai-evidence-");
-  const dataDir = `${profile}/orchestrator`;
+  const daemonHome = `${profile}/sushiai`;
+  const dataDir = `${daemonHome}/orchestrator`;
   let app = null;
 
   try {
@@ -131,8 +133,8 @@ if (!seedPath || !title) {
       const dir = `${dataDir}/tasks/${task.id}`;
       await fs.mkdir(dir, { recursive: true });
       // `evidence: {"<attempt n>": ["<image path>", ...]}` copies images into
-      // runs/<n>/evidence/, where orchd keeps an attempt's screenshots, and
-      // lists them on that attempt the way orchd records them.
+      // runs/<n>/evidence/, where the orchestrator keeps an attempt's screenshots, and
+      // lists them on that attempt the way it records them.
       for (const [n, files] of Object.entries(seed.evidence ?? {})) {
         const to = `${dir}/runs/${n}/evidence`;
         await fs.mkdir(to, { recursive: true });
@@ -175,6 +177,10 @@ if (!seedPath || !title) {
     }
     report.seededTitles = tasks.map((t) => t.title);
 
+    // The daemon hosts the orchestrator module only when it is enabled.
+    await fs.mkdir(`${daemonHome}/modules`, { recursive: true, mode: 0o700 });
+    await fs.writeFile(`${daemonHome}/modules/orch.enabled`, "");
+
     app = await electron.launch({
       args: ["."],
       cwd: root,
@@ -182,26 +188,25 @@ if (!seedPath || !title) {
         ...process.env,
         SUSHIAI_TEST_WINDOW: "hidden",
         BRIDGE_DATA_DIR: profile,
-        HERDR_SOCKET_PATH: `${profile}/no-herdr.sock`,
+        // Never the owner's ~/.codex or ~/.sushiai/bin link.
+        HOME: profile,
+        CODEX_HOME: `${profile}/codex`,
+        SUSHIAI_HOME: daemonHome,
         BRIDGE_DEV_URL: "",
       },
     });
     const page = await app.firstWindow();
     page.on("pageerror", (error) => report.pageErrors.push(error.message));
     await page.waitForSelector(".panel-agent");
+    // The orchestrator extension is off in a fresh profile.
+    await page.getByRole("button", { name: "Extensions", exact: true }).click();
+    await page.getByRole("button", { name: "Enable Orchestrator" }).click();
+    await page.getByRole("button", { name: "Disable Orchestrator" }).waitFor();
+    await page.getByRole("button", { name: "Extensions", exact: true }).click();
 
-    // A fresh profile has no project open yet - a Local workspace pointed at
-    // this repo gives the Orchestrator panel a `cwd` its seeded tasks' own
-    // `repo` field matches (`task.list` filters on exact equality).
-    await page.getByRole("button", { name: "New workspace" }).click();
-    const workspaceDialog = page.getByRole("dialog", { name: "New workspace" });
-    await workspaceDialog.locator('input[name="name"]').fill("Evidence");
-    await workspaceDialog.getByLabel("Project folder").fill(root);
-    await workspaceDialog
-      .getByRole("button", { name: "Create workspace" })
-      .click();
-
-    await page.getByRole("button", { name: "Add panel" }).click();
+    // The first-run workspace already runs in this repo, so the seeded tasks'
+    // own `repo` field matches its `cwd` (`task.list` filters on equality).
+    await page.getByRole("button", { name: "Add panel" }).first().click();
     const panelDialog = page.getByRole("dialog", { name: "Add panel" });
     await panelDialog.getByRole("button", { name: "Orchestrator" }).click();
     // Maximized, not split beside the workspace's other panel: below ~640px
@@ -209,17 +214,13 @@ if (!seedPath || !title) {
     await page.getByRole("button", { name: "Maximize Orchestrator" }).click();
 
     await page
-      .locator(
-        ".orch-rail, [data-orchestrator-not-built], .orch-view-scroll.offline",
-      )
+      .locator(".orch-rail, .orch-view-scroll.offline")
       .first()
       .waitFor({ timeout: 15000 });
-    const notBuilt = page.locator(
-      "[data-orchestrator-not-built], .orch-view-scroll.offline",
-    );
-    if (await notBuilt.count()) {
+    const offlinePanel = page.locator(".orch-view-scroll.offline");
+    if (await offlinePanel.count()) {
       throw new Error(
-        `the orchestrator panel could not open: ${(await notBuilt.first().innerText()).trim()}`,
+        `the orchestrator panel could not open: ${(await offlinePanel.first().innerText()).trim()}`,
       );
     }
 
@@ -296,7 +297,14 @@ if (!seedPath || !title) {
     report.error = String(error?.message ?? error);
   } finally {
     if (app) await app.close().catch(() => {});
-    await fs.rm(profile, { recursive: true, force: true });
+    stopDaemon(daemonHome);
+    // A shell that exits late may still write its history into HOME.
+    await fs.rm(profile, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 200,
+    });
     console.log(JSON.stringify(report, null, 2));
     if (report.error || report.pageErrors.length > 0) process.exitCode = 1;
   }

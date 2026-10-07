@@ -78,7 +78,13 @@ function registerExtensionIpc({
   getExtensions,
   getSurfaceState,
   announce = () => {},
+  announceCompanion = () => {},
 }) {
+  // A companion's view.changed (or its process changing state) reaches the
+  // renderer as {extensionId, surfaceId}. Subscribed once, when the manager
+  // exists.
+  getExtensions()?.onCompanionChanged?.(announceCompanion);
+
   handle("extensions-state-read", (extensionId, surfaceId, version, scope) => {
     const surface = locate(getExtensions(), extensionId, surfaceId);
     checkAddress(surface, version, scope);
@@ -129,6 +135,36 @@ function registerExtensionIpc({
     const extensions = getExtensions();
     if (!extensions) throw new Error("Extension manager is not ready.");
     return extensions.refresh();
+  });
+
+  const name = (value, what) => {
+    if (typeof value !== "string" || !value || value.length > 200)
+      throw new Error(`Invalid ${what}.`);
+    return value;
+  };
+  const manager = () => {
+    const extensions = getExtensions();
+    if (!extensions) throw new Error("Extension manager is not ready.");
+    return extensions;
+  };
+
+  handle("extensions-companion-read", (extensionId, surfaceId) =>
+    manager().companionRead(
+      name(extensionId, "extension id"),
+      name(surfaceId, "surface id"),
+    ),
+  );
+
+  handle("extensions-companion-action", (extensionId, surfaceId, actionId) =>
+    manager().companionAction(
+      name(extensionId, "extension id"),
+      name(surfaceId, "surface id"),
+      name(actionId, "action id"),
+    ),
+  );
+
+  handle("extensions-approve", async (extensionId) => {
+    await manager().approve(name(extensionId, "extension id"));
   });
 
   handle("extensions-set-enabled", (extensionId, enabled) => {

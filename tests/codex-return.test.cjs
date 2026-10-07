@@ -1,6 +1,7 @@
 // A ChatGPT login is refreshed with a single-use token, so a host session
-// that refreshed it hands the new one back. Runs the real session script on a
-// fake host and collects through the real account store.
+// that refreshed it hands the new one back. A host session is simulated by the
+// files it leaves under ~/.sushiai/codex-sessions on a fake host; the login is
+// collected through the real account store and the real collect script.
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
@@ -8,7 +9,6 @@ const os = require("node:os");
 const path = require("node:path");
 const { readStore, writeStore } = require("../electron/app-db.cjs");
 const { CodexAccounts, newerLogin } = require("../electron/codex-accounts.cjs");
-const { sessionEnvPrefix } = require("../electron/project-session.cjs");
 const { makeHost } = require("./helpers/fake-host.cjs");
 
 const login = (refresh, at, account = "acc-1") =>
@@ -26,13 +26,10 @@ const REFRESHED = login("r2", "2026-01-09T00:00:00Z");
 
 const during = {};
 
-async function rig(t, codexScript) {
+async function rig(t) {
   during.hook = null;
   const host = await makeHost(t, {
-    bin: {
-      ln: '#!/bin/sh\nexec /bin/ln "$@"\n',
-      codex: `#!/bin/sh\n${codexScript}\n`,
-    },
+    bin: { ln: '#!/bin/sh\nexec /bin/ln "$@"\n' },
   });
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-return-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -49,57 +46,37 @@ async function rig(t, codexScript) {
   });
   const { id } = await accounts.add("Work");
   await fs.writeFile(path.join(accounts.homeFor(id), "auth.json"), FIRST);
-  const run = async () => {
-    const { prefix, launch } = await sessionEnvPrefix(
-      {
-        upload: (endpoint, payload) =>
-          host.connections.exec(
-            endpoint,
-            'umask 077; f=$(mktemp); cat > "$f"; printf %s "$f"',
-            { input: payload },
-          ),
-        remove: async () => {},
-        resolveCodexAccount: (accountId, endpoint) =>
-          accounts.resolve(accountId, endpoint),
-      },
-      {
-        endpoint: host.endpoint,
-        cwd: host.home,
-        agent: "codex",
-        codexAccountId: id,
-      },
-    );
-    await host.connections.exec(host.endpoint, `(${prefix}exec ${launch})`);
-  };
   const sessions = path.join(host.home, ".sushiai", "codex-sessions");
+  // One session started on the host: the app hands out a return token, and
+  // the session leaves `files` in the directory of that token.
+  const run = async (files = {}) => {
+    const { ret } = await accounts.resolve(id, host.endpoint);
+    if (!Object.keys(files).length) return ret;
+    const home = path.join(sessions, ret);
+    await fs.mkdir(home, { recursive: true });
+    for (const [name, text] of Object.entries(files))
+      await fs.writeFile(path.join(home, name), text);
+    return ret;
+  };
   const own = () =>
     fs.readFile(path.join(accounts.homeFor(id), "auth.json"), "utf8");
   return { accounts, id, run, sessions, own, host, dir };
 }
 
 test("a login refreshed in a host session comes back at the next start", async (t) => {
-  const { accounts, id, run, sessions, own } = await rig(
-    t,
-    `printf '%s' '${REFRESHED}' > "$CODEX_HOME/auth.json"`,
-  );
-  await run();
-  // Only the new login stays on the host, until it is collected.
-  const [token] = await fs.readdir(sessions);
-  assert.deepEqual((await fs.readdir(path.join(sessions, token))).sort(), [
-    ".ret",
-    "auth.json",
-  ]);
+  const { accounts, id, run, sessions, own } = await rig(t);
+  await run({ ".ret": "", "auth.json": REFRESHED });
   assert.equal(await own(), FIRST);
   await accounts.resolve(id);
   assert.equal(await own(), REFRESHED);
-  assert.deepEqual(await fs.readdir(sessions), []);
+  assert.deepEqual(await fs.readdir(sessions).catch(() => []), []);
 });
 
 test("a session that did not refresh leaves nothing on the host", async (t) => {
-  const { accounts, id, run, sessions, own } = await rig(t, "true");
+  const { accounts, id, run, sessions, own } = await rig(t);
   await run();
-  assert.deepEqual(await fs.readdir(sessions), []);
   await accounts.resolve(id);
+  assert.deepEqual(await fs.readdir(sessions).catch(() => []), []);
   assert.equal(await own(), FIRST);
 });
 
@@ -113,38 +90,21 @@ test("only a later login of the same account replaces the one kept here", () => 
   assert.equal(newerLogin("not json", FIRST), false);
 });
 
-test("a pane killed before its trap still hands back its login; a live one is read and left", async (t) => {
-  const { accounts, id, run, sessions, own } = await rig(
-    t,
-    `printf '%s' '${REFRESHED}' > "$CODEX_HOME/auth.json"; kill -9 $PPID`,
-  );
-  await run().catch(() => {});
-  const [token] = await fs.readdir(sessions);
-  const home = path.join(sessions, token);
+test("a live session is read and left, a finished one is collected and removed", async (t) => {
+  const { accounts, id, run, sessions, own } = await rig(t);
+  const token = await run({ "auth.json": REFRESHED, pid: String(process.pid) });
   // Still running: its login is taken, its home stays.
-  await fs.writeFile(path.join(home, "pid"), String(process.pid));
   await accounts.resolve(id);
   assert.equal(await own(), REFRESHED);
   assert.deepEqual(await fs.readdir(sessions), [token]);
-  // Its shell is gone: collected and removed.
-  await fs.writeFile(path.join(home, "pid"), "999999");
+  // Its process is gone: collected and removed.
+  await fs.writeFile(path.join(sessions, token, "pid"), "999999");
   await accounts.resolve(id);
   assert.deepEqual(await fs.readdir(sessions), []);
 });
 
-test("a session ended by a hangup keeps its login through both traps", async (t) => {
-  const { accounts, id, run, sessions, own } = await rig(
-    t,
-    `printf '%s' '${REFRESHED}' > "$CODEX_HOME/auth.json"; kill -HUP $PPID`,
-  );
-  await run().catch(() => {});
-  assert.equal((await fs.readdir(sessions)).length, 1);
-  await accounts.resolve(id);
-  assert.equal(await own(), REFRESHED);
-});
-
 test("another host's session in a shared home is never judged dead here", async (t) => {
-  const { run, sessions, host } = await rig(t, "true");
+  const { sessions, host } = await rig(t);
   const other = path.join(sessions, "00000000-0000-4000-8000-000000000001");
   await fs.mkdir(other, { recursive: true });
   for (const [name, text] of [
@@ -154,22 +114,18 @@ test("another host's session in a shared home is never judged dead here", async 
     [".sent", FIRST],
   ])
     await fs.writeFile(path.join(other, name), text);
-  await run();
-  assert.deepEqual(await fs.readdir(sessions), [path.basename(other)]);
   const { CODEX_COLLECT } = require("../electron/project-session.cjs");
   const out = await host.connections.exec(
     host.endpoint,
     CODEX_COLLECT([path.basename(other)]),
   );
   assert.match(out, /^@@ \S+\nlive\n/);
+  assert.deepEqual(await fs.readdir(sessions), [path.basename(other)]);
 });
 
 test("a login refreshed here while hosts answer is never replaced by an older one", async (t) => {
-  const { accounts, id, run, own } = await rig(
-    t,
-    `printf '%s' '${REFRESHED}' > "$CODEX_HOME/auth.json"`,
-  );
-  await run();
+  const { accounts, id, run, own } = await rig(t);
+  await run({ ".ret": "", "auth.json": REFRESHED });
   const LATER = login("r3", "2026-01-20T00:00:00Z");
   during.hook = () =>
     fs.writeFile(path.join(accounts.homeFor(id), "auth.json"), LATER);
@@ -178,13 +134,8 @@ test("a login refreshed here while hosts answer is never replaced by an older on
 });
 
 test("a session seen live is kept past the return window", async (t) => {
-  const { accounts, id, run, sessions, dir } = await rig(
-    t,
-    `printf '%s' '${REFRESHED}' > "$CODEX_HOME/auth.json"; kill -9 $PPID`,
-  );
-  await run().catch(() => {});
-  const [token] = await fs.readdir(sessions);
-  await fs.writeFile(path.join(sessions, token, "pid"), String(process.pid));
+  const { accounts, id, run, dir } = await rig(t);
+  await run({ "auth.json": REFRESHED, pid: String(process.pid) });
   const store = { ...readStore(dir, "codex-accounts") };
   store[id].returns[0].at = 0;
   writeStore(dir, "codex-accounts", store);

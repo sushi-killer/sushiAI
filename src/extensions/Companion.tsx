@@ -14,10 +14,12 @@ import {
   type CoreViewProps,
   type LaunchAgentRequest,
 } from "./coreViews.ts";
+import { daemonHost } from "../daemonSessions.ts";
+import type { ArgsPatch } from "./args.ts";
 import type { ExtensionRegistry } from "./registry.ts";
 
 export type CompanionPatch = {
-  args?: Record<string, string>;
+  args?: ArgsPatch;
   open?: boolean;
   ratio?: number;
 };
@@ -68,7 +70,6 @@ export function CompanionSplit({
   panel,
   registry,
   cwd,
-  socket,
   endpoint,
   onLaunchAgent,
   worktrees,
@@ -79,7 +80,6 @@ export function CompanionSplit({
   panel: Panel;
   registry: ExtensionRegistry;
   cwd: string;
-  socket: string;
   endpoint?: string;
   onLaunchAgent?(
     panelId: string,
@@ -174,8 +174,8 @@ export function CompanionSplit({
                   cwd={cwd}
                   paneCwd={panel.paneCwd}
                   connection={endpoint}
-                  agentHerdrPaneId={panel.herdrId}
-                  herdrEndpoint={socket}
+                  agentSessionId={panel.sessionId}
+                  agentHost={daemonHost(endpoint)}
                   agentLabel={panel.title}
                   launchAgent={onLaunchAgent ? launchAgent : undefined}
                   worktrees={worktrees}

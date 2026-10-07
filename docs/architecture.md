@@ -20,6 +20,9 @@ flowchart TB
       panels["Panels<br/>terminal, chat, browser, files, git"]
       orchPanel["Orchestrator panel<br/>src/orchestrator"]
       slots["Extension slots<br/>src/extensions"]
+      settingsTabs["Settings tabs + companion view<br/>settings.page surfaces: status, QR, text, action buttons"]
+      moduleUi["Module UI API - src/extensions/modules.ts<br/>built-ins only: attention items, worktree claims,<br/>shell hook"]
+      panelMigrations["src/extensions/panelMigrations.ts<br/>panel migrations: a saved panel of a retired kind<br/>loads as its module pane; kept apart from modules.ts"]
       previewPane["Preview pane - src/extensions/preview<br/>core view of builtin.artifacts: Markdown,<br/>sandboxed HTML, images, PDF; comments; Start task"]
       inbox["Inbox page - src/app/InboxPage.tsx<br/>inboxModel.ts, attention.ts, useAttention.ts<br/>queue, badge count, reminders"]
       wsState["src/workspaceState.ts<br/>layout, panes, mode"]
@@ -31,15 +34,17 @@ flowchart TB
     mascotPreload["mascot-preload.cjs<br/>window.mascot"]
     subgraph main["Main process - electron/"]
       direction TB
-      ipc["ipc/* - app, chat,<br/>terminals, projects"]
-      orchSvc["orchestrator.cjs<br/>spawns + proxies orchd; the Extensions switch<br/>(builtin.orchestrator, the only disableable built-in)<br/>calls OrchestratorHosts.setEnabled, and while off<br/>every IPC rejects with ORCHESTRATOR_OFF"]
-      extMgr["extensions/*<br/>manifest validator"]
-      herdrIpc["herdr.cjs, connections.cjs<br/>endpoint RPC + SSH tunnels"]
-      sessionLaunch["session-launch.cjs<br/>operation queue + durable creation journal<br/>host checkout + environment preparation"]
-      herdrSync["herdr-events.cjs, herdr-snapshots.cjs<br/>native events + one snapshot flight per endpoint"]
-      terminalFlow["terminal-stream.cjs, terminal-flow.cjs<br/>bounded output credit + xterm acknowledgements"]
-      herdrContract["herdr-contract.cjs<br/>verified release, protocol, capabilities, checksums"]
-      remoteSvc["orchestrator-remote.cjs<br/>install, start, forward, preflight<br/>per SSH profile"]
+      ipc["ipc/* - app, chat, daemon,<br/>projects"]
+      orchSvc["orchestrator.cjs<br/>orch.* requests over the daemon connection, per-host events and secrets;<br/>the Extensions switch<br/>(builtin.orchestrator, the only disableable built-in)<br/>calls OrchestratorHosts.setEnabled (register or unregister the module on each host,<br/>then restart its daemon), and while off<br/>every IPC rejects with ORCHESTRATOR_OFF"]
+      extMgr["extensions/*<br/>manifest validator, consent state"]
+      companionSup["extensions/companion-process.cjs<br/>companion supervisor: starts only after approval of<br/>path + args + permissions, minimal env, bounded restart,<br/>SIGTERM then SIGKILL; hosts.cjs lists ssh hosts for hosts.read"]
+      companionProc[("Companion process<br/>native command outside the extension folder")]
+      notices["extensions/notices.cjs<br/>Notices API, built-ins only: one notice source per module,<br/>routes to the mascot, a native notification or nothing"]
+      conns["connections.cjs<br/>SSH profiles, exec, inspect, port forwards"]
+      daemonMgr["daemon/manager.cjs, client.cjs, connectors.cjs, local.cjs<br/>one connection per host: local socket, ssh proxy or command;<br/>state, reconnect, session events"]
+      sessionLaunch["session-launch.cjs<br/>host checkout + worktree, environment and accounts,<br/>then session.create with an idempotency key"]
+      terminalFlow["daemon/terminals.cjs, terminal-flow.cjs<br/>attach, bounded output credit + xterm acknowledgements"]
+      hostInstall["host-install.cjs, host-setup.cjs<br/>install and update sushiai on a host"]
       projectStore[("sushiai.db<br/>projects, folders, safeStorage secrets")]
       gitSsh["project-git-ssh.cjs<br/>public key + Git server trust recovery"]
       attention["attention.cjs<br/>tray, Dock badge, notifications,<br/>close-to-menu-bar, app preferences"]
@@ -51,29 +56,35 @@ flowchart TB
       artSkill["artifacts-skill.cjs + extensions/builtin-skills.cjs<br/>global sushiai-artifacts skill in ~/.claude, ~/.codex, ~/.agents,<br/>CLAUDE_CONFIG_DIR / CODEX_HOME, Codex account homes, SSH hosts; removed when disabled"]
     end
     orchPanel <--> preload <--> orchSvc
-    orchSvc --> remoteSvc --> herdrIpc
-    projectStore -->|host values over forwarded socket;<br/>SSH terminal values via one-shot stdin file| remoteOrchd
+    settingsTabs <--> preload <--> extMgr
+    extMgr --> companionSup
+    companionSup <-->|"hello, view.read, actions, view.changed<br/>over stdio frames"| companionProc
+    moduleUi -.->|"rows and claims from a built-in module"| shell
+    orchSvc --> daemonMgr --> conns
+    projectStore -->|task values through orch.secrets.set;<br/>session values in session.create, both over the daemon protocol| sushiaiDaemon
     projectStore -->|"prepare: clone + install over ssh,<br/>values on stdin (none for a host switched off)"| remoteHost[("SSH host ~/sushiai/slug")]
     ipc --> gitSsh
     gitSsh -->|key stays on host;<br/>public key and fingerprints to UI| remoteHost
     panels <--> preload <--> sessionLaunch
-    sessionLaunch --> herdrIpc
-    herdrSync --> herdrIpc
-    herdrSync -->|events + snapshots| preload -->|SnapshotCoordinator| wsState
-    panels <-->|frame acknowledgement| preload <--> terminalFlow
-    terminalFlow -->|Herdr CLI stream| herdr
-    sessionLaunch & terminalFlow -->|compatibility preflight| herdrContract
+    sessionLaunch --> daemonMgr
+    daemonMgr -->|"daemon-state, daemon-event"| preload -->|"useDaemon: reconcileSessions"| wsState
+    panels <-->|"attach, input, resize, acknowledgement"| preload <--> terminalFlow
+    terminalFlow --> daemonMgr
+    hostInstall --> conns
+    hostInstall --> daemonMgr
     inbox -->|attention-badge, attention-notify| preload --> attention
     wsState <-->|workspace-state-read / -flush sendSync,<br/>-write invoke| preload <--> wsSnap
-    orchSvc -->|task notice| attention
-    attention -->|desktop mascot on| mascotSvc
+    orchSvc -->|"module notice"| notices
+    notices -->|"mascot on: queue"| mascotSvc
+    notices -->|"mascot off: native notification"| attention
     mascotPage <-->|mascot-* IPC| mascotPreload <--> mascotSvc
-    mascotSvc -->|task.answer, land, rerun| orchSvc
+    mascotSvc -->|"notice action"| notices
+    notices -->|"onAction"| orchSvc
     mascotSvc & attention -->|orchestrator-open, open-inbox,<br/>attention-open| preload
-    devRestart -->|Core updated notice| mascotSvc
-    wsState -->|"sushiai_open token -> useOpenSignals:<br/>open a core surface as the companion half of the agent pane"| previewPane
+    devRestart -->|Core updated notice| notices
+    wsState -->|"session.open -> useOpenSignals:<br/>open a core surface as the companion half of the agent pane"| previewPane
     previewPane <-->|"project-preview (annotate), project-inspect read"| preload <--> previewSrv
-    previewPane -->|"comments: pane.send_input;<br/>Start task: session-launch prompt /goal"| preload
+    previewPane -->|"comments: session.input;<br/>Start task: session launch with a prompt /goal"| preload
     shortcut(["global Alt+Space"]) -->|fold / unfold| mascotSvc
   end
   macos[("macOS tray, Dock,<br/>Notification Center")]
@@ -81,20 +92,20 @@ flowchart TB
   attention --> macos
   wsSnap & winState --> profile
 
-  subgraph orchd["orchd daemon - Rust, started on first use (or at launch when tasks are still pending on disk; attached if already running), stopped on quit only when this app spawned it (an attached one keeps running), and it exits when its data dir is deleted"]
+  subgraph orch["orchestrator module (crates/sushiai-orch) - hosted by the sushiai daemon, loaded only when the Orchestrator extension is on; desktop calls orch.* over the daemon connection and receives orch.event; file-backed runs are re-adopted by process group after a daemon restart"]
     direction LR
-    proto["protocol.rs<br/>NDJSON socket + token"]
+    proto["protocol.rs<br/>orch.* request and result types"]
     engine["engine/<br/>task loop, gates, routing"]
     chat["chat.rs<br/>orchestrator chat"]
     audit["audit.rs<br/>repo.audit, read-only"]
     insights["timeline.rs<br/>task.timeline, failures.catalogue"]
     evolution["evolution/<br/>signals when a task ends,<br/>clusters, proposals, measurement"]
-    evolveCli["orchd evolve<br/>evolution.run / evolution.adopt"]
-    costs["costs.rs<br/>costs.summary, orchd costs"]
+    evolveCli["sushiai orch evolve<br/>evolution.run / evolution.adopt"]
+    costs["costs.rs<br/>costs.summary, sushiai orch costs"]
     harness["harness.rs<br/>claude -p / codex exec"]
     side["git.rs (worktrees, commit)<br/>messages.rs (merging)"]
     store[("data dir<br/>tasks/, runs/, settings.json,<br/>costs.jsonl, chats/, audits/,<br/>evolution/ (signals.jsonl, detected.jsonl,<br/>proposals/)")]
-    mcp["orchd mcp<br/>task_* tools, stdio"]
+    mcp["sushiai mcp<br/>task_* tools, stdio"]
     chatTools["engine/chat_tools.rs<br/>connected MCP servers, OK-card writes"]
     mcpConfig[("owner's MCP config<br/>~/.claude.json, plugins")]
     prompts[("prompts/orchestrator.yaml<br/>+ data dir prompts.yaml override")]
@@ -125,8 +136,9 @@ flowchart TB
     orchAgent["Orchestrator agent<br/>Opus, read-only + MCP"]
   end
 
-  herdr[("Herdr daemon")]
   repo[("Git repo<br/>base branch + worktrees")]
+  sushiaiDaemon["sushiai daemon - one per host (crates/)<br/>local: ~/.sushiai/daemon.sock, started by the app;<br/>remote: reached through sushiai proxy over ssh.<br/>Sessions live in sushiai hold processes that outlive the daemon and the app"]
+  holders[("sushiai hold processes<br/>one per session: pty, screen, scrollback")]
 
   owner --> shell
   orchSvc <-->|socket| proto
@@ -134,17 +146,21 @@ flowchart TB
   orchAgent -->|MCP| mcp
   taskAgent -->|Stop hook| proto
   side --> repo
-  herdrIpc <--> herdr
-  herdr -->|"agent: herdr workspace report-metadata<br/>--token sushiai_open=..."| herdrSync
-  remoteSvc <-->|shared ssh master,<br/>forwarded orchd.sock + token| remoteOrchd[("orchd on an SSH host<br/>detached, outlives the app")]
-  remoteOrchd -->|task agent env + project MCP| taskAgent
+  daemonMgr <-->|"NDJSON frames: sessions, attach, asks, catalog"| sushiaiDaemon
+  sushiaiDaemon <--> holders
+  holders -->|"agent hooks: sushiai hook, sushiai open"| sushiaiDaemon
+  sushiaiDaemon -->|task agent launch + project MCP| taskAgent
 ```
 
-An agent asks for a Preview by setting the herdr workspace token `sushiai_open=<pane> <extension>/<surface> <nonce>` with the path in `sushiai_open_arg` (Herdr cuts a value at 80 characters) (the global `sushiai-artifacts` skill holds the command; `artifacts-skill.cjs` registers it with `extensions/builtin-skills.cjs`, which installs it for Claude Code and Codex while the extension is on and removes it when it is off). The token reaches the renderer in the next `session.snapshot` from any endpoint, local or SSH. `src/extensions/useOpenSignals.ts` acts on each new value once, ignoring the value seen at start, and opens the builtin core surface as the companion half of that pane (one pane, a draggable seam, hidden and shown from the pane header), without moving focus. Only `view.kind: "core"` surfaces, which only builtins may declare, can be opened this way. The Preview reads files only inside its workspace folder, through the main process with the project as root, so a symlink out of it is refused. HTML runs in an `allow-scripts` iframe without same-origin, so it cannot reach `window.bridge`; the injected comment script only posts what the owner pointed at.
+The app talks to one `sushiai` daemon per host. `electron/daemon/manager.cjs` owns a connector per host (`local`: the daemon socket in `$SUSHIAI_HOME` or `~/.sushiai`, started by the app when missing; `ssh`: `sushiai proxy` over the host's ssh; `command`: a local command that speaks the protocol on stdio) and publishes `daemon-state` and `daemon-event` to the renderer. The renderer never opens a socket: `useDaemon` lists the sessions of each ready host once, then applies events, and `reconcileSessions` binds every panel to its session by `panel.sessionId` (a session that is gone ends its panel with Reopen; a saved panel without a `sessionId` restores ended). Terminals attach through `daemon/terminals.cjs` (a snapshot, then output with a byte credit and acknowledgements; xterm keeps the scrollback). Sessions are held by `sushiai hold` processes, so the daemon can be killed or upgraded and the app can quit or crash without ending a session; on the next start the panels reattach to the same screens. Agents report status through hooks (`sushiai hook`), ask for permission through the daemon (Inbox **Allow** and **Deny** answer it) and ask for a Preview with `sushiai open <extension>/<surface> <path>`, which the daemon delivers as a `session.open` event. A remote host gets `sushiai` from **Connections → Install** (`createHostInstaller` in `host-setup.cjs`: upload over ssh, sha256 check, atomic link, hooks installed, daemon restarted). Project and group catalogs sync to every daemon (`catalog-sync.cjs`).
 
-App state lives in one database, `sushiai.db` (`node:sqlite`, `electron/app-db.cjs`, one cached handle per profile, WAL, owner-only file mode, migrations on `user_version`). Each old JSON store (`projects.json`, `workspace-state.json`, `herdr-launches.json`, `connections.json`, `orchestrator-hosts.json`) is imported once into its tables and renamed `<name>.imported`. The renderer's workspace snapshot keeps its IPC (`workspace-state-read/write/flush`); the main process splits it into `workspaces` rows (unique per Herdr endpoint and workspace id, so one Herdr workspace is never stored twice) and `app_state` keys, and writes only what changed in one transaction. Session launch records, SSH connection profiles and enabled orchestrator hosts are tables too. Every other main-process store (model providers and profiles, Claude and Codex account lists, provider and project secrets, window bounds, update settings, app preferences) is a named map in the generic `store(name, key, value)` table, read with `readStore` and written with `writeStore`/`putStore` (changed keys only, one transaction). Secrets keep their `safeStorage` ciphertext, whose key lives in the macOS Keychain; when secure storage is unavailable, provider keys fall back to unencrypted storage, as before. Files stay files only where another program reads them or they can be regenerated: Codex homes, CLI settings staged for a launch, extension manifests, attachments, update downloads, the skills catalog cache. `scripts/check-conventions.mjs` fails on a new `*.json` name under `electron/` that is not on its allowlist. Project metadata is a `projects` table and a `folders` table keyed by host and path, which holds each folder's attached project and its last git identity (remote key, common dir, checkout, branch); environment and account values are stored in the `project-secrets` store, encrypted through Electron `safeStorage`, and deleted in the same transaction as their project. The renderer receives presence and masked hints, while the main process resolves values for the selected project, stage, and host. Local sessions receive their stage-specific environment at launch. Every SSH host the owner added receives a project's values (adding the host is the consent) unless the owner switched sending off for that project and host; remote task values cross through the forwarded orchd socket; remote terminal values use a one-shot file sent over SSH stdin and removed after sourcing. Codex accounts are not values in that store: each one is its own Codex home under userData (`codex-accounts/<id>`), signed in by `codex login` and refreshed by Codex itself, with the rest of `~/.codex` linked in. A local session runs Codex with `CODEX_HOME` set to it; an SSH session gets the account's login through the same one-shot file, for that session only. A ChatGPT login refreshed there (its refresh token is single-use) is left in a named session home on the host and collected over SSH at the account's next start, the newer login winning. Switching sending off prevents later reads from including that host's project values and replaces what that host's daemon already holds (when the host is offline, at the next connection).
+An extension manifest may add a Settings tab (`settings.page`) and name a companion program. The supervisor in `electron/extensions/companion-process.cjs` starts it only after the owner approves its resolved path, args and permissions, and the tab shows the values it serves (`docs/extensions/companion.md`). Built-in modules attach rows, worktree claims and notices through `src/extensions/modules.ts` and `electron/extensions/notices.cjs`; both are internal APIs, not part of the manifest contract.
 
-Every writer of the project store (`upsert`, `updateEnv`, `updateMcp`, `mergeImport`, `setSecret`, `setHostSecret`, `clearSecret`, `setHostWithheld`, `setHostOverrides`, `setGitToken`, `delete`) runs one at a time under a single lock and reads fresh state; `upsert` never rewrites the variables or MCP servers of an existing project, and ids that are not own keys of the store are unknown projects. Project IPCs: `projects:env:update` and `projects:mcp:update` (variables and servers, MCP credentials become `${VAR}` references), `projects:git-token:set`, `projects:import-local`, `projects:import-mcp-text`, `projects:scan-source`, `projects:env:review-text`, `projects:env:classify`, `projects:local-install`, and `projects:host:prepare`. A host the owner added gets a project's values with no prompt: the "+" picker's "Prepare <host> and start" and the New project flow just clone, install, send the values and go on. The one control is "Don't send secrets to this host" (Project settings → Hosts, off by default, stored as `hosts[host].withheld`): with it on, `projects:host:prepare` clones with the host's own git login and installs with no value, task and terminal reads return none, and `setHostWithheld` makes `OrchestratorHosts.refreshSecrets(host)` re-push the allowed values so the host's daemon drops what it holds. Tasks and SSH terminals get the values; Herdr panes never do. `#withMcp` sends the enabled server definitions, with `${VAR}` references, to a remote orchd regardless of that switch; the values behind those references and the project's variables reach a remote orchd only through `#pushSecrets`, which honours it. Every folder has a project: `Projects.resolveProject` is the one resolver - the project the folder is attached to, else the project of its git remote (the branch's upstream remote, else `origin`, else the first one, through `insteadOf`), else a project with an attached folder of the same common git dir on that host - and a folder that gains a remote later keeps its project, which follows the remote. `projects:identify` gives the sidebar a folder's project id and git identity: it answers from the stored row at once and reads git once per run in the background (the local active workspace re-reads on a slow timer for its branch, a remote host is never polled), writing only when something changed, so an offline host's checkouts still join their project. The sidebar merges rows by that project id, then by remote, then by common dir on one host; grouping by host only splits the display; `projects:import-local` pulls a folder's `.env`, `.env.local`, `.mcp.json` and Claude config into the project (new keys only, empty secrets filled, removed keys not brought back unless asked), previewable. `claude-mcp-usage` counts MCP tool calls per server and plugin from Claude Code's own transcripts for the last 30 days.
+A `session.open` event opens a Preview: `src/extensions/useOpenSignals.ts` acts on each new event once and opens the builtin core surface as the companion half of that pane (one pane, a draggable seam, hidden and shown from the pane header), without moving focus. Only `view.kind: "core"` surfaces, which only builtins may declare, can be opened this way. The Preview reads files only inside its workspace folder, through the main process with the project as root, so a symlink out of it is refused. HTML runs in an `allow-scripts` iframe without same-origin, so it cannot reach `window.bridge`; the injected comment script only posts what the owner pointed at.
+
+App state lives in one database, `sushiai.db` (`node:sqlite`, `electron/app-db.cjs`, one cached handle per profile, WAL, owner-only file mode, migrations on `user_version`). Each old JSON store (`projects.json`, `workspace-state.json`, `connections.json`, `orchestrator-hosts.json`) is imported once into its tables and renamed `<name>.imported`. The renderer's workspace snapshot keeps its IPC (`workspace-state-read/write/flush`); the main process splits it into `workspaces` rows (the id is the daemon group) and `app_state` keys, and writes only what changed in one transaction. SSH connection profiles and enabled orchestrator hosts are tables too. Every other main-process store (model providers and profiles, Claude and Codex account lists, provider and project secrets, window bounds, update settings, app preferences) is a named map in the generic `store(name, key, value)` table, read with `readStore` and written with `writeStore`/`putStore` (changed keys only, one transaction). Secrets keep their `safeStorage` ciphertext, whose key lives in the macOS Keychain; when secure storage is unavailable, provider keys fall back to unencrypted storage, as before. Files stay files only where another program reads them or they can be regenerated: Codex homes, CLI settings staged for a launch, extension manifests, attachments, update downloads, the skills catalog cache. `scripts/check-conventions.mjs` fails on a new `*.json` name under `electron/` that is not on its allowlist. Project metadata is a `projects` table and a `folders` table keyed by host and path, which holds each folder's attached project and its last git identity (remote key, common dir, checkout, branch); environment and account values are stored in the `project-secrets` store, encrypted through Electron `safeStorage`, and deleted in the same transaction as their project. The renderer receives presence and masked hints, while the main process resolves values for the selected project, stage, and host. Local sessions receive their stage-specific environment at launch. Every SSH host the owner added receives a project's values (adding the host is the consent) unless the owner switched sending off for that project and host; remote task values cross through `orch.secrets.set` over the daemon connection; remote session values travel in `session.create` `env` over the daemon protocol (through the ssh proxy) and live only in the holder's environment and the daemon's memory, never in `argv` or `state.json`. Codex accounts are not values in that store: each one is its own Codex home under userData (`codex-accounts/<id>`), signed in by `codex login` and refreshed by Codex itself, with the rest of `~/.codex` linked in. A local session runs Codex with `CODEX_HOME` set to it; an SSH session gets the account's login through the same `session.create` `env`, for that session only. A ChatGPT login refreshed there (its refresh token is single-use) is left in a named session home on the host and collected over SSH at the account's next start, the newer login winning. Switching sending off prevents later reads from including that host's project values and replaces what that host's daemon already holds (when the host is offline, at the next connection).
+
+Every writer of the project store (`upsert`, `updateEnv`, `updateMcp`, `mergeImport`, `setSecret`, `setHostSecret`, `clearSecret`, `setHostWithheld`, `setHostOverrides`, `setGitToken`, `delete`) runs one at a time under a single lock and reads fresh state; `upsert` never rewrites the variables or MCP servers of an existing project, and ids that are not own keys of the store are unknown projects. Project IPCs: `projects:env:update` and `projects:mcp:update` (variables and servers, MCP credentials become `${VAR}` references), `projects:git-token:set`, `projects:import-local`, `projects:import-mcp-text`, `projects:scan-source`, `projects:env:review-text`, `projects:env:classify`, `projects:local-install`, and `projects:host:prepare`. A host the owner added gets a project's values with no prompt: the "+" picker's "Prepare <host> and start" and the New project flow just clone, install, send the values and go on. The one control is "Don't send secrets to this host" (Project settings → Hosts, off by default, stored as `hosts[host].withheld`): with it on, `projects:host:prepare` clones with the host's own git login and installs with no value, task and terminal reads return none, and `setHostWithheld` makes `OrchestratorHosts.refreshSecrets(host)` re-push the allowed values so the host's daemon drops what it holds. Tasks and sessions get the values. `#withMcp` sends the enabled server definitions, with `${VAR}` references, to a remote orchestrator regardless of that switch; the values behind those references and the project's variables reach a remote orchestrator only through `#pushSecrets`, which honours it. Every folder has a project: `Projects.resolveProject` is the one resolver - the project the folder is attached to, else the project of its git remote (the branch's upstream remote, else `origin`, else the first one, through `insteadOf`), else a project with an attached folder of the same common git dir on that host - and a folder that gains a remote later keeps its project, which follows the remote. `projects:identify` gives the sidebar a folder's project id and git identity: it answers from the stored row at once and reads git once per run in the background (the local active workspace re-reads on a slow timer for its branch, a remote host is never polled), writing only when something changed, so an offline host's checkouts still join their project. The sidebar merges rows by that project id, then by remote, then by common dir on one host; grouping by host only splits the display; `projects:import-local` pulls a folder's `.env`, `.env.local`, `.mcp.json` and Claude config into the project (new keys only, empty secrets filled, removed keys not brought back unless asked), previewable. `claude-mcp-usage` counts MCP tool calls per server and plugin from Claude Code's own transcripts for the last 30 days.
 
 ## 2. Task lifecycle
 
@@ -177,11 +193,11 @@ A task can be parked in the planning backlog (`task.backlog`, or `backlog` on
 `task.create`): a `next` or `later` bucket with an integer order. A backlog
 task is started only by `task.start` or the autopilot; recovery and the graph
 never start it (a drafting one resumes planning but stops after the plan). With
-`settings.autopilot` on, orchd starts the ready `next` tasks (every `dependsOn`
+`settings.autopilot` on, the orchestrator starts the ready `next` tasks (every `dependsOn`
 done) in (order, createdAt, id) order while live loops are below `parallel`.
 Starting clears the backlog and records who started it in `decisions`.
 
-A task graph is state orchd keeps, never a split it decides: the planner
+A task graph is state the orchestrator keeps, never a split it decides: the planner
 may answer a top-level request with `subtasks` (keys, requests, `dependsOn`
 between keys), or the orchestrator agent builds one with `task.create
 {parent, dependsOn}`. A parent runs no implement attempt unless finishing fails (below); each child
@@ -214,7 +230,7 @@ drop it, or stop.
 
 ### Self-healing briefs
 
-`engine/healing.rs` lets orchd repair a task's own contract without the owner,
+`engine/healing.rs` lets the orchestrator repair a task's own contract without the owner,
 each change a decision line plus an assumption (`by: orchd`) the owner can
 overturn. Before the first attempt every verify/finalVerify/check command runs
 on the base (`base_check.rs`); one that fails goes to the cheap judge
@@ -222,7 +238,7 @@ on the base (`base_check.rs`); one that fails goes to the cheap judge
 or marks it non-gating. When review marks the same criterion unmet in two
 attempts, the judge rules `code gap` (retry) or `infeasible as written` (the
 criterion is amended and the same attempt reviewed again). A planner-named
-screenshot command is run by orchd itself; otherwise an earlier attempt's
+screenshot command is run by the orchestrator itself; otherwise an earlier attempt's
 images count while no UI file it changed has changed. After the first attempt
 only P0/P1 findings about the task's own work block; the rest are report
 follow-ups. An owner or policy answer that contradicts a criterion amends it
@@ -239,7 +255,7 @@ flowchart LR
   gate -->|weakens a check or protected path,<br/>targets AGENTS.md or memory| rejected([stored rejected, with a reason])
   gate -->|passes| proposed([proposed])
   proposed -->|repo track: Approve| task[task runs] -->|done| adopted([adopted])
-  proposed -->|harness track: orchd eval run,<br/>evolution.adopt| adopted
+  proposed -->|harness track: sushiai orch eval run,<br/>evolution.adopt| adopted
   adopted --> measure[measure later tasks] -->|metric regressed| revert([revert_suggested])
 ```
 
@@ -268,7 +284,7 @@ flowchart TD
   done([done])
   fail["Failure<br/>signature dedup, maybe escalate tier"]
   budget{"Budget left?"}
-  ab[["orchd ab<br/>metrics per variant"]]
+  ab[["sushiai orch ab<br/>metrics per variant"]]
   triage["Orchestrator triages, max 2 per task<br/>continue / reject finding / escalate"]
   ownerQ(["Owner question"])
 
@@ -329,7 +345,7 @@ flowchart LR
   orch -->|task_create / task_answer via MCP| planner
 ```
 
-Task agents run with `sandbox: native` by default (`orchd/src/model.rs`): the
+Task agents run with `sandbox: native` by default (`crates/sushiai-orch/src/model.rs`): the
 sandbox keeps writes inside the task's worktree and the network is open
 (`allowedDomains: ["*"]`). `sandbox: host` turns it off.
 
@@ -342,13 +358,12 @@ flowchart LR
     oc["OpenClaw<br/>skills with references/,<br/>autoreview, deslop,<br/>ask only consequential decisions"]
     stsa["Stateful Task / Stateless Agent<br/>state on disk, fresh disposable sessions"]
     cc["Claude Code harness<br/>hooks, subagents with models,<br/>headless -p, sandbox, MCP"]
-    hd["Herdr<br/>machine-wide session daemon,<br/>agent states"]
   end
   subgraph ours["sushiAI"]
     modes["Shell modes Agent / Code / Chat"]
-    orchdN["orchd: task store + socket API,<br/>orchestrator agent over MCP"]
+    orchdN["orchestrator module in the sushiai daemon:<br/>task store, orch.* API,<br/>orchestrator agent over MCP"]
     skills[".agents/skills + role agents<br/>implementer, reviewer, qa, design-critic"]
-    sessions["Terminal panels over Herdr"]
+    sessions["Terminal panels over the sushiai daemon"]
   end
   bm --> modes
   bm --> orchdN
@@ -356,7 +371,6 @@ flowchart LR
   cc --> orchdN
   oc --> skills
   cc --> skills
-  hd --> sessions
 ```
 
 ## 6. Planned next

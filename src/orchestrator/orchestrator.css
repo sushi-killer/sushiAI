@@ -591,26 +591,6 @@
   color: var(--text-muted);
   font-size: var(--text-sm);
 }
-.orch-command {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--bg-sunken);
-}
-.orch-command code {
-  flex: 1;
-  color: var(--text);
-  font-family: Menlo, monospace;
-  font-size: 12.5px;
-}
-.orch-command-prompt {
-  color: var(--text-faint);
-  font-family: Menlo, monospace;
-  font-size: var(--text-sm);
-}
 
 /* Pane/Composer, docked at the bottom of the main pane. */
 .orch-composer-dock {
@@ -1057,7 +1037,7 @@
 }
 
 /* The prepare page (Figma "Prepare host"). */
-.orch-prep-eyebrow {
+.host-prep-eyebrow {
   color: var(--text-faint);
   font-size: 10.5px;
   font-weight: 600;
@@ -1065,63 +1045,63 @@
   line-height: 13px;
   text-transform: uppercase;
 }
-.orch-prep-caption {
+.host-prep-caption {
   color: var(--text-faint);
   font-size: 10px;
   font-weight: 600;
   line-height: 12px;
   text-transform: uppercase;
 }
-.orch-prep-steps {
+.host-prep-steps {
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 10px;
 }
-.orch-prep-step {
+.host-prep-step {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--line-divider);
 }
-.orch-prep-step:last-child {
+.host-prep-step:last-child {
   border-bottom: 0;
 }
-.orch-prep-mark {
+.host-prep-mark {
   flex: none;
   width: 16px;
   height: 16px;
   border: 1px solid var(--line-strong);
   border-radius: 50%;
 }
-.orch-prep-step.done .orch-prep-mark {
+.host-prep-step.done .host-prep-mark {
   border-color: transparent;
   background: var(--tone-ok);
 }
-.orch-prep-step.active .orch-prep-mark {
+.host-prep-step.active .host-prep-mark {
   border-color: var(--tone-warning);
 }
-.orch-prep-step.failed .orch-prep-mark {
+.host-prep-step.failed .host-prep-mark {
   border-color: var(--danger);
 }
-.orch-prep-text {
+.host-prep-text {
   display: flex;
   flex: 1;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
 }
-.orch-prep-title {
+.host-prep-title {
   color: var(--text-muted);
   font-size: 12.5px;
   line-height: 15px;
 }
-.orch-prep-step.done .orch-prep-title,
-.orch-prep-step.active .orch-prep-title,
-.orch-prep-step.failed .orch-prep-title {
+.host-prep-step.done .host-prep-title,
+.host-prep-step.active .host-prep-title,
+.host-prep-step.failed .host-prep-title {
   color: var(--text);
 }
-.orch-prep-sub {
+.host-prep-sub {
   overflow: hidden;
   color: var(--text-faint);
   font-size: 11px;
@@ -1129,15 +1109,15 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.orch-prep-step.failed .orch-prep-sub {
+.host-prep-step.failed .host-prep-sub {
   color: var(--danger);
 }
-.orch-prep-right {
+.host-prep-right {
   color: var(--text-faint);
   font-size: 11px;
   line-height: 13px;
 }
-.orch-prep {
+.host-prep {
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -1146,47 +1126,47 @@
   overflow: auto;
   padding: 22px 28px 18px;
 }
-.orch-prep h2 {
+.host-prep h2 {
   margin: 0;
   color: var(--text);
   font-size: 20px;
   font-weight: 600;
   line-height: 24px;
 }
-.orch-prep > p {
+.host-prep > p {
   margin: -10px 0 0;
   color: var(--text-muted);
   font-size: 12.5px;
   line-height: 15px;
 }
-.orch-prep .orch-prep-steps {
+.host-prep .host-prep-steps {
   border-color: var(--line-pane);
   background: var(--bg-raised);
 }
-.orch-prep .orch-prep-step {
+.host-prep .host-prep-step {
   align-items: flex-start;
   gap: 10px;
 }
-.orch-prep .orch-prep-title {
+.host-prep .host-prep-title {
   font-size: 13px;
   line-height: 16px;
 }
-.orch-prep .orch-prep-sub {
+.host-prep .host-prep-sub {
   font-size: 11.5px;
   line-height: 14px;
 }
-.orch-prep-help {
+.host-prep-help {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
-.orch-prep-help p {
+.host-prep-help p {
   margin: 0;
   color: var(--text-faint);
   font-size: 11.5px;
   line-height: 14px;
 }
-.orch-prep-token {
+.host-prep-token {
   height: 32px;
   margin-top: 6px;
   padding: 0 10px;
@@ -1195,7 +1175,7 @@
   background: var(--bg-app);
   color: var(--text);
 }
-.orch-prep-actions {
+.host-prep-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;

@@ -17,7 +17,7 @@ import {
   X,
 } from "lucide-react";
 import "./orchestrator.css";
-import type { OrchestratorView } from "../types";
+import type { OrchestratorView } from "./types";
 import type { TaskTarget } from "./notices";
 import type { OrchestratorHost, Preflight } from "./types";
 import { pendingReveal, subscribeReveal } from "./reveal";
@@ -47,7 +47,7 @@ import {
   PrepareProgress,
   PreparingHost,
   type PrepareFailure,
-} from "./PrepareViews";
+} from "../ui/PrepareViews";
 import { PreflightStrip, RemoteSetup, RepoPrompt } from "./RemoteHostViews";
 import { useOrchestratorHosts } from "./useHosts";
 import { useWorkspaceRepos } from "./workspaceRepos";
@@ -57,7 +57,6 @@ import {
   daemonDown,
   errorText,
   formatDuration,
-  isPackagedInstall,
   planDrafts,
   sortTasks,
   taskCreateParams,
@@ -78,7 +77,7 @@ import type {
   Task,
 } from "./types";
 import type { Project, ProjectHostReadiness } from "../types";
-import { Banner, Tag } from "./ui";
+import { Banner, Tag } from "../ui";
 import { OrchRail } from "./OrchRail";
 import { Composer, OrchestratorRouteChip, TaskRouteLabel } from "./Composer";
 import { TaskDetail } from "./TaskDetail";
@@ -313,7 +312,7 @@ function OrchestratorBody({
   useEffect(() => reportDaemon.current(daemonState), [daemonState]);
 
   // The subscribe relay doesn't tell the renderer when the daemon goes away,
-  // so an open panel pings it: one that stops answering flips the panel to
+  // so an open panel checks it: one that stops answering flips the panel to
   // the unreachable state within a few seconds, and one that answers again -
   // or answers as a new process, restarted in between - reloads the task
   // list, whose events the old subscription missed.
@@ -324,12 +323,12 @@ function OrchestratorBody({
     let pid: number | null = null;
     let cancelled = false;
     const check = () => {
-      if (inFlight || daemonRef.current === "not-built") return;
+      if (inFlight) return;
       inFlight = true;
       let timer = 0;
       const timeout = new Promise<never>((_, reject) => {
         timer = window.setTimeout(
-          () => reject(new Error("orchd did not respond")),
+          () => reject(new Error("The sushiai daemon did not respond")),
           PING_TIMEOUT_MS,
         );
       });
@@ -750,43 +749,6 @@ function OrchestratorBody({
           : "task";
 
   function offlineBody() {
-    if (daemonState === "not-built" && isPackagedInstall(error))
-      return (
-        <div data-orchestrator-not-built>
-          <Banner
-            tone="warning"
-            title="The orchestrator is missing from this installation."
-            body="Reinstall sushiAI, then Retry."
-            action={{ label: "Retry", onClick: retry }}
-          />
-        </div>
-      );
-    if (daemonState === "not-built")
-      return (
-        <>
-          <div data-orchestrator-not-built>
-            <Banner
-              tone="warning"
-              title="The orchestrator isn't built yet."
-              body="Build it once from the repository root, then Retry."
-              action={{ label: "Retry", onClick: retry }}
-            />
-          </div>
-          <div className="orch-command">
-            <span className="orch-command-prompt">$</span>
-            <code>npm run build:orchd</code>
-            <button
-              type="button"
-              className="ui-button ghost"
-              onClick={() =>
-                void navigator.clipboard?.writeText("npm run build:orchd")
-              }
-            >
-              Copy
-            </button>
-          </div>
-        </>
-      );
     const seen =
       lastSeenAt === null
         ? ""
@@ -1034,9 +996,7 @@ function OrchestratorBody({
               }
               placeholder={
                 offline
-                  ? daemonState === "not-built"
-                    ? "Build the orchestrator to send tasks"
-                    : "Reconnect to send tasks"
+                  ? "Reconnect to send tasks"
                   : composerMode === "ask"
                     ? "Ask the orchestrator to start, check or answer a task…"
                     : composerMode === "plan"
@@ -1349,7 +1309,7 @@ function OrchestratorPanelBody({
             void window.bridge?.orchestratorPreflight(host).catch(() => {});
             setAttempt((n) => n + 1);
           }}
-          onInstallRust={() => {
+          onInstallSushiai={() => {
             retry();
             void window.bridge?.orchestratorHostSetup(host).catch(() => {});
             setAttempt((n) => n + 1);

@@ -80,6 +80,12 @@ const desktop = await electron.launch({
   },
 });
 const errors = [];
+// UI evidence: SUSHIAI_SHOT_DIR names a folder for the approval dialog and the
+// settings tab screenshots.
+const shot = (page, name) =>
+  process.env.SUSHIAI_SHOT_DIR
+    ? page.screenshot({ path: path.join(process.env.SUSHIAI_SHOT_DIR, name) })
+    : undefined;
 try {
   const page = await desktop.firstWindow();
   page.on("pageerror", (error) => errors.push(error.message));
@@ -110,6 +116,7 @@ try {
   );
   assert.ok(shown.includes(manifest.companion.args.join(" ")));
   assert.deepEqual(await readStarts(), [], "no process while reviewing");
+  await shot(page, "s7-final-approval.png");
   await dialog.getByRole("button", { name: "Approve", exact: true }).click();
   await dialog.waitFor({ state: "detached" });
   await card
@@ -128,6 +135,7 @@ try {
     .filter({ hasText: "Connected" })
     .waitFor();
   await settings.locator("svg[role=img]").first().waitFor();
+  await shot(page, "s7-final-companion-settings.png");
   await page.getByRole("button", { name: "Close dialog" }).click();
 
   await page

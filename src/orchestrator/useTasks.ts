@@ -20,7 +20,7 @@ function publish(tasks: Task[]) {
 
 /** Reads every orchd task across repos and keeps it live from the daemon's
  * task events. Returns the function that stops all of it. */
-function start(): () => void {
+export function startTaskStore(): () => void {
   if (!window.bridge) return () => {};
   let cancelled = false;
   // One list per host; a host that is down keeps what it last showed.
@@ -66,6 +66,12 @@ function start(): () => void {
   };
   void load(true);
   const offHosts = window.bridge.onOrchestratorHosts(() => void load(false));
+  // The module came up late (enabled, then the daemon restarted with the
+  // `orch` capability) or the daemon reconnected: read the list now.
+  const offDaemon = window.bridge.onDaemonState((state) => {
+    if (state.state === "ready" && state.capabilities?.includes("orch"))
+      void loadHost(state.host || "local");
+  });
   const timer = setInterval(() => void load(true), REFRESH_MS);
   const off = window.bridge.onOrchestrator((event) => {
     if (event.event !== "task") return;
@@ -79,12 +85,13 @@ function start(): () => void {
     cancelled = true;
     clearInterval(timer);
     offHosts();
+    offDaemon?.();
     off?.();
   };
 }
 
 function retain(): () => void {
-  if (users++ === 0) stop = start();
+  if (users++ === 0) stop = startTaskStore();
   return () => {
     if (--users > 0) return;
     stop?.();

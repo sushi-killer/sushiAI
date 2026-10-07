@@ -228,6 +228,13 @@ pub struct AgentInfo {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<String>,
+    /// An agent seen in the foreground of a session that was launched without one (started by
+    /// hand in a shell). Detection only: it never makes the session a hook agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_agent: Option<String>,
+    /// The working directory of that agent's process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
     /// The agent's status, separate from the process `status`.
@@ -383,6 +390,9 @@ pub struct HoldAttachResult {
     /// then every later resize with the offset it happened at. Empty from an older holder.
     #[serde(default)]
     pub sizes: Vec<SizeMark>,
+    /// Pid of the PTY child (the shell). None from an older holder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child: Option<u32>,
 }
 
 /// The PTY had this size from stream offset `seq` on.
@@ -474,6 +484,11 @@ pub struct SessionMeta {
     pub id: String,
     pub agent_session: Option<String>,
     pub transcript_path: Option<String>,
+    /// Additive: absent from an older daemon.
+    #[serde(default)]
+    pub foreground_agent: Option<String>,
+    #[serde(default)]
+    pub foreground_cwd: Option<String>,
 }
 
 /// Params of `session.askClosed`. `decided` is true when the owner answered; false when the

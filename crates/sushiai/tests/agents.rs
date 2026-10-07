@@ -797,7 +797,9 @@ fn hooks_install_refuses_to_overwrite_a_regular_file_at_the_stable_path() {
     fs::create_dir_all(&bin).expect("mkdir");
     fs::write(bin.join("sushiai"), "mine").expect("file");
     let mut command = Command::new(BIN);
-    command.args(["hooks", "install"]);
+    command
+        .args(["hooks", "install"])
+        .env_remove("SUSHIAI_HOME");
     for (k, v) in codex_env(home.path()) {
         command.env(k, v);
     }
@@ -823,7 +825,9 @@ fn running_the_binary_through_its_own_link_keeps_the_link_pointing_at_the_binary
 
     // Install again, this time started through the link.
     let mut command = Command::new(&link);
-    command.args(["hooks", "install"]);
+    command
+        .args(["hooks", "install"])
+        .env_remove("SUSHIAI_HOME");
     for (k, v) in codex_env(home.path()) {
         command.env(k, v);
     }

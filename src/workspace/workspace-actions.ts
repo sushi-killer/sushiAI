@@ -133,17 +133,25 @@ export function reopenRequest(
   operationId: string,
   defaultEndpoint: string,
 ): SessionLaunchRequest {
-  const agent = ended.kind === "agent";
+  // A terminal whose shell ran an agent by hand continues it. Claude and Codex
+  // only with the exact conversation id (the newest one in the folder may be
+  // another pane's); without it the shell comes back. The others just restart.
+  const handStarted = ended.kind === "terminal" && !!ended.agent;
+  const resumable = ended.agent === "claude" || ended.agent === "codex";
+  const agent =
+    ended.kind === "agent" ||
+    (handStarted && (!resumable || !!ended.agentSession));
   return {
     operationId,
     endpoint: owner.connection || defaultEndpoint,
-    cwd: owner.cwd,
+    cwd: (handStarted && agent && ended.agentCwd) || owner.cwd,
     label: owner.name,
     kind: agent ? "agent" : "terminal",
     agent: agent ? ended.agent || "claude" : undefined,
     modelProfileId: ended.modelProfileId,
-    claudeAccountId: ended.claudeAccountId,
-    codexAccountId: ended.codexAccountId,
+    // A hand-started agent used the host's own login: no account is picked.
+    claudeAccountId: handStarted && agent ? "" : ended.claudeAccountId,
+    codexAccountId: handStarted && agent ? "" : ended.codexAccountId,
     workspaceId: owner.id,
     ...(agent && ended.agentSession ? { resume: ended.agentSession } : {}),
     restore: true,

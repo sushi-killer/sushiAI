@@ -104,6 +104,7 @@ fn a_full_task_leaves_one_cost_record_per_run_and_summaries_add_up() {
 
     // The CLI prints the same rows.
     let out = std::process::Command::new(sushiai_bin())
+        .env_remove("SUSHIAI_HOME")
         .args(["orch", "costs", "--json", "--by", "stage", "--data"])
         .arg(daemon.data_dir())
         .output()

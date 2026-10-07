@@ -95,6 +95,24 @@ Modules attach at the composition bin (`crates/sushiai`); nothing else knows whi
   applies it only while no hook drives the status, so a hook status always wins
   (`statusSource` says which); Codex dialogs only ever block, and a
   `SessionStart` hook ends a dialog read before any hook.
+- Hand-started agents: a session created without an agent (a shell) is polled
+  every 2 s. `foreground.rs` reads the PTY's foreground process group of the
+  shell (`HoldAttachResult.child` is the shell pid; for an older holder, the
+  holder's only child) and matches its command line against `agent::AGENT_NAMES`:
+  the program name exactly, or an interpreter's script (`node .../codex.js`, or a
+  script inside the agent's npm package). The result is `foregroundAgent` and
+  `foregroundCwd` in the record and in `session.meta`. The agent's own
+  conversation id is read from its files, with the paths taken from the agent
+  process's environment. Claude: `sessions/<pid>.json` for the leader or any
+  process in the group. Codex: the `rollout-*.jsonl` file under `<CODEX_HOME>/sessions`
+  that a process of the group holds open (checked again on every poll; a
+  sub-agent's rollout is skipped). A Codex that talks to the shared app server
+  holds none, so it has no id and Reopen gives a shell; only an in-process Codex
+  (`--no-daemon`) is continued. All clear when
+  the shell owns the terminal again, and also when the shell exits by itself; they
+  stay when the holder is lost, so Reopen continues what was last seen.
+  Detection never makes the session a hook agent: tokens, hooks and the status
+  machine stay keyed to the launch agent (`agent`).
 - Asks: a `PermissionRequest` opens an ask (`session.ask`, listed in
   `session.list` as `asks`). `ask.respond` answers it. Timeout or a vanished hook
   process hands it back to the terminal (`PermissionClosed {decided: false}`).

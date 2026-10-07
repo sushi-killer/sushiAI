@@ -23,6 +23,7 @@ use tokio::time::{interval, sleep_until, timeout, Instant};
 
 use crate::agent::{self, now_ms, random_hex};
 use crate::error::Fail;
+use crate::foreground;
 use crate::holder::{HolderConn, SendError};
 use crate::registry::Registry;
 
@@ -40,6 +41,8 @@ const ENDING_GRACE: Duration = Duration::from_secs(3);
 const SCREEN_THROTTLE: Duration = Duration::from_millis(500);
 /// Open permission asks per session; more are left to the agent's own terminal prompt.
 const MAX_ASKS: usize = 20;
+/// How often the foreground process of a shell session is looked at.
+const FOREGROUND_POLL: Duration = Duration::from_secs(2);
 /// Formatted history bytes one attach may carry; the oldest lines go first.
 const HISTORY_BUDGET: usize = 4 * 1024 * 1024;
 
@@ -209,6 +212,13 @@ struct Actor {
     /// When the screen was last read, and when the next read is due after output was held back.
     screen_read: Option<Instant>,
     screen_due: Option<Instant>,
+    /// Pid of the PTY child, and when the foreground was last looked at. Only a session started
+    /// without an agent is watched for one started by hand.
+    child: Option<u32>,
+    watch_foreground: bool,
+    foreground_polled: Option<Instant>,
+    /// Leader of the foreground group at the last poll: a new leader is a new agent process.
+    foreground_leader: Option<u32>,
 }
 
 /// Starts the actor for a session whose holder is attached and replayed up to `seq`.
@@ -233,6 +243,9 @@ pub fn start(
         registry.announce_created(&info.id);
     }
     registry.set_handle(&info.id, handle.clone());
+    let watch_foreground = agent::agent_of(info_name.as_deref()).is_none()
+        && agent::screen_agent_of(info_name.as_deref()).is_none();
+    let child = foreground::child_pid(holder.child_pid, info.holder_pid);
     let mut actor = Actor {
         agent: restore_agent(&info),
         info,
@@ -251,6 +264,10 @@ pub fn start(
         screen_agent: agent::screen_agent_of(info_name.as_deref()),
         screen_read: None,
         screen_due: None,
+        child,
+        watch_foreground,
+        foreground_polled: None,
+        foreground_leader: None,
     };
     // The screen was replayed before the actor existed: read it once now.
     actor.screen_changed();
@@ -312,7 +329,10 @@ impl Actor {
                 }
                 () = until(self.retry.map(|(at, _)| at)) => self.reconnect().await,
                 () = until(self.screen_due) => self.read_screen(),
-                _ = tick.tick() => self.sweep(),
+                _ = tick.tick() => {
+                    self.sweep();
+                    self.poll_foreground();
+                }
             }
             // An exited session with nobody attached has nothing left to serve.
             if self.info.status == SessionStatus::Exited && self.output.receiver_count() == 0 {
@@ -546,6 +566,98 @@ impl Actor {
         }
     }
 
+    /// Every `FOREGROUND_POLL`: an agent the owner started by hand in a shell is reported as
+    /// `foregroundAgent` and `foregroundCwd`, with its own conversation id as `agentSession`
+    /// when its files name one. All clear when the shell owns the terminal again. The record
+    /// never becomes a hook agent. After the session exits the last values stay: that is what
+    /// Reopen continues.
+    fn poll_foreground(&mut self) {
+        let Some(child) = self
+            .child
+            .filter(|_| self.watch_foreground && self.running())
+        else {
+            return;
+        };
+        if self
+            .foreground_polled
+            .is_some_and(|at| at.elapsed() < FOREGROUND_POLL)
+        {
+            return;
+        }
+        self.foreground_polled = Some(Instant::now());
+        let seen = foreground::foreground(child);
+        let same_leader = seen
+            .as_ref()
+            .is_some_and(|s| self.foreground_leader == Some(s.leader));
+        self.foreground_leader = seen.as_ref().map(|s| s.leader);
+        let known = self
+            .info
+            .agent
+            .agent_session
+            .clone()
+            .filter(|_| same_leader);
+        let session = seen.as_ref().and_then(|s| self.conversation(s, known));
+        let record = &mut self.info.agent;
+        let name = seen.as_ref().map(|s| s.agent.to_string());
+        let cwd = seen.and_then(|s| s.cwd);
+        if record.foreground_agent == name
+            && record.foreground_cwd == cwd
+            && record.agent_session == session
+        {
+            return;
+        }
+        record.foreground_agent = name;
+        record.foreground_cwd = cwd;
+        record.agent_session = session;
+        self.registry.update(self.info.clone());
+        self.send_meta();
+    }
+
+    /// The conversation id of a hand-started agent, or `known` when its files do not say.
+    /// Claude names its pid in a file. Codex's id is the rollout file its process holds open,
+    /// checked again on every poll: one that holds none (it talks to the shared app server)
+    /// has no id.
+    fn conversation(&self, seen: &foreground::Seen, known: Option<String>) -> Option<String> {
+        match seen.agent {
+            "claude" => seen
+                .config_dir("CLAUDE_CONFIG_DIR", ".claude")
+                .and_then(|dir| foreground::claude_session(&dir, seen.leader, foreground::pgrp_of))
+                .or(known),
+            "codex" => {
+                let home = seen.config_dir("CODEX_HOME", ".codex")?;
+                foreground::codex_session(&home, &foreground::group_open_files(seen.leader))
+            }
+            _ => None,
+        }
+    }
+
+    /// Clears what hand-started agent detection recorded. True when something was set.
+    fn forget_foreground(&mut self) -> bool {
+        let record = &mut self.info.agent;
+        let had = record.foreground_agent.is_some()
+            || record.foreground_cwd.is_some()
+            || record.agent_session.is_some();
+        record.foreground_agent = None;
+        record.foreground_cwd = None;
+        record.agent_session = None;
+        had
+    }
+
+    fn send_meta(&self) {
+        let record = &self.info.agent;
+        let params = SessionMeta {
+            id: self.info.id.clone(),
+            agent_session: record.agent_session.clone(),
+            transcript_path: record.transcript_path.clone(),
+            foreground_agent: record.foreground_agent.clone(),
+            foreground_cwd: record.foreground_cwd.clone(),
+        };
+        let _ = self
+            .registry
+            .events
+            .send(Notification::new(method::SESSION_META, params));
+    }
+
     /// Copies the state machine into the session record, saves it and announces changes.
     fn publish(&mut self) {
         let Some(agent) = &self.agent else {
@@ -592,15 +704,7 @@ impl Actor {
                 .send(Notification::new(method::SESSION_STATUS, params));
         }
         if meta_changed {
-            let params = SessionMeta {
-                id,
-                agent_session: self.info.agent.agent_session.clone(),
-                transcript_path: self.info.agent.transcript_path.clone(),
-            };
-            let _ = self
-                .registry
-                .events
-                .send(Notification::new(method::SESSION_META, params));
+            self.send_meta();
         }
     }
 
@@ -729,6 +833,9 @@ impl Actor {
             if let Some(attached) = attached {
                 self.info.status = SessionStatus::Running;
                 self.info.holder_pid = Some(attached.pid).filter(|p| *p != 0);
+                self.child =
+                    foreground::child_pid(attached.child.filter(|p| *p != 0), self.info.holder_pid)
+                        .or(self.child);
                 self.registry.update(self.info.clone());
                 if let Some(graceful) = self.close_pending.take() {
                     let signal = if graceful { Signal::Term } else { Signal::Kill };
@@ -833,6 +940,10 @@ impl Actor {
         mark_exited(&mut self.info, code);
         // An exited session takes no more hooks: its token stops working.
         self.info.agent.token_hash = None;
+        // A shell that ended by itself may have been left a moment after its agent quit, before
+        // the next poll: nothing is running in it, so Reopen has no agent to continue. A lost
+        // holder (no exit code) keeps what was last seen.
+        let forget = self.watch_foreground && code.is_some() && self.forget_foreground();
         let mut dropped = Vec::new();
         if let Some(agent) = self.agent.as_mut() {
             dropped = agent.asks.drain(..).map(|a| a.ask.ask_id).collect();
@@ -843,6 +954,9 @@ impl Actor {
         }
         self.registry.update(self.info.clone());
         self.publish();
+        if forget {
+            self.send_meta();
+        }
         for ask_id in dropped {
             let params = AskClosed {
                 ask_id,

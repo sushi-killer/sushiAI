@@ -31,6 +31,7 @@ Rule: land one working end-to-end path first, then generalize.
 
 Root cause: JS tests on a base without the step 5 isolation changed the real home.
 Rule: merge the isolation fix into every lane base before JS tests run.
+Update 2026-10-07: inherited `SUSHIAI_HOME` relinked it again; spawned binaries set or remove it.
 
 ## Promoted
 

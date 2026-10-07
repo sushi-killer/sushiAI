@@ -6,6 +6,7 @@
 mod agent;
 mod binlink;
 mod error;
+mod foreground;
 mod framed;
 mod holder;
 mod home;

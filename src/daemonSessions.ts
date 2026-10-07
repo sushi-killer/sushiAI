@@ -27,6 +27,9 @@ type MetaParams = {
   id: string;
   agentSession?: string | null;
   transcriptPath?: string | null;
+  /** Absent from an older daemon: the field is left as it was. */
+  foregroundAgent?: string | null;
+  foregroundCwd?: string | null;
 };
 
 const withoutAsks = (session: DaemonSession): DaemonSession => {
@@ -162,6 +165,12 @@ export function applyDaemonEvent(
             ...known,
             agentSession: p.agentSession ?? undefined,
             transcriptPath: p.transcriptPath ?? undefined,
+            ...("foregroundAgent" in p
+              ? {
+                  foregroundAgent: p.foregroundAgent ?? undefined,
+                  foregroundCwd: p.foregroundCwd ?? undefined,
+                }
+              : {}),
           },
         },
       };
@@ -258,20 +267,45 @@ function panelStatus(
 /** A session the host no longer runs. The panel keeps its slot and its saved
  * state; it shows "Session ended" with Reopen until it is reopened or closed. */
 function endPanel(panel: Panel, session?: DaemonSession): Panel {
-  const agentSession = session?.agentSession || panel.agentSession;
-  if (
-    panel.ended &&
-    panel.status === undefined &&
-    panel.agentSession === agentSession
-  )
-    return panel;
-  const next: Panel = {
-    ...panel,
-    ended: true,
-    ...(agentSession ? { agentSession } : {}),
-  };
+  const terminal = panel.kind === "terminal";
+  const next: Panel = { ...panel, ended: true };
   delete next.status;
-  return next;
+  if (session) {
+    // The host still has the record, so it is what Reopen continues: a shell
+    // that was left after its agent quit has nothing to continue. Only a host
+    // that forgot the session leaves the panel's own copy.
+    const agent =
+      session.agent ??
+      session.foregroundAgent ??
+      (terminal ? undefined : panel.agent);
+    const conversation =
+      session.agentSession || (terminal ? undefined : panel.agentSession);
+    setOrDelete(next, "agent", agent);
+    setOrDelete(next, "agentSession", conversation);
+    setOrDelete(next, "agentCwd", terminal ? session.foregroundCwd : undefined);
+  }
+  return unchanged(panel, next);
+}
+
+function setOrDelete<K extends "agent" | "agentSession" | "agentCwd">(
+  panel: Panel,
+  key: K,
+  value: string | undefined,
+) {
+  if (value) panel[key] = value;
+  else delete panel[key];
+}
+
+/** The old panel when `next` differs from it in no field. */
+function unchanged(panel: Panel, next: Panel): Panel {
+  const keys = new Set([...Object.keys(panel), ...Object.keys(next)]);
+  for (const key of keys)
+    if (
+      (panel as Record<string, unknown>)[key] !==
+      (next as Record<string, unknown>)[key]
+    )
+      return next;
+  return panel;
 }
 
 function livePanel(panel: Panel, session: DaemonSession): Panel {
@@ -284,16 +318,19 @@ function livePanel(panel: Panel, session: DaemonSession): Panel {
   if (title) next.title = title;
   if (session.cwd) next.paneCwd = session.cwd;
   if (session.agentSession) next.agentSession = session.agentSession;
-  // The icon follows the agent the daemon runs in the session.
-  if (session.agent) next.agent = session.agent;
-  const keys = new Set([...Object.keys(panel), ...Object.keys(next)]);
-  for (const key of keys)
-    if (
-      (panel as Record<string, unknown>)[key] !==
-      (next as Record<string, unknown>)[key]
-    )
-      return next;
-  return panel;
+  // The icon follows the agent the daemon runs in the session. A terminal also
+  // follows one the owner started by hand, and drops it (with its conversation
+  // id and folder) when that agent is gone.
+  const agent =
+    session.agent ??
+    (panel.kind === "terminal" ? session.foregroundAgent : undefined);
+  if (agent) next.agent = agent;
+  if (panel.kind === "terminal") {
+    if (!agent) delete next.agent;
+    if (!session.agentSession) delete next.agentSession;
+    setOrDelete(next, "agentCwd", session.foregroundCwd);
+  }
+  return unchanged(panel, next);
 }
 
 /** Brings the panels bound to a daemon session in line with what each host

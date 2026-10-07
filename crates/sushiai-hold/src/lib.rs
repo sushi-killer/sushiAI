@@ -509,6 +509,7 @@ fn dispatch(holder: &Holder, conn: u64, request: &Request) -> Result<Option<Valu
                     next_seq,
                     pid: std::process::id(),
                     sizes: sizes_from(&state.sizes, start),
+                    child: *lock(&holder.pid),
                 },
             );
             enqueue(&mut state, Some(conn), Out::Bytes(encode(&head.frame())));

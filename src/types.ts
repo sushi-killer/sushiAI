@@ -43,6 +43,10 @@ export type DaemonSession = {
   rows: number;
   agent?: string;
   agentSession?: string;
+  /** An agent the owner started by hand in a shell session (detection only). */
+  foregroundAgent?: string;
+  /** The folder that agent's process runs in. */
+  foregroundCwd?: string;
   transcriptPath?: string;
   agentStatus?: "starting" | "working" | "blocked" | "idle" | "exited";
   statusSource?: "hook" | "heuristic";
@@ -171,6 +175,8 @@ type PanelState = {
   sessionId?: string;
   /** The agent CLI's own session id, kept so Reopen can resume it. */
   agentSession?: string;
+  /** The folder an agent started by hand in this terminal ran in, for Reopen. */
+  agentCwd?: string;
   pinned?: boolean;
   updatedAt?: number;
   note?: string;

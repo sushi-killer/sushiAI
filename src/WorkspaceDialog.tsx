@@ -21,7 +21,7 @@ import { Tag, Toggle } from "./ui";
 import { GitRecovery } from "./ui/GitRecovery";
 import { inspectProjectSource } from "./projectSource";
 import { LOCAL_ENDPOINT } from "./daemonSessions";
-import { openSettings } from "./app/openSettings";
+import { openSettings } from "./lib/openSettings";
 import {
   DoneRow,
   HostProgress,

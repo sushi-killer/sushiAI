@@ -1,5 +1,5 @@
 import type { Workspace } from "../types";
-import { groupKey } from "./workspaceMerge.ts";
+import { groupKey } from "../lib/hostGroup.ts";
 
 type WorkspaceKey = Pick<Workspace, "id" | "cwd" | "connection">;
 

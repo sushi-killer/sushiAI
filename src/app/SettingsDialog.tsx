@@ -11,13 +11,13 @@ import {
 import "./settings-dialog.css";
 import { RenderProfiler } from "../RenderProfiler.tsx";
 import { agentTitle } from "./agent-title.ts";
-import { errorText } from "./errors.ts";
+import { errorText } from "../lib/errors.ts";
 import {
   OPEN_PROJECT_SETTINGS_EVENT,
   OPEN_SETTINGS_EVENT,
   setPendingProjectTab,
   type ProjectSettingsTab,
-} from "./openSettings.ts";
+} from "../lib/openSettings.ts";
 import {
   ExtensionSectionSlot,
   ExtensionSettingsPage,

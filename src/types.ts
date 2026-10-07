@@ -129,18 +129,6 @@ export type Message = {
   /** The model that actually answered, as the CLI resolved it. */
   model?: string;
 };
-/** What the Orchestrator panel shows: home (the default), the plan, its
- * chat, one task, improvements, analytics, the archive or the
- * agent messages. Kept on the panel so a restart reopens the same view. */
-export type OrchestratorView =
-  | { kind: "home" }
-  | { kind: "plan" }
-  | { kind: "chat" }
-  | { kind: "task"; id: string }
-  | { kind: "improvements" }
-  | { kind: "analytics" }
-  | { kind: "archive" }
-  | { kind: "messages" };
 /** Where a Files pane was browsing: its root folder, the folder listed and the
  * open file ("" for none). Not part of the panel's remount key. */
 export type FilesView = { root: string; directory: string; file: string };
@@ -382,6 +370,17 @@ export type WorktreeList =
     }
   | { host: string; cwd: string; error: string };
 
+/** What a host offers a project's runs: git, a C linker and each agent CLI
+ * with whether it is installed and signed in. */
+export type HostCliReadiness = {
+  git: boolean;
+  /** A C linker (cc or gcc), which a Rust build needs; absent on old hosts' data. */
+  cc?: boolean;
+  claude: { installed: boolean; loggedIn: boolean };
+  codex: { installed: boolean; loggedIn: boolean };
+  checkedAt: number;
+};
+
 export type ProjectHostReadiness = {
   /** `uname -sm` of the host, e.g. "Linux x86_64". */
   platform?: string;
@@ -393,7 +392,7 @@ export type ProjectHostReadiness = {
     stale?: boolean;
     lockFile?: string;
   };
-  clis: import("./orchestrator/types.ts").Preflight;
+  clis: HostCliReadiness;
   mcp: {
     ok: boolean;
     count: number;

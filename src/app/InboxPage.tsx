@@ -14,7 +14,9 @@ import {
 import { moduleUis } from "../extensions/modules.ts";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import type { InboxGroup, InboxRow } from "./attention.ts";
-import { LOCAL_GROUP, groupKey, groupLabel } from "./workspaceMerge.ts";
+import { LOCAL_GROUP, groupKey } from "../lib/hostGroup.ts";
+import { ownsKey } from "../lib/ownsKey.ts";
+import { groupLabel } from "./workspaceMerge.ts";
 import {
   askDecision,
   asksOf,
@@ -23,7 +25,7 @@ import {
   type SessionsByHost,
 } from "../daemonSessions.ts";
 import { daemonHost } from "../daemonSessions.ts";
-import { errorText } from "./errors.ts";
+import { errorText } from "../lib/errors.ts";
 import {
   KINDS,
   actionForKey,
@@ -34,7 +36,6 @@ import {
   inScope,
   inboxItems,
   needsYou,
-  ownsKey,
   reviewTargets,
   scopedHeadline,
   stepSelection,

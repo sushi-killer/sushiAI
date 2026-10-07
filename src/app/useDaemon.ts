@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { errorText } from "./errors.ts";
+import { errorText } from "../lib/errors.ts";
 import {
   LOCAL_ENDPOINT,
   emptyFeed,

@@ -332,6 +332,23 @@ for (const file of coreFiles) {
   }
 }
 
+// The reverse holds too: a module directory reaches the shell only through
+// the module API (extensions/modules.ts) and shared code in src/lib, never by
+// importing a src/app file.
+for (const dir of moduleDirs) {
+  for (const file of await listFiles(dir)) {
+    if (!/\.(ts|tsx)$/.test(file)) continue;
+    const text = await readFile(path.join(moduleRoot, file), "utf8");
+    for (const [, source] of text.matchAll(SHELL_IMPORT)) {
+      if (!source.startsWith(".")) continue;
+      if (resolvedDir(file, source).startsWith("src/app/"))
+        problems.push(
+          `${file} imports ${source}; a module may not import the shell (src/app), move shared code to src/lib`,
+        );
+    }
+  }
+}
+
 // docs/LESSONS.md is meant to be read every session, so a promoted entry
 // collapses to a one-line index entry instead of growing the file forever.
 // Strip the fenced format-example first, so it doesn't count as an entry.

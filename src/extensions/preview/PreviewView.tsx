@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { errorText } from "../../app/errors.ts";
+import { errorText } from "../../lib/errors.ts";
 import { orchestratorClientFor } from "../../orchestrator/client.ts";
 import { useOrchestratorEnabled } from "../../orchestrator/enabled.ts";
 import { Tag } from "../../ui/index.ts";

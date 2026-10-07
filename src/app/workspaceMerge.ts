@@ -1,14 +1,11 @@
 import type { ConnectionProfile, Workspace } from "../types";
 import type { ProjectGit } from "./useProjectGit";
 import type { WorktreeClaim } from "../extensions/modules";
+import { LOCAL_GROUP, groupKey } from "../lib/hostGroup";
 
 /** Groups the flat workspace list by which host (this Mac or an SSH host) owns
  * it. Shared by Sidebar (which draws the grouping) and App (which needs to
  * know a pane's own host without drawing anything). */
-export const LOCAL_GROUP = "local";
-export function groupKey(connection?: string) {
-  return connection?.startsWith("ssh:") ? connection : LOCAL_GROUP;
-}
 export function groupLabel(key: string, profiles: ConnectionProfile[]) {
   if (key === LOCAL_GROUP) return "Local";
   return (

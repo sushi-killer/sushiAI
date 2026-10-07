@@ -1,6 +1,6 @@
 import { useMemo, useSyncExternalStore } from "react";
 import type { AttentionAction, AttentionItem } from "../extensions/modules.ts";
-import { groupKey } from "../app/workspaceMerge.ts";
+import { groupKey } from "../lib/hostGroup.ts";
 import { orchestratorClientFor } from "./client.ts";
 import {
   formatCost,

@@ -9,7 +9,7 @@ import {
   MessageSquare,
   Sparkles,
 } from "lucide-react";
-import type { OrchestratorView } from "../types";
+import type { OrchestratorView } from "./types";
 import {
   childrenOf,
   railGroups,

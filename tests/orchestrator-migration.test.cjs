@@ -154,6 +154,7 @@ test("the local connector stops a legacy orchd once per app run, before it runs 
   const order = [];
   const connector = createLocalConnector({
     env: {
+      HOME: home,
       SUSHIAI_HOME: path.join(home, "home"),
       SUSHIAI_DAEMON_BIN: path.join(home, "missing-sushiai"),
     },
@@ -176,6 +177,7 @@ test("the local connector stops a legacy orchd once per app run, before it runs 
   // A failing stop never blocks the daemon from starting.
   const failing = createLocalConnector({
     env: {
+      HOME: home,
       SUSHIAI_HOME: path.join(home, "home2"),
       SUSHIAI_DAEMON_BIN: path.join(home, "missing-sushiai"),
     },

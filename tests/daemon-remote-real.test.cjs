@@ -12,15 +12,9 @@ const { remoteConnectors } = require("../electron/daemon/connectors.cjs");
 const { createHostInstaller } = require("../electron/host-setup.cjs");
 const { setupHost } = require("../electron/host-setup.cjs");
 const { makeHost } = require("./helpers/fake-host.cjs");
+const { realDaemon } = require("./helpers/real-daemon.cjs");
 
-function realBinary() {
-  return [
-    process.env.SUSHIAI_DAEMON_BIN,
-    path.join(__dirname, "..", "target", "debug", "sushiai"),
-    path.join(__dirname, "..", "target", "release", "sushiai"),
-  ].find((file) => file && fs.existsSync(file));
-}
-const binary = realBinary();
+const { binary, skip } = realDaemon();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const until = async (check, ms = 20000, what = "condition") => {
   const end = Date.now() + ms;
@@ -34,7 +28,7 @@ const until = async (check, ms = 20000, what = "condition") => {
 
 test(
   "real daemon over a fake ssh: not installed, install, ready, shell session, echo",
-  { skip: binary ? false : "sushiai binary not built", timeout: 120000 },
+  { skip, timeout: 120000 },
   async (t) => {
     // A short TMPDIR keeps the daemon's unix socket path under the OS limit.
     const previous = process.env.TMPDIR;

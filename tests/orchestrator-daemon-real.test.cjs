@@ -15,10 +15,8 @@ const {
   createModuleSwitch,
 } = require("../electron/orchestrator.cjs");
 
-const binary = path.join(
-  process.env.CARGO_TARGET_DIR || path.join(__dirname, "../target"),
-  "debug/sushiai",
-);
+const { realDaemon } = require("./helpers/real-daemon.cjs");
+const { binary, skip } = realDaemon();
 const until = async (check, what, ms = 15000) => {
   const end = Date.now() + ms;
   for (;;) {
@@ -86,7 +84,7 @@ function world(t, { binDir = "", enabled = false } = {}) {
 
 test(
   "the local daemon offers orch, answers orch.*, and a kill -9 of it ends in a ready daemon with the secrets pushed again",
-  { skip: !fs.existsSync(binary) && "debug sushiai binary is not built" },
+  { skip },
   async (t) => {
     const { home, connector, manager, pidOf, ready } = world(t);
     const hosts = createOrchestratorHosts({
@@ -165,7 +163,7 @@ const RESULT =
 
 test(
   "with the module enabled, a task run survives a kill -9 of the daemon and finishes with one attempt",
-  { skip: !fs.existsSync(binary) && "debug sushiai binary is not built" },
+  { skip },
   async (t) => {
     // A fake `claude` first in the daemon's PATH: it streams one message,
     // waits, then reports its cost and exits 0.
@@ -263,7 +261,7 @@ test(
 
 test(
   "turning the Orchestrator off with a task running and another queued leaves no agent process behind",
-  { skip: !fs.existsSync(binary) && "debug sushiai binary is not built" },
+  { skip },
   async (t) => {
     // A fake `claude` that streams one message and then waits for a minute.
     const bin = fs.mkdtempSync(path.join(os.tmpdir(), "orch-fake-bin-"));

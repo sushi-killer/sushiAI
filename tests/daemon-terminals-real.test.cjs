@@ -7,10 +7,8 @@ const { spawn } = require("node:child_process");
 const { connectDaemon } = require("../electron/daemon/client.cjs");
 const { createTerminalHandlers } = require("../electron/daemon/terminals.cjs");
 
-const binary = path.join(
-  process.env.CARGO_TARGET_DIR || path.join(__dirname, "../target"),
-  "debug/sushiai",
-);
+const { realDaemon } = require("./helpers/real-daemon.cjs");
+const { binary, skip } = realDaemon();
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(check, what, ms = 10000) {
   const end = Date.now() + ms;
@@ -24,7 +22,7 @@ async function until(check, what, ms = 10000) {
 
 test(
   "terminals stream a real shell session through the daemon",
-  { skip: !fs.existsSync(binary) && "debug sushiai binary is not built" },
+  { skip },
   async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "st-"));
     fs.chmodSync(home, 0o700);

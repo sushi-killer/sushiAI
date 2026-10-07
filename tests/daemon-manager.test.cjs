@@ -5,6 +5,7 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { EventEmitter } = require("node:events");
+const { realDaemon } = require("./helpers/real-daemon.cjs");
 const { connectDaemon } = require("../electron/daemon/client.cjs");
 const { createDecoder, encode } = require("../electron/daemon/frame.cjs");
 const { createDaemonManager } = require("../electron/daemon/manager.cjs");
@@ -690,20 +691,9 @@ test("in a checkout the newer of the release and debug binaries is used", () => 
 
 // Real daemon -------------------------------------------------------------
 
-function realBinary() {
-  const candidates = [
-    process.env.SUSHIAI_DAEMON_BIN,
-    process.env.CARGO_TARGET_DIR &&
-      path.join(process.env.CARGO_TARGET_DIR, "debug", "sushiai"),
-    path.join(__dirname, "..", "target", "debug", "sushiai"),
-    path.join(__dirname, "..", "target", "release", "sushiai"),
-  ];
-  return candidates.find((file) => file && fs.existsSync(file));
-}
-
 test("real daemon: kill -9 and the manager is ready again with the session still listed", async (t) => {
-  const binary = realBinary();
-  if (!binary) return t.skip("sushiai binary not built");
+  const { binary, skip } = realDaemon();
+  if (skip) return t.skip(skip);
   const dir = tmp();
   const home = path.join(dir, "h");
   const env = {

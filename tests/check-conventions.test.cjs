@@ -322,7 +322,10 @@ test("a core main-process file that requires a module main.cjs loads fails the c
     fs.mkdirSync(path.join(dir, "electron/ipc"), { recursive: true });
     const write = (name, text) =>
       fs.writeFileSync(path.join(dir, "electron", name), text);
-    write("main.cjs", 'require("./plugin.cjs");\nrequire("./ipc/router.cjs");\n');
+    write(
+      "main.cjs",
+      'require("./plugin.cjs");\nrequire("./ipc/router.cjs");\n',
+    );
     write("plugin.cjs", "module.exports = {};\n");
     write("ipc/router.cjs", 'require("../plugin.cjs");\n');
     const bad = run({ CORE_ISOLATION_ROOT_OVERRIDE: dir });

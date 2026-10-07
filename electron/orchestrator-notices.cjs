@@ -1,7 +1,7 @@
 "use strict";
 
 /**
- * Maps an orchd task notice (`orchestratorNotice` in orchestrator.cjs) to the
+ * Maps an orchestrator task notice (`orchestratorNotice` in orchestrator.cjs) to the
  * generic notice the Notices API shows, and runs the actions of that notice
  * against the orchestrator service. All task wording and task rules live here.
  */
@@ -9,7 +9,7 @@
 const MAX_ANSWER_CHARS = 2000;
 const MAX_TRACKED = 200;
 const SOURCE_ID = "builtin.orchestrator";
-// orchd task ids are v4 UUIDs (orchd/src/engine/mod.rs validate_task_id).
+// Task ids are v4 UUIDs, as the orchestrator module validates them.
 const TASK_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RERUNNABLE = new Set(["failed", "stopped"]);

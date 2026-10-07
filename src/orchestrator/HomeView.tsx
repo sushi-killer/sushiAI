@@ -328,7 +328,7 @@ export function HomeView({
                 </>
               ))
             }
-            meta={`${repo} \u00b7 orchd`}
+            meta={`${repo} \u00b7 orchestrator`}
             onOpen={() => onOpen(task.id)}
           />
         );

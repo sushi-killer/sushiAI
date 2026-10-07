@@ -27,6 +27,11 @@ one index line; git history keeps the detail and updates.
 Root cause: schema and fairness harness built before any real plugin used them.
 Rule: land one working end-to-end path first, then generalize.
 
+## 2026-10-07 — lanes from an old base rewrote the owner's `~/.sushiai` link
+
+Root cause: JS tests on a base without the step 5 isolation changed the real home.
+Rule: merge the isolation fix into every lane base before JS tests run.
+
 ## Promoted
 
 - 2026-10-07 A test launcher with only `SUSHIAI_HOME` rewrote the owner's `~/.codex` and bin link → set `HOME` and `CODEX_HOME` too. `check-conventions.mjs`.
@@ -48,13 +53,9 @@ Rule: land one working end-to-end path first, then generalize.
 - 2026-09-30 A plugin MCP server failed under `--strict-mcp-config` (OAuth keyed by plugin name) → keep its Claude Code name. `chat_tools::server_key`.
 - 2026-09-29 A kill lost uncommitted localStorage state → durable state goes in `sushiai.db`.
 - 2026-09-30 A preselected answer plus Enter sent unpicked answers → Enter needs a pick or typed text. `enterAnswer` in `ownerAttention.ts`.
-- 2026-09-29 Contradicting criteria cost three attempts → cross-check criteria before launch.
 - 2026-09-28 Trusted `rtk rewrite` (`rtk read` drops code) → allowlist. `rtk_rewrite_output_*`.
 - 2026-09-25 Disabled `select!` branch still built `Instant + Duration::MAX`, panicking the loop → bounded deadline. `run_harness`.
 - 2026-09-24 An unparsed review verdict counted as PASS → no verdict asks the owner. `a_review_without_a_verdict_waits_for_the_owner_instead_of_passing`.
-- 2026-09-24 Chat harness outlived daemon shutdown → drain every live-child map. `shutdown_kills_a_live_orchestrator_chat_turn_s_child`.
 - 2026-09-24 Orchestrator chat edited code instead of filing tasks → enforce roles with tools. `orchd/src/chat.rs`.
 - 2026-09-24 Unset `HERDR_SOCKET_PATH`/inherited `BRIDGE_DEV_URL` photographed the owner's Herdr/dev server → override both. `ui-evidence` template.
 - 2026-09-24 Real Claude/Codex output broke `orchd` while self-written fakes passed → parsers assert captured CLI lines. `parses_captured_real_cli_streams`.
-- 2026-09-14 A debug paste leaked a real IP/host → examples use 192.0.2.0/24. `check-conventions.mjs`.
-- 2026-09-29 orchd preflights checks on a fresh checkout → check commands build what they need. `package.json`.

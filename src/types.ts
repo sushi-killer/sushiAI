@@ -886,6 +886,8 @@ export interface Bridge {
   ): Promise<import("./extensions/types.ts").CompanionResult>;
   /** Answers the owner card of one host.exec call (Allow or Deny). */
   companionExecAnswer(id: string, allow: boolean): Promise<void>;
+  /** main takes a card back (answered, timed out, or its companion restarted). */
+  onCompanionExecWithdraw(callback: (card: { id: string }) => void): () => void;
   onCompanionExec(
     callback: (question: {
       id: string;

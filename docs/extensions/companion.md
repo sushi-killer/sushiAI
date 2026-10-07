@@ -145,7 +145,15 @@ keeps the last 64 KiB of each stream. `code` is null after a timeout.
 
 - `local` and unknown hosts are refused. So are hosts that use a command
   connector.
-- `stdin` is at most 32 MiB decoded. `timeoutMs` is at most 300000.
+- `stdin` is at most 11 MiB decoded: the whole JSON request must fit one 16 MiB
+  frame. `argv` is at most 64 Ki characters in total. `title` has no control or
+  invisible characters. A request over these limits fails with `-32602`. A frame
+  over 16 MiB is a protocol error and ends the connection; the app cannot fail
+  that one request alone, so a program must check the size first.
+  `timeoutMs` is at most 300000.
+- The app sends the command to the host as fixed text plus base64 that the
+  host's `/bin/sh` decodes and evals, so every login shell (sh, bash, zsh,
+  fish) passes the same words that the card showed.
 - **Every call needs its own owner confirmation.** There is no standing
   allowance. The app draws a card outside the extension's tab. It shows the
   extension name and id, the host name and address, the exact argv (monospace,
@@ -155,14 +163,26 @@ keeps the last 64 KiB of each stream. `code` is null after a timeout.
 - Deny is the default. Enter and Escape deny. Allow needs a mouse click (or Tab
   to the button and Space), and the button is disabled for the first second.
   No answer in 2 minutes refuses; the 2 minutes start when the card shows.
-- One card shows at a time. More calls from the same program queue behind it,
-  each with its own card. A call counts its `timeoutMs` from when it starts to
-  run. A card answered after the program restarted is void.
+- The app owns the queue: one card is on screen at a time across all programs.
+  A program has one card on screen and at most one call waiting behind it;
+  more calls fail with `-32002`. The app ignores an Allow earlier than 1 s
+  after the card was shown. The card closes when it times out or the program
+  restarts, and a late answer does nothing. If the saved host changed while the
+  card was open, the call is refused.
+- A call counts its `timeoutMs` from when it starts to run.
+- The card escapes every control, invisible and line-separator character in the
+  text the program supplied.
 - `hosts.changed` never lists `local`.
 - At most one command per host and 4 in total.
 - The app never logs or stores argv, stdin or output text. The audit line holds
   the extension id, host id, SHA-256 of argv, SHA-256 of stdin, the decision
-  (`allowed`, `denied`, `timeout`), the exit code and the time.
+  (`allowed`, `denied`, `timeout`, or `busy` when an allowed call found the host
+  taken), the exit code and the time.
+
+**What the card is, and is not.** The card is consent. It protects against an
+honest or buggy program. It is not a sandbox: an approved program already runs
+with your OS rights and could read `~/.ssh` and connect on its own. The real
+protection against a malicious program is not approving it.
 
 Error codes: `-32001` the owner refused, `-32002` busy, `-32003` no
 `hosts.exec` permission, `-32004` unknown or unsupported host, `-32602` bad

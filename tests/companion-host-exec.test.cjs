@@ -87,9 +87,7 @@ test("a Deny refuses with -32001 and runs nothing; an unanswered card refuses to
   );
   assert.equal(log.ran.length, 0);
   assert.equal(log.audit[0].decision, "denied");
-  const silent = setup({
-    deps: { askOwner: () => new Promise(() => {}), askTimeoutMs: 20 },
-  });
+  const silent = setup({ deps: { askOwner: async () => "timeout" } });
   await rejectsWith(silent.exec.run(COMPANION, REQUEST), "refused");
   assert.equal(silent.log.ran.length, 0);
   assert.equal(silent.log.audit[0].decision, "timeout");
@@ -135,81 +133,105 @@ test("every call needs its own card, however soon after an Allow", async () => {
   assert.equal(log.ran.length, 4);
 });
 
-test("one card at a time per companion: later calls queue, each with its own card", async () => {
+test("a companion has one card on screen and one behind it; more calls are busy", async () => {
   const answers = [];
-  let open = 0;
-  let mostOpen = 0;
   const { exec, log } = setup({
     deps: {
-      askOwner: (question) =>
-        new Promise((resolve) => {
-          open += 1;
-          mostOpen = Math.max(mostOpen, open);
-          answers.push(() => {
-            open -= 1;
-            resolve(true);
-          });
-          void question;
-        }),
-    },
-  });
-  const calls = [
-    exec.run(COMPANION, REQUEST),
-    exec.run(COMPANION, { ...REQUEST, host: "h-2" }),
-    exec.run(COMPANION, REQUEST),
-  ];
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(answers.length, 1, "only the first card is on screen");
-  answers[0]();
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(answers.length, 2);
-  answers[1]();
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  answers[2]();
-  await Promise.all(calls);
-  assert.equal(mostOpen, 1);
-  assert.equal(log.ran.length, 3);
-});
-
-test("the 2 minutes count from when the card shows, not while it waits", async () => {
-  const gates = [];
-  const { exec } = setup({
-    deps: {
-      askTimeoutMs: 150,
-      askOwner: () => new Promise((resolve) => gates.push(resolve)),
+      askOwner: () => new Promise((resolve) => answers.push(resolve)),
     },
   });
   const first = exec.run(COMPANION, REQUEST);
-  const second = exec.run(COMPANION, REQUEST);
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  gates[0](true);
-  await first;
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  // 200 ms after the second call started, but only 100 ms after its card.
-  assert.equal(gates.length, 2);
-  gates[1](true);
-  await second;
+  const second = exec.run(COMPANION, { ...REQUEST, host: "h-2" });
+  await rejectsWith(exec.run(COMPANION, { ...REQUEST, host: "h-3" }), "busy");
+  // Another companion is not held up by the first one's queue.
+  const other = exec.run(
+    { ...COMPANION, id: "ext.two" },
+    { ...REQUEST, host: "h-4" },
+  );
+  answers.forEach((resolve) => resolve("allowed"));
+  await Promise.all([first, second, other]);
+  assert.equal(log.ran.length, 3);
 });
 
-test("limits: stdin 32 MiB decoded, timeout 300 s, title, argv", async () => {
+test("forget() makes a pending answer void", async () => {
+  let answer;
+  const cancelled = [];
+  const { exec, log } = setup({
+    deps: {
+      askOwner: () => new Promise((resolve) => (answer = resolve)),
+      cancelAsks: (id) => cancelled.push(id),
+    },
+  });
+  const call = exec.run(COMPANION, REQUEST);
+  exec.forget("ext.one");
+  answer("allowed");
+  await rejectsWith(call, "refused");
+  assert.deepEqual(cancelled, ["ext.one"]);
+  assert.equal(log.ran.length, 0);
+});
+
+test("a host that changed while the card was open is not run", async () => {
+  const profiles = PROFILES.map((profile) => ({ ...profile }));
+  let answer;
+  const { exec, log } = setup({
+    deps: {
+      getProfiles: () => profiles,
+      askOwner: () => new Promise((resolve) => (answer = resolve)),
+    },
+  });
+  const call = exec.run(COMPANION, REQUEST);
+  profiles[0].host = "user@elsewhere";
+  answer("allowed");
+  await rejectsWith(call, "host");
+  assert.equal(log.ran.length, 0);
+});
+
+test("an allowed call that then finds the host busy is audited", async () => {
+  let release;
+  const { exec, log } = setup({
+    deps: {
+      execOnHost: () => new Promise((resolve) => (release = resolve)),
+    },
+  });
+  // Both pass the early check and both get a card; the second finds the host
+  // taken once its owner has said yes.
+  const first = exec.run(COMPANION, REQUEST);
+  const second = exec.run({ ...COMPANION, id: "ext.two" }, REQUEST);
+  await rejectsWith(second, "busy");
+  release({ code: 0, stdout: "", stderr: "" });
+  await first;
+  assert.deepEqual(
+    log.audit.map((line) => [line.extensionId, line.decision]),
+    [
+      ["ext.two", "busy"],
+      ["ext.one", "allowed"],
+    ],
+  );
+});
+
+test("limits: stdin 11 MiB decoded, timeout 300 s, title, argv", async () => {
   const { exec, log } = setup();
   const bad = async (patch) =>
     rejectsWith(exec.run(COMPANION, { ...REQUEST, ...patch }), "params");
-  await bad({ stdin: "AAAA".repeat(11184811) }); // 32 MiB + 1 decoded
+  await bad({ stdin: "AAAA".repeat(3844779) }); // 11 MiB + 1 decoded
   await bad({ stdin: "not base64!" });
   await bad({ timeoutMs: 300001 });
   await bad({ timeoutMs: 0 });
   await bad({ title: "" });
   await bad({ title: "t".repeat(121) });
   await bad({ title: "two\nlines" });
+  await bad({ title: "zero\u200bwidth" });
+  await bad({ title: "bidi\u202eflip" });
+  await bad({ title: "sep\u2028line" });
+  await bad({ argv: ["x".repeat(70000)] });
   await bad({ argv: [] });
   await bad({ argv: "uname" });
   await bad({ argv: ["a\0b"] });
   assert.equal(log.asked.length + log.ran.length, 0);
-  // The edge cases pass: exactly 32 MiB, 300 s, and a default of 120 s.
-  const edge = Buffer.alloc(32 * 1024 * 1024, 1).toString("base64");
+  // The edge cases pass: exactly 11 MiB, 300 s, and a default of 120 s.
+  const edge = Buffer.alloc(11 * 1024 * 1024, 1).toString("base64");
   await exec.run(COMPANION, { ...REQUEST, stdin: edge, timeoutMs: 300000 });
-  assert.equal(log.ran[0].opts.input.length, 32 * 1024 * 1024);
+  assert.equal(log.ran[0].opts.input.length, 11 * 1024 * 1024);
   assert.equal(log.ran[0].opts.timeout, 300000);
   await exec.run(COMPANION, REQUEST);
   assert.equal(log.ran[1].opts.timeout, 120000);
@@ -227,10 +249,13 @@ test("at most one command per host and four in total; extra calls are busy", asy
   await new Promise((resolve) => setImmediate(resolve));
   await rejectsWith(exec.run(COMPANION, REQUEST), "busy");
   const more = ["h-2", "h-3", "h-4"].map((host) =>
-    exec.run(COMPANION, { ...REQUEST, host }),
+    exec.run({ ...COMPANION, id: `ext.${host}` }, { ...REQUEST, host }),
   );
   await new Promise((resolve) => setImmediate(resolve));
-  await rejectsWith(exec.run(COMPANION, { ...REQUEST, host: "h-5" }), "busy");
+  await rejectsWith(
+    exec.run({ ...COMPANION, id: "ext.h-5" }, { ...REQUEST, host: "h-5" }),
+    "busy",
+  );
   gates.forEach((release) => release(done));
   await Promise.all([first, ...more]);
   // The slots are free again.
@@ -458,7 +483,7 @@ async function rig(t, { permissions } = {}) {
   });
   companions.setAskOwner(async (question) => {
     asked.push(question);
-    return true;
+    return "allowed";
   });
   const manager = new ExtensionManager({
     dataDir: path.join(base, "data"),

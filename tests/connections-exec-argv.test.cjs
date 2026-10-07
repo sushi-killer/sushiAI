@@ -41,9 +41,12 @@ exit 7`,
   assert.equal(Buffer.byteLength(result.stdout), 65536);
   assert.ok(result.stdout.endsWith("END-OUT"));
   assert.equal(result.stderr, "ERR-LINE");
-  assert.equal(
-    await fs.readFile(path.join(dir, "command"), "utf8"),
-    `'sh' '-c' 'echo '\\''it'\\'''\\''s'\\''; $HOME'`,
+  // The command is fixed text plus base64: no quote of the login shell is
+  // involved, whatever the words hold.
+  const command = await fs.readFile(path.join(dir, "command"), "utf8");
+  assert.match(
+    command,
+    /^exec \/bin\/sh -c 'eval "\$\(printf %s [A-Za-z0-9+/=]+ \| /,
   );
   assert.deepEqual(await fs.readFile(path.join(dir, "stdin")), input);
 });
@@ -68,4 +71,60 @@ test("execArgv refuses a host that connects through a command", async (t) => {
     () => connections.execArgv(`ssh:${profile.id}`, ["true"]),
     /no shell access/,
   );
+});
+
+const HOSTILE = [
+  "plain",
+  "it's",
+  'say "hi"',
+  "back\\slash \\' \\\\",
+  "$HOME `id` $(id) ; | & > <",
+  "two\nlines\n",
+  "tab\there",
+  "  spaces  ",
+  "",
+  "\u202eRLO\u200bzw",
+  "unicode \u00e9\u65e5\u672c",
+  "!history ~tilde *glob? {a,b}",
+];
+
+test("every login shell hands the program exactly the argv", async (t) => {
+  const { remoteCommand } = require("../electron/ssh-command.cjs");
+  const { spawnSync } = require("node:child_process");
+  const argv = [
+    "sh",
+    "-c",
+    'for a; do printf "%s\\0" "$a"; done',
+    "name",
+    ...HOSTILE,
+  ];
+  const command = remoteCommand(argv);
+  const shells = ["sh", "bash", "zsh", "fish", "dash", "ksh"].filter(
+    (shell) => spawnSync("which", [shell]).status === 0,
+  );
+  assert.ok(shells.includes("sh") && shells.includes("bash"));
+  for (const shell of shells) {
+    // Login shells run `shell -c <command>`, which is what sshd does.
+    const result = spawnSync(shell, ["-c", command], { encoding: "utf8" });
+    assert.equal(result.status, 0, `${shell}: ${result.stderr}`);
+    assert.deepEqual(
+      result.stdout.split("\0").slice(0, -1),
+      HOSTILE,
+      `${shell} must pass the same words`,
+    );
+  }
+  t.diagnostic(`shells tried: ${shells.join(", ")}`);
+});
+
+test("stdin reaches the program untouched through the wrapper", () => {
+  const { remoteCommand } = require("../electron/ssh-command.cjs");
+  const { spawnSync } = require("node:child_process");
+  const input = Buffer.from([0, 1, 2, 255, 10, 13, 39]);
+  const result = spawnSync("sh", ["-c", remoteCommand(["cat"])], { input });
+  assert.deepEqual(result.stdout, input);
+});
+
+test("a command too long for one argument is refused", () => {
+  const { remoteCommand } = require("../electron/ssh-command.cjs");
+  assert.throws(() => remoteCommand(["x".repeat(80000)]), /too long/);
 });

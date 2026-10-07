@@ -1,4 +1,4 @@
-const { randomUUID } = require("node:crypto");
+const { createOwnerPrompts } = require("../extensions/companion-prompts.cjs");
 
 const MAX_RECORDS = 1000;
 
@@ -82,6 +82,7 @@ function registerExtensionIpc({
   announce = () => {},
   announceCompanion = () => {},
   announceExec = () => {},
+  withdrawExec = () => {},
 }) {
   // A companion's view.changed (or its process changing state) reaches the
   // renderer as {extensionId, surfaceId}. Subscribed once, when the manager
@@ -175,24 +176,17 @@ function registerExtensionIpc({
     ),
   );
 
-  // The card that asks the owner before a companion runs commands on a host.
-  // One pending question per id; the renderer answers by id.
-  const questions = new Map();
-  getExtensions()?.companions?.setAskOwner(
-    (question) =>
-      new Promise((resolve) => {
-        const id = randomUUID();
-        questions.set(id, resolve);
-        // The exec layer gives up after 2 minutes; drop the stale entry too.
-        setTimeout(() => questions.delete(id), 150000).unref();
-        announceExec({ id, ...question });
-      }),
-  );
-  handle("extensions-companion-exec-answer", (id, allow) => {
-    const resolve = questions.get(name(id, "question id"));
-    questions.delete(id);
-    resolve?.(allow === true);
+  // The cards that ask the owner before a companion runs a command on a host.
+  // Main owns the queue (companion-prompts.cjs); the renderer draws and
+  // answers by id.
+  const prompts = createOwnerPrompts({
+    announce: announceExec,
+    withdraw: withdrawExec,
   });
+  getExtensions()?.companions?.setAskOwner(prompts.ask, prompts.cancel);
+  handle("extensions-companion-exec-answer", (id, allow) =>
+    prompts.answer(name(id, "question id"), allow === true),
+  );
 
   handle("extensions-approve", async (extensionId) => {
     await manager().approve(name(extensionId, "extension id"));

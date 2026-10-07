@@ -305,6 +305,7 @@ registerExtensionIpc({
   announce: (change) => send("extensions-state-changed", change),
   announceCompanion: (change) => send("extensions-companion-changed", change),
   announceExec: (question) => send("extensions-companion-exec", question),
+  withdrawExec: (card) => send("extensions-companion-exec-withdraw", card),
 });
 registerWorkspaceSnapshot({
   ipcMain,

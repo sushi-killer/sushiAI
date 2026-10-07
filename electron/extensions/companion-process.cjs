@@ -241,11 +241,13 @@ function createCompanions({
   let started = false;
   let unsubscribeHosts;
   // The owner card; set by the IPC layer. Without one every ask is a refusal.
-  let askOwner = async () => false;
+  let askOwner = async () => "denied";
+  let cancelAsks = () => {};
   const hostExec = createHostExec({
     getProfiles: getHosts,
     execOnHost: (...args) => execOnHost(...args),
     askOwner: (question) => askOwner(question),
+    cancelAsks: (extensionId) => cancelAsks(extensionId),
     audit,
   });
   // Set by stopAll (quit): nothing may spawn afterwards, even if start() or
@@ -508,9 +510,10 @@ function createCompanions({
     hosts: () => getHosts(),
     /** Sets how the owner is asked before a companion runs commands on a
      * host: ask({extensionId, extensionName, hostId, hostName, title}) resolves
-     * true (Allow) or false (Deny). */
-    setAskOwner(ask) {
+     * "allowed", "denied" or "timeout"; `cancel(extensionId)` voids its cards. */
+    setAskOwner(ask, cancel = () => {}) {
       askOwner = ask;
+      cancelAsks = cancel;
     },
     async read(extensionId, surfaceId, view) {
       const result = await running(extensionId).client.request(

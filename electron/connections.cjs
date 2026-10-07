@@ -5,6 +5,7 @@ const net = require("node:net");
 const { randomUUID } = require("node:crypto");
 const { appDb, transaction } = require("./app-db.cjs");
 const { InspectionWorker } = require("./inspection-worker.cjs");
+const { remoteCommand } = require("./ssh-command.cjs");
 const quote = (text) => "'" + String(text).replaceAll("'", "'\\''") + "'";
 
 function run(binary, args, input = "", timeout = 20000) {
@@ -330,7 +331,7 @@ class Connections {
   }
   /** Runs argv on the host over the same ssh path as exec(); resolves with
    * {code, stdout, stderr} (the last `tailBytes` of each) for any exit code.
-   * The words are quoted for the remote shell. `input` is a Buffer or string. */
+   * The command string is shell-independent (see ssh-command.cjs). `input` is a Buffer or string. */
   async execArgv(
     endpoint,
     argv,
@@ -340,7 +341,7 @@ class Connections {
     this.#needShell(endpoint);
     return runTail(
       this.ssh,
-      [...this.args(profile), profile.host, argv.map(quote).join(" ")],
+      [...this.args(profile), profile.host, remoteCommand(argv)],
       input,
       timeout,
       tailBytes,

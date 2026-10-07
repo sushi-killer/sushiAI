@@ -14,13 +14,21 @@ export function execKeyAction(
   return "default";
 }
 
-/** A word of argv for display: exactly as sent, except that control and
- * bidirectional-override characters (other than newline and tab) are written
- * as \uXXXX, so nothing can hide in the text. */
+const HIDDEN = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+const hex = (char: string) =>
+  `\\u{${(char.codePointAt(0) as number).toString(16)}}`;
+
+/** Text for the card: every control, format (zero-width, bidi), line- and
+ * paragraph-separator character is written as \u{hex}, so nothing can hide. */
+export function escapeText(text: string): string {
+  return text.replace(HIDDEN, hex);
+}
+
+/** A word of argv for display. As escapeText, but a newline reads as a visible
+ * \n marker followed by a real line break, and a tab as \t, so a script stays
+ * readable and every character is still shown. */
 export function showWord(word: string): string {
-  return word.replace(
-    // eslint-disable-next-line no-control-regex
-    /[\u0000-\u0008\u000b-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩﻿]/g,
-    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  return word.replace(HIDDEN, (char) =>
+    char === "\n" ? "\\n\n" : char === "\t" ? "\\t" : hex(char),
   );
 }

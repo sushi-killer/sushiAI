@@ -165,7 +165,10 @@ a minimal environment allowlist (`PATH`, `HOME`, `USER`, `LANG`, `TMPDIR`,
 SIGKILL after a grace period. This is consent, not a sandbox: the process keeps
 the owner's OS rights. The `hosts.read` permission limits only what the app
 sends it. The `hosts.exec` permission (owner decision 2026-10-07) lets it run commands
-on saved ssh hosts through the app, each call behind an owner card. Any change that lets an extension carry its own code, or widens the
+on saved ssh hosts through the app, each call behind an owner card. The card is
+consent against an honest or buggy companion, not a sandbox: an approved
+companion already has the owner's OS rights (it could use `~/.ssh` itself), so
+the protection against a malicious one is not approving it. Any change that lets an extension carry its own code, or widens the
 companion, needs the owner first.
 
 ## Vision & boundaries

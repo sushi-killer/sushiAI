@@ -480,8 +480,8 @@ test("runRow calls the row method path with the field and row ids, with a busy f
   controller.stop();
 });
 
-test("the owner card: Enter and Escape deny, Allow needs a click, and argv shows every character", async () => {
-  const { execKeyAction, showWord, ALLOW_DELAY_MS } =
+test("the owner card: Enter and Escape deny, Allow needs a click", async () => {
+  const { execKeyAction, ALLOW_DELAY_MS } =
     await import("../src/extensions/companionExec.ts");
   assert.equal(execKeyAction("Escape", false), "deny");
   assert.equal(execKeyAction("Escape", true), "deny");
@@ -490,19 +490,65 @@ test("the owner card: Enter and Escape deny, Allow needs a click, and argv shows
   assert.equal(execKeyAction(" ", true), "default");
   assert.equal(execKeyAction("Tab", false), "default");
   assert.ok(ALLOW_DELAY_MS >= 1000);
-  assert.equal(showWord("a\nb\tc"), "a\nb\tc");
-  assert.equal(showWord("x\u0007y\r"), "x\\u0007y\\u000d");
-  assert.equal(showWord("evil‮txt"), "evil\\u202etxt");
 });
 
-test("the owner card draws the exact command, the description label and the stdin hash", async () => {
-  const { CompanionExecPrompt } = await load(
-    "extensions/CompanionExecPrompt.tsx",
-  );
-  assert.equal(typeof CompanionExecPrompt, "function");
-  // Nothing is drawn until a question arrives.
+test("escapeText and showWord write every control, format and separator character", async () => {
+  const { escapeText, showWord } =
+    await import("../src/extensions/companionExec.ts");
   assert.equal(
-    renderToStaticMarkup(React.createElement(CompanionExecPrompt)),
-    "",
+    escapeText("a\nb\u202ec\u200bd\u2028e\u2029f\u0007"),
+    "a\\u{a}b\\u{202e}c\\u{200b}d\\u{2028}e\\u{2029}f\\u{7}",
   );
+  assert.equal(escapeText("\u{e0041}tag \ufeff"), "\\u{e0041}tag \\u{feff}");
+  assert.equal(escapeText("plain \u00e9\u65e5"), "plain \u00e9\u65e5");
+  // A newline keeps its line break, with a visible marker in front of it.
+  assert.equal(showWord("a\nb\tc"), "a\\n\nb\\tc");
+  assert.equal(showWord("x\r\u202ey"), "x\\u{d}\\u{202e}y");
+});
+
+const hostile = {
+  id: "q1",
+  extensionId: "ext.\u202eevil",
+  extensionName: "Nice\u200b Name\n",
+  hostName: "dev\u2028box",
+  hostAddress: "user@devbox\u202e:22",
+  title: "Totally safe\u202e txt\u200b",
+  argv: ["sh", "-c", "echo hi\nrm -rf ~\u202e\u200b\u2028"],
+  stdinBytes: 12,
+  stdinSha256: "ab".repeat(32),
+};
+
+test("the owner card escapes hostile text, labels the description, shows stdin size and hash only, and starts with Allow disabled", async () => {
+  const { ExecCard } = await load("extensions/CompanionExecPrompt.tsx");
+  const draw = (ready) =>
+    renderToStaticMarkup(
+      React.createElement(ExecCard, {
+        question: hostile,
+        ready,
+        onAnswer() {},
+      }),
+    );
+  const html = draw(false);
+  for (const raw of ["\u202e", "\u200b", "\u2028"])
+    assert.ok(
+      !html.includes(raw),
+      `raw U+${raw.codePointAt(0).toString(16)} must not reach the card`,
+    );
+  assert.match(html, /\\u\{202e\}/);
+  assert.match(html, /\\u\{200b\}/);
+  assert.match(html, /\\u\{2028\}/);
+  assert.match(
+    html,
+    /Extension&#x27;s description|Extension&rsquo;s description|Extension\u2019s description/,
+  );
+  assert.match(html, /12 bytes · SHA-256 (ab){32}/);
+  assert.ok(!html.includes("STDIN-SECRET"));
+  // The command, exactly: one block per word, newline marked.
+  assert.match(html, /<pre>echo hi\\n\nrm -rf ~/);
+  assert.match(
+    html,
+    /<button class="primary" data-allow="true" disabled="">Allow</,
+  );
+  assert.doesNotMatch(draw(true), /data-allow="true" disabled/);
+  assert.match(html, /<button class="secondary"[^>]*>Deny</);
 });

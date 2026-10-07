@@ -25,7 +25,7 @@ use ring::Ring;
 use serde_json::{json, Value};
 use sushiai_protocol::{
     code, encode, method, Decoder, Frame, HoldAttach, HoldAttachResult, HoldClose, HoldExited,
-    HoldInput, HoldResize, Message, Notification, Request, Response, Signal,
+    HoldInput, HoldResize, Message, Notification, Request, Response, Signal, SizeMark,
 };
 
 const RING_BYTES: usize = 2 * 1024 * 1024;
@@ -76,6 +76,8 @@ struct Exit {
 
 struct State {
     ring: Ring,
+    /// Every PTY size with the stream offset it began at; the first entry is the spawn size.
+    sizes: Vec<SizeMark>,
     client: Option<Client>,
     exit: Option<Exit>,
 }
@@ -173,6 +175,11 @@ pub fn start(cfg: Config) -> Result<Running, Error> {
         id: cfg.id.clone(),
         state: Mutex::new(State {
             ring: Ring::new(RING_BYTES),
+            sizes: vec![SizeMark {
+                seq: 0,
+                cols: cfg.cols,
+                rows: cfg.rows,
+            }],
             client: None,
             exit: None,
         }),
@@ -292,6 +299,35 @@ fn reap(holder: &Holder, child: &mut (dyn portable_pty::Child + Send + Sync)) ->
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Most size marks kept; the oldest go first.
+const MAX_SIZE_MARKS: usize = 256;
+
+fn note_size(sizes: &mut Vec<SizeMark>, mark: SizeMark) {
+    let last = sizes.last().copied();
+    if last.is_some_and(|l| (l.cols, l.rows) == (mark.cols, mark.rows)) {
+        return;
+    }
+    // A resize before any further output replaces the mark at the same offset.
+    if last.is_some_and(|l| l.seq == mark.seq) {
+        sizes.pop();
+    }
+    sizes.push(mark);
+    if sizes.len() > MAX_SIZE_MARKS {
+        sizes.remove(0);
+    }
+}
+
+/// The marks that apply to a replay starting at `start`: the size in force there, rebased
+/// to `start`, then every later change.
+fn sizes_from(sizes: &[SizeMark], start: u64) -> Vec<SizeMark> {
+    let Some(first) = sizes.iter().rposition(|m| m.seq <= start) else {
+        return sizes.to_vec();
+    };
+    let mut out = sizes[first..].to_vec();
+    out[0].seq = start;
+    out
 }
 
 fn pump_output(holder: &Holder, mut reader: Box<dyn Read + Send>) {
@@ -472,6 +508,7 @@ fn dispatch(holder: &Holder, conn: u64, request: &Request) -> Result<Option<Valu
                     from_seq: start,
                     next_seq,
                     pid: std::process::id(),
+                    sizes: sizes_from(&state.sizes, start),
                 },
             );
             enqueue(&mut state, Some(conn), Out::Bytes(encode(&head.frame())));
@@ -508,6 +545,8 @@ fn dispatch(holder: &Holder, conn: u64, request: &Request) -> Result<Option<Valu
         }
         method::HOLD_RESIZE => {
             let HoldResize { cols, rows } = params(request)?;
+            // Under the state lock, so no output byte lands between the new size and its mark.
+            let mut state = lock(&holder.state);
             lock(&holder.master)
                 .resize(PtySize {
                     rows,
@@ -516,6 +555,8 @@ fn dispatch(holder: &Holder, conn: u64, request: &Request) -> Result<Option<Valu
                     pixel_height: 0,
                 })
                 .map_err(|e| (code::INTERNAL, e.to_string()))?;
+            let seq = state.ring.end();
+            note_size(&mut state.sizes, SizeMark { seq, cols, rows });
             Ok(Some(json!({})))
         }
         method::HOLD_CLOSE => {

@@ -1,5 +1,6 @@
 //! Daemon side of the holder protocol, and spawning holders.
 
+use std::collections::VecDeque;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -9,7 +10,7 @@ use std::time::Duration;
 use sushiai_core::Screen;
 use sushiai_protocol::{
     method, Frame, HoldAttach, HoldAttachResult, HoldClose, HoldInput, HoldResize, Message,
-    Request, Signal,
+    Request, Signal, SizeMark,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::unix::OwnedReadHalf;
@@ -101,9 +102,12 @@ impl HolderConn {
     async fn replay(&mut self, screen: &mut Screen) -> Result<u64> {
         let mut head: Option<HoldAttachResult> = None;
         let mut seq = 0;
+        // Size marks not yet applied to the screen, in offset order.
+        let mut marks: VecDeque<SizeMark> = VecDeque::new();
         loop {
             if let Some(h) = &head {
                 if seq >= h.next_seq {
+                    apply_marks(screen, &mut marks, u64::MAX);
                     return Ok(seq);
                 }
             }
@@ -124,12 +128,31 @@ impl HolderConn {
                         let parsed: HoldAttachResult = serde_json::from_value(result)?;
                         self.holder_pid = Some(parsed.pid).filter(|p| *p != 0);
                         seq = parsed.from_seq;
+                        // The ring holds bytes written at the sizes the PTY had then: replay
+                        // them at those sizes, not all at the final one.
+                        marks = parsed.sizes.iter().copied().collect();
+                        if let Some(first) = marks.pop_front() {
+                            *screen = Screen::new(first.rows, first.cols);
+                        }
                         head = Some(parsed);
                     }
                 }
                 Frame::Output { seq: at, data, .. } => {
-                    screen.feed(&data);
-                    seq = at + data.len() as u64;
+                    let mut rest = &data[..];
+                    let mut at = at;
+                    while let Some(mark) = marks
+                        .front()
+                        .copied()
+                        .filter(|m| m.seq < at + rest.len() as u64)
+                    {
+                        let cut = mark.seq.saturating_sub(at) as usize;
+                        screen.feed(&rest[..cut]);
+                        rest = &rest[cut..];
+                        at += cut as u64;
+                        apply_marks(screen, &mut marks, at);
+                    }
+                    screen.feed(rest);
+                    seq = at + rest.len() as u64;
                 }
             }
         }
@@ -234,5 +257,13 @@ pub fn kill_group(pid: u32) {
         unsafe {
             libc::kill(-pid, libc::SIGKILL);
         }
+    }
+}
+
+/// Resizes `screen` to every mark at or before `upto`.
+fn apply_marks(screen: &mut Screen, marks: &mut VecDeque<SizeMark>, upto: u64) {
+    while let Some(mark) = marks.front().copied().filter(|m| m.seq <= upto) {
+        marks.pop_front();
+        screen.resize(mark.rows, mark.cols);
     }
 }

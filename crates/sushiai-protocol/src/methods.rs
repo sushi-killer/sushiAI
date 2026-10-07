@@ -377,6 +377,18 @@ pub struct HoldAttachResult {
     pub next_seq: u64,
     #[serde(default)]
     pub pid: u32,
+    /// The PTY size over the replayed bytes: the size the first replayed byte was written at,
+    /// then every later resize with the offset it happened at. Empty from an older holder.
+    #[serde(default)]
+    pub sizes: Vec<SizeMark>,
+}
+
+/// The PTY had this size from stream offset `seq` on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SizeMark {
+    pub seq: u64,
+    pub cols: u16,
+    pub rows: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

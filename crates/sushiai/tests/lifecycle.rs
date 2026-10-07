@@ -898,3 +898,34 @@ fn a_reattach_at_the_same_size_does_not_resize_the_child() {
     assert!(!marks.exists(), "the child got a SIGWINCH");
     client.call("session.close", json!({"id": id, "graceful": false}));
 }
+
+#[test]
+fn a_recovered_screen_replays_output_at_the_sizes_it_was_written_at() {
+    let mut sandbox = Sandbox::new();
+    let daemon = sandbox.start_daemon();
+    let mut client = sandbox.client();
+    // The prompt-like line is written at 80 columns; the pane is narrowed afterwards. The
+    // child does not redraw on SIGWINCH, so the ring only holds the 80-column bytes.
+    let script = "printf 'prompt-%s-end\\n' 0123456789012345678901234567890123456789012345678901234567890123456789; while :; do sleep 0.05; done";
+    let created = client.call(
+        "session.create",
+        json!({"cmd": ["/bin/sh", "-c", script], "cwd": "/tmp", "cols": 80, "rows": 24}),
+    );
+    let id = created["id"].as_str().expect("id").to_string();
+    wait_snapshot_contains(&mut client, &id, "-end");
+    client.call("session.resize", json!({"id": id, "cols": 44, "rows": 9}));
+    wait_until("the state file to hold the size", 5, || {
+        fs::read_to_string(sandbox.home().join("state.json")).is_ok_and(|t| t.contains("44"))
+    });
+    let before = client.attach_result(&id);
+    kill(daemon, "-KILL");
+    wait_until("daemon to die", 5, || !alive(daemon));
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    wait_until("the session to come back", 10, || {
+        info_of(&mut sandbox.client(), &id)["status"] == "running"
+    });
+    let after = client.attach_result(&id);
+    assert_eq!(after["snapshot"], before["snapshot"]);
+    client.call("session.close", json!({"id": id, "graceful": false}));
+}

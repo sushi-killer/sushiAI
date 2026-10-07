@@ -271,7 +271,7 @@ fn only_sushiai_commands_are_ours() {
     assert!(is_ours("'/a b/sushiai' hook stop --agent codex"));
     assert!(is_ours("'/a'\\''b/sushiai' hook stop"));
     assert!(!is_ours("/x/not-sushiai hook stop"));
-    assert!(!is_ours("/x/sushiai-link hook stop"));
+    assert!(!is_ours("/x/other-tool hook stop"));
     assert!(!is_ours("echo /x/sushiai hook stop"));
     assert!(!is_ours("/x/sushiai status"));
 }

@@ -106,7 +106,7 @@ fn remove_takes_our_handler_out_of_a_shared_group() {
 fn marker_matches_quoted_and_plain_paths_only() {
     assert!(is_ours("/a/sushiai hook stop"));
     assert!(is_ours("'/a b/sushiai' hook stop --agent codex"));
-    assert!(!is_ours("/a/sushiai-link hook stop"));
+    assert!(!is_ours("/a/other-tool hook stop"));
     assert!(!is_ours("echo sushiai"));
 }
 

@@ -61,6 +61,11 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 }
 
 async fn run(home: Home, modules: Vec<ModuleSlot>) -> Result<(fs::File, Arc<Registry>)> {
+    // Hashing the binary takes long in a large build: it runs beside startup, so the first
+    // `hello` finds it measured instead of making a client wait.
+    std::thread::spawn(|| {
+        server::own_build();
+    });
     home.ensure()?;
     // The lock lives until the daemon stops: one daemon per home, decided before any recovery.
     let lock = lock_home(&home)?;

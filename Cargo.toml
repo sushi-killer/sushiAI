@@ -32,3 +32,7 @@ sushiai-orch = { path = "crates/sushiai-orch" }
 debug = "line-tables-only"
 # Short-lived worktrees never reuse incremental data; off lets sccache cache across them.
 incremental = false
+
+# Hashing the daemon binary for `hello.build` takes about a second unoptimized.
+[profile.dev.package.sha2]
+opt-level = 3

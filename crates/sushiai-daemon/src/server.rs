@@ -703,7 +703,7 @@ async fn create_new(
 }
 
 /// sha256 (hex) of the running binary, measured once: what `hello.build` reports.
-fn own_build() -> Option<&'static str> {
+pub(crate) fn own_build() -> Option<&'static str> {
     static BUILD: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     BUILD
         .get_or_init(|| {

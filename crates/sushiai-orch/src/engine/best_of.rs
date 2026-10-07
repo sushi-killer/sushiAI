@@ -115,26 +115,8 @@ pub(super) fn prepare_run(
             allow.extend(tools.allowed().into_iter().map(serde_json::Value::String));
         }
         let _ = store::write_json_atomic(&settings_path, &claude_settings);
-        let ctx = Arc::new(HookContext {
-            task_id: task_id.to_string(),
-            attempt_n,
-            repo: task.repo.clone(),
-            worktree: worktree.to_path_buf(),
-            base_sha: base_sha.to_string(),
-            verify: task.verify.clone(),
-            blocks: AtomicU32::new(0),
-            cancel: CancelToken::new(),
-            hook_running: Arc::new(AtomicBool::new(false)),
-            run_grants: Default::default(),
-            run_denied: Default::default(),
-            handled: Default::default(),
-            staged: Default::default(),
-            ask_lock: tokio::sync::Mutex::new(()),
-        });
-        app.hook_tokens
-            .write()
-            .unwrap()
-            .insert(token.clone(), ctx.clone());
+        let ctx = HookContext::new(task, attempt_n, worktree, base_sha);
+        app.register_hook(&token, &ctx, run_dir);
         registered = Some((token.clone(), ctx));
     }
     PreparedRun {
@@ -390,7 +372,7 @@ where
     );
     let (a_res, b_res) = tokio::join!(a_run, b_run);
     if let Some((token, ctx)) = &prep.registered {
-        app.hook_tokens.write().unwrap().remove(token);
+        app.forget_hook(token, &run_dir_b);
         ctx.cancel.cancel();
         permissions::finish_staging(ctx);
     }

@@ -36,7 +36,7 @@ struct Setup {
 
 /// Starts a daemon, creates a task and waits until the first run has
 /// streamed its message to `events.jsonl` (and its pgid is saved).
-fn start(home: &Path, fake_bins: &[(&str, &str)]) -> Setup {
+fn start(home: &Path, fake_bins: &[(&str, &str)], verify: &str) -> Setup {
     let data = home.join("orchestrator");
     let socket = socket_of(home);
     let first = spawn_daemon(home, fake_bins);
@@ -56,7 +56,7 @@ fn start(home: &Path, fake_bins: &[(&str, &str)]) -> Setup {
         &socket,
         "task.create",
         serde_json::json!({"repo": repo.path().to_str().unwrap(),
-        "title": "Survives", "goal": "g", "criteria": [], "verify": ["true"]}),
+        "title": "Survives", "goal": "g", "criteria": [], "verify": [verify]}),
     );
     let id = task["id"].as_str().unwrap().to_string();
     let events = data.join("tasks").join(&id).join("runs/1/events.jsonl");
@@ -113,7 +113,7 @@ fn a_run_survives_a_killed_daemon_and_ends_done_without_a_requeue() {
     let script = script(scripts.path(), 4);
     let fake_bins = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
     let holder = tempfile::tempdir().unwrap();
-    let mut s = start(holder.path(), &fake_bins);
+    let mut s = start(holder.path(), &fake_bins, "true");
     s.first.kill().unwrap();
     let _ = s.first.wait();
     assert!(is_alive(s.pgid), "the run must outlive the daemon");
@@ -143,6 +143,64 @@ fn a_run_survives_a_killed_daemon_and_ends_done_without_a_requeue() {
         log.contains("msg_1") && log.contains("total_cost_usd"),
         "{log}"
     );
+    // The run is over: its hook token is gone from disk too.
+    assert!(
+        !token_file(&s).exists(),
+        "the token file must go with the run"
+    );
+    stop_daemon(&socket);
+    let _ = wait_for_exit(second, Duration::from_secs(5));
+    let _ = std::fs::remove_dir_all(&s.worktree);
+}
+
+fn token_file(s: &Setup) -> std::path::PathBuf {
+    s.home
+        .join("orchestrator/tasks")
+        .join(&s.id)
+        .join("runs/1/events.token")
+}
+
+#[test]
+fn a_readopted_run_keeps_the_token_of_its_stop_hook() {
+    use std::os::unix::fs::PermissionsExt;
+    let scripts = tempfile::tempdir().unwrap();
+    let script = script(scripts.path(), 20);
+    let fake_bins = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
+    let holder = tempfile::tempdir().unwrap();
+    // Verify fails, so a live token makes the hook block the agent's stop.
+    let mut s = start(holder.path(), &fake_bins, "false");
+    let token = std::fs::read_to_string(token_file(&s)).expect("the run files hold the token");
+    let mode = std::fs::metadata(token_file(&s))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+    s.first.kill().unwrap();
+    let _ = s.first.wait();
+    assert!(is_alive(s.pgid), "the run must outlive the daemon");
+
+    let (second, socket) = restart(&s, &fake_bins);
+    // The loop re-adopts the run: from then on the old token is known again.
+    let start_wait = Instant::now();
+    let answer = loop {
+        let answer = request_on(
+            &socket,
+            "hook.stop",
+            serde_json::json!({"token": token.trim()}),
+        );
+        if answer["decision"] == "block" || start_wait.elapsed() > Duration::from_secs(15) {
+            break answer;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(
+        answer["decision"], "block",
+        "the token was not restored: {answer}"
+    );
+    unsafe {
+        libc::killpg(s.pgid, libc::SIGKILL);
+    }
     stop_daemon(&socket);
     let _ = wait_for_exit(second, Duration::from_secs(5));
     let _ = std::fs::remove_dir_all(&s.worktree);
@@ -154,7 +212,7 @@ fn a_dead_run_with_no_exit_file_is_interrupted_and_requeued() {
     let script = script(scripts.path(), 30);
     let fake_bins = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
     let holder = tempfile::tempdir().unwrap();
-    let mut s = start(holder.path(), &fake_bins);
+    let mut s = start(holder.path(), &fake_bins, "true");
     s.first.kill().unwrap();
     let _ = s.first.wait();
     // The run dies with the daemon: no exit file, no live process group.

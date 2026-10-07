@@ -29,14 +29,16 @@ impl CostTag {
 
 /// The files a file-backed run (an implement or plan attempt) leaves next to
 /// its `events.jsonl`: the child's stdin, its raw stdout and stderr, the exit
-/// code its wrapper writes last, and the argv it was started with. They let
-/// a restarted daemon find the run again and finish it (see `recovery.rs`).
+/// code its wrapper writes last, the argv it was started with, and the token
+/// its Stop hook presents (mode 0600). They let a restarted daemon find the
+/// run again and finish it (see `recovery.rs`).
 pub(super) struct RunFiles {
     pub stdin: PathBuf,
     pub raw: PathBuf,
     pub stderr: PathBuf,
     pub exit: PathBuf,
     pub meta: PathBuf,
+    pub token: PathBuf,
 }
 
 impl RunFiles {
@@ -48,6 +50,7 @@ impl RunFiles {
             stderr: at("stderr.log"),
             exit: at("exit"),
             meta: at("run.json"),
+            token: at("token"),
         }
     }
 }

@@ -507,17 +507,30 @@ pub(super) async fn run_task_loop(
             task.updated_at = now_ms();
             let _ = app.store.save_task(&task);
             app.broadcast_task(&task);
+            // The agent still running holds the token of its Stop hook: the
+            // earlier daemon left it with the run files.
+            let worktree = PathBuf::from(&task.worktree);
+            let registered =
+                std::fs::read_to_string(&RunFiles::of(&run_dir.join("events.jsonl")).token)
+                    .ok()
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .map(|token| {
+                        let ctx = HookContext::new(&task, a.n, &worktree, &task.base_sha);
+                        app.register_hook(&token, &ctx, &run_dir);
+                        (token, ctx)
+                    });
             let result = follow_run(&app, &task, idx, &cancel).await;
             (
                 settings,
                 a.n,
                 idx,
                 route,
-                PathBuf::from(&task.worktree),
+                worktree,
                 task.base_sha.clone(),
                 run_dir.clone(),
                 run_dir.join("key"),
-                None,
+                registered,
                 result,
                 BestOfExtra::default(),
             )
@@ -866,7 +879,7 @@ pub(super) async fn run_task_loop(
 
         let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
         let (gate_blocks, handled, staged_lines) = if let Some((tok, ctx)) = registered.take() {
-            app.hook_tokens.write().unwrap().remove(&tok);
+            app.forget_hook(&tok, &run_dir);
             ctx.cancel.cancel();
             let applied = permissions::finish_staging(&ctx);
             (

@@ -252,6 +252,27 @@ struct HookContext {
     ask_lock: tokio::sync::Mutex<()>,
 }
 
+impl HookContext {
+    fn new(task: &Task, attempt_n: u32, worktree: &Path, base_sha: &str) -> Arc<Self> {
+        Arc::new(HookContext {
+            task_id: task.id.clone(),
+            attempt_n,
+            repo: task.repo.clone(),
+            worktree: worktree.to_path_buf(),
+            base_sha: base_sha.to_string(),
+            verify: task.verify.clone(),
+            blocks: AtomicU32::new(0),
+            cancel: CancelToken::new(),
+            hook_running: Arc::new(AtomicBool::new(false)),
+            run_grants: Default::default(),
+            run_denied: Default::default(),
+            handled: Default::default(),
+            staged: Default::default(),
+            ask_lock: tokio::sync::Mutex::new(()),
+        })
+    }
+}
+
 /// An implement attempt's stall watchdog: the silence limit, paused while
 /// `paused` is set.
 struct Stall {
@@ -556,6 +577,23 @@ impl App {
             TaskStatus::Running => TaskStatus::Queued,
             other => *other,
         }
+    }
+
+    /// Registers `token` for a run's Stop hook and keeps it in the run's token
+    /// file, so a restarted daemon can register it again for a run it re-adopts.
+    fn register_hook(&self, token: &str, ctx: &Arc<HookContext>, run_dir: &Path) {
+        let file = RunFiles::of(&run_dir.join("events.jsonl")).token;
+        let _ = store::write_secret_file(&file, token);
+        self.hook_tokens
+            .write()
+            .unwrap()
+            .insert(token.to_string(), ctx.clone());
+    }
+
+    /// Forgets the token of a run that ended, in memory and on disk.
+    fn forget_hook(&self, token: &str, run_dir: &Path) {
+        self.hook_tokens.write().unwrap().remove(token);
+        let _ = std::fs::remove_file(RunFiles::of(&run_dir.join("events.jsonl")).token);
     }
 
     /// The hook token registered for attempt `n` of a task, if its run has one.

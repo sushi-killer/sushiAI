@@ -249,7 +249,7 @@ wire is additive (`PROTOCOL_VERSION` stays 1, capability `hibernate`).
 - **Launch store.** `session.create` for claude/codex seals `{env, claudeSettings, model,
 extraArgs}` into `<home>/sessions/<id>.launch` (0600) with ChaCha20-Poly1305: random
   nonce, the session id as associated data. The key is a login keychain item on macOS
-  (default home only; Security framework, never argv; made only on errSecItemNotFound), else `SUSHIAI_LAUNCH_KEY_FILE`, else `<home>/keys/launch.key`
+  (default home only; `/usr/bin/security`, the new key on the stdin of `security -i`, never argv; made only on errSecItemNotFound), else `SUSHIAI_LAUNCH_KEY_FILE`, else `<home>/keys/launch.key`
   (0600). It is deleted when the session is closed or removed (or pruned). Env and
   `claudeSettings` are still never logged or sent to clients. A file that cannot be opened
   is `WAKE_NEEDS_LAUNCH` (1012). On a headless host the key file sits beside the data: a
@@ -284,6 +284,13 @@ extraArgs}` into `<home>/sessions/<id>.launch` (0600) with ChaCha20-Poly1305: ra
   with it. A wake that fails drops that input with a warning and leaves the record wakeable.
   A hook that arrives before the holder is connected finishes the wake once it is. A ready
   agent that sent no hook (a resumed Codex) is set to idle, so it can sleep again.
+  A wake whose launch file is gone or does not open ends the record as `exited` and answers
+  1012 (no later wake can start a second agent from it). A key that cannot be read right now
+  (locked or denied keychain, unreadable key file) answers `LAUNCH_KEY_UNAVAILABLE` 1013 and
+  the record stays hibernated; the desktop shows "Unlock the keychain to wake this agent" and
+  does not start a new session. A session the owner closed refuses any later wake. Daemon
+  start never reads the key: it checks only that the launch file exists. The 30-day prune
+  asks the session's actor to remove itself, so a wake that is under way wins.
 - **Restart.** A restored session whose holder is gone (reboot, killed holder) and that can
   hibernate (its launch opens) becomes `hibernated` instead of `exited`; a hibernated record
   whose launch no longer opens at start becomes `exited`. Hibernated records older than 30

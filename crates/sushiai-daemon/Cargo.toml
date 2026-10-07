@@ -18,8 +18,5 @@ tokio.workspace = true
 tracing.workspace = true
 libc.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
-security-framework = "3"
-
 [dev-dependencies]
 tempfile.workspace = true

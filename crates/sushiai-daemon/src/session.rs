@@ -104,6 +104,10 @@ enum Cmd {
     Respond(AskRespond, Reply),
     Wake(Box<Prepared>, Reply),
     Hibernate(Reply),
+    /// The stored launch cannot open (or is gone): a hibernated session ends as exited.
+    LaunchLost(Reply),
+    /// The prune asks a hibernated session to remove itself when it is older than 30 days.
+    Expire(u64),
     /// A wake was asked while the session is going to sleep: remembered for the sleep's end.
     WakeAsked(Reply),
     /// The wake that followed a sleep with input waiting failed: that input is dropped.
@@ -182,6 +186,17 @@ impl Handle {
     /// A `session.wake` that arrived while the session goes to sleep.
     pub async fn wake_asked(&self) -> Result<(), Fail> {
         self.ask(Cmd::WakeAsked).await
+    }
+
+    /// The launch of this session is gone for good: it must not wake any more.
+    pub async fn launch_lost(&self) -> Result<(), Fail> {
+        self.ask(Cmd::LaunchLost).await
+    }
+
+    /// Asks a hibernated session to remove itself if it is older than the limit; a wake that
+    /// came first wins, because both go through the same queue. Does not wait.
+    pub fn expire(&self, now_ms: u64) {
+        let _ = self.tx.try_send(Cmd::Expire(now_ms));
     }
 
     pub async fn hibernate(&self) -> Result<(), Fail> {
@@ -299,6 +314,10 @@ struct Actor {
     wake_asked: bool,
     /// The owner closed the session: its launch and tail go when it ends.
     closing: bool,
+    /// The owner closed it (kept for good): no wake may revive it, not even a late one.
+    closed: bool,
+    /// The record was removed by the prune: the actor ends.
+    removed: bool,
     wake: Option<Wake>,
     wake_due: Option<Instant>,
     /// Pid of the holder that ended with the last sleep; a new holder waits for it to be gone.
@@ -390,6 +409,8 @@ fn spawn_actor(
         sleep_queue: Vec::new(),
         wake_asked: false,
         closing: false,
+        closed: false,
+        removed: false,
         wake: None,
         wake_due: None,
         dead_holder: None,
@@ -466,6 +487,9 @@ impl Actor {
                     self.poll_foreground();
                     self.hibernate_tick();
                 }
+            }
+            if self.removed {
+                break;
             }
             // An exited session with nobody attached has nothing left to serve.
             if self.info.status == SessionStatus::Exited && self.output.receiver_count() == 0 {
@@ -544,6 +568,7 @@ impl Actor {
             Cmd::Close(_, reply) if self.info.status == SessionStatus::Hibernated => {
                 // Nothing runs: the session ends as exited, and its launch and tail go.
                 self.closing = true;
+                self.closed = true;
                 self.exited(None);
                 let _ = reply.send(Ok(()));
             }
@@ -554,11 +579,13 @@ impl Actor {
                 // Not connected to the holder right now: close as soon as it is back, or end
                 // as exited if it turns out to be gone.
                 self.closing = true;
+                self.closed = true;
                 self.close_pending = Some(graceful);
                 let _ = reply.send(Ok(()));
             }
             Cmd::Close(graceful, reply) => {
                 self.closing = true;
+                self.closed = true;
                 let signal = if graceful { Signal::Term } else { Signal::Kill };
                 self.track(reply, |h| h.close(signal), Pending::Ack);
                 if graceful
@@ -591,8 +618,34 @@ impl Actor {
                 let _ = reply.send(self.respond(answer));
             }
             Cmd::Wake(prepared, reply) => {
-                self.begin_wake(*prepared);
+                let result = if self.closed {
+                    Err((
+                        code::WAKE_NEEDS_LAUNCH,
+                        "the session was closed".to_string(),
+                    ))
+                } else {
+                    self.begin_wake(*prepared);
+                    Ok(())
+                };
+                let _ = reply.send(result);
+            }
+            Cmd::LaunchLost(reply) => {
+                if self.info.status == SessionStatus::Hibernated {
+                    self.closing = true;
+                    self.exited(None);
+                } else {
+                    self.registry.drop_files(&self.info.id);
+                }
                 let _ = reply.send(Ok(()));
+            }
+            Cmd::Expire(now) => {
+                let old = self.info.agent.hibernated_at.is_some_and(|at| {
+                    now.saturating_sub(at) > crate::registry::HIBERNATED_MAX_AGE_MS
+                });
+                if old && self.info.status == SessionStatus::Hibernated && self.wake.is_none() {
+                    self.registry.remove_hibernated(&self.info.id);
+                    self.removed = true;
+                }
             }
             Cmd::WakeAsked(reply) => {
                 self.wake_asked |= self.hibernating;

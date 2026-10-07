@@ -3,11 +3,12 @@
 
 use std::sync::Arc;
 
-use sushiai_core::{hibernate::can_hibernate, mark_hibernated};
+use sushiai_core::{hibernate::can_hibernate, mark_exited, mark_hibernated};
 use sushiai_protocol::{code, SessionCreate, SessionStatus};
 
 use crate::agent::{self, now_ms};
 use crate::error::Fail;
+use crate::launch_store::OpenError;
 use crate::registry::Registry;
 use crate::session;
 
@@ -50,7 +51,23 @@ pub async fn wake(registry: &Arc<Registry>, id: &str) -> Result<(), Fail> {
     let launch = tokio::task::spawn_blocking(move || store.launches().open(&key))
         .await
         .map_err(|e| (code::INTERNAL, e.to_string()))?
-        .map_err(|_| needs_launch())?;
+        .map_err(|e| match e {
+            OpenError::KeyUnavailable => (
+                code::LAUNCH_KEY_UNAVAILABLE,
+                "the key for the stored launch is not available".to_string(),
+            ),
+            OpenError::Gone => needs_launch(),
+        });
+    let launch = match launch {
+        Ok(launch) => launch,
+        Err(fail) => {
+            if fail.0 == code::WAKE_NEEDS_LAUNCH {
+                // It can never wake: end the record, so no later wake starts a second agent.
+                launch_lost(registry, id).await;
+            }
+            return Err(fail);
+        }
+    };
     let request = SessionCreate {
         cmd: Vec::new(),
         cwd: info.cwd.clone(),
@@ -77,6 +94,10 @@ pub async fn wake(registry: &Arc<Registry>, id: &str) -> Result<(), Fail> {
     let handle = match registry.handle(id) {
         Some(handle) => handle,
         None => {
+            // A close that came after the launch was read must not be undone.
+            if !registry.launches().exists(id) {
+                return Err(needs_launch());
+            }
             // An exited record whose actor is gone sleeps first, so the actor has one start.
             let mut record = info;
             if !can_hibernate(&record, true, true) {
@@ -87,4 +108,20 @@ pub async fn wake(registry: &Arc<Registry>, id: &str) -> Result<(), Fail> {
         }
     };
     handle.wake(prepared).await
+}
+
+/// The stored launch of `id` is gone or damaged: the record ends as exited and its files go.
+async fn launch_lost(registry: &Arc<Registry>, id: &str) {
+    if let Some(handle) = registry.handle(id) {
+        let _ = handle.launch_lost().await;
+        return;
+    }
+    if let Some(mut info) = registry.stored(id) {
+        if info.status != SessionStatus::Exited {
+            mark_exited(&mut info, None);
+            registry.update(info);
+            registry.announce_updated(id);
+        }
+    }
+    registry.drop_files(id);
 }

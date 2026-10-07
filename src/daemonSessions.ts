@@ -480,6 +480,19 @@ export async function configureAllHosts(
 /** `session.wake` errors that mean "start a new session instead": the host has
  * no such record (1003) or no stored launch for it (1012). */
 const WAKE_FALLBACK_CODES = [1003, 1012];
+/** `session.wake` refused because the key of the stored launch is unavailable
+ * (LAUNCH_KEY_UNAVAILABLE 1013): the session stays asleep; a new session must not start. */
+const WAKE_KEY_UNAVAILABLE = 1013;
+const KEY_UNAVAILABLE_NOTICE = "Unlock the keychain to wake this agent";
+
+/** Whether Reopen applies to a pane: a terminal or agent that ended, has no session
+ * yet, or sleeps (its wake failed and the click or keystroke fell back to Reopen). */
+export function canReopen(
+  panel: Pick<Panel, "kind" | "ended" | "sessionId" | "status">,
+): boolean {
+  if (panel.kind !== "agent" && panel.kind !== "terminal") return false;
+  return !!panel.ended || !panel.sessionId || panel.status === "sleeping";
+}
 
 /** The wake call for a Reopen, or null when Reopen must create a session: only
  * an agent panel whose session holds the agent's own conversation id wakes. A
@@ -509,6 +522,8 @@ export async function wakeInPlace(
   if (result.ok) return true;
   if (result.code !== undefined && WAKE_FALLBACK_CODES.includes(result.code))
     return false;
+  if (result.code === WAKE_KEY_UNAVAILABLE)
+    throw new Error(KEY_UNAVAILABLE_NOTICE);
   throw new Error(result.message);
 }
 
@@ -526,6 +541,7 @@ export async function wakeOrReopen(
     reopen();
     return null;
   }
+  if (result.code === WAKE_KEY_UNAVAILABLE) return KEY_UNAVAILABLE_NOTICE;
   return result.message;
 }
 

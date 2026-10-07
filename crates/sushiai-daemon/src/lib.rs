@@ -281,11 +281,13 @@ fn load_state(registry: &Arc<Registry>) -> Result<Vec<Pending>> {
             pending.push(Pending { info, probed });
         } else if info.status == SessionStatus::Hibernated {
             let mut info = info;
-            if registry.launches().opens(&info.id) {
+            // Existence only: the key (a keychain read) is never touched before the socket
+            // answers. A launch that does not open is found at the wake.
+            if registry.launches().exists(&info.id) {
                 session::start_hibernated(registry.clone(), info);
             } else {
                 // It could never wake: Reopen starts it again from its conversation.
-                tracing::warn!("session {} has no launch that opens; it is exited", info.id);
+                tracing::warn!("session {} has no stored launch; it is exited", info.id);
                 mark_exited(&mut info, None);
                 registry.update(info);
             }
@@ -345,10 +347,7 @@ fn reattach_all(registry: &Arc<Registry>, pending: Vec<Pending>) {
                     registry.settle();
                     return;
                 }
-                let (store, key) = (registry.clone(), id.clone());
-                let opens = tokio::task::spawn_blocking(move || store.launches().opens(&key))
-                    .await
-                    .unwrap_or(false);
+                let opens = registry.launches().exists(&id);
                 let resumable = agent::agent_of(info.agent.name.as_deref()).is_some();
                 if can_hibernate(&info, opens, resumable) {
                     // The process died with the machine (or the holder was killed): the

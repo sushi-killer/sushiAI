@@ -3,8 +3,9 @@
 //! is `sessions/<id>.launch` (0600): `SLK1`, a random 12-byte nonce, then ChaCha20-Poly1305
 //! text with the session id as associated data (a file moved to another id does not open).
 //!
-//! The key lives in the macOS login keychain (service `sushiai-launch-key`, through the
-//! Security framework, never on a command line) for the default home, else in a key file (0600): `SUSHIAI_LAUNCH_KEY_FILE`, or `<home>/keys/launch.key`. A
+//! The key lives in the macOS login keychain (service `sushiai-launch-key`, through
+//! `/usr/bin/security`, never on a command line) for the default home, else in a key file
+//! (0600): `SUSHIAI_LAUNCH_KEY_FILE`, or `<home>/keys/launch.key`. A
 //! daemon whose home is not `~/.sushiai` never touches the keychain. Headless hosts have no
 //! keyring, so the key file sits beside the data it protects: a stolen copy of the file alone
 //! stays sealed, a stolen home does not. Nothing here is ever logged.
@@ -52,6 +53,13 @@ impl Launch {
             extra_args: p.extra_args.clone(),
         }
     }
+}
+
+/// Why a stored launch did not open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenError {
+    Gone,
+    KeyUnavailable,
 }
 
 enum KeySource {
@@ -119,15 +127,16 @@ impl LaunchStore {
         fs::rename(&tmp, path)
     }
 
-    /// An error means the launch is not there or cannot be opened: the session cannot wake.
-    pub fn open(&self, id: &str) -> io::Result<Launch> {
-        let bytes = fs::read(self.home.launch_file(id))?;
-        let bad = || io::Error::new(io::ErrorKind::InvalidData, "the launch cannot be opened");
+    /// `Gone` means the launch is not there or does not open with the key (it can never wake
+    /// this session); `KeyUnavailable` means the key could not be read right now (a locked
+    /// or denied keychain, an unreadable key file): the launch may open later.
+    pub fn open(&self, id: &str) -> Result<Launch, OpenError> {
+        let bytes = fs::read(self.home.launch_file(id)).map_err(|_| OpenError::Gone)?;
         if bytes.len() < MAGIC.len() + NONCE_LEN || &bytes[..MAGIC.len()] != MAGIC {
-            return Err(bad());
+            return Err(OpenError::Gone);
         }
         let (nonce, sealed) = bytes[MAGIC.len()..].split_at(NONCE_LEN);
-        let key = self.key()?;
+        let key = self.key().map_err(|_| OpenError::KeyUnavailable)?;
         let plain = ChaCha20Poly1305::new(Key::from_slice(&key))
             .decrypt(
                 Nonce::from_slice(nonce),
@@ -136,13 +145,8 @@ impl LaunchStore {
                     aad: id.as_bytes(),
                 },
             )
-            .map_err(|_| bad())?;
-        serde_json::from_slice(&plain).map_err(|_| bad())
-    }
-
-    /// True when the launch exists and opens (the key is there and the file is intact).
-    pub fn opens(&self, id: &str) -> bool {
-        self.open(id).is_ok()
+            .map_err(|_| OpenError::Gone)?;
+        serde_json::from_slice(&plain).map_err(|_| OpenError::Gone)
     }
 
     pub fn delete(&self, id: &str) {
@@ -214,25 +218,55 @@ fn account_name() -> io::Result<String> {
 
 /// The key of the login keychain, made only when the item is missing (`errSecItemNotFound`).
 /// Any other failure is an error and is not cached, so a locked or denied keychain never
-/// makes a second key. The key goes through the Security framework, never through argv.
+/// makes a second key. `/usr/bin/security` is used, not the Security framework: the framework
+/// would load into every holder too (the same binary). The new key goes in on the stdin of
+/// `security -i`, never on argv.
 #[cfg(target_os = "macos")]
 fn keychain_key() -> io::Result<[u8; 32]> {
-    use security_framework::passwords::{get_generic_password, set_generic_password};
-    // errSecItemNotFound
-    const NOT_FOUND: i32 = -25300;
+    use std::process::{Command, Stdio};
+    // errSecItemNotFound, as the exit status of `security find-generic-password`.
+    const NOT_FOUND: i32 = 44;
+    const SECURITY: &str = "/usr/bin/security";
 
     let account = account_name()?;
-    let refused = |_| io::Error::other("the keychain refused the launch key");
-    match get_generic_password(KEYCHAIN_SERVICE, &account) {
-        Ok(found) => return parse_key(&String::from_utf8_lossy(&found)),
-        Err(e) if e.code() == NOT_FOUND => {}
-        Err(e) => return Err(refused(e)),
+    if account.contains(['"', '\\', '\n']) {
+        return Err(io::Error::other(
+            "the account name cannot be passed to the keychain",
+        ));
+    }
+    let find = || -> io::Result<Option<[u8; 32]>> {
+        let out = Command::new(SECURITY)
+            .args(["find-generic-password", "-s", KEYCHAIN_SERVICE])
+            .args(["-a", &account, "-w"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()?;
+        match out.status.code() {
+            Some(0) => parse_key(&String::from_utf8_lossy(&out.stdout)).map(Some),
+            Some(NOT_FOUND) => Ok(None),
+            _ => Err(io::Error::other("the keychain refused the launch key")),
+        }
+    };
+    if let Some(key) = find()? {
+        return Ok(key);
     }
     let made = random_hex(32)?;
-    set_generic_password(KEYCHAIN_SERVICE, &account, made.as_bytes()).map_err(refused)?;
+    let mut child = Command::new(SECURITY)
+        .arg("-i")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        // No -U: an item another process added in between is never replaced.
+        writeln!(
+            stdin,
+            "add-generic-password -s {KEYCHAIN_SERVICE} -a \"{account}\" -w {made}"
+        )?;
+    }
+    child.wait()?;
     // Use what the keychain holds: if another process added a key in between, both agree.
-    let stored = get_generic_password(KEYCHAIN_SERVICE, &account).map_err(refused)?;
-    parse_key(&String::from_utf8_lossy(&stored))
+    find()?.ok_or_else(|| io::Error::other("the keychain did not keep the launch key"))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -291,6 +325,30 @@ mod tests {
         fs::write(sessions.join("s1.launch"), raw).expect("write");
         assert!(store.open("s1").is_err());
         assert!(store.open("missing").is_err());
+    }
+
+    #[test]
+    fn a_key_that_cannot_be_read_is_not_a_launch_that_is_gone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = store(&dir);
+        a.seal("s1", &launch()).expect("seal");
+        // A second store whose key path is a directory: the key cannot be read.
+        let home = Home::new(dir.path().to_path_buf());
+        let blocked = dir.path().join("blocked");
+        fs::create_dir_all(&blocked).expect("dir");
+        let b = LaunchStore {
+            source: KeySource::File(blocked),
+            home,
+            key: Mutex::new(None),
+        };
+        assert_eq!(b.open("s1").err(), Some(OpenError::KeyUnavailable));
+        // A file that is cut, or missing, is gone whatever the key does.
+        assert_eq!(b.open("missing").err(), Some(OpenError::Gone));
+        let path = dir.path().join("sessions/s1.launch");
+        let mut raw = fs::read(&path).expect("read");
+        raw.truncate(raw.len() - 1);
+        fs::write(&path, raw).expect("write");
+        assert_eq!(a.open("s1").err(), Some(OpenError::Gone));
     }
 
     #[test]

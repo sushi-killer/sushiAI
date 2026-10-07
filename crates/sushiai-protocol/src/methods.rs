@@ -108,6 +108,9 @@ pub mod code {
     pub const SHUTTING_DOWN: i64 = 1011;
     /// The session has no stored launch (or it cannot be opened): it cannot be woken.
     pub const WAKE_NEEDS_LAUNCH: i64 = 1012;
+    /// The key that opens the session's stored launch is not available (a locked or denied
+    /// keychain): the session stays asleep and a later wake can work.
+    pub const LAUNCH_KEY_UNAVAILABLE: i64 = 1013;
     /// A hosted module is still starting; the request waited and gave up.
     pub const MODULE_STARTING: i64 = 1100;
 }

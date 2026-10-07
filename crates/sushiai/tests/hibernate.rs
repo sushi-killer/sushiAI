@@ -259,27 +259,75 @@ fn the_launch_is_sealed_and_a_wake_without_it_is_refused() {
 
     client.call("session.hibernate", json!({"id": id}));
     wait_status(&mut client, &id, "hibernated");
-    // A file that does not open, and no file at all, both mean: no stored launch.
+    // A file that does not open means: no stored launch, and never one again. The record
+    // ends as exited, so no later wake can start a second agent from it.
     fs::write(&file, b"SLK1garbage-garbage-garbage").expect("corrupt");
     let broken = client
         .try_call("session.wake", json!({"id": id}))
         .expect_err("a damaged launch cannot wake");
     assert_eq!(broken.code, 1012);
-    fs::remove_file(&file).expect("remove");
-    let missing = client
+    assert_eq!(status_of(&mut client, &id), "exited");
+    assert!(!file.exists() && !tail_file(&sandbox, &id).exists());
+    let again = client
         .try_call("session.wake", json!({"id": id}))
         .expect_err("no launch, no wake");
-    assert_eq!(missing.code, 1012);
-    assert_eq!(status_of(&mut client, &id), "hibernated");
+    assert_eq!(again.code, 1012);
     let unknown = client
         .try_call("session.wake", json!({"id": "nope"}))
         .expect_err("unknown");
     assert_eq!(unknown.code, 1003);
+}
 
-    // Closing a sleeping session ends it and removes what it left.
+#[test]
+fn a_key_that_cannot_be_read_keeps_the_record_asleep_with_error_1013() {
+    let rig = Rig::new("claude");
+    let mut sandbox = rig.sandbox(None);
+    let daemon = sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let id = rig.create(&mut client);
+    wait_idle(&mut client, &id);
+    client.call("session.hibernate", json!({"id": id}));
+    wait_status(&mut client, &id, "hibernated");
+    client.call("daemon.shutdown", Value::Null);
+    wait_until("the daemon to stop", 10, || !alive(daemon));
+    // A new daemon has not read the key yet; the key file is now unreadable (a directory).
+    let key = rig.dir.path().join("launch.key");
+    let saved = fs::read(&key).expect("key");
+    fs::remove_file(&key).expect("remove key");
+    fs::create_dir(&key).expect("key dir");
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let unavailable = client
+        .try_call("session.wake", json!({"id": id}))
+        .expect_err("no key, no wake");
+    assert_eq!(unavailable.code, 1013);
+    assert_eq!(status_of(&mut client, &id), "hibernated");
+    assert!(launch_file(&sandbox, &id).exists(), "the launch is kept");
+    // The key is back (the keychain unlocked): the same record wakes.
+    fs::remove_dir(&key).expect("remove dir");
+    fs::write(&key, saved).expect("restore key");
+    client.call("session.wake", json!({"id": id}));
+    wait_status(&mut client, &id, "running");
+}
+
+#[test]
+fn a_late_wake_cannot_revive_a_session_the_owner_closed() {
+    let rig = Rig::new("claude");
+    let mut sandbox = rig.sandbox(None);
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let id = rig.create(&mut client);
+    wait_idle(&mut client, &id);
+    client.call("session.hibernate", json!({"id": id}));
+    wait_status(&mut client, &id, "hibernated");
     client.call("session.close", json!({"id": id, "graceful": true}));
     assert_eq!(status_of(&mut client, &id), "exited");
-    assert!(!tail_file(&sandbox, &id).exists());
+    let late = client
+        .try_call("session.wake", json!({"id": id}))
+        .expect_err("closed");
+    assert_eq!(late.code, 1012);
+    assert_eq!(status_of(&mut client, &id), "exited");
+    assert_eq!(rig.argvs().len(), 1, "no second agent started");
 }
 
 #[test]
@@ -450,7 +498,7 @@ fn a_woken_codex_that_sends_no_hook_is_idle_so_it_can_sleep_again() {
 }
 
 #[test]
-fn a_hibernated_record_whose_launch_does_not_open_at_start_is_exited() {
+fn a_hibernated_record_without_a_launch_at_start_is_exited() {
     let rig = Rig::new("claude");
     let mut sandbox = rig.sandbox(None);
     let daemon = sandbox.start_daemon();
@@ -461,7 +509,7 @@ fn a_hibernated_record_whose_launch_does_not_open_at_start_is_exited() {
     wait_status(&mut client, &id, "hibernated");
     client.call("daemon.shutdown", Value::Null);
     wait_until("the daemon to stop", 10, || !alive(daemon));
-    fs::write(launch_file(&sandbox, &id), b"SLK1garbage-garbage-garbage").expect("corrupt");
+    fs::remove_file(launch_file(&sandbox, &id)).expect("remove launch");
     sandbox.start_daemon();
     let mut client = sandbox.client();
     assert_eq!(status_of(&mut client, &id), "exited");

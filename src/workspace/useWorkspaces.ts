@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { contains, leaf, remove, resize, split, uid } from "../layout.ts";
 import { initialWorkspace } from "../workspaceState.ts";
-import { LOCAL_ENDPOINT, wakeInPlace, wakeRequest } from "../daemonSessions.ts";
+import {
+  LOCAL_ENDPOINT,
+  canReopen,
+  wakeInPlace,
+  wakeRequest,
+} from "../daemonSessions.ts";
 import type { ClosedProject, Routine, Saved } from "../workspaceState.ts";
 import { applyChatEvent, startUserTurn } from "../chat-threads.ts";
 import { disposeTerminal } from "../TerminalPanel.tsx";
@@ -435,14 +440,7 @@ export function useWorkspaces({
     if (queued) return queued;
     const owner = findPanelOwner(workspacesRef.current, panelId);
     const ended = owner?.panels.find((item) => item.id === panelId);
-    if (
-      !owner ||
-      !ended ||
-      (ended.kind !== "agent" && ended.kind !== "terminal") ||
-      // A sleeping pane is not ended, but its wake failed: Reopen takes over.
-      (!ended.ended && ended.sessionId && ended.status !== "sleeping")
-    )
-      return Promise.resolve();
+    if (!owner || !ended || !canReopen(ended)) return Promise.resolve();
     const request: SessionLaunchRequest = reopenRequest(
       owner,
       ended,

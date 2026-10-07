@@ -315,3 +315,42 @@ test("a new connection generation of the host re-reads the capability; others ch
     null,
   );
 });
+
+test("Reopen applies to an ended, unstarted or sleeping pane, not to a running one", async () => {
+  const { canReopen } = await library;
+  const base = { kind: "agent", sessionId: "s1" };
+  assert.equal(canReopen({ ...base, status: "sleeping" }), true);
+  assert.equal(canReopen({ ...base, ended: true, status: "idle" }), true);
+  assert.equal(canReopen({ kind: "terminal", status: "idle" }), true);
+  assert.equal(canReopen({ ...base, status: "idle" }), false);
+  assert.equal(canReopen({ ...base, status: "working" }), false);
+  assert.equal(canReopen({ ...base, status: "waking" }), false);
+  assert.equal(
+    canReopen({ kind: "browser", sessionId: "s1", status: "sleeping" }),
+    false,
+  );
+});
+
+test("an unavailable launch key shows a notice and never falls back to a new session", async () => {
+  const { wakeOrReopen, wakeInPlace } = await library;
+  const request = { host: "local", id: "s1" };
+  const refused = { ok: false, code: 1013, message: "key" };
+  let reopened = 0;
+  const notice = await wakeOrReopen(
+    { sessionWake: async () => refused },
+    request,
+    () => reopened++,
+  );
+  assert.equal(notice, "Unlock the keychain to wake this agent");
+  assert.equal(reopened, 0);
+  await assert.rejects(
+    wakeInPlace(
+      {
+        daemonStates: async () => [state("local", ["hibernate"])],
+        sessionWake: async () => refused,
+      },
+      request,
+    ),
+    /Unlock the keychain/,
+  );
+});

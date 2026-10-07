@@ -619,10 +619,11 @@ impl Registry {
     }
 
     /// Forgets hibernated sessions that slept longer than `HIBERNATED_MAX_AGE_MS` before
-    /// `now_ms`, with their launch and tail.
+    /// `now_ms`, with their launch and tail. A session with an actor is asked through it, so
+    /// a wake that is under way wins; one without an actor is removed here.
     pub fn prune_hibernated(&self, now_ms: u64) {
-        let mut catalog = self.catalog();
-        let old: Vec<String> = catalog
+        let old: Vec<(String, Option<Handle>)> = self
+            .catalog()
             .sessions
             .iter()
             .filter(|(_, e)| {
@@ -632,17 +633,30 @@ impl Registry {
                         .hibernated_at
                         .is_some_and(|at| now_ms.saturating_sub(at) > HIBERNATED_MAX_AGE_MS)
             })
-            .map(|(id, _)| id.clone())
+            .map(|(id, e)| (id.clone(), e.handle.clone()))
             .collect();
-        if old.is_empty() {
+        for (id, handle) in old {
+            match handle {
+                Some(handle) => handle.expire(now_ms),
+                None => self.remove_hibernated(&id),
+            }
+        }
+    }
+
+    /// Removes a record that is still hibernated, with its launch and tail. The record of a
+    /// session that woke meanwhile stays.
+    pub(crate) fn remove_hibernated(&self, id: &str) {
+        let mut catalog = self.catalog();
+        if catalog
+            .sessions
+            .get(id)
+            .is_none_or(|e| e.info.status != SessionStatus::Hibernated)
+        {
             return;
         }
-        for id in old {
-            // Dropping the entry drops the actor's handle: the idle actor ends.
-            catalog.sessions.remove(&id);
-            self.drop_files(&id);
-            self.notify(method::SESSION_REMOVED, SessionRemoved { id });
-        }
+        catalog.sessions.remove(id);
+        self.drop_files(id);
+        self.notify(method::SESSION_REMOVED, SessionRemoved { id: id.into() });
         self.save(&catalog);
     }
 

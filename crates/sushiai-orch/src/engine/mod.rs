@@ -237,7 +237,7 @@ struct HookContext {
     cancel: CancelToken,
     /// Set while `hook.stop` runs verify for this attempt: the harness is
     /// silent then by design, so the stall clock waits.
-    hook_running: Arc<AtomicBool>,
+    hook_running: Arc<HookClock>,
     /// Rules the owner allowed for this run only (`permissions.rs`).
     run_grants: StdMutex<std::collections::HashSet<String>>,
     /// Rules the owner denied during this run.
@@ -263,7 +263,7 @@ impl HookContext {
             verify: task.verify.clone(),
             blocks: AtomicU32::new(0),
             cancel: CancelToken::new(),
-            hook_running: Arc::new(AtomicBool::new(false)),
+            hook_running: Arc::default(),
             run_grants: Default::default(),
             run_denied: Default::default(),
             handled: Default::default(),
@@ -274,17 +274,33 @@ impl HookContext {
 }
 
 /// An implement attempt's stall watchdog: the silence limit, paused while
-/// `paused` is set.
+/// the hook clock runs.
 struct Stall {
     limit: Duration,
-    paused: Arc<AtomicBool>,
+    paused: Arc<HookClock>,
 }
 
-struct ClearOnDrop<'a>(&'a AtomicBool);
+/// Whether a hook runs now, and when the last one ended. The end counts as
+/// activity: the stall window starts then.
+#[derive(Default)]
+struct HookClock {
+    running: AtomicBool,
+    ended: StdMutex<Option<tokio::time::Instant>>,
+}
+
+impl HookClock {
+    fn start(&self) -> ClearOnDrop<'_> {
+        self.running.store(true, Ordering::SeqCst);
+        ClearOnDrop(self)
+    }
+}
+
+struct ClearOnDrop<'a>(&'a HookClock);
 
 impl Drop for ClearOnDrop<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        *self.0.ended.lock().unwrap() = Some(tokio::time::Instant::now());
+        self.0.running.store(false, Ordering::SeqCst);
     }
 }
 

@@ -509,8 +509,7 @@ async fn ask(app: &Arc<App>, ctx: &HookContext, subject: &Subject, detail: &str)
         .unwrap()
         .insert(ctx.task_id.clone(), tx);
     // The harness is silent while it waits for us: the stall clock pauses.
-    ctx.hook_running.store(true, Ordering::SeqCst);
-    let _paused = ClearOnDrop(&ctx.hook_running);
+    let _paused = ctx.hook_running.start();
     let mut task = app.store.load_task(&ctx.task_id).ok().flatten()?;
     task.question = Some(question.clone());
     task.status = TaskStatus::Waiting;

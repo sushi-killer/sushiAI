@@ -150,7 +150,7 @@ impl Guard {
     }
 
     /// The watch a variant asks for; `hook_running` pauses the stall clock.
-    pub fn for_variant(variant: &Variant, hook_running: Option<Arc<AtomicBool>>) -> Self {
+    pub fn for_variant(variant: &Variant, hook_running: Option<Arc<HookClock>>) -> Self {
         Guard {
             stall: (variant.stall_timeout_secs > 0).then(|| Stall {
                 limit: Duration::from_secs(variant.stall_timeout_secs),
@@ -183,11 +183,19 @@ impl Guard {
 
     /// The silence limit ran out. Silence is the only stall signal; a long
     /// Bash call or the Stop hook's verify (up to 540s) is silent too, so the
-    /// limit must sit above them and the clock pauses while the hook runs.
+    /// limit must sit above them. While a hook runs no stall fires, and the
+    /// moment it ends counts as activity: the window starts then.
     pub(super) fn stall_expired(&mut self) -> Option<Trip> {
         let stall = self.stall.as_ref()?;
-        if stall.paused.load(Ordering::SeqCst) {
+        if stall.paused.running.load(Ordering::SeqCst) {
             self.heard();
+            return None;
+        }
+        let ended = *stall.paused.ended.lock().unwrap();
+        if let Some(ended) = ended.filter(|e| *e > self.last_output) {
+            self.last_output = ended;
+        }
+        if tokio::time::Instant::now() < self.deadline() {
             return None;
         }
         Some(Trip::Stalled(format!(
@@ -763,6 +771,56 @@ mod tests {
         assert_eq!(
             redact("invented-secret-value xyz", &env),
             "[REDACTED] [REDACTED]"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stall_tests {
+    use super::*;
+
+    fn guarded(limit: u64) -> (Guard, Arc<HookClock>) {
+        let clock = Arc::new(HookClock::default());
+        let variant = Variant {
+            stall_timeout_secs: limit,
+            ..Default::default()
+        };
+        (Guard::for_variant(&variant, Some(clock.clone())), clock)
+    }
+
+    fn ago(secs: u64) -> tokio::time::Instant {
+        tokio::time::Instant::now() - Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn a_hook_that_ends_on_the_limit_does_not_trip_the_stall() {
+        let (mut guard, clock) = guarded(10);
+        // Quiet since 20s ago; the hook ran the whole time and ends now,
+        // exactly when the second window runs out.
+        guard.last_output = ago(20);
+        let hook = clock.start();
+        assert!(
+            guard.stall_expired().is_none(),
+            "paused while the hook runs"
+        );
+        guard.last_output = ago(20);
+        drop(hook);
+        assert!(guard.stall_expired().is_none());
+        assert!(guard.deadline() > tokio::time::Instant::now());
+    }
+
+    #[test]
+    fn silence_past_the_limit_after_the_hook_ends_trips() {
+        let (mut guard, clock) = guarded(10);
+        guard.last_output = ago(30);
+        drop(clock.start());
+        *clock.ended.lock().unwrap() = Some(ago(12));
+        assert!(matches!(guard.stall_expired(), Some(Trip::Stalled(_))));
+        *clock.ended.lock().unwrap() = Some(ago(5));
+        guard.last_output = ago(30);
+        assert!(
+            guard.stall_expired().is_none(),
+            "only 5s since the hook ended"
         );
     }
 }

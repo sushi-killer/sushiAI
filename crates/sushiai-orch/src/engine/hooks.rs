@@ -15,8 +15,7 @@ impl App {
             return Ok(json!({}));
         };
 
-        ctx.hook_running.store(true, Ordering::SeqCst);
-        let _hook_done = ClearOnDrop(&ctx.hook_running);
+        let _hook_done = ctx.hook_running.start();
         let worktree = ctx.worktree.clone();
         let base_sha = ctx.base_sha.clone();
         // What the owner let the agent stage at a protected path is in place

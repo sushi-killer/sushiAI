@@ -29,3 +29,19 @@ test("tasks become local claims, active first then newest, blank fields dropped"
   });
   assert.equal(claims[2].path, "/w/a");
 });
+
+test("a remote task claims its worktree on its own host", async () => {
+  const { claimsOf } = await import("../src/orchestrator/moduleWorktrees.ts");
+  const [claim] = claimsOf([
+    {
+      repo: "/srv/app",
+      branch: "t/2",
+      worktree: "/srv/app-wt",
+      title: "remote",
+      status: "running",
+      updatedAt: 1,
+      host: "ssh:lab",
+    },
+  ]);
+  assert.equal(claim.host, "ssh:lab");
+});

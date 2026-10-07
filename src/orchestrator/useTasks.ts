@@ -37,7 +37,11 @@ export function startTaskStore(): () => void {
       .probe()
       .then(() => client.taskList())
       .then((list) => {
-        loaded.set(host, list);
+        // The list does not name its host; an event does.
+        loaded.set(
+          host,
+          host === "local" ? list : list.map((task) => ({ ...task, host })),
+        );
         listed.add(host);
         push();
       })

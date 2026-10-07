@@ -348,27 +348,23 @@ where
         images: &[],
         repo_settings: true,
     };
-    let stall_b = (variant.stall_timeout_secs > 0).then(|| Stall {
-        limit: Duration::from_secs(variant.stall_timeout_secs),
-        paused: prep
-            .registered
-            .as_ref()
-            .map(|(_, ctx)| ctx.hook_running.clone())
-            .unwrap_or_default(),
-    });
     let b_run = run_harness(
         app,
         task_id,
         attempt_n,
-        false,
+        RunTrack::No,
         &wt_b,
         &req_b,
         CostTag::task("implement", &b_route.id),
         brief_text,
         &events_b,
         cancel,
-        stall_b,
-        variant.loop_detect.then(LoopDetector::new),
+        Guard::for_variant(
+            &variant,
+            prep.registered
+                .as_ref()
+                .map(|(_, ctx)| ctx.hook_running.clone()),
+        ),
     );
     let (a_res, b_res) = tokio::join!(a_run, b_run);
     if let Some((token, ctx)) = &prep.registered {
@@ -609,15 +605,14 @@ async fn run_pick(
         app,
         task_id,
         attempt_n,
-        false,
+        RunTrack::No,
         worktree,
         &req,
         CostTag::task("pick", &route.id),
         &brief_text,
         &events,
         cancel,
-        None,
-        None,
+        Guard::off(),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);

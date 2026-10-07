@@ -712,15 +712,14 @@ async fn run_proposer(
             app,
             &job.id,
             0,
-            false,
+            RunTrack::No,
             &job.toplevel,
             &req,
             CostTag::repo("evolution", &route.id, &job.repo),
             &brief_text,
             &dir.join("events.jsonl"),
             &cancel,
-            None,
-            None,
+            Guard::off(),
         )
         .await;
         let _ = std::fs::remove_file(&key_path);

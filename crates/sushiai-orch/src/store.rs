@@ -142,10 +142,11 @@ impl Store {
                     RunFate::Resume => {}
                     RunFate::Interrupted => {
                         let attempt = &mut task.attempts[idx];
+                        let run_dir = self.run_dir(&task.id, attempt.n);
                         if let Some(pgid) = attempt.pgid {
-                            kill_stale_process_group(pgid);
+                            kill_stale_process_group(pgid, &run_dir);
                         }
-                        let key_file = self.run_dir(&task.id, attempt.n).join("key");
+                        let key_file = run_dir.join("key");
                         let _ = fs::remove_file(key_file);
                         attempt.status = AttemptStatus::Interrupted;
                         attempt.ended_at = Some(crate::model::now_ms());
@@ -325,10 +326,10 @@ pub enum RunFate {
 /// or blocks the caller for long -- this runs once at startup, before the
 /// tokio runtime is doing anything else that matters.
 #[cfg(unix)]
-fn kill_stale_process_group(pgid: i32) {
+fn kill_stale_process_group(pgid: i32, run_dir: &Path) {
     unsafe {
-        if libc::kill(pgid, 0) != 0 {
-            return; // already gone
+        if libc::kill(pgid, 0) != 0 || !group_started_with(pgid, run_dir) {
+            return; // gone, or a stranger's process that reused the pgid
         }
         libc::killpg(pgid, libc::SIGTERM);
     }
@@ -341,7 +342,17 @@ fn kill_stale_process_group(pgid: i32) {
 }
 
 #[cfg(not(unix))]
-fn kill_stale_process_group(_pgid: i32) {}
+fn kill_stale_process_group(_pgid: i32, _run_dir: &Path) {}
+
+/// `true` when process `pgid` was started with `path` on its command line.
+/// A run's wrapper shell carries its exit file as `$0`, so this tells the
+/// run's group from an unrelated process that reuses a saved pgid.
+pub fn group_started_with(pgid: i32, path: &Path) -> bool {
+    std::process::Command::new("ps")
+        .args(["-ww", "-o", "args=", "-p", &pgid.to_string()])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&*path.to_string_lossy()))
+}
 
 /// Write `value` as JSON to `path` atomically: serialize to a sibling temp
 /// file, then rename over the destination. The rename is atomic on the same
@@ -639,17 +650,10 @@ mod tests {
         assert_eq!(untouched.status, TaskStatus::Done);
     }
 
-    #[test]
-    fn recover_interrupted_kills_a_stale_process_group_if_still_alive() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path()).unwrap();
-
-        // Spawn a detached child in its own process group, the same way the
-        // engine spawns harness/verify children, to prove recovery kills it
-        // rather than just marking the attempt interrupted and leaving an
-        // orphaned process running forever.
-        let mut cmd = std::process::Command::new("sleep");
-        cmd.arg("30");
+    /// A detached group like the engine's run wrapper: `$0` is `marker`.
+    fn spawn_group(marker: &std::path::Path) -> std::process::Child {
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg("sleep 30; true").arg(marker);
         #[cfg(unix)]
         unsafe {
             use std::os::unix::process::CommandExt;
@@ -658,31 +662,60 @@ mod tests {
                 Ok(())
             });
         }
-        let mut child = cmd.spawn().unwrap();
-        let pgid = child.id() as i32;
+        cmd.spawn().unwrap()
+    }
 
+    /// Waits for `child` to end (reaping it: a zombie's pid still answers
+    /// `kill(pid, 0)`). `true` when it ended within `secs`.
+    fn ends_within(child: &mut std::process::Child, secs: u64) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(secs) {
+            if child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn recover_interrupted_kills_a_stale_process_group_if_still_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
         let mut task = sample_task("running", TaskStatus::Running, AttemptStatus::Running);
-        task.attempts[0].pgid = Some(pgid);
+        // Proves recovery kills the run's group rather than just marking
+        // the attempt interrupted and leaving an orphan running forever.
+        let run_dir = store.run_dir("running", task.attempts[0].n);
+        let mut child = spawn_group(&run_dir.join("events.exit"));
+        task.attempts[0].pgid = Some(child.id() as i32);
         store.save_task(&task).unwrap();
 
         store.recover_interrupted(|_, _| {}).unwrap();
 
-        // `try_wait()` (not a raw `kill(pid, 0)`) is the correct liveness
-        // check here: once SIGTERM/SIGKILL lands, the child becomes a
-        // zombie until *this* process reaps it, and a zombie's pid still
-        // answers `kill(pid, 0)` with success -- `try_wait()` is what
-        // actually reaps it and reports the exit.
-        let start = std::time::Instant::now();
-        loop {
-            if child.try_wait().unwrap().is_some() {
-                break;
-            }
-            assert!(
-                start.elapsed() < std::time::Duration::from_secs(2),
-                "stale process group {pgid} should have been killed on recovery"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        assert!(
+            ends_within(&mut child, 2),
+            "stale process group should have been killed on recovery"
+        );
+    }
+
+    #[test]
+    fn recover_interrupted_leaves_a_reused_pgid_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        let mut task = sample_task("running", TaskStatus::Running, AttemptStatus::Running);
+        // The saved pgid belongs to a stranger's process now.
+        let mut stranger = spawn_group(std::path::Path::new("/not-a-run"));
+        task.attempts[0].pgid = Some(stranger.id() as i32);
+        store.save_task(&task).unwrap();
+
+        store.recover_interrupted(|_, _| {}).unwrap();
+
+        assert!(
+            !ends_within(&mut stranger, 1),
+            "a process that is not the run must not be killed"
+        );
+        let _ = stranger.kill();
+        let _ = stranger.wait();
     }
 
     #[test]

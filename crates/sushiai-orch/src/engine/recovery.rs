@@ -25,7 +25,11 @@ impl App {
         for a in self.store.recover_interrupted_audits()? {
             audit::broadcast(self, &a);
         }
-        for mut t in self.store.list_tasks()? {
+        // A run that is still going holds its concurrency slot already: its
+        // loop starts before the queued ones compete for the rest.
+        let mut tasks = self.store.list_tasks()?;
+        tasks.sort_by_key(|t| resumable_attempt(self, t).is_none());
+        for mut t in tasks {
             if t.archived {
                 continue;
             }
@@ -125,7 +129,11 @@ impl RawTail {
 }
 
 /// Stops a run's process group: SIGTERM, SIGKILL after 5 s.
-async fn stop_group(pgid: i32) {
+/// Does nothing for a group that is not the run of `exit` (a reused pgid).
+async fn stop_group(pgid: i32, exit: &Path) {
+    if !run_group_alive(pgid, exit) {
+        return;
+    }
     unsafe {
         libc::killpg(pgid, libc::SIGTERM);
     }
@@ -156,7 +164,11 @@ impl App {
         }
         let (_, secrets) = run_secrets(self, &task.id);
         RawTail::rebuild(&files, &events).pump(&secrets, true);
-        if files.exit.exists() || attempt.pgid.is_some_and(group_alive) {
+        if files.exit.exists()
+            || attempt
+                .pgid
+                .is_some_and(|p| run_group_alive(p, &files.exit))
+        {
             return RunFate::Resume;
         }
         RunFate::Interrupted
@@ -184,11 +196,19 @@ pub(super) async fn follow_run(
     task: &Task,
     idx: usize,
     cancel: &CancelToken,
+    mut guard: Guard,
 ) -> Result<harness::RunOutcome, RunError> {
     let attempt = &task.attempts[idx];
-    let (n, pgid) = (attempt.n, attempt.pgid.unwrap_or(0));
+    let n = attempt.n;
     let events = app.store.run_dir(&task.id, n).join("events.jsonl");
     let files = RunFiles::of(&events);
+    // A pgid that is not this run's wrapper is treated as dead.
+    let pgid = attempt
+        .pgid
+        .filter(|p| run_group_alive(*p, &files.exit))
+        .unwrap_or(0);
+    let model = (!attempt.model.is_empty()).then(|| attempt.model.clone());
+    let mut trip = None;
     let (_, secrets) = run_secrets(app, &task.id);
     let mut tail = RawTail::rebuild(&files, &events);
     let mut notes = harness::RunOutcome::default();
@@ -200,25 +220,39 @@ pub(super) async fn follow_run(
             if let (true, Some(note)) = (caught_up, note) {
                 app.broadcast_log(&task.id, n, note);
             }
+            if trip.is_none() {
+                let run = (attempt.harness, model.as_deref());
+                trip = guard.line(app, run, &line, &notes);
+            }
         }
         caught_up = true;
         if over {
             break;
         }
+        if trip.is_some() {
+            stop_group(pgid, &files.exit).await;
+            tail.pump(&secrets, true);
+            break;
+        }
         tokio::select! {
             _ = cancel.cancelled() => {
                 if !app.shutting_down.load(Ordering::SeqCst) {
-                    stop_group(pgid).await;
+                    stop_group(pgid, &files.exit).await;
                     tail.pump(&secrets, true);
                 }
                 return Err(RunError::Cancelled);
+            }
+            _ = tokio::time::sleep_until(guard.deadline()), if guard.armed() => {
+                trip = guard.stall_expired();
             }
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
         }
     }
     let code = std::fs::read_to_string(&files.exit)
         .ok()
-        .and_then(|t| t.trim().parse::<i32>().ok());
+        .and_then(|t| t.trim().parse::<i32>().ok())
+        // A group killed hard before its wrapper wrote the code.
+        .or(trip.as_ref().map(|_| 137));
     if code.is_none() {
         return Err(RunError::Io(
             "The run ended without leaving an exit code.".into(),
@@ -226,7 +260,10 @@ pub(super) async fn follow_run(
     }
     let raw = std::fs::read_to_string(&files.raw).unwrap_or_default();
     let mut outcome = harness::replay_events(attempt.harness, &raw);
-    if code != Some(0) && outcome.error.is_none() {
+    if let Some(trip) = trip {
+        trip.apply(&mut outcome);
+    }
+    if code != Some(0) && outcome.error.is_none() && outcome.looped.is_none() {
         let stderr = std::fs::read_to_string(&files.stderr).unwrap_or_default();
         let tail: String = stderr.trim().chars().rev().take(4000).collect();
         let tail: String = tail.chars().rev().collect();
@@ -240,7 +277,6 @@ pub(super) async fn follow_run(
             )
         });
     }
-    let model = (!attempt.model.is_empty()).then(|| attempt.model.clone());
     finalize_cost(app, attempt.harness, model.as_deref(), &mut outcome);
     let meta: serde_json::Value = std::fs::read_to_string(&files.meta)
         .ok()
@@ -272,4 +308,22 @@ pub(super) async fn follow_run(
         );
     }
     Ok(outcome)
+}
+
+impl App {
+    /// `true` when a daemon shutdown must leave attempt `idx` as it is:
+    /// its implement run files stay for the next daemon to adopt.
+    pub(super) fn leaves_run_going(&self, task: &Task, idx: usize) -> bool {
+        self.shutting_down.load(Ordering::SeqCst) && resumable_attempt(self, task) == Some(idx)
+    }
+
+    /// Deletes the unredacted output of every attempt of `task` that is
+    /// settled: a `running` attempt may still be resumed from it.
+    pub(super) fn drop_settled_output(&self, task: &Task) {
+        for attempt in &task.attempts {
+            if attempt.status != AttemptStatus::Running {
+                remove_raw_output(&self.store.run_dir(&task.id, attempt.n));
+            }
+        }
+    }
 }

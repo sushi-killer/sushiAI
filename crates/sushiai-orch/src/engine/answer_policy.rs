@@ -285,15 +285,14 @@ async fn judge_impossible(
         app,
         &task.id,
         attempt_n,
-        false,
+        RunTrack::No,
         &worktree,
         &req,
         CostTag::task("answer_judge", &route.id),
         &brief_text,
         &events_path,
         cancel,
-        None,
-        None,
+        Guard::off(),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);

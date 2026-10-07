@@ -520,7 +520,11 @@ pub(super) async fn run_task_loop(
                         app.register_hook(&token, &ctx, &run_dir);
                         (token, ctx)
                     });
-            let result = follow_run(&app, &task, idx, &cancel).await;
+            let guard = Guard::for_variant(
+                &task.variant(),
+                registered.as_ref().map(|(_, ctx)| ctx.hook_running.clone()),
+            );
+            let result = follow_run(&app, &task, idx, &cancel, guard).await;
             (
                 settings,
                 a.n,
@@ -824,21 +828,17 @@ pub(super) async fn run_task_loop(
                 &app,
                 &task_id,
                 attempt_n,
-                true,
+                RunTrack::Resumable,
                 &worktree,
                 &req,
                 CostTag::task("implement", &route.id),
                 &brief_text,
                 &events_path,
                 &cancel,
-                (task.variant().stall_timeout_secs > 0).then(|| Stall {
-                    limit: Duration::from_secs(task.variant().stall_timeout_secs),
-                    paused: registered
-                        .as_ref()
-                        .map(|(_, ctx)| ctx.hook_running.clone())
-                        .unwrap_or_default(),
-                }),
-                task.variant().loop_detect.then(LoopDetector::new),
+                Guard::for_variant(
+                    &task.variant(),
+                    registered.as_ref().map(|(_, ctx)| ctx.hook_running.clone()),
+                ),
             );
             // Recorded after the reload below, which would drop a line pushed now.
             let mut no_second = BestOfExtra::default();
@@ -877,6 +877,17 @@ pub(super) async fn run_task_loop(
             )
         };
 
+        if matches!(run_result, Err(RunError::Cancelled)) && app.leaves_run_going(&task, idx) {
+            // The run outlives this daemon and stays `running`; the next
+            // daemon's loop follows it, with its token and key file as they
+            // are. Only the in-memory token goes.
+            if let Some((token, _)) = registered.take() {
+                app.unload_hook(&token);
+            }
+            drop(permit);
+            app.finish_task_loop(&task_id);
+            return;
+        }
         let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
         let (gate_blocks, handled, staged_lines) = if let Some((tok, ctx)) = registered.take() {
             app.forget_hook(&tok, &run_dir);
@@ -925,15 +936,6 @@ pub(super) async fn run_task_loop(
         let outcome = match run_result {
             Ok(o) => o,
             Err(RunError::Cancelled) => {
-                if app.shutting_down.load(Ordering::SeqCst)
-                    && resumable_attempt(&app, &task) == Some(idx)
-                {
-                    // The run outlives this daemon and stays `running`; the
-                    // next daemon's loop follows it.
-                    drop(permit);
-                    app.finish_task_loop(&task_id);
-                    return;
-                }
                 task.attempts[idx].status = AttemptStatus::Interrupted;
                 task.attempts[idx].ended_at = Some(now_ms());
                 settle_unfinished_cost(&mut task, idx, &run_dir, &settings.prices);
@@ -1354,12 +1356,7 @@ pub(super) async fn run_task_loop(
         }
 
         if cancel.is_cancelled() {
-            task.attempts[idx].status = AttemptStatus::Interrupted;
-            task.attempts[idx].ended_at = Some(now_ms());
-            task.status = app.cancelled_status(&task.status);
-            task.updated_at = now_ms();
-            let _ = app.store.save_task(&task);
-            app.broadcast_task(&task);
+            interrupt_attempt(&app, &mut task, idx);
             drop(permit);
             app.finish_task_loop(&task_id);
             return;
@@ -1964,6 +1961,11 @@ pub(super) async fn run_task_loop(
                     // Stopped at the gate: the attempt ends here too, or a
                     // restart would find it `running` and requeue the task.
                     if let Ok(Some(mut t)) = app.store.load_task(&task_id) {
+                        if app.leaves_run_going(&t, idx) {
+                            drop(permit);
+                            app.finish_task_loop(&task_id);
+                            return;
+                        }
                         if let Some(a) = t.attempts.get_mut(idx) {
                             a.status = AttemptStatus::Interrupted;
                             a.ended_at = Some(now_ms());
@@ -2063,12 +2065,7 @@ pub(super) async fn run_task_loop(
                                     }
                                     Ok(false) => {}
                                     Err(_) => {
-                                        task.attempts[idx].status = AttemptStatus::Interrupted;
-                                        task.attempts[idx].ended_at = Some(now_ms());
-                                        task.status = app.cancelled_status(&task.status);
-                                        task.updated_at = now_ms();
-                                        let _ = app.store.save_task(&task);
-                                        app.broadcast_task(&task);
+                                        interrupt_attempt(&app, &mut task, idx);
                                         drop(permit);
                                         app.finish_task_loop(&task_id);
                                         return;
@@ -2081,12 +2078,7 @@ pub(super) async fn run_task_loop(
                         Err(ReviewFailure::Cancelled) => {
                             // A cancelled review is never a PASS: the attempt
                             // (and the task) is simply stopped.
-                            task.attempts[idx].status = AttemptStatus::Interrupted;
-                            task.attempts[idx].ended_at = Some(now_ms());
-                            task.status = app.cancelled_status(&task.status);
-                            task.updated_at = now_ms();
-                            let _ = app.store.save_task(&task);
-                            app.broadcast_task(&task);
+                            interrupt_attempt(&app, &mut task, idx);
                             drop(permit);
                             app.finish_task_loop(&task_id);
                             return;
@@ -2347,9 +2339,14 @@ pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) {
     }
 }
 
-/// A daemon shutdown killed the attempt's run: it is interrupted, never a
-/// failure, and the next daemon resumes the task.
+/// The attempt's loop was cancelled after its run: interrupted, never a
+/// failure. A daemon shutdown during review or verify leaves a finished (or
+/// still running) implement attempt `running` instead, and the next daemon
+/// resumes into review and verify.
 fn interrupt_attempt(app: &Arc<App>, task: &mut Task, idx: usize) {
+    if app.leaves_run_going(task, idx) {
+        return;
+    }
     task.attempts[idx].status = AttemptStatus::Interrupted;
     task.attempts[idx].ended_at = Some(now_ms());
     task.status = app.cancelled_status(&task.status);
@@ -2422,6 +2419,7 @@ impl App {
     fn finish_task_loop(&self, task_id: &str) {
         self.controls.lock().unwrap().remove(task_id);
         if let Ok(Some(task)) = self.store.load_task(task_id) {
+            self.drop_settled_output(&task);
             self.advance_graph(&task.repo);
         }
         self.record_evolution_signals(task_id);

@@ -590,9 +590,14 @@ impl App {
             .insert(token.to_string(), ctx.clone());
     }
 
+    /// Forgets a token in memory only; its file stays for the next daemon.
+    fn unload_hook(&self, token: &str) {
+        self.hook_tokens.write().unwrap().remove(token);
+    }
+
     /// Forgets the token of a run that ended, in memory and on disk.
     fn forget_hook(&self, token: &str, run_dir: &Path) {
-        self.hook_tokens.write().unwrap().remove(token);
+        self.unload_hook(token);
         let _ = std::fs::remove_file(RunFiles::of(&run_dir.join("events.jsonl")).token);
     }
 

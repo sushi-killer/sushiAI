@@ -57,7 +57,6 @@ test("the hosts readiness IPC probes through a fake ssh executable", async (t) =
     id: "00000000-0000-4000-8000-000000000001",
     name: "Devbox",
     host: "user@devbox",
-    socket: "~/.sushiai/orchestrator/orchd.sock",
   });
   const output = await connections.exec(`ssh:${profile.id}`, hostProbeScript());
   const matrix = readiness({

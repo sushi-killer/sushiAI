@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-// orchd must build and pass its tests on Linux too. macOS-only facilities may
+// The orchestrator crate must build and pass its tests on Linux too. macOS-only facilities may
 // appear only behind cfg(target_os = "macos") (or in a comment).
 const MACOS_ONLY =
   /sandbox-exec|\/private\/(var|tmp)|Library\/Caches|\/opt\/homebrew/;
@@ -19,8 +19,8 @@ function rustFiles(directory) {
   });
 }
 
-test('orchd has no macOS-only code outside cfg(target_os = "macos")', () => {
-  const root = path.join(__dirname, "..", "orchd");
+test('the orchestrator crate has no macOS-only code outside cfg(target_os = "macos")', () => {
+  const root = path.join(__dirname, "..", "crates", "sushiai-orch");
   const offenders = [];
   for (const file of rustFiles(root)) {
     const lines = fs.readFileSync(file, "utf8").split("\n");

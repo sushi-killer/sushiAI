@@ -91,6 +91,15 @@ compareRecords, bucketOf, orderBuckets`). `relativeDate`/`dueBucket` are
   deliberately kept module-internal — don't export them "for reuse" without a
   second caller that actually needs them.
 
+## Core stays generic
+
+Core exposes generic module and extension APIs only. Core, protocol and CI never
+name a specific module or plugin. Modules attach at the composition point:
+`crates/sushiai` (bin), `src/extensions/coreViews.ts`, `src/extensions/modules.ts`
+and `electron/main.cjs`. `scripts/check-crate-deps.mjs` enforces the Rust side
+(a core crate never depends on a module crate; a module crate never depends on
+a core crate; only the composition bin depends on both).
+
 ## One owner, complete cutover
 
 When a domain moves (the Tasks → Probe fixture migration is the template),
@@ -203,9 +212,9 @@ by `scripts/check-conventions.mjs` in CI, not just a naming convention:
 ## Execution gotchas
 
 - Before finishing, run `./node_modules/.bin/prettier --write` on the files
-  you touched; `prettier --check` in CI fails otherwise. orchd is a bin-only
-  crate: use `cargo test --manifest-path orchd/Cargo.toml` (or
-  `--bin orchd <filter>`), never `--lib`. `src/App.tsx` is capped at 600 lines
+  you touched; `prettier --check` in CI fails otherwise. the Rust workspace is
+  tested by `npm run test:daemon` (`cargo test --workspace`; one package:
+  `cargo test -p sushiai-orch <filter>`). `src/App.tsx` is capped at 600 lines
   (`tests/app-boundary.test.cjs`) - move logic out instead of growing it.
 - Screenshots of the built app come from the `ui-evidence` scripts:
   `.agents/skills/ui-evidence/scripts/<screen>.mjs` (orchestrator panel,

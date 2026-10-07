@@ -1,7 +1,11 @@
 const fs = require("node:fs");
 const { execFile } = require("node:child_process");
 const path = require("node:path");
-const { installSushiai, REMOTE_PATH } = require("./host-install.cjs");
+const {
+  installSushiai,
+  parseProbe,
+  REMOTE_PATH,
+} = require("./host-install.cjs");
 const { quote } = require("./connections.cjs");
 const { syncBuiltinSkillsOnHost } = require("./extensions/builtin-skills.cjs");
 
@@ -39,6 +43,34 @@ else
   rm -rf "$d"
 fi
 `;
+
+// `claude auth status` / `codex login status` exit non-zero when logged out.
+// Bounded with `timeout` when the host has it: a CLI waiting on a prompt must
+// not hang the probe.
+const PREFLIGHT_SCRIPT = `${REMOTE_PATH}
+t() { if command -v timeout >/dev/null 2>&1; then timeout 10 "$@"; else "$@"; fi; }
+command -v git >/dev/null 2>&1 && echo "git=1"
+if command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; then echo "cc=1"; fi
+if command -v claude >/dev/null 2>&1; then echo "claude=1"; t claude auth status >/dev/null 2>&1 && echo "claude_login=1"; fi
+if command -v codex >/dev/null 2>&1; then echo "codex=1"; t codex login status >/dev/null 2>&1 && echo "codex_login=1"; fi
+exit 0`;
+
+/** What a host offers the orchestrator's routes: `git` plus each harness
+ * CLI's presence and login. */
+function parsePreflight(output, now = Date.now()) {
+  const values = parseProbe(output);
+  const harness = (name) => ({
+    installed: values[name] === "1",
+    loggedIn: values[`${name}_login`] === "1",
+  });
+  return {
+    git: values.git === "1",
+    cc: values.cc === "1",
+    claude: harness("claude"),
+    codex: harness("codex"),
+    checkedAt: now,
+  };
+}
 
 /** `{ manifest, binDir }` from the manifest file `npm run build:host` writes
  * into target/host, or null when it is not there. The caller passes the result
@@ -236,6 +268,23 @@ const needsOwner = (state) =>
   state.state === "need_auth" || state.reason === "host_key_changed";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** manager.retry(host) until the host is ready or its state needs the owner;
+ * resolves the last state (`before` when no attempt ran). */
+async function reconnectUntilReady(
+  manager,
+  host,
+  { attempts = READY_ATTEMPTS, settleMs = SETTLE_MS, before } = {},
+) {
+  let state = before;
+  for (let i = 0; i < attempts; i++) {
+    state = await manager.retry(host);
+    if (state.state === "ready") return state;
+    if (needsOwner(state)) break;
+    await sleep(settleMs);
+  }
+  return state;
+}
+
 /** The `host-install` handler. A remote host: setupHost with the host manifest
  * (tools, skills, then the bundled sushiai), the old daemon stops
  * (`daemon.shutdown` when connected; sessions live in their holders and
@@ -252,16 +301,8 @@ function createHostInstaller({
   settleMs = SETTLE_MS,
   attempts = READY_ATTEMPTS,
 }) {
-  async function untilReady(host, before) {
-    let state = before;
-    for (let i = 0; i < attempts; i++) {
-      state = await manager.retry(host);
-      if (state.state === "ready") return state;
-      if (needsOwner(state)) break;
-      await sleep(settleMs);
-    }
-    return state;
-  }
+  const untilReady = (host, before) =>
+    reconnectUntilReady(manager, host, { attempts, settleMs, before });
   async function installOn(host) {
     if (host === "local") {
       await restartLocal();
@@ -309,7 +350,10 @@ module.exports = {
   SETUP_SCRIPT,
   createHostInstaller,
   serializePerHost,
+  reconnectUntilReady,
   STOP_DAEMON_COMMAND,
+  PREFLIGHT_SCRIPT,
+  parsePreflight,
   parseSetup,
   setupSummary,
   setupHost,

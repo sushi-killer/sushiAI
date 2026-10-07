@@ -931,14 +931,14 @@ test("daemonDown tells a gone daemon from a refused request", async () => {
     ),
     "not-built",
   );
-  assert.equal(
-    daemonDown("connect ECONNREFUSED /tmp/orchd.sock"),
-    "unavailable",
-  );
-  assert.equal(
-    daemonDown("The orchestrator daemon disconnected before responding."),
-    "unavailable",
-  );
+  for (const message of [
+    "connect ECONNREFUSED /tmp/daemon.sock",
+    "The sushiai daemon is not running.",
+    "The sushiai daemon on Devbox is not ready.",
+    "Update sushiai on Devbox",
+    "daemon connection closed",
+  ])
+    assert.equal(daemonDown(message), "unavailable", message);
   assert.equal(daemonDown("task is running"), null);
 });
 

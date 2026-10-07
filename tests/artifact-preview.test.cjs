@@ -254,7 +254,7 @@ test("the orchestrator start uses an accepted task source", async () => {
     },
   ]);
   const model = require("node:fs").readFileSync(
-    require("node:path").join(__dirname, "../orchd/src/model.rs"),
+    require("node:path").join(__dirname, "../crates/sushiai-orch/src/model.rs"),
     "utf8",
   );
   const sources = /TASK_SOURCES: \[&str; \d+\] = \[([^\]]*)\]/.exec(model)[1];

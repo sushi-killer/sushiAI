@@ -6,8 +6,6 @@ import http from "node:http";
 import { readdir, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
-import { existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { daemonBinary, stopDaemon } from "./lib/daemon-binary.mjs";
 const root = process.cwd();
 
@@ -78,22 +76,6 @@ const daemonPid = async () =>
   Number(
     (await fs.readFile(path.join(daemonHome, "daemon.lock"), "utf8")).trim(),
   );
-const orchdBuilt = existsSync(path.join(root, "orchd/target/release/orchd"));
-// Polls `ps` until a daemon for this profile's data dir is (or is no longer)
-// running; true when the wanted state was reached in time.
-async function pollOrchd(wantRunning, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  do {
-    const running = execFileSync("ps", ["-axo", "pid=,command="], {
-      encoding: "utf8",
-    })
-      .split("\n")
-      .some((line) => line.includes(`--data ${profile}/orchestrator`));
-    if (running === wantRunning) return true;
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  } while (Date.now() < deadline);
-  return false;
-}
 await fs.mkdir("artifacts", { recursive: true });
 // The app under test is the built bundle, not the sources: a stale dist silently
 // tests the previous build. Fail loudly instead.
@@ -866,9 +848,6 @@ try {
     (text) => /^ROUTINE_OK$/m.test(text),
   );
   assert.match(routineOutput, /^ROUTINE_OK$/m);
-  // The daemon starts lazily on the first request; send one so the exit check
-  // in `finally` has a daemon to look for.
-  if (orchdBuilt) await page.evaluate(() => window.bridge.orchestrator("ping"));
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Close Smoke routine" }).click();
   await page
@@ -889,13 +868,6 @@ try {
   await page.waitForSelector(".panel-agent");
   assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);
   await assertHiddenWindow(page);
-  // orchd starts lazily on the first real orchestrator request; make one so
-  // the teardown below has a daemon to prove it stops with the app.
-  if (orchdBuilt) {
-    await page.evaluate(() =>
-      window.bridge.orchestrator("chat.list", {}).catch(() => null),
-    );
-  }
   assert.deepEqual(errors, [], "No uncaught renderer errors");
   console.log(
     JSON.stringify(
@@ -921,7 +893,6 @@ try {
           "settings connection",
           "routine execution",
           "layout persistence",
-          "orchd starts on first use and exits with the app",
           "no renderer errors",
         ],
         screenshot: "artifacts/workspace.png",
@@ -937,18 +908,7 @@ try {
   throw error;
 } finally {
   await new Promise((resolve) => preview.close(resolve));
-  // orchd starts on first use, so make one call. A test-launched app stops
-  // its own daemon on quit: prove one ran (so the check below cannot pass
-  // trivially), then that none outlives the app.
-  if (orchdBuilt)
-    await (
-      await desktop.firstWindow()
-    )
-      .evaluate(() => window.bridge.orchestrator("task.list", {}))
-      .catch(() => {});
-  const orchdRan = orchdBuilt && (await pollOrchd(true, 10000));
   await desktop.close();
-  const orchdGone = !orchdBuilt || (await pollOrchd(false, 3000));
   stopDaemon(daemonHome);
   // A shell that exits late may still write its history into HOME.
   await fs.rm(profile, {
@@ -957,6 +917,4 @@ try {
     maxRetries: 5,
     retryDelay: 200,
   });
-  assert.ok(!orchdBuilt || orchdRan, "orchd never started for this data dir");
-  assert.ok(orchdGone, "orchd for this data dir outlived the app");
 }

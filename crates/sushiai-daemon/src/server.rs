@@ -247,6 +247,14 @@ impl Conn {
                 "hook connections may only call hook.*".into(),
             ));
         }
+        if let Some((namespace, rest)) = request.method.split_once('.') {
+            if let Some(module) = self.registry.module(namespace) {
+                if self.registry.stopping() {
+                    return Err((code::SHUTTING_DOWN, "the daemon is stopping".into()));
+                }
+                return call_module(module, rest, request.params.clone()).await;
+            }
+        }
         if self.registry.stopping() && CHANGES.contains(&request.method.as_str()) {
             return Err((code::SHUTTING_DOWN, "the daemon is stopping".into()));
         }
@@ -363,7 +371,12 @@ impl Conn {
         }
         Ok(json!(HelloResult {
             protocol: PROTOCOL_VERSION,
-            capabilities: CAPABILITIES.iter().map(|c| (*c).to_string()).collect(),
+            capabilities: CAPABILITIES
+                .iter()
+                .copied()
+                .chain(self.registry.modules().iter().map(|m| m.capability()))
+                .map(str::to_string)
+                .collect(),
             daemon: env!("CARGO_PKG_VERSION").into(),
             host: self.registry.host.clone(),
             build: own_build().map(str::to_string),
@@ -465,6 +478,20 @@ impl Conn {
             floor: attached.snap.seq,
         });
         Ok(json!(attach_result(attached.snap)))
+    }
+}
+
+/// Runs a module call on its own task: a panic (in the call or its future) answers INTERNAL
+/// for this request only.
+async fn call_module(
+    module: Arc<dyn crate::module::Module>,
+    method: &str,
+    params: Value,
+) -> Result<Value, Fail> {
+    let method = method.to_string();
+    match tokio::spawn(async move { module.call(&method, params).await }).await {
+        Ok(reply) => reply,
+        Err(e) => Err((code::INTERNAL, format!("module call failed: {e}"))),
     }
 }
 

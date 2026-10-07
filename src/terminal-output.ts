@@ -46,3 +46,14 @@ export function createTerminalInput(
     },
   };
 }
+
+/** Whether a cached terminal should attach again when its host comes up: its
+ * first attach failed, or it was ended because the host went away while the
+ * panel itself is not ended (a reconnect finds the session alive). */
+export function shouldReattach(
+  runtime: { ready: boolean; error: string; exited: boolean },
+  panelEnded: boolean | undefined,
+): boolean {
+  if (panelEnded) return false;
+  return runtime.exited || (!runtime.ready && !!runtime.error);
+}

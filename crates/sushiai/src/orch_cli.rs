@@ -245,8 +245,8 @@ fn register(home: &Home) -> anyhow::Result<Vec<String>> {
     use anyhow::{bail, Context};
     use sushiai_daemon::{ensure_bin_link, Link};
     let user = user_home()?;
-    let base = user.join(".sushiai");
-    if ensure_bin_link(&base)? == Link::Kept {
+    let base = home.dir();
+    if ensure_bin_link(base)? == Link::Kept {
         bail!(
             "{} exists and is not a symlink",
             base.join("bin/sushiai").display()

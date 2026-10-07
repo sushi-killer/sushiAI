@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
-import { errorText } from "../../app/errors.ts";
+import { errorText } from "../../lib/errors.ts";
 import { projectRelative, type ArtifactKind } from "./artifact.ts";
 
 export type PreviewFile =

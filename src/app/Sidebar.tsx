@@ -30,10 +30,8 @@ import {
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import { codePanels } from "../workspaceState.ts";
 import {
-  LOCAL_GROUP,
   computeHostMergeGroups,
   computeMergeGroups,
-  groupKey,
   groupLabel,
   groupStatus,
   isHidden,
@@ -45,6 +43,7 @@ import {
   shouldCollapseHostMarkers,
   type MergeGroup,
 } from "./workspaceMerge.ts";
+import { LOCAL_GROUP, groupKey } from "../lib/hostGroup.ts";
 import type { ConnectionProfile, Panel, Workspace } from "../types";
 import { useWorktreeClaims } from "./useWorktreeClaims.ts";
 import type { ProjectGit } from "./useProjectGit.ts";

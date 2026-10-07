@@ -8,7 +8,7 @@ import type {
 } from "./types";
 import { Tag, Toggle } from "./ui";
 import { GitRecovery } from "./ui/GitRecovery";
-import { openSettings } from "./app/openSettings";
+import { openSettings } from "./lib/openSettings";
 import { ProjectPage } from "./ProjectPage";
 import {
   checkoutPath,

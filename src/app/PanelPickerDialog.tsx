@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { agentTitle } from "./agent-title.ts";
 import { Icon } from "../PanelIcon.tsx";
-import { openSettings } from "./openSettings.ts";
+import { openSettings } from "../lib/openSettings.ts";
 import { checkoutPath, tildePath as tilde } from "../projectPrepare.ts";
 import {
   launchTarget,

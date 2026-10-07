@@ -8,7 +8,7 @@ import { ProjectHostsTab } from "./ProjectHostsTab";
 import { ProjectWorktreesTab } from "./ProjectWorktreesTab";
 import { ProjectPage } from "./ProjectPage";
 import { repoSlug } from "./projectPrepare";
-import { takePendingTab } from "./app/openSettings";
+import { takePendingTab } from "./lib/openSettings";
 
 type Tab = "General" | "Environment" | "MCP servers" | "Worktrees" | "Hosts";
 const TABS = [

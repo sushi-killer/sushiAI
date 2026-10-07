@@ -368,7 +368,8 @@ test("member ordering: this Mac first, then remote hosts A->Z", async () => {
 });
 
 test("D2: the status dot follows the active member, else this Mac, else the first", async () => {
-  const { computeMergeGroups, mergedRowStatusKey, LOCAL_GROUP } = await library;
+  const { computeMergeGroups, mergedRowStatusKey } = await library;
+  const { LOCAL_GROUP } = await import("../src/lib/hostGroup.ts");
   const local = workspace("w-local", undefined, "/Users/dev/sushiai");
   const lab = workspace("w-lab", "ssh:lab", "/home/dev/sushiai");
   const group = computeMergeGroups([local, lab], gitFor([local, lab]), [

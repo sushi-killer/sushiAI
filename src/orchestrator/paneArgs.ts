@@ -1,4 +1,4 @@
-import type { OrchestratorView } from "../types.ts";
+import type { OrchestratorView } from "./types.ts";
 
 /** The pane's saved state is a string map; the view is kept as JSON. */
 export function parseView(

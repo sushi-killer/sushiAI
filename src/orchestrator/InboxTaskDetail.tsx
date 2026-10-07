@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowUpRight, GitBranch } from "lucide-react";
 import type { AttentionItem } from "../extensions/modules.ts";
-import { ownsKey } from "../app/inboxModel.ts";
-import { groupKey } from "../app/workspaceMerge.ts";
+import { ownsKey } from "../lib/ownsKey.ts";
+import { groupKey } from "../lib/hostGroup.ts";
 import { orchestratorClientFor } from "./client.ts";
 import { hostOf } from "./hosts.ts";
 import {

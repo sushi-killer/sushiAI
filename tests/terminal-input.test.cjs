@@ -25,3 +25,15 @@ test("renderer limits pending IPC input and preserves paste and Unicode order", 
   assert.deepEqual(sent, ["Привет 🌍", "paste".repeat(180000)]);
   assert.equal(input.stats.bytes, 0);
 });
+
+test("a host that reconnects re-attaches a pane its disconnect ended", async () => {
+  const { shouldReattach } = await import("../src/terminal-output.ts");
+  const live = { ready: true, error: "", exited: false };
+  assert.equal(shouldReattach(live, false), false);
+  const failed = { ready: false, error: "no route", exited: false };
+  assert.equal(shouldReattach(failed, false), true);
+  const dropped = { ready: true, error: "Session ended.", exited: true };
+  assert.equal(shouldReattach(dropped, false), true);
+  // The panel itself ended: the session is gone, nothing to attach to.
+  assert.equal(shouldReattach(dropped, true), false);
+});

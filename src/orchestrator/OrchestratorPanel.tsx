@@ -17,7 +17,7 @@ import {
   X,
 } from "lucide-react";
 import "./orchestrator.css";
-import type { OrchestratorView } from "../types";
+import type { OrchestratorView } from "./types";
 import type { TaskTarget } from "./notices";
 import type { OrchestratorHost, Preflight } from "./types";
 import { pendingReveal, subscribeReveal } from "./reveal";

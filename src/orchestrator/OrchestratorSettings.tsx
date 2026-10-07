@@ -255,7 +255,7 @@ function SettingsJsonEditor({
       <span className="os-row-desc">
         Every setting as JSON, including keys with no control above. Saving
         sends the whole object. Each key is documented in{" "}
-        <code>docs/orchd-settings.md</code> in the sushiAI repository.
+        <code>docs/orchestrator-settings.md</code> in the sushiAI repository.
       </span>
       <textarea
         className="os-json-text"

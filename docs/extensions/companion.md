@@ -27,7 +27,7 @@ The view is a surface on the host `settings.page`:
   "kind": "companion",
   "fields": [
     { "id": "service", "label": "Service", "type": "status" },
-    { "id": "pairing", "label": "Pairing code", "type": "qr" },
+    { "id": "pairing", "label": "Scan code", "type": "qr" },
     { "id": "note", "label": "Note", "type": "text" }
   ],
   "actions": [

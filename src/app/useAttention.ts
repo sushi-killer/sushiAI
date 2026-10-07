@@ -10,7 +10,8 @@ import {
   workingCount,
   type AttentionState,
 } from "./attention.ts";
-import { groupKey, groupLabel } from "./workspaceMerge.ts";
+import { groupKey } from "../lib/hostGroup.ts";
+import { groupLabel } from "./workspaceMerge.ts";
 import { moduleUis } from "../extensions/modules.ts";
 import type { ModuleEntry } from "./inboxModel.ts";
 import type { SectionRef } from "./navigation.ts";

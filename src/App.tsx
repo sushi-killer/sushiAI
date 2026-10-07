@@ -6,7 +6,7 @@ import { ChatView } from "./ChatView";
 import { AgentsView } from "./agents/AgentsView";
 import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
 import { WorkspaceDialog } from "./WorkspaceDialog";
-import { errorText } from "./app/errors";
+import { errorText } from "./lib/errors";
 import { useAppPersistence } from "./app/useAppPersistence";
 import { useSessionState } from "./app/useSessionState";
 import { useAttention } from "./app/useAttention";

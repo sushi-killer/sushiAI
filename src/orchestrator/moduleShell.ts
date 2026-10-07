@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { LOCAL_ENDPOINT } from "../daemonSessions.ts";
 import type { ModuleShell } from "../extensions/modules.ts";
 import type { Workspace } from "../types.ts";
 import { ORCHESTRATOR_EXTENSION_ID } from "./enabled.ts";
@@ -16,7 +17,7 @@ import { setWorkspaceRepos } from "./workspaceRepos.ts";
  * has none yet. */
 export type OpenStep =
   | { kind: "surface"; workspaceId: string }
-  | { kind: "workspace"; cwd: string; name: string };
+  | { kind: "workspace"; cwd: string; connection: string; name: string };
 
 export function openStep(
   workspaces: Workspace[],
@@ -24,7 +25,12 @@ export function openStep(
 ): OpenStep {
   const place = orchestratorTarget(workspaces, target.repo, target.host);
   return place.kind === "create-workspace"
-    ? { kind: "workspace", cwd: place.cwd, name: place.name }
+    ? {
+        kind: "workspace",
+        cwd: place.cwd,
+        connection: target.host ?? LOCAL_ENDPOINT,
+        name: place.name,
+      }
     : { kind: "surface", workspaceId: place.workspaceId };
 }
 
@@ -36,13 +42,11 @@ export function useOrchestratorShell(
   shell: ModuleShell,
 ): void {
   const [pending, setPending] = useState<TaskTarget | null>(null);
-  const kicked = useRef("");
   const { workspaces, openSurface } = shell;
   useEffect(() => setWorkspaceRepos(workspaces), [workspaces]);
 
   const openTask = useCallback((target: TaskTarget) => {
     publishReveal(target);
-    kicked.current = "";
     setPending(target);
   }, []);
 
@@ -69,14 +73,13 @@ export function useOrchestratorShell(
       setPending(null);
       return;
     }
-    // Once the workspace exists the next pass finds it and adds the pane.
-    if (kicked.current === step.cwd) return;
-    kicked.current = step.cwd;
+    // The shell queues the pane for the new workspace, so one call is enough.
     openSurface(
-      { cwd: step.cwd, name: step.name },
+      { cwd: step.cwd, connection: step.connection, name: step.name },
       ORCHESTRATOR_EXTENSION_ID,
       ORCHESTRATION_SURFACE,
       {},
     );
+    setPending(null);
   }, [pending, workspaces, openSurface]);
 }

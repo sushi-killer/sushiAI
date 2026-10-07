@@ -1,4 +1,5 @@
-// Pure logic behind the orchd task notices: which workspace a notice opens. No React, no bridge.
+// Pure logic behind the orchestrator task notices: which workspace a notice opens. No React, no bridge.
+import { LOCAL_ENDPOINT } from "../daemonSessions.ts";
 import { contains } from "../layout.ts";
 import { projectName } from "./ownerAttention.ts";
 import type { Panel, Workspace } from "../types.ts";
@@ -67,7 +68,13 @@ export function orchestratorTarget(
   host?: string,
 ): OrchestratorTarget {
   if (host) return remoteTarget(workspaces, repo, host);
-  const matching = workspaces.filter((workspace) => workspace.cwd === repo);
+  // A local task never lands on a workspace of another host: the same path
+  // there is a different folder.
+  const matching = workspaces.filter(
+    (workspace) =>
+      workspace.cwd === repo &&
+      (workspace.connection || LOCAL_ENDPOINT) === LOCAL_ENDPOINT,
+  );
   for (const workspace of matching) {
     const panel = workspace.panels.find(
       (item) =>

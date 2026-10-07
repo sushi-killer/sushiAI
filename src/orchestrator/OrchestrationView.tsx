@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { CoreViewProps } from "../extensions/coreViews.ts";
-import { openSettings } from "../app/openSettings.ts";
+import { openSettings } from "../lib/openSettings.ts";
 import { OrchestratorPanel } from "./OrchestratorPanel";
 import { parseView } from "./paneArgs.ts";
 

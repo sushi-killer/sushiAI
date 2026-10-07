@@ -9,10 +9,8 @@ const { createSessionLauncher } = require("../electron/session-launch.cjs");
 const { toDaemonLaunch } = require("../src/workspace/session-launch.ts");
 const { rememberTerminalSize } = require("../src/terminal-sizing.ts");
 
-const binary = path.join(
-  process.env.CARGO_TARGET_DIR || path.join(__dirname, "../target"),
-  "debug/sushiai",
-);
+const { realDaemon } = require("./helpers/real-daemon.cjs");
+const { binary, skip } = realDaemon();
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(check, what, ms = 10000) {
   const end = Date.now() + ms;
@@ -26,7 +24,7 @@ async function until(check, what, ms = 10000) {
 
 test(
   "a launch from a measured 40x9 pane starts the session at 40x9 and never resizes it",
-  { skip: !fs.existsSync(binary) && "debug sushiai binary is not built" },
+  { skip },
   async () => {
     // Short path under /tmp: unix socket paths are limited on macOS.
     const home = fs.mkdtempSync("/tmp/cs-");

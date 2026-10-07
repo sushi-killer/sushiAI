@@ -13,7 +13,7 @@ import {
 } from "./terminal-sizing";
 import { installTerminalInteractions } from "./terminal-interactions";
 import { createTerminalLinkProvider, openTerminalLink } from "./terminal-links";
-import { createTerminalInput } from "./terminal-output";
+import { createTerminalInput, shouldReattach } from "./terminal-output";
 import "@xterm/xterm/css/xterm.css";
 
 type CachedTerminal = {
@@ -73,19 +73,20 @@ export function TerminalPanel({
   useEffect(() => {
     if (panel.ended) disposeTerminal(panel.id);
   }, [panel.ended, panel.id]);
-  // A host that comes (back) up after the first attach failed gets another try.
+  // A host that comes (back) up after the first attach failed, or after its
+  // disconnect ended the pane's stream, gets another try.
   useEffect(() => {
     if (!panel.sessionId || !window.bridge?.onDaemonState) return;
     const hostId = daemonHost(endpoint);
     return window.bridge.onDaemonState((state) => {
       if (state.host !== hostId || state.state !== "ready") return;
       const runtime = cache.get(panel.id);
-      if (runtime && !runtime.ready && runtime.error) {
+      if (runtime && shouldReattach(runtime, panel.ended)) {
         disposeTerminal(panel.id);
         setAttempt((a) => a + 1);
       }
     });
-  }, [panel.id, panel.sessionId, endpoint]);
+  }, [panel.id, panel.sessionId, panel.ended, endpoint]);
   useEffect(() => {
     if (!active || !host.current) return;
     if (!window.bridge) {

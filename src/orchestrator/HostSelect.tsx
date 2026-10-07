@@ -10,7 +10,7 @@ import {
 import { hostStatus, LOCAL_HOST, type DaemonReach } from "./hosts";
 import type { OrchestratorHost } from "./types";
 import type { Project, ProjectHostReadiness } from "../types";
-import { openProjectSettings } from "../app/openSettings";
+import { openProjectSettings } from "../lib/openSettings";
 import { readPrepareTimes } from "../projectPrepare";
 
 export function RunOnSelect({

@@ -373,3 +373,34 @@ test("core may not import a directory the composition root loads as a module", (
 
   fs.rmSync(tree, { recursive: true, force: true });
 });
+
+test("a module directory may not import the shell", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "module-shell-"));
+  const write = (file, text) => {
+    fs.mkdirSync(path.dirname(path.join(tree, file)), { recursive: true });
+    fs.writeFileSync(path.join(tree, file), text);
+  };
+  write(
+    "src/extensions/modules.ts",
+    'import { widget } from "../gadget/module.ts";\nexport const modules = [widget];\n',
+  );
+  write("src/extensions/coreViews.ts", "export const views = [];\n");
+  write("src/gadget/module.ts", "export const widget = {};\n");
+  write("src/lib/keys.ts", "export const keys = [];\n");
+  write("src/gadget/Panel.tsx", 'import { keys } from "../lib/keys.ts";\n');
+  assert.equal(run({ MODULE_ROOT_OVERRIDE: tree }).status, 0);
+
+  write("src/app/model.ts", "export const model = 1;\n");
+  write("src/gadget/Leak.tsx", 'import { model } from "../app/model.ts";\n');
+  const failed = run({ MODULE_ROOT_OVERRIDE: tree });
+  assert.equal(failed.status, 1);
+  assert.match(
+    failed.stderr,
+    /src\/gadget\/Leak\.tsx imports \.\.\/app\/model\.ts; a module may not import the shell/,
+  );
+
+  fs.rmSync(tree, { recursive: true, force: true });
+});

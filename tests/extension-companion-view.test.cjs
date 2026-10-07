@@ -99,7 +99,7 @@ const view = {
   kind: "companion",
   fields: [
     { id: "service", label: "Service", type: "status" },
-    { id: "code", label: "Pairing code", type: "qr" },
+    { id: "code", label: "Scan code", type: "qr" },
     { id: "note", label: "Note", type: "text" },
     { id: "gone", label: "Empty", type: "text" },
   ],
@@ -130,7 +130,7 @@ test("a companion panel draws status tone, a QR SVG, text and buttons", async ()
     }),
   );
   assert.match(html, /class="companion-status" data-tone="ok">Connected</);
-  assert.match(html, /<svg class="companion-qr"[^>]*aria-label="Pairing code"/);
+  assert.match(html, /<svg class="companion-qr"[^>]*aria-label="Scan code"/);
   assert.match(html, /<path d="M\d+ \d+h\d+v1h-\d+z/);
   assert.match(html, /Hello &lt;b&gt;there&lt;\/b&gt;/);
   // A field without a value is left out, not drawn as a dash.

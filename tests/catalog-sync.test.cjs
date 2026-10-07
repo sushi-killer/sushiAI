@@ -215,13 +215,11 @@ test("a daemon error is logged, not thrown", async () => {
   sync.stop();
 });
 
-const binary = path.join(
-  process.env.CARGO_TARGET_DIR || path.join(__dirname, "../target"),
-  "debug/sushiai",
-);
+const { realDaemon } = require("./helpers/real-daemon.cjs");
+const { binary, skip } = realDaemon();
 test(
   "the real daemon applies the sync and binds a session by cwd",
-  { skip: !fs.existsSync(binary) && "debug sushiai binary is not built" },
+  { skip },
   async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "cs-"));
     fs.chmodSync(home, 0o700);

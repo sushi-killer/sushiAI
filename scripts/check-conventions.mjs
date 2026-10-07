@@ -164,7 +164,7 @@ const JSON_ALLOWED = {
     [/^manifest\.json$/, "host binary manifest written by build:host"],
   ],
   "electron/ipc/app.cjs": [[/^skills-catalog\.json$/, "regenerable cache"]],
-  "electron/orchestrator.cjs": [[/^task\.json$/, "orchd task file"]],
+  "electron/orchestrator.cjs": [[/^task\.json$/, "orchestrator task file"]],
   "electron/project-hosts.cjs": [[/^package-lock\.json$/, "repo lockfile"]],
 };
 const stateRoot = process.env.STATE_STORE_ROOT_OVERRIDE || root;
@@ -329,6 +329,23 @@ for (const file of coreFiles) {
         problems.push(
           `${file} imports ${source}; core may not import ${dir}, which the composition root loads as a module`,
         );
+  }
+}
+
+// The reverse holds too: a module directory reaches the shell only through
+// the module API (extensions/modules.ts) and shared code in src/lib, never by
+// importing a src/app file.
+for (const dir of moduleDirs) {
+  for (const file of await listFiles(dir)) {
+    if (!/\.(ts|tsx)$/.test(file)) continue;
+    const text = await readFile(path.join(moduleRoot, file), "utf8");
+    for (const [, source] of text.matchAll(SHELL_IMPORT)) {
+      if (!source.startsWith(".")) continue;
+      if (resolvedDir(file, source).startsWith("src/app/"))
+        problems.push(
+          `${file} imports ${source}; a module may not import the shell (src/app), move shared code to src/lib`,
+        );
+    }
   }
 }
 

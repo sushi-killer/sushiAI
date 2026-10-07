@@ -118,7 +118,7 @@ test("a folder opens the workspace on the same host, not the same path elsewhere
 
 test("a requested project tab is used once, by its own workspace, and expires", async () => {
   const { setPendingProjectTab, takePendingTab } =
-    await import("../src/app/openSettings.ts");
+    await import("../src/lib/openSettings.ts");
   setPendingProjectTab("Hosts", "/work/app", "ssh:lab");
   assert.equal(takePendingTab("/work/app", undefined), "General"); // same path, other host
   setPendingProjectTab("Hosts", "/work/app", "ssh:lab");

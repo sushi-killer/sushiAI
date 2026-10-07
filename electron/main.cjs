@@ -559,7 +559,11 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionRequestHandler((_, __, callback) =>
     callback(false),
   );
-  const savedWindow = loadWindowState(app.getPath("userData"));
+  // A hidden test window keeps its default size: clamping saved bounds to a small
+  // CI screen would change what screenshots and size checks see after a restart.
+  const savedWindow = testMode.hidden
+    ? null
+    : loadWindowState(app.getPath("userData"));
   const startBounds = savedWindow
     ? clampBounds(
         savedWindow,
@@ -603,7 +607,7 @@ app.whenReady().then(async () => {
       onChange: (presenting) => mascot.setPresenting(presenting),
     });
   }
-  if (savedWindow && !testMode.hidden) {
+  if (savedWindow) {
     if (savedWindow.isFullScreen) mainWindow.setFullScreen(true);
     else if (savedWindow.isMaximized) mainWindow.maximize();
   }

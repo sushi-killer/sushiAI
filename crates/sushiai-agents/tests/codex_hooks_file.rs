@@ -1,7 +1,9 @@
 use std::fs;
 
 use serde_json::{json, Value};
-use sushiai_agents::codex_hooks::{install, is_ours, merge, remove, uninstall, HooksFileError};
+use sushiai_agents::codex_hooks::{
+    install, is_ours, merge, remove, uninstall, write_text_atomic, HooksFileError,
+};
 
 const BIN: &str = "/home/user/.sushiai/bin/sushiai";
 
@@ -202,4 +204,23 @@ fn invalid_json_file_is_left_untouched() {
     ));
     assert_eq!(fs::read_to_string(&path).unwrap(), "{ not json");
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn an_atomic_write_is_private_from_the_first_byte_and_keeps_an_old_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+    let fresh = dir.path().join("fresh.json");
+    write_text_atomic(&fresh, "secret", 1).unwrap();
+    assert_eq!(mode(&fresh), 0o600);
+
+    let old = dir.path().join("old.json");
+    fs::write(&old, "old").unwrap();
+    fs::set_permissions(&old, fs::Permissions::from_mode(0o640)).unwrap();
+    write_text_atomic(&old, "new", 2).unwrap();
+    assert_eq!(fs::read_to_string(&old).unwrap(), "new");
+    assert_eq!(mode(&old), 0o640);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2, "no temp left");
 }

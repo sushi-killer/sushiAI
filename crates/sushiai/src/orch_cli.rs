@@ -79,11 +79,7 @@ fn hook(home: &Home, args: &[String]) {
         Some("edit") => "orch.hook.edit",
         _ => return println!("{{}}"),
     };
-    let flag = args
-        .windows(2)
-        .find(|w| w[0] == "--token")
-        .map(|w| w[1].clone());
-    let token = flag.or_else(|| std::env::var("SUSHIAI_ORCH_TOKEN").ok());
+    let token = std::env::var("SUSHIAI_ORCH_TOKEN").ok();
     let answer = token.and_then(|token| {
         let mut input = String::new();
         std::io::stdin().read_to_string(&mut input).ok()?;
@@ -123,26 +119,19 @@ fn codex_home(home: &Path) -> PathBuf {
         .map_or_else(|| home.join(".codex"), PathBuf::from)
 }
 
-/// Writes `text` to `path` through a temp file, keeping the old file's mode, after saving the
-/// old content next to it as `<name>.sushiai-bak-<ts>`.
+/// Writes `text` to `path` through the shared atomic writer (the old file's mode, or 0600),
+/// after saving the old content next to it as `<name>.bak-<ts>` (the newest three are kept).
 fn replace_file(path: &Path, text: &str) -> anyhow::Result<()> {
     use anyhow::Context;
-    let existing = path.exists();
-    if existing {
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        let backup = path.with_file_name(format!("{name}.sushiai-bak-{ts}"));
-        std::fs::copy(path, &backup)
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    if path.exists() {
+        sushiai_agents::codex_hooks::backup_file(path, ts)
             .with_context(|| format!("cannot back up {}", path.display()))?;
     }
-    let tmp = path.with_extension("sushiai-tmp");
-    std::fs::write(&tmp, text).with_context(|| format!("cannot write {}", tmp.display()))?;
-    if existing {
-        std::fs::set_permissions(&tmp, std::fs::metadata(path)?.permissions())?;
-    }
-    std::fs::rename(&tmp, path).with_context(|| format!("cannot replace {}", path.display()))
+    sushiai_agents::codex_hooks::write_text_atomic(path, text, ts)
+        .with_context(|| format!("cannot replace {}", path.display()))
 }
 
 /// Our MCP entry in Claude's `~/.claude.json`. Everything else in the file stays as it is.

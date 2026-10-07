@@ -322,16 +322,16 @@ test("a core main-process file that requires a module main.cjs loads fails the c
     fs.mkdirSync(path.join(dir, "electron/ipc"), { recursive: true });
     const write = (name, text) =>
       fs.writeFileSync(path.join(dir, "electron", name), text);
-    write("main.cjs", 'require("./plugin.cjs");\nrequire("./ipc/hub.cjs");\n');
+    write("main.cjs", 'require("./plugin.cjs");\nrequire("./ipc/router.cjs");\n');
     write("plugin.cjs", "module.exports = {};\n");
-    write("ipc/hub.cjs", 'require("../plugin.cjs");\n');
+    write("ipc/router.cjs", 'require("../plugin.cjs");\n');
     const bad = run({ CORE_ISOLATION_ROOT_OVERRIDE: dir });
     assert.equal(bad.status, 1);
     assert.match(
       bad.stderr,
-      /electron\/ipc\/hub\.cjs requires electron\/plugin\.cjs, a module main\.cjs plugs in/,
+      /electron\/ipc\/router\.cjs requires electron\/plugin\.cjs, a module main\.cjs plugs in/,
     );
-    write("ipc/hub.cjs", 'require("node:path");\nrequire("./peer.cjs");\n');
+    write("ipc/router.cjs", 'require("node:path");\nrequire("./peer.cjs");\n');
     write("ipc/peer.cjs", "module.exports = {};\n");
     assert.equal(run({ CORE_ISOLATION_ROOT_OVERRIDE: dir }).status, 0);
   } finally {

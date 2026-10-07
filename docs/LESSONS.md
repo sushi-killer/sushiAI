@@ -34,6 +34,8 @@ Rule: merge the isolation fix into every lane base before JS tests run.
 
 ## Promoted
 
+- 2026-10-07 A new session's first `hook.open` came before its actor and was refused → wait for every live session without an actor. `a_new_session_without_its_actor_is_waited_for_and_an_exited_one_is_not`.
+- 2026-10-07 A restart clamped saved bounds to a small CI screen → hidden test windows skip saved bounds. `smoke.mjs`.
 - 2026-10-07 A test launcher with only `SUSHIAI_HOME` rewrote the owner's `~/.codex` and bin link → set `HOME` and `CODEX_HOME` too. `check-conventions.mjs`.
 - 2026-10-06 Agent-shell markers leaked into sessions → daemon strips them (lifecycle.rs test).
 - 2026-10-06 Codex TUI hooks ran in a shared server → `--no-daemon` (launch_spec).
@@ -56,6 +58,4 @@ Rule: merge the isolation fix into every lane base before JS tests run.
 - 2026-09-28 Trusted `rtk rewrite` (`rtk read` drops code) → allowlist. `rtk_rewrite_output_*`.
 - 2026-09-25 Disabled `select!` branch still built `Instant + Duration::MAX`, panicking the loop → bounded deadline. `run_harness`.
 - 2026-09-24 An unparsed review verdict counted as PASS → no verdict asks the owner. `a_review_without_a_verdict_waits_for_the_owner_instead_of_passing`.
-- 2026-09-24 Orchestrator chat edited code instead of filing tasks → enforce roles with tools. `orchd/src/chat.rs`.
 - 2026-09-24 Unset `HERDR_SOCKET_PATH`/inherited `BRIDGE_DEV_URL` photographed the owner's Herdr/dev server → override both. `ui-evidence` template.
-- 2026-09-24 Real Claude/Codex output broke `orchd` while self-written fakes passed → parsers assert captured CLI lines. `parses_captured_real_cli_streams`.

@@ -521,3 +521,17 @@ test("a project is its path, unless it lives on another machine", async () => {
   );
   assert.equal(projectScope("", "ssh:build-box"), "", "no folder, no scope");
 });
+
+test("compareOrder is the one ordering: order, then extension id, then id", async () => {
+  const { compareOrder } = await import("../src/extensions/registry.ts");
+  const items = [
+    { extensionId: "b", id: "x", order: 1 },
+    { extensionId: "b", id: "a" },
+    { extensionId: "a", id: "z" },
+    { extensionId: "a", id: "y", order: 2 },
+  ];
+  assert.deepEqual(
+    items.sort(compareOrder).map((item) => `${item.extensionId}.${item.id}`),
+    ["a.z", "b.a", "b.x", "a.y"],
+  );
+});

@@ -141,12 +141,14 @@ export class ExtensionRegistry {
   }
 }
 
-function compareOrder(
-  a: { order: number; extensionId: string; id: string },
+/** The one ordering of contributions: `order` first (a contribution with none,
+ * like a surface, counts as 0), then extension id, then id. */
+export function compareOrder(
+  a: { order?: number; extensionId: string; id: string },
   b: typeof a,
 ) {
   return (
-    a.order - b.order ||
+    (a.order ?? 0) - (b.order ?? 0) ||
     a.extensionId.localeCompare(b.extensionId) ||
     a.id.localeCompare(b.id)
   );

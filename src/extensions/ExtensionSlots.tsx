@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { ExtensionSurfaceView } from "./SurfaceRenderer.tsx";
 import { actionsFor, navigationFor, surfacesFor } from "./routes.ts";
-import type { ExtensionRegistry } from "./registry.ts";
+import { compareOrder, type ExtensionRegistry } from "./registry.ts";
 import type {
   ExtensionIcon as ExtensionIconValue,
   NavigationPlacement,
@@ -230,15 +230,13 @@ export function ExtensionSectionSlot({
   );
 }
 
-/** The surfaces that contribute a Settings tab, ordered by extension id and
- * then surface id so the tabs never shuffle between runs. */
+/** The surfaces that contribute a Settings tab, in `compareOrder` (a surface
+ * has no `order`, so extension id then surface id) so the tabs never shuffle
+ * between runs. */
 export function settingsPageSurfaces(
   registry: ExtensionRegistry,
 ): SurfaceContribution[] {
-  return surfacesFor(registry, "settings.page").sort(
-    (a, b) =>
-      a.extensionId.localeCompare(b.extensionId) || a.id.localeCompare(b.id),
-  );
+  return surfacesFor(registry, "settings.page").sort(compareOrder);
 }
 
 export const settingsPageKey = (surface: SurfaceContribution) =>

@@ -95,13 +95,12 @@ test(
       });
       assert.equal(sent[0].cols, 40);
       assert.equal(sent[0].rows, 9);
-      await handlers.write("p1", "stty size; echo done\r");
-      await until(
-        () => sent.some((m) => (m.data ?? "").includes("done")),
-        "stty output",
-      );
-      const text = sent.map((m) => m.snapshot ?? m.data ?? "").join("");
-      assert.match(text, /9 40/);
+      const text = () => sent.map((m) => m.snapshot ?? m.data ?? "").join("");
+      await handlers.write("p1", "stty size\r");
+      // Wait for the output line itself: the echo of the typed command can
+      // arrive first and holds no size.
+      await until(() => /^\d+ \d+\r?$/m.test(text()), "stty output");
+      assert.match(text(), /^9 40\r?$/m);
       assert.ok(!methods.includes("session.resize"), "no resize was sent");
       await client.request("session.close", { id: sessionId, graceful: false });
     } finally {

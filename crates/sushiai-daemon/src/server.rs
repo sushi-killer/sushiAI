@@ -699,6 +699,9 @@ async fn create_new(
     };
     // Announced inside `start`, before the actor can broadcast anything about the session.
     session::start(registry.clone(), info, conn, screen, seq, sock, true);
+    // The answer promises a session that outlives a daemon crash: its state is on disk first.
+    let flushing = registry.clone();
+    let _ = tokio::task::spawn_blocking(move || flushing.flush()).await;
     Ok(json!({ "id": id }))
 }
 

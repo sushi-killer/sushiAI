@@ -84,7 +84,17 @@ mod tests {
     fn fake_orchd(dir: &Path) -> Child {
         let exe = dir.join("orchd");
         std::fs::copy("/bin/sleep", &exe).unwrap();
-        Command::new(&exe).arg("60").spawn().unwrap()
+        // On Linux a test forking in parallel can briefly inherit the copy's
+        // write descriptor, and exec then fails with "Text file busy".
+        for _ in 0..50 {
+            match Command::new(&exe).arg("60").spawn() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                other => return other.unwrap(),
+            }
+        }
+        panic!("fake orchd stayed busy");
     }
 
     #[test]

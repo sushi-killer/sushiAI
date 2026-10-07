@@ -185,9 +185,10 @@ impl Conn {
         }
     }
 
-    /// The session's handle. A restored session whose holder has not answered yet is waited
-    /// for (at most `RECOVERY_WAIT`), so a client that reconnects at once can attach, type,
-    /// resize and close. After a timeout or an exit the normal error is returned.
+    /// The session's handle. A session without an actor yet is waited for (at most
+    /// `RECOVERY_WAIT`): a restored one, so a client that reconnects at once can attach, type,
+    /// resize and close, and a new one, so its child's first `hook.*` call is not refused while
+    /// `session.create` attaches. After a timeout or an exit the normal error is returned.
     async fn session(&self, id: &str) -> Result<Handle, Fail> {
         let deadline = tokio::time::Instant::now() + RECOVERY_WAIT;
         loop {
@@ -197,7 +198,7 @@ impl Conn {
             settled.as_mut().enable();
             match self.registry.handle(id) {
                 Some(handle) => return Ok(handle),
-                None if self.registry.recovering(id) => {}
+                None if self.registry.awaiting_actor(id) => {}
                 None if self.registry.known(id) => {
                     return Err((code::SESSION_NOT_RUNNING, "session is not running".into()))
                 }

@@ -273,16 +273,17 @@ impl Registry {
         self.stopping.load(Ordering::SeqCst)
     }
 
-    /// True for a restored session whose holder has not answered yet: listed `detached`, and
-    /// without an actor. A session whose actor lost its holder keeps its handle.
-    pub fn recovering(&self, id: &str) -> bool {
+    /// True for a session without an actor yet: a restored one whose holder has not answered
+    /// (listed `detached`), or a new one whose child already runs while `session.create`
+    /// attaches. A session whose actor lost its holder keeps its handle.
+    pub fn awaiting_actor(&self, id: &str) -> bool {
         self.catalog()
             .sessions
             .get(id)
-            .is_some_and(|e| e.handle.is_none() && e.info.status == SessionStatus::Detached)
+            .is_some_and(|e| e.handle.is_none() && e.info.status != SessionStatus::Exited)
     }
 
-    /// Wakes the requests that wait for a restored session.
+    /// Wakes the requests that wait for a session's actor.
     pub fn settle(&self) {
         self.settled.notify_waiters();
     }
@@ -439,6 +440,7 @@ impl Registry {
         if let Some(entry) = self.catalog().sessions.get_mut(id) {
             entry.handle = Some(handle);
         }
+        self.settle();
     }
 
     pub fn clear_handle(&self, id: &str) {
@@ -498,6 +500,8 @@ impl Registry {
         let mut catalog = self.catalog();
         catalog.sessions.remove(id);
         self.save(&catalog);
+        drop(catalog);
+        self.settle();
     }
 
     /// The sessions as clients see them: without the token hash.
@@ -592,6 +596,23 @@ mod tests {
         let saved = StateFile::from_bytes(&fs::read(dir.path().join("state.json")).expect("read"))
             .expect("state");
         assert_eq!(saved.sessions.len(), MAX_EXITED);
+    }
+
+    #[test]
+    fn a_new_session_without_its_actor_is_waited_for_and_an_exited_one_is_not() {
+        // The child of a new session may call `hook.open` before `session.create` attaches.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = Registry::new(Home::new(dir.path().to_path_buf()));
+        let creating = SessionInfo {
+            status: SessionStatus::Running,
+            exit_code: None,
+            ..exited(1)
+        };
+        registry.update(creating);
+        registry.update(exited(2));
+        assert!(registry.awaiting_actor("s001"));
+        assert!(!registry.awaiting_actor("s002"));
+        assert!(!registry.awaiting_actor("nope"));
     }
 
     #[test]

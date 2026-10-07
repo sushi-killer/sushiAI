@@ -402,17 +402,8 @@ impl Conn {
         if self.registry.agent_of(&p.session).as_deref() != Some(p.agent.as_str()) {
             return Err((code::UNAUTHORIZED, "hook is from another agent".into()));
         }
-        // The session is known from `session.create` on; its actor may still be starting.
-        let mut tries = 0;
-        let handle = loop {
-            match self.session(&p.session).await {
-                Err((code::SESSION_NOT_RUNNING, _)) if tries < 100 => {
-                    tries += 1;
-                    sleep(Duration::from_millis(20)).await;
-                }
-                other => break other?,
-            }
-        };
+        // The session is known from `session.create` on; `session` waits for a starting actor.
+        let handle = self.session(&p.session).await?;
         let waiting = handle
             .hook(serde_json::to_vec(&p.payload).unwrap_or_default())
             .await?;

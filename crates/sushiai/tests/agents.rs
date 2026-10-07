@@ -203,7 +203,9 @@ fn claude_hooks_from_settings_drive_status_asks_and_the_session_id() {
     sandbox.start_daemon();
     let mut client = sandbox.client();
     let id = create_agent(&mut client, "claude");
-    assert_eq!(list_entry(&mut client, &id)["agentStatus"], "starting");
+    // The fake sends SessionStart at once, so a fast machine may already be idle.
+    let first = list_entry(&mut client, &id)["agentStatus"].clone();
+    assert!(first == "starting" || first == "idle", "{first}");
 
     let ask = client.wait_note("session.ask");
     assert_eq!(ask["session"], id.as_str());

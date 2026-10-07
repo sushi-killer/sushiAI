@@ -75,7 +75,9 @@ function sshManager(proxy, options = {}) {
         profile: PROFILE,
         ssh: proxy.script,
         args: () => ["-T", "-o", "BatchMode=yes"],
-        helloTimeoutMs: 3000,
+        // The fake ssh is a Node process: under a loaded CI run its start alone
+        // can pass 3 s, and a hello timeout would kill it before its exit code.
+        helloTimeoutMs: 15000,
       }),
     },
     backoffMinMs: options.backoffMinMs ?? 20,

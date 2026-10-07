@@ -81,7 +81,12 @@ fn login_path() -> String {
         let _ = stdout.read_to_string(&mut text);
         let _ = tx.send(text);
     });
-    let result = rx.recv_timeout(PATH_WAIT);
+    // Tests raise the wait so a loaded machine does not fall back.
+    let wait = std::env::var("SUSHIAI_PATH_WAIT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map_or(PATH_WAIT, Duration::from_millis);
+    let result = rx.recv_timeout(wait);
     if result.is_err() {
         let _ = child.kill();
     }

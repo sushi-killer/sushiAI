@@ -490,6 +490,7 @@ fn the_auto_started_daemon_gets_a_clean_environment_and_the_login_path() {
         ("SSH_AUTH_SOCK", "/tmp/x"),
         ("PATH", "/nonexistent"),
         ("SHELL", shell.to_str().expect("utf8")),
+        ("SUSHIAI_PATH_WAIT_MS", "30000"),
     ]);
     proxy.hello();
     let file = sandbox.home().join("vars.txt");

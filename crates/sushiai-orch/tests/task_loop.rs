@@ -655,21 +655,22 @@ fn the_stall_clock_waits_while_the_stop_hook_runs_verify() {
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
     let repo = init_git_repo();
-    // The hook's verify is silent for 12s, well past the 5s stall timeout;
-    // 5s leaves room for a loaded machine to start the fake harness.
+    // The hook's verify is silent for 15s, past the 10s stall timeout. The
+    // paused clock re-arms at 10s, so the verify must end mid-window (15s,
+    // not on a 10s multiple) with 5s of slack either side for a loaded machine.
     let task = daemon.request(
         "task.create",
         serde_json::json!({
             "repo": repo.path().to_str().unwrap(),
             "title": "Slow hook",
             "goal": "Make a trivial change",
-            "verify": ["sleep 12 && test -f verified-marker.txt"],
-            "variant": {"stallTimeoutSecs": 5},
+            "verify": ["sleep 15 && test -f verified-marker.txt"],
+            "variant": {"stallTimeoutSecs": 10},
             "start": true,
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(60));
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(90));
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
     assert_eq!(
         settled["attempts"].as_array().unwrap().len(),

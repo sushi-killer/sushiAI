@@ -213,7 +213,13 @@ async fn a_stalled_adopted_run_whose_member_traps_sigterm_is_still_killed() {
     let outcome = follow_within(&app, &task, Guard::for_variant(&variant, None)).await;
 
     assert!(outcome.stalled, "{:?}", outcome.error);
-    // Any member, not just the leader (which is reaped by now).
+    // Any member, not just the leader. The leader is this test's own child: reap it, or
+    // its zombie still counts as a member; teardown after SIGKILL also takes a moment.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while unsafe { libc::kill(-pgid, 0) } == 0 && std::time::Instant::now() < deadline {
+        unsafe { libc::waitpid(-pgid, std::ptr::null_mut(), libc::WNOHANG) };
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     assert!(
         unsafe { libc::kill(-pgid, 0) } != 0,
         "a member that traps SIGTERM must still be killed"

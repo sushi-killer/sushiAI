@@ -86,4 +86,6 @@ Build output is written to `release/`. To open a local Apple Silicon build:
 open release/mac-arm64/sushiAI.app
 ```
 
+`Resources/host` is excluded from electron-builder signing (`mac.signIgnore`): `build:host` ad-hoc signs the two macOS binaries before it hashes them, so `manifest.json` matches the shipped bytes. `npm run package` ends with `node scripts/verify-host-manifest.mjs release/mac-arm64/sushiAI.app`, which fails on any drift. With a Developer ID and notarization, sign those binaries in `scripts/build-host-binaries.mjs` before hashing; do not sign them after packaging.
+
 Packages built with the default configuration are ad-hoc signed, not Apple-notarized. See the [README](../README.md#development) for test commands.

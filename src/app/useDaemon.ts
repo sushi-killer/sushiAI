@@ -3,6 +3,7 @@ import { errorText } from "../lib/errors.ts";
 import {
   LOCAL_ENDPOINT,
   emptyFeed,
+  configureHibernation,
   emptyHost,
   failList,
   feedEvent,
@@ -131,6 +132,13 @@ export function useDaemon({
       }
       if (entry.ready && state.generation === known) return;
       hosts.current[state.host] = { ...entry, ready: true, listed: false };
+      // The idle-sleep delay is the app's setting; a host learns it on hello.
+      bridge
+        .appPreferences()
+        .then((prefs) =>
+          configureHibernation(bridge, state, prefs.hibernateAfterSecs),
+        )
+        .catch(() => {});
       load(state.host);
     };
     const onEvent = (event: DaemonEvent) => {

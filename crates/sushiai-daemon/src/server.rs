@@ -9,10 +9,11 @@ use serde_json::{json, Value};
 use sushiai_core::Screen;
 use sushiai_protocol::catalog::{ProjectsSync, SessionUpdate};
 use sushiai_protocol::{
-    code, encode, method, AskRespond, AttachResult, Frame, Hello, HelloResult, HookEvent, HookOpen,
-    HookOpenResult, HookResult, Message, Notification, ReadResult, Request, Response,
-    SessionAttach, SessionClose, SessionCreate, SessionId, SessionInfo, SessionInput, SessionOpen,
-    SessionRead, SessionResize, SessionSnapshot, SessionStatus, CAPABILITIES, PROTOCOL_VERSION,
+    code, encode, method, AskRespond, AttachResult, DaemonConfigure, Frame, Hello, HelloResult,
+    HookEvent, HookOpen, HookOpenResult, HookResult, Message, Notification, ReadResult, Request,
+    Response, SessionAttach, SessionClose, SessionCreate, SessionFocus, SessionId, SessionInfo,
+    SessionInput, SessionOpen, SessionRead, SessionResize, SessionSnapshot, SessionStatus,
+    SessionWake, CAPABILITIES, PROTOCOL_VERSION,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -24,8 +25,10 @@ use crate::agent;
 use crate::error::Fail;
 use crate::framed::FrameReader;
 use crate::holder::{self, HolderConn};
+use crate::launch_store::Launch;
 use crate::registry::{Registry, RemoveError};
 use crate::session::{self, Chunk, Handle, Snap};
+use crate::wake;
 
 type Outbox = mpsc::Sender<Vec<u8>>;
 
@@ -36,10 +39,12 @@ const WRITER_GRACE: Duration = Duration::from_secs(2);
 const RECOVERY_WAIT: Duration = Duration::from_secs(12);
 
 pub async fn serve(listener: UnixListener, registry: Arc<Registry>) {
+    let mut next_conn = 0u64;
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                tokio::spawn(connection(stream, registry.clone()));
+                next_conn += 1;
+                tokio::spawn(connection(stream, registry.clone(), next_conn));
             }
             Err(e) => {
                 tracing::warn!("accept failed: {e}");
@@ -58,12 +63,17 @@ const CHANGES: &[&str] = &[
     method::SESSION_CLOSE,
     method::SESSION_UPDATE,
     method::SESSION_REMOVE,
+    method::SESSION_WAKE,
+    method::SESSION_HIBERNATE,
+    method::DAEMON_CONFIGURE,
     method::PROJECTS_SYNC,
     method::GROUPS_SYNC,
 ];
 
 struct Conn {
     registry: Arc<Registry>,
+    /// Which connection this is: what `session.focus` is kept under.
+    id: u64,
     out: Outbox,
     said_hello: bool,
     /// A hook process: it may call `hook.*` only and receives no notifications.
@@ -81,7 +91,7 @@ struct Stream {
     floor: u64,
 }
 
-async fn connection(stream: UnixStream, registry: Arc<Registry>) {
+async fn connection(stream: UnixStream, registry: Arc<Registry>, id: u64) {
     let (read, mut write) = stream.into_split();
     let (out, mut queue) = mpsc::channel::<Vec<u8>>(OUTBOX);
     let mut writer = tokio::spawn(async move {
@@ -91,8 +101,10 @@ async fn connection(stream: UnixStream, registry: Arc<Registry>) {
             }
         }
     });
+    let focus = registry.clone();
     let mut conn = Conn {
         registry,
+        id,
         out,
         said_hello: false,
         hook_only: false,
@@ -137,6 +149,8 @@ async fn connection(stream: UnixStream, registry: Arc<Registry>) {
             }
         }
     }
+    // Whatever the client looked at is no longer looked at.
+    focus.clear_focus(id);
     // The client is gone or has half-closed. Responses already queued still go out: stop the
     // tasks that hold a sender, drop ours, and let the writer drain its queue (bounded).
     let Conn {
@@ -289,6 +303,10 @@ impl Conn {
             method::SESSION_LIST => Ok(json!(self.registry.list())),
             method::SESSION_INPUT => {
                 let p: SessionInput = params(request)?;
+                // Typing into a sleeping session wakes it; the bytes wait for the agent.
+                if self.registry.info(&p.id).map(|i| i.status) == Some(SessionStatus::Hibernated) {
+                    wake::wake(&self.registry, &p.id).await?;
+                }
                 self.session(&p.id)
                     .await?
                     .input(p.data.into_bytes())
@@ -304,6 +322,33 @@ impl Conn {
             method::SESSION_CLOSE => {
                 let p: SessionClose = params(request)?;
                 self.session(&p.id).await?.close(p.graceful).await?;
+                Ok(json!({}))
+            }
+            method::SESSION_WAKE => {
+                let p: SessionWake = params(request)?;
+                wake::wake(&self.registry, &p.id).await?;
+                Ok(json!({}))
+            }
+            method::SESSION_HIBERNATE => {
+                let p: SessionId = params(request)?;
+                self.session(&p.id).await?.hibernate().await?;
+                Ok(json!({}))
+            }
+            method::SESSION_FOCUS => {
+                let p: SessionFocus = params(request)?;
+                if !self.registry.known(&p.id) {
+                    return Err((code::SESSION_NOT_FOUND, format!("no session {}", p.id)));
+                }
+                self.registry.set_focus(self.id, &p.id, p.focused);
+                Ok(json!({}))
+            }
+            method::DAEMON_CONFIGURE => {
+                let p: DaemonConfigure = params(request)?;
+                let registry = self.registry.clone();
+                tokio::task::spawn_blocking(move || registry.configure(p.hibernate_after_secs))
+                    .await
+                    .map_err(|e| (code::INTERNAL, e.to_string()))?
+                    .map_err(|e| (code::INTERNAL, format!("cannot save the settings: {e}")))?;
                 Ok(json!({}))
             }
             method::PROJECTS_SYNC => {
@@ -645,6 +690,17 @@ async fn create_new(
         .await
         .map_err(|e| (code::INTERNAL, e.to_string()))??;
     prepared.agent.idempotency_key = key;
+    // What a wake needs, sealed before the child runs. A session that cannot store it still
+    // runs; it just never sleeps.
+    if agent::agent_of(p.agent.as_deref()).is_some() {
+        let (store, key, launch) = (registry.clone(), id.clone(), Launch::of(&p));
+        let sealed = tokio::task::spawn_blocking(move || store.launches().seal(&key, &launch))
+            .await
+            .map_err(|e| (code::INTERNAL, e.to_string()))?;
+        if let Err(e) = sealed {
+            tracing::warn!("session {id} cannot store its launch: {e}");
+        }
+    }
     let info = SessionInfo {
         id: id.clone(),
         cmd: prepared.cmd.clone(),
@@ -676,6 +732,7 @@ async fn create_new(
         Ok(pid) => pid,
         Err(e) => {
             registry.forget(&id);
+            registry.drop_files(&id);
             return Err(spawn_failed(&e));
         }
     };
@@ -694,6 +751,7 @@ async fn create_new(
             holder::kill_group(pid);
             let _ = std::fs::remove_file(&sock);
             registry.forget(&id);
+            registry.drop_files(&id);
             return Err(spawn_failed(&e));
         }
     };
@@ -790,6 +848,7 @@ mod tests {
         let (out, _queue) = mpsc::channel(8);
         let mut conn = Conn {
             registry,
+            id: 0,
             out,
             said_hello: true,
             hook_only: false,

@@ -74,6 +74,15 @@ Package an `.app` for your Mac's architecture:
 npm run package
 ```
 
+To run your own build every day, install it instead: `npm run install:app` builds,
+signs, installs `/Applications/sushiAI.app` and removes the build. macOS keeps one
+privacy grant (Desktop, Full Disk Access) per app id and one signature to trust for it,
+so keep exactly one copy of the app and sign it with a stable identity: an ad-hoc
+build is a new app to macOS after every rebuild, and a second copy (an old build left
+in `release/`) makes the grant flip between them. Create the identity once with
+`scripts/setup-local-signing.sh`; `install:app` refuses to run without it. The
+`mac.identity: "-"` in `package.json` keeps `npm run package` and CI on ad hoc signing.
+
 Build an Apple Silicon DMG:
 
 ```sh
@@ -85,5 +94,7 @@ Build output is written to `release/`. To open a local Apple Silicon build:
 ```sh
 open release/mac-arm64/sushiAI.app
 ```
+
+`Resources/host` is excluded from electron-builder signing (`mac.signIgnore`): `build:host` ad-hoc signs the two macOS binaries before it hashes them, so `manifest.json` matches the shipped bytes. `npm run package` ends with `node scripts/verify-host-manifest.mjs release/mac-arm64/sushiAI.app`, which fails on any drift. With a Developer ID and notarization, sign those binaries in `scripts/build-host-binaries.mjs` before hashing; do not sign them after packaging.
 
 Packages built with the default configuration are ad-hoc signed, not Apple-notarized. See the [README](../README.md#development) for test commands.

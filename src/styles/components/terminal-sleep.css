@@ -1,0 +1,49 @@
+/* Terminal pane of a sleeping or waking agent: one quiet line over the saved
+ * screen, dimmed while it sleeps (not while it wakes); the moon and pin marks
+ * after a pane or sidebar title. It takes no clicks, so a click still reaches the terminal. */
+.terminal-sleep {
+  position: absolute;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  max-width: calc(100% - 24px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 10px;
+  border: 1px solid var(--line-pane);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 16px;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.terminal-host {
+  transition: opacity 120ms ease;
+}
+.terminal-host.is-sleeping {
+  opacity: 0.55;
+}
+.sleep-mark {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.panel-title.with-mark {
+  flex: 0 1 auto;
+}
+.panel-title.with-mark + .sleep-mark {
+  margin-right: auto;
+}
+.panel-menu .panel-menu-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.panel-menu-tick {
+  display: inline-flex;
+  width: 12px;
+  flex-shrink: 0;
+}

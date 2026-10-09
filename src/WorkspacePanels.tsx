@@ -1,7 +1,16 @@
-import { memo, useRef, useState, type ReactNode } from "react";
-import { Maximize2, Minimize2, MoreHorizontal, Plus, X } from "lucide-react";
-import type { Layout, Panel } from "./types";
+import { memo, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  Check,
+  Maximize2,
+  Minimize2,
+  MoreHorizontal,
+  Plus,
+  X,
+} from "lucide-react";
+import { SleepMark } from "./ui/SleepMark";
+import type { DaemonState, Layout, Panel } from "./types";
 import { TerminalPanel } from "./TerminalPanel";
+import { daemonHost, hostSupports } from "./daemonSessions";
 import { BrowserPanel } from "./BrowserPanel";
 import { ChatPanel } from "./ChatPanel";
 import { ProjectPanel } from "./ProjectPanel";
@@ -59,6 +68,30 @@ type PanelHostProps = {
   onCompanion(panelId: string, patch: CompanionPatch): void;
 };
 
+/** Whether the panel's host can put sessions to sleep; an older host cannot,
+ * so a sleep control would do nothing there. */
+function useHostSleeps(host: string, enabled: boolean): boolean {
+  const [sleeps, setSleeps] = useState(false);
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    // Every ready state of the host (first hello, a daemon restart) answers again.
+    const apply = (state: DaemonState) => {
+      if (!cancelled && state.host === host && state.state === "ready")
+        setSleeps(hostSupports([state], host, "hibernate"));
+    };
+    const unsubscribe = window.bridge?.onDaemonState?.(apply);
+    void Promise.resolve(window.bridge?.daemonStates?.())
+      .then((states) => (states ?? []).forEach(apply))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, [host, enabled]);
+  return enabled && sleeps;
+}
+
 export const PanelHost = memo(function PanelHost({
   panel,
   cwd,
@@ -89,6 +122,12 @@ export const PanelHost = memo(function PanelHost({
   onCompanion,
 }: PanelHostProps) {
   const companion = companionTarget(extensionRegistry, panel.companion);
+  const canKeepAwake =
+    panel.kind === "agent" &&
+    !!panel.sessionId &&
+    !panel.ended &&
+    (panel.agent === "claude" || panel.agent === "codex");
+  const hostSleeps = useHostSleeps(daemonHost(endpoint), canKeepAwake);
   return (
     <RenderProfiler id={`panel:${panel.id}`}>
       <PanelFrame
@@ -104,6 +143,17 @@ export const PanelHost = memo(function PanelHost({
         onZoom={() => onZoom(panel.id)}
         onAdd={onAdd}
         onRename={(title) => onRename(panel.id, title)}
+        onKeepAwake={
+          hostSleeps
+            ? (on) =>
+                void window.bridge
+                  ?.sessionUpdate(daemonHost(endpoint), {
+                    id: panel.sessionId!,
+                    pinned: on,
+                  })
+                  .catch(() => {})
+            : undefined
+        }
         frame={
           panel.kind === "terminal" || panel.kind === "agent"
             ? (main) => (
@@ -298,6 +348,7 @@ function PanelFrame({
   onZoom,
   onAdd,
   onRename,
+  onKeepAwake,
   frame,
   companionToggle,
   children,
@@ -314,6 +365,8 @@ function PanelFrame({
   onZoom(): void;
   onAdd(): void;
   onRename(title: string): void;
+  /** Set for an agent session that can sleep: pins or unpins it on its host. */
+  onKeepAwake?(on: boolean): void;
   /** Wraps the header and body, so a companion half can sit beside both. */
   frame?: (main: ReactNode) => ReactNode;
   companionToggle: ReactNode;
@@ -322,6 +375,8 @@ function PanelFrame({
   const [edge, setEdge] = useState(""),
     [menu, setMenu] = useState(false),
     [rename, setRename] = useState(false);
+  const sleeping = panel.status === "sleeping";
+  const marked = sleeping || !!panel.keepAwake;
   const main = (
     <>
       <header
@@ -357,7 +412,19 @@ function PanelFrame({
             }}
           />
         ) : (
-          <span className="panel-title">{panel.title}</span>
+          <>
+            <span
+              className={`panel-title ${marked ? "with-mark" : ""}`}
+              title={marked && sleeping ? "Sleeping" : undefined}
+            >
+              {panel.title}
+            </span>
+            <SleepMark
+              sleeping={sleeping}
+              keepAwake={!!panel.keepAwake}
+              size={12}
+            />
+          </>
         )}
         <div className="panel-actions">
           {companionToggle}
@@ -395,6 +462,23 @@ function PanelFrame({
             >
               {zoomed ? "Restore layout" : "Focus panel"}
             </button>
+            {onKeepAwake && (
+              <button
+                role="menuitemcheckbox"
+                aria-checked={!!panel.keepAwake}
+                className="panel-menu-check"
+                title="A kept-awake agent never sleeps when idle."
+                onClick={() => {
+                  onKeepAwake(!panel.keepAwake);
+                  setMenu(false);
+                }}
+              >
+                <span className="panel-menu-tick" aria-hidden="true">
+                  {panel.keepAwake && <Check size={12} />}
+                </span>
+                Keep awake
+              </button>
+            )}
             <button onClick={onClose}>
               {panel.sessionId ? "Close / end session…" : "Close panel"}
             </button>

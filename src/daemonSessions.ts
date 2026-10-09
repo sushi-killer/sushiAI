@@ -1,7 +1,9 @@
 import type {
+  Bridge,
   DaemonAsk,
   DaemonEvent,
   DaemonSession,
+  DaemonState,
   Panel,
   Workspace,
 } from "./types";
@@ -27,6 +29,9 @@ type MetaParams = {
   id: string;
   agentSession?: string | null;
   transcriptPath?: string | null;
+  /** Absent from an older daemon: the field is left as it was. */
+  foregroundAgent?: string | null;
+  foregroundCwd?: string | null;
 };
 
 const withoutAsks = (session: DaemonSession): DaemonSession => {
@@ -162,6 +167,12 @@ export function applyDaemonEvent(
             ...known,
             agentSession: p.agentSession ?? undefined,
             transcriptPath: p.transcriptPath ?? undefined,
+            ...("foregroundAgent" in p
+              ? {
+                  foregroundAgent: p.foregroundAgent ?? undefined,
+                  foregroundCwd: p.foregroundCwd ?? undefined,
+                }
+              : {}),
           },
         },
       };
@@ -237,6 +248,9 @@ function panelStatus(
   session: DaemonSession,
   previous: string | undefined,
 ): string | undefined {
+  // A sleeping or waking agent is alive, not ended; it counts like idle.
+  if (session.status === "hibernated") return "sleeping";
+  if (session.status === "waking") return "waking";
   switch (session.agentStatus) {
     case "starting":
       return "starting";
@@ -258,20 +272,45 @@ function panelStatus(
 /** A session the host no longer runs. The panel keeps its slot and its saved
  * state; it shows "Session ended" with Reopen until it is reopened or closed. */
 function endPanel(panel: Panel, session?: DaemonSession): Panel {
-  const agentSession = session?.agentSession || panel.agentSession;
-  if (
-    panel.ended &&
-    panel.status === undefined &&
-    panel.agentSession === agentSession
-  )
-    return panel;
-  const next: Panel = {
-    ...panel,
-    ended: true,
-    ...(agentSession ? { agentSession } : {}),
-  };
+  const terminal = panel.kind === "terminal";
+  const next: Panel = { ...panel, ended: true };
   delete next.status;
-  return next;
+  if (session) {
+    // The host still has the record, so it is what Reopen continues: a shell
+    // that was left after its agent quit has nothing to continue. Only a host
+    // that forgot the session leaves the panel's own copy.
+    const agent =
+      session.agent ??
+      session.foregroundAgent ??
+      (terminal ? undefined : panel.agent);
+    const conversation =
+      session.agentSession || (terminal ? undefined : panel.agentSession);
+    setOrDelete(next, "agent", agent);
+    setOrDelete(next, "agentSession", conversation);
+    setOrDelete(next, "agentCwd", terminal ? session.foregroundCwd : undefined);
+  }
+  return unchanged(panel, next);
+}
+
+function setOrDelete<K extends "agent" | "agentSession" | "agentCwd">(
+  panel: Panel,
+  key: K,
+  value: string | undefined,
+) {
+  if (value) panel[key] = value;
+  else delete panel[key];
+}
+
+/** The old panel when `next` differs from it in no field. */
+function unchanged(panel: Panel, next: Panel): Panel {
+  const keys = new Set([...Object.keys(panel), ...Object.keys(next)]);
+  for (const key of keys)
+    if (
+      (panel as Record<string, unknown>)[key] !==
+      (next as Record<string, unknown>)[key]
+    )
+      return next;
+  return panel;
 }
 
 function livePanel(panel: Panel, session: DaemonSession): Panel {
@@ -284,16 +323,21 @@ function livePanel(panel: Panel, session: DaemonSession): Panel {
   if (title) next.title = title;
   if (session.cwd) next.paneCwd = session.cwd;
   if (session.agentSession) next.agentSession = session.agentSession;
-  // The icon follows the agent the daemon runs in the session.
-  if (session.agent) next.agent = session.agent;
-  const keys = new Set([...Object.keys(panel), ...Object.keys(next)]);
-  for (const key of keys)
-    if (
-      (panel as Record<string, unknown>)[key] !==
-      (next as Record<string, unknown>)[key]
-    )
-      return next;
-  return panel;
+  if (session.pinned) next.keepAwake = true;
+  else delete next.keepAwake;
+  // The icon follows the agent the daemon runs in the session. A terminal also
+  // follows one the owner started by hand, and drops it (with its conversation
+  // id and folder) when that agent is gone.
+  const agent =
+    session.agent ??
+    (panel.kind === "terminal" ? session.foregroundAgent : undefined);
+  if (agent) next.agent = agent;
+  if (panel.kind === "terminal") {
+    if (!agent) delete next.agent;
+    if (!session.agentSession) delete next.agentSession;
+    setOrDelete(next, "agentCwd", session.foregroundCwd);
+  }
+  return unchanged(panel, next);
 }
 
 /** Brings the panels bound to a daemon session in line with what each host
@@ -385,4 +429,135 @@ export function askDecision(
   decision: "allow" | "deny",
 ): [string, { sessionId: string; askId: string; decision: "allow" | "deny" }] {
   return [ask.host, { sessionId: ask.session, askId: ask.askId, decision }];
+}
+
+/** True when the host's daemon reported the capability in its hello. */
+export function hostSupports(
+  states: Pick<DaemonState, "host" | "state" | "capabilities">[],
+  host: string,
+  capability: string,
+): boolean {
+  return states.some(
+    (state) =>
+      state.host === host &&
+      state.state === "ready" &&
+      !!state.capabilities?.includes(capability),
+  );
+}
+
+/** The idle-sleep choices of Settings -> General, in seconds; 0 is off. */
+export const HIBERNATE_CHOICES = [
+  { secs: 0, label: "Off" },
+  { secs: 3600, label: "1 h" },
+  { secs: 14400, label: "4 h" },
+  { secs: 43200, label: "12 h" },
+] as const;
+export const DEFAULT_HIBERNATE_SECS = 14400;
+
+/** Pushes the idle-sleep delay to one host, only when it can hibernate. */
+export async function configureHibernation(
+  bridge: Pick<Bridge, "daemonConfigure">,
+  state: Pick<DaemonState, "host" | "state" | "capabilities">,
+  secs: number,
+): Promise<void> {
+  if (!hostSupports([state], state.host, "hibernate")) return;
+  await bridge.daemonConfigure(state.host, secs);
+}
+
+/** Pushes the delay to every ready host that can hibernate. */
+export async function configureAllHosts(
+  bridge: Pick<Bridge, "daemonStates" | "daemonConfigure">,
+  secs: number,
+): Promise<void> {
+  const states = await bridge.daemonStates();
+  await Promise.all(
+    states.map((state) =>
+      configureHibernation(bridge, state, secs).catch(() => {}),
+    ),
+  );
+}
+
+/** `session.wake` errors that mean "start a new session instead": the host has
+ * no such record (1003) or no stored launch for it (1012). */
+const WAKE_FALLBACK_CODES = [1003, 1012];
+/** `session.wake` refused because the key of the stored launch is unavailable
+ * (LAUNCH_KEY_UNAVAILABLE 1013): the session stays asleep; a new session must not start. */
+const WAKE_KEY_UNAVAILABLE = 1013;
+const KEY_UNAVAILABLE_NOTICE = "Unlock the keychain to wake this agent";
+
+/** Whether Reopen applies to a pane: a terminal or agent that ended, has no session
+ * yet, or sleeps (its wake failed and the click or keystroke fell back to Reopen). */
+export function canReopen(
+  panel: Pick<Panel, "kind" | "ended" | "sessionId" | "status">,
+): boolean {
+  if (panel.kind !== "agent" && panel.kind !== "terminal") return false;
+  return !!panel.ended || !panel.sessionId || panel.status === "sleeping";
+}
+
+/** The wake call for a Reopen, or null when Reopen must create a session: only
+ * an agent panel whose session holds the agent's own conversation id wakes. A
+ * terminal (shell or hand-started agent) reopens as before. */
+export function wakeRequest(
+  owner: Workspace,
+  ended: Panel,
+  defaultEndpoint: string,
+): { host: string; id: string } | null {
+  if (ended.kind !== "agent" || !ended.sessionId || !ended.agentSession)
+    return null;
+  return {
+    host: daemonHost(owner.connection || defaultEndpoint),
+    id: ended.sessionId,
+  };
+}
+
+/** Tries to wake the session in place. True when it is waking; false when the
+ * caller must fall back to `session.create {resume}`. Any other refusal throws. */
+export async function wakeInPlace(
+  bridge: Pick<Bridge, "daemonStates" | "sessionWake">,
+  request: { host: string; id: string },
+): Promise<boolean> {
+  const states = await bridge.daemonStates();
+  if (!hostSupports(states, request.host, "hibernate")) return false;
+  const result = await bridge.sessionWake(request.host, request.id);
+  if (result.ok) return true;
+  if (result.code !== undefined && WAKE_FALLBACK_CODES.includes(result.code))
+    return false;
+  if (result.code === WAKE_KEY_UNAVAILABLE)
+    throw new Error(KEY_UNAVAILABLE_NOTICE);
+  throw new Error(result.message);
+}
+
+/** Wakes a sleeping session for a click or a keystroke. When the host has no such
+ * record or no stored launch (1003, 1012) the same fallback as Reopen runs
+ * (`reopen`: a new session that resumes). Returns the refusal text, or null. */
+export async function wakeOrReopen(
+  bridge: Pick<Bridge, "sessionWake">,
+  request: { host: string; id: string },
+  reopen: () => void,
+): Promise<string | null> {
+  const result = await bridge.sessionWake(request.host, request.id);
+  if (result.ok) return null;
+  if (result.code !== undefined && WAKE_FALLBACK_CODES.includes(result.code)) {
+    reopen();
+    return null;
+  }
+  if (result.code === WAKE_KEY_UNAVAILABLE) return KEY_UNAVAILABLE_NOTICE;
+  return result.message;
+}
+
+/** What a terminal does with a daemon state of its host: null when it changes nothing
+ * (another host, not ready, a generation already handled), else the capability read
+ * again. A new generation (hello, daemon restart) also means the host forgot what it
+ * was told, so the caller resets its `reported` flag and says "focused" again. */
+export function hostGenerationChange(
+  seen: number,
+  state: Pick<DaemonState, "host" | "state" | "capabilities" | "generation">,
+  host: string,
+): { generation: number; canFocus: boolean } | null {
+  if (state.host !== host || state.state !== "ready") return null;
+  if (state.generation === seen) return null;
+  return {
+    generation: state.generation,
+    canFocus: hostSupports([state], host, "hibernate"),
+  };
 }

@@ -80,6 +80,21 @@ const CHANNELS = {
         (typeof update[key] !== "string" || update[key].length > MAX_TEXT)
       )
         throw new Error(`Invalid ${key}.`);
+    if (update.pinned !== undefined && typeof update.pinned !== "boolean")
+      throw new Error("Invalid pinned.");
+  },
+  "daemon-session-wake": (h, id) => {
+    host(h);
+    text(id, "session id");
+  },
+  "daemon-session-focus": (h, id, focused) => {
+    host(h);
+    text(id, "session id");
+    if (typeof focused !== "boolean") throw new Error("Invalid focused.");
+  },
+  "daemon-configure": (h, secs) => {
+    host(h);
+    int(secs, "hibernateAfterSecs", { max: 366 * 24 * 3600 });
   },
   "daemon-session-read": (h, id, scrollback) => {
     host(h);
@@ -141,9 +156,18 @@ const LIFECYCLE = {
     { id, graceful },
   ],
   "daemon-session-update": (_h, patch) => {
-    const { id, project, group, title } = patch;
-    return ["session.update", { id, project, group, title }];
+    const { id, project, group, title, pinned } = patch;
+    return ["session.update", { id, project, group, title, pinned }];
   },
+  "daemon-session-wake": (_h, id) => ["session.wake", { id }],
+  "daemon-session-focus": (_h, id, focused) => [
+    "session.focus",
+    { id, focused },
+  ],
+  "daemon-configure": (_h, hibernateAfterSecs) => [
+    "daemon.configure",
+    { hibernateAfterSecs },
+  ],
   "daemon-session-read": (_h, id, scrollback) => [
     "session.read",
     { id, scrollback },
@@ -204,6 +228,16 @@ function registerDaemonIpc({
       const terminal = TERMINAL_CHANNELS[channel];
       if (terminal) return terminal(terminals, ...args);
       const [method, params] = LIFECYCLE[channel](...args);
+      if (channel === "daemon-session-wake") {
+        // The renderer picks the next step from the code, and an IPC error
+        // keeps only its message: a refusal comes back as a value.
+        try {
+          await manager.request(args[0], method, params);
+          return { ok: true };
+        } catch (error) {
+          return { ok: false, code: error.code, message: error.message };
+        }
+      }
       const result = await manager.request(args[0], method, params);
       return RETURNS_RESULT.has(channel) ? result : undefined;
     });

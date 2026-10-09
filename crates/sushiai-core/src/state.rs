@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 use sushiai_protocol::SessionInfo;
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// The schema this daemon writes. Schema 1 (no hibernation fields) is still read.
+pub const SCHEMA_VERSION: u32 = 2;
+const OLDEST_SCHEMA: u32 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
-    #[error("state file schema version {0:?} is not supported (expected {SCHEMA_VERSION})")]
+    #[error("state file schema version {0:?} is not supported (expected {OLDEST_SCHEMA} or {SCHEMA_VERSION})")]
     UnsupportedSchema(Option<u64>),
     #[error("state file is not valid: {0}")]
     Invalid(#[from] serde_json::Error),
@@ -34,7 +36,8 @@ impl StateFile {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, StateError> {
         let value: serde_json::Value = serde_json::from_slice(bytes)?;
         let version = value.get("schemaVersion").and_then(|v| v.as_u64());
-        if version != Some(u64::from(SCHEMA_VERSION)) {
+        let known = u64::from(OLDEST_SCHEMA)..=u64::from(SCHEMA_VERSION);
+        if !version.is_some_and(|v| known.contains(&v)) {
             return Err(StateError::UnsupportedSchema(version));
         }
         Ok(serde_json::from_value(value)?)

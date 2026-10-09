@@ -5,6 +5,7 @@ const net = require("node:net");
 const { randomUUID } = require("node:crypto");
 const { appDb, transaction } = require("./app-db.cjs");
 const { InspectionWorker } = require("./inspection-worker.cjs");
+const { remoteCommand } = require("./ssh-command.cjs");
 const quote = (text) => "'" + String(text).replaceAll("'", "'\\''") + "'";
 
 function run(binary, args, input = "", timeout = 20000) {
@@ -42,6 +43,41 @@ function run(binary, args, input = "", timeout = 20000) {
         : code
           ? reject(new Error(stderr || `Process exited (${code})`))
           : resolve(stdout);
+    });
+    proc.stdin.on("error", () => {});
+    proc.stdin.end(input);
+  });
+}
+/** Like run(), but for a caller that wants the exit code and the end of both
+ * streams (at most `tailBytes` each, kept as raw bytes) whatever the code is.
+ * A timeout kills the process and reports code null. */
+function runTail(binary, args, input, timeout, tailBytes) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(binary, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let out = Buffer.alloc(0);
+    let err = Buffer.alloc(0);
+    let timedOut = false;
+    const keep = (buffer, chunk) =>
+      Buffer.concat([buffer, chunk]).subarray(-tailBytes);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill("SIGKILL");
+    }, timeout);
+    proc.stdout.on("data", (chunk) => (out = keep(out, chunk)));
+    proc.stderr.on("data", (chunk) => (err = keep(err, chunk)));
+    proc.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({
+        code: timedOut ? null : code,
+        stdout: out.toString("utf8"),
+        stderr: timedOut
+          ? `${err.toString("utf8")}\nTimed out after ${timeout} ms.`.trim()
+          : err.toString("utf8"),
+      });
     });
     proc.stdin.on("error", () => {});
     proc.stdin.end(input);
@@ -291,6 +327,24 @@ class Connections {
       [...this.args(profile), profile.host, command],
       input,
       timeout,
+    );
+  }
+  /** Runs argv on the host over the same ssh path as exec(); resolves with
+   * {code, stdout, stderr} (the last `tailBytes` of each) for any exit code.
+   * The command string is shell-independent (see ssh-command.cjs). `input` is a Buffer or string. */
+  async execArgv(
+    endpoint,
+    argv,
+    { input = "", timeout = 120000, tailBytes = 65536 } = {},
+  ) {
+    const profile = this.get(endpoint);
+    this.#needShell(endpoint);
+    return runTail(
+      this.ssh,
+      [...this.args(profile), profile.host, remoteCommand(argv)],
+      input,
+      timeout,
+      tailBytes,
     );
   }
   /** Starts `ssh -L specification` (through the shared master when it has

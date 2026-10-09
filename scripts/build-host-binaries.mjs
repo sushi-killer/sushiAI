@@ -167,6 +167,9 @@ function build(target) {
 function finish(target, binary) {
   if (TARGETS[target].os === "darwin") {
     // Stripping rewrites the file and drops the signature; arm64 macOS refuses unsigned code.
+    // The manifest hash is taken after this ad-hoc signature, and package.json mac.signIgnore keeps
+    // electron-builder from re-signing Resources/host. Developer-ID/notarization: sign these here
+    // with the Developer ID (hardened runtime) before hashing, never after packaging.
     if (run("strip", ["-x", binary]).status !== 0)
       fail(`strip failed for ${target}`);
     if (run("codesign", ["-s", "-", "-f", binary]).status !== 0)

@@ -824,6 +824,48 @@
   border-bottom: 1px solid var(--line-divider);
 }
 
+.companion-field[data-type="list"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.companion-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.companion-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line-divider);
+}
+
+.companion-row:first-child {
+  border-top: 0;
+}
+
+.companion-row-main {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 2px;
+}
+
+.companion-row-label {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.companion-row-detail {
+  user-select: text;
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .companion-field[data-type="qr"] {
   align-items: start;
 }
@@ -834,6 +876,7 @@
 }
 
 .companion-text {
+  user-select: text;
   min-width: 0;
   overflow-wrap: anywhere;
   font-size: 13px;
@@ -966,4 +1009,39 @@
 
 .extension-companion-state[data-state="failed"] {
   color: var(--tone-danger);
+}
+
+/* Owner card for one companion host.exec call (CompanionExecPrompt). */
+.companion-exec {
+  width: min(640px, calc(100vw - 48px));
+}
+
+.companion-exec-label {
+  margin: 0 0 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.companion-exec-argv {
+  max-height: 240px;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--line-divider);
+  border-radius: var(--radius-sm);
+  user-select: text;
+}
+
+.companion-exec-argv pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.companion-exec-argv pre + pre {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line-divider);
 }

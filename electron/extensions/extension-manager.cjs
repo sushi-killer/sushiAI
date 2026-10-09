@@ -518,6 +518,23 @@ class ExtensionManager {
     );
   }
 
+  /** A list row's button. The renderer names the field and the row; the
+   * method comes from the manifest. */
+  async companionRow(extensionId, surfaceId, fieldId, rowId) {
+    await this.ready;
+    const surface = this.companionSurface(extensionId, surfaceId);
+    const field = surface.view.fields.find((item) => item.id === fieldId);
+    if (field?.type !== "list" || !field.method)
+      throw new Error(`Unknown companion list: ${fieldId}.`);
+    return this.companions.callRow(
+      extensionId,
+      field.method,
+      surfaceId,
+      rowId,
+      surface.view,
+    );
+  }
+
   /** listener({extensionId, surfaceId}) when a companion view has new values
    * or its process changed state. Returns an unsubscribe. */
   onCompanionChanged(listener) {

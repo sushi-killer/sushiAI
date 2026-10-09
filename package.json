@@ -14,13 +14,14 @@
     "test": "node --test tests/*.test.cjs",
     "test:desktop": "npm run build && node scripts/smoke.mjs && node scripts/smoke-companion.mjs",
     "test:terminal": "node scripts/terminal-rendering.mjs",
-    "package": "npm run build:daemon && npm run build:host && npm run build && electron-builder --mac dir",
+    "package": "npm run build:daemon && npm run build:host && npm run build && electron-builder --mac dir && node scripts/verify-host-manifest.mjs release/mac-arm64/sushiAI.app",
+    "install:app": "node scripts/install-app.mjs",
     "postinstall": "electron-builder install-app-deps",
     "format": "prettier --write src electron scripts tests *.json *.ts *.html README.md",
     "icon": "node scripts/icon.mjs",
     "test:remote": "node scripts/features-smoke.mjs",
     "promo": "node scripts/promo.mjs",
-    "package:dmg": "npm run build:daemon && npm run build:host && npm run build && electron-builder --mac dmg --arm64 --publish never",
+    "package:dmg": "npm run build:daemon && npm run build:host && npm run build && electron-builder --mac dmg --arm64 --publish never && node scripts/verify-host-manifest.mjs release/mac-arm64/sushiAI.app",
     "test:unicode": "node scripts/terminal-unicode.mjs",
     "perf": "node scripts/perf-benchmark.mjs",
     "check:conventions": "node scripts/check-conventions.mjs",
@@ -77,8 +78,18 @@
       "category": "public.app-category.developer-tools",
       "target": "dir",
       "identity": "-",
+      "signIgnore": [
+        "Resources/host/"
+      ],
       "hardenedRuntime": false,
-      "minimumSystemVersion": "13.0"
+      "minimumSystemVersion": "13.0",
+      "extendInfo": {
+        "NSDesktopFolderUsageDescription": "Agent sessions read and write the projects you keep on your Desktop.",
+        "NSDocumentsFolderUsageDescription": "Agent sessions read and write the projects you keep in Documents.",
+        "NSDownloadsFolderUsageDescription": "Agent sessions read files you saved to Downloads.",
+        "NSRemovableVolumesUsageDescription": "Agent sessions read projects on removable drives.",
+        "NSNetworkVolumesUsageDescription": "Agent sessions read projects on network drives."
+      }
     },
     "artifactName": "sushiAI-${version}-${arch}.${ext}",
     "extraResources": [

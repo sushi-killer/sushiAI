@@ -8,7 +8,12 @@
 function listSshHosts(getProfiles) {
   const profiles = typeof getProfiles === "function" ? getProfiles() : [];
   return (Array.isArray(profiles) ? profiles : [])
-    .filter((profile) => profile && profile.connector?.kind !== "command")
+    .filter(
+      (profile) =>
+        profile &&
+        profile.id !== "local" &&
+        profile.connector?.kind !== "command",
+    )
     .map((profile) => ({
       id: String(profile.id),
       name: String(profile.name ?? profile.host),

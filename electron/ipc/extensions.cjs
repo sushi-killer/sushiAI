@@ -1,3 +1,5 @@
+const { createOwnerPrompts } = require("../extensions/companion-prompts.cjs");
+
 const MAX_RECORDS = 1000;
 
 /** The surface a request names, if it exists and is switched on. State is
@@ -79,6 +81,8 @@ function registerExtensionIpc({
   getSurfaceState,
   announce = () => {},
   announceCompanion = () => {},
+  announceExec = () => {},
+  withdrawExec = () => {},
 }) {
   // A companion's view.changed (or its process changing state) reaches the
   // renderer as {extensionId, surfaceId}. Subscribed once, when the manager
@@ -161,6 +165,27 @@ function registerExtensionIpc({
       name(surfaceId, "surface id"),
       name(actionId, "action id"),
     ),
+  );
+
+  handle("extensions-companion-row", (extensionId, surfaceId, fieldId, rowId) =>
+    manager().companionRow(
+      name(extensionId, "extension id"),
+      name(surfaceId, "surface id"),
+      name(fieldId, "field id"),
+      name(rowId, "row id"),
+    ),
+  );
+
+  // The cards that ask the owner before a companion runs a command on a host.
+  // Main owns the queue (companion-prompts.cjs); the renderer draws and
+  // answers by id.
+  const prompts = createOwnerPrompts({
+    announce: announceExec,
+    withdraw: withdrawExec,
+  });
+  getExtensions()?.companions?.setAskOwner(prompts.ask, prompts.cancel);
+  handle("extensions-companion-exec-answer", (id, allow) =>
+    prompts.answer(name(id, "question id"), allow === true),
   );
 
   handle("extensions-approve", async (extensionId) => {

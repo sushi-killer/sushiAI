@@ -561,3 +561,18 @@ export function hostGenerationChange(
     canFocus: hostSupports([state], host, "hibernate"),
   };
 }
+
+/** Signals an owner (or the OS on logout) sends to close a process: HUP, INT, KILL, TERM. */
+const CLOSE_SIGNALS = new Set([1, 2, 9, 15]);
+
+/** How an exited session ended. The daemon reports a signal death as `128 + signo`, the shell
+ * convention, so a direct-child agent and a shell-wrapped one read the same. Closing signals
+ * are `stopped`; any other nonzero code, crash signals included, is `failed`. */
+export function exitOutcome(
+  session: Pick<DaemonSession, "status" | "exitCode">,
+): "running" | "done" | "stopped" | "failed" {
+  if (session.status !== "exited") return "running";
+  const code = session.exitCode;
+  if (code === undefined || code === 0) return "done";
+  return code > 128 && CLOSE_SIGNALS.has(code - 128) ? "stopped" : "failed";
+}

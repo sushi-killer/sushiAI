@@ -279,6 +279,23 @@ impl Running {
     }
 }
 
+/// The code a shell would report: a child killed by signal `n` exits `128 + n`. portable-pty
+/// keeps only the `strsignal` text and reports code 1 for it, so the number is found by name.
+fn exit_code_of(status: &portable_pty::ExitStatus) -> i32 {
+    let Some(name) = status.signal() else {
+        return status.exit_code() as i32;
+    };
+    let signo = (1..=31).find(|&n| {
+        let text = unsafe { libc::strsignal(n) };
+        !text.is_null()
+            && unsafe { std::ffi::CStr::from_ptr(text) }
+                .to_string_lossy()
+                .as_ref()
+                == name
+    });
+    signo.map_or(status.exit_code() as i32, |n| 128 + n)
+}
+
 /// Waits for the child. `try_wait` runs under the pid lock, so a signal is never sent
 /// to a pid that was already reaped.
 fn reap(holder: &Holder, child: &mut (dyn portable_pty::Child + Send + Sync)) -> Option<i32> {
@@ -289,7 +306,7 @@ fn reap(holder: &Holder, child: &mut (dyn portable_pty::Child + Send + Sync)) ->
                 Ok(None) => {}
                 Ok(Some(status)) => {
                     *pid = None;
-                    return Some(status.exit_code() as i32);
+                    return Some(exit_code_of(&status));
                 }
                 Err(_) => {
                     *pid = None;

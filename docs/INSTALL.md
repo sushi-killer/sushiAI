@@ -74,6 +74,12 @@ Package an `.app` for your Mac's architecture:
 npm run package
 ```
 
+A local build is signed ad hoc, so macOS treats every rebuild as a new app and asks
+again for Desktop and other privacy access. To keep those grants, create a stable local
+signing identity once (`scripts/setup-local-signing.sh`), then package with it:
+`npm run build:daemon && npm run build:host && npm run build && electron-builder --mac dir "-c.mac.identity=sushiAI Local Signing"`
+(the `mac.identity: "-"` in `package.json` keeps CI and other machines on ad hoc signing).
+
 Build an Apple Silicon DMG:
 
 ```sh

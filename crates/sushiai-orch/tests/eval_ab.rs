@@ -444,6 +444,7 @@ fn a_done_eval_task_counts_as_a_success_only_when_its_check_passes() {
 
     // The daemon's data dir feeds the report exactly as `sushiai orch ab` reads it.
     let out = Command::new(sushiai_bin())
+        .env_remove("SUSHIAI_HOME")
         .args(["orch", "ab", "--eval", "set-x", "--data"])
         .arg(daemon.data_dir())
         .output()

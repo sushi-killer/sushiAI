@@ -8,7 +8,7 @@
   "companion": {
     "command": "probe-companion",
     "args": ["serve"],
-    "permissions": ["hosts.read"]
+    "permissions": ["hosts.read", "hosts.exec"]
   },
   "contributions": {
     "surfaces": [
@@ -24,7 +24,13 @@
           "fields": [
             { "id": "service", "label": "Service", "type": "status" },
             { "id": "pairing", "label": "Scan code", "type": "qr" },
-            { "id": "note", "label": "Note", "type": "text" }
+            { "id": "note", "label": "Note", "type": "text" },
+            {
+              "id": "hosts",
+              "label": "Hosts",
+              "type": "list",
+              "method": "host.add"
+            }
           ],
           "actions": [
             {

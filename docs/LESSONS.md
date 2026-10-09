@@ -31,6 +31,7 @@ Rule: land one working end-to-end path first, then generalize.
 
 Root cause: JS tests on a base without the step 5 isolation changed the real home.
 Rule: merge the isolation fix into every lane base before JS tests run.
+Update 2026-10-07: inherited `SUSHIAI_HOME` relinked it again; spawned binaries set or remove it.
 
 ## Promoted
 
@@ -43,6 +44,7 @@ Rule: merge the isolation fix into every lane base before JS tests run.
 - 2026-10-02 Duplicate project rows survived three point fixes → data-model fix, not another patch.
 - 2026-10-02 herdr ignored a lower `--seq` and repeats → signals carry a nonce. `open-signal.test.cjs`.
 - 2026-10-02 Exact Herdr pin broke on self-update → check capabilities + protocol match.
+- 2026-10-09 A reused LAN address sent the Hub `rsync --delete` to another server → check the target runs the service first. Remote `hub-deploy.mjs` preflight.
 - 2026-10-02 Mid-session dead-row removal raced close flows → sweep at restore.
 - 2026-10-02 Fixtures invented `gh` output → copy real CLI shapes (`MERGED`). `worktree-session.test.cjs`.
 - 2026-10-02 Git identity loading split worktree rows → wait for first-host identities before drawing.
@@ -57,4 +59,3 @@ Rule: merge the isolation fix into every lane base before JS tests run.
 - 2026-09-29 A kill lost uncommitted localStorage state → durable state goes in `sushiai.db`.
 - 2026-09-30 A preselected answer plus Enter sent unpicked answers → Enter needs a pick or typed text. `enterAnswer` in `ownerAttention.ts`.
 - 2026-09-28 Trusted `rtk rewrite` (`rtk read` drops code) → allowlist. `rtk_rewrite_output_*`.
-- 2026-09-24 An unparsed review verdict counted as PASS → no verdict asks the owner. `a_review_without_a_verdict_waits_for_the_owner_instead_of_passing`.

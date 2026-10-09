@@ -230,8 +230,8 @@ const MAX_OPTIONS = 32;
 const MAX_VIEWS = 1;
 // A companion process is a native program the app runs for an extension (see
 // companion-process.cjs). Its view is a form of values the process reports.
-const COMPANION_FIELD_TYPES = new Set(["text", "status", "qr"]);
-const COMPANION_PERMISSIONS = new Set(["hosts.read"]);
+const COMPANION_FIELD_TYPES = new Set(["text", "status", "qr", "list"]);
+const COMPANION_PERMISSIONS = new Set(["hosts.read", "hosts.exec"]);
 const COMPANION_SEND = new Set(["hosts"]);
 const COMPANION_METHOD = /^[a-z][a-z0-9.]*$/;
 const MAX_COMPANION_ARGS = 8;
@@ -509,6 +509,8 @@ function validateCompanion(input, sourceKind) {
       );
   if (new Set(permissions).size !== permissions.length)
     throw new Error("companion.permissions lists a permission twice.");
+  if (permissions.includes("hosts.exec") && !permissions.includes("hosts.read"))
+    throw new Error("companion.permissions: hosts.exec needs hosts.read.");
   return { command, args: [...args], permissions: [...permissions] };
 }
 
@@ -524,16 +526,39 @@ function validateCompanionView(view, at) {
       `${at}.view.actions may declare at most ${MAX_COMPANION_ACTIONS} actions.`,
     );
   const ids = new Set();
+  let listFields = 0;
   const outFields = fields.map((field, index) => {
     const where = `${at}.view.fields[${index}]`;
     const fieldId = id(field?.id, `${where}.id`);
     if (ids.has(fieldId))
       throw new Error(`${at}.view.fields: ${fieldId} is declared twice.`);
     ids.add(fieldId);
+    const type = choice(
+      field.type,
+      `${where}.type`,
+      COMPANION_FIELD_TYPES,
+      "text",
+    );
+    if (type !== "list" && field.method !== undefined)
+      throw new Error(`${where}.method belongs to a list field.`);
+    if (type === "list") {
+      listFields += 1;
+      if (listFields > 1)
+        throw new Error(`${at}.view.fields may declare at most 1 list field.`);
+      if (
+        field.method !== undefined &&
+        (typeof field.method !== "string" ||
+          !COMPANION_METHOD.test(field.method))
+      )
+        throw new Error(`${where}.method must match ${COMPANION_METHOD}.`);
+    }
     return {
       id: fieldId,
       label: requiredString(field.label ?? fieldId, `${where}.label`),
-      type: choice(field.type, `${where}.type`, COMPANION_FIELD_TYPES, "text"),
+      type,
+      ...(type === "list" && field.method !== undefined
+        ? { method: field.method }
+        : {}),
     };
   });
   const actionIds = new Set();

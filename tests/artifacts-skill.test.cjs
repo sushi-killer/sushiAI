@@ -159,7 +159,12 @@ test("the remote script decodes to the exact text, hostile characters included",
     fs.mkdirSync(path.join(home, ".claude"));
     execFileSync("/bin/sh", ["-s"], {
       input: remoteInstallScript(TEXT),
-      env: { ...process.env, HOME: home },
+      env: {
+        ...process.env,
+        HOME: home,
+        CLAUDE_CONFIG_DIR: "",
+        CODEX_HOME: "",
+      },
     });
     assert.equal(
       fs.readFileSync(
@@ -287,7 +292,12 @@ test("the remote removal script deletes ours and leaves a foreign skill", async 
     const exec = async (e, c, { input }) =>
       execFileSync("/bin/sh", ["-s"], {
         input,
-        env: { ...process.env, HOME: home },
+        env: {
+          ...process.env,
+          HOME: home,
+          CLAUDE_CONFIG_DIR: "",
+          CODEX_HOME: "",
+        },
       }).toString();
     await withRealEnv(() => syncBuiltinSkillsOnHost({ exec }, "ssh:u@h"));
     assert.equal(fs.existsSync(own), false);

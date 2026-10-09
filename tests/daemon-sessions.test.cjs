@@ -341,3 +341,101 @@ test("a workspace without a connection reconciles against the local host and the
     ],
   );
 });
+
+test("a terminal follows the agent started by hand and drops it when it is gone", async () => {
+  const { reconcileSessions, applyDaemonEvent } = await library;
+  const shell = { cmd: ["zsh"] };
+  const terminal = panel("t1", "s1", { kind: "terminal" });
+  let host = ready([session("s1", shell)]);
+  const run = (h, panels) =>
+    reconcileSessions([workspace(panels, undefined)], { local: h })[0].panels;
+
+  host = applyDaemonEvent(host, {
+    method: "session.meta",
+    params: {
+      id: "s1",
+      agentSession: "agent-conv-id",
+      foregroundAgent: "claude",
+      foregroundCwd: "/work/deep",
+    },
+  });
+  assert.equal(host.sessions.s1.foregroundAgent, "claude");
+  const live = run(host, [terminal]);
+  assert.equal(live[0].agent, "claude");
+  assert.equal(live[0].agentSession, "agent-conv-id");
+  assert.equal(live[0].agentCwd, "/work/deep");
+
+  // The agent exits back to the shell: both clear.
+  host = applyDaemonEvent(host, {
+    method: "session.meta",
+    params: {
+      id: "s1",
+      agentSession: null,
+      foregroundAgent: null,
+      foregroundCwd: null,
+    },
+  });
+  assert.equal(host.sessions.s1.foregroundAgent, undefined);
+  const cleared = run(host, live);
+  assert.equal("agent" in cleared[0], false);
+  assert.equal("agentSession" in cleared[0], false);
+  assert.equal("agentCwd" in cleared[0], false);
+
+  // A meta event without the field (an older daemon) leaves it alone.
+  host = applyDaemonEvent(
+    ready([session("s1", { ...shell, foregroundAgent: "codex" })]),
+    { method: "session.meta", params: { id: "s1", agentSession: null } },
+  );
+  assert.equal(host.sessions.s1.foregroundAgent, "codex");
+
+  // An agent panel launched by the app is never cleared by a session without one.
+  const launched = panel("a1", "s2", { agent: "claude" });
+  assert.equal(
+    run(ready([session("s2", shell)]), [launched])[0].agent,
+    "claude",
+  );
+});
+
+test("an exited terminal takes what the host still records, else keeps its own copy", async () => {
+  const { reconcileSessions } = await library;
+  const end = (record, panelExtra = {}) =>
+    reconcileSessions(
+      [
+        workspace(
+          [panel("t1", "s1", { kind: "terminal", ...panelExtra })],
+          undefined,
+        ),
+      ],
+      { local: ready(record ? [record] : []) },
+    )[0].panels[0];
+  const exited = (extra = {}) =>
+    session("s1", { cmd: ["zsh"], status: "exited", ...extra });
+
+  const kept = end(
+    exited({
+      foregroundAgent: "codex",
+      agentSession: "thread-1",
+      foregroundCwd: "/work/deep",
+    }),
+  );
+  assert.equal(kept.ended, true);
+  assert.deepEqual(
+    [kept.agent, kept.agentSession, kept.agentCwd],
+    ["codex", "thread-1", "/work/deep"],
+  );
+
+  // The shell was left right after its agent quit: the host cleared the
+  // record, so the stale copy on the panel goes too.
+  const stale = { agent: "claude", agentSession: "old", agentCwd: "/x" };
+  const cleared = end(exited(), stale);
+  assert.equal(cleared.ended, true);
+  for (const key of ["agent", "agentSession", "agentCwd"])
+    assert.equal(key in cleared, false, key);
+
+  // A host that forgot the session leaves the panel as it was.
+  const forgotten = end(null, stale);
+  assert.deepEqual(
+    [forgotten.agent, forgotten.agentSession, forgotten.agentCwd],
+    ["claude", "old", "/x"],
+  );
+});

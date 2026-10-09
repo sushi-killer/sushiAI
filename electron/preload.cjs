@@ -72,6 +72,9 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   daemonSessionLaunch: invoke("daemon-session-launch"),
   sessionClose: invoke("daemon-session-close"),
   sessionUpdate: invoke("daemon-session-update"),
+  sessionWake: invoke("daemon-session-wake"),
+  sessionFocus: invoke("daemon-session-focus"),
+  daemonConfigure: invoke("daemon-configure"),
   sessionRead: invoke("daemon-session-read"),
   sessionInput: invoke("daemon-session-input"),
   askRespond: invoke("daemon-ask-respond"),
@@ -156,6 +159,23 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   extensionsSetEnabled: invoke("extensions-set-enabled"),
   companionRead: invoke("extensions-companion-read"),
   companionAction: invoke("extensions-companion-action"),
+  companionRow: invoke("extensions-companion-row"),
+  companionExecAnswer: invoke("extensions-companion-exec-answer"),
+  onCompanionExecWithdraw: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on("extensions-companion-exec-withdraw", listener);
+    return () =>
+      ipcRenderer.removeListener(
+        "extensions-companion-exec-withdraw",
+        listener,
+      );
+  },
+  onCompanionExec: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on("extensions-companion-exec", listener);
+    return () =>
+      ipcRenderer.removeListener("extensions-companion-exec", listener);
+  },
   extensionApprove: invoke("extensions-approve"),
   onCompanionChanged: (callback) => {
     const listener = (_, data) => callback(data);

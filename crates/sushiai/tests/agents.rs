@@ -403,6 +403,31 @@ stay();
 }
 
 #[test]
+fn a_turn_stop_while_a_subagent_runs_keeps_the_session_working() {
+    let fake = Fake::new(
+        "claude",
+        "say('token', process.env.SUSHIAI_SESSION_TOKEN); stay();",
+    );
+    let mut sandbox = fake.sandbox();
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let id = create_agent(&mut client, "claude");
+    wait_until("token file", 15, || !fake.read("token").is_empty());
+    let token = fake.read("token").trim().to_string();
+    let mut hook = hook_client(&sandbox);
+    let mut send = |payload: Value| {
+        hook.call("hook.event", hook_params(&id, &token, "claude", payload));
+    };
+    let sub = |name: &str| json!({"hook_event_name": name, "agent_id": "a1"});
+    send(json!({"hook_event_name": "UserPromptSubmit"}));
+    send(sub("SubagentStart"));
+    send(json!({"hook_event_name": "Stop"}));
+    assert_eq!(list_entry(&mut client, &id)["agentStatus"], "working");
+    send(sub("SubagentStop"));
+    assert_eq!(list_entry(&mut client, &id)["agentStatus"], "idle");
+}
+
+#[test]
 fn a_hook_for_another_agent_is_rejected_by_the_daemon_too() {
     let fake = Fake::new(
         "claude",
@@ -797,7 +822,9 @@ fn hooks_install_refuses_to_overwrite_a_regular_file_at_the_stable_path() {
     fs::create_dir_all(&bin).expect("mkdir");
     fs::write(bin.join("sushiai"), "mine").expect("file");
     let mut command = Command::new(BIN);
-    command.args(["hooks", "install"]);
+    command
+        .args(["hooks", "install"])
+        .env_remove("SUSHIAI_HOME");
     for (k, v) in codex_env(home.path()) {
         command.env(k, v);
     }
@@ -823,7 +850,9 @@ fn running_the_binary_through_its_own_link_keeps_the_link_pointing_at_the_binary
 
     // Install again, this time started through the link.
     let mut command = Command::new(&link);
-    command.args(["hooks", "install"]);
+    command
+        .args(["hooks", "install"])
+        .env_remove("SUSHIAI_HOME");
     for (k, v) in codex_env(home.path()) {
         command.env(k, v);
     }

@@ -36,13 +36,23 @@ export type DaemonSession = {
   cwd: string;
   title?: string | null;
   /** Process status. */
-  status: "running" | "detached" | "exited";
+  status: "running" | "detached" | "exited" | "hibernated" | "waking";
   exitCode?: number;
+  /** 0 for the first process, +1 per wake. Absent when 0. */
+  incarnation?: number;
+  /** "Keep awake": the daemon never hibernates a pinned session. */
+  pinned?: boolean;
+  /** Unix milliseconds; present while the session is hibernated. */
+  hibernatedAt?: number;
   holderPid?: number;
   cols: number;
   rows: number;
   agent?: string;
   agentSession?: string;
+  /** An agent the owner started by hand in a shell session (detection only). */
+  foregroundAgent?: string;
+  /** The folder that agent's process runs in. */
+  foregroundCwd?: string;
   transcriptPath?: string;
   agentStatus?: "starting" | "working" | "blocked" | "idle" | "exited";
   statusSource?: "hook" | "heuristic";
@@ -171,6 +181,10 @@ type PanelState = {
   sessionId?: string;
   /** The agent CLI's own session id, kept so Reopen can resume it. */
   agentSession?: string;
+  /** The folder an agent started by hand in this terminal ran in, for Reopen. */
+  agentCwd?: string;
+  /** The host's "Keep awake" flag for this pane's session. */
+  keepAwake?: boolean;
   pinned?: boolean;
   updatedAt?: number;
   note?: string;
@@ -535,6 +549,8 @@ export type AppPreferences = {
   desktopMascot: boolean;
   /** Opt-in global shortcut that toggles the mascot. */
   mascotShortcut: boolean;
+  /** Seconds an idle agent session runs before it sleeps; 0 is off. */
+  hibernateAfterSecs: number;
 };
 export type MascotShortcutStatus = {
   accelerator: string;
@@ -620,8 +636,24 @@ export interface Bridge {
   sessionClose(host: string, id: string, graceful: boolean): Promise<void>;
   sessionUpdate(
     host: string,
-    patch: { id: string; project?: string; group?: string; title?: string },
+    patch: {
+      id: string;
+      project?: string;
+      group?: string;
+      title?: string;
+      pinned?: boolean;
+    },
   ): Promise<void>;
+  /** Wakes a hibernated or exited agent session on the same id. A refusal
+   * resolves with the daemon's error code instead of throwing. */
+  sessionWake(
+    host: string,
+    id: string,
+  ): Promise<{ ok: true } | { ok: false; code?: number; message: string }>;
+  /** Tells the host this window is looking at a session (never hibernates). */
+  sessionFocus(host: string, id: string, focused: boolean): Promise<void>;
+  /** Sets the host's idle-sleep delay in seconds; 0 turns it off. */
+  daemonConfigure(host: string, hibernateAfterSecs: number): Promise<void>;
   sessionRead(
     host: string,
     id: string,
@@ -846,6 +878,30 @@ export interface Bridge {
     surfaceId: string,
     actionId: string,
   ): Promise<import("./extensions/types.ts").CompanionResult>;
+  companionRow(
+    extensionId: string,
+    surfaceId: string,
+    fieldId: string,
+    rowId: string,
+  ): Promise<import("./extensions/types.ts").CompanionResult>;
+  /** Answers the owner card of one host.exec call (Allow or Deny). */
+  companionExecAnswer(id: string, allow: boolean): Promise<void>;
+  /** main takes a card back (answered, timed out, or its companion restarted). */
+  onCompanionExecWithdraw(callback: (card: { id: string }) => void): () => void;
+  onCompanionExec(
+    callback: (question: {
+      id: string;
+      extensionId: string;
+      extensionName: string;
+      hostName: string;
+      hostAddress: string;
+      /** The extension's own words; not verified. */
+      title: string;
+      argv: string[];
+      stdinBytes: number;
+      stdinSha256: string | null;
+    }) => void,
+  ): () => void;
   /** Records consent to the exact path, args and permissions in the listing. */
   extensionApprove(extensionId: string): Promise<void>;
   onCompanionChanged(

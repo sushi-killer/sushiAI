@@ -580,4 +580,54 @@ test("rename, close and reopen map a panel onto daemon calls", async () => {
   );
   assert.equal(shell.kind, "terminal");
   assert.equal("resume" in shell, false, "a shell has nothing to resume");
+  assert.equal(shell.agent, undefined);
+
+  const handStarted = (agent, extra = {}) =>
+    reopenRequest(
+      local,
+      panel("t", "terminal", { sessionId: "s2", ended: true, agent, ...extra }),
+      "op-3",
+      "/tmp/sock",
+    );
+  const claude = handStarted("claude", {
+    agentSession: "agent-conv-id",
+    agentCwd: "/work/deep",
+  });
+  assert.equal(claude.kind, "agent");
+  assert.equal(claude.agent, "claude");
+  assert.equal(claude.resume, "agent-conv-id");
+  assert.equal(claude.cwd, "/work/deep", "the agent's own folder");
+  assert.equal(claude.claudeAccountId, "", "the host's own login");
+  assert.equal(claude.codexAccountId, "");
+  // Without the exact conversation id the shell comes back: the newest
+  // conversation in the folder may belong to another pane.
+  for (const name of ["claude", "codex"]) {
+    const plain = handStarted(name, { agentCwd: "/work/deep" });
+    assert.equal(plain.kind, "terminal", name);
+    assert.equal(plain.agent, undefined);
+    assert.equal("resume" in plain, false);
+    assert.equal(plain.cwd, "/tmp", "a shell opens in the workspace folder");
+  }
+  const codex = handStarted("codex", { agentSession: "thread-3" });
+  assert.equal(codex.kind, "agent");
+  assert.equal(codex.resume, "thread-3");
+  // Gemini and cursor-agent have no conversation id: the command just runs again.
+  const gemini = handStarted("gemini");
+  assert.equal(gemini.kind, "agent");
+  assert.equal(gemini.agent, "gemini");
+  assert.equal("resume" in gemini, false);
+  // An app-launched agent panel without an id keeps today's behaviour.
+  const launched = reopenRequest(
+    local,
+    { ...live, agentSession: undefined, ended: true },
+    "op-4",
+    "/tmp/sock",
+  );
+  assert.equal("resume" in launched, false);
+  assert.equal(
+    launched.codexAccountId,
+    "work",
+    "an app launch keeps its account",
+  );
+  assert.equal(launched.cwd, "/tmp");
 });

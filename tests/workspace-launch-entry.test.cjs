@@ -769,6 +769,8 @@ test("Reopen of an ended agent panel launches with resume and the workspace as g
   const workspace = hostWorkspace([ended], { type: "leaf", id: "old" });
   const app = controller(
     {
+      // A host that does not report "hibernate" cannot wake: Reopen creates.
+      daemonStates: async () => [],
       daemonSessionLaunch: async (input) => {
         requests.push(input);
         return { host: "local", sessionId: "s-new", cwd: "/tmp/checkout" };
@@ -908,4 +910,53 @@ test("closing any live daemon session asks first, an ended one closes without as
   ]);
   app.ws.closePanel("e");
   assert.equal(app.confirmations.length, 0);
+});
+
+test("agent Reopen wakes the same session, and creates one only when the host cannot", async () => {
+  const endedAgent = () => ({
+    id: "old",
+    sessionId: "gone",
+    kind: "agent",
+    agent: "claude",
+    agentSession: "conversation-1",
+    title: "Claude",
+    ended: true,
+  });
+  const run = async (wake, capabilities = ["hibernate"]) => {
+    const server = daemon();
+    const wakes = [];
+    const bridge = {
+      ...server.bridge,
+      daemonStates: async () => [
+        { host: "local", state: "ready", generation: 1, capabilities },
+      ],
+      sessionWake: async (host, id) => {
+        wakes.push([host, id]);
+        return wake;
+      },
+    };
+    const app = controller(bridge, [
+      {
+        ...hostWorkspace([endedAgent()], { type: "leaf", id: "old" }),
+        connection: "local",
+      },
+    ]);
+    await app.ws.reopenPanel("old");
+    return { server, wakes, app };
+  };
+  const woken = await run({ ok: true });
+  assert.deepEqual(woken.wakes, [["local", "gone"]]);
+  assert.equal(woken.server.requests.length, 0, "no new session");
+  for (const code of [1012, 1003]) {
+    const fallback = await run({ ok: false, code, message: "no launch" });
+    assert.equal(fallback.wakes.length, 1);
+    assert.equal(fallback.server.requests.length, 1, `${code} creates`);
+    assert.equal(fallback.server.requests[0].resume, "conversation-1");
+  }
+  const old = await run({ ok: true }, []);
+  assert.equal(old.wakes.length, 0, "a host without the capability");
+  assert.equal(old.server.requests[0].resume, "conversation-1");
+  const failed = await run({ ok: false, code: 1001, message: "host busy" });
+  assert.equal(failed.server.requests.length, 0);
+  assert.deepEqual(failed.app.errors, ["host busy"]);
 });

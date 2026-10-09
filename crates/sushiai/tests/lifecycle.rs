@@ -938,3 +938,45 @@ fn a_recovered_screen_replays_output_at_the_sizes_it_was_written_at() {
     assert_eq!(after["snapshot"], before["snapshot"]);
     client.call("session.close", json!({"id": id, "graceful": false}));
 }
+
+/// A session whose command is a direct child of the holder keeps the signal that ended it:
+/// the exit code is `128 + signo`, like a shell reports.
+fn exit_code_after(command: &[&str], signal: Option<&str>) -> i64 {
+    let mut sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let created = client.call(
+        "session.create",
+        json!({"cmd": command, "cwd": "/tmp", "cols": 80, "rows": 24}),
+    );
+    let id = created["id"].as_str().expect("id").to_string();
+    if let Some(signal) = signal {
+        let holder = sandbox.holder_pid(&id);
+        kill(child_of(holder), signal);
+    }
+    let note = client.wait_note("session.exited");
+    assert_eq!(note["id"], id.as_str());
+    let listed = client.call("session.list", Value::Null);
+    let info = listed
+        .as_array()
+        .and_then(|l| l.iter().find(|s| s["id"] == id.as_str()))
+        .expect("listed");
+    assert_eq!(info["status"], "exited");
+    assert_eq!(info["exitCode"], note["code"]);
+    note["code"].as_i64().expect("code")
+}
+
+#[test]
+fn a_direct_child_killed_by_a_signal_reports_128_plus_the_signal() {
+    assert_eq!(exit_code_after(&["sleep", "60"], Some("-TERM")), 143);
+    assert_eq!(exit_code_after(&["sleep", "60"], Some("-KILL")), 137);
+}
+
+#[test]
+fn a_direct_child_that_crashes_reports_the_crash_signal() {
+    // SIGSEGV is 11: not a closing signal, so the desktop shows it as failed.
+    assert_eq!(
+        exit_code_after(&["/bin/sh", "-c", "kill -SEGV $$"], None),
+        139
+    );
+}

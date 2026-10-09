@@ -153,7 +153,7 @@ test("the companion is not started before approval, and starts after it", async 
     path.join(dirs.home, "bin", "probe-companion"),
   );
   assert.deepEqual(before.args, ["serve"]);
-  assert.deepEqual(before.permissions, ["hosts.read"]);
+  assert.deepEqual(before.permissions, ["hosts.read", "hosts.exec"]);
   await sleep(150);
   assert.deepEqual(dirs.pids(), [], "nothing ran without consent");
   await assert.rejects(() => manager.companionRead(ID, SURFACE), /not running/);
@@ -697,4 +697,76 @@ test("the validator caps fields at 8 and actions at 4, and checks their shape", 
       ),
     /send may only list/,
   );
+});
+
+test("a list field takes an optional method, at most one per view, and hosts.exec needs hosts.read", () => {
+  const list = (extra = {}) => ({
+    id: "hosts",
+    label: "Hosts",
+    type: "list",
+    ...extra,
+  });
+  const built = validateExtensionManifest(
+    view({ fields: [list({ method: "host.add" })], actions: [] }),
+  );
+  assert.deepEqual(built.contributions.surfaces[0].view.fields, [
+    { id: "hosts", label: "Hosts", type: "list", method: "host.add" },
+  ]);
+  const noMethod = validateExtensionManifest(
+    view({ fields: [list()], actions: [] }),
+  );
+  assert.equal(
+    "method" in noMethod.contributions.surfaces[0].view.fields[0],
+    false,
+  );
+  assert.throws(
+    () =>
+      validateExtensionManifest(
+        view({ fields: [list({ method: "Host.Add" })], actions: [] }),
+      ),
+    /method must match/,
+  );
+  assert.throws(
+    () =>
+      validateExtensionManifest(
+        view({
+          fields: [list(), list({ id: "more", label: "More" })],
+          actions: [],
+        }),
+      ),
+    /at most 1 list field/,
+  );
+  assert.throws(
+    () =>
+      validateExtensionManifest(
+        view({
+          fields: [{ id: "t", label: "T", type: "text", method: "x" }],
+          actions: [],
+        }),
+      ),
+    /belongs to a list field/,
+  );
+  // A list counts toward the 8-field cap.
+  const text = Array.from({ length: 8 }, (_, index) => ({
+    id: `f${index}`,
+    label: `F${index}`,
+    type: "text",
+  }));
+  assert.throws(
+    () =>
+      validateExtensionManifest(
+        view({ fields: [...text, list()], actions: [] }),
+      ),
+    /at most 8/,
+  );
+  const withPermissions = (permissions) => {
+    const manifest = base();
+    manifest.companion.permissions = permissions;
+    return validateExtensionManifest(manifest);
+  };
+  assert.deepEqual(
+    withPermissions(["hosts.exec", "hosts.read"]).companion.permissions,
+    ["hosts.exec", "hosts.read"],
+  );
+  assert.throws(() => withPermissions(["hosts.exec"]), /needs hosts\.read/);
 });

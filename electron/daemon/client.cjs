@@ -31,6 +31,8 @@ function connectDaemon({
   const decoder = createDecoder();
   const pending = new Map();
   const attached = new Map();
+  // Requests the peer sends us (a companion process asking the app), by method.
+  const handlers = new Map();
   let nextId = 1;
   let closed = false;
   let socket;
@@ -152,6 +154,10 @@ function connectDaemon({
     } catch {
       return;
     }
+    if (message.method && message.id !== undefined) {
+      void answer(message);
+      return;
+    }
     if (message.method && message.id === undefined) {
       const state =
         message.method === "session.snapshot" &&
@@ -168,6 +174,32 @@ function connectDaemon({
     clearTimeout(entry.timer);
     if (message.error) entry.reject(new RpcError(message.error));
     else entry.resolve(message.result);
+  }
+
+  function reply(body) {
+    if (closed || socket.destroyed) return;
+    socket.write(
+      encode({ kind: "J", json: JSON.stringify({ jsonrpc: "2.0", ...body }) }),
+    );
+  }
+
+  // A request from the peer: run its handler and send back the result or a
+  // JSON-RPC error. A handler error may carry a numeric `code`.
+  async function answer({ id, method, params }) {
+    const handler = handlers.get(method);
+    if (!handler)
+      return reply({ id, error: { code: -32601, message: "unknown method" } });
+    try {
+      reply({ id, result: (await handler(params ?? {})) ?? null });
+    } catch (error) {
+      reply({
+        id,
+        error: {
+          code: Number.isInteger(error?.code) ? error.code : -32000,
+          message: String(error?.message || error),
+        },
+      });
+    }
   }
 
   function onClose(error) {
@@ -219,6 +251,14 @@ function connectDaemon({
 
   const api = Object.assign(events, {
     request,
+    /** Sends a notification (no reply expected). */
+    notify(method, params = {}) {
+      reply({ method, params });
+    },
+    /** Answers the peer's requests of this method with `handler(params)`. */
+    handle(method, handler) {
+      handlers.set(method, handler);
+    },
     attach,
     close,
     pendingCount: () => pending.size,

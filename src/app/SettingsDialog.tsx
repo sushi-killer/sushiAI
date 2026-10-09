@@ -13,6 +13,11 @@ import { RenderProfiler } from "../RenderProfiler.tsx";
 import { agentTitle } from "./agent-title.ts";
 import { errorText } from "../lib/errors.ts";
 import {
+  DEFAULT_HIBERNATE_SECS,
+  HIBERNATE_CHOICES,
+  configureAllHosts,
+} from "../daemonSessions.ts";
+import {
   OPEN_PROJECT_SETTINGS_EVENT,
   OPEN_SETTINGS_EVENT,
   setPendingProjectTab,
@@ -85,6 +90,7 @@ const DEFAULT_APP_PREFERENCES: AppPreferences = {
   notifications: true,
   desktopMascot: true,
   mascotShortcut: false,
+  hibernateAfterSecs: DEFAULT_HIBERNATE_SECS,
 };
 
 export function SettingsDialog({
@@ -148,6 +154,16 @@ export function SettingsDialog({
       cancelled = true;
     };
   }, []);
+
+  function changeHibernate(secs: number) {
+    setAppPreferences((prev) => ({ ...prev, hibernateAfterSecs: secs }));
+    const bridge = window.bridge;
+    if (!bridge) return;
+    bridge
+      .appPreferencesSet({ hibernateAfterSecs: secs })
+      .then(() => configureAllHosts(bridge, secs))
+      .catch((error) => notify(errorText(error)));
+  }
 
   function refreshShortcutStatus() {
     return window.bridge
@@ -263,7 +279,7 @@ export function SettingsDialog({
                   </div>
                 </div>
                 <div className="setting-block">
-                  <h4>Sleep</h4>
+                  <h4>Mac sleep</h4>
                   <label className="setting-check">
                     <input
                       type="checkbox"
@@ -278,6 +294,39 @@ export function SettingsDialog({
                       </em>
                     </span>
                   </label>
+                </div>
+                <div className="setting-block">
+                  <h4>Idle agents</h4>
+                  <p className="setting-hint">
+                    Sleep idle Claude and Codex agents after this long. They
+                    resume where they left off when you type or click.
+                  </p>
+                  <span className="setting-label" id="hibernate-label">
+                    Sleep idle agents after
+                  </span>
+                  <div
+                    className="workspace-control-tabs"
+                    role="radiogroup"
+                    aria-labelledby="hibernate-label"
+                  >
+                    {HIBERNATE_CHOICES.map(({ secs, label }) => (
+                      <button
+                        key={secs}
+                        role="radio"
+                        aria-checked={
+                          appPreferences.hibernateAfterSecs === secs
+                        }
+                        className={
+                          appPreferences.hibernateAfterSecs === secs
+                            ? "selected"
+                            : ""
+                        }
+                        onClick={() => changeHibernate(secs)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 <div className="setting-block">
                   <h4>Background</h4>

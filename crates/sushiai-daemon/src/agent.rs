@@ -56,6 +56,10 @@ fn uuid_v4() -> std::io::Result<String> {
     ))
 }
 
+/// Every agent name the daemon knows. The foreground detection of a hand-started agent
+/// matches these and no others.
+pub const AGENT_NAMES: &[&str] = &["claude", "codex", "gemini", "cursor-agent"];
+
 pub fn agent_of(name: Option<&str>) -> Option<Agent> {
     match name {
         Some("claude") => Some(Agent::Claude),

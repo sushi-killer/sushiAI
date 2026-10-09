@@ -9,7 +9,16 @@ const DEFAULT_PREFERENCES = {
   notifications: true,
   desktopMascot: true,
   mascotShortcut: false,
+  // Seconds an idle agent session runs before the daemon puts it to sleep; 0 is off.
+  hibernateAfterSecs: 14400,
 };
+
+/** A value of the same type as the default; a number must be a whole count of
+ * seconds, so a hand-edited file never sends the daemon nonsense. */
+function validPreference(key, value) {
+  if (typeof value !== typeof DEFAULT_PREFERENCES[key]) return false;
+  return typeof value !== "number" || (Number.isInteger(value) && value >= 0);
+}
 
 /** Falls back to a default for anything missing, non-boolean or unknown -
  * a corrupt or hand-edited preferences file never blocks startup. */
@@ -17,7 +26,7 @@ function normalizePreferences(value) {
   const result = { ...DEFAULT_PREFERENCES };
   if (value && typeof value === "object" && !Array.isArray(value))
     for (const key of Object.keys(DEFAULT_PREFERENCES))
-      if (typeof value[key] === "boolean") result[key] = value[key];
+      if (validPreference(key, value[key])) result[key] = value[key];
   return result;
 }
 
@@ -178,7 +187,7 @@ function registerAttentionIpc({
     const merged = { ...preferences };
     if (patch && typeof patch === "object" && !Array.isArray(patch))
       for (const key of Object.keys(DEFAULT_PREFERENCES))
-        if (Object.hasOwn(patch, key) && typeof patch[key] === "boolean")
+        if (Object.hasOwn(patch, key) && validPreference(key, patch[key]))
           merged[key] = patch[key];
     preferences = merged;
     await save();

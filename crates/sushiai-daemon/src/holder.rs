@@ -38,6 +38,8 @@ pub struct HolderConn {
     next_id: u64,
     /// The holder's pid, known once an attach was answered.
     pub holder_pid: Option<u32>,
+    /// The PTY child's pid, known once an attach was answered by a holder that reports it.
+    pub child_pid: Option<u32>,
 }
 
 impl HolderConn {
@@ -56,6 +58,7 @@ impl HolderConn {
             writes,
             next_id: 1,
             holder_pid: None,
+            child_pid: None,
         })
     }
 
@@ -127,6 +130,7 @@ impl HolderConn {
                             .ok_or_else(|| Error::Holder("attach refused".into()))?;
                         let parsed: HoldAttachResult = serde_json::from_value(result)?;
                         self.holder_pid = Some(parsed.pid).filter(|p| *p != 0);
+                        self.child_pid = parsed.child.filter(|p| *p != 0);
                         seq = parsed.from_seq;
                         // The ring holds bytes written at the sizes the PTY had then: replay
                         // them at those sizes, not all at the final one.

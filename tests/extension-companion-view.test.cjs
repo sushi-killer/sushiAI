@@ -359,3 +359,196 @@ test("a core view in a pane gets the panel's args and saves new ones", async () 
   seen.props.onArgs({ repo: "/work/example", view: "tasks" });
   assert.deepEqual(saved, [{ repo: "/work/example", view: "tasks" }]);
 });
+
+const listView = {
+  kind: "companion",
+  fields: [
+    { id: "hosts", label: "Hosts", type: "list", method: "host.add" },
+    { id: "plain", label: "Plain", type: "list" },
+  ],
+  actions: [],
+};
+
+test("listRows drops invalid rows, repeats and rows past 50, and softens an unknown tone", async () => {
+  const { listRows } = await import("../src/extensions/companionModel.ts");
+  assert.deepEqual(listRows(null), []);
+  assert.deepEqual(listRows("text"), []);
+  const rows = listRows([
+    {
+      id: "a",
+      label: "Alpha",
+      detail: "user@devbox:22",
+      tone: "ok",
+      status: "In",
+      action: "Add",
+    },
+    { id: "a", label: "Again" },
+    { id: "", label: "No id" },
+    { id: "b" },
+    { label: "No id either" },
+    null,
+    "row",
+    { id: "c", label: "Gamma", tone: "purple" },
+  ]);
+  assert.deepEqual(
+    rows.map((row) => [row.id, row.tone]),
+    [
+      ["a", "ok"],
+      ["c", "neutral"],
+    ],
+  );
+  const many = listRows(
+    Array.from({ length: 80 }, (_, index) => ({ id: `r${index}`, label: "L" })),
+  );
+  assert.equal(many.length, 50);
+});
+
+test("a list draws rows with status, and a button only when the field has a method", async () => {
+  const { CompanionPanel } = await load("extensions/CompanionView.tsx");
+  const { INITIAL_COMPANION_STATE } =
+    await import("../src/extensions/companionModel.ts");
+  const rows = [
+    {
+      id: "h1",
+      label: "devbox",
+      detail: "user@devbox:22",
+      tone: "warning",
+      status: "Not in Remote",
+      action: "Add to Remote",
+    },
+    { id: "h2", label: "box2", status: "In Remote", tone: "ok" },
+  ];
+  const draw = (busy) =>
+    renderToStaticMarkup(
+      React.createElement(CompanionPanel, {
+        view: listView,
+        onAction() {},
+        state: {
+          ...INITIAL_COMPANION_STATE,
+          loaded: true,
+          busy,
+          values: { hosts: rows, plain: rows },
+        },
+      }),
+    );
+  const html = draw(null);
+  assert.match(
+    html,
+    /class="companion-status" data-tone="warning">Not in Remote</,
+  );
+  assert.match(html, /user@devbox:22/);
+  // Only the field with a method, and only the row with an action, has a button.
+  assert.equal((html.match(/Add to Remote<\/button>/g) || []).length, 1);
+  assert.match(draw("row:hosts:h1"), /aria-busy="true"[^>]*>Working…</);
+  assert.match(draw("row:hosts:h1"), /disabled=""/);
+});
+
+test("runRow calls the row method path with the field and row ids, with a busy flag", async () => {
+  const { createCompanionController, rowBusyKey } =
+    await import("../src/extensions/companionModel.ts");
+  const calls = [];
+  let release;
+  const bridge = {
+    companionRead: async () => ({ values: {} }),
+    companionAction: async () => ({}),
+    companionRow: (...args) => {
+      calls.push(args);
+      return new Promise((resolve) => (release = resolve));
+    },
+    onCompanionChanged: () => () => {},
+  };
+  const states = [];
+  const controller = createCompanionController(bridge, "x.y", "s", (state) =>
+    states.push(state),
+  );
+  controller.start();
+  const run = controller.runRow("hosts", "h1");
+  assert.equal(states.at(-1).busy, rowBusyKey("hosts", "h1"));
+  void controller.runRow("hosts", "h2"); // ignored while busy
+  release({ message: "added" });
+  await run;
+  assert.deepEqual(calls, [["x.y", "s", "hosts", "h1"]]);
+  assert.equal(states.at(-1).busy, null);
+  assert.equal(states.at(-1).message, "added");
+  // A failure shows like an action error and ends the busy state.
+  bridge.companionRow = async () => {
+    throw new Error("Host refused");
+  };
+  await controller.runRow("hosts", "h1");
+  assert.equal(states.at(-1).error, "Host refused");
+  assert.equal(states.at(-1).busy, null);
+  controller.stop();
+});
+
+test("the owner card: Enter and Escape deny, Allow needs a click", async () => {
+  const { execKeyAction, ALLOW_DELAY_MS } =
+    await import("../src/extensions/companionExec.ts");
+  assert.equal(execKeyAction("Escape", false), "deny");
+  assert.equal(execKeyAction("Escape", true), "deny");
+  assert.equal(execKeyAction("Enter", false), "deny");
+  assert.equal(execKeyAction("Enter", true), "ignore");
+  assert.equal(execKeyAction(" ", true), "default");
+  assert.equal(execKeyAction("Tab", false), "default");
+  assert.ok(ALLOW_DELAY_MS >= 1000);
+});
+
+test("escapeText and showWord write every control, format and separator character", async () => {
+  const { escapeText, showWord } =
+    await import("../src/extensions/companionExec.ts");
+  assert.equal(
+    escapeText("a\nb\u202ec\u200bd\u2028e\u2029f\u0007"),
+    "a\\u{a}b\\u{202e}c\\u{200b}d\\u{2028}e\\u{2029}f\\u{7}",
+  );
+  assert.equal(escapeText("\u{e0041}tag \ufeff"), "\\u{e0041}tag \\u{feff}");
+  assert.equal(escapeText("plain \u00e9\u65e5"), "plain \u00e9\u65e5");
+  // A newline keeps its line break, with a visible marker in front of it.
+  assert.equal(showWord("a\nb\tc"), "a\\n\nb\\tc");
+  assert.equal(showWord("x\r\u202ey"), "x\\u{d}\\u{202e}y");
+});
+
+const hostile = {
+  id: "q1",
+  extensionId: "ext.\u202eevil",
+  extensionName: "Nice\u200b Name\n",
+  hostName: "dev\u2028box",
+  hostAddress: "user@devbox\u202e:22",
+  title: "Totally safe\u202e txt\u200b",
+  argv: ["sh", "-c", "echo hi\nrm -rf ~\u202e\u200b\u2028"],
+  stdinBytes: 12,
+  stdinSha256: "ab".repeat(32),
+};
+
+test("the owner card escapes hostile text, labels the description, shows stdin size and hash only, and starts with Allow disabled", async () => {
+  const { ExecCard } = await load("extensions/CompanionExecPrompt.tsx");
+  const draw = (ready) =>
+    renderToStaticMarkup(
+      React.createElement(ExecCard, {
+        question: hostile,
+        ready,
+        onAnswer() {},
+      }),
+    );
+  const html = draw(false);
+  for (const raw of ["\u202e", "\u200b", "\u2028"])
+    assert.ok(
+      !html.includes(raw),
+      `raw U+${raw.codePointAt(0).toString(16)} must not reach the card`,
+    );
+  assert.match(html, /\\u\{202e\}/);
+  assert.match(html, /\\u\{200b\}/);
+  assert.match(html, /\\u\{2028\}/);
+  assert.match(
+    html,
+    /Extension&#x27;s description|Extension&rsquo;s description|Extension\u2019s description/,
+  );
+  assert.match(html, /12 bytes · SHA-256 (ab){32}/);
+  assert.ok(!html.includes("STDIN-SECRET"));
+  // The command, exactly: one block per word, newline marked.
+  assert.match(html, /<pre>echo hi\\n\nrm -rf ~/);
+  assert.match(
+    html,
+    /<button class="primary" data-allow="true" disabled="">Allow</,
+  );
+  assert.doesNotMatch(draw(true), /data-allow="true" disabled/);
+  assert.match(html, /<button class="secondary"[^>]*>Deny</);
+});

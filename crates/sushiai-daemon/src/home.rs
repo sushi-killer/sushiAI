@@ -56,6 +56,26 @@ impl Home {
         self.dir.join("sessions")
     }
 
+    /// The daemon's settings (`daemon.configure`).
+    pub fn settings(&self) -> PathBuf {
+        self.dir.join("settings.json")
+    }
+
+    /// The sealed launch of a session (see `launch_store`).
+    pub fn launch_file(&self, id: &str) -> PathBuf {
+        self.sessions().join(format!("{id}.launch"))
+    }
+
+    /// The saved screen of a hibernated session.
+    pub fn tail_file(&self, id: &str) -> PathBuf {
+        self.sessions().join(format!("{id}.tail"))
+    }
+
+    /// Where the launch key lives when it is not in the login keychain.
+    pub fn launch_key_file(&self) -> PathBuf {
+        self.dir.join("keys").join("launch.key")
+    }
+
     /// The host name this daemon answers to for `projects.sync`: `$SUSHIAI_HOST`, else the first
     /// line of `<home>/host`, else the machine's hostname.
     pub fn host_name(&self) -> String {

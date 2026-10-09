@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { contains, leaf, remove, resize, split, uid } from "../layout.ts";
 import { initialWorkspace } from "../workspaceState.ts";
-import { LOCAL_ENDPOINT } from "../daemonSessions.ts";
+import {
+  LOCAL_ENDPOINT,
+  canReopen,
+  wakeInPlace,
+  wakeRequest,
+} from "../daemonSessions.ts";
 import type { ClosedProject, Routine, Saved } from "../workspaceState.ts";
 import { applyChatEvent, startUserTurn } from "../chat-threads.ts";
 import { disposeTerminal } from "../TerminalPanel.tsx";
@@ -435,23 +440,28 @@ export function useWorkspaces({
     if (queued) return queued;
     const owner = findPanelOwner(workspacesRef.current, panelId);
     const ended = owner?.panels.find((item) => item.id === panelId);
-    if (
-      !owner ||
-      !ended ||
-      (ended.kind !== "agent" && ended.kind !== "terminal") ||
-      (!ended.ended && ended.sessionId)
-    )
-      return Promise.resolve();
+    if (!owner || !ended || !canReopen(ended)) return Promise.resolve();
     const request: SessionLaunchRequest = reopenRequest(
       owner,
       ended,
       operationId || uid(),
       LOCAL_ENDPOINT,
     );
+    // An agent whose host still holds its session wakes in place; only a host
+    // without the record or its stored launch gets a new session that resumes.
+    const wake = wakeRequest(owner, ended, LOCAL_ENDPOINT);
     const run = Promise.resolve()
-      .then(() =>
-        launchSession(request, ended, { workspaceId: owner.id, panelId }),
-      )
+      .then(async () => {
+        if (wake && window.bridge) {
+          try {
+            if (await wakeInPlace(window.bridge, wake)) return;
+          } catch (error) {
+            notify(errorText(error));
+            return;
+          }
+        }
+        await launchSession(request, ended, { workspaceId: owner.id, panelId });
+      })
       .then(() => {});
     reopening.current.set(panelId, run);
     void run.finally(() => {

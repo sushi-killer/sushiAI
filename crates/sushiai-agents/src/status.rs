@@ -6,6 +6,10 @@
 //! - A hook event whose `seq` is not newer than the last accepted one is
 //!   dropped (async hooks may arrive out of order).
 //! - Subagent events (`agent_id` set) change nothing, except a permission ask.
+//! - `SubagentStart`/`SubagentStop` keep the set of running subagents (by `agent_id`).
+//!   A `Stop` while one runs keeps `Working` (an open permission ask still wins);
+//!   the stop is applied when the last one ends. `SubagentsLost` (no subagent hook
+//!   for a long time) drops the set, so a lost `SubagentStop` cannot pin `Working`.
 //! - `PreToolUse`/`PostToolUse` move to `Working` only when no `Stop` was seen
 //!   since the last prompt. While blocked on a permission ask only
 //!   `PostToolUse*`, a prompt, a stop or `PermissionClosed` unblock: an async
@@ -22,7 +26,7 @@
 //! - Hook state wins over screen state: `Screen` input applies only while the
 //!   source is `Heuristic`. `HookSilence` switches the source back.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use serde_json::Value;
 
@@ -81,7 +85,10 @@ pub enum Input {
     /// A `SessionEnd` hook was seen and the PTY did not exit within the grace.
     EndingTimeout,
     /// No hook event for the silence window while the screen shows activity.
+    /// Ignored while a subagent runs: the screen shows an idle prompt then.
     HookSilence,
+    /// No subagent hook for the decay window: the running set is dropped.
+    SubagentsLost,
     Screen(Detected),
 }
 
@@ -105,6 +112,11 @@ pub struct SessionStatus {
     current_turn: Option<String>,
     past_turns: VecDeque<String>,
     pending_ask: Option<(Option<String>, Option<Value>)>,
+    subagents: HashSet<String>,
+    /// Time of the last subagent hook (a start, a stop or any event inside one).
+    subagent_at: u64,
+    /// A `Stop` arrived while a subagent ran; the value is its error flag.
+    stop_pending: Option<bool>,
 }
 
 impl SessionStatus {
@@ -125,6 +137,22 @@ impl SessionStatus {
             current_turn: None,
             past_turns: VecDeque::new(),
             pending_ask: None,
+            subagents: HashSet::new(),
+            subagent_at: now,
+            stop_pending: None,
+        }
+    }
+
+    /// True when subagents are recorded as running and none sent a hook for `window_ms`.
+    pub fn subagents_stale(&self, now: u64, window_ms: u64) -> bool {
+        !self.subagents.is_empty() && self.subagent_at.saturating_add(window_ms) <= now
+    }
+
+    /// The process is up and has sent no hook yet (a resumed Codex): idle, so it can sleep
+    /// again. Any other status stays.
+    pub fn ready(&mut self, now: u64) {
+        if self.status == Status::Starting {
+            self.set(Status::Idle, None, now);
         }
     }
 
@@ -151,6 +179,8 @@ impl SessionStatus {
             match input {
                 Input::Exit(info) => {
                     self.exit = Some(info);
+                    self.subagents.clear();
+                    self.stop_pending = None;
                     self.set(Status::Exited, None, now);
                 }
                 Input::EndingTimeout => {
@@ -169,9 +199,20 @@ impl SessionStatus {
                         }
                     }
                 }
-                Input::HookSilence => self.source = StatusSource::Heuristic,
+                Input::HookSilence => {
+                    if self.subagents.is_empty() {
+                        self.source = StatusSource::Heuristic;
+                    }
+                }
+                Input::SubagentsLost => self.subagents.clear(),
                 Input::Screen(d) => self.apply_screen(d, now),
                 Input::Hook { seq, payload } => self.apply_hook(seq, *payload, now),
+            }
+            // The last subagent ended (or was lost) after a stop: apply the stop now.
+            if self.subagents.is_empty() && !self.blocked_on_ask() {
+                if let Some(error) = self.stop_pending.take() {
+                    self.finish_turn(error, now);
+                }
             }
         }
         before != (self.status, self.blocked_kind, self.source, self.error)
@@ -230,6 +271,26 @@ impl SessionStatus {
         if matches!(p.event, HookEvent::Unknown(_)) {
             return;
         }
+        if in_subagent {
+            self.subagent_at = now;
+        }
+        match &p.event {
+            HookEvent::SubagentStart => {
+                self.subagent_at = now;
+                self.subagents
+                    .insert(p.common.agent_id.clone().unwrap_or_default());
+                self.source = StatusSource::Hook;
+                self.tool_started(now);
+                return;
+            }
+            HookEvent::SubagentStop => {
+                self.subagent_at = now;
+                self.subagents
+                    .remove(p.common.agent_id.as_deref().unwrap_or_default());
+                return;
+            }
+            _ => {}
+        }
         let ask_pending = self.pending_ask.is_some();
         let passes = matches!(p.event, HookEvent::PermissionRequest(_))
             || (ask_pending
@@ -285,12 +346,13 @@ impl SessionStatus {
                 self.stop_seen = false;
                 self.permission_seen_this_turn = false;
                 self.error = false;
+                self.stop_pending = None;
                 if let Some(ev) = p.common.turn() {
                     self.enter_turn(ev);
                 }
                 self.work(now);
             }
-            HookEvent::PreToolUse { .. } | HookEvent::SubagentStart => self.tool_started(now),
+            HookEvent::PreToolUse { .. } => self.tool_started(now),
             HookEvent::PostToolUse { tool_name } | HookEvent::PostToolUseFailure { tool_name } => {
                 if self.blocked_on_ask() {
                     if self.matches_ask(tool_name.as_deref(), p.common.tool_input.as_ref()) {
@@ -317,7 +379,7 @@ impl SessionStatus {
                     self.ending = true;
                 }
             }
-            HookEvent::SubagentStop | HookEvent::Unknown(_) => {}
+            HookEvent::SubagentStart | HookEvent::SubagentStop | HookEvent::Unknown(_) => {}
         }
     }
 
@@ -337,6 +399,15 @@ impl SessionStatus {
 
     fn finish_turn(&mut self, error: bool, now: u64) {
         self.stop_seen = true;
+        if !self.subagents.is_empty() {
+            // A background subagent still runs: the turn is over but the session is not idle.
+            self.stop_pending = Some(error);
+            if !self.blocked_on_ask() {
+                self.work(now);
+            }
+            return;
+        }
+        self.stop_pending = None;
         self.error = error;
         self.set(Status::Idle, None, now);
     }

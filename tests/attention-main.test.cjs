@@ -23,6 +23,7 @@ test("normalizePreferences keeps valid booleans and falls back to defaults other
       notifications: false,
       desktopMascot: false,
       mascotShortcut: false,
+      hibernateAfterSecs: 14400,
     },
   );
   assert.deepEqual(normalizePreferences({}), {
@@ -30,30 +31,35 @@ test("normalizePreferences keeps valid booleans and falls back to defaults other
     notifications: true,
     desktopMascot: true,
     mascotShortcut: false,
+    hibernateAfterSecs: 14400,
   });
   assert.deepEqual(normalizePreferences(null), {
     runInMenuBar: true,
     notifications: true,
     desktopMascot: true,
     mascotShortcut: false,
+    hibernateAfterSecs: 14400,
   });
   assert.deepEqual(normalizePreferences(undefined), {
     runInMenuBar: true,
     notifications: true,
     desktopMascot: true,
     mascotShortcut: false,
+    hibernateAfterSecs: 14400,
   });
   assert.deepEqual(normalizePreferences("not an object"), {
     runInMenuBar: true,
     notifications: true,
     desktopMascot: true,
     mascotShortcut: false,
+    hibernateAfterSecs: 14400,
   });
   assert.deepEqual(normalizePreferences([true, false]), {
     runInMenuBar: true,
     notifications: true,
     desktopMascot: true,
     mascotShortcut: false,
+    hibernateAfterSecs: 14400,
   });
   // Non-boolean values for a known key fall back to the default for that key.
   assert.deepEqual(
@@ -63,6 +69,7 @@ test("normalizePreferences keeps valid booleans and falls back to defaults other
       notifications: false,
       desktopMascot: true,
       mascotShortcut: false,
+      hibernateAfterSecs: 14400,
     },
   );
   // Unknown keys are ignored rather than adopted.
@@ -71,6 +78,7 @@ test("normalizePreferences keeps valid booleans and falls back to defaults other
     notifications: true,
     desktopMascot: true,
     mascotShortcut: false,
+    hibernateAfterSecs: 14400,
   });
 });
 
@@ -232,4 +240,20 @@ test("mascotIconPath sits beside the tray icon", () => {
     mascotIconPath("/app/dist/trayTemplate.png"),
     "/app/dist/sushi-dock.png",
   );
+});
+
+test("hibernateAfterSecs keeps a whole number of seconds and rejects anything else", () => {
+  assert.equal(
+    normalizePreferences({ hibernateAfterSecs: 0 }).hibernateAfterSecs,
+    0,
+  );
+  assert.equal(
+    normalizePreferences({ hibernateAfterSecs: 3600 }).hibernateAfterSecs,
+    3600,
+  );
+  for (const bad of [-1, 1.5, "3600", NaN, null])
+    assert.equal(
+      normalizePreferences({ hibernateAfterSecs: bad }).hibernateAfterSecs,
+      14400,
+    );
 });

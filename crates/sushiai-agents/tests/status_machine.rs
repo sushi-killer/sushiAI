@@ -298,3 +298,88 @@ fn session_start_ends_a_dialog_read_from_the_screen_before_any_hook() {
     p.apply(hook(2, "SessionStart"), 4);
     assert_eq!(p.status, Status::Blocked);
 }
+
+fn sub(seq: u64, name: &str, id: &str) -> Input {
+    hook_json(
+        seq,
+        &format!(r#"{{"hook_event_name":"{name}","session_id":"s1","agent_id":"{id}"}}"#),
+    )
+}
+
+#[test]
+fn stop_while_a_subagent_runs_keeps_working_until_it_stops() {
+    let mut s = fresh();
+    s.apply(hook(1, "UserPromptSubmit"), 1);
+    s.apply(sub(2, "SubagentStart", "a1"), 2);
+    s.apply(hook(3, "Stop"), 3);
+    assert_eq!((s.status, s.since), (Status::Working, 1));
+    // A silent hook channel does not hand the status to the screen.
+    s.apply(Input::HookSilence, 4);
+    assert_eq!(s.source, StatusSource::Hook);
+    s.apply(Input::Screen(Detected::Idle), 4);
+    assert_eq!(s.status, Status::Working);
+    s.apply(sub(4, "SubagentStop", "a1"), 5);
+    assert_eq!((s.status, s.since), (Status::Idle, 5));
+}
+
+#[test]
+fn stop_failure_error_is_kept_until_the_last_subagent_stops() {
+    let mut s = fresh();
+    s.apply(hook(1, "UserPromptSubmit"), 1);
+    s.apply(sub(2, "SubagentStart", "a1"), 2);
+    s.apply(sub(3, "SubagentStart", "a2"), 2);
+    s.apply(hook(4, "StopFailure"), 3);
+    s.apply(sub(5, "SubagentStop", "a1"), 4);
+    assert_eq!(s.status, Status::Working);
+    s.apply(sub(6, "SubagentStop", "a2"), 5);
+    assert_eq!(s.status, Status::Idle);
+    assert!(s.error);
+}
+
+#[test]
+fn stray_subagent_stop_never_goes_below_zero() {
+    let mut s = fresh();
+    s.apply(hook(1, "UserPromptSubmit"), 1);
+    s.apply(sub(2, "SubagentStop", "a1"), 2);
+    s.apply(hook(3, "Stop"), 3);
+    assert_eq!(s.status, Status::Idle);
+}
+
+#[test]
+fn an_open_ask_wins_over_a_running_subagent() {
+    let mut s = fresh();
+    s.apply(hook(1, "UserPromptSubmit"), 1);
+    s.apply(sub(2, "SubagentStart", "a1"), 2);
+    s.apply(perm(3), 3);
+    s.apply(hook(4, "Stop"), 4);
+    assert_eq!(s.status, Status::Blocked);
+    s.apply(sub(5, "SubagentStop", "a1"), 5);
+    assert_eq!(s.status, Status::Blocked);
+}
+
+#[test]
+fn exit_resets_subagents_and_a_lost_stop_decays() {
+    let mut s = fresh();
+    s.apply(hook(1, "UserPromptSubmit"), 1);
+    s.apply(sub(2, "SubagentStart", "a1"), 1000);
+    s.apply(hook(3, "Stop"), 1001);
+    assert!(!s.subagents_stale(1500, 1000));
+    // An event inside the subagent is a sign of life.
+    s.apply(sub(4, "PreToolUse", "a1"), 1900);
+    assert!(!s.subagents_stale(2800, 1000));
+    assert!(s.subagents_stale(2900, 1000));
+    s.apply(Input::SubagentsLost, 2900);
+    assert_eq!(s.status, Status::Idle);
+    assert!(!s.subagents_stale(9999, 1000));
+    // Exit clears the set.
+    let mut s = fresh();
+    s.apply(sub(1, "SubagentStart", "a1"), 1);
+    s.apply(
+        Input::Exit(ExitInfo {
+            code: Some(0),
+            signal: None,
+        }),
+        2,
+    );
+    assert!(!s.subagents_stale(99999, 1));
+}

@@ -403,6 +403,31 @@ stay();
 }
 
 #[test]
+fn a_turn_stop_while_a_subagent_runs_keeps_the_session_working() {
+    let fake = Fake::new(
+        "claude",
+        "say('token', process.env.SUSHIAI_SESSION_TOKEN); stay();",
+    );
+    let mut sandbox = fake.sandbox();
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let id = create_agent(&mut client, "claude");
+    wait_until("token file", 15, || !fake.read("token").is_empty());
+    let token = fake.read("token").trim().to_string();
+    let mut hook = hook_client(&sandbox);
+    let mut send = |payload: Value| {
+        hook.call("hook.event", hook_params(&id, &token, "claude", payload));
+    };
+    let sub = |name: &str| json!({"hook_event_name": name, "agent_id": "a1"});
+    send(json!({"hook_event_name": "UserPromptSubmit"}));
+    send(sub("SubagentStart"));
+    send(json!({"hook_event_name": "Stop"}));
+    assert_eq!(list_entry(&mut client, &id)["agentStatus"], "working");
+    send(sub("SubagentStop"));
+    assert_eq!(list_entry(&mut client, &id)["agentStatus"], "idle");
+}
+
+#[test]
 fn a_hook_for_another_agent_is_rejected_by_the_daemon_too() {
     let fake = Fake::new(
         "claude",

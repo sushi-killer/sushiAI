@@ -37,6 +37,8 @@ const OUTPUT_BACKLOG: usize = 256;
 const MAX_PENDING: usize = 1024;
 const RECONNECT_FIRST: Duration = Duration::from_millis(50);
 const RECONNECT_MAX: Duration = Duration::from_secs(2);
+/// No subagent hook for this long: a lost `SubagentStop` stops pinning `Working`.
+const SUBAGENT_LOST_MS: u64 = 10 * 60 * 1000;
 /// A working agent that sends no hook for this long is no longer trusted to send them.
 const HOOK_SILENCE: Duration = Duration::from_secs(15);
 /// How long the process may outlive a `SessionEnd` hook.
@@ -838,6 +840,9 @@ impl Actor {
             && agent.last_hook + HOOK_SILENCE <= now;
         if silent {
             agent.status.apply(Input::HookSilence, now_ms());
+        }
+        if agent.status.subagents_stale(now_ms(), SUBAGENT_LOST_MS) {
+            agent.status.apply(Input::SubagentsLost, now_ms());
         }
         if agent.ending_at.is_some_and(|at| at <= now) {
             agent.ending_at = None;

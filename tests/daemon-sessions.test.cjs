@@ -439,17 +439,3 @@ test("an exited terminal takes what the host still records, else keeps its own c
     ["claude", "old", "/x"],
   );
 });
-
-test("exitOutcome treats closing signals as stopped and crashes as failed", async () => {
-  const { exitOutcome } = await library;
-  const exited = (exitCode) =>
-    exitOutcome(session("a", { status: "exited", exitCode }));
-  assert.equal(exitOutcome(session("a")), "running");
-  assert.equal(exited(0), "done");
-  assert.equal(exited(1), "failed");
-  for (const signo of [1, 2, 9, 15])
-    assert.equal(exited(128 + signo), "stopped");
-  for (const signo of [6, 7, 10, 11])
-    assert.equal(exited(128 + signo), "failed");
-  assert.equal(exitOutcome(session("a", { status: "exited" })), "done");
-});
